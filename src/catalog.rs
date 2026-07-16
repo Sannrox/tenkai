@@ -138,6 +138,7 @@ pub async fn promote(ctx: &mut Ctx, spec: &str, channel: &str) -> Result<String>
     };
     validate_identifier("product", name)?;
     validate_identifier("version", version)?;
+    manifest::validate_version(version)?;
     validate_identifier("channel", channel)?;
     let rid = release_id(name, version);
     if ctx.get(&rid).await?.is_none() {

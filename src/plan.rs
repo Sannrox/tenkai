@@ -448,6 +448,9 @@ async fn reconcile_deployment_locked(
     object
         .properties
         .remove(&format!("deployed_prev.{product}"));
+    object
+        .properties
+        .remove(&format!("dependency_managed.{product}"));
     object.updated = crate::now_millis();
     ctx.put(object).await?;
     Ok(match deployed {
@@ -741,6 +744,23 @@ fn removal_order_from_dependencies(
     Ok(order)
 }
 
+fn obsolete_dependency_products(
+    deployed: &BTreeMap<String, String>,
+    properties: &HashMap<String, String>,
+    desired: &BTreeSet<String>,
+    subscribed: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    deployed
+        .keys()
+        .filter(|product| {
+            properties.contains_key(&format!("dependency_managed.{product}"))
+                && !desired.contains(*product)
+                && !subscribed.contains(*product)
+        })
+        .cloned()
+        .collect()
+}
+
 async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateInput>, Vec<Step>)> {
     let env_obj = environment(ctx, env).await?;
     let channels = ctx.linked(&env_obj.id, REL_SUBSCRIBES, "out").await?;
@@ -875,13 +895,12 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
                 .map(|product| (product.to_string(), version.clone()))
         })
         .collect::<BTreeMap<_, _>>();
-    let obsolete = deployed
-        .keys()
-        .filter(|product| {
-            !desired_products.contains(*product) && !subscribed_products.contains(*product)
-        })
-        .cloned()
-        .collect::<BTreeSet<_>>();
+    let obsolete = obsolete_dependency_products(
+        &deployed,
+        &env_obj.properties,
+        &desired_products,
+        &subscribed_products,
+    );
     if !obsolete.is_empty() {
         for product in deployed_removal_order(ctx, &deployed)
             .await
@@ -1129,6 +1148,29 @@ install = "true"
         )
         .unwrap();
         assert_eq!(order, ["app", "runtime", "database"]);
+    }
+
+    #[test]
+    fn only_planner_managed_dependencies_become_obsolete() {
+        let deployed = BTreeMap::from([
+            ("managed".into(), "1.0.0".into()),
+            ("reconciled".into(), "2.0.0".into()),
+        ]);
+        let properties = HashMap::from([
+            ("deployed.managed".into(), "1.0.0".into()),
+            ("dependency_managed.managed".into(), "true".into()),
+            ("deployed.reconciled".into(), "2.0.0".into()),
+        ]);
+
+        assert_eq!(
+            obsolete_dependency_products(
+                &deployed,
+                &properties,
+                &BTreeSet::new(),
+                &BTreeSet::new(),
+            ),
+            BTreeSet::from(["managed".into()])
+        );
     }
 
     fn example_plan() -> Plan {

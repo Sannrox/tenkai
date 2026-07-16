@@ -465,7 +465,7 @@ async fn compensate_activation(
         .await
         .is_ok()
         {
-            restored = set_env_deployed(ctx, env, &step.product, previous, Some(&step.to))
+            restored = set_env_deployed(ctx, env, &step.product, previous, Some(&step.to), false)
                 .await
                 .is_ok();
         }
@@ -557,6 +557,7 @@ async fn set_env_deployed(
     product: &str,
     version: &str,
     previous: Option<&str>,
+    mark_dependency_managed: bool,
 ) -> Result<()> {
     let Some(mut env_obj) = ctx.get(&env_id(env)).await? else {
         bail!("environment {env} disappeared during apply");
@@ -572,6 +573,11 @@ async fn set_env_deployed(
         env_obj
             .properties
             .insert(format!("deployed_prev.{product}"), prev.to_string());
+    }
+    if mark_dependency_managed {
+        env_obj
+            .properties
+            .insert(format!("dependency_managed.{product}"), "true".to_string());
     }
     env_obj
         .properties
@@ -596,6 +602,9 @@ async fn set_env_unknown(ctx: &mut Ctx, env: &str, product: &str, detail: &str) 
         .remove(&format!("deployed_release.{product}"));
     environment
         .properties
+        .remove(&format!("dependency_managed.{product}"));
+    environment
+        .properties
         .insert(format!("deployment_health.{product}"), "unknown".into());
     environment
         .properties
@@ -618,6 +627,9 @@ async fn clear_env_deployed(ctx: &mut Ctx, env: &str, product: &str) -> Result<(
     environment
         .properties
         .remove(&format!("deployed_prev.{product}"));
+    environment
+        .properties
+        .remove(&format!("dependency_managed.{product}"));
     environment
         .properties
         .remove(&format!("deployment_health.{product}"));
@@ -930,6 +942,12 @@ async fn execute_locked(
     let plan_id = stored_plan.id.clone();
     let env = stored_plan.environment.clone();
     let steps = stored_plan.steps.clone();
+    let dependency_installs = stored_plan
+        .inputs
+        .iter()
+        .filter(|input| input.channel_id.is_empty() && input.deployed_version.is_none())
+        .map(|input| input.product.clone())
+        .collect::<std::collections::BTreeSet<_>>();
     if !skip_gates {
         for step in &steps {
             ensure_not_cancelled(cancellation)?;
@@ -1022,6 +1040,7 @@ async fn execute_locked(
             &env,
             &plan_id,
             &step,
+            dependency_installs.contains(&step.product),
             cancellation,
             recovery,
             mutation_started,
@@ -1318,7 +1337,7 @@ async fn compensate_completed_step(
         .await;
         *mutation_started |= restore_started;
         let recovered = restored
-            && set_env_deployed(ctx, env, &step.product, previous, None)
+            && set_env_deployed(ctx, env, &step.product, previous, None, true)
                 .await
                 .is_ok();
         if !recovered {
@@ -1369,7 +1388,7 @@ async fn compensate_completed_step(
             *mutation_started |= restore_started;
             detail = restore_detail;
             restored
-                && set_env_deployed(ctx, env, &step.product, previous, Some(&step.to))
+                && set_env_deployed(ctx, env, &step.product, previous, Some(&step.to), false)
                     .await
                     .is_ok()
         }
@@ -1397,6 +1416,7 @@ async fn execute_step(
     env: &str,
     plan_oid: &str,
     step: &Step,
+    mark_dependency_managed: bool,
     cancellation: &Cancellation,
     recovery: &Cancellation,
     mutation_started: &mut bool,
@@ -1541,8 +1561,15 @@ async fn execute_step(
                 status: "succeeded".into(),
                 detail: String::new(),
             };
-            if let Err(error) =
-                set_env_deployed(ctx, env, &step.product, &step.to, step.from.as_deref()).await
+            if let Err(error) = set_env_deployed(
+                ctx,
+                env,
+                &step.product,
+                &step.to,
+                step.from.as_deref(),
+                mark_dependency_managed,
+            )
+            .await
             {
                 compensate_activation(ctx, env, step, &content, &error, recovery, mutation_started)
                     .await;
@@ -1631,7 +1658,7 @@ async fn compensate_removal_bookkeeping(
         .is_ok();
     let state_restored = if let Some(previous) = step.from.as_deref() {
         restored
-            && set_env_deployed(ctx, env, &step.product, previous, None)
+            && set_env_deployed(ctx, env, &step.product, previous, None, true)
                 .await
                 .is_ok()
     } else {

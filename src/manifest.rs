@@ -112,6 +112,7 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
     }
     crate::ontology::validate_identifier("product.name", &manifest.product.name)?;
     crate::ontology::validate_identifier("product.version", &manifest.product.version)?;
+    validate_version(&manifest.product.version)?;
     validate_dependencies(&manifest)?;
     let workdir = base
         .join(&manifest.deploy.workdir)
@@ -122,6 +123,12 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
         raw,
         workdir,
     })
+}
+
+pub fn validate_version(version: &str) -> Result<()> {
+    semver::Version::parse(version)
+        .with_context(|| format!("product.version {version:?} is not valid semver"))?;
+    Ok(())
 }
 
 pub fn validate_dependencies(manifest: &Manifest) -> Result<()> {
@@ -463,6 +470,12 @@ install = "true"
         .unwrap();
 
         assert_eq!(manifest.deploy.executor, ExecutorKind::LocalShell);
+    }
+
+    #[test]
+    fn release_versions_must_be_semver() {
+        assert!(validate_version("1.2.3+build.4").is_ok());
+        assert!(validate_version("legacy_build").is_err());
     }
 
     #[test]
