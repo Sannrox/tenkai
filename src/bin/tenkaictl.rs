@@ -194,7 +194,7 @@ async fn main() -> Result<()> {
             let stored = plan::create_rollback(&mut ctx, &env, &product).await?;
             println!("rolling back in {env}:");
             print_steps(&stored.steps);
-            run_plan(&mut ctx, &stored.id, true).await?;
+            run_plan(&mut ctx, &stored.id, false).await?;
         }
     }
     Ok(())
