@@ -73,7 +73,7 @@ struct ParsedCandidate {
 #[derive(Clone)]
 struct Requirement {
     range: VersionReq,
-    exact_version: Option<String>,
+    exact_versions: Vec<String>,
     expression: String,
     source: String,
 }
@@ -206,11 +206,7 @@ fn add_requirement(
         .or_default()
         .push(Requirement {
             range,
-            exact_version: expression
-                .strip_prefix('=')
-                .map(str::trim)
-                .filter(|version| Version::parse(version).is_ok())
-                .map(str::to_string),
+            exact_versions: exact_versions(expression),
             expression: expression.to_string(),
             source,
         });
@@ -265,12 +261,7 @@ fn search(
         for dependency in &candidate.dependencies {
             let requirement = Requirement {
                 range: dependency.requirement.clone(),
-                exact_version: dependency
-                    .expression
-                    .strip_prefix('=')
-                    .map(str::trim)
-                    .filter(|version| Version::parse(version).is_ok())
-                    .map(str::to_string),
+                exact_versions: exact_versions(&dependency.expression),
                 expression: dependency.expression.clone(),
                 source: format!("{}@{}", product, candidate.version_text),
             };
@@ -307,9 +298,19 @@ fn search(
 fn requirement_matches(requirement: &Requirement, candidate: &ParsedCandidate) -> bool {
     requirement.range.matches(&candidate.version)
         && requirement
-            .exact_version
-            .as_ref()
-            .is_none_or(|exact| exact == &candidate.version_text)
+            .exact_versions
+            .iter()
+            .all(|exact| exact == &candidate.version_text)
+}
+
+fn exact_versions(expression: &str) -> Vec<String> {
+    expression
+        .split(',')
+        .filter_map(|comparator| comparator.trim().strip_prefix('='))
+        .map(str::trim)
+        .filter(|version| Version::parse(version).is_ok())
+        .map(str::to_string)
+        .collect()
 }
 
 fn facts_match(candidate: &ParsedCandidate, facts: &BTreeMap<String, String>) -> bool {
@@ -542,6 +543,25 @@ mod tests {
         };
         let error = resolve(&request).unwrap_err().to_string();
         assert!(error.contains("=1.0.0+expected"));
+    }
+
+    #[test]
+    fn exact_build_pins_allow_whitespace_and_compound_comparators() {
+        for requirement in [" =1.0.0+expected", ">=1.0.0, =1.0.0+expected"] {
+            let request = Request {
+                roots: BTreeMap::from([("app".into(), "1.0.0".into())]),
+                version_requirements: BTreeMap::from([(
+                    "runtime".into(),
+                    vec![requirement.into()],
+                )]),
+                candidates: vec![
+                    candidate("app", "1.0.0", &[("runtime", "*")]),
+                    candidate("runtime", "1.0.0+other", &[]),
+                ],
+                ..Request::default()
+            };
+            assert!(resolve(&request).is_err(), "requirement {requirement}");
+        }
     }
 
     #[test]
