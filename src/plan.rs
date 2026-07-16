@@ -672,6 +672,75 @@ async fn catalog_candidates(ctx: &mut Ctx, roots: &[ChannelRoot]) -> Result<Vec<
     Ok(candidates)
 }
 
+async fn deployed_removal_order(
+    ctx: &mut Ctx,
+    deployed: &BTreeMap<String, String>,
+) -> Result<Vec<String>> {
+    let mut dependencies = BTreeMap::<String, Vec<String>>::new();
+    for (product, version) in deployed {
+        let id = release_id(product, version);
+        let release = ctx
+            .get(&id)
+            .await?
+            .with_context(|| format!("deployed release {id} is not published"))?;
+        let candidate = candidate_from_release(&release)?;
+        dependencies.insert(
+            product.clone(),
+            candidate
+                .dependencies
+                .into_iter()
+                .filter(|dependency| deployed.contains_key(&dependency.product))
+                .map(|dependency| dependency.product)
+                .collect(),
+        );
+    }
+    removal_order_from_dependencies(deployed.keys().cloned().collect(), dependencies)
+}
+
+fn removal_order_from_dependencies(
+    products: BTreeSet<String>,
+    dependencies: BTreeMap<String, Vec<String>>,
+) -> Result<Vec<String>> {
+    let mut dependents = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut indegree = products
+        .iter()
+        .map(|product| (product.clone(), 0_usize))
+        .collect::<BTreeMap<_, _>>();
+    for (product, product_dependencies) in dependencies {
+        for dependency in product_dependencies {
+            if products.contains(&dependency)
+                && dependents
+                    .entry(dependency)
+                    .or_default()
+                    .insert(product.clone())
+            {
+                *indegree.get_mut(&product).expect("deployed product") += 1;
+            }
+        }
+    }
+    let mut ready = indegree
+        .iter()
+        .filter(|(_, degree)| **degree == 0)
+        .map(|(product, _)| product.clone())
+        .collect::<BTreeSet<_>>();
+    let mut order = Vec::with_capacity(products.len());
+    while let Some(product) = ready.pop_first() {
+        order.push(product.clone());
+        for dependent in dependents.get(&product).into_iter().flatten() {
+            let degree = indegree.get_mut(dependent).expect("deployed dependent");
+            *degree -= 1;
+            if *degree == 0 {
+                ready.insert(dependent.clone());
+            }
+        }
+    }
+    if order.len() != products.len() {
+        bail!("deployed dependency graph contains a cycle");
+    }
+    order.reverse();
+    Ok(order)
+}
+
 async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateInput>, Vec<Step>)> {
     let env_obj = environment(ctx, env).await?;
     let channels = ctx.linked(&env_obj.id, REL_SUBSCRIBES, "out").await?;
@@ -812,26 +881,9 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
         .cloned()
         .collect::<BTreeSet<_>>();
     if !obsolete.is_empty() {
-        let previous_roots = deployed
-            .iter()
-            .map(|(product, version)| ChannelRoot {
-                product: product.clone(),
-                channel: String::new(),
-                channel_id: String::new(),
-                version: version.clone(),
-            })
-            .collect::<Vec<_>>();
-        let previous = crate::planner::resolve(&Request {
-            roots: previous_roots
-                .iter()
-                .map(|root| (root.product.clone(), root.version.clone()))
-                .collect(),
-            candidates: catalog_candidates(ctx, &previous_roots).await?,
-            ..Request::default()
-        })
-        .with_context(|| format!("cannot order removals for environment {env}"))?;
-        for product in previous
-            .removal_order()
+        for product in deployed_removal_order(ctx, &deployed)
+            .await
+            .with_context(|| format!("cannot order removals for environment {env}"))?
             .into_iter()
             .filter(|product| obsolete.contains(product))
         {
@@ -1061,6 +1113,20 @@ install = "true"
                 .to_string()
                 .contains("does not match manifest identity")
         );
+    }
+
+    #[test]
+    fn deployed_products_are_removed_before_their_dependencies() {
+        let order = removal_order_from_dependencies(
+            BTreeSet::from(["app".into(), "runtime".into(), "database".into()]),
+            BTreeMap::from([
+                ("app".into(), vec!["runtime".into()]),
+                ("runtime".into(), vec!["database".into()]),
+                ("database".into(), Vec::new()),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(order, ["app", "runtime", "database"]);
     }
 
     fn example_plan() -> Plan {
