@@ -19,3 +19,6 @@ pub fn now_millis() -> i64 {
         .unwrap_or_default()
         .as_millis() as i64
 }
+
+#[cfg(not(unix))]
+compile_error!("tenkai currently supports Unix deployment hosts only");

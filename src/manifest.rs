@@ -46,6 +46,9 @@ pub struct DeploySection {
     /// Optional health probe; exit 0 means healthy. Failure triggers rollback.
     #[serde(default)]
     pub health: Option<String>,
+    /// Maximum duration for each install, uninstall, health, or restore command.
+    #[serde(default = "default_timeout_seconds")]
+    pub timeout_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -58,6 +61,10 @@ pub struct GateSection {
 
 fn default_workdir() -> String {
     ".".into()
+}
+
+fn default_timeout_seconds() -> Option<u64> {
+    Some(600)
 }
 
 pub struct LoadedManifest {
@@ -90,6 +97,9 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
     }
     if manifest.deploy.install.trim().is_empty() {
         bail!("manifest needs a non-empty deploy.install command");
+    }
+    if manifest.deploy.timeout_seconds == Some(0) {
+        bail!("deploy.timeout_seconds must be greater than zero");
     }
     crate::ontology::validate_identifier("product.name", &manifest.product.name)?;
     crate::ontology::validate_identifier("product.version", &manifest.product.version)?;
@@ -176,6 +186,9 @@ pub fn artifact_digest(root: &Path, inputs: &[String]) -> Result<String> {
     }
     hasher.update((inputs.len() as u64).to_le_bytes());
     for input in inputs {
+        if input.is_empty() {
+            bail!("deploy inputs must not contain empty paths");
+        }
         let relative = Path::new(&input);
         if relative.is_absolute()
             || relative

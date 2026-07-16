@@ -5,10 +5,41 @@ use std::os::unix::process::CommandExt as _;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use serde::{Deserialize, Serialize};
 
 use crate::plan::Action;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelReason {
+    Interrupt,
+    Terminate,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Cancellation {
+    signal: Arc<AtomicU8>,
+}
+
+impl Cancellation {
+    pub fn cancel(&self, reason: CancelReason) {
+        let signal = match reason {
+            CancelReason::Interrupt => 1,
+            CancelReason::Terminate => 2,
+        };
+        self.signal.store(signal, Ordering::SeqCst);
+    }
+
+    pub fn reason(&self) -> Option<&'static str> {
+        match self.signal.load(Ordering::SeqCst) {
+            1 => Some("deployment apply interrupted"),
+            2 => Some("deployment apply terminated"),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -30,6 +61,7 @@ pub struct ExecutorInput {
     pub install: String,
     pub uninstall: Option<String>,
     pub health: Option<String>,
+    pub timeout_seconds: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +75,7 @@ pub enum ExecutorPhase {
 pub struct ExecutorResult {
     pub phase: ExecutorPhase,
     pub succeeded: bool,
+    pub started: bool,
     pub detail: String,
 }
 
@@ -51,6 +84,7 @@ impl ExecutorResult {
         Self {
             phase,
             succeeded: true,
+            started: true,
             detail: String::new(),
         }
     }
@@ -59,6 +93,16 @@ impl ExecutorResult {
         Self {
             phase,
             succeeded: false,
+            started: true,
+            detail: detail.into(),
+        }
+    }
+
+    pub fn not_started(phase: ExecutorPhase, detail: impl Into<String>) -> Self {
+        Self {
+            phase,
+            succeeded: false,
+            started: false,
             detail: detail.into(),
         }
     }
@@ -67,9 +111,17 @@ impl ExecutorResult {
 pub type ExecutorFuture<'a> = Pin<Box<dyn Future<Output = ExecutorResult> + Send + 'a>>;
 
 pub trait Executor: Send + Sync {
-    fn activate<'a>(&'a self, input: &'a ExecutorInput) -> ExecutorFuture<'a>;
+    fn activate<'a>(
+        &'a self,
+        input: &'a ExecutorInput,
+        cancellation: &'a Cancellation,
+    ) -> ExecutorFuture<'a>;
 
-    fn deactivate<'a>(&'a self, input: &'a ExecutorInput) -> ExecutorFuture<'a>;
+    fn deactivate<'a>(
+        &'a self,
+        input: &'a ExecutorInput,
+        cancellation: &'a Cancellation,
+    ) -> ExecutorFuture<'a>;
 }
 
 pub struct LocalShellExecutor;
@@ -80,7 +132,11 @@ impl LocalShellExecutor {
         input: &ExecutorInput,
         phase: ExecutorPhase,
         command_text: &str,
+        cancellation: &Cancellation,
     ) -> ExecutorResult {
+        if let Some(reason) = cancellation.reason() {
+            return ExecutorResult::not_started(phase, reason);
+        }
         let identity_digest =
             crate::manifest::digest(&format!("{}\0{}", input.environment, input.product));
         let compose_project = format!("tenkai-{}", &identity_digest[..16]);
@@ -100,7 +156,7 @@ impl LocalShellExecutor {
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
-                return ExecutorResult::failed(
+                return ExecutorResult::not_started(
                     phase,
                     format!("spawning deployment command failed: {error}"),
                 );
@@ -108,33 +164,21 @@ impl LocalShellExecutor {
         };
         let process_group = child.id().map(|id| -(id as i32));
         let mut wait = Box::pin(child.wait());
-        let mut interrupt =
-            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()) {
-                Ok(signal) => signal,
-                Err(error) => {
-                    return ExecutorResult::failed(
-                        phase,
-                        format!("registering interrupt handler failed: {error}"),
-                    );
+        let timeout = tokio::time::sleep(std::time::Duration::from_secs(input.timeout_seconds));
+        let cancelled = async {
+            loop {
+                if let Some(reason) = cancellation.reason() {
+                    break reason;
                 }
-            };
-        let mut terminate =
-            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                Ok(signal) => signal,
-                Err(error) => {
-                    return ExecutorResult::failed(
-                        phase,
-                        format!("registering termination handler failed: {error}"),
-                    );
-                }
-            };
-        let timeout = tokio::time::sleep(std::time::Duration::from_secs(600));
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        };
         tokio::pin!(timeout);
+        tokio::pin!(cancelled);
         let (status, interrupted) = tokio::select! {
             status = &mut wait => (status, None),
-            _ = &mut timeout => (Ok(Default::default()), Some("deployment command exceeded the 10 minute timeout")),
-            _ = interrupt.recv() => (Ok(Default::default()), Some("deployment command interrupted")),
-            _ = terminate.recv() => (Ok(Default::default()), Some("deployment command terminated")),
+            _ = &mut timeout => (Ok(Default::default()), Some(format!("deployment command exceeded its {} second timeout", input.timeout_seconds))),
+            reason = &mut cancelled => (Ok(Default::default()), Some(reason.into())),
         };
         if let Some(reason) = interrupted {
             if let Some(process_group) = process_group {
@@ -160,10 +204,14 @@ impl LocalShellExecutor {
 }
 
 impl Executor for LocalShellExecutor {
-    fn activate<'a>(&'a self, input: &'a ExecutorInput) -> ExecutorFuture<'a> {
+    fn activate<'a>(
+        &'a self,
+        input: &'a ExecutorInput,
+        cancellation: &'a Cancellation,
+    ) -> ExecutorFuture<'a> {
         Box::pin(async move {
             let install = self
-                .run_command(input, ExecutorPhase::Install, &input.install)
+                .run_command(input, ExecutorPhase::Install, &input.install, cancellation)
                 .await;
             if !install.succeeded {
                 return install;
@@ -174,15 +222,22 @@ impl Executor for LocalShellExecutor {
                 .filter(|command| !command.is_empty())
             {
                 Some(command) => {
-                    self.run_command(input, ExecutorPhase::Health, command)
-                        .await
+                    let mut health = self
+                        .run_command(input, ExecutorPhase::Health, command, cancellation)
+                        .await;
+                    health.started |= install.started;
+                    health
                 }
                 None => install,
             }
         })
     }
 
-    fn deactivate<'a>(&'a self, input: &'a ExecutorInput) -> ExecutorFuture<'a> {
+    fn deactivate<'a>(
+        &'a self,
+        input: &'a ExecutorInput,
+        cancellation: &'a Cancellation,
+    ) -> ExecutorFuture<'a> {
         Box::pin(async move {
             match input
                 .uninstall
@@ -190,10 +245,10 @@ impl Executor for LocalShellExecutor {
                 .filter(|command| !command.is_empty())
             {
                 Some(command) => {
-                    self.run_command(input, ExecutorPhase::Uninstall, command)
+                    self.run_command(input, ExecutorPhase::Uninstall, command, cancellation)
                         .await
                 }
-                None => ExecutorResult::failed(
+                None => ExecutorResult::not_started(
                     ExecutorPhase::Uninstall,
                     "release has no uninstall command",
                 ),
@@ -247,6 +302,7 @@ mod tests {
             install: "touch installed".into(),
             uninstall: Some("touch uninstalled".into()),
             health: Some("test -f healthy".into()),
+            timeout_seconds: 600,
         }
     }
 
@@ -258,7 +314,9 @@ mod tests {
             crate::now_millis()
         ));
         std::fs::create_dir_all(&workdir).unwrap();
-        let result = LocalShellExecutor.activate(&input(workdir.clone())).await;
+        let result = LocalShellExecutor
+            .activate(&input(workdir.clone()), &Cancellation::default())
+            .await;
 
         assert_eq!(result.phase, ExecutorPhase::Health);
         assert!(!result.succeeded);
@@ -275,10 +333,34 @@ mod tests {
             crate::now_millis()
         ));
         std::fs::create_dir_all(&workdir).unwrap();
-        let result = LocalShellExecutor.deactivate(&input(workdir.clone())).await;
+        let result = LocalShellExecutor
+            .deactivate(&input(workdir.clone()), &Cancellation::default())
+            .await;
 
         assert_eq!(result, ExecutorResult::succeeded(ExecutorPhase::Uninstall));
         assert!(workdir.join("uninstalled").exists());
+        std::fs::remove_dir_all(workdir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn local_shell_does_not_start_after_cancellation() {
+        let workdir = std::env::temp_dir().join(format!(
+            "tenkai-executor-cancelled-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        std::fs::create_dir_all(&workdir).unwrap();
+        let cancellation = Cancellation::default();
+        cancellation.cancel(CancelReason::Interrupt);
+
+        let result = LocalShellExecutor
+            .activate(&input(workdir.clone()), &cancellation)
+            .await;
+
+        assert!(!result.succeeded);
+        assert!(!result.started);
+        assert!(result.detail.contains("interrupted"));
+        assert!(!workdir.join("installed").exists());
         std::fs::remove_dir_all(workdir).unwrap();
     }
 }

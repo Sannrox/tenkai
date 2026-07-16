@@ -5,13 +5,15 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use anyhow::{Context as _, Result, bail};
 use prost::Message as _;
 use sha2::{Digest as _, Sha256};
 
 use crate::client::Ctx;
-use crate::executor::{self, Executor, ExecutorInput};
+use crate::executor::{self, CancelReason, Cancellation, Executor, ExecutorInput};
 use crate::manifest::{self, Manifest};
 use crate::ontology::*;
 use crate::pb::chisei::{
@@ -24,6 +26,136 @@ pub struct Outcome {
     pub step: Step,
     pub status: String, // succeeded | failed | rolled_back
     pub detail: String,
+}
+
+struct SignalMonitor {
+    targets: Arc<ApplySignalTargets>,
+}
+
+struct ApplySignalTargets {
+    forward: Cancellation,
+    recovery: Cancellation,
+    received: AtomicU8,
+}
+
+type SignalRegistry = Arc<Mutex<Vec<Weak<ApplySignalTargets>>>>;
+static SIGNAL_REGISTRY: OnceLock<std::result::Result<SignalRegistry, String>> = OnceLock::new();
+
+fn ensure_not_cancelled(cancellation: &Cancellation) -> Result<()> {
+    if let Some(reason) = cancellation.reason() {
+        bail!(reason);
+    }
+    Ok(())
+}
+
+fn dispatch_signal(registry: &SignalRegistry, reason: CancelReason) {
+    let active = {
+        let mut registrations = registry.lock().expect("signal registry lock");
+        let active = registrations
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect::<Vec<_>>();
+        registrations.retain(|registration| registration.strong_count() > 0);
+        active
+    };
+    if active.is_empty() {
+        std::process::exit(match reason {
+            CancelReason::Interrupt => 130,
+            CancelReason::Terminate => 143,
+        });
+    }
+    for targets in active {
+        if targets.received.fetch_add(1, Ordering::SeqCst) == 0 {
+            targets.forward.cancel(reason);
+        } else {
+            targets.recovery.cancel(reason);
+            let exit_code = match reason {
+                CancelReason::Interrupt => 130,
+                CancelReason::Terminate => 143,
+            };
+            std::thread::spawn(move || {
+                // Give a running executor a brief chance to kill its process group.
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                std::process::exit(exit_code);
+            });
+        }
+    }
+}
+
+fn start_signal_dispatcher() -> std::result::Result<SignalRegistry, String> {
+    let registry = Arc::new(Mutex::new(Vec::new()));
+    let target = Arc::clone(&registry);
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("tenkai-signal-dispatcher".into())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let _ = ready_tx.send(Err(format!("creating signal runtime failed: {error}")));
+                    return;
+                }
+            };
+            runtime.block_on(async move {
+                let mut interrupt =
+                    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                    {
+                        Ok(signal) => signal,
+                        Err(error) => {
+                            let _ = ready_tx.send(Err(format!(
+                                "registering interrupt handler failed: {error}"
+                            )));
+                            return;
+                        }
+                    };
+                let mut terminate =
+                    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    {
+                        Ok(signal) => signal,
+                        Err(error) => {
+                            let _ = ready_tx.send(Err(format!(
+                                "registering termination handler failed: {error}"
+                            )));
+                            return;
+                        }
+                    };
+                if ready_tx.send(Ok(())).is_err() {
+                    return;
+                }
+                loop {
+                    let reason = tokio::select! {
+                        _ = interrupt.recv() => CancelReason::Interrupt,
+                        _ = terminate.recv() => CancelReason::Terminate,
+                    };
+                    dispatch_signal(&target, reason);
+                }
+            });
+        })
+        .map_err(|error| format!("starting signal dispatcher failed: {error}"))?;
+    ready_rx
+        .recv()
+        .map_err(|error| format!("signal dispatcher stopped during startup: {error}"))??;
+    Ok(registry)
+}
+
+fn monitor_apply_signals() -> Result<SignalMonitor> {
+    let registry = SIGNAL_REGISTRY
+        .get_or_init(start_signal_dispatcher)
+        .as_ref()
+        .map_err(|error| anyhow::anyhow!(error.clone()))?;
+    let targets = Arc::new(ApplySignalTargets {
+        forward: Cancellation::default(),
+        recovery: Cancellation::default(),
+        received: AtomicU8::new(0),
+    });
+    registry
+        .lock()
+        .expect("signal registry lock")
+        .push(Arc::downgrade(&targets));
+    Ok(SignalMonitor { targets })
 }
 
 enum GateDecision {
@@ -218,6 +350,7 @@ fn executor_input(
         install: content.manifest.deploy.install.clone(),
         uninstall: content.manifest.deploy.uninstall.clone(),
         health: content.manifest.deploy.health.clone(),
+        timeout_seconds: content.manifest.deploy.timeout_seconds.unwrap_or(600),
     }
 }
 
@@ -225,8 +358,11 @@ async fn activate(
     executor: &dyn Executor,
     input: &ExecutorInput,
     content: &ReleaseContent,
+    cancellation: &Cancellation,
+    mutation_started: &mut bool,
 ) -> Result<(), String> {
-    let result = executor.activate(input).await;
+    let result = executor.activate(input, cancellation).await;
+    *mutation_started |= result.started;
     match verify_content_integrity(content) {
         Err(error) => Err(error.to_string()),
         Ok(()) if result.succeeded => Ok(()),
@@ -238,8 +374,11 @@ async fn deactivate(
     executor: &dyn Executor,
     input: &ExecutorInput,
     content: &ReleaseContent,
+    cancellation: &Cancellation,
+    mutation_started: &mut bool,
 ) -> Result<(), String> {
-    let result = executor.deactivate(input).await;
+    let result = executor.deactivate(input, cancellation).await;
+    *mutation_started |= result.started;
     match verify_content_integrity(content) {
         Err(error) => Err(error.to_string()),
         Ok(()) if result.succeeded => Ok(()),
@@ -253,8 +392,10 @@ async fn restore_previous(
     content: &ReleaseContent,
     version: &str,
     failure: String,
+    cancellation: &Cancellation,
+    mutation_started: &mut bool,
 ) -> (bool, String) {
-    match activate(executor, input, content).await {
+    match activate(executor, input, content, cancellation, mutation_started).await {
         Ok(()) => (true, format!("{failure}; restored {version}")),
         Err(restore) => (
             false,
@@ -268,9 +409,12 @@ async fn cleanup_failed_install(
     input: &ExecutorInput,
     content: &ReleaseContent,
     failure: String,
+    cancellation: &Cancellation,
+    mutation_started: &mut bool,
 ) -> (bool, String) {
     match content.manifest.deploy.uninstall.as_deref() {
-        Some(_) => match deactivate(executor, input, content).await {
+        Some(_) => match deactivate(executor, input, content, cancellation, mutation_started).await
+        {
             Ok(()) => (true, format!("{failure}; cleaned up failed install")),
             Err(cleanup) => (false, format!("{failure}; cleanup also failed: {cleanup}")),
         },
@@ -284,13 +428,21 @@ async fn compensate_activation(
     step: &Step,
     content: &ReleaseContent,
     failure: &anyhow::Error,
+    cancellation: &Cancellation,
+    mutation_started: &mut bool,
 ) {
     let failure = format!("deployment bookkeeping failed after activation: {failure}");
     let target_executor = executor::select(content.manifest.deploy.executor);
     let target_input = executor_input(content, step, step.action, step.from.clone());
-    let cleaned = deactivate(target_executor, &target_input, content)
-        .await
-        .is_ok();
+    let cleaned = deactivate(
+        target_executor,
+        &target_input,
+        content,
+        cancellation,
+        mutation_started,
+    )
+    .await
+    .is_ok();
     let mut restored = step.from.is_none();
 
     if let (Some(previous), Some(pin)) = (step.from.as_deref(), step.restore.as_ref())
@@ -303,9 +455,15 @@ async fn compensate_activation(
             Action::Rollback,
             Some(step.to.clone()),
         );
-        if activate(previous_executor, &previous_input, &previous_content)
-            .await
-            .is_ok()
+        if activate(
+            previous_executor,
+            &previous_input,
+            &previous_content,
+            cancellation,
+            mutation_started,
+        )
+        .await
+        .is_ok()
         {
             restored = set_env_deployed(ctx, env, &step.product, previous, Some(&step.to))
                 .await
@@ -483,13 +641,43 @@ async fn set_plan_state_confirmed(
     Ok(())
 }
 
+async fn fail_running_plan(
+    ctx: &mut Ctx,
+    plan: &mut Plan,
+    gates_skipped: bool,
+    detail: impl Into<String>,
+    retain_lease: &mut bool,
+) -> Result<()> {
+    if let Err(error) =
+        set_plan_state_confirmed(ctx, plan, PlanState::Failed, gates_skipped, detail).await
+    {
+        *retain_lease = true;
+        return Err(error.context("persisting failed plan state"));
+    }
+    Ok(())
+}
+
+async fn stop_running_if_cancelled(
+    ctx: &mut Ctx,
+    plan: &mut Plan,
+    gates_skipped: bool,
+    cancellation: &Cancellation,
+    retain_lease: &mut bool,
+) -> Result<()> {
+    if let Some(reason) = cancellation.reason() {
+        fail_running_plan(ctx, plan, gates_skipped, reason, retain_lease).await?;
+        bail!(reason);
+    }
+    Ok(())
+}
+
 fn environment_claim_id(environment: &str) -> String {
     format!("{}:execution", env_id(environment))
 }
 
 const ENVIRONMENT_LEASE_MS: i64 = 2 * 60 * 60 * 1000;
 
-struct EnvironmentLease {
+pub(crate) struct EnvironmentLease {
     id: String,
     environment: String,
     owner: String,
@@ -511,7 +699,7 @@ fn lease_object(lease: &EnvironmentLease, now: i64) -> Object {
     )
 }
 
-async fn claim_environment(
+pub(crate) async fn claim_environment(
     ctx: &mut Ctx,
     environment: &str,
     owner: &str,
@@ -559,7 +747,7 @@ async fn refresh_environment_lease(ctx: &mut Ctx, lease: &EnvironmentLease) -> R
     Ok(())
 }
 
-async fn release_environment(ctx: &mut Ctx, lease: &EnvironmentLease) -> Result<()> {
+pub(crate) async fn release_environment(ctx: &mut Ctx, lease: &EnvironmentLease) -> Result<()> {
     if let Some(existing) = ctx.get(&lease.id).await?
         && existing.properties.get("owner") == Some(&lease.owner)
     {
@@ -619,6 +807,9 @@ async fn validate_preconditions(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
 
 /// Execute a stored plan's ordered steps, one product at a time.
 pub async fn execute(ctx: &mut Ctx, plan_id: &str, skip_gates: bool) -> Result<Vec<Outcome>> {
+    let signal_monitor = monitor_apply_signals()?;
+    let cancellation = &signal_monitor.targets.forward;
+    let recovery = &signal_monitor.targets.recovery;
     let stored_plan = plan::load(ctx, plan_id).await?;
     if !matches!(stored_plan.state, PlanState::Computed | PlanState::Blocked) {
         bail!(
@@ -630,12 +821,34 @@ pub async fn execute(ctx: &mut Ctx, plan_id: &str, skip_gates: bool) -> Result<V
     let environment = stored_plan.environment.clone();
     let owner = stored_plan.id.clone();
     let lease = claim_environment(ctx, &environment, &owner).await?;
-    let result = execute_locked(ctx, stored_plan, skip_gates, &lease).await;
+    let mut mutation_started = false;
+    let result = execute_locked(
+        ctx,
+        stored_plan,
+        skip_gates,
+        &lease,
+        cancellation,
+        recovery,
+        &mut mutation_started,
+    )
+    .await;
+    if result.is_err() && mutation_started {
+        return result.map_err(|error| {
+            error.context(format!(
+                "environment {environment} may require recovery; apply lease retained"
+            ))
+        });
+    }
     let unlock = release_environment(ctx, &lease).await;
     match (result, unlock) {
         (Ok(outcomes), Ok(())) => Ok(outcomes),
-        (Err(error), _) => Err(error),
-        (Ok(_), Err(error)) => Err(error.context("releasing environment apply lock")),
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(unlock)) => Err(error.context(format!(
+            "releasing environment apply lease also failed: {unlock}; run `tenkaictl env unlock {environment}` after verifying no apply is running"
+        ))),
+        (Ok(_), Err(error)) => Err(error.context(format!(
+            "releasing environment apply lease failed; run `tenkaictl env unlock {environment}` after verifying no apply is running"
+        ))),
     }
 }
 
@@ -644,13 +857,18 @@ async fn execute_locked(
     mut stored_plan: Plan,
     skip_gates: bool,
     lease: &EnvironmentLease,
+    cancellation: &Cancellation,
+    recovery: &Cancellation,
+    mutation_started: &mut bool,
 ) -> Result<Vec<Outcome>> {
+    ensure_not_cancelled(cancellation)?;
     validate_preconditions(ctx, &stored_plan).await?;
     let plan_id = stored_plan.id.clone();
     let env = stored_plan.environment.clone();
     let steps = stored_plan.steps.clone();
     if !skip_gates {
         for step in &steps {
+            ensure_not_cancelled(cancellation)?;
             if step.action == Action::Rollback {
                 continue;
             }
@@ -692,6 +910,7 @@ async fn execute_locked(
             return Ok(vec![outcome]);
         }
     }
+    ensure_not_cancelled(cancellation)?;
     set_plan_state_confirmed(ctx, &mut stored_plan, PlanState::Running, skip_gates, "").await?;
 
     let mut outcomes = Vec::new();
@@ -700,27 +919,46 @@ async fn execute_locked(
     let mut final_detail = String::new();
 
     for step in steps {
+        stop_running_if_cancelled(
+            ctx,
+            &mut stored_plan,
+            skip_gates,
+            cancellation,
+            mutation_started,
+        )
+        .await?;
         if let Err(error) = refresh_environment_lease(ctx, lease).await {
             let detail = format!("refreshing environment apply lease failed: {error}");
-            set_plan_state(
-                ctx,
-                &mut stored_plan,
-                PlanState::Failed,
-                skip_gates,
-                &detail,
-            )
-            .await?;
+            fail_running_plan(ctx, &mut stored_plan, skip_gates, &detail, mutation_started).await?;
             return Err(error.context(detail));
         }
-        let outcome = match execute_step(ctx, &env, &plan_id, &step).await {
+        stop_running_if_cancelled(
+            ctx,
+            &mut stored_plan,
+            skip_gates,
+            cancellation,
+            mutation_started,
+        )
+        .await?;
+        let outcome = match execute_step(
+            ctx,
+            &env,
+            &plan_id,
+            &step,
+            cancellation,
+            recovery,
+            mutation_started,
+        )
+        .await
+        {
             Ok(outcome) => outcome,
             Err(error) => {
-                set_plan_state(
+                fail_running_plan(
                     ctx,
                     &mut stored_plan,
-                    PlanState::Failed,
                     skip_gates,
                     error.to_string(),
+                    mutation_started,
                 )
                 .await?;
                 return Err(error);
@@ -746,12 +984,34 @@ async fn execute_locked(
     } else {
         PlanState::Succeeded
     };
-    set_plan_state_confirmed(ctx, &mut stored_plan, final_state, skip_gates, final_detail).await?;
+    stop_running_if_cancelled(
+        ctx,
+        &mut stored_plan,
+        skip_gates,
+        cancellation,
+        mutation_started,
+    )
+    .await?;
+    if let Err(error) =
+        set_plan_state_confirmed(ctx, &mut stored_plan, final_state, skip_gates, final_detail).await
+    {
+        *mutation_started = true;
+        return Err(error.context("persisting final plan state"));
+    }
 
     Ok(outcomes)
 }
 
-async fn execute_step(ctx: &mut Ctx, env: &str, plan_oid: &str, step: &Step) -> Result<Outcome> {
+async fn execute_step(
+    ctx: &mut Ctx,
+    env: &str,
+    plan_oid: &str,
+    step: &Step,
+    cancellation: &Cancellation,
+    recovery: &Cancellation,
+    mutation_started: &mut bool,
+) -> Result<Outcome> {
+    let mut step_mutation_started = false;
     let target = ReleasePin {
         release_id: step.release_id.clone(),
         digest: step.release_digest.clone(),
@@ -776,10 +1036,20 @@ async fn execute_step(ctx: &mut Ctx, env: &str, plan_oid: &str, step: &Step) -> 
         let outgoing_executor = executor::select(outgoing.manifest.deploy.executor);
         let outgoing_input =
             executor_input(outgoing, step, Action::Rollback, Some(step.to.clone()));
-        let cleanup_failure = deactivate(outgoing_executor, &outgoing_input, outgoing)
-            .await
-            .err();
+        let cleanup_failure = deactivate(
+            outgoing_executor,
+            &outgoing_input,
+            outgoing,
+            cancellation,
+            &mut step_mutation_started,
+        )
+        .await
+        .err();
+        *mutation_started |= step_mutation_started;
         if let Some(detail) = cleanup_failure {
+            if !step_mutation_started && cancellation.reason().is_some() {
+                bail!(detail);
+            }
             let detail = format!("rollback blocked: outgoing release cleanup failed: {detail}");
             set_env_unknown(ctx, env, &step.product, &detail).await?;
             let outcome = Outcome {
@@ -794,7 +1064,23 @@ async fn execute_step(ctx: &mut Ctx, env: &str, plan_oid: &str, step: &Step) -> 
 
     let target_executor = executor::select(content.manifest.deploy.executor);
     let target_input = executor_input(&content, step, step.action, step.from.clone());
-    let activation = activate(target_executor, &target_input, &content).await;
+    let mut activation_started = false;
+    let activation = activate(
+        target_executor,
+        &target_input,
+        &content,
+        cancellation,
+        &mut activation_started,
+    )
+    .await;
+    step_mutation_started |= activation_started;
+    *mutation_started |= step_mutation_started;
+    if let Err(detail) = &activation
+        && !step_mutation_started
+        && cancellation.reason().is_some()
+    {
+        bail!(detail.clone());
+    }
     let outcome = match activation {
         Ok(()) => {
             let outcome = Outcome {
@@ -805,11 +1091,13 @@ async fn execute_step(ctx: &mut Ctx, env: &str, plan_oid: &str, step: &Step) -> 
             if let Err(error) =
                 set_env_deployed(ctx, env, &step.product, &step.to, step.from.as_deref()).await
             {
-                compensate_activation(ctx, env, step, &content, &error).await;
+                compensate_activation(ctx, env, step, &content, &error, recovery, mutation_started)
+                    .await;
                 return Err(error);
             }
             if let Err(error) = record_deployment(ctx, env, plan_oid, &outcome).await {
-                compensate_activation(ctx, env, step, &content, &error).await;
+                compensate_activation(ctx, env, step, &content, &error, recovery, mutation_started)
+                    .await;
                 return Err(error);
             }
             return Ok(outcome);
@@ -818,9 +1106,19 @@ async fn execute_step(ctx: &mut Ctx, env: &str, plan_oid: &str, step: &Step) -> 
             // Install or health failed: try to restore the previous release.
             match &step.from {
                 Some(prev) => {
-                    let (cleaned, detail) =
-                        cleanup_failed_install(target_executor, &target_input, &content, detail)
-                            .await;
+                    let (cleaned, detail) = if activation_started {
+                        cleanup_failed_install(
+                            target_executor,
+                            &target_input,
+                            &content,
+                            detail,
+                            recovery,
+                            mutation_started,
+                        )
+                        .await
+                    } else {
+                        (true, detail)
+                    };
                     let Some(prev_content) = restore_content.as_ref() else {
                         let detail =
                             format!("{detail}; step {} has no pinned restore release", step.id);
@@ -842,6 +1140,8 @@ async fn execute_step(ctx: &mut Ctx, env: &str, plan_oid: &str, step: &Step) -> 
                         prev_content,
                         prev,
                         detail,
+                        recovery,
+                        mutation_started,
                     )
                     .await;
                     let recovered = cleaned && restored;
@@ -855,9 +1155,19 @@ async fn execute_step(ctx: &mut Ctx, env: &str, plan_oid: &str, step: &Step) -> 
                     }
                 }
                 None => {
-                    let (cleaned, detail) =
-                        cleanup_failed_install(target_executor, &target_input, &content, detail)
-                            .await;
+                    let (cleaned, detail) = if activation_started {
+                        cleanup_failed_install(
+                            target_executor,
+                            &target_input,
+                            &content,
+                            detail,
+                            recovery,
+                            mutation_started,
+                        )
+                        .await
+                    } else {
+                        (true, detail)
+                    };
                     if !cleaned {
                         set_env_unknown(ctx, env, &step.product, &detail).await?;
                     }
@@ -975,6 +1285,7 @@ mod tests {
                     inputs: Vec::new(),
                     uninstall: uninstall.map(str::to_string),
                     health: health.map(str::to_string),
+                    timeout_seconds: Some(600),
                 },
                 gate: GateSection::default(),
             },
@@ -1022,15 +1333,44 @@ mod tests {
     }
 
     impl Executor for FakeExecutor {
-        fn activate<'a>(&'a self, _input: &'a ExecutorInput) -> ExecutorFuture<'a> {
+        fn activate<'a>(
+            &'a self,
+            _input: &'a ExecutorInput,
+            _cancellation: &'a Cancellation,
+        ) -> ExecutorFuture<'a> {
             let result = self.next();
             Box::pin(async move { result })
         }
 
-        fn deactivate<'a>(&'a self, _input: &'a ExecutorInput) -> ExecutorFuture<'a> {
+        fn deactivate<'a>(
+            &'a self,
+            _input: &'a ExecutorInput,
+            _cancellation: &'a Cancellation,
+        ) -> ExecutorFuture<'a> {
             let result = self.next();
             Box::pin(async move { result })
         }
+    }
+
+    fn active_cancellation() -> Cancellation {
+        Cancellation::default()
+    }
+
+    async fn activate_for_test(
+        executor: &dyn Executor,
+        input: &ExecutorInput,
+        content: &ReleaseContent,
+        cancellation: &Cancellation,
+    ) -> Result<(), String> {
+        let mut mutation_started = false;
+        activate(
+            executor,
+            input,
+            content,
+            cancellation,
+            &mut mutation_started,
+        )
+        .await
     }
 
     #[test]
@@ -1108,7 +1448,10 @@ mod tests {
         let input = executor_input(&release, &step, step.action, step.from.clone());
         let fake = FakeExecutor::returning([ExecutorResult::succeeded(ExecutorPhase::Install)]);
 
-        assert_eq!(activate(&fake, &input, &release).await, Ok(()));
+        assert_eq!(
+            activate_for_test(&fake, &input, &release, &active_cancellation()).await,
+            Ok(())
+        );
         assert!(!dir.join("command-ran").exists());
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -1125,7 +1468,7 @@ mod tests {
         )]);
 
         assert_eq!(
-            activate(&fake, &input, &release).await,
+            activate_for_test(&fake, &input, &release, &active_cancellation()).await,
             Err("install rejected".into())
         );
         assert!(!dir.join("command-ran").exists());
@@ -1149,7 +1492,7 @@ mod tests {
         )]);
 
         assert_eq!(
-            activate(&fake, &input, &release).await,
+            activate_for_test(&fake, &input, &release, &active_cancellation()).await,
             Err("health rejected".into())
         );
         assert!(!dir.join("command-ran").exists());
@@ -1165,8 +1508,17 @@ mod tests {
         let input = executor_input(&previous, &step, Action::Rollback, Some("2.0.0".into()));
         let fake = FakeExecutor::returning([ExecutorResult::succeeded(ExecutorPhase::Install)]);
 
-        let (restored, detail) =
-            restore_previous(&fake, &input, &previous, "1.0.0", "upgrade failed".into()).await;
+        let mut mutation_started = false;
+        let (restored, detail) = restore_previous(
+            &fake,
+            &input,
+            &previous,
+            "1.0.0",
+            "upgrade failed".into(),
+            &active_cancellation(),
+            &mut mutation_started,
+        )
+        .await;
 
         assert!(restored);
         assert!(detail.contains("restored 1.0.0"));
@@ -1185,10 +1537,11 @@ mod tests {
         );
         let step = step();
         let input = executor_input(&release, &step, step.action, step.from.clone());
-        let failure = activate(
+        let failure = activate_for_test(
             executor::select(release.manifest.deploy.executor),
             &input,
             &release,
+            &active_cancellation(),
         )
         .await
         .unwrap_err();
@@ -1208,10 +1561,11 @@ mod tests {
 
         let step = step();
         let input = executor_input(&release, &step, step.action, step.from.clone());
-        let failure = activate(
+        let failure = activate_for_test(
             executor::select(release.manifest.deploy.executor),
             &input,
             &release,
+            &active_cancellation(),
         )
         .await
         .unwrap_err();
@@ -1231,10 +1585,11 @@ mod tests {
         let step = step();
         let input = executor_input(&release, &step, step.action, step.from.clone());
 
-        let failure = activate(
+        let failure = activate_for_test(
             executor::select(release.manifest.deploy.executor),
             &input,
             &release,
+            &active_cancellation(),
         )
         .await
         .unwrap_err();
@@ -1249,12 +1604,15 @@ mod tests {
         let previous = content(dir.clone(), "touch restored", Some("false"), None);
         let step = step();
         let input = executor_input(&previous, &step, Action::Rollback, Some("2.0.0".into()));
+        let mut mutation_started = false;
         let (restored, detail) = restore_previous(
             executor::select(previous.manifest.deploy.executor),
             &input,
             &previous,
             "1.0.0",
             "upgrade failed".into(),
+            &active_cancellation(),
+            &mut mutation_started,
         )
         .await;
         assert!(!restored);
@@ -1269,11 +1627,14 @@ mod tests {
         let release = content(dir.clone(), "false", None, Some("touch cleaned"));
         let step = step();
         let input = executor_input(&release, &step, step.action, step.from.clone());
+        let mut mutation_started = false;
         let (cleaned, detail) = cleanup_failed_install(
             executor::select(release.manifest.deploy.executor),
             &input,
             &release,
             "install failed".into(),
+            &active_cancellation(),
+            &mut mutation_started,
         )
         .await;
         assert!(cleaned);

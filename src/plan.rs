@@ -41,7 +41,7 @@ fn classify_change(current: &str, desired: &str) -> Action {
     }
 }
 
-pub const PLAN_FORMAT_VERSION: u32 = 1;
+pub const PLAN_FORMAT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Step {
@@ -189,6 +189,22 @@ impl Plan {
             .properties
             .get("plan")
             .with_context(|| format!("plan object {} has no serialized plan", object.id))?;
+        let stored_format = object
+            .properties
+            .get("format_version")
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(1);
+        if stored_format != PLAN_FORMAT_VERSION {
+            bail!(
+                "plan {} uses legacy format version {stored_format}; create a new plan with `tenkaictl plan --env {}`",
+                object.id,
+                object
+                    .properties
+                    .get("environment")
+                    .map(String::as_str)
+                    .unwrap_or("<environment>")
+            );
+        }
         let plan: Self = serde_json::from_str(raw)
             .with_context(|| format!("parsing stored plan {}", object.id))?;
         if plan.format_version != PLAN_FORMAT_VERSION {
@@ -325,7 +341,36 @@ pub async fn env_add(ctx: &mut Ctx, name: &str, description: &str) -> Result<Str
         if existing.kind != KIND_ENVIRONMENT {
             bail!("object {id} is {}, not {KIND_ENVIRONMENT}", existing.kind);
         }
-        return Ok(format!("environment {name} already registered"));
+        let owner = format!("environment-update:{}", crate::now_millis());
+        let lease = crate::apply::claim_environment(ctx, name, &owner).await?;
+        let result = async {
+            let latest = ctx.get(&id).await?;
+            let effective_description = if description.is_empty() {
+                latest
+                    .as_ref()
+                    .and_then(|object| object.properties.get("description"))
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                description.to_string()
+            };
+            let object =
+                environment_record(latest, name, &effective_description, crate::now_millis())?;
+            ctx.put(object).await?;
+            Ok::<_, anyhow::Error>(format!("environment {name} updated"))
+        }
+        .await;
+        let unlock = crate::apply::release_environment(ctx, &lease).await;
+        return match (result, unlock) {
+            (Ok(message), Ok(())) => Ok(message),
+            (Err(error), Ok(())) => Err(error),
+            (Err(error), Err(unlock)) => Err(error.context(format!(
+                "releasing environment update lease also failed: {unlock}; run `tenkaictl env unlock {name}` after verifying no mutation is running"
+            ))),
+            (Ok(_), Err(error)) => Err(error.context(format!(
+                "releasing environment update lease failed; run `tenkaictl env unlock {name}` after verifying no mutation is running"
+            ))),
+        };
     }
     let object = environment_record(None, name, description, now)?;
     match ctx.create_once(object).await {
@@ -347,10 +392,28 @@ pub async fn reconcile_deployment(
 ) -> Result<String> {
     validate_identifier("environment", env)?;
     validate_identifier("product", product)?;
-    let lease_id = format!("{}:execution", env_id(env));
-    if ctx.get(&lease_id).await?.is_some() {
-        bail!("environment {env} has an apply in progress");
+    let owner = format!("reconcile:{product}:{}", crate::now_millis());
+    let lease = crate::apply::claim_environment(ctx, env, &owner).await?;
+    let result = reconcile_deployment_locked(ctx, env, product, deployed).await;
+    let unlock = crate::apply::release_environment(ctx, &lease).await;
+    match (result, unlock) {
+        (Ok(message), Ok(())) => Ok(message),
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(unlock)) => Err(error.context(format!(
+            "releasing environment reconciliation lease also failed: {unlock}; run `tenkaictl env unlock {env}` after verifying no mutation is running"
+        ))),
+        (Ok(_), Err(error)) => Err(error.context(format!(
+            "releasing environment reconciliation lease failed; run `tenkaictl env unlock {env}` after verifying no mutation is running"
+        ))),
     }
+}
+
+async fn reconcile_deployment_locked(
+    ctx: &mut Ctx,
+    env: &str,
+    product: &str,
+    deployed: Option<&str>,
+) -> Result<String> {
     let mut object = environment(ctx, env).await?;
     match deployed {
         Some(version) => {
@@ -399,6 +462,29 @@ pub async fn subscribe(ctx: &mut Ctx, env: &str, product: &str, channel: &str) -
     if ctx.get(&eid).await?.is_none() {
         bail!("environment {env} is not registered (tenkaictl env add {env})");
     }
+    let owner = format!("subscribe:{product}:{}", crate::now_millis());
+    let lease = crate::apply::claim_environment(ctx, env, &owner).await?;
+    let result = subscribe_locked(ctx, env, product, channel).await;
+    let unlock = crate::apply::release_environment(ctx, &lease).await;
+    match (result, unlock) {
+        (Ok(message), Ok(())) => Ok(message),
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(unlock)) => Err(error.context(format!(
+            "releasing environment subscription lease also failed: {unlock}; run `tenkaictl env unlock {env}` after verifying no mutation is running"
+        ))),
+        (Ok(_), Err(error)) => Err(error.context(format!(
+            "releasing environment subscription lease failed; run `tenkaictl env unlock {env}` after verifying no mutation is running"
+        ))),
+    }
+}
+
+async fn subscribe_locked(
+    ctx: &mut Ctx,
+    env: &str,
+    product: &str,
+    channel: &str,
+) -> Result<String> {
+    let eid = env_id(env);
     let cid = channel_id(product, channel);
     if ctx.get(&cid).await?.is_none() {
         bail!("channel {product}/{channel} does not exist — promote a release into it first");

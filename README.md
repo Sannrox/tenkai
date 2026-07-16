@@ -1,5 +1,7 @@
 # tenkai
 
+tenkai currently supports Unix deployment hosts (Linux and macOS).
+
 `tenkai` (展開, "deployment / unfolding") is a local-first, constraint-based
 delivery control plane in the spirit of Palantir Apollo, backed by
 [sekai-chisei](https://github.com/Sannrox/sekai-chisei).
@@ -63,6 +65,7 @@ install = "docker compose up -d" # any command; activates this release
 uninstall = "docker compose down"
 health = "curl -sf localhost:8080/healthz"  # exit 0 = healthy; failure rolls back
 inputs = ["compose.yaml"]          # immutable files/directories used by these commands
+timeout_seconds = 600              # maximum duration of each deployment command
 
 [gate]
 eval_suite = "my-suite"          # chisei eval suite; latest run must fully pass
