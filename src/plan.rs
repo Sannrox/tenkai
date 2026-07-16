@@ -783,6 +783,22 @@ fn retain_required_dependencies(
     }
 }
 
+fn rollback_execution_order(
+    install_order: &[String],
+    actions: &BTreeMap<String, Action>,
+) -> Vec<String> {
+    install_order
+        .iter()
+        .filter(|product| actions.get(*product) == Some(&Action::Install))
+        .chain(install_order.iter().rev().filter(|product| {
+            actions
+                .get(*product)
+                .is_some_and(|action| *action != Action::Install)
+        }))
+        .cloned()
+        .collect()
+}
+
 async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateInput>, Vec<Step>)> {
     let env_obj = environment(ctx, env).await?;
     let channels = ctx.linked(&env_obj.id, REL_SUBSCRIBES, "out").await?;
@@ -1079,13 +1095,15 @@ pub async fn create_rollback(ctx: &mut Ctx, env: &str, product: &str) -> Result<
     let desired_products = resolution.selected.keys().cloned().collect::<BTreeSet<_>>();
     let mut inputs = Vec::new();
     let mut steps = Vec::new();
-    for selected_product in resolution.install_order {
-        let desired = resolution.selected[&selected_product].clone();
+    let install_order = resolution.install_order;
+    let mut resolved_steps = BTreeMap::<String, Step>::new();
+    for selected_product in &install_order {
+        let desired = resolution.selected[selected_product].clone();
         let deployed = env_obj
             .properties
             .get(&format!("deployed.{selected_product}"))
             .cloned();
-        let target = pin_release(ctx, &release_id(&selected_product, &desired)).await?;
+        let target = pin_release(ctx, &release_id(selected_product, &desired)).await?;
         inputs.push(DesiredStateInput {
             product: selected_product.clone(),
             channel: String::new(),
@@ -1104,24 +1122,38 @@ pub async fn create_rollback(ctx: &mut Ctx, env: &str, product: &str) -> Result<
                 } else {
                     classify_change(&version, &desired)
                 };
-                let restore = pin_release(ctx, &release_id(&selected_product, &version)).await?;
+                let restore = pin_release(ctx, &release_id(selected_product, &version)).await?;
                 (action, Some(version), Some(restore))
             }
             None => (Action::Install, None, None),
         };
-        steps.push(Step {
-            id: String::new(),
-            order: steps.len() as u32,
-            product: selected_product,
-            action,
-            from,
-            to: desired,
-            release_id: target.release_id,
-            release_digest: target.digest,
-            artifact_digest: target.artifact_digest,
-            workdir: target.workdir,
-            restore,
-        });
+        resolved_steps.insert(
+            selected_product.clone(),
+            Step {
+                id: String::new(),
+                order: 0,
+                product: selected_product.clone(),
+                action,
+                from,
+                to: desired,
+                release_id: target.release_id,
+                release_digest: target.digest,
+                artifact_digest: target.artifact_digest,
+                workdir: target.workdir,
+                restore,
+            },
+        );
+    }
+    let actions = resolved_steps
+        .iter()
+        .map(|(product, step)| (product.clone(), step.action))
+        .collect::<BTreeMap<_, _>>();
+    for selected_product in rollback_execution_order(&install_order, &actions) {
+        steps.push(
+            resolved_steps
+                .remove(&selected_product)
+                .expect("rollback order only contains changed products"),
+        );
     }
 
     let deployed = env_obj
@@ -1363,6 +1395,21 @@ install = "true"
                 BTreeSet::from(["runtime".into()]),
             ),
             BTreeSet::from(["runtime".into()])
+        );
+    }
+
+    #[test]
+    fn rollback_installs_new_dependencies_then_changes_dependents_first() {
+        let install_order = vec!["database".into(), "runtime".into(), "app".into()];
+        let actions = BTreeMap::from([
+            ("database".into(), Action::Install),
+            ("runtime".into(), Action::Downgrade),
+            ("app".into(), Action::Rollback),
+        ]);
+
+        assert_eq!(
+            rollback_execution_order(&install_order, &actions),
+            ["database", "app", "runtime"]
         );
     }
 
