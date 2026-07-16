@@ -759,15 +759,48 @@ pub(crate) async fn claim_environment(
     bail!("environment {environment} already has an apply in progress")
 }
 
-async fn refresh_environment_lease(ctx: &mut Ctx, lease: &EnvironmentLease) -> Result<()> {
-    let existing = ctx
-        .get(&lease.id)
-        .await?
-        .with_context(|| format!("environment lease {} disappeared", lease.id))?;
-    if existing.properties.get("owner") != Some(&lease.owner) {
-        bail!("environment lease {} is owned by another apply", lease.id);
+struct LeaseRefreshFailure {
+    error: anyhow::Error,
+    ownership_lost: bool,
+}
+
+impl std::fmt::Display for LeaseRefreshFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(formatter)
     }
-    ctx.put(lease_object(lease, crate::now_millis())).await?;
+}
+
+async fn refresh_environment_lease(
+    ctx: &mut Ctx,
+    lease: &EnvironmentLease,
+) -> std::result::Result<(), LeaseRefreshFailure> {
+    let existing = match ctx.get(&lease.id).await {
+        Ok(Some(existing)) => existing,
+        Ok(None) => {
+            return Err(LeaseRefreshFailure {
+                error: anyhow::anyhow!("environment lease {} disappeared", lease.id),
+                ownership_lost: true,
+            });
+        }
+        Err(error) => {
+            return Err(LeaseRefreshFailure {
+                error,
+                ownership_lost: false,
+            });
+        }
+    };
+    if existing.properties.get("owner") != Some(&lease.owner) {
+        return Err(LeaseRefreshFailure {
+            error: anyhow::anyhow!("environment lease {} is owned by another apply", lease.id),
+            ownership_lost: true,
+        });
+    }
+    ctx.put(lease_object(lease, crate::now_millis()))
+        .await
+        .map_err(|error| LeaseRefreshFailure {
+            error,
+            ownership_lost: false,
+        })?;
     Ok(())
 }
 
@@ -951,10 +984,23 @@ async fn execute_locked(
             mutation_started,
         )
         .await?;
-        if let Err(error) = refresh_environment_lease(ctx, lease).await {
-            let detail = format!("refreshing environment apply lease failed: {error}");
+        if let Err(failure) = refresh_environment_lease(ctx, lease).await {
+            let mut detail = format!("refreshing environment apply lease failed: {failure}");
+            if !failure.ownership_lost {
+                let compensation = unwind_succeeded_steps(
+                    ctx,
+                    &env,
+                    &plan_id,
+                    &mut outcomes,
+                    &detail,
+                    recovery,
+                    mutation_started,
+                )
+                .await;
+                append_compensation_detail(&mut detail, &compensation);
+            }
             fail_running_plan(ctx, &mut stored_plan, skip_gates, &detail, mutation_started).await?;
-            return Err(error.context(detail));
+            return Err(failure.error.context(detail));
         }
         stop_running_if_cancelled(
             ctx,
