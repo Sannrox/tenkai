@@ -675,10 +675,10 @@ async fn catalog_candidates(ctx: &mut Ctx, roots: &[ChannelRoot]) -> Result<Vec<
     Ok(candidates)
 }
 
-async fn deployed_removal_order(
+async fn deployed_dependencies(
     ctx: &mut Ctx,
     deployed: &BTreeMap<String, String>,
-) -> Result<Vec<String>> {
+) -> Result<BTreeMap<String, Vec<String>>> {
     let mut dependencies = BTreeMap::<String, Vec<String>>::new();
     for (product, version) in deployed {
         let id = release_id(product, version);
@@ -697,7 +697,7 @@ async fn deployed_removal_order(
                 .collect(),
         );
     }
-    removal_order_from_dependencies(deployed.keys().cloned().collect(), dependencies)
+    Ok(dependencies)
 }
 
 fn removal_order_from_dependencies(
@@ -759,6 +759,28 @@ fn obsolete_dependency_products(
         })
         .cloned()
         .collect()
+}
+
+fn retain_required_dependencies(
+    deployed: &BTreeMap<String, String>,
+    dependencies: &BTreeMap<String, Vec<String>>,
+    mut removable: BTreeSet<String>,
+) -> BTreeSet<String> {
+    loop {
+        let required_by_retained = deployed
+            .keys()
+            .filter(|product| !removable.contains(*product))
+            .flat_map(|product| dependencies.get(product).into_iter().flatten())
+            .filter(|dependency| removable.contains(*dependency))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if required_by_retained.is_empty() {
+            return removable;
+        }
+        for product in required_by_retained {
+            removable.remove(&product);
+        }
+    }
 }
 
 async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateInput>, Vec<Step>)> {
@@ -902,11 +924,11 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
         &subscribed_products,
     );
     if !obsolete.is_empty() {
-        for product in deployed_removal_order(ctx, &deployed)
-            .await
+        let dependencies = deployed_dependencies(ctx, &deployed).await?;
+        let obsolete = retain_required_dependencies(&deployed, &dependencies, obsolete);
+        for product in removal_order_from_dependencies(obsolete.clone(), dependencies)
             .with_context(|| format!("cannot order removals for environment {env}"))?
             .into_iter()
-            .filter(|product| obsolete.contains(product))
         {
             let version = deployed[&product].clone();
             let target = pin_release(ctx, &release_id(&product, &version)).await?;
@@ -1170,6 +1192,29 @@ install = "true"
                 &BTreeSet::new(),
             ),
             BTreeSet::from(["managed".into()])
+        );
+    }
+
+    #[test]
+    fn dependencies_required_by_retained_deployments_are_not_removed() {
+        let deployed = BTreeMap::from([
+            ("worker".into(), "1.0.0".into()),
+            ("runtime".into(), "1.0.0".into()),
+            ("database".into(), "1.0.0".into()),
+        ]);
+        let dependencies = BTreeMap::from([
+            ("worker".into(), vec!["runtime".into()]),
+            ("runtime".into(), vec!["database".into()]),
+            ("database".into(), Vec::new()),
+        ]);
+
+        assert!(
+            retain_required_dependencies(
+                &deployed,
+                &dependencies,
+                BTreeSet::from(["runtime".into(), "database".into()]),
+            )
+            .is_empty()
         );
     }
 
