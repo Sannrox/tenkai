@@ -1,0 +1,13 @@
+[product]
+name = "hello-local"
+version = "0.1.0"
+description = "Demo product: writes its version to .state/version"
+
+[deploy]
+workdir = "."
+install = "mkdir -p .state && echo 0.1.0 > .state/version"
+health = "grep -qx 0.1.0 .state/version"
+
+# Optional chisei eval gate: apply blocks unless the suite's latest run passes.
+# [gate]
+# eval_suite = "hello-local-quality"
