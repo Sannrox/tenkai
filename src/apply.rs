@@ -605,6 +605,30 @@ async fn set_env_unknown(ctx: &mut Ctx, env: &str, product: &str, detail: &str) 
     Ok(())
 }
 
+async fn clear_env_deployed(ctx: &mut Ctx, env: &str, product: &str) -> Result<()> {
+    let Some(mut environment) = ctx.get(&env_id(env)).await? else {
+        bail!("environment {env} disappeared during apply");
+    };
+    environment
+        .properties
+        .remove(&format!("deployed.{product}"));
+    environment
+        .properties
+        .remove(&format!("deployed_release.{product}"));
+    environment
+        .properties
+        .remove(&format!("deployed_prev.{product}"));
+    environment
+        .properties
+        .remove(&format!("deployment_health.{product}"));
+    environment
+        .properties
+        .remove(&format!("deployment_error.{product}"));
+    environment.updated = crate::now_millis();
+    ctx.put(environment).await?;
+    Ok(())
+}
+
 async fn set_plan_state(
     ctx: &mut Ctx,
     plan: &mut Plan,
@@ -977,6 +1001,23 @@ async fn execute_locked(
         }
     }
 
+    if plan_failed {
+        let compensation = unwind_succeeded_steps(
+            ctx,
+            &env,
+            &plan_id,
+            &mut outcomes,
+            &final_detail,
+            recovery,
+            mutation_started,
+        )
+        .await?;
+        if !compensation.is_empty() {
+            final_detail.push_str("; ");
+            final_detail.push_str(&compensation);
+        }
+    }
+
     let final_state = if plan_blocked {
         PlanState::Blocked
     } else if plan_failed {
@@ -1000,6 +1041,119 @@ async fn execute_locked(
     }
 
     Ok(outcomes)
+}
+
+async fn unwind_succeeded_steps(
+    ctx: &mut Ctx,
+    env: &str,
+    plan_oid: &str,
+    outcomes: &mut [Outcome],
+    cause: &str,
+    recovery: &Cancellation,
+    mutation_started: &mut bool,
+) -> Result<String> {
+    let mut details = Vec::new();
+    for index in succeeded_indices_in_reverse(outcomes) {
+        let step = outcomes[index].step.clone();
+        let compensation =
+            compensate_completed_step(ctx, env, plan_oid, &step, cause, recovery, mutation_started)
+                .await?;
+        details.push(format!("{} {}", step.product, compensation.detail));
+        outcomes[index].status = compensation.status;
+        outcomes[index].detail = compensation.detail;
+    }
+    if details.is_empty() {
+        Ok(String::new())
+    } else {
+        Ok(format!("compensation: {}", details.join("; ")))
+    }
+}
+
+fn succeeded_indices_in_reverse(outcomes: &[Outcome]) -> Vec<usize> {
+    outcomes
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, outcome)| outcome.status == "succeeded")
+        .map(|(index, _)| index)
+        .collect()
+}
+
+async fn compensate_completed_step(
+    ctx: &mut Ctx,
+    env: &str,
+    plan_oid: &str,
+    step: &Step,
+    cause: &str,
+    recovery: &Cancellation,
+    mutation_started: &mut bool,
+) -> Result<Outcome> {
+    let target = ReleasePin {
+        release_id: step.release_id.clone(),
+        digest: step.release_digest.clone(),
+        artifact_digest: step.artifact_digest.clone(),
+        workdir: step.workdir.clone(),
+    };
+    let content = release_content(ctx, &target, env, &step.product).await?;
+    let failure = format!("later plan step failed: {cause}");
+    let target_executor = executor::select(content.manifest.deploy.executor);
+    let target_input = executor_input(&content, step, step.action, step.from.clone());
+    let mut compensation_started = false;
+    let (cleaned, mut detail) = cleanup_failed_install(
+        target_executor,
+        &target_input,
+        &content,
+        failure,
+        recovery,
+        &mut compensation_started,
+    )
+    .await;
+    *mutation_started |= compensation_started;
+    let restored = match (step.from.as_deref(), step.restore.as_ref()) {
+        (Some(previous), Some(pin)) => {
+            let previous_content = release_content(ctx, pin, env, &step.product).await?;
+            let previous_executor = executor::select(previous_content.manifest.deploy.executor);
+            let previous_input = executor_input(
+                &previous_content,
+                step,
+                Action::Rollback,
+                Some(step.to.clone()),
+            );
+            let mut restore_started = false;
+            let (restored, restore_detail) = restore_previous(
+                previous_executor,
+                &previous_input,
+                &previous_content,
+                previous,
+                detail,
+                recovery,
+                &mut restore_started,
+            )
+            .await;
+            *mutation_started |= restore_started;
+            detail = restore_detail;
+            restored
+                && set_env_deployed(ctx, env, &step.product, previous, Some(&step.to))
+                    .await
+                    .is_ok()
+        }
+        (Some(_), None) => {
+            detail.push_str("; completed step has no pinned restore release");
+            false
+        }
+        (None, _) => cleaned && clear_env_deployed(ctx, env, &step.product).await.is_ok(),
+    };
+    let recovered = cleaned && restored;
+    if !recovered {
+        set_env_unknown(ctx, env, &step.product, &detail).await?;
+    }
+    let outcome = Outcome {
+        step: step.clone(),
+        status: if recovered { "rolled_back" } else { "failed" }.into(),
+        detail,
+    };
+    record_deployment(ctx, env, plan_oid, &outcome).await?;
+    Ok(outcome)
 }
 
 async fn execute_step(
@@ -1642,5 +1796,32 @@ mod tests {
         assert!(dir.join("cleaned").exists());
         assert!(detail.contains("cleaned up failed install"));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn completed_steps_unwind_in_reverse_order() {
+        let outcome = |product: &str, status: &str| Outcome {
+            step: Step {
+                id: product.into(),
+                order: 0,
+                product: product.into(),
+                action: Action::Install,
+                from: None,
+                to: "1.0.0".into(),
+                release_id: String::new(),
+                release_digest: String::new(),
+                artifact_digest: String::new(),
+                workdir: String::new(),
+                restore: None,
+            },
+            status: status.into(),
+            detail: String::new(),
+        };
+        let outcomes = vec![
+            outcome("database", "succeeded"),
+            outcome("runtime", "succeeded"),
+            outcome("application", "rolled_back"),
+        ];
+        assert_eq!(succeeded_indices_in_reverse(&outcomes), [1, 0]);
     }
 }
