@@ -785,7 +785,7 @@ async fn refresh_environment_lease(
         Err(error) => {
             return Err(LeaseRefreshFailure {
                 error,
-                ownership_lost: false,
+                ownership_lost: true,
             });
         }
     };
@@ -933,7 +933,7 @@ async fn execute_locked(
     if !skip_gates {
         for step in &steps {
             ensure_not_cancelled(cancellation)?;
-            if step.action == Action::Rollback {
+            if matches!(step.action, Action::Rollback | Action::Remove) {
                 continue;
             }
             let target = ReleasePin {
@@ -1186,6 +1186,40 @@ async fn compensate_completed_step(
     };
     let content = release_content(ctx, &target, env, &step.product).await?;
     let failure = format!("later plan step failed: {cause}");
+    if step.action == Action::Remove {
+        let previous = step
+            .from
+            .as_deref()
+            .context("completed removal has no previous version")?;
+        let previous_executor = executor::select(content.manifest.deploy.executor);
+        let previous_input = executor_input(&content, step, Action::Rollback, None);
+        let mut restore_started = false;
+        let (restored, detail) = restore_previous(
+            previous_executor,
+            &previous_input,
+            &content,
+            previous,
+            failure,
+            recovery,
+            &mut restore_started,
+        )
+        .await;
+        *mutation_started |= restore_started;
+        let recovered = restored
+            && set_env_deployed(ctx, env, &step.product, previous, None)
+                .await
+                .is_ok();
+        if !recovered {
+            set_env_unknown(ctx, env, &step.product, &detail).await?;
+        }
+        let outcome = Outcome {
+            step: step.clone(),
+            status: if recovered { "rolled_back" } else { "failed" }.into(),
+            detail,
+        };
+        record_deployment(ctx, env, plan_oid, &outcome).await?;
+        return Ok(outcome);
+    }
     let target_executor = executor::select(content.manifest.deploy.executor);
     let target_input = executor_input(&content, step, step.action, step.from.clone());
     let mut compensation_started = false;
@@ -1267,6 +1301,69 @@ async fn execute_step(
         Some(pin) => Some(release_content(ctx, pin, env, &step.product).await?),
         None => None,
     };
+
+    if step.action == Action::Remove {
+        let target_executor = executor::select(content.manifest.deploy.executor);
+        let target_input = executor_input(&content, step, Action::Remove, step.from.clone());
+        let removal = deactivate(
+            target_executor,
+            &target_input,
+            &content,
+            cancellation,
+            &mut step_mutation_started,
+        )
+        .await;
+        *mutation_started |= step_mutation_started;
+        if removal.is_err() && !step_mutation_started && cancellation.reason().is_some() {
+            bail!(removal.unwrap_err());
+        }
+        let outcome = match removal {
+            Ok(()) => {
+                if let Err(error) = clear_env_deployed(ctx, env, &step.product).await {
+                    compensate_removal_bookkeeping(
+                        ctx,
+                        env,
+                        step,
+                        &content,
+                        &error,
+                        recovery,
+                        mutation_started,
+                    )
+                    .await;
+                    return Err(error);
+                }
+                Outcome {
+                    step: step.clone(),
+                    status: "succeeded".into(),
+                    detail: String::new(),
+                }
+            }
+            Err(detail) => {
+                set_env_unknown(ctx, env, &step.product, &detail).await?;
+                Outcome {
+                    step: step.clone(),
+                    status: "failed".into(),
+                    detail,
+                }
+            }
+        };
+        if let Err(error) = record_deployment(ctx, env, plan_oid, &outcome).await {
+            if outcome.status == "succeeded" {
+                compensate_removal_bookkeeping(
+                    ctx,
+                    env,
+                    step,
+                    &content,
+                    &error,
+                    recovery,
+                    mutation_started,
+                )
+                .await;
+            }
+            return Err(error);
+        }
+        return Ok(outcome);
+    }
 
     if step.action == Action::Rollback
         && let Some(outgoing) = restore_content.as_ref()
@@ -1427,6 +1524,34 @@ async fn execute_step(
 
     record_deployment(ctx, env, plan_oid, &outcome).await?;
     Ok(outcome)
+}
+
+async fn compensate_removal_bookkeeping(
+    ctx: &mut Ctx,
+    env: &str,
+    step: &Step,
+    content: &ReleaseContent,
+    failure: &anyhow::Error,
+    recovery: &Cancellation,
+    mutation_started: &mut bool,
+) {
+    let detail = format!("removal bookkeeping failed after deactivation: {failure}");
+    let executor = executor::select(content.manifest.deploy.executor);
+    let input = executor_input(content, step, Action::Rollback, None);
+    let restored = activate(executor, &input, content, recovery, mutation_started)
+        .await
+        .is_ok();
+    let state_restored = if let Some(previous) = step.from.as_deref() {
+        restored
+            && set_env_deployed(ctx, env, &step.product, previous, None)
+                .await
+                .is_ok()
+    } else {
+        false
+    };
+    if !state_restored {
+        let _ = set_env_unknown(ctx, env, &step.product, &detail).await;
+    }
 }
 
 async fn record_deployment(

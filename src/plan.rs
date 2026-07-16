@@ -18,6 +18,7 @@ pub enum Action {
     Upgrade,
     Downgrade,
     Rollback,
+    Remove,
 }
 
 impl std::fmt::Display for Action {
@@ -27,6 +28,7 @@ impl std::fmt::Display for Action {
             Action::Upgrade => "upgrade",
             Action::Downgrade => "downgrade",
             Action::Rollback => "rollback",
+            Action::Remove => "remove",
         };
         f.write_str(s)
     }
@@ -734,6 +736,7 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
 
     let mut inputs = Vec::new();
     let mut steps = Vec::new();
+    let desired_products = resolution.selected.keys().cloned().collect::<BTreeSet<_>>();
     for product in resolution.install_order {
         let desired = resolution
             .selected
@@ -793,6 +796,62 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
             workdir: target.workdir,
             restore,
         });
+    }
+
+    let deployed = env_obj
+        .properties
+        .iter()
+        .filter_map(|(key, version)| {
+            key.strip_prefix("deployed.")
+                .map(|product| (product.to_string(), version.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let obsolete = deployed
+        .keys()
+        .filter(|product| !desired_products.contains(*product))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if !obsolete.is_empty() {
+        let previous_roots = deployed
+            .iter()
+            .map(|(product, version)| ChannelRoot {
+                product: product.clone(),
+                channel: String::new(),
+                channel_id: String::new(),
+                version: version.clone(),
+            })
+            .collect::<Vec<_>>();
+        let previous = crate::planner::resolve(&Request {
+            roots: previous_roots
+                .iter()
+                .map(|root| (root.product.clone(), root.version.clone()))
+                .collect(),
+            candidates: catalog_candidates(ctx, &previous_roots).await?,
+            ..Request::default()
+        })
+        .with_context(|| format!("cannot order removals for environment {env}"))?;
+        for product in previous
+            .removal_order()
+            .into_iter()
+            .filter(|product| obsolete.contains(product))
+        {
+            let version = deployed[&product].clone();
+            let target = pin_release(ctx, &release_id(&product, &version)).await?;
+            let order = steps.len() as u32;
+            steps.push(Step {
+                id: format!("{}:step:{order}", env_id(env)),
+                order,
+                product,
+                action: Action::Remove,
+                from: Some(version),
+                to: String::new(),
+                release_id: target.release_id.clone(),
+                release_digest: target.digest.clone(),
+                artifact_digest: target.artifact_digest.clone(),
+                workdir: target.workdir.clone(),
+                restore: Some(target),
+            });
+        }
     }
     Ok((inputs, steps))
 }
