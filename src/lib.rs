@@ -7,6 +7,7 @@
 pub mod apply;
 pub mod catalog;
 pub mod client;
+pub mod executor;
 pub mod manifest;
 pub mod ontology;
 pub mod pb;
