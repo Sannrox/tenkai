@@ -6,6 +6,8 @@ use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
+use crate::executor::ExecutorKind;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
@@ -27,6 +29,9 @@ pub struct ProductSection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeploySection {
+    /// Deployment adapter. Existing manifests default to the local shell.
+    #[serde(default)]
+    pub executor: ExecutorKind,
     /// Working directory for all commands, relative to the manifest file.
     #[serde(default = "default_workdir")]
     pub workdir: String,
@@ -395,6 +400,23 @@ pub fn execution_workdir(
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn manifests_without_executor_use_local_shell() {
+        let manifest = parse_raw(
+            r#"
+[product]
+name = "api"
+version = "1.0.0"
+
+[deploy]
+install = "true"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(manifest.deploy.executor, ExecutorKind::LocalShell);
+    }
 
     #[test]
     fn artifact_digest_changes_with_executable_inputs() {

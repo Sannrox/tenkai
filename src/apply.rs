@@ -991,6 +991,7 @@ mod tests {
                     description: String::new(),
                 },
                 deploy: DeploySection {
+                    executor: crate::executor::ExecutorKind::LocalShell,
                     workdir: ".".into(),
                     install: install.into(),
                     inputs: Vec::new(),

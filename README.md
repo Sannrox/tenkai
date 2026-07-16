@@ -57,6 +57,7 @@ name = "hello-local"
 version = "0.1.0"
 
 [deploy]
+executor = "local-shell"          # optional; local-shell is the default
 workdir = "."                    # relative to the manifest
 install = "docker compose up -d" # any command; activates this release
 uninstall = "docker compose down"

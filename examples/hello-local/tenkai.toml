@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Demo product: writes its version to .state/version"
 
 [deploy]
+executor = "local-shell"
 workdir = "."
 install = "mkdir -p .state && echo 0.1.0 > .state/version"
 health = "grep -qx 0.1.0 .state/version"
