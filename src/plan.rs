@@ -840,10 +840,28 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
             .iter()
             .map(|(product, root)| (product.clone(), root.version.clone()))
             .collect(),
-        candidates,
+        candidates: candidates.clone(),
         ..Request::default()
     })
     .with_context(|| format!("cannot resolve dependencies for environment {env}"))?;
+    let selected_dependencies = resolution
+        .selected
+        .iter()
+        .map(|(product, version)| {
+            let candidate = candidates
+                .iter()
+                .find(|candidate| candidate.product == *product && candidate.version == *version)
+                .expect("resolved release must come from catalog candidates");
+            (
+                product.clone(),
+                candidate
+                    .dependencies
+                    .iter()
+                    .map(|dependency| dependency.product.clone())
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
 
     let mut inputs = Vec::new();
     let mut steps = Vec::new();
@@ -924,7 +942,12 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
         &subscribed_products,
     );
     if !obsolete.is_empty() {
-        let dependencies = deployed_dependencies(ctx, &deployed).await?;
+        let mut dependencies = deployed_dependencies(ctx, &deployed).await?;
+        for (product, final_dependencies) in selected_dependencies {
+            if deployed.contains_key(&product) {
+                dependencies.insert(product, final_dependencies);
+            }
+        }
         let obsolete = retain_required_dependencies(&deployed, &dependencies, obsolete);
         for product in removal_order_from_dependencies(obsolete.clone(), dependencies)
             .with_context(|| format!("cannot order removals for environment {env}"))?
@@ -1215,6 +1238,25 @@ install = "true"
                 BTreeSet::from(["runtime".into(), "database".into()]),
             )
             .is_empty()
+        );
+    }
+
+    #[test]
+    fn dependencies_dropped_by_selected_upgrades_are_removed() {
+        let deployed = BTreeMap::from([
+            ("app".into(), "1.0.0".into()),
+            ("runtime".into(), "1.0.0".into()),
+        ]);
+        let final_dependencies =
+            BTreeMap::from([("app".into(), Vec::new()), ("runtime".into(), Vec::new())]);
+
+        assert_eq!(
+            retain_required_dependencies(
+                &deployed,
+                &final_dependencies,
+                BTreeSet::from(["runtime".into()]),
+            ),
+            BTreeSet::from(["runtime".into()])
         );
     }
 
