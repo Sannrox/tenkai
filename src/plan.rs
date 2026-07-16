@@ -787,50 +787,58 @@ fn rollback_execution_order(
     dependencies: &BTreeMap<String, Vec<String>>,
     actions: &BTreeMap<String, Action>,
 ) -> Result<Vec<String>> {
-    let mut requires_install = actions
-        .iter()
-        .filter(|(_, action)| **action == Action::Install)
-        .map(|(product, _)| product.clone())
-        .collect::<BTreeSet<_>>();
-    loop {
-        let propagated = dependencies
-            .iter()
-            .filter(|(product, product_dependencies)| {
-                !requires_install.contains(*product)
-                    && product_dependencies
-                        .iter()
-                        .any(|dependency| requires_install.contains(dependency))
-            })
-            .map(|(product, _)| product.clone())
-            .collect::<Vec<_>>();
-        if propagated.is_empty() {
-            break;
-        }
-        requires_install.extend(propagated);
-    }
-    let mut outgoing = dependencies
+    let mut outgoing = actions
         .keys()
         .map(|product| (product.clone(), BTreeSet::new()))
         .collect::<BTreeMap<_, _>>();
-    let mut indegree = dependencies
+    let mut indegree = actions
         .keys()
         .map(|product| (product.clone(), 0_usize))
         .collect::<BTreeMap<_, _>>();
-    for (dependent, product_dependencies) in dependencies {
-        for dependency in product_dependencies {
-            let (before, after) = if actions.get(dependent) == Some(&Action::Install)
-                || requires_install.contains(dependency)
-            {
-                (dependency, dependent)
+    for (dependent, dependent_action) in actions {
+        let mut paths = BTreeMap::<String, bool>::new();
+        let mut pending = dependencies
+            .get(dependent)
+            .into_iter()
+            .flatten()
+            .map(|dependency| {
+                (
+                    dependency.clone(),
+                    *dependent_action == Action::Install
+                        || actions.get(dependency) == Some(&Action::Install),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut visited = BTreeSet::new();
+        while let Some((dependency, path_has_install)) = pending.pop() {
+            if !visited.insert((dependency.clone(), path_has_install)) {
+                continue;
+            }
+            if actions.contains_key(&dependency) {
+                paths
+                    .entry(dependency.clone())
+                    .and_modify(|has_install| *has_install |= path_has_install)
+                    .or_insert(path_has_install);
+            }
+            for transitive in dependencies.get(&dependency).into_iter().flatten() {
+                pending.push((
+                    transitive.clone(),
+                    path_has_install || actions.get(transitive) == Some(&Action::Install),
+                ));
+            }
+        }
+        for (dependency, path_has_install) in paths {
+            let (before, after) = if path_has_install {
+                (&dependency, dependent)
             } else {
-                (dependent, dependency)
+                (dependent, &dependency)
             };
             if outgoing
                 .get_mut(before)
-                .expect("resolved rollback product")
+                .expect("changed rollback product")
                 .insert(after.clone())
             {
-                *indegree.get_mut(after).expect("resolved rollback product") += 1;
+                *indegree.get_mut(after).expect("changed rollback product") += 1;
             }
         }
     }
@@ -839,26 +847,23 @@ fn rollback_execution_order(
         .filter(|(_, degree)| **degree == 0)
         .map(|(product, _)| product.clone())
         .collect::<BTreeSet<_>>();
-    let mut order = Vec::with_capacity(dependencies.len());
+    let mut order = Vec::with_capacity(actions.len());
     while let Some(product) = ready.pop_first() {
         order.push(product.clone());
         for dependent in &outgoing[&product] {
             let degree = indegree
                 .get_mut(dependent)
-                .expect("resolved rollback product");
+                .expect("changed rollback product");
             *degree -= 1;
             if *degree == 0 {
                 ready.insert(dependent.clone());
             }
         }
     }
-    if order.len() != dependencies.len() {
+    if order.len() != actions.len() {
         bail!("rollback dependency changes require conflicting execution order");
     }
-    Ok(order
-        .into_iter()
-        .filter(|product| actions.contains_key(product))
-        .collect())
+    Ok(order)
 }
 
 async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateInput>, Vec<Step>)> {
@@ -1475,7 +1480,7 @@ install = "true"
 
         assert_eq!(
             rollback_execution_order(&dependencies, &actions).unwrap(),
-            ["database", "runtime", "app"]
+            ["database", "app", "runtime"]
         );
     }
 
@@ -1513,6 +1518,25 @@ install = "true"
         assert_eq!(
             rollback_execution_order(&dependencies, &actions).unwrap(),
             ["database", "app"]
+        );
+    }
+
+    #[test]
+    fn unchanged_diamond_edges_do_not_create_rollback_conflicts() {
+        let dependencies = BTreeMap::from([
+            ("app".into(), vec!["new_dep".into(), "unchanged_dep".into()]),
+            ("new_dep".into(), vec!["shared".into()]),
+            ("unchanged_dep".into(), vec!["shared".into()]),
+            ("shared".into(), Vec::new()),
+        ]);
+        let actions = BTreeMap::from([
+            ("new_dep".into(), Action::Install),
+            ("app".into(), Action::Rollback),
+        ]);
+
+        assert_eq!(
+            rollback_execution_order(&dependencies, &actions).unwrap(),
+            ["new_dep", "app"]
         );
     }
 
