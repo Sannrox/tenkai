@@ -796,7 +796,7 @@ fn rollback_execution_order(
         .map(|product| (product.clone(), 0_usize))
         .collect::<BTreeMap<_, _>>();
     for (dependent, dependent_action) in actions {
-        let mut paths = BTreeMap::<String, bool>::new();
+        let mut paths = BTreeMap::<String, u8>::new();
         let mut pending = dependencies
             .get(dependent)
             .into_iter()
@@ -815,10 +815,11 @@ fn rollback_execution_order(
                 continue;
             }
             if actions.contains_key(&dependency) {
+                let path_mode = if path_has_install { 0b10 } else { 0b01 };
                 paths
                     .entry(dependency.clone())
-                    .and_modify(|has_install| *has_install |= path_has_install)
-                    .or_insert(path_has_install);
+                    .and_modify(|modes| *modes |= path_mode)
+                    .or_insert(path_mode);
             }
             for transitive in dependencies.get(&dependency).into_iter().flatten() {
                 pending.push((
@@ -827,8 +828,13 @@ fn rollback_execution_order(
                 ));
             }
         }
-        for (dependency, path_has_install) in paths {
-            let (before, after) = if path_has_install {
+        for (dependency, path_modes) in paths {
+            if path_modes == 0b11 {
+                bail!(
+                    "rollback dependency changes require conflicting execution order between {dependent} and {dependency}"
+                );
+            }
+            let (before, after) = if path_modes == 0b10 {
                 (&dependency, dependent)
             } else {
                 (dependent, &dependency)
@@ -1537,6 +1543,28 @@ install = "true"
         assert_eq!(
             rollback_execution_order(&dependencies, &actions).unwrap(),
             ["new_dep", "app"]
+        );
+    }
+
+    #[test]
+    fn mixed_paths_between_changed_products_fail_closed() {
+        let dependencies = BTreeMap::from([
+            ("app".into(), vec!["new_dep".into(), "unchanged_dep".into()]),
+            ("new_dep".into(), vec!["shared".into()]),
+            ("unchanged_dep".into(), vec!["shared".into()]),
+            ("shared".into(), Vec::new()),
+        ]);
+        let actions = BTreeMap::from([
+            ("new_dep".into(), Action::Install),
+            ("shared".into(), Action::Downgrade),
+            ("app".into(), Action::Rollback),
+        ]);
+
+        assert!(
+            rollback_execution_order(&dependencies, &actions)
+                .unwrap_err()
+                .to_string()
+                .contains("conflicting execution order between app and shared")
         );
     }
 
