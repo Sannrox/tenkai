@@ -952,18 +952,7 @@ async fn execute_locked(
         )
         .await?;
         if let Err(error) = refresh_environment_lease(ctx, lease).await {
-            let mut detail = format!("refreshing environment apply lease failed: {error}");
-            let compensation = unwind_succeeded_steps(
-                ctx,
-                &env,
-                &plan_id,
-                &mut outcomes,
-                &detail,
-                recovery,
-                mutation_started,
-            )
-            .await;
-            append_compensation_detail(&mut detail, &compensation);
+            let detail = format!("refreshing environment apply lease failed: {error}");
             fail_running_plan(ctx, &mut stored_plan, skip_gates, &detail, mutation_started).await?;
             return Err(error.context(detail));
         }
