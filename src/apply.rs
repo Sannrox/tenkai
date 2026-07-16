@@ -1147,17 +1147,26 @@ async fn finish_deferred_restore(
     mutation_started: &mut bool,
 ) -> Result<Outcome> {
     let cleaned = outcome.status == "restore_pending";
-    let previous = outcome
-        .step
-        .from
-        .as_deref()
-        .context("deferred restore has no previous version")?;
-    let pin = outcome
-        .step
-        .restore
-        .as_ref()
-        .context("deferred restore has no pinned release")?;
-    let previous_content = release_content(ctx, pin, env, &outcome.step.product).await?;
+    let Some(previous) = outcome.step.from.as_deref() else {
+        return fail_deferred_restore(ctx, env, plan_oid, outcome, "no previous version").await;
+    };
+    let Some(pin) = outcome.step.restore.as_ref() else {
+        return fail_deferred_restore(ctx, env, plan_oid, outcome, "no pinned restore release")
+            .await;
+    };
+    let previous_content = match release_content(ctx, pin, env, &outcome.step.product).await {
+        Ok(content) => content,
+        Err(error) => {
+            return fail_deferred_restore(
+                ctx,
+                env,
+                plan_oid,
+                outcome,
+                &format!("restore release unavailable: {error}"),
+            )
+            .await;
+        }
+    };
     let previous_executor = executor::select(previous_content.manifest.deploy.executor);
     let previous_input = executor_input(
         &previous_content,
@@ -1181,6 +1190,23 @@ async fn finish_deferred_restore(
     }
     outcome.status = if recovered { "rolled_back" } else { "failed" }.into();
     outcome.detail = detail;
+    record_deployment(ctx, env, plan_oid, &outcome).await?;
+    Ok(outcome)
+}
+
+async fn fail_deferred_restore(
+    ctx: &mut Ctx,
+    env: &str,
+    plan_oid: &str,
+    mut outcome: Outcome,
+    failure: &str,
+) -> Result<Outcome> {
+    if !outcome.detail.is_empty() {
+        outcome.detail.push_str("; ");
+    }
+    outcome.detail.push_str(failure);
+    outcome.status = "failed".into();
+    set_env_unknown(ctx, env, &outcome.step.product, &outcome.detail).await?;
     record_deployment(ctx, env, plan_oid, &outcome).await?;
     Ok(outcome)
 }
