@@ -191,8 +191,7 @@ async fn main() -> Result<()> {
             }
         }
         Command::Rollback { product, env } => {
-            let step = plan::rollback_step(&mut ctx, &env, &product).await?;
-            let stored = plan::create_from_steps(&mut ctx, &env, vec![step]).await?;
+            let stored = plan::create_rollback(&mut ctx, &env, &product).await?;
             println!("rolling back in {env}:");
             print_steps(&stored.steps);
             run_plan(&mut ctx, &stored.id, true).await?;

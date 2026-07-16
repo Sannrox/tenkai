@@ -853,6 +853,7 @@ async fn validate_preconditions(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
         .get(&env_id(&plan.environment))
         .await?
         .with_context(|| format!("environment {} not found", plan.environment))?;
+    validate_no_unknown_deployments(&plan.id, &environment)?;
     validate_desired_inputs(&plan.id, &plan.inputs, &environment)?;
     for step in &plan.steps {
         if environment
@@ -878,6 +879,19 @@ async fn validate_preconditions(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
                 actual
             );
         }
+    }
+    Ok(())
+}
+
+fn validate_no_unknown_deployments(plan_id: &str, environment: &Object) -> Result<()> {
+    if let Some(product) = environment.properties.iter().find_map(|(key, value)| {
+        (value == "unknown")
+            .then(|| key.strip_prefix("deployment_health."))
+            .flatten()
+    }) {
+        bail!(
+            "plan {plan_id} cannot apply while {product} has unknown deployment state; reconcile the external target first"
+        );
     }
     Ok(())
 }
@@ -2222,6 +2236,12 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("deployment state is unknown")
+        );
+        assert!(
+            validate_no_unknown_deployments("plan", &environment)
+                .unwrap_err()
+                .to_string()
+                .contains("runtime has unknown deployment state")
         );
     }
 }

@@ -1022,8 +1022,8 @@ async fn create_with_content(
     Ok(plan)
 }
 
-/// A rollback step to the previously deployed version of one product.
-pub async fn rollback_step(ctx: &mut Ctx, env: &str, product: &str) -> Result<Step> {
+/// Resolve and persist a rollback with the target release's dependency graph.
+pub async fn create_rollback(ctx: &mut Ctx, env: &str, product: &str) -> Result<Plan> {
     validate_identifier("product", product)?;
     let env_obj = environment(ctx, env).await?;
     if env_obj
@@ -1035,10 +1035,6 @@ pub async fn rollback_step(ctx: &mut Ctx, env: &str, product: &str) -> Result<St
             "deployment state for {product} in {env} is unknown; reconcile the external target before rollback"
         );
     }
-    let current = env_obj
-        .properties
-        .get(&format!("deployed.{product}"))
-        .cloned();
     let Some(prev) = env_obj
         .properties
         .get(&format!("deployed_prev.{product}"))
@@ -1047,24 +1043,134 @@ pub async fn rollback_step(ctx: &mut Ctx, env: &str, product: &str) -> Result<St
     else {
         bail!("no previous version of {product} recorded in {env} — nothing to roll back to");
     };
-    let target = pin_release(ctx, &release_id(product, &prev)).await?;
-    let restore = match current.as_deref() {
-        Some(version) => Some(pin_release(ctx, &release_id(product, version)).await?),
-        None => None,
+    let rollback_root = ChannelRoot {
+        product: product.to_string(),
+        channel: String::new(),
+        channel_id: String::new(),
+        version: prev.clone(),
     };
-    Ok(Step {
-        id: format!("{}:rollback:{product}", env_id(env)),
-        order: 0,
-        release_id: target.release_id,
-        release_digest: target.digest,
-        artifact_digest: target.artifact_digest,
-        workdir: target.workdir,
-        restore,
-        product: product.into(),
-        action: Action::Rollback,
-        from: current,
-        to: prev,
+    let candidates = catalog_candidates(ctx, std::slice::from_ref(&rollback_root)).await?;
+    let resolution = crate::planner::resolve(&Request {
+        roots: BTreeMap::from([(product.to_string(), prev)]),
+        candidates: candidates.clone(),
+        ..Request::default()
     })
+    .with_context(|| format!("cannot resolve rollback dependencies for {product} in {env}"))?;
+    let selected_dependencies = resolution
+        .selected
+        .iter()
+        .map(|(selected_product, version)| {
+            let candidate = candidates
+                .iter()
+                .find(|candidate| {
+                    candidate.product == *selected_product && candidate.version == *version
+                })
+                .expect("resolved rollback release must come from catalog candidates");
+            (
+                selected_product.clone(),
+                candidate
+                    .dependencies
+                    .iter()
+                    .map(|dependency| dependency.product.clone())
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let desired_products = resolution.selected.keys().cloned().collect::<BTreeSet<_>>();
+    let mut inputs = Vec::new();
+    let mut steps = Vec::new();
+    for selected_product in resolution.install_order {
+        let desired = resolution.selected[&selected_product].clone();
+        let deployed = env_obj
+            .properties
+            .get(&format!("deployed.{selected_product}"))
+            .cloned();
+        let target = pin_release(ctx, &release_id(&selected_product, &desired)).await?;
+        inputs.push(DesiredStateInput {
+            product: selected_product.clone(),
+            channel: String::new(),
+            channel_id: String::new(),
+            desired_version: desired.clone(),
+            release_id: target.release_id.clone(),
+            release_digest: target.digest.clone(),
+            artifact_digest: target.artifact_digest.clone(),
+            deployed_version: deployed.clone(),
+        });
+        let (action, from, restore) = match deployed {
+            Some(version) if version == desired => continue,
+            Some(version) => {
+                let action = if selected_product == product {
+                    Action::Rollback
+                } else {
+                    classify_change(&version, &desired)
+                };
+                let restore = pin_release(ctx, &release_id(&selected_product, &version)).await?;
+                (action, Some(version), Some(restore))
+            }
+            None => (Action::Install, None, None),
+        };
+        steps.push(Step {
+            id: String::new(),
+            order: steps.len() as u32,
+            product: selected_product,
+            action,
+            from,
+            to: desired,
+            release_id: target.release_id,
+            release_digest: target.digest,
+            artifact_digest: target.artifact_digest,
+            workdir: target.workdir,
+            restore,
+        });
+    }
+
+    let deployed = env_obj
+        .properties
+        .iter()
+        .filter_map(|(key, version)| {
+            key.strip_prefix("deployed.")
+                .map(|product| (product.to_string(), version.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let subscribed_products = ctx
+        .linked(&env_obj.id, REL_SUBSCRIBES, "out")
+        .await?
+        .into_iter()
+        .filter_map(|channel| channel.properties.get("product").cloned())
+        .collect::<BTreeSet<_>>();
+    let obsolete = obsolete_dependency_products(
+        &deployed,
+        &env_obj.properties,
+        &desired_products,
+        &subscribed_products,
+    );
+    if !obsolete.is_empty() {
+        let mut dependencies = deployed_dependencies(ctx, &deployed).await?;
+        for (selected_product, final_dependencies) in selected_dependencies {
+            if deployed.contains_key(&selected_product) {
+                dependencies.insert(selected_product, final_dependencies);
+            }
+        }
+        let obsolete = retain_required_dependencies(&deployed, &dependencies, obsolete);
+        for removed_product in removal_order_from_dependencies(obsolete.clone(), dependencies)? {
+            let version = deployed[&removed_product].clone();
+            let target = pin_release(ctx, &release_id(&removed_product, &version)).await?;
+            steps.push(Step {
+                id: String::new(),
+                order: steps.len() as u32,
+                product: removed_product,
+                action: Action::Remove,
+                from: Some(version),
+                to: String::new(),
+                release_id: target.release_id.clone(),
+                release_digest: target.digest.clone(),
+                artifact_digest: target.artifact_digest.clone(),
+                workdir: target.workdir.clone(),
+                restore: Some(target),
+            });
+        }
+    }
+    create_with_content(ctx, env, inputs, &mut steps).await
 }
 
 pub struct StatusRow {
