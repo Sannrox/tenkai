@@ -1152,35 +1152,22 @@ pub async fn create_rollback(ctx: &mut Ctx, env: &str, product: &str) -> Result<
         if !subscribed_products.insert(subscribed_product.clone()) {
             bail!("environment {env} has multiple channel subscriptions for {subscribed_product}");
         }
-        let version = channel
-            .properties
-            .get("current_version")
-            .cloned()
-            .unwrap_or_default();
-        let release = channel
-            .properties
-            .get("current_release")
-            .cloned()
-            .unwrap_or_default();
-        if version.is_empty() || release.is_empty() {
+        if subscribed_product == product {
             continue;
         }
-        if release != release_id(&subscribed_product, &version) {
-            bail!(
-                "channel {} points to inconsistent release {release} for {subscribed_product}@{version}",
-                channel.id
-            );
-        }
+        let Some(version) = env_obj
+            .properties
+            .get(&format!("deployed.{subscribed_product}"))
+            .cloned()
+        else {
+            continue;
+        };
         rollback_roots.insert(
             subscribed_product.clone(),
             ChannelRoot {
                 product: subscribed_product,
-                channel: channel
-                    .properties
-                    .get("channel")
-                    .cloned()
-                    .unwrap_or_default(),
-                channel_id: channel.id,
+                channel: String::new(),
+                channel_id: String::new(),
                 version,
             },
         );
