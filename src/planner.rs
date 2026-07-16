@@ -83,7 +83,7 @@ struct Catalog {
 }
 
 pub fn resolve(request: &Request) -> Result<Resolution, ResolutionError> {
-    let catalog = parse_catalog(&request.candidates)?;
+    let catalog = parse_catalog(&request.candidates, &request.roots)?;
     let mut policies = BTreeMap::<String, Vec<Requirement>>::new();
     for (product, expressions) in &request.version_requirements {
         for expression in expressions {
@@ -130,16 +130,23 @@ pub fn resolve(request: &Request) -> Result<Resolution, ResolutionError> {
     })
 }
 
-fn parse_catalog(candidates: &[Candidate]) -> Result<Catalog, ResolutionError> {
+fn parse_catalog(
+    candidates: &[Candidate],
+    roots: &BTreeMap<String, String>,
+) -> Result<Catalog, ResolutionError> {
     let mut by_product = BTreeMap::<String, Vec<ParsedCandidate>>::new();
     let mut identities = BTreeSet::new();
     for candidate in candidates {
-        let version = Version::parse(&candidate.version).map_err(|error| {
-            ResolutionError(format!(
-                "published release {}@{} is not valid semver: {error}",
-                candidate.product, candidate.version
-            ))
-        })?;
+        let version = match Version::parse(&candidate.version) {
+            Ok(version) => version,
+            Err(error) if roots.get(&candidate.product) == Some(&candidate.version) => {
+                return Err(ResolutionError(format!(
+                    "channel head {}@{} is not valid semver: {error}",
+                    candidate.product, candidate.version
+                )));
+            }
+            Err(_) => continue,
+        };
         if !identities.insert((candidate.product.clone(), version.clone())) {
             return Err(ResolutionError(format!(
                 "catalog contains duplicate release {}@{}",
@@ -622,5 +629,33 @@ mod tests {
         })
         .unwrap();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn unselected_non_semver_history_does_not_block_resolution() {
+        let request = Request {
+            roots: BTreeMap::from([("app".into(), "1.0.0".into())]),
+            candidates: vec![
+                candidate("app", "legacy_build", &[]),
+                candidate("app", "1.0.0", &[]),
+            ],
+            ..Request::default()
+        };
+        assert_eq!(resolve(&request).unwrap().selected["app"], "1.0.0");
+    }
+
+    #[test]
+    fn non_semver_channel_heads_fail_closed() {
+        let request = Request {
+            roots: BTreeMap::from([("app".into(), "legacy_build".into())]),
+            candidates: vec![candidate("app", "legacy_build", &[])],
+            ..Request::default()
+        };
+        assert!(
+            resolve(&request)
+                .unwrap_err()
+                .to_string()
+                .contains("channel head app@legacy_build is not valid semver")
+        );
     }
 }
