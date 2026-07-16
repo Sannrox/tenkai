@@ -73,6 +73,7 @@ struct ParsedCandidate {
 #[derive(Clone)]
 struct Requirement {
     range: VersionReq,
+    exact_version: Option<String>,
     expression: String,
     source: String,
 }
@@ -115,7 +116,7 @@ pub fn resolve(request: &Request) -> Result<Resolution, ResolutionError> {
         requirements,
         BTreeMap::new(),
     )?;
-    let install_order = topological_order(&catalog, &selected)?;
+    let install_order = topological_order(&selected)?;
     let selected = selected
         .into_iter()
         .map(|(product, candidate)| (product, candidate.version_text))
@@ -205,6 +206,11 @@ fn add_requirement(
         .or_default()
         .push(Requirement {
             range,
+            exact_version: expression
+                .strip_prefix('=')
+                .map(str::trim)
+                .filter(|version| Version::parse(version).is_ok())
+                .map(str::to_string),
             expression: expression.to_string(),
             source,
         });
@@ -222,7 +228,7 @@ fn search(
         if let Some(required) = requirements.get(product)
             && !required
                 .iter()
-                .all(|item| item.range.matches(&candidate.version))
+                .all(|item| requirement_matches(item, candidate))
         {
             return Err(conflict(product, required, catalog, facts));
         }
@@ -232,6 +238,7 @@ fn search(
         .find(|product| !selected.contains_key(*product))
         .cloned()
     else {
+        topological_order(&selected)?;
         return Ok(selected);
     };
     let required = requirements.get(&product).expect("selected map checked");
@@ -246,7 +253,7 @@ fn search(
         forced.is_none_or(|version| version == &candidate.version_text)
             && required
                 .iter()
-                .all(|item| item.range.matches(&candidate.version))
+                .all(|item| requirement_matches(item, candidate))
             && facts_match(candidate, facts)
     });
     let mut last_error = None;
@@ -258,15 +265,21 @@ fn search(
         for dependency in &candidate.dependencies {
             let requirement = Requirement {
                 range: dependency.requirement.clone(),
+                exact_version: dependency
+                    .expression
+                    .strip_prefix('=')
+                    .map(str::trim)
+                    .filter(|version| Version::parse(version).is_ok())
+                    .map(str::to_string),
                 expression: dependency.expression.clone(),
                 source: format!("{}@{}", product, candidate.version_text),
             };
             next_requirements
                 .entry(dependency.product.clone())
                 .or_default()
-                .push(requirement);
+                .push(requirement.clone());
             if let Some(selected_dependency) = next_selected.get(&dependency.product)
-                && !dependency.requirement.matches(&selected_dependency.version)
+                && !requirement_matches(&requirement, selected_dependency)
             {
                 invalid = Some(conflict(
                     &dependency.product,
@@ -289,6 +302,14 @@ fn search(
         }
     }
     Err(last_error.unwrap_or_else(|| conflict(&product, required, catalog, facts)))
+}
+
+fn requirement_matches(requirement: &Requirement, candidate: &ParsedCandidate) -> bool {
+    requirement.range.matches(&candidate.version)
+        && requirement
+            .exact_version
+            .as_ref()
+            .is_none_or(|exact| exact == &candidate.version_text)
 }
 
 fn facts_match(candidate: &ParsedCandidate, facts: &BTreeMap<String, String>) -> bool {
@@ -345,7 +366,6 @@ fn conflict(
 }
 
 fn topological_order(
-    catalog: &Catalog,
     selected: &BTreeMap<String, ParsedCandidate>,
 ) -> Result<Vec<String>, ResolutionError> {
     let mut dependents = BTreeMap::<String, BTreeSet<String>>::new();
@@ -394,7 +414,6 @@ fn topological_order(
             remaining.join(" -> ")
         )));
     }
-    let _ = catalog;
     Ok(order)
 }
 
@@ -489,6 +508,40 @@ mod tests {
             ..Request::default()
         };
         assert!(resolve(&request).unwrap_err().to_string().contains("cycle"));
+    }
+
+    #[test]
+    fn cycle_in_a_preferred_candidate_backtracks_to_a_valid_release() {
+        let request = Request {
+            roots: BTreeMap::from([("a".into(), "1.0.0".into())]),
+            candidates: vec![
+                candidate("a", "1.0.0", &[("b", "*")]),
+                candidate("b", "2.0.0", &[("a", "*")]),
+                candidate("b", "1.0.0", &[]),
+            ],
+            ..Request::default()
+        };
+        let resolution = resolve(&request).unwrap();
+        assert_eq!(resolution.selected["b"], "1.0.0");
+        assert_eq!(resolution.install_order, ["b", "a"]);
+    }
+
+    #[test]
+    fn exact_pins_include_build_metadata() {
+        let request = Request {
+            roots: BTreeMap::from([("app".into(), "1.0.0".into())]),
+            version_requirements: BTreeMap::from([(
+                "runtime".into(),
+                vec!["=1.0.0+expected".into()],
+            )]),
+            candidates: vec![
+                candidate("app", "1.0.0", &[("runtime", "*")]),
+                candidate("runtime", "1.0.0+other", &[]),
+            ],
+            ..Request::default()
+        };
+        let error = resolve(&request).unwrap_err().to_string();
+        assert!(error.contains("=1.0.0+expected"));
     }
 
     #[test]
