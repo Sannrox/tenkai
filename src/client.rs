@@ -10,8 +10,9 @@ use tonic::{Request, Status};
 use crate::pb::chisei::chisei_service_client::ChiseiServiceClient;
 use crate::pb::sekai::sekai_service_client::SekaiServiceClient;
 use crate::pb::sekai::{
-    CreateLinkRequest, CreateObjectRequest, GetLinkedObjectsRequest, GetObjectRequest, Link,
-    Object, UpdateObjectRequest,
+    ActionRequest, CreateLinkRequest, CreateObjectRequest, DeleteLinkRequest, DeleteObjectRequest,
+    ExecuteActionRequest, GetLinkedObjectsRequest, GetLinksRequest, GetObjectRequest, Link, Object,
+    UpdateObjectRequest,
 };
 
 /// Attaches auth + caller identity metadata to every request.
@@ -46,12 +47,39 @@ pub struct Ctx {
     pub chisei: Chisei,
 }
 
+fn token_transport_is_safe(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return false;
+    }
+    if parsed.scheme() == "https" {
+        return true;
+    }
+    if parsed.scheme() != "http" {
+        return false;
+    }
+    match parsed.host() {
+        Some(url::Host::Domain("localhost")) => true,
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        _ => false,
+    }
+}
+
 /// Connect to sekai-chisei. Honors `TENKAI_SEKAI_URL`, `GRPC_PORT`,
 /// `SEKAI_AUTH_TOKEN`, and `TENKAI_PRINCIPAL` (default `tenkai`).
 pub async fn connect() -> Result<Ctx> {
     let port = std::env::var("GRPC_PORT").unwrap_or_else(|_| "50051".into());
     let url =
         std::env::var("TENKAI_SEKAI_URL").unwrap_or_else(|_| format!("http://127.0.0.1:{port}"));
+    let token = std::env::var("SEKAI_AUTH_TOKEN").ok();
+    if token.is_some() && !token_transport_is_safe(&url) {
+        anyhow::bail!(
+            "refusing to send SEKAI_AUTH_TOKEN to non-loopback plaintext endpoint {url}; use HTTPS"
+        );
+    }
     let channel = Endpoint::from_shared(url.clone())?
         .connect()
         .await
@@ -61,7 +89,7 @@ pub async fn connect() -> Result<Ctx> {
             )
         })?;
     let meta = Meta {
-        token: std::env::var("SEKAI_AUTH_TOKEN").ok(),
+        token,
         principal: std::env::var("TENKAI_PRINCIPAL").unwrap_or_else(|_| "tenkai".into()),
     };
     Ok(Ctx {
@@ -82,6 +110,29 @@ impl Ctx {
             Err(status) if status.code() == tonic::Code::NotFound => Ok(None),
             Err(status) => Err(status.into()),
         }
+    }
+
+    /// Create an object without falling back to update when its id exists.
+    pub async fn create_once(
+        &mut self,
+        object: Object,
+    ) -> std::result::Result<Object, tonic::Status> {
+        Ok(self
+            .sekai
+            .create_object(CreateObjectRequest {
+                object: Some(object),
+            })
+            .await?
+            .into_inner()
+            .object
+            .unwrap_or_default())
+    }
+
+    pub async fn delete(&mut self, id: &str) -> Result<()> {
+        self.sekai
+            .delete_object(DeleteObjectRequest { id: id.into() })
+            .await?;
+        Ok(())
     }
 
     /// Create the object, or update it if the id already exists.
@@ -135,6 +186,15 @@ impl Ctx {
         }
     }
 
+    pub async fn unlink(&mut self, from_id: &str, to_id: &str, relation: &str) -> Result<()> {
+        let id = format!("{from_id}--{relation}--{to_id}");
+        match self.sekai.delete_link(DeleteLinkRequest { id }).await {
+            Ok(_) => Ok(()),
+            Err(status) if status.code() == tonic::Code::NotFound => Ok(()),
+            Err(status) => Err(status.into()),
+        }
+    }
+
     pub async fn linked(
         &mut self,
         object_id: &str,
@@ -151,5 +211,60 @@ impl Ctx {
             .await?
             .into_inner()
             .objects)
+    }
+
+    pub async fn links(&mut self, object_id: &str, relation: &str) -> Result<Vec<Link>> {
+        Ok(self
+            .sekai
+            .get_links(GetLinksRequest {
+                object_id: object_id.into(),
+                relation: relation.into(),
+                direction: "out".into(),
+            })
+            .await?
+            .into_inner()
+            .links)
+    }
+
+    pub async fn execute_action(
+        &mut self,
+        action: &str,
+        params: std::collections::HashMap<String, String>,
+    ) -> Result<()> {
+        let result = self
+            .sekai
+            .execute_action(ExecuteActionRequest {
+                request: Some(ActionRequest {
+                    action: action.into(),
+                    params,
+                    actor: String::new(),
+                }),
+                dry_run: false,
+            })
+            .await?
+            .into_inner()
+            .result
+            .context("governed action returned no result")?;
+        if result.decision != "allow" {
+            anyhow::bail!("action {action} was not allowed: {}", result.decision);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::token_transport_is_safe;
+
+    #[test]
+    fn bearer_tokens_require_tls_or_loopback() {
+        assert!(token_transport_is_safe("https://sekai.example.com"));
+        assert!(token_transport_is_safe("http://127.0.0.1:50051"));
+        assert!(token_transport_is_safe("http://[::1]:50051"));
+        assert!(!token_transport_is_safe("http://sekai.example.com"));
+        assert!(!token_transport_is_safe("http://127.0.0.1.evil.test"));
+        assert!(!token_transport_is_safe(
+            "http://localhost:80@attacker.example:50051"
+        ));
     }
 }

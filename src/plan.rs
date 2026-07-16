@@ -31,6 +31,16 @@ impl std::fmt::Display for Action {
     }
 }
 
+fn classify_change(current: &str, desired: &str) -> Action {
+    match (
+        semver::Version::parse(current),
+        semver::Version::parse(desired),
+    ) {
+        (Ok(current), Ok(target)) if target < current => Action::Downgrade,
+        _ => Action::Upgrade,
+    }
+}
+
 pub const PLAN_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +52,18 @@ pub struct Step {
     pub from: Option<String>,
     pub to: String,
     pub release_id: String,
+    pub release_digest: String,
+    pub artifact_digest: String,
+    pub workdir: String,
+    pub restore: Option<ReleasePin>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleasePin {
+    pub release_id: String,
+    pub digest: String,
+    pub artifact_digest: String,
+    pub workdir: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,6 +73,8 @@ pub struct DesiredStateInput {
     pub channel_id: String,
     pub desired_version: String,
     pub release_id: String,
+    pub release_digest: String,
+    pub artifact_digest: String,
     pub deployed_version: Option<String>,
 }
 
@@ -59,6 +83,7 @@ pub struct DesiredStateInput {
 pub enum PlanState {
     Computed,
     Running,
+    Blocked,
     Succeeded,
     Failed,
 }
@@ -68,6 +93,7 @@ impl std::fmt::Display for PlanState {
         f.write_str(match self {
             Self::Computed => "computed",
             Self::Running => "running",
+            Self::Blocked => "blocked",
             Self::Succeeded => "succeeded",
             Self::Failed => "failed",
         })
@@ -78,22 +104,45 @@ impl std::fmt::Display for PlanState {
 pub struct Plan {
     pub format_version: u32,
     pub id: String,
+    pub content_id: String,
     pub environment: String,
     pub created_at: i64,
     pub inputs: Vec<DesiredStateInput>,
     pub steps: Vec<Step>,
     pub state: PlanState,
     pub gates_skipped: Option<bool>,
+    pub status_detail: String,
 }
 
 #[derive(Serialize)]
 struct ExecutableContent<'a> {
     format_version: u32,
     id: &'a str,
+    content_id: &'a str,
     environment: &'a str,
     created_at: i64,
     inputs: &'a [DesiredStateInput],
     steps: &'a [Step],
+}
+
+fn content_address(
+    environment: &str,
+    created_at: i64,
+    inputs: &[DesiredStateInput],
+    steps: &[Step],
+) -> Result<String> {
+    let mut normalized_steps = steps.to_vec();
+    for step in &mut normalized_steps {
+        step.id.clear();
+    }
+    let bytes = serde_json::to_vec(&(
+        PLAN_FORMAT_VERSION,
+        environment,
+        created_at,
+        inputs,
+        normalized_steps,
+    ))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
 impl Plan {
@@ -101,6 +150,7 @@ impl Plan {
         let content = ExecutableContent {
             format_version: self.format_version,
             id: &self.id,
+            content_id: &self.content_id,
             environment: &self.environment,
             created_at: self.created_at,
             inputs: &self.inputs,
@@ -155,6 +205,25 @@ impl Plan {
                 object.id
             );
         }
+        let expected_content_id = content_address(
+            &plan.environment,
+            plan.created_at,
+            &plan.inputs,
+            &plan.steps,
+        )?;
+        if plan.content_id != expected_content_id
+            || plan.id != plan_id(&plan.environment, plan.created_at, &expected_content_id)
+        {
+            bail!(
+                "stored plan {} does not match its content-addressed id",
+                object.id
+            );
+        }
+        for (order, step) in plan.steps.iter().enumerate() {
+            if step.order != order as u32 || step.id != format!("{}:step:{order}", plan.id) {
+                bail!("stored plan {} has invalid step ordering or ids", object.id);
+            }
+        }
         let status = object
             .properties
             .get("status")
@@ -179,10 +248,20 @@ pub async fn store(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
         if stored.executable_digest()? != plan.executable_digest()? {
             bail!("plan {} executable content is immutable", plan.id);
         }
+        if stored.state == plan.state
+            && stored.state != PlanState::Blocked
+            && (stored.gates_skipped != plan.gates_skipped
+                || stored.status_detail != plan.status_detail)
+        {
+            bail!("plan {} lifecycle audit fields are immutable", plan.id);
+        }
         let valid_transition = stored.state == plan.state
             || matches!(
                 (stored.state, plan.state),
                 (PlanState::Computed, PlanState::Running)
+                    | (PlanState::Computed, PlanState::Blocked)
+                    | (PlanState::Blocked, PlanState::Running)
+                    | (PlanState::Running, PlanState::Blocked)
                     | (PlanState::Running, PlanState::Succeeded)
                     | (PlanState::Running, PlanState::Failed)
             );
@@ -207,24 +286,115 @@ pub async fn load(ctx: &mut Ctx, id: &str) -> Result<Plan> {
     Plan::from_object(&object)
 }
 
-pub async fn env_add(ctx: &mut Ctx, name: &str, description: &str) -> Result<String> {
-    let now = crate::now_millis();
-    ctx.put(Object {
-        id: env_id(name),
-        kind: KIND_ENVIRONMENT.into(),
-        name: name.into(),
-        namespace: NS.into(),
-        external_id: String::new(),
-        properties: HashMap::from([("description".into(), description.to_string())]),
-        created: now,
-        updated: now,
+fn environment_record(
+    existing: Option<Object>,
+    name: &str,
+    description: &str,
+    now: i64,
+) -> Result<Object> {
+    let id = env_id(name);
+    Ok(match existing {
+        Some(mut existing) => {
+            if existing.kind != KIND_ENVIRONMENT {
+                bail!("object {id} is {}, not {KIND_ENVIRONMENT}", existing.kind);
+            }
+            existing
+                .properties
+                .insert("description".into(), description.to_string());
+            existing.updated = now;
+            existing
+        }
+        None => Object {
+            id,
+            kind: KIND_ENVIRONMENT.into(),
+            name: name.into(),
+            namespace: NS.into(),
+            external_id: String::new(),
+            properties: HashMap::from([("description".into(), description.to_string())]),
+            created: now,
+            updated: now,
+        },
     })
-    .await?;
+}
+
+pub async fn env_add(ctx: &mut Ctx, name: &str, description: &str) -> Result<String> {
+    validate_identifier("environment", name)?;
+    let now = crate::now_millis();
+    let id = env_id(name);
+    if let Some(existing) = ctx.get(&id).await? {
+        if existing.kind != KIND_ENVIRONMENT {
+            bail!("object {id} is {}, not {KIND_ENVIRONMENT}", existing.kind);
+        }
+        return Ok(format!("environment {name} already registered"));
+    }
+    let object = environment_record(None, name, description, now)?;
+    match ctx.create_once(object).await {
+        Ok(_) => {}
+        Err(status)
+            if status.code() == tonic::Code::AlreadyExists
+                || (status.code() == tonic::Code::Internal
+                    && status.message().contains("UNIQUE")) => {}
+        Err(status) => return Err(status.into()),
+    }
     Ok(format!("environment {name} registered"))
+}
+
+pub async fn reconcile_deployment(
+    ctx: &mut Ctx,
+    env: &str,
+    product: &str,
+    deployed: Option<&str>,
+) -> Result<String> {
+    validate_identifier("environment", env)?;
+    validate_identifier("product", product)?;
+    let lease_id = format!("{}:execution", env_id(env));
+    if ctx.get(&lease_id).await?.is_some() {
+        bail!("environment {env} has an apply in progress");
+    }
+    let mut object = environment(ctx, env).await?;
+    match deployed {
+        Some(version) => {
+            validate_identifier("version", version)?;
+            let release = release_id(product, version);
+            if ctx.get(&release).await?.is_none() {
+                bail!("release {product}@{version} is not published");
+            }
+            object
+                .properties
+                .insert(format!("deployed.{product}"), version.into());
+            object
+                .properties
+                .insert(format!("deployed_release.{product}"), release);
+        }
+        None => {
+            object.properties.remove(&format!("deployed.{product}"));
+            object
+                .properties
+                .remove(&format!("deployed_release.{product}"));
+        }
+    }
+    object
+        .properties
+        .remove(&format!("deployment_health.{product}"));
+    object
+        .properties
+        .remove(&format!("deployment_error.{product}"));
+    object
+        .properties
+        .remove(&format!("deployed_prev.{product}"));
+    object.updated = crate::now_millis();
+    ctx.put(object).await?;
+    Ok(match deployed {
+        Some(version) => format!("recorded {product}@{version} as deployed in {env}"),
+        None => format!("cleared unknown deployment state for {product} in {env}"),
+    })
 }
 
 /// Subscribe an environment to a product channel. The channel must exist.
 pub async fn subscribe(ctx: &mut Ctx, env: &str, product: &str, channel: &str) -> Result<String> {
+    validate_identifier("environment", env)?;
+    validate_identifier("product", product)?;
+    validate_identifier("channel", channel)?;
     let eid = env_id(env);
     if ctx.get(&eid).await?.is_none() {
         bail!("environment {env} is not registered (tenkaictl env add {env})");
@@ -233,20 +403,118 @@ pub async fn subscribe(ctx: &mut Ctx, env: &str, product: &str, channel: &str) -
     if ctx.get(&cid).await?.is_none() {
         bail!("channel {product}/{channel} does not exist — promote a release into it first");
     }
-    ctx.link(&eid, &cid, REL_SUBSCRIBES).await?;
+    let links = ctx.links(&eid, REL_SUBSCRIBES).await?;
+    let mut existing = Vec::new();
+    for link in links {
+        let channel = ctx
+            .get(&link.to_id)
+            .await?
+            .with_context(|| format!("subscription link {} has no channel", link.id))?;
+        if channel.properties.get("product").map(String::as_str) == Some(product) {
+            existing.push(link);
+        }
+    }
+    if existing.len() > 1 {
+        bail!("environment {env} has conflicting subscriptions for {product}");
+    }
+    if existing.first().is_some_and(|link| link.to_id == cid) {
+        return Ok(format!("{env} already subscribed to {product}/{channel}"));
+    }
+    let mut params = HashMap::from([("id".into(), eid), ("channel_id".into(), cid)]);
+    let action = if let Some(link) = existing.first() {
+        params.insert("old_link_id".into(), link.id.clone());
+        ACTION_REPLACE_SUBSCRIPTION
+    } else {
+        ACTION_SUBSCRIBE
+    };
+    ctx.execute_action(action, params).await?;
     Ok(format!("{env} subscribed to {product}/{channel}"))
 }
 
 async fn environment(ctx: &mut Ctx, env: &str) -> Result<Object> {
+    validate_identifier("environment", env)?;
     match ctx.get(&env_id(env)).await? {
         Some(o) => Ok(o),
         None => bail!("environment {env} is not registered (tenkaictl env add {env})"),
     }
 }
 
+async fn pin_release(ctx: &mut Ctx, id: &str) -> Result<ReleasePin> {
+    let mut object = ctx
+        .get(id)
+        .await?
+        .with_context(|| format!("release object {id} not found"))?;
+    if object.kind != KIND_RELEASE {
+        bail!("object {id} is {}, not {KIND_RELEASE}", object.kind);
+    }
+    let digest = object
+        .properties
+        .get("digest")
+        .filter(|value| !value.is_empty())
+        .with_context(|| format!("release object {id} has no digest"))?
+        .clone();
+    let workdir = object
+        .properties
+        .get("workdir")
+        .filter(|value| !value.is_empty())
+        .with_context(|| format!("release object {id} has no workdir"))?
+        .clone();
+    let artifact_digest = match object
+        .properties
+        .get("artifact_digest")
+        .filter(|value| !value.is_empty())
+    {
+        Some(digest) => digest.clone(),
+        None => {
+            let raw = object
+                .properties
+                .get("manifest")
+                .cloned()
+                .with_context(|| format!("release object {id} has no manifest"))?;
+            let manifest = crate::manifest::parse_raw(&raw)
+                .with_context(|| format!("parsing legacy release manifest {id}"))?;
+            let digest = crate::manifest::artifact_digest(
+                std::path::Path::new(&workdir),
+                &manifest.deploy.inputs,
+            )
+            .with_context(|| {
+                format!(
+                    "backfilling artifact digest for legacy release {id}; republish it if its workdir moved"
+                )
+            })?;
+            object
+                .properties
+                .insert("artifact_digest".into(), digest.clone());
+            object.updated = crate::now_millis();
+            ctx.put(object).await?;
+            digest
+        }
+    };
+    Ok(ReleasePin {
+        release_id: id.to_string(),
+        digest,
+        artifact_digest,
+        workdir,
+    })
+}
+
 async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateInput>, Vec<Step>)> {
     let env_obj = environment(ctx, env).await?;
     let channels = ctx.linked(&env_obj.id, REL_SUBSCRIBES, "out").await?;
+
+    let mut products = std::collections::HashSet::new();
+    for channel in &channels {
+        let product = channel
+            .properties
+            .get("product")
+            .cloned()
+            .unwrap_or_default();
+        if !products.insert(product.clone()) {
+            bail!(
+                "environment {env} has multiple channel subscriptions for {product}; subscribe again after concurrent updates settle"
+            );
+        }
+    }
 
     let mut inputs = Vec::new();
     let mut pending = Vec::new();
@@ -266,6 +534,21 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
         if desired.is_empty() || release.is_empty() {
             continue; // channel exists but nothing promoted yet
         }
+        let target = pin_release(ctx, &release).await?;
+        if env_obj
+            .properties
+            .get(&format!("deployment_health.{product}"))
+            .is_some_and(|health| health == "unknown")
+        {
+            let detail = env_obj
+                .properties
+                .get(&format!("deployment_error.{product}"))
+                .map(String::as_str)
+                .unwrap_or("deployment state requires manual reconciliation");
+            bail!(
+                "deployment state for {product} in {env} is unknown: {detail}; reconcile it or use rollback before creating a new plan"
+            );
+        }
         let deployed = env_obj
             .properties
             .get(&format!("deployed.{product}"))
@@ -276,12 +559,18 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
             channel_id: ch.id,
             desired_version: desired.clone(),
             release_id: release.clone(),
+            release_digest: target.digest.clone(),
+            artifact_digest: target.artifact_digest.clone(),
             deployed_version: deployed.clone(),
         });
         match deployed {
             Some(v) if v == desired => {}
-            Some(v) => pending.push((product, Action::Upgrade, Some(v), desired, release)),
-            None => pending.push((product, Action::Install, None, desired, release)),
+            Some(v) => {
+                let action = classify_change(&v, &desired);
+                let restore = pin_release(ctx, &release_id(&product, &v)).await?;
+                pending.push((product, action, Some(v), desired, target, Some(restore)));
+            }
+            None => pending.push((product, Action::Install, None, desired, target, None)),
         }
     }
     inputs.sort_by(|a, b| a.product.cmp(&b.product));
@@ -289,15 +578,21 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
     let steps = pending
         .into_iter()
         .enumerate()
-        .map(|(index, (product, action, from, to, release_id))| Step {
-            id: format!("{}:step:{index}", env_id(env)),
-            order: index as u32,
-            product,
-            action,
-            from,
-            to,
-            release_id,
-        })
+        .map(
+            |(index, (product, action, from, to, release, restore))| Step {
+                id: format!("{}:step:{index}", env_id(env)),
+                order: index as u32,
+                product,
+                action,
+                from,
+                to,
+                release_id: release.release_id,
+                release_digest: release.digest,
+                artifact_digest: release.artifact_digest,
+                workdir: release.workdir,
+                restore,
+            },
+        )
         .collect();
     Ok((inputs, steps))
 }
@@ -326,20 +621,25 @@ async fn create_with_content(
     steps: &mut [Step],
 ) -> Result<Plan> {
     let created_at = crate::now_millis();
-    let id = plan_id(env, created_at);
+    for (order, step) in steps.iter_mut().enumerate() {
+        step.order = order as u32;
+    }
+    let content_id = content_address(env, created_at, &inputs, steps)?;
+    let id = plan_id(env, created_at, &content_id);
     for (order, step) in steps.iter_mut().enumerate() {
         step.id = format!("{id}:step:{order}");
-        step.order = order as u32;
     }
     let plan = Plan {
         format_version: PLAN_FORMAT_VERSION,
         id,
+        content_id,
         environment: env.to_string(),
         created_at,
         inputs,
         steps: steps.to_vec(),
         state: PlanState::Computed,
         gates_skipped: None,
+        status_detail: String::new(),
     };
     store(ctx, &plan).await?;
     Ok(plan)
@@ -347,7 +647,17 @@ async fn create_with_content(
 
 /// A rollback step to the previously deployed version of one product.
 pub async fn rollback_step(ctx: &mut Ctx, env: &str, product: &str) -> Result<Step> {
+    validate_identifier("product", product)?;
     let env_obj = environment(ctx, env).await?;
+    if env_obj
+        .properties
+        .get(&format!("deployment_health.{product}"))
+        .is_some_and(|health| health == "unknown")
+    {
+        bail!(
+            "deployment state for {product} in {env} is unknown; reconcile the external target before rollback"
+        );
+    }
     let current = env_obj
         .properties
         .get(&format!("deployed.{product}"))
@@ -360,10 +670,19 @@ pub async fn rollback_step(ctx: &mut Ctx, env: &str, product: &str) -> Result<St
     else {
         bail!("no previous version of {product} recorded in {env} — nothing to roll back to");
     };
+    let target = pin_release(ctx, &release_id(product, &prev)).await?;
+    let restore = match current.as_deref() {
+        Some(version) => Some(pin_release(ctx, &release_id(product, version)).await?),
+        None => None,
+    };
     Ok(Step {
         id: format!("{}:rollback:{product}", env_id(env)),
         order: 0,
-        release_id: release_id(product, &prev),
+        release_id: target.release_id,
+        release_digest: target.digest,
+        artifact_digest: target.artifact_digest,
+        workdir: target.workdir,
+        restore,
         product: product.into(),
         action: Action::Rollback,
         from: current,
@@ -375,6 +694,8 @@ pub struct StatusRow {
     pub product: String,
     pub channel: String,
     pub deployed: Option<String>,
+    pub health: Option<String>,
+    pub error: Option<String>,
     pub head: String,
 }
 
@@ -388,6 +709,14 @@ pub async fn status(ctx: &mut Ctx, env: &str) -> Result<Vec<StatusRow>> {
             deployed: env_obj
                 .properties
                 .get(&format!("deployed.{product}"))
+                .cloned(),
+            health: env_obj
+                .properties
+                .get(&format!("deployment_health.{product}"))
+                .cloned(),
+            error: env_obj
+                .properties
+                .get(&format!("deployment_error.{product}"))
                 .cloned(),
             channel: ch.properties.get("channel").cloned().unwrap_or_default(),
             head: ch
@@ -407,9 +736,10 @@ mod tests {
     use super::*;
 
     fn example_plan() -> Plan {
-        Plan {
+        let mut plan = Plan {
             format_version: PLAN_FORMAT_VERSION,
-            id: "tenkai:plan:prod:123".into(),
+            id: String::new(),
+            content_id: String::new(),
             environment: "prod".into(),
             created_at: 123,
             inputs: vec![DesiredStateInput {
@@ -418,20 +748,42 @@ mod tests {
                 channel_id: "tenkai:channel:api/stable".into(),
                 desired_version: "2.0.0".into(),
                 release_id: "tenkai:release:api@2.0.0".into(),
+                release_digest: "target-digest".into(),
+                artifact_digest: "target-artifact-digest".into(),
                 deployed_version: Some("1.0.0".into()),
             }],
             steps: vec![Step {
-                id: "tenkai:plan:prod:123:step:0".into(),
+                id: String::new(),
                 order: 0,
                 product: "api".into(),
                 action: Action::Upgrade,
                 from: Some("1.0.0".into()),
                 to: "2.0.0".into(),
                 release_id: "tenkai:release:api@2.0.0".into(),
+                release_digest: "target-digest".into(),
+                artifact_digest: "target-artifact-digest".into(),
+                workdir: "/srv/api".into(),
+                restore: Some(ReleasePin {
+                    release_id: "tenkai:release:api@1.0.0".into(),
+                    digest: "restore-digest".into(),
+                    artifact_digest: "restore-artifact-digest".into(),
+                    workdir: "/srv/api".into(),
+                }),
             }],
             state: PlanState::Computed,
             gates_skipped: None,
-        }
+            status_detail: String::new(),
+        };
+        plan.content_id = content_address(
+            &plan.environment,
+            plan.created_at,
+            &plan.inputs,
+            &plan.steps,
+        )
+        .unwrap();
+        plan.id = plan_id(&plan.environment, plan.created_at, &plan.content_id);
+        plan.steps[0].id = format!("{}:step:0", plan.id);
+        plan
     }
 
     #[test]
@@ -462,6 +814,20 @@ mod tests {
             .properties
             .insert("plan".into(), serde_json::to_string(&changed).unwrap());
         let error = Plan::from_object(&object).unwrap_err().to_string();
-        assert!(error.contains("executable content was mutated"));
+        assert!(error.contains("content-addressed id"));
+    }
+
+    #[test]
+    fn semantic_version_direction_is_recorded() {
+        assert_eq!(classify_change("2.0.0", "1.9.0"), Action::Downgrade);
+        assert_eq!(classify_change("1.9.0", "2.0.0"), Action::Upgrade);
+    }
+
+    #[test]
+    fn environment_record_initializes_without_deployment_state() {
+        let record = environment_record(None, "prod", "production", 20).unwrap();
+        assert_eq!(record.properties.get("description").unwrap(), "production");
+        assert_eq!(record.created, 20);
+        assert_eq!(record.updated, 20);
     }
 }

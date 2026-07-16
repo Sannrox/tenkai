@@ -66,6 +66,15 @@ enum EnvCommand {
     },
     /// Subscribe an environment to a product channel, e.g. `subscribe local hello=stable`.
     Subscribe { env: String, spec: String },
+    /// Remove an abandoned apply lease after verifying no apply is running.
+    Unlock { env: String },
+    /// Record manually reconciled deployment state; omit --deployed after cleanup.
+    Reconcile {
+        env: String,
+        product: String,
+        #[arg(long)]
+        deployed: Option<String>,
+    },
 }
 
 fn print_steps(steps: &[plan::Step]) {
@@ -118,6 +127,20 @@ async fn main() -> Result<()> {
                     plan::subscribe(&mut ctx, &env, product, channel).await?
                 );
             }
+            EnvCommand::Unlock { env } => {
+                println!("{}", apply::unlock_environment(&mut ctx, &env).await?);
+            }
+            EnvCommand::Reconcile {
+                env,
+                product,
+                deployed,
+            } => {
+                println!(
+                    "{}",
+                    plan::reconcile_deployment(&mut ctx, &env, &product, deployed.as_deref())
+                        .await?
+                );
+            }
         },
         Command::Plan { env } => {
             let stored = plan::create(&mut ctx, &env).await?;
@@ -150,15 +173,21 @@ async fn main() -> Result<()> {
             );
             for r in rows {
                 let deployed = r.deployed.clone().unwrap_or_else(|| "-".into());
-                let state = match &r.deployed {
-                    Some(v) if *v == r.head => "current",
-                    Some(_) => "behind",
-                    None => "missing",
+                let state = match (&r.deployed, r.health.as_deref()) {
+                    (_, Some("unknown")) => "unknown",
+                    (Some(v), _) if *v == r.head => "current",
+                    (Some(_), _) => "behind",
+                    (None, _) => "missing",
                 };
                 println!(
                     "{:<24} {:<10} {:<12} {:<12} {state}",
                     r.product, r.channel, deployed, r.head
                 );
+                if state == "unknown"
+                    && let Some(error) = r.error.as_deref()
+                {
+                    println!("  recovery required: {error}");
+                }
             }
         }
         Command::Rollback { product, env } => {
@@ -178,6 +207,10 @@ async fn run_plan(ctx: &mut client::Ctx, plan_id: &str, skip_gates: bool) -> Res
     for o in &outcomes {
         match o.status.as_str() {
             "succeeded" => println!("  ok        {:<24} {}", o.step.product, o.step.to),
+            "blocked" => {
+                failed = true;
+                println!("  BLOCKED   {:<24} {}", o.step.product, o.detail);
+            }
             "rolled_back" => {
                 failed = true;
                 println!("  ROLLBACK  {:<24} {}", o.step.product, o.detail);

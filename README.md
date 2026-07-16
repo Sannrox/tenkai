@@ -45,6 +45,9 @@ cargo build
 Publish a new version and `apply` again to upgrade. If the health probe of a
 new release fails, the previous release is restored automatically. Use
 `tenkaictl rollback <product>` to return to the previously deployed version.
+If failed cleanup leaves deployment state unknown, reconcile the external
+target manually, then run `tenkaictl env reconcile <env> <product>` after
+cleanup or add `--deployed <version>` to record the verified live version.
 
 ## The manifest (`tenkai.toml`)
 
@@ -58,18 +61,25 @@ workdir = "."                    # relative to the manifest
 install = "docker compose up -d" # any command; activates this release
 uninstall = "docker compose down"
 health = "curl -sf localhost:8080/healthz"  # exit 0 = healthy; failure rolls back
+inputs = ["compose.yaml"]          # immutable files/directories used by these commands
 
 [gate]
 eval_suite = "my-suite"          # chisei eval suite; latest run must fully pass
 ```
 
-Releases are immutable: re-publishing the same version with different content
-is rejected — bump `product.version`.
+Releases are immutable: re-publishing the same version with different manifest
+content or different declared deploy inputs is rejected — bump
+`product.version`. Runtime state must live outside declared `inputs`.
+Manifests without `inputs` retain legacy in-place workdir execution; declare
+all command inputs to enable immutable snapshots and per-environment isolation.
 
 ## Gates
 
 If a release declares `gate.eval_suite`, `apply` blocks unless the suite's
-latest eval run in chisei exists and every case passed (fail closed).
+latest eval run in chisei exists and every current case passed (fail closed).
+The run's `config_ref` must match the content-bound reference shown in the
+blocked-plan detail; it covers the manifest, immutable deploy inputs, and the
+current suite definition, so stale evidence cannot authorize changed content.
 `--skip-gates` bypasses, and the bypass is recorded in the graph like any
 other apply.
 
@@ -111,6 +121,7 @@ control plane can't safely restart its own backend mid-apply.
 | `GRPC_PORT` | `50051` | Port used for the default URL |
 | `SEKAI_AUTH_TOKEN` | unset | Bearer token, when the server requires auth |
 | `TENKAI_PRINCIPAL` | `tenkai` | Caller identity (`x-principal`) |
+| `TENKAI_STATE_DIR` | `<workdir-parent>/.tenkai-state` | Immutable deploy-input snapshots and per-environment runtime directories; must be outside the source workdir |
 
 ## Ontology
 
