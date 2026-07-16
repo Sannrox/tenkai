@@ -227,12 +227,10 @@ async fn activate(
     content: &ReleaseContent,
 ) -> Result<(), String> {
     let result = executor.activate(input).await;
-    if !result.succeeded {
-        return Err(result.detail);
-    }
     match verify_content_integrity(content) {
-        Ok(()) => Ok(()),
         Err(error) => Err(error.to_string()),
+        Ok(()) if result.succeeded => Ok(()),
+        Ok(()) => Err(result.detail),
     }
 }
 
@@ -242,12 +240,10 @@ async fn deactivate(
     content: &ReleaseContent,
 ) -> Result<(), String> {
     let result = executor.deactivate(input).await;
-    if !result.succeeded {
-        return Err(result.detail);
-    }
     match verify_content_integrity(content) {
-        Ok(()) => Ok(()),
         Err(error) => Err(error.to_string()),
+        Ok(()) if result.succeeded => Ok(()),
+        Ok(()) => Err(result.detail),
     }
 }
 
@@ -1212,6 +1208,29 @@ mod tests {
 
         let step = step();
         let input = executor_input(&release, &step, step.action, step.from.clone());
+        let failure = activate(
+            executor::select(release.manifest.deploy.executor),
+            &input,
+            &release,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(failure.contains("immutable deployment inputs changed"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_activation_still_rejects_mutated_immutable_inputs() {
+        let dir = test_dir("failed-immutable-inputs");
+        std::fs::write(dir.join("deploy.sh"), "original\n").unwrap();
+        let mut release = content(dir.clone(), "echo changed > deploy.sh; false", None, None);
+        release.manifest.deploy.inputs = vec!["deploy.sh".into()];
+        release.artifact_digest =
+            manifest::artifact_digest(&release.workdir, &release.manifest.deploy.inputs).unwrap();
+        let step = step();
+        let input = executor_input(&release, &step, step.action, step.from.clone());
+
         let failure = activate(
             executor::select(release.manifest.deploy.executor),
             &input,
