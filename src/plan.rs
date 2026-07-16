@@ -877,7 +877,9 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
         .collect::<BTreeMap<_, _>>();
     let obsolete = deployed
         .keys()
-        .filter(|product| !desired_products.contains(*product))
+        .filter(|product| {
+            !desired_products.contains(*product) && !subscribed_products.contains(*product)
+        })
         .cloned()
         .collect::<BTreeSet<_>>();
     if !obsolete.is_empty() {

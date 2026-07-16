@@ -1047,6 +1047,45 @@ async fn execute_locked(
                 return Err(error.context(detail));
             }
         };
+        if matches!(
+            outcome.status.as_str(),
+            "restore_pending" | "restore_pending_cleanup_failed"
+        ) {
+            let compensation_detail = unwind_succeeded_steps(
+                ctx,
+                &env,
+                &plan_id,
+                &mut outcomes,
+                &outcome.detail,
+                recovery,
+                mutation_started,
+            )
+            .await;
+            let mut outcome = match finish_deferred_restore(
+                ctx,
+                &env,
+                &plan_id,
+                outcome,
+                recovery,
+                mutation_started,
+            )
+            .await
+            {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    let mut detail = error.to_string();
+                    append_compensation_detail(&mut detail, &compensation_detail);
+                    fail_running_plan(ctx, &mut stored_plan, skip_gates, &detail, mutation_started)
+                        .await?;
+                    return Err(error.context(detail));
+                }
+            };
+            append_compensation_detail(&mut outcome.detail, &compensation_detail);
+            final_detail = outcome.detail.clone();
+            plan_failed = true;
+            outcomes.push(outcome);
+            break;
+        }
         if outcome.status == "blocked" {
             plan_blocked = true;
             final_detail = outcome.detail.clone();
@@ -1097,6 +1136,53 @@ async fn execute_locked(
     }
 
     Ok(outcomes)
+}
+
+async fn finish_deferred_restore(
+    ctx: &mut Ctx,
+    env: &str,
+    plan_oid: &str,
+    mut outcome: Outcome,
+    recovery: &Cancellation,
+    mutation_started: &mut bool,
+) -> Result<Outcome> {
+    let cleaned = outcome.status == "restore_pending";
+    let previous = outcome
+        .step
+        .from
+        .as_deref()
+        .context("deferred restore has no previous version")?;
+    let pin = outcome
+        .step
+        .restore
+        .as_ref()
+        .context("deferred restore has no pinned release")?;
+    let previous_content = release_content(ctx, pin, env, &outcome.step.product).await?;
+    let previous_executor = executor::select(previous_content.manifest.deploy.executor);
+    let previous_input = executor_input(
+        &previous_content,
+        &outcome.step,
+        Action::Rollback,
+        Some(outcome.step.to.clone()),
+    );
+    let (restored, detail) = restore_previous(
+        previous_executor,
+        &previous_input,
+        &previous_content,
+        previous,
+        outcome.detail,
+        recovery,
+        mutation_started,
+    )
+    .await;
+    let recovered = cleaned && restored;
+    if !recovered {
+        set_env_unknown(ctx, env, &outcome.step.product, &detail).await?;
+    }
+    outcome.status = if recovered { "rolled_back" } else { "failed" }.into();
+    outcome.detail = detail;
+    record_deployment(ctx, env, plan_oid, &outcome).await?;
+    Ok(outcome)
 }
 
 async fn unwind_succeeded_steps(
@@ -1446,7 +1532,7 @@ async fn execute_step(
         Err(detail) => {
             // Install or health failed: try to restore the previous release.
             match &step.from {
-                Some(prev) => {
+                Some(_) => {
                     let (cleaned, detail) = if activation_started {
                         cleanup_failed_install(
                             target_executor,
@@ -1460,40 +1546,16 @@ async fn execute_step(
                     } else {
                         (true, detail)
                     };
-                    let Some(prev_content) = restore_content.as_ref() else {
-                        let detail =
-                            format!("{detail}; step {} has no pinned restore release", step.id);
-                        set_env_unknown(ctx, env, &step.product, &detail).await?;
-                        let outcome = Outcome {
-                            step: step.clone(),
-                            status: "failed".into(),
-                            detail,
-                        };
-                        record_deployment(ctx, env, plan_oid, &outcome).await?;
-                        return Ok(outcome);
-                    };
-                    let previous_executor = executor::select(prev_content.manifest.deploy.executor);
-                    let previous_input =
-                        executor_input(prev_content, step, Action::Rollback, Some(step.to.clone()));
-                    let (restored, detail) = restore_previous(
-                        previous_executor,
-                        &previous_input,
-                        prev_content,
-                        prev,
-                        detail,
-                        recovery,
-                        mutation_started,
-                    )
-                    .await;
-                    let recovered = cleaned && restored;
-                    if !recovered {
-                        set_env_unknown(ctx, env, &step.product, &detail).await?;
-                    }
-                    Outcome {
+                    return Ok(Outcome {
                         step: step.clone(),
-                        status: if recovered { "rolled_back" } else { "failed" }.into(),
+                        status: if cleaned {
+                            "restore_pending"
+                        } else {
+                            "restore_pending_cleanup_failed"
+                        }
+                        .into(),
                         detail,
-                    }
+                    });
                 }
                 None => {
                     let (cleaned, detail) = if activation_started {
