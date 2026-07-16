@@ -1273,6 +1273,7 @@ mod tests {
         ReleaseContent {
             release_id: "release:api:1.0.0".into(),
             manifest: Manifest {
+                dependencies: Vec::new(),
                 product: ProductSection {
                     name: "api".into(),
                     version: "1.0.0".into(),

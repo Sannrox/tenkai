@@ -14,7 +14,16 @@ pub struct Manifest {
     pub product: ProductSection,
     pub deploy: DeploySection,
     #[serde(default)]
+    pub dependencies: Vec<DependencySection>,
+    #[serde(default)]
     pub gate: GateSection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DependencySection {
+    pub product: String,
+    pub version: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,6 +112,7 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
     }
     crate::ontology::validate_identifier("product.name", &manifest.product.name)?;
     crate::ontology::validate_identifier("product.version", &manifest.product.version)?;
+    validate_dependencies(&manifest)?;
     let workdir = base
         .join(&manifest.deploy.workdir)
         .canonicalize()
@@ -112,6 +122,30 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
         raw,
         workdir,
     })
+}
+
+pub fn validate_dependencies(manifest: &Manifest) -> Result<()> {
+    let mut products = std::collections::BTreeSet::new();
+    for dependency in &manifest.dependencies {
+        crate::ontology::validate_identifier("dependency.product", &dependency.product)?;
+        if dependency.product == manifest.product.name {
+            bail!("release {} cannot depend on itself", manifest.product.name);
+        }
+        if !products.insert(&dependency.product) {
+            bail!(
+                "release {} declares dependency {} more than once",
+                manifest.product.name,
+                dependency.product
+            );
+        }
+        semver::VersionReq::parse(&dependency.version).with_context(|| {
+            format!(
+                "invalid dependency version range {:?} for {}",
+                dependency.version, dependency.product
+            )
+        })?;
+    }
+    Ok(())
 }
 
 pub fn parse_raw(raw: &str) -> Result<Manifest> {

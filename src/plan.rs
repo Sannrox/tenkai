@@ -1,6 +1,6 @@
 //! Environments, subscriptions, and plan computation (desired vs deployed).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -9,6 +9,7 @@ use sha2::{Digest as _, Sha256};
 use crate::client::Ctx;
 use crate::ontology::*;
 use crate::pb::sekai::Object;
+use crate::planner::{Candidate, Dependency, Request};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -584,43 +585,160 @@ async fn pin_release(ctx: &mut Ctx, id: &str) -> Result<ReleasePin> {
     })
 }
 
+#[derive(Clone)]
+struct ChannelRoot {
+    product: String,
+    channel: String,
+    channel_id: String,
+    version: String,
+}
+
+fn candidate_from_release(release: &Object) -> Result<Candidate> {
+    if release.kind != KIND_RELEASE {
+        bail!(
+            "object {} is {}, not {KIND_RELEASE}",
+            release.id,
+            release.kind
+        );
+    }
+    let product = release
+        .properties
+        .get("product")
+        .filter(|value| !value.is_empty())
+        .with_context(|| format!("release {} has no product", release.id))?
+        .clone();
+    let version = release
+        .properties
+        .get("version")
+        .filter(|value| !value.is_empty())
+        .with_context(|| format!("release {} has no version", release.id))?
+        .clone();
+    let raw = release
+        .properties
+        .get("manifest")
+        .with_context(|| format!("release {} has no manifest", release.id))?;
+    let manifest = crate::manifest::parse_raw(raw)
+        .with_context(|| format!("parsing release manifest {}", release.id))?;
+    crate::manifest::validate_dependencies(&manifest)?;
+    if manifest.product.name != product || manifest.product.version != version {
+        bail!(
+            "release {} metadata does not match manifest identity {}@{}",
+            release.id,
+            manifest.product.name,
+            manifest.product.version
+        );
+    }
+    Ok(Candidate {
+        product,
+        version,
+        dependencies: manifest
+            .dependencies
+            .into_iter()
+            .map(|dependency| Dependency {
+                product: dependency.product,
+                requirement: dependency.version,
+            })
+            .collect(),
+        required_facts: BTreeMap::new(),
+    })
+}
+
+async fn catalog_candidates(ctx: &mut Ctx, roots: &[ChannelRoot]) -> Result<Vec<Candidate>> {
+    let mut queue = roots
+        .iter()
+        .map(|root| root.product.clone())
+        .collect::<VecDeque<_>>();
+    let mut visited = BTreeSet::new();
+    let mut candidates = Vec::new();
+    while let Some(product) = queue.pop_front() {
+        if !visited.insert(product.clone()) {
+            continue;
+        }
+        let releases = ctx
+            .linked(&product_id(&product), REL_RELEASE_OF, "in")
+            .await?;
+        for release in releases {
+            let candidate = candidate_from_release(&release)?;
+            for dependency in &candidate.dependencies {
+                if !visited.contains(&dependency.product) {
+                    queue.push_back(dependency.product.clone());
+                }
+            }
+            candidates.push(candidate);
+        }
+    }
+    Ok(candidates)
+}
+
 async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateInput>, Vec<Step>)> {
     let env_obj = environment(ctx, env).await?;
     let channels = ctx.linked(&env_obj.id, REL_SUBSCRIBES, "out").await?;
-
-    let mut products = std::collections::HashSet::new();
-    for channel in &channels {
+    let mut roots = BTreeMap::<String, ChannelRoot>::new();
+    for channel in channels {
         let product = channel
             .properties
             .get("product")
             .cloned()
             .unwrap_or_default();
-        if !products.insert(product.clone()) {
+        if roots.contains_key(&product) {
             bail!(
                 "environment {env} has multiple channel subscriptions for {product}; subscribe again after concurrent updates settle"
             );
         }
-    }
-
-    let mut inputs = Vec::new();
-    let mut pending = Vec::new();
-    for ch in channels {
-        let product = ch.properties.get("product").cloned().unwrap_or_default();
-        let channel = ch.properties.get("channel").cloned().unwrap_or_default();
-        let desired = ch
+        let version = channel
             .properties
             .get("current_version")
             .cloned()
             .unwrap_or_default();
-        let release = ch
+        let release = channel
             .properties
             .get("current_release")
             .cloned()
             .unwrap_or_default();
-        if desired.is_empty() || release.is_empty() {
-            continue; // channel exists but nothing promoted yet
+        if version.is_empty() || release.is_empty() {
+            continue;
         }
-        let target = pin_release(ctx, &release).await?;
+        if release != release_id(&product, &version) {
+            bail!(
+                "channel {} points to inconsistent release {release} for {product}@{version}",
+                channel.id
+            );
+        }
+        roots.insert(
+            product.clone(),
+            ChannelRoot {
+                product,
+                channel: channel
+                    .properties
+                    .get("channel")
+                    .cloned()
+                    .unwrap_or_default(),
+                channel_id: channel.id,
+                version,
+            },
+        );
+    }
+
+    let root_values = roots.values().cloned().collect::<Vec<_>>();
+    let candidates = catalog_candidates(ctx, &root_values).await?;
+    let resolution = crate::planner::resolve(&Request {
+        roots: roots
+            .iter()
+            .map(|(product, root)| (product.clone(), root.version.clone()))
+            .collect(),
+        candidates,
+        ..Request::default()
+    })
+    .with_context(|| format!("cannot resolve dependencies for environment {env}"))?;
+
+    let mut inputs = Vec::new();
+    let mut steps = Vec::new();
+    for product in resolution.install_order {
+        let desired = resolution
+            .selected
+            .get(&product)
+            .expect("ordered product must be selected")
+            .clone();
         if env_obj
             .properties
             .get(&format!("deployment_health.{product}"))
@@ -639,47 +757,42 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
             .properties
             .get(&format!("deployed.{product}"))
             .cloned();
+        let target = pin_release(ctx, &release_id(&product, &desired)).await?;
+        let root = roots.get(&product);
         inputs.push(DesiredStateInput {
             product: product.clone(),
-            channel,
-            channel_id: ch.id,
+            channel: root.map(|root| root.channel.clone()).unwrap_or_default(),
+            channel_id: root.map(|root| root.channel_id.clone()).unwrap_or_default(),
             desired_version: desired.clone(),
-            release_id: release.clone(),
+            release_id: target.release_id.clone(),
             release_digest: target.digest.clone(),
             artifact_digest: target.artifact_digest.clone(),
             deployed_version: deployed.clone(),
         });
-        match deployed {
-            Some(v) if v == desired => {}
-            Some(v) => {
-                let action = classify_change(&v, &desired);
-                let restore = pin_release(ctx, &release_id(&product, &v)).await?;
-                pending.push((product, action, Some(v), desired, target, Some(restore)));
+        let (action, from, restore) = match deployed {
+            Some(version) if version == desired => continue,
+            Some(version) => {
+                let action = classify_change(&version, &desired);
+                let restore = pin_release(ctx, &release_id(&product, &version)).await?;
+                (action, Some(version), Some(restore))
             }
-            None => pending.push((product, Action::Install, None, desired, target, None)),
-        }
+            None => (Action::Install, None, None),
+        };
+        let order = steps.len() as u32;
+        steps.push(Step {
+            id: format!("{}:step:{order}", env_id(env)),
+            order,
+            product,
+            action,
+            from,
+            to: desired,
+            release_id: target.release_id,
+            release_digest: target.digest,
+            artifact_digest: target.artifact_digest,
+            workdir: target.workdir,
+            restore,
+        });
     }
-    inputs.sort_by(|a, b| a.product.cmp(&b.product));
-    pending.sort_by(|a, b| a.0.cmp(&b.0));
-    let steps = pending
-        .into_iter()
-        .enumerate()
-        .map(
-            |(index, (product, action, from, to, release, restore))| Step {
-                id: format!("{}:step:{index}", env_id(env)),
-                order: index as u32,
-                product,
-                action,
-                from,
-                to,
-                release_id: release.release_id,
-                release_digest: release.digest,
-                artifact_digest: release.artifact_digest,
-                workdir: release.workdir,
-                restore,
-            },
-        )
-        .collect();
     Ok((inputs, steps))
 }
 
@@ -820,6 +933,75 @@ pub async fn status(ctx: &mut Ctx, env: &str) -> Result<Vec<StatusRow>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn release_object(product: &str, version: &str, manifest: &str) -> Object {
+        Object {
+            id: release_id(product, version),
+            kind: KIND_RELEASE.into(),
+            name: format!("{product}@{version}"),
+            namespace: NS.into(),
+            external_id: String::new(),
+            properties: HashMap::from([
+                ("product".into(), product.into()),
+                ("version".into(), version.into()),
+                ("manifest".into(), manifest.into()),
+            ]),
+            created: 1,
+            updated: 1,
+        }
+    }
+
+    #[test]
+    fn catalog_release_dependencies_feed_the_resolver() {
+        let release = release_object(
+            "api",
+            "2.0.0",
+            r#"
+[product]
+name = "api"
+version = "2.0.0"
+
+[deploy]
+install = "true"
+
+[[dependencies]]
+product = "runtime"
+version = ">=1, <2"
+"#,
+        );
+        let candidate = candidate_from_release(&release).unwrap();
+        assert_eq!(candidate.product, "api");
+        assert_eq!(candidate.version, "2.0.0");
+        assert_eq!(
+            candidate.dependencies,
+            [Dependency {
+                product: "runtime".into(),
+                requirement: ">=1, <2".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn catalog_release_identity_must_match_its_manifest() {
+        let release = release_object(
+            "api",
+            "2.0.0",
+            r#"
+[product]
+name = "other"
+version = "2.0.0"
+
+[deploy]
+install = "true"
+"#,
+        );
+        assert!(
+            candidate_from_release(&release)
+                .unwrap_err()
+                .to_string()
+                .contains("does not match manifest identity")
+        );
+    }
 
     fn example_plan() -> Plan {
         let mut plan = Plan {
