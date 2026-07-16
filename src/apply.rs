@@ -952,7 +952,18 @@ async fn execute_locked(
         )
         .await?;
         if let Err(error) = refresh_environment_lease(ctx, lease).await {
-            let detail = format!("refreshing environment apply lease failed: {error}");
+            let mut detail = format!("refreshing environment apply lease failed: {error}");
+            let compensation = unwind_succeeded_steps(
+                ctx,
+                &env,
+                &plan_id,
+                &mut outcomes,
+                &detail,
+                recovery,
+                mutation_started,
+            )
+            .await;
+            append_compensation_detail(&mut detail, &compensation);
             fail_running_plan(ctx, &mut stored_plan, skip_gates, &detail, mutation_started).await?;
             return Err(error.context(detail));
         }
@@ -977,15 +988,21 @@ async fn execute_locked(
         {
             Ok(outcome) => outcome,
             Err(error) => {
-                fail_running_plan(
+                let mut detail = error.to_string();
+                let compensation = unwind_succeeded_steps(
                     ctx,
-                    &mut stored_plan,
-                    skip_gates,
-                    error.to_string(),
+                    &env,
+                    &plan_id,
+                    &mut outcomes,
+                    &detail,
+                    recovery,
                     mutation_started,
                 )
-                .await?;
-                return Err(error);
+                .await;
+                append_compensation_detail(&mut detail, &compensation);
+                fail_running_plan(ctx, &mut stored_plan, skip_gates, &detail, mutation_started)
+                    .await?;
+                return Err(error.context(detail));
             }
         };
         if outcome.status == "blocked" {
@@ -1011,11 +1028,8 @@ async fn execute_locked(
             recovery,
             mutation_started,
         )
-        .await?;
-        if !compensation.is_empty() {
-            final_detail.push_str("; ");
-            final_detail.push_str(&compensation);
-        }
+        .await;
+        append_compensation_detail(&mut final_detail, &compensation);
     }
 
     let final_state = if plan_blocked {
@@ -1051,22 +1065,56 @@ async fn unwind_succeeded_steps(
     cause: &str,
     recovery: &Cancellation,
     mutation_started: &mut bool,
-) -> Result<String> {
+) -> String {
     let mut details = Vec::new();
     for index in succeeded_indices_in_reverse(outcomes) {
         let step = outcomes[index].step.clone();
-        let compensation =
-            compensate_completed_step(ctx, env, plan_oid, &step, cause, recovery, mutation_started)
-                .await?;
-        details.push(format!("{} {}", step.product, compensation.detail));
-        outcomes[index].status = compensation.status;
-        outcomes[index].detail = compensation.detail;
+        match compensate_completed_step(
+            ctx,
+            env,
+            plan_oid,
+            &step,
+            cause,
+            recovery,
+            mutation_started,
+        )
+        .await
+        {
+            Ok(compensation) => {
+                details.push(format!("{} {}", step.product, compensation.detail));
+                outcomes[index].status = compensation.status;
+                outcomes[index].detail = compensation.detail;
+            }
+            Err(error) => {
+                let detail = format!("compensation failed: {error}");
+                let _ = set_env_unknown(ctx, env, &step.product, &detail).await;
+                let failed = Outcome {
+                    step,
+                    status: "failed".into(),
+                    detail: detail.clone(),
+                };
+                let _ = record_deployment(ctx, env, plan_oid, &failed).await;
+                details.push(format!("{} {detail}", failed.step.product));
+                outcomes[index].status = failed.status;
+                outcomes[index].detail = failed.detail;
+            }
+        }
     }
     if details.is_empty() {
-        Ok(String::new())
+        String::new()
     } else {
-        Ok(format!("compensation: {}", details.join("; ")))
+        format!("compensation: {}", details.join("; "))
     }
+}
+
+fn append_compensation_detail(detail: &mut String, compensation: &str) {
+    if compensation.is_empty() {
+        return;
+    }
+    if !detail.is_empty() {
+        detail.push_str("; ");
+    }
+    detail.push_str(compensation);
 }
 
 fn succeeded_indices_in_reverse(outcomes: &[Outcome]) -> Vec<usize> {
