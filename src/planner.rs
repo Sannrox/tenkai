@@ -84,23 +84,25 @@ struct Catalog {
 
 pub fn resolve(request: &Request) -> Result<Resolution, ResolutionError> {
     let catalog = parse_catalog(&request.candidates)?;
-    let mut requirements = BTreeMap::<String, Vec<Requirement>>::new();
+    let mut policies = BTreeMap::<String, Vec<Requirement>>::new();
     for (product, expressions) in &request.version_requirements {
         for expression in expressions {
             add_requirement(
-                &mut requirements,
+                &mut policies,
                 product,
                 expression,
                 format!("environment constraint on {product}"),
             )?;
         }
     }
+    let mut requirements = BTreeMap::<String, Vec<Requirement>>::new();
     for (product, version) in &request.roots {
         Version::parse(version).map_err(|error| {
             ResolutionError(format!(
                 "channel head {product}@{version} is not valid semver: {error}"
             ))
         })?;
+        activate_product(&mut requirements, &policies, product);
         add_requirement(
             &mut requirements,
             product,
@@ -113,6 +115,7 @@ pub fn resolve(request: &Request) -> Result<Resolution, ResolutionError> {
         &catalog,
         &request.roots,
         &request.facts,
+        &policies,
         requirements,
         BTreeMap::new(),
     )?;
@@ -217,6 +220,7 @@ fn search(
     catalog: &Catalog,
     roots: &BTreeMap<String, String>,
     facts: &BTreeMap<String, String>,
+    policies: &BTreeMap<String, Vec<Requirement>>,
     requirements: BTreeMap<String, Vec<Requirement>>,
     selected: BTreeMap<String, ParsedCandidate>,
 ) -> Result<BTreeMap<String, ParsedCandidate>, ResolutionError> {
@@ -259,6 +263,7 @@ fn search(
         let mut next_requirements = requirements.clone();
         let mut invalid = None;
         for dependency in &candidate.dependencies {
+            activate_product(&mut next_requirements, policies, &dependency.product);
             let requirement = Requirement {
                 range: dependency.requirement.clone(),
                 exact_versions: exact_versions(&dependency.expression),
@@ -287,12 +292,32 @@ fn search(
             last_error = Some(error);
             continue;
         }
-        match search(catalog, roots, facts, next_requirements, next_selected) {
+        match search(
+            catalog,
+            roots,
+            facts,
+            policies,
+            next_requirements,
+            next_selected,
+        ) {
             Ok(solution) => return Ok(solution),
             Err(error) => last_error = Some(error),
         }
     }
     Err(last_error.unwrap_or_else(|| conflict(&product, required, catalog, facts)))
+}
+
+fn activate_product(
+    requirements: &mut BTreeMap<String, Vec<Requirement>>,
+    policies: &BTreeMap<String, Vec<Requirement>>,
+    product: &str,
+) {
+    if !requirements.contains_key(product) {
+        requirements.insert(
+            product.to_string(),
+            policies.get(product).cloned().unwrap_or_default(),
+        );
+    }
 }
 
 fn requirement_matches(requirement: &Requirement, candidate: &ParsedCandidate) -> bool {
@@ -483,6 +508,19 @@ mod tests {
         let error = resolve(&request).unwrap_err().to_string();
         assert!(error.contains("environment constraint on runtime requires =1.0.0"));
         assert!(error.contains("app@1.0.0 requires >=2"));
+    }
+
+    #[test]
+    fn constraints_do_not_create_desired_products() {
+        let request = Request {
+            roots: BTreeMap::from([("app".into(), "1.0.0".into())]),
+            version_requirements: BTreeMap::from([("runtime".into(), vec!["=1.0.0".into()])]),
+            candidates: vec![candidate("app", "1.0.0", &[])],
+            ..Request::default()
+        };
+        let resolution = resolve(&request).unwrap();
+        assert_eq!(resolution.install_order, ["app"]);
+        assert!(!resolution.selected.contains_key("runtime"));
     }
 
     #[test]
