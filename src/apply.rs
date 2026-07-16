@@ -20,7 +20,7 @@ use crate::pb::chisei::{
     EvalRun, EvalSuite, GetEvalRunRequest, GetEvalSuiteRequest, ListEvalRunsRequest,
 };
 use crate::pb::sekai::Object;
-use crate::plan::{self, Action, Plan, PlanState, ReleasePin, Step};
+use crate::plan::{self, Action, DesiredStateInput, Plan, PlanState, ReleasePin, Step};
 
 pub struct Outcome {
     pub step: Step,
@@ -853,6 +853,7 @@ async fn validate_preconditions(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
         .get(&env_id(&plan.environment))
         .await?
         .with_context(|| format!("environment {} not found", plan.environment))?;
+    validate_desired_inputs(&plan.id, &plan.inputs, &environment)?;
     for step in &plan.steps {
         if environment
             .properties
@@ -874,6 +875,37 @@ async fn validate_preconditions(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
                 plan.id,
                 step.product,
                 step.from,
+                actual
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_desired_inputs(
+    plan_id: &str,
+    inputs: &[DesiredStateInput],
+    environment: &Object,
+) -> Result<()> {
+    for input in inputs {
+        if environment
+            .properties
+            .get(&format!("deployment_health.{}", input.product))
+            .is_some_and(|health| health == "unknown")
+        {
+            bail!(
+                "plan {plan_id} cannot apply {} while its deployment state is unknown; reconcile or roll back first",
+                input.product
+            );
+        }
+        let actual = environment
+            .properties
+            .get(&format!("deployed.{}", input.product));
+        if actual != input.deployed_version.as_ref() {
+            bail!(
+                "plan {plan_id} is stale for {}: expected deployed version {:?}, found {:?}",
+                input.product,
+                input.deployed_version,
                 actual
             );
         }
@@ -2153,5 +2185,43 @@ mod tests {
             outcome("application", "rolled_back"),
         ];
         assert_eq!(succeeded_indices_in_reverse(&outcomes), [1, 0]);
+    }
+
+    #[test]
+    fn desired_inputs_without_steps_are_revalidated() {
+        let input = DesiredStateInput {
+            product: "runtime".into(),
+            channel: String::new(),
+            channel_id: String::new(),
+            desired_version: "1.0.0".into(),
+            release_id: String::new(),
+            release_digest: String::new(),
+            artifact_digest: String::new(),
+            deployed_version: Some("1.0.0".into()),
+        };
+        let mut environment = Object::default();
+        environment
+            .properties
+            .insert("deployed.runtime".into(), "2.0.0".into());
+
+        assert!(
+            validate_desired_inputs("plan", std::slice::from_ref(&input), &environment)
+                .unwrap_err()
+                .to_string()
+                .contains("stale for runtime")
+        );
+
+        environment
+            .properties
+            .insert("deployed.runtime".into(), "1.0.0".into());
+        environment
+            .properties
+            .insert("deployment_health.runtime".into(), "unknown".into());
+        assert!(
+            validate_desired_inputs("plan", &[input], &environment)
+                .unwrap_err()
+                .to_string()
+                .contains("deployment state is unknown")
+        );
     }
 }
