@@ -1141,15 +1141,66 @@ pub async fn create_rollback(ctx: &mut Ctx, env: &str, product: &str) -> Result<
     else {
         bail!("no previous version of {product} recorded in {env} — nothing to roll back to");
     };
-    let rollback_root = ChannelRoot {
-        product: product.to_string(),
-        channel: String::new(),
-        channel_id: String::new(),
-        version: prev.clone(),
-    };
-    let candidates = catalog_candidates(ctx, std::slice::from_ref(&rollback_root)).await?;
+    let mut rollback_roots = BTreeMap::<String, ChannelRoot>::new();
+    let mut subscribed_products = BTreeSet::new();
+    for channel in ctx.linked(&env_obj.id, REL_SUBSCRIBES, "out").await? {
+        let subscribed_product = channel
+            .properties
+            .get("product")
+            .cloned()
+            .unwrap_or_default();
+        if !subscribed_products.insert(subscribed_product.clone()) {
+            bail!("environment {env} has multiple channel subscriptions for {subscribed_product}");
+        }
+        let version = channel
+            .properties
+            .get("current_version")
+            .cloned()
+            .unwrap_or_default();
+        let release = channel
+            .properties
+            .get("current_release")
+            .cloned()
+            .unwrap_or_default();
+        if version.is_empty() || release.is_empty() {
+            continue;
+        }
+        if release != release_id(&subscribed_product, &version) {
+            bail!(
+                "channel {} points to inconsistent release {release} for {subscribed_product}@{version}",
+                channel.id
+            );
+        }
+        rollback_roots.insert(
+            subscribed_product.clone(),
+            ChannelRoot {
+                product: subscribed_product,
+                channel: channel
+                    .properties
+                    .get("channel")
+                    .cloned()
+                    .unwrap_or_default(),
+                channel_id: channel.id,
+                version,
+            },
+        );
+    }
+    rollback_roots.insert(
+        product.to_string(),
+        ChannelRoot {
+            product: product.to_string(),
+            channel: String::new(),
+            channel_id: String::new(),
+            version: prev,
+        },
+    );
+    let rollback_root_values = rollback_roots.values().cloned().collect::<Vec<_>>();
+    let candidates = catalog_candidates(ctx, &rollback_root_values).await?;
     let resolution = crate::planner::resolve(&Request {
-        roots: BTreeMap::from([(product.to_string(), prev)]),
+        roots: rollback_roots
+            .iter()
+            .map(|(root_product, root)| (root_product.clone(), root.version.clone()))
+            .collect(),
         candidates: candidates.clone(),
         ..Request::default()
     })
@@ -1246,12 +1297,6 @@ pub async fn create_rollback(ctx: &mut Ctx, env: &str, product: &str) -> Result<
                 .map(|product| (product.to_string(), version.clone()))
         })
         .collect::<BTreeMap<_, _>>();
-    let subscribed_products = ctx
-        .linked(&env_obj.id, REL_SUBSCRIBES, "out")
-        .await?
-        .into_iter()
-        .filter_map(|channel| channel.properties.get("product").cloned())
-        .collect::<BTreeSet<_>>();
     let obsolete = obsolete_dependency_products(
         &deployed,
         &env_obj.properties,
