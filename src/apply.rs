@@ -796,10 +796,13 @@ async fn refresh_environment_lease(
         });
     }
     if let Err(error) = ctx.put(lease_object(lease, crate::now_millis())).await {
-        let ownership_confirmed = matches!(
-            ctx.get(&lease.id).await,
-            Ok(Some(ref current)) if current.properties.get("owner") == Some(&lease.owner)
-        );
+        let ownership_confirmed = match ctx.get(&lease.id).await {
+            Ok(Some(current)) => current.properties.get("owner") == Some(&lease.owner),
+            Ok(None) => false,
+            // External compensation is unsafe unless this apply can prove it
+            // still owns the environment after a failed refresh write.
+            Err(_) => false,
+        };
         return Err(LeaseRefreshFailure {
             error,
             ownership_lost: !ownership_confirmed,
