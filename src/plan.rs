@@ -804,8 +804,10 @@ fn rollback_execution_order(
             .map(|dependency| {
                 (
                     dependency.clone(),
-                    *dependent_action == Action::Install
-                        || actions.get(dependency) == Some(&Action::Install),
+                    action_requires_prerequisites(*dependent_action)
+                        || actions
+                            .get(dependency)
+                            .is_some_and(|action| action_requires_prerequisites(*action)),
                 )
             })
             .collect::<Vec<_>>();
@@ -824,7 +826,10 @@ fn rollback_execution_order(
             for transitive in dependencies.get(&dependency).into_iter().flatten() {
                 pending.push((
                     transitive.clone(),
-                    path_has_install || actions.get(transitive) == Some(&Action::Install),
+                    path_has_install
+                        || actions
+                            .get(transitive)
+                            .is_some_and(|action| action_requires_prerequisites(*action)),
                 ));
             }
         }
@@ -870,6 +875,10 @@ fn rollback_execution_order(
         bail!("rollback dependency changes require conflicting execution order");
     }
     Ok(order)
+}
+
+fn action_requires_prerequisites(action: Action) -> bool {
+    matches!(action, Action::Install | Action::Upgrade)
 }
 
 async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateInput>, Vec<Step>)> {
@@ -1506,6 +1515,23 @@ install = "true"
         assert_eq!(
             rollback_execution_order(&dependencies, &actions).unwrap(),
             ["runtime", "sidecar", "app"]
+        );
+    }
+
+    #[test]
+    fn rollback_upgrades_dependencies_before_dependents() {
+        let dependencies = BTreeMap::from([
+            ("app".into(), vec!["runtime".into()]),
+            ("runtime".into(), Vec::new()),
+        ]);
+        let actions = BTreeMap::from([
+            ("runtime".into(), Action::Upgrade),
+            ("app".into(), Action::Rollback),
+        ]);
+
+        assert_eq!(
+            rollback_execution_order(&dependencies, &actions).unwrap(),
+            ["runtime", "app"]
         );
     }
 
