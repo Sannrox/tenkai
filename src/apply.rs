@@ -795,12 +795,16 @@ async fn refresh_environment_lease(
             ownership_lost: true,
         });
     }
-    ctx.put(lease_object(lease, crate::now_millis()))
-        .await
-        .map_err(|error| LeaseRefreshFailure {
+    if let Err(error) = ctx.put(lease_object(lease, crate::now_millis())).await {
+        let ownership_confirmed = matches!(
+            ctx.get(&lease.id).await,
+            Ok(Some(ref current)) if current.properties.get("owner") == Some(&lease.owner)
+        );
+        return Err(LeaseRefreshFailure {
             error,
-            ownership_lost: false,
-        })?;
+            ownership_lost: !ownership_confirmed,
+        });
+    }
     Ok(())
 }
 
