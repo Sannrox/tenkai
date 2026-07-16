@@ -4,15 +4,14 @@
 //! answers "what ran, when, gated by what, and what happened" after the fact.
 
 use std::collections::HashMap;
-use std::os::unix::process::CommandExt as _;
 use std::path::Path;
-use std::process::Stdio;
 
 use anyhow::{Context as _, Result, bail};
 use prost::Message as _;
 use sha2::{Digest as _, Sha256};
 
 use crate::client::Ctx;
+use crate::executor::{self, Executor, ExecutorInput};
 use crate::manifest::{self, Manifest};
 use crate::ontology::*;
 use crate::pb::chisei::{
@@ -25,58 +24,6 @@ pub struct Outcome {
     pub step: Step,
     pub status: String, // succeeded | failed | rolled_back
     pub detail: String,
-}
-
-async fn run_command(
-    cmd: &str,
-    workdir: &Path,
-    environment: &str,
-    product: &str,
-) -> Result<Result<(), String>> {
-    let identity_digest = manifest::digest(&format!("{environment}\0{product}"));
-    let compose_project = format!("tenkai-{}", &identity_digest[..16]);
-    let mut command = tokio::process::Command::new("sh");
-    command
-        .arg("-c")
-        .arg(cmd)
-        .current_dir(workdir)
-        .kill_on_drop(true)
-        .env_remove("SEKAI_AUTH_TOKEN")
-        .env("TENKAI_ENVIRONMENT", environment)
-        .env("TENKAI_PRODUCT", product)
-        .env("COMPOSE_PROJECT_NAME", compose_project)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    command.as_std_mut().process_group(0);
-    let mut child = command.spawn().context("spawning deployment command")?;
-    let process_group = child.id().map(|id| -(id as i32));
-    let mut wait = Box::pin(child.wait());
-    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    let timeout = tokio::time::sleep(std::time::Duration::from_secs(600));
-    tokio::pin!(timeout);
-    let (status, interrupted) = tokio::select! {
-        status = &mut wait => (Some(status?), None),
-        _ = &mut timeout => (None, Some("deployment command exceeded the 10 minute timeout")),
-        _ = interrupt.recv() => (None, Some("deployment command interrupted")),
-        _ = terminate.recv() => (None, Some("deployment command terminated")),
-    };
-    if let Some(reason) = interrupted {
-        if let Some(process_group) = process_group {
-            // The shell is the process-group leader; a negative PID kills the full tree.
-            unsafe {
-                libc::kill(process_group, libc::SIGKILL);
-            }
-        }
-        let _ = wait.await;
-        return Ok(Err(reason.into()));
-    }
-    let status = status.expect("completed command has an exit status");
-    if status.success() {
-        Ok(Ok(()))
-    } else {
-        Ok(Err(format!("deployment command exited with {status}")))
-    }
 }
 
 enum GateDecision {
@@ -237,6 +184,7 @@ fn gate_config_ref(release_digest: &str, artifact_digest: &str, suite: &EvalSuit
 }
 
 struct ReleaseContent {
+    release_id: String,
     manifest: Manifest,
     artifact_digest: String,
     workdir: std::path::PathBuf,
@@ -252,87 +200,86 @@ fn verify_content_integrity(content: &ReleaseContent) -> Result<()> {
     Ok(())
 }
 
-async fn activate(content: &ReleaseContent) -> Result<Result<(), String>> {
-    let install = run_command(
-        &content.manifest.deploy.install,
-        &content.workdir,
-        &content.environment,
-        &content.product,
-    )
-    .await?;
-    let result = match install {
-        Ok(()) => match &content.manifest.deploy.health {
-            Some(command) if !command.is_empty() => {
-                run_command(
-                    command,
-                    &content.workdir,
-                    &content.environment,
-                    &content.product,
-                )
-                .await
-            }
-            _ => Ok(Ok(())),
-        },
-        error => Ok(error),
-    }?;
-    match verify_content_integrity(content) {
-        Ok(()) => Ok(result),
-        Err(error) => Ok(Err(error.to_string())),
+fn executor_input(
+    content: &ReleaseContent,
+    step: &Step,
+    action: Action,
+    from_version: Option<String>,
+) -> ExecutorInput {
+    ExecutorInput {
+        step_id: step.id.clone(),
+        action,
+        environment: content.environment.clone(),
+        product: content.product.clone(),
+        from_version,
+        to_version: content.manifest.product.version.clone(),
+        release_id: content.release_id.clone(),
+        workdir: content.workdir.clone(),
+        install: content.manifest.deploy.install.clone(),
+        uninstall: content.manifest.deploy.uninstall.clone(),
+        health: content.manifest.deploy.health.clone(),
     }
 }
 
-async fn deactivate(content: &ReleaseContent) -> Result<Result<(), String>> {
-    match content.manifest.deploy.uninstall.as_deref() {
-        Some(command) if !command.is_empty() => {
-            let result = run_command(
-                command,
-                &content.workdir,
-                &content.environment,
-                &content.product,
-            )
-            .await?;
-            match verify_content_integrity(content) {
-                Ok(()) => Ok(result),
-                Err(error) => Ok(Err(error.to_string())),
-            }
-        }
-        _ => Ok(Err("release has no uninstall command".into())),
+async fn activate(
+    executor: &dyn Executor,
+    input: &ExecutorInput,
+    content: &ReleaseContent,
+) -> Result<(), String> {
+    let result = executor.activate(input).await;
+    if !result.succeeded {
+        return Err(result.detail);
+    }
+    match verify_content_integrity(content) {
+        Ok(()) => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+async fn deactivate(
+    executor: &dyn Executor,
+    input: &ExecutorInput,
+    content: &ReleaseContent,
+) -> Result<(), String> {
+    let result = executor.deactivate(input).await;
+    if !result.succeeded {
+        return Err(result.detail);
+    }
+    match verify_content_integrity(content) {
+        Ok(()) => Ok(()),
+        Err(error) => Err(error.to_string()),
     }
 }
 
 async fn restore_previous(
+    executor: &dyn Executor,
+    input: &ExecutorInput,
     content: &ReleaseContent,
     version: &str,
     failure: String,
-) -> Result<(bool, String)> {
-    Ok(match activate(content).await {
-        Ok(Ok(())) => (true, format!("{failure}; restored {version}")),
-        Ok(Err(restore)) => (
+) -> (bool, String) {
+    match activate(executor, input, content).await {
+        Ok(()) => (true, format!("{failure}; restored {version}")),
+        Err(restore) => (
             false,
             format!("{failure}; restore or health check of {version} also failed: {restore}"),
         ),
-        Err(error) => (
-            false,
-            format!("{failure}; restore executor failed for {version}: {error}"),
-        ),
-    })
+    }
 }
 
 async fn cleanup_failed_install(
+    executor: &dyn Executor,
+    input: &ExecutorInput,
     content: &ReleaseContent,
     failure: String,
-) -> Result<(bool, String)> {
-    Ok(match content.manifest.deploy.uninstall.as_deref() {
-        Some(_) => match deactivate(content).await {
-            Ok(Ok(())) => (true, format!("{failure}; cleaned up failed install")),
-            Ok(Err(cleanup)) => (false, format!("{failure}; cleanup also failed: {cleanup}")),
-            Err(error) => (
-                false,
-                format!("{failure}; cleanup executor also failed: {error}"),
-            ),
+) -> (bool, String) {
+    match content.manifest.deploy.uninstall.as_deref() {
+        Some(_) => match deactivate(executor, input, content).await {
+            Ok(()) => (true, format!("{failure}; cleaned up failed install")),
+            Err(cleanup) => (false, format!("{failure}; cleanup also failed: {cleanup}")),
         },
         None => (false, failure),
-    })
+    }
 }
 
 async fn compensate_activation(
@@ -343,16 +290,31 @@ async fn compensate_activation(
     failure: &anyhow::Error,
 ) {
     let failure = format!("deployment bookkeeping failed after activation: {failure}");
-    let cleaned = matches!(deactivate(content).await, Ok(Ok(())));
+    let target_executor = executor::select(content.manifest.deploy.executor);
+    let target_input = executor_input(content, step, step.action, step.from.clone());
+    let cleaned = deactivate(target_executor, &target_input, content)
+        .await
+        .is_ok();
     let mut restored = step.from.is_none();
 
     if let (Some(previous), Some(pin)) = (step.from.as_deref(), step.restore.as_ref())
         && let Ok(previous_content) = release_content(ctx, pin, env, &step.product).await
-        && matches!(activate(&previous_content).await, Ok(Ok(())))
     {
-        restored = set_env_deployed(ctx, env, &step.product, previous, Some(&step.to))
+        let previous_executor = executor::select(previous_content.manifest.deploy.executor);
+        let previous_input = executor_input(
+            &previous_content,
+            step,
+            Action::Rollback,
+            Some(step.to.clone()),
+        );
+        if activate(previous_executor, &previous_input, &previous_content)
             .await
-            .is_ok();
+            .is_ok()
+        {
+            restored = set_env_deployed(ctx, env, &step.product, previous, Some(&step.to))
+                .await
+                .is_ok();
+        }
     }
 
     // A graph write already failed, so this update is necessarily best effort.
@@ -412,6 +374,7 @@ async fn release_content(
         )?
     };
     Ok(ReleaseContent {
+        release_id: pin.release_id.clone(),
         manifest,
         artifact_digest: pin.artifact_digest.clone(),
         workdir,
@@ -814,11 +777,12 @@ async fn execute_step(ctx: &mut Ctx, env: &str, plan_oid: &str, step: &Step) -> 
             .as_deref()
             .is_some_and(|command| !command.is_empty())
     {
-        let cleanup_failure = match deactivate(outgoing).await {
-            Ok(Ok(())) => None,
-            Ok(Err(detail)) => Some(detail),
-            Err(error) => Some(format!("cleanup executor failed: {error}")),
-        };
+        let outgoing_executor = executor::select(outgoing.manifest.deploy.executor);
+        let outgoing_input =
+            executor_input(outgoing, step, Action::Rollback, Some(step.to.clone()));
+        let cleanup_failure = deactivate(outgoing_executor, &outgoing_input, outgoing)
+            .await
+            .err();
         if let Some(detail) = cleanup_failure {
             let detail = format!("rollback blocked: outgoing release cleanup failed: {detail}");
             set_env_unknown(ctx, env, &step.product, &detail).await?;
@@ -832,10 +796,9 @@ async fn execute_step(ctx: &mut Ctx, env: &str, plan_oid: &str, step: &Step) -> 
         }
     }
 
-    let activation = match activate(&content).await {
-        Ok(result) => result,
-        Err(error) => Err(format!("deployment executor failed: {error}")),
-    };
+    let target_executor = executor::select(content.manifest.deploy.executor);
+    let target_input = executor_input(&content, step, step.action, step.from.clone());
+    let activation = activate(target_executor, &target_input, &content).await;
     let outcome = match activation {
         Ok(()) => {
             let outcome = Outcome {
@@ -859,7 +822,9 @@ async fn execute_step(ctx: &mut Ctx, env: &str, plan_oid: &str, step: &Step) -> 
             // Install or health failed: try to restore the previous release.
             match &step.from {
                 Some(prev) => {
-                    let (cleaned, detail) = cleanup_failed_install(&content, detail).await?;
+                    let (cleaned, detail) =
+                        cleanup_failed_install(target_executor, &target_input, &content, detail)
+                            .await;
                     let Some(prev_content) = restore_content.as_ref() else {
                         let detail =
                             format!("{detail}; step {} has no pinned restore release", step.id);
@@ -872,7 +837,17 @@ async fn execute_step(ctx: &mut Ctx, env: &str, plan_oid: &str, step: &Step) -> 
                         record_deployment(ctx, env, plan_oid, &outcome).await?;
                         return Ok(outcome);
                     };
-                    let (restored, detail) = restore_previous(prev_content, prev, detail).await?;
+                    let previous_executor = executor::select(prev_content.manifest.deploy.executor);
+                    let previous_input =
+                        executor_input(prev_content, step, Action::Rollback, Some(step.to.clone()));
+                    let (restored, detail) = restore_previous(
+                        previous_executor,
+                        &previous_input,
+                        prev_content,
+                        prev,
+                        detail,
+                    )
+                    .await;
                     let recovered = cleaned && restored;
                     if !recovered {
                         set_env_unknown(ctx, env, &step.product, &detail).await?;
@@ -884,7 +859,9 @@ async fn execute_step(ctx: &mut Ctx, env: &str, plan_oid: &str, step: &Step) -> 
                     }
                 }
                 None => {
-                    let (cleaned, detail) = cleanup_failed_install(&content, detail).await?;
+                    let (cleaned, detail) =
+                        cleanup_failed_install(target_executor, &target_input, &content, detail)
+                            .await;
                     if !cleaned {
                         set_env_unknown(ctx, env, &step.product, &detail).await?;
                     }
@@ -964,6 +941,10 @@ async fn record_deployment(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    use crate::executor::{ExecutorFuture, ExecutorPhase, ExecutorResult};
     use crate::manifest::{DeploySection, GateSection, ProductSection};
     use crate::pb::chisei::CaseResult;
 
@@ -984,6 +965,7 @@ mod tests {
         uninstall: Option<&str>,
     ) -> ReleaseContent {
         ReleaseContent {
+            release_id: "release:api:1.0.0".into(),
             manifest: Manifest {
                 product: ProductSection {
                     name: "api".into(),
@@ -1004,6 +986,54 @@ mod tests {
             workdir,
             environment: "test".into(),
             product: "api".into(),
+        }
+    }
+
+    fn step() -> Step {
+        Step {
+            id: "plan:step:0".into(),
+            order: 0,
+            product: "api".into(),
+            action: Action::Install,
+            from: None,
+            to: "1.0.0".into(),
+            release_id: "release:api:1.0.0".into(),
+            release_digest: "manifest".into(),
+            artifact_digest: "artifact".into(),
+            workdir: ".".into(),
+            restore: None,
+        }
+    }
+
+    struct FakeExecutor {
+        results: Mutex<VecDeque<ExecutorResult>>,
+    }
+
+    impl FakeExecutor {
+        fn returning(results: impl IntoIterator<Item = ExecutorResult>) -> Self {
+            Self {
+                results: Mutex::new(results.into_iter().collect()),
+            }
+        }
+
+        fn next(&self) -> ExecutorResult {
+            self.results
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("fake executor result")
+        }
+    }
+
+    impl Executor for FakeExecutor {
+        fn activate<'a>(&'a self, _input: &'a ExecutorInput) -> ExecutorFuture<'a> {
+            let result = self.next();
+            Box::pin(async move { result })
+        }
+
+        fn deactivate<'a>(&'a self, _input: &'a ExecutorInput) -> ExecutorFuture<'a> {
+            let result = self.next();
+            Box::pin(async move { result })
         }
     }
 
@@ -1075,6 +1105,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fake_executor_exercises_activation_success_without_commands() {
+        let dir = test_dir("fake-success");
+        let release = content(dir.clone(), "touch command-ran", None, None);
+        let step = step();
+        let input = executor_input(&release, &step, step.action, step.from.clone());
+        let fake = FakeExecutor::returning([ExecutorResult::succeeded(ExecutorPhase::Install)]);
+
+        assert_eq!(activate(&fake, &input, &release).await, Ok(()));
+        assert!(!dir.join("command-ran").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn fake_executor_exercises_install_failure_without_commands() {
+        let dir = test_dir("fake-failure");
+        let release = content(dir.clone(), "touch command-ran", None, None);
+        let step = step();
+        let input = executor_input(&release, &step, step.action, step.from.clone());
+        let fake = FakeExecutor::returning([ExecutorResult::failed(
+            ExecutorPhase::Install,
+            "install rejected",
+        )]);
+
+        assert_eq!(
+            activate(&fake, &input, &release).await,
+            Err("install rejected".into())
+        );
+        assert!(!dir.join("command-ran").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn fake_executor_exercises_health_failure_without_commands() {
+        let dir = test_dir("fake-health");
+        let release = content(
+            dir.clone(),
+            "touch command-ran",
+            Some("touch health-ran"),
+            None,
+        );
+        let step = step();
+        let input = executor_input(&release, &step, step.action, step.from.clone());
+        let fake = FakeExecutor::returning([ExecutorResult::failed(
+            ExecutorPhase::Health,
+            "health rejected",
+        )]);
+
+        assert_eq!(
+            activate(&fake, &input, &release).await,
+            Err("health rejected".into())
+        );
+        assert!(!dir.join("command-ran").exists());
+        assert!(!dir.join("health-ran").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn fake_executor_exercises_restore_without_commands() {
+        let dir = test_dir("fake-restore");
+        let previous = content(dir.clone(), "touch command-ran", None, None);
+        let step = step();
+        let input = executor_input(&previous, &step, Action::Rollback, Some("2.0.0".into()));
+        let fake = FakeExecutor::returning([ExecutorResult::succeeded(ExecutorPhase::Install)]);
+
+        let (restored, detail) =
+            restore_previous(&fake, &input, &previous, "1.0.0", "upgrade failed".into()).await;
+
+        assert!(restored);
+        assert!(detail.contains("restored 1.0.0"));
+        assert!(!dir.join("command-ran").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
     async fn activation_runs_health_after_install() {
         let dir = test_dir("health");
         let release = content(
@@ -1083,7 +1187,15 @@ mod tests {
             Some("test -f healthy"),
             None,
         );
-        let failure = activate(&release).await.unwrap().unwrap_err();
+        let step = step();
+        let input = executor_input(&release, &step, step.action, step.from.clone());
+        let failure = activate(
+            executor::select(release.manifest.deploy.executor),
+            &input,
+            &release,
+        )
+        .await
+        .unwrap_err();
         assert!(dir.join("installed").exists());
         assert!(failure.contains("deployment command exited"));
         std::fs::remove_dir_all(dir).unwrap();
@@ -1098,7 +1210,15 @@ mod tests {
         release.artifact_digest =
             manifest::artifact_digest(&release.workdir, &release.manifest.deploy.inputs).unwrap();
 
-        let failure = activate(&release).await.unwrap().unwrap_err();
+        let step = step();
+        let input = executor_input(&release, &step, step.action, step.from.clone());
+        let failure = activate(
+            executor::select(release.manifest.deploy.executor),
+            &input,
+            &release,
+        )
+        .await
+        .unwrap_err();
 
         assert!(failure.contains("immutable deployment inputs changed"));
         std::fs::remove_dir_all(dir).unwrap();
@@ -1108,9 +1228,16 @@ mod tests {
     async fn restore_requires_the_previous_release_to_be_healthy() {
         let dir = test_dir("restore");
         let previous = content(dir.clone(), "touch restored", Some("false"), None);
-        let (restored, detail) = restore_previous(&previous, "1.0.0", "upgrade failed".into())
-            .await
-            .unwrap();
+        let step = step();
+        let input = executor_input(&previous, &step, Action::Rollback, Some("2.0.0".into()));
+        let (restored, detail) = restore_previous(
+            executor::select(previous.manifest.deploy.executor),
+            &input,
+            &previous,
+            "1.0.0",
+            "upgrade failed".into(),
+        )
+        .await;
         assert!(!restored);
         assert!(dir.join("restored").exists());
         assert!(detail.contains("health check of 1.0.0 also failed"));
@@ -1121,9 +1248,15 @@ mod tests {
     async fn failed_fresh_install_runs_cleanup() {
         let dir = test_dir("cleanup");
         let release = content(dir.clone(), "false", None, Some("touch cleaned"));
-        let (cleaned, detail) = cleanup_failed_install(&release, "install failed".into())
-            .await
-            .unwrap();
+        let step = step();
+        let input = executor_input(&release, &step, step.action, step.from.clone());
+        let (cleaned, detail) = cleanup_failed_install(
+            executor::select(release.manifest.deploy.executor),
+            &input,
+            &release,
+            "install failed".into(),
+        )
+        .await;
         assert!(cleaned);
         assert!(dir.join("cleaned").exists());
         assert!(detail.contains("cleaned up failed install"));
