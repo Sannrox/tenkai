@@ -13,6 +13,7 @@ const VENDORED_PROTOS: [(&str, &str); 2] = [
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     verify_vendored_protos()?;
+    println!("cargo:rerun-if-changed=proto/tenkai/agent/v1/agent.proto");
 
     unsafe {
         std::env::set_var("PROTOC", protoc_bin_vendored::protoc_bin_path()?);
@@ -21,8 +22,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_server(false)
         .build_client(true)
         .compile_protos(
-            &["proto/vendor/sekai.proto", "proto/vendor/chisei.proto"],
-            &["proto/vendor/"],
+            &[
+                "proto/vendor/sekai.proto",
+                "proto/vendor/chisei.proto",
+                "proto/tenkai/agent/v1/agent.proto",
+            ],
+            &["proto/vendor/", "proto/"],
         )?;
     Ok(())
 }
