@@ -674,13 +674,14 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
     let env_obj = environment(ctx, env).await?;
     let channels = ctx.linked(&env_obj.id, REL_SUBSCRIBES, "out").await?;
     let mut roots = BTreeMap::<String, ChannelRoot>::new();
+    let mut subscribed_products = BTreeSet::new();
     for channel in channels {
         let product = channel
             .properties
             .get("product")
             .cloned()
             .unwrap_or_default();
-        if roots.contains_key(&product) {
+        if !subscribed_products.insert(product.clone()) {
             bail!(
                 "environment {env} has multiple channel subscriptions for {product}; subscribe again after concurrent updates settle"
             );
