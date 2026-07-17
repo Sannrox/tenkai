@@ -786,7 +786,8 @@ fn retain_required_dependencies(
 }
 
 fn transition_execution_order(
-    dependencies: &BTreeMap<String, Vec<String>>,
+    current_dependencies: &BTreeMap<String, Vec<String>>,
+    final_dependencies: &BTreeMap<String, Vec<String>>,
     actions: &BTreeMap<String, Action>,
 ) -> Result<Vec<String>> {
     let mut outgoing = actions
@@ -799,7 +800,7 @@ fn transition_execution_order(
         .collect::<BTreeMap<_, _>>();
     for (dependent, dependent_action) in actions {
         let mut paths = BTreeMap::<String, u8>::new();
-        let mut pending = dependencies
+        let mut pending = final_dependencies
             .get(dependent)
             .into_iter()
             .flatten()
@@ -825,7 +826,7 @@ fn transition_execution_order(
                     .and_modify(|modes| *modes |= path_mode)
                     .or_insert(path_mode);
             }
-            for transitive in dependencies.get(&dependency).into_iter().flatten() {
+            for transitive in final_dependencies.get(&dependency).into_iter().flatten() {
                 pending.push((
                     transitive.clone(),
                     path_has_install
@@ -834,6 +835,28 @@ fn transition_execution_order(
                             .is_some_and(|action| action_requires_prerequisites(*action)),
                 ));
             }
+        }
+        let mut current_pending = current_dependencies
+            .get(dependent)
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut current_visited = BTreeSet::new();
+        while let Some(dependency) = current_pending.pop() {
+            if !current_visited.insert(dependency.clone()) {
+                continue;
+            }
+            if actions.contains_key(&dependency) && !paths.contains_key(&dependency) {
+                paths.insert(dependency.clone(), 0b01);
+            }
+            current_pending.extend(
+                current_dependencies
+                    .get(&dependency)
+                    .into_iter()
+                    .flatten()
+                    .cloned(),
+            );
         }
         for (dependency, path_modes) in paths {
             if path_modes == 0b11 {
@@ -961,6 +984,14 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
         })
         .collect::<BTreeMap<_, _>>();
 
+    let deployed = env_obj
+        .properties
+        .iter()
+        .filter_map(|(key, version)| {
+            key.strip_prefix("deployed.")
+                .map(|product| (product.to_string(), version.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut inputs = Vec::new();
     let mut steps = Vec::new();
     let mut resolved_steps = BTreeMap::<String, Step>::new();
@@ -1032,7 +1063,14 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
         .iter()
         .map(|(product, step)| (product.clone(), step.action))
         .collect::<BTreeMap<_, _>>();
-    for product in transition_execution_order(&selected_dependencies, &actions)? {
+    let current_dependencies = if actions.len() > 1 {
+        deployed_dependencies(ctx, &deployed).await?
+    } else {
+        BTreeMap::new()
+    };
+    for product in
+        transition_execution_order(&current_dependencies, &selected_dependencies, &actions)?
+    {
         let mut step = resolved_steps
             .remove(&product)
             .expect("transition order only contains changed products");
@@ -1041,14 +1079,6 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
         steps.push(step);
     }
 
-    let deployed = env_obj
-        .properties
-        .iter()
-        .filter_map(|(key, version)| {
-            key.strip_prefix("deployed.")
-                .map(|product| (product.to_string(), version.clone()))
-        })
-        .collect::<BTreeMap<_, _>>();
     let obsolete = obsolete_dependency_products(
         &deployed,
         &env_obj.properties,
@@ -1201,14 +1231,15 @@ pub async fn create_rollback(ctx: &mut Ctx, env: &str, product: &str) -> Result<
     );
     let rollback_root_values = rollback_roots.values().cloned().collect::<Vec<_>>();
     let candidates = catalog_candidates(ctx, &rollback_root_values).await?;
-    let preferred_versions = env_obj
+    let deployed = env_obj
         .properties
         .iter()
         .filter_map(|(key, version)| {
             key.strip_prefix("deployed.")
                 .map(|product| (product.to_string(), version.clone()))
         })
-        .collect();
+        .collect::<BTreeMap<_, _>>();
+    let preferred_versions = deployed.clone();
     let resolution = crate::planner::resolve(&Request {
         roots: rollback_roots
             .iter()
@@ -1296,7 +1327,14 @@ pub async fn create_rollback(ctx: &mut Ctx, env: &str, product: &str) -> Result<
         .iter()
         .map(|(product, step)| (product.clone(), step.action))
         .collect::<BTreeMap<_, _>>();
-    for selected_product in transition_execution_order(&selected_dependencies, &actions)? {
+    let current_dependencies = if actions.len() > 1 {
+        deployed_dependencies(ctx, &deployed).await?
+    } else {
+        BTreeMap::new()
+    };
+    for selected_product in
+        transition_execution_order(&current_dependencies, &selected_dependencies, &actions)?
+    {
         steps.push(
             resolved_steps
                 .remove(&selected_product)
@@ -1304,14 +1342,6 @@ pub async fn create_rollback(ctx: &mut Ctx, env: &str, product: &str) -> Result<
         );
     }
 
-    let deployed = env_obj
-        .properties
-        .iter()
-        .filter_map(|(key, version)| {
-            key.strip_prefix("deployed.")
-                .map(|product| (product.to_string(), version.clone()))
-        })
-        .collect::<BTreeMap<_, _>>();
     let obsolete = obsolete_dependency_products(
         &deployed,
         &env_obj.properties,
@@ -1554,7 +1584,7 @@ install = "true"
         ]);
 
         assert_eq!(
-            transition_execution_order(&dependencies, &actions).unwrap(),
+            transition_execution_order(&BTreeMap::new(), &dependencies, &actions).unwrap(),
             ["database", "app", "runtime"]
         );
     }
@@ -1571,7 +1601,27 @@ install = "true"
         ]);
 
         assert_eq!(
-            transition_execution_order(&dependencies, &actions).unwrap(),
+            transition_execution_order(&BTreeMap::new(), &dependencies, &actions).unwrap(),
+            ["app", "runtime"]
+        );
+    }
+
+    #[test]
+    fn channel_downgrades_preserve_dependencies_dropped_by_the_target() {
+        let current_dependencies = BTreeMap::from([
+            ("app".into(), vec!["runtime".into()]),
+            ("runtime".into(), Vec::new()),
+        ]);
+        let final_dependencies =
+            BTreeMap::from([("app".into(), Vec::new()), ("runtime".into(), Vec::new())]);
+        let actions = BTreeMap::from([
+            ("app".into(), Action::Downgrade),
+            ("runtime".into(), Action::Downgrade),
+        ]);
+
+        assert_eq!(
+            transition_execution_order(&current_dependencies, &final_dependencies, &actions,)
+                .unwrap(),
             ["app", "runtime"]
         );
     }
@@ -1590,7 +1640,7 @@ install = "true"
         ]);
 
         assert_eq!(
-            transition_execution_order(&dependencies, &actions).unwrap(),
+            transition_execution_order(&BTreeMap::new(), &dependencies, &actions).unwrap(),
             ["runtime", "sidecar", "app"]
         );
     }
@@ -1607,7 +1657,7 @@ install = "true"
         ]);
 
         assert_eq!(
-            transition_execution_order(&dependencies, &actions).unwrap(),
+            transition_execution_order(&BTreeMap::new(), &dependencies, &actions).unwrap(),
             ["runtime", "app"]
         );
     }
@@ -1625,7 +1675,7 @@ install = "true"
         ]);
 
         assert_eq!(
-            transition_execution_order(&dependencies, &actions).unwrap(),
+            transition_execution_order(&BTreeMap::new(), &dependencies, &actions).unwrap(),
             ["database", "app"]
         );
     }
@@ -1644,7 +1694,7 @@ install = "true"
         ]);
 
         assert_eq!(
-            transition_execution_order(&dependencies, &actions).unwrap(),
+            transition_execution_order(&BTreeMap::new(), &dependencies, &actions).unwrap(),
             ["new_dep", "app"]
         );
     }
@@ -1664,7 +1714,7 @@ install = "true"
         ]);
 
         assert!(
-            transition_execution_order(&dependencies, &actions)
+            transition_execution_order(&BTreeMap::new(), &dependencies, &actions)
                 .unwrap_err()
                 .to_string()
                 .contains("conflicting execution order between app and shared")
