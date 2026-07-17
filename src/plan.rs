@@ -599,6 +599,30 @@ struct ChannelRoot {
     version: String,
 }
 
+fn rollback_root_version(env: &Object, channel: &Object, product: &str) -> Result<String> {
+    if let Some(version) = env
+        .properties
+        .get(&format!("deployed.{product}"))
+        .filter(|version| !version.is_empty())
+    {
+        return Ok(version.clone());
+    }
+    let version = channel
+        .properties
+        .get("current_version")
+        .filter(|version| !version.is_empty())
+        .with_context(|| format!("subscribed product {product} has no channel head"))?;
+    let release = channel
+        .properties
+        .get("current_release")
+        .filter(|release| !release.is_empty())
+        .with_context(|| format!("subscribed product {product} has no channel release"))?;
+    if release != &release_id(product, version) {
+        bail!("subscribed product {product} has inconsistent channel release {release}");
+    }
+    Ok(version.clone())
+}
+
 fn candidate_from_release(release: &Object) -> Result<Candidate> {
     if release.kind != KIND_RELEASE {
         bail!(
@@ -1272,13 +1296,7 @@ pub async fn create_rollback(ctx: &mut Ctx, env: &str, product: &str) -> Result<
                 "cannot roll back {product} while {subscribed_product} has unknown deployment state; reconcile the external target first"
             );
         }
-        let Some(version) = env_obj
-            .properties
-            .get(&format!("deployed.{subscribed_product}"))
-            .cloned()
-        else {
-            continue;
-        };
+        let version = rollback_root_version(&env_obj, &channel, &subscribed_product)?;
         rollback_roots.insert(
             subscribed_product.clone(),
             ChannelRoot {
@@ -1559,6 +1577,38 @@ install = "true"
                 .unwrap_err()
                 .to_string()
                 .contains("does not match manifest identity")
+        );
+    }
+
+    #[test]
+    fn rollback_roots_missing_subscriptions_at_their_channel_head() {
+        let env = Object {
+            id: "env:prod".into(),
+            kind: KIND_ENVIRONMENT.into(),
+            name: "prod".into(),
+            namespace: NS.into(),
+            external_id: String::new(),
+            properties: HashMap::new(),
+            created: 1,
+            updated: 1,
+        };
+        let channel = Object {
+            id: "channel:runtime:stable".into(),
+            kind: KIND_CHANNEL.into(),
+            name: "runtime stable".into(),
+            namespace: NS.into(),
+            external_id: String::new(),
+            properties: HashMap::from([
+                ("current_version".into(), "2.0.0".into()),
+                ("current_release".into(), release_id("runtime", "2.0.0")),
+            ]),
+            created: 1,
+            updated: 1,
+        };
+
+        assert_eq!(
+            rollback_root_version(&env, &channel, "runtime").unwrap(),
+            "2.0.0"
         );
     }
 
