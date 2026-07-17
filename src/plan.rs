@@ -784,6 +784,25 @@ fn retain_required_dependencies(
     }
 }
 
+fn dependency_closure(
+    dependencies: &BTreeMap<String, Vec<String>>,
+    product: &str,
+) -> BTreeSet<String> {
+    let mut pending = dependencies
+        .get(product)
+        .into_iter()
+        .flatten()
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut closure = BTreeSet::new();
+    while let Some(dependency) = pending.pop() {
+        if closure.insert(dependency.clone()) {
+            pending.extend(dependencies.get(&dependency).into_iter().flatten().cloned());
+        }
+    }
+    closure
+}
+
 fn transition_execution_order(
     current_dependencies: &BTreeMap<String, Vec<String>>,
     final_dependencies: &BTreeMap<String, Vec<String>>,
@@ -798,6 +817,27 @@ fn transition_execution_order(
         .map(|product| (product.clone(), 0_usize))
         .collect::<BTreeMap<_, _>>();
     for (dependent, dependent_action) in actions {
+        let rollback_current_closure = (*dependent_action == Action::Rollback)
+            .then(|| dependency_closure(current_dependencies, dependent));
+        if let Some(current_closure) = &rollback_current_closure {
+            let final_closure = dependency_closure(final_dependencies, dependent);
+            if let Some(dependency) =
+                final_closure
+                    .intersection(current_closure)
+                    .find(|dependency| {
+                        actions.get(*dependency).is_some_and(|action| {
+                            matches!(
+                                action,
+                                Action::Upgrade | Action::Downgrade | Action::Rollback
+                            )
+                        })
+                    })
+            {
+                bail!(
+                    "rollback of {dependent} cannot atomically change retained dependency {dependency}"
+                );
+            }
+        }
         let mut paths = BTreeMap::<String, u8>::new();
         let mut pending = final_dependencies
             .get(dependent)
@@ -809,7 +849,10 @@ fn transition_execution_order(
                     action_requires_prerequisites(*dependent_action)
                         || actions
                             .get(dependency)
-                            .is_some_and(|action| action_requires_prerequisites(*action)),
+                            .is_some_and(|action| action_requires_prerequisites(*action))
+                        || rollback_current_closure
+                            .as_ref()
+                            .is_some_and(|current| !current.contains(dependency)),
                 )
             })
             .collect::<Vec<_>>();
@@ -831,7 +874,10 @@ fn transition_execution_order(
                     path_has_install
                         || actions
                             .get(transitive)
-                            .is_some_and(|action| action_requires_prerequisites(*action)),
+                            .is_some_and(|action| action_requires_prerequisites(*action))
+                        || rollback_current_closure
+                            .as_ref()
+                            .is_some_and(|current| !current.contains(transitive)),
                 ));
             }
         }
@@ -1596,7 +1642,7 @@ install = "true"
     }
 
     #[test]
-    fn rollback_installs_new_dependencies_then_changes_dependents_first() {
+    fn rollback_prepares_final_only_dependency_paths_before_activation() {
         let dependencies = BTreeMap::from([
             ("app".into(), vec!["runtime".into()]),
             ("runtime".into(), vec!["database".into()]),
@@ -1610,7 +1656,26 @@ install = "true"
 
         assert_eq!(
             transition_execution_order(&BTreeMap::new(), &dependencies, &actions).unwrap(),
-            ["database", "app", "runtime"]
+            ["database", "runtime", "app"]
+        );
+    }
+
+    #[test]
+    fn rollback_rejects_changes_to_retained_dependencies() {
+        let dependencies = BTreeMap::from([
+            ("app".into(), vec!["runtime".into()]),
+            ("runtime".into(), Vec::new()),
+        ]);
+        let actions = BTreeMap::from([
+            ("runtime".into(), Action::Downgrade),
+            ("app".into(), Action::Rollback),
+        ]);
+
+        assert!(
+            transition_execution_order(&dependencies, &dependencies, &actions)
+                .unwrap_err()
+                .to_string()
+                .contains("cannot atomically change retained dependency runtime")
         );
     }
 
@@ -1837,7 +1902,7 @@ install = "true"
     }
 
     #[test]
-    fn mixed_paths_between_changed_products_fail_closed() {
+    fn rollback_orders_shared_final_only_prerequisites_before_mixed_paths() {
         let dependencies = BTreeMap::from([
             ("app".into(), vec!["new_dep".into(), "unchanged_dep".into()]),
             ("new_dep".into(), vec!["shared".into()]),
@@ -1850,11 +1915,9 @@ install = "true"
             ("app".into(), Action::Rollback),
         ]);
 
-        assert!(
-            transition_execution_order(&BTreeMap::new(), &dependencies, &actions)
-                .unwrap_err()
-                .to_string()
-                .contains("conflicting execution order between app and shared")
+        assert_eq!(
+            transition_execution_order(&BTreeMap::new(), &dependencies, &actions).unwrap(),
+            ["shared", "new_dep", "app"]
         );
     }
 
