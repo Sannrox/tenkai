@@ -27,6 +27,9 @@ pub struct Request {
     pub roots: BTreeMap<String, String>,
     /// Environment pins/ranges, grouped by product. Every range must match.
     pub version_requirements: BTreeMap<String, Vec<String>>,
+    /// Soft preferences, used when the preferred release satisfies every hard
+    /// requirement. This lets rollback preserve compatible deployed versions.
+    pub preferred_versions: BTreeMap<String, String>,
     pub facts: BTreeMap<String, String>,
     pub candidates: Vec<Candidate>,
 }
@@ -116,6 +119,7 @@ pub fn resolve(request: &Request) -> Result<Resolution, ResolutionError> {
         &request.roots,
         &request.facts,
         &policies,
+        &request.preferred_versions,
         requirements,
         BTreeMap::new(),
     )?;
@@ -228,6 +232,7 @@ fn search(
     roots: &BTreeMap<String, String>,
     facts: &BTreeMap<String, String>,
     policies: &BTreeMap<String, Vec<Requirement>>,
+    preferred_versions: &BTreeMap<String, String>,
     requirements: BTreeMap<String, Vec<Requirement>>,
     selected: BTreeMap<String, ParsedCandidate>,
 ) -> Result<BTreeMap<String, ParsedCandidate>, ResolutionError> {
@@ -256,12 +261,23 @@ fn search(
         )));
     };
     let forced = roots.get(&product);
-    let eligible = candidates.iter().filter(|candidate| {
-        forced.is_none_or(|version| version == &candidate.version_text)
-            && required
-                .iter()
-                .all(|item| requirement_matches(item, candidate))
-            && facts_match(candidate, facts)
+    let mut eligible = candidates
+        .iter()
+        .filter(|candidate| {
+            forced.is_none_or(|version| version == &candidate.version_text)
+                && required
+                    .iter()
+                    .all(|item| requirement_matches(item, candidate))
+                && facts_match(candidate, facts)
+        })
+        .collect::<Vec<_>>();
+    let preferred = preferred_versions.get(&product);
+    eligible.sort_by(|left, right| {
+        let left_preferred = preferred == Some(&left.version_text);
+        let right_preferred = preferred == Some(&right.version_text);
+        right_preferred
+            .cmp(&left_preferred)
+            .then_with(|| right.version.cmp(&left.version))
     });
     let mut last_error = None;
     for candidate in eligible {
@@ -304,6 +320,7 @@ fn search(
             roots,
             facts,
             policies,
+            preferred_versions,
             next_requirements,
             next_selected,
         ) {
@@ -498,6 +515,22 @@ mod tests {
             ..Request::default()
         };
         assert_eq!(resolve(&request).unwrap().selected["runtime"], "1.4.0");
+    }
+
+    #[test]
+    fn prefers_a_compatible_deployed_release() {
+        let request = Request {
+            roots: BTreeMap::from([("app".into(), "1.0.0".into())]),
+            preferred_versions: BTreeMap::from([("runtime".into(), "1.2.0".into())]),
+            candidates: vec![
+                candidate("app", "1.0.0", &[("runtime", "^1")]),
+                candidate("runtime", "1.4.0", &[]),
+                candidate("runtime", "1.2.0", &[]),
+            ],
+            ..Request::default()
+        };
+
+        assert_eq!(resolve(&request).unwrap().selected["runtime"], "1.2.0");
     }
 
     #[test]

@@ -855,6 +855,26 @@ async fn validate_preconditions(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
         .with_context(|| format!("environment {} not found", plan.environment))?;
     validate_no_unknown_deployments(&plan.id, &environment)?;
     validate_desired_inputs(&plan.id, &plan.inputs, &environment)?;
+    for input in &plan.inputs {
+        release_content(
+            ctx,
+            &ReleasePin {
+                release_id: input.release_id.clone(),
+                digest: input.release_digest.clone(),
+                artifact_digest: input.artifact_digest.clone(),
+                workdir: input.workdir.clone(),
+            },
+            &plan.environment,
+            &input.product,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "plan {} pinned input for {} is no longer valid",
+                plan.id, input.product
+            )
+        })?;
+    }
     for step in &plan.steps {
         if environment
             .properties
@@ -2211,6 +2231,7 @@ mod tests {
             release_id: String::new(),
             release_digest: String::new(),
             artifact_digest: String::new(),
+            workdir: String::new(),
             deployed_version: Some("1.0.0".into()),
         };
         let mut environment = Object::default();

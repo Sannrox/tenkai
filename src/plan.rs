@@ -57,6 +57,7 @@ pub struct Step {
     pub release_id: String,
     pub release_digest: String,
     pub artifact_digest: String,
+    #[serde(default)]
     pub workdir: String,
     pub restore: Option<ReleasePin>,
 }
@@ -78,6 +79,7 @@ pub struct DesiredStateInput {
     pub release_id: String,
     pub release_digest: String,
     pub artifact_digest: String,
+    pub workdir: String,
     pub deployed_version: Option<String>,
 }
 
@@ -998,6 +1000,7 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
             release_id: target.release_id.clone(),
             release_digest: target.digest.clone(),
             artifact_digest: target.artifact_digest.clone(),
+            workdir: target.workdir.clone(),
             deployed_version: deployed.clone(),
         });
         let (action, from, restore) = match deployed {
@@ -1185,12 +1188,21 @@ pub async fn create_rollback(ctx: &mut Ctx, env: &str, product: &str) -> Result<
     );
     let rollback_root_values = rollback_roots.values().cloned().collect::<Vec<_>>();
     let candidates = catalog_candidates(ctx, &rollback_root_values).await?;
+    let preferred_versions = env_obj
+        .properties
+        .iter()
+        .filter_map(|(key, version)| {
+            key.strip_prefix("deployed.")
+                .map(|product| (product.to_string(), version.clone()))
+        })
+        .collect();
     let resolution = crate::planner::resolve(&Request {
         roots: rollback_roots
             .iter()
             .map(|(root_product, root)| (root_product.clone(), root.version.clone()))
             .collect(),
         candidates: candidates.clone(),
+        preferred_versions,
         ..Request::default()
     })
     .with_context(|| format!("cannot resolve rollback dependencies for {product} in {env}"))?;
@@ -1234,6 +1246,7 @@ pub async fn create_rollback(ctx: &mut Ctx, env: &str, product: &str) -> Result<
             release_id: target.release_id.clone(),
             release_digest: target.digest.clone(),
             artifact_digest: target.artifact_digest.clone(),
+            workdir: target.workdir.clone(),
             deployed_version: deployed.clone(),
         });
         let (action, from, restore) = match deployed {
@@ -1643,6 +1656,7 @@ install = "true"
                 release_id: "tenkai:release:api@2.0.0".into(),
                 release_digest: "target-digest".into(),
                 artifact_digest: "target-artifact-digest".into(),
+                workdir: "/srv/api".into(),
                 deployed_version: Some("1.0.0".into()),
             }],
             steps: vec![Step {
