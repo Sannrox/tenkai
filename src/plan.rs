@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::client::Ctx;
+use crate::constraint::{self, ConstraintEvaluation};
 use crate::ontology::*;
 use crate::pb::sekai::Object;
 use crate::planner::{Candidate, Dependency, Request};
@@ -44,7 +45,7 @@ fn classify_change(current: &str, desired: &str) -> Action {
     }
 }
 
-pub const PLAN_FORMAT_VERSION: u32 = 5;
+pub const PLAN_FORMAT_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Step {
@@ -113,7 +114,11 @@ pub struct Plan {
     pub environment: String,
     pub created_at: i64,
     pub inputs: Vec<DesiredStateInput>,
+    #[serde(default)]
+    pub subscription_ids: Vec<String>,
     pub steps: Vec<Step>,
+    #[serde(default)]
+    pub constraint_evaluations: Vec<ConstraintEvaluation>,
     pub state: PlanState,
     pub gates_skipped: Option<bool>,
     pub status_detail: String,
@@ -127,18 +132,26 @@ struct ExecutableContent<'a> {
     environment: &'a str,
     created_at: i64,
     inputs: &'a [DesiredStateInput],
+    subscription_ids: &'a [String],
     steps: &'a [Step],
+    constraint_evaluations: &'a [ConstraintEvaluation],
 }
 
 fn content_address(
+    format_version: u32,
     environment: &str,
     created_at: i64,
     inputs: &[DesiredStateInput],
+    subscription_ids: &[String],
     steps: &[Step],
+    constraint_evaluations: &[ConstraintEvaluation],
 ) -> Result<String> {
     let mut normalized_steps = steps.to_vec();
     for step in &mut normalized_steps {
         step.id.clear();
+    }
+    if format_version != PLAN_FORMAT_VERSION {
+        bail!("unsupported plan format version {format_version}");
     }
     let bytes = serde_json::to_vec(&(
         PLAN_FORMAT_VERSION,
@@ -146,22 +159,28 @@ fn content_address(
         created_at,
         inputs,
         normalized_steps,
+        constraint_evaluations,
+        subscription_ids,
     ))?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
 impl Plan {
     fn executable_digest(&self) -> Result<String> {
-        let content = ExecutableContent {
+        if self.format_version != PLAN_FORMAT_VERSION {
+            bail!("unsupported plan format version {}", self.format_version);
+        }
+        let bytes = serde_json::to_vec(&ExecutableContent {
             format_version: self.format_version,
             id: &self.id,
             content_id: &self.content_id,
             environment: &self.environment,
             created_at: self.created_at,
             inputs: &self.inputs,
+            subscription_ids: &self.subscription_ids,
             steps: &self.steps,
-        };
-        let bytes = serde_json::to_vec(&content)?;
+            constraint_evaluations: &self.constraint_evaluations,
+        })?;
         Ok(format!("{:x}", Sha256::digest(bytes)))
     }
 
@@ -227,10 +246,13 @@ impl Plan {
             );
         }
         let expected_content_id = content_address(
+            plan.format_version,
             &plan.environment,
             plan.created_at,
             &plan.inputs,
+            &plan.subscription_ids,
             &plan.steps,
+            &plan.constraint_evaluations,
         )?;
         if plan.content_id != expected_content_id
             || plan.id != plan_id(&plan.environment, plan.created_at, &expected_content_id)
@@ -1410,26 +1432,104 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
 
 /// Compute the steps that converge the environment on its subscribed channels.
 pub async fn compute(ctx: &mut Ctx, env: &str) -> Result<Vec<Step>> {
-    Ok(compute_snapshot(ctx, env).await?.1)
+    validate_identifier("environment", env)?;
+    let owner = format!("plan-preview:{}", crate::now_millis());
+    let lease = crate::apply::claim_environment(ctx, env, &owner).await?;
+    let result = async {
+        let evaluations = constraint::evaluate_environment(ctx, env).await?;
+        if constraint::denied(&evaluations) {
+            bail!(
+                "plan blocked by constraints: {}",
+                constraint::denial_detail(&evaluations)
+            );
+        }
+        Ok(compute_snapshot(ctx, env).await?.1)
+    }
+    .await;
+    let unlock = crate::apply::release_environment(ctx, &lease).await;
+    match (result, unlock) {
+        (Ok(steps), Ok(())) => Ok(steps),
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(unlock)) => Err(error.context(format!(
+            "releasing environment planning preview lease also failed: {unlock}"
+        ))),
+        (Ok(_), Err(error)) => Err(error.context("releasing environment planning preview lease")),
+    }
+}
+
+async fn subscription_ids(ctx: &mut Ctx, env: &str) -> Result<Vec<String>> {
+    let mut ids = ctx
+        .links(&env_id(env), REL_SUBSCRIBES)
+        .await?
+        .into_iter()
+        .map(|link| link.to_id)
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
 }
 
 /// Compute and persist an immutable executable plan before any step is run.
 pub async fn create(ctx: &mut Ctx, env: &str) -> Result<Plan> {
-    let (inputs, mut steps) = compute_snapshot(ctx, env).await?;
-    create_with_content(ctx, env, inputs, &mut steps).await
+    validate_identifier("environment", env)?;
+    let owner = format!("plan-create:{}", crate::now_millis());
+    let lease = crate::apply::claim_environment(ctx, env, &owner).await?;
+    let result = async {
+        let subscription_ids = subscription_ids(ctx, env).await?;
+        let evaluations = constraint::evaluate_environment_with_channels(
+            ctx,
+            env,
+            subscription_ids.iter().cloned(),
+        )
+        .await?;
+        if constraint::denied(&evaluations) {
+            let mut steps = Vec::new();
+            return create_with_content(
+                ctx,
+                env,
+                Vec::new(),
+                subscription_ids,
+                &mut steps,
+                evaluations,
+            )
+            .await;
+        }
+        let (inputs, mut steps) = compute_snapshot(ctx, env).await?;
+        create_with_content(ctx, env, inputs, subscription_ids, &mut steps, evaluations).await
+    }
+    .await;
+    let unlock = crate::apply::release_environment(ctx, &lease).await;
+    match (result, unlock) {
+        (Ok(plan), Ok(())) => Ok(plan),
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(unlock)) => Err(error.context(format!(
+            "releasing environment planning lease also failed: {unlock}"
+        ))),
+        (Ok(_), Err(error)) => Err(error.context("releasing environment planning lease")),
+    }
 }
 
 async fn create_with_content(
     ctx: &mut Ctx,
     env: &str,
     inputs: Vec<DesiredStateInput>,
+    subscription_ids: Vec<String>,
     steps: &mut [Step],
+    constraint_evaluations: Vec<ConstraintEvaluation>,
 ) -> Result<Plan> {
     let created_at = crate::now_millis();
     for (order, step) in steps.iter_mut().enumerate() {
         step.order = order as u32;
     }
-    let content_id = content_address(env, created_at, &inputs, steps)?;
+    let content_id = content_address(
+        PLAN_FORMAT_VERSION,
+        env,
+        created_at,
+        &inputs,
+        &subscription_ids,
+        steps,
+        &constraint_evaluations,
+    )?;
     let id = plan_id(env, created_at, &content_id);
     for (order, step) in steps.iter_mut().enumerate() {
         step.id = format!("{id}:step:{order}");
@@ -1441,10 +1541,16 @@ async fn create_with_content(
         environment: env.to_string(),
         created_at,
         inputs,
+        subscription_ids,
         steps: steps.to_vec(),
-        state: PlanState::Computed,
+        state: if constraint::denied(&constraint_evaluations) {
+            PlanState::Blocked
+        } else {
+            PlanState::Computed
+        },
+        status_detail: constraint::denial_detail(&constraint_evaluations),
+        constraint_evaluations,
         gates_skipped: None,
-        status_detail: String::new(),
     };
     store(ctx, &plan).await?;
     Ok(plan)
@@ -1452,7 +1558,31 @@ async fn create_with_content(
 
 /// Resolve and persist a rollback with the target release's dependency graph.
 pub async fn create_rollback(ctx: &mut Ctx, env: &str, product: &str) -> Result<Plan> {
+    validate_identifier("environment", env)?;
     validate_identifier("product", product)?;
+    let owner = format!("rollback-plan-create:{}", crate::now_millis());
+    let lease = crate::apply::claim_environment(ctx, env, &owner).await?;
+    let result = create_rollback_locked(ctx, env, product).await;
+    let unlock = crate::apply::release_environment(ctx, &lease).await;
+    match (result, unlock) {
+        (Ok(plan), Ok(())) => Ok(plan),
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(unlock)) => Err(error.context(format!(
+            "releasing environment rollback planning lease also failed: {unlock}"
+        ))),
+        (Ok(_), Err(error)) => Err(error.context("releasing environment rollback planning lease")),
+    }
+}
+
+async fn create_rollback_locked(ctx: &mut Ctx, env: &str, product: &str) -> Result<Plan> {
+    let subscription_ids = subscription_ids(ctx, env).await?;
+    let evaluations =
+        constraint::evaluate_environment_with_channels(ctx, env, subscription_ids.iter().cloned())
+            .await?;
+    if constraint::denied(&evaluations) {
+        return create_with_content(ctx, env, Vec::new(), subscription_ids, &mut [], evaluations)
+            .await;
+    }
     let env_obj = environment(ctx, env).await?;
     if env_obj
         .properties
@@ -1514,7 +1644,15 @@ pub async fn create_rollback(ctx: &mut Ctx, env: &str, product: &str) -> Result<
         let (input, step) =
             legacy_rollback_content(product, prev, current, dependency_managed, target, restore);
         let mut steps = vec![step];
-        return create_with_content(ctx, env, vec![input], &mut steps).await;
+        return create_with_content(
+            ctx,
+            env,
+            vec![input],
+            subscription_ids,
+            &mut steps,
+            evaluations,
+        )
+        .await;
     }
     let mut rollback_roots = BTreeMap::<String, ChannelRoot>::new();
     for channel in subscription_channels {
@@ -1746,7 +1884,7 @@ pub async fn create_rollback(ctx: &mut Ctx, env: &str, product: &str) -> Result<
                 .expect("rollback order only contains changed products"),
         );
     }
-    create_with_content(ctx, env, inputs, &mut steps).await
+    create_with_content(ctx, env, inputs, subscription_ids, &mut steps, evaluations).await
 }
 
 pub struct StatusRow {
@@ -2464,6 +2602,7 @@ version = "<2"
                 workdir: "/srv/api".into(),
                 deployed_version: Some("1.0.0".into()),
             }],
+            subscription_ids: vec!["tenkai:channel:api/stable".into()],
             steps: vec![Step {
                 id: String::new(),
                 order: 0,
@@ -2482,15 +2621,19 @@ version = "<2"
                     workdir: "/srv/api".into(),
                 }),
             }],
+            constraint_evaluations: Vec::new(),
             state: PlanState::Computed,
             gates_skipped: None,
             status_detail: String::new(),
         };
         plan.content_id = content_address(
+            plan.format_version,
             &plan.environment,
             plan.created_at,
             &plan.inputs,
+            &plan.subscription_ids,
             &plan.steps,
+            &plan.constraint_evaluations,
         )
         .unwrap();
         plan.id = plan_id(&plan.environment, plan.created_at, &plan.content_id);
@@ -2525,6 +2668,17 @@ version = "<2"
         assert_eq!(
             plan.executable_digest().unwrap(),
             running.executable_digest().unwrap()
+        );
+    }
+
+    #[test]
+    fn subscription_snapshot_is_immutable_executable_content() {
+        let plan = example_plan();
+        let mut changed = plan.clone();
+        changed.subscription_ids = vec!["tenkai:channel:api/canary".into()];
+        assert_ne!(
+            plan.executable_digest().unwrap(),
+            changed.executable_digest().unwrap()
         );
     }
 

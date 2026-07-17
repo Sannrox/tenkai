@@ -1,11 +1,12 @@
 //! tenkaictl — local delivery control plane CLI, backed by sekai-chisei.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 
-use tenkai::{apply, catalog, client, ontology, plan};
+use tenkai::{apply, catalog, client, constraint, ontology, plan};
 
 #[derive(Parser)]
 #[command(
@@ -30,6 +31,11 @@ enum Command {
     Env {
         #[command(subcommand)]
         command: EnvCommand,
+    },
+    /// Manage environment and subscription constraints.
+    Constraint {
+        #[command(subcommand)]
+        command: ConstraintCommand,
     },
     /// Show the steps that would converge the environment (dry run).
     Plan {
@@ -75,6 +81,94 @@ enum EnvCommand {
         #[arg(long)]
         deployed: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum ConstraintCommand {
+    /// Create a constraint for an environment or one of its subscriptions.
+    Add {
+        env: String,
+        identity: String,
+        #[arg(long)]
+        kind: String,
+        #[arg(long)]
+        reason: String,
+        /// Evaluator parameter in key=value form; repeat for multiple parameters.
+        #[arg(long = "param")]
+        parameters: Vec<String>,
+        /// Target one subscription in product=channel form instead of the whole environment.
+        #[arg(long)]
+        subscription: Option<String>,
+        /// Create the constraint disabled.
+        #[arg(long)]
+        disabled: bool,
+    },
+    /// List every constraint for an environment.
+    List { env: String },
+    /// Enable a constraint.
+    Enable { env: String, identity: String },
+    /// Disable a constraint.
+    Disable { env: String, identity: String },
+}
+
+fn parameters(values: &[String]) -> Result<BTreeMap<String, String>> {
+    let mut parameters = BTreeMap::new();
+    for value in values {
+        let Some((key, value)) = value.split_once('=') else {
+            bail!("expected constraint parameter <key>=<value>, got {value:?}");
+        };
+        if parameters.insert(key.into(), value.into()).is_some() {
+            bail!("constraint parameter {key:?} was provided more than once");
+        }
+    }
+    Ok(parameters)
+}
+
+fn constraint_target(
+    env: &str,
+    subscription: Option<&str>,
+) -> Result<constraint::ConstraintTarget> {
+    let Some(subscription) = subscription else {
+        return Ok(constraint::ConstraintTarget::Environment {
+            environment: env.into(),
+        });
+    };
+    let Some((product, channel)) = subscription.split_once('=') else {
+        bail!("expected subscription <product>=<channel>, got {subscription:?}");
+    };
+    ontology::validate_identifier("product", product)?;
+    ontology::validate_identifier("channel", channel)?;
+    Ok(constraint::ConstraintTarget::Subscription {
+        environment: env.into(),
+        channel_id: ontology::channel_id(product, channel),
+    })
+}
+
+fn print_constraints(constraints: &[constraint::Constraint]) {
+    for constraint in constraints {
+        let target = match &constraint.target {
+            constraint::ConstraintTarget::Environment { .. } => "environment".into(),
+            constraint::ConstraintTarget::Subscription { channel_id, .. } => {
+                format!("subscription:{channel_id}")
+            }
+        };
+        let state = if constraint.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        println!(
+            "{:<24} {:<20} {:<8} {:<40} {}",
+            constraint.identity, constraint.kind, state, target, constraint.reason
+        );
+        if !constraint.parameters.is_empty() {
+            println!(
+                "  parameters: {}",
+                serde_json::to_string(&constraint.parameters)
+                    .unwrap_or_else(|_| "<invalid>".into())
+            );
+        }
+    }
 }
 
 fn print_steps(steps: &[plan::Step]) {
@@ -142,10 +236,60 @@ async fn main() -> Result<()> {
                 );
             }
         },
+        Command::Constraint { command } => match command {
+            ConstraintCommand::Add {
+                env,
+                identity,
+                kind,
+                reason,
+                parameters: raw_parameters,
+                subscription,
+                disabled,
+            } => {
+                let target = constraint_target(&env, subscription.as_deref())?;
+                let created = constraint::create(
+                    &mut ctx,
+                    &identity,
+                    &kind,
+                    parameters(&raw_parameters)?,
+                    !disabled,
+                    &reason,
+                    target,
+                )
+                .await?;
+                println!(
+                    "constraint {} created ({})",
+                    created.identity,
+                    if created.enabled {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    }
+                );
+            }
+            ConstraintCommand::List { env } => {
+                let constraints = constraint::list(&mut ctx, &env).await?;
+                if constraints.is_empty() {
+                    println!("{env} has no constraints");
+                } else {
+                    print_constraints(&constraints);
+                }
+            }
+            ConstraintCommand::Enable { env, identity } => {
+                constraint::set_enabled(&mut ctx, &env, &identity, true).await?;
+                println!("constraint {identity} enabled in {env}");
+            }
+            ConstraintCommand::Disable { env, identity } => {
+                constraint::set_enabled(&mut ctx, &env, &identity, false).await?;
+                println!("constraint {identity} disabled in {env}");
+            }
+        },
         Command::Plan { env } => {
             let stored = plan::create(&mut ctx, &env).await?;
             println!("plan id: {}", stored.id);
-            if stored.steps.is_empty() {
+            if stored.state == plan::PlanState::Blocked {
+                bail!("plan blocked by constraints: {}", stored.status_detail);
+            } else if stored.steps.is_empty() {
                 println!("{env} is up to date");
             } else {
                 println!("plan for {env}:");
@@ -225,4 +369,55 @@ async fn run_plan(ctx: &mut client::Ctx, plan_id: &str, skip_gates: bool) -> Res
         std::process::exit(1);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_environment_constraint_creation() {
+        let cli = Cli::try_parse_from([
+            "tenkaictl",
+            "constraint",
+            "add",
+            "prod",
+            "release-freeze",
+            "--kind",
+            "always.deny",
+            "--reason",
+            "release freeze",
+            "--disabled",
+        ])
+        .unwrap();
+        let Command::Constraint {
+            command:
+                ConstraintCommand::Add {
+                    env,
+                    identity,
+                    kind,
+                    disabled,
+                    ..
+                },
+        } = cli.command
+        else {
+            panic!("expected constraint add command");
+        };
+        assert_eq!(env, "prod");
+        assert_eq!(identity, "release-freeze");
+        assert_eq!(kind, "always.deny");
+        assert!(disabled);
+    }
+
+    #[test]
+    fn parses_subscription_target_and_rejects_duplicate_parameters() {
+        assert_eq!(
+            constraint_target("prod", Some("api=stable")).unwrap(),
+            constraint::ConstraintTarget::Subscription {
+                environment: "prod".into(),
+                channel_id: ontology::channel_id("api", "stable"),
+            }
+        );
+        assert!(parameters(&["key=one".into(), "key=two".into()]).is_err());
+    }
 }

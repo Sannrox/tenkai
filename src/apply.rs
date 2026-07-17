@@ -13,6 +13,7 @@ use prost::Message as _;
 use sha2::{Digest as _, Sha256};
 
 use crate::client::Ctx;
+use crate::constraint;
 use crate::executor::{self, CancelReason, Cancellation, Executor, ExecutorInput};
 use crate::manifest::{self, Manifest};
 use crate::ontology::*;
@@ -1060,6 +1061,13 @@ pub async fn execute(ctx: &mut Ctx, plan_id: &str, skip_gates: bool) -> Result<V
     let cancellation = &signal_monitor.targets.forward;
     let recovery = &signal_monitor.targets.recovery;
     let stored_plan = plan::load(ctx, plan_id).await?;
+    if stored_plan.format_version != plan::PLAN_FORMAT_VERSION {
+        bail!(
+            "plan {} uses legacy format version {}; create a new plan before execution",
+            stored_plan.id,
+            stored_plan.format_version
+        );
+    }
     if !matches!(stored_plan.state, PlanState::Computed | PlanState::Blocked) {
         bail!(
             "plan {} is {}, only computed or blocked plans can be applied",
@@ -1111,6 +1119,56 @@ async fn execute_locked(
     mutation_started: &mut bool,
 ) -> Result<Vec<Outcome>> {
     ensure_not_cancelled(cancellation)?;
+    let plan_channel_ids = stored_plan.subscription_ids.iter().cloned().chain(
+        stored_plan
+            .inputs
+            .iter()
+            .map(|input| input.channel_id.clone()),
+    );
+    let current_evaluations = constraint::evaluate_environment_with_channels(
+        ctx,
+        &stored_plan.environment,
+        plan_channel_ids,
+    )
+    .await?;
+    constraint::record_execution_evaluation(
+        ctx,
+        &stored_plan.id,
+        &stored_plan.environment,
+        current_evaluations.clone(),
+    )
+    .await
+    .context("persisting execution-time constraint evidence")?;
+    if constraint::denied(&stored_plan.constraint_evaluations) {
+        let detail = format!(
+            "plan constraint evaluation denied execution: {}",
+            constraint::denial_detail(&stored_plan.constraint_evaluations)
+        );
+        set_plan_state_confirmed(
+            ctx,
+            &mut stored_plan,
+            PlanState::Blocked,
+            skip_gates,
+            &detail,
+        )
+        .await?;
+        bail!(detail);
+    }
+    if constraint::denied(&current_evaluations) {
+        let detail = format!(
+            "current constraint evaluation denied execution: {}",
+            constraint::denial_detail(&current_evaluations)
+        );
+        set_plan_state_confirmed(
+            ctx,
+            &mut stored_plan,
+            PlanState::Blocked,
+            skip_gates,
+            &detail,
+        )
+        .await?;
+        bail!(detail);
+    }
     validate_preconditions(ctx, &stored_plan).await?;
     let plan_id = stored_plan.id.clone();
     let env = stored_plan.environment.clone();

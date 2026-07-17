@@ -14,6 +14,8 @@ pub const KIND_PRODUCT: &str = "tenkai.product";
 pub const KIND_RELEASE: &str = "tenkai.release";
 pub const KIND_CHANNEL: &str = "tenkai.channel";
 pub const KIND_ENVIRONMENT: &str = "tenkai.environment";
+pub const KIND_CONSTRAINT: &str = "tenkai.constraint";
+pub const KIND_CONSTRAINT_EVALUATION: &str = "tenkai.constraint_evaluation";
 pub const KIND_PLAN: &str = "tenkai.plan";
 pub const KIND_ENVIRONMENT_EXECUTION: &str = "tenkai.environment_execution";
 pub const KIND_DEPLOYMENT: &str = "tenkai.deployment";
@@ -21,6 +23,9 @@ pub const KIND_DEPLOYMENT: &str = "tenkai.deployment";
 pub const REL_RELEASE_OF: &str = "release_of";
 pub const REL_PROMOTES: &str = "promotes";
 pub const REL_SUBSCRIBES: &str = "subscribes";
+pub const REL_CONSTRAINS_ENVIRONMENT: &str = "constrains_environment";
+pub const REL_CONSTRAINS_SUBSCRIPTION: &str = "constrains_subscription";
+pub const REL_HAS_CONSTRAINT_EVALUATION: &str = "has_constraint_evaluation";
 pub const REL_DEPLOYED_RELEASE: &str = "deployed_release";
 pub const REL_IN_ENVIRONMENT: &str = "in_environment";
 pub const REL_PART_OF_PLAN: &str = "part_of_plan";
@@ -50,6 +55,9 @@ pub fn channel_id(product: &str, channel: &str) -> String {
 }
 pub fn env_id(name: &str) -> String {
     format!("tenkai:env:{name}")
+}
+pub fn constraint_id(environment: &str, identity: &str) -> String {
+    format!("tenkai:constraint:{environment}:{identity}")
 }
 pub fn plan_id(env: &str, ts: i64, content_id: &str) -> String {
     format!("tenkai:plan:{env}:{ts}:{content_id}")
@@ -119,7 +127,59 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
         object_type(
             KIND_ENVIRONMENT,
             "A managed deployment target; deployed.* properties hold current state",
-            vec![prop("description", false, "What this environment is")],
+            vec![
+                prop("description", false, "What this environment is"),
+                prop(
+                    "constraints",
+                    false,
+                    "Canonical JSON map of environment-scoped constraints",
+                ),
+            ],
+        ),
+        object_type(
+            KIND_CONSTRAINT,
+            "An auditable rule bounding planning for an environment or subscription",
+            vec![
+                prop(
+                    "identity",
+                    true,
+                    "Stable constraint identity within the environment",
+                ),
+                prop("constraint_kind", true, "Evaluator kind"),
+                prop(
+                    "parameters",
+                    true,
+                    "Canonical JSON object of evaluator parameters",
+                ),
+                prop("enabled", true, "Whether the constraint is enforced"),
+                prop(
+                    "reason",
+                    true,
+                    "Operator-provided reason for the constraint",
+                ),
+                prop("target_kind", true, "environment|subscription"),
+                prop("environment", true, "Target environment name"),
+                prop(
+                    "channel_id",
+                    false,
+                    "Target channel for a subscription constraint",
+                ),
+            ],
+        ),
+        object_type(
+            KIND_CONSTRAINT_EVALUATION,
+            "An immutable execution-time constraint evaluation for one plan attempt",
+            vec![
+                prop("plan_id", true, "Plan evaluated before execution"),
+                prop("environment", true, "Environment evaluated"),
+                prop("evaluated_at", true, "Evaluation time in Unix milliseconds"),
+                prop(
+                    "sequence",
+                    true,
+                    "Monotonic attempt sequence within the plan",
+                ),
+                prop("evaluations", true, "Structured JSON evaluation evidence"),
+            ],
         ),
         object_type(
             KIND_PLAN,
