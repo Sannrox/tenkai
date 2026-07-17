@@ -44,7 +44,7 @@ fn classify_change(current: &str, desired: &str) -> Action {
     }
 }
 
-pub const PLAN_FORMAT_VERSION: u32 = 2;
+pub const PLAN_FORMAT_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Step {
@@ -78,7 +78,6 @@ pub struct DesiredStateInput {
     pub release_id: String,
     pub release_digest: String,
     pub artifact_digest: String,
-    #[serde(default)]
     pub workdir: String,
     pub deployed_version: Option<String>,
 }
@@ -1916,6 +1915,18 @@ install = "true"
         let plan = example_plan();
         let object = plan.to_object().unwrap();
         assert_eq!(Plan::from_object(&object).unwrap(), plan);
+    }
+
+    #[test]
+    fn legacy_plan_formats_require_recomputation() {
+        let plan = example_plan();
+        let mut object = plan.to_object().unwrap();
+        object
+            .properties
+            .insert("format_version".into(), "2".into());
+
+        let error = Plan::from_object(&object).unwrap_err().to_string();
+        assert!(error.contains("legacy format version 2"));
     }
 
     #[test]
