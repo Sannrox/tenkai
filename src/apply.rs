@@ -1569,7 +1569,9 @@ async fn execute_step(
                 }
             }
             Err(detail) => {
-                set_env_unknown(ctx, env, &step.product, &detail).await?;
+                if step_mutation_started {
+                    set_env_unknown(ctx, env, &step.product, &detail).await?;
+                }
                 Outcome {
                     step: step.clone(),
                     status: "failed".into(),
