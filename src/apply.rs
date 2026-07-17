@@ -874,8 +874,14 @@ async fn validate_preconditions(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
         .with_context(|| format!("environment {} not found", plan.environment))?;
     validate_no_unknown_deployments(&plan.id, &environment)?;
     validate_desired_inputs(&plan.id, &plan.inputs, &environment)?;
-    let has_removals = plan.steps.iter().any(|step| step.action == Action::Remove);
-    let subscribed_products = if has_removals {
+    let needs_ownership_preconditions = plan.steps.iter().any(|step| {
+        step.action == Action::Remove
+            || plan
+                .inputs
+                .iter()
+                .any(|input| input.product == step.product && input.dependency_managed)
+    });
+    let subscribed_products = if needs_ownership_preconditions {
         ctx.linked(&environment.id, REL_SUBSCRIBES, "out")
             .await?
             .into_iter()
@@ -938,7 +944,11 @@ async fn validate_preconditions(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
         })?;
     }
     for step in &plan.steps {
-        validate_remove_preconditions(&plan.id, step, &environment, &subscribed_products)?;
+        let input = plan
+            .inputs
+            .iter()
+            .find(|input| input.product == step.product);
+        validate_dependency_ownership(&plan.id, step, input, &environment, &subscribed_products)?;
         if environment
             .properties
             .get(&format!("deployment_health.{}", step.product))
@@ -966,19 +976,25 @@ async fn validate_preconditions(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
     Ok(())
 }
 
-fn validate_remove_preconditions(
+fn validate_dependency_ownership(
     plan_id: &str,
     step: &Step,
+    input: Option<&DesiredStateInput>,
     environment: &Object,
     subscribed_products: &BTreeSet<String>,
 ) -> Result<()> {
-    if step.action != Action::Remove {
+    let dependency_managed =
+        step.action == Action::Remove || input.is_some_and(|input| input.dependency_managed);
+    if !dependency_managed {
         return Ok(());
     }
-    if environment
-        .properties
-        .get(&format!("dependency_managed.{}", step.product))
-        .is_none_or(|managed| managed != "true")
+    let existing_dependency = step.action == Action::Remove
+        || input.is_some_and(|input| input.deployed_version.is_some());
+    if existing_dependency
+        && environment
+            .properties
+            .get(&format!("dependency_managed.{}", step.product))
+            .is_none_or(|managed| managed != "true")
     {
         bail!(
             "plan {plan_id} is stale for {}: product is no longer dependency-managed",
@@ -1102,7 +1118,7 @@ async fn execute_locked(
     let dependency_installs = stored_plan
         .inputs
         .iter()
-        .filter(|input| input.channel_id.is_empty() && input.deployed_version.is_none())
+        .filter(|input| input.dependency_managed && input.deployed_version.is_none())
         .map(|input| input.product.clone())
         .collect::<std::collections::BTreeSet<_>>();
     if !skip_gates {
@@ -1981,12 +1997,13 @@ mod tests {
             .insert("dependency_managed.api".into(), "true".into());
 
         assert!(
-            validate_remove_preconditions("plan", &remove, &environment, &BTreeSet::new()).is_ok()
+            validate_dependency_ownership("plan", &remove, None, &environment, &BTreeSet::new())
+                .is_ok()
         );
 
         environment.properties.remove("dependency_managed.api");
         assert!(
-            validate_remove_preconditions("plan", &remove, &environment, &BTreeSet::new())
+            validate_dependency_ownership("plan", &remove, None, &environment, &BTreeSet::new(),)
                 .unwrap_err()
                 .to_string()
                 .contains("no longer dependency-managed")
@@ -2003,15 +2020,64 @@ mod tests {
             .insert("dependency_managed.api".into(), "true".into());
 
         assert!(
-            validate_remove_preconditions(
+            validate_dependency_ownership(
                 "plan",
                 &remove,
+                None,
                 &environment,
                 &BTreeSet::from(["api".into()]),
             )
             .unwrap_err()
             .to_string()
             .contains("now subscribed")
+        );
+    }
+
+    #[test]
+    fn dependency_changes_require_current_planner_ownership() {
+        let mut upgrade = step();
+        upgrade.action = Action::Upgrade;
+        upgrade.from = Some("1.0.0".into());
+        let input = DesiredStateInput {
+            product: "api".into(),
+            channel: String::new(),
+            channel_id: String::new(),
+            dependency_managed: true,
+            desired_version: "2.0.0".into(),
+            release_id: String::new(),
+            release_digest: String::new(),
+            artifact_digest: String::new(),
+            workdir: String::new(),
+            deployed_version: Some("1.0.0".into()),
+        };
+        let mut environment = Object::default();
+        environment
+            .properties
+            .insert("dependency_managed.api".into(), "true".into());
+
+        assert!(
+            validate_dependency_ownership(
+                "plan",
+                &upgrade,
+                Some(&input),
+                &environment,
+                &BTreeSet::new(),
+            )
+            .is_ok()
+        );
+
+        environment.properties.remove("dependency_managed.api");
+        assert!(
+            validate_dependency_ownership(
+                "plan",
+                &upgrade,
+                Some(&input),
+                &environment,
+                &BTreeSet::new(),
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("no longer dependency-managed")
         );
     }
 
@@ -2379,6 +2445,7 @@ mod tests {
             product: "runtime".into(),
             channel: String::new(),
             channel_id: String::new(),
+            dependency_managed: false,
             desired_version: "1.0.0".into(),
             release_id: String::new(),
             release_digest: String::new(),

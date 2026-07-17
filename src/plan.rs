@@ -44,7 +44,7 @@ fn classify_change(current: &str, desired: &str) -> Action {
     }
 }
 
-pub const PLAN_FORMAT_VERSION: u32 = 4;
+pub const PLAN_FORMAT_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Step {
@@ -74,6 +74,7 @@ pub struct DesiredStateInput {
     pub product: String,
     pub channel: String,
     pub channel_id: String,
+    pub dependency_managed: bool,
     pub desired_version: String,
     pub release_id: String,
     pub release_digest: String,
@@ -655,6 +656,7 @@ fn legacy_rollback_content(
     product: &str,
     previous: String,
     current: Option<String>,
+    dependency_managed: bool,
     target: ReleasePin,
     restore: Option<ReleasePin>,
 ) -> (DesiredStateInput, Step) {
@@ -663,6 +665,7 @@ fn legacy_rollback_content(
             product: product.into(),
             channel: String::new(),
             channel_id: String::new(),
+            dependency_managed,
             desired_version: previous.clone(),
             release_id: target.release_id.clone(),
             release_digest: target.digest.clone(),
@@ -1270,6 +1273,7 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
             product: product.clone(),
             channel: String::new(),
             channel_id: String::new(),
+            dependency_managed: false,
             desired_version: version.clone(),
             release_id: pin.release_id,
             release_digest: pin.digest,
@@ -1310,6 +1314,7 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
             product: product.clone(),
             channel: root.map(|root| root.channel.clone()).unwrap_or_default(),
             channel_id: root.map(|root| root.channel_id.clone()).unwrap_or_default(),
+            dependency_managed: root.is_none(),
             desired_version: desired.clone(),
             release_id: target.release_id.clone(),
             release_digest: target.digest.clone(),
@@ -1466,6 +1471,18 @@ pub async fn create_rollback(ctx: &mut Ctx, env: &str, product: &str) -> Result<
     else {
         bail!("no previous version of {product} recorded in {env} — nothing to roll back to");
     };
+    let subscription_channels = ctx.linked(&env_obj.id, REL_SUBSCRIBES, "out").await?;
+    let mut subscribed_products = BTreeSet::new();
+    for channel in &subscription_channels {
+        let subscribed_product = channel
+            .properties
+            .get("product")
+            .cloned()
+            .unwrap_or_default();
+        if !subscribed_products.insert(subscribed_product.clone()) {
+            bail!("environment {env} has multiple channel subscriptions for {subscribed_product}");
+        }
+    }
     if semver::Version::parse(&prev).is_err() {
         let current = env_obj
             .properties
@@ -1489,21 +1506,23 @@ pub async fn create_rollback(ctx: &mut Ctx, env: &str, product: &str) -> Result<
             Some(version) => Some(pin_release(ctx, &release_id(product, version)).await?),
             None => None,
         };
-        let (input, step) = legacy_rollback_content(product, prev, current, target, restore);
+        let dependency_managed = env_obj
+            .properties
+            .get(&format!("dependency_managed.{product}"))
+            .is_some_and(|managed| managed == "true")
+            && !subscribed_products.contains(product);
+        let (input, step) =
+            legacy_rollback_content(product, prev, current, dependency_managed, target, restore);
         let mut steps = vec![step];
         return create_with_content(ctx, env, vec![input], &mut steps).await;
     }
     let mut rollback_roots = BTreeMap::<String, ChannelRoot>::new();
-    let mut subscribed_products = BTreeSet::new();
-    for channel in ctx.linked(&env_obj.id, REL_SUBSCRIBES, "out").await? {
+    for channel in subscription_channels {
         let subscribed_product = channel
             .properties
             .get("product")
             .cloned()
             .unwrap_or_default();
-        if !subscribed_products.insert(subscribed_product.clone()) {
-            bail!("environment {env} has multiple channel subscriptions for {subscribed_product}");
-        }
         if subscribed_product == product {
             continue;
         }
@@ -1608,6 +1627,7 @@ pub async fn create_rollback(ctx: &mut Ctx, env: &str, product: &str) -> Result<
             product: retained_product.clone(),
             channel: String::new(),
             channel_id: String::new(),
+            dependency_managed: false,
             desired_version: version.clone(),
             release_id: pin.release_id,
             release_digest: pin.digest,
@@ -1630,6 +1650,12 @@ pub async fn create_rollback(ctx: &mut Ctx, env: &str, product: &str) -> Result<
             product: selected_product.clone(),
             channel: String::new(),
             channel_id: String::new(),
+            dependency_managed: !subscribed_products.contains(selected_product)
+                && (env_obj
+                    .properties
+                    .get(&format!("dependency_managed.{selected_product}"))
+                    .is_some_and(|managed| managed == "true")
+                    || !rollback_roots.contains_key(selected_product)),
             desired_version: desired.clone(),
             release_id: target.release_id.clone(),
             release_digest: target.digest.clone(),
@@ -2004,12 +2030,14 @@ install = "true"
             "app",
             "legacy_build".into(),
             Some("2.0.0".into()),
+            true,
             target,
             Some(restore),
         );
 
         assert_eq!(input.desired_version, "legacy_build");
         assert_eq!(input.deployed_version.as_deref(), Some("2.0.0"));
+        assert!(input.dependency_managed);
         assert_eq!(step.action, Action::Rollback);
         assert_eq!(step.to, "legacy_build");
         assert_eq!(step.from.as_deref(), Some("2.0.0"));
@@ -2428,6 +2456,7 @@ version = "<2"
                 product: "api".into(),
                 channel: "stable".into(),
                 channel_id: "tenkai:channel:api/stable".into(),
+                dependency_managed: false,
                 desired_version: "2.0.0".into(),
                 release_id: "tenkai:release:api@2.0.0".into(),
                 release_digest: "target-digest".into(),
