@@ -1217,6 +1217,15 @@ pub async fn create_rollback(ctx: &mut Ctx, env: &str, product: &str) -> Result<
         if subscribed_product == product {
             continue;
         }
+        if env_obj
+            .properties
+            .get(&format!("deployment_health.{subscribed_product}"))
+            .is_some_and(|health| health == "unknown")
+        {
+            bail!(
+                "cannot roll back {product} while {subscribed_product} has unknown deployment state; reconcile the external target first"
+            );
+        }
         let Some(version) = env_obj
             .properties
             .get(&format!("deployed.{subscribed_product}"))
