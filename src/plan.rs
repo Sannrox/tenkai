@@ -1075,37 +1075,22 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
             },
         );
     }
-    let actions = resolved_steps
-        .iter()
-        .map(|(product, step)| (product.clone(), step.action))
-        .collect::<BTreeMap<_, _>>();
-    let current_dependencies = if actions.len() > 1 {
-        deployed_dependencies(ctx, &deployed).await?
-    } else {
-        BTreeMap::new()
-    };
-    for product in
-        transition_execution_order(&current_dependencies, &selected_dependencies, &actions)?
-    {
-        let mut step = resolved_steps
-            .remove(&product)
-            .expect("transition order only contains changed products");
-        step.order = steps.len() as u32;
-        step.id = format!("{}:step:{}", env_id(env), step.order);
-        steps.push(step);
-    }
-
     let obsolete = obsolete_dependency_products(
         &deployed,
         &env_obj.properties,
         &desired_products,
         &subscribed_products,
     );
+    let current_dependencies = if resolved_steps.len() > 1 || !obsolete.is_empty() {
+        deployed_dependencies(ctx, &deployed).await?
+    } else {
+        BTreeMap::new()
+    };
     if !obsolete.is_empty() {
-        let mut dependencies = deployed_dependencies(ctx, &deployed).await?;
-        for (product, final_dependencies) in selected_dependencies {
-            if deployed.contains_key(&product) {
-                dependencies.insert(product, final_dependencies);
+        let mut dependencies = current_dependencies.clone();
+        for (product, final_dependencies) in &selected_dependencies {
+            if deployed.contains_key(product) {
+                dependencies.insert(product.clone(), final_dependencies.clone());
             }
         }
         let obsolete = retain_required_dependencies(&deployed, &dependencies, obsolete);
@@ -1115,21 +1100,37 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
         {
             let version = deployed[&product].clone();
             let target = pin_release(ctx, &release_id(&product, &version)).await?;
-            let order = steps.len() as u32;
-            steps.push(Step {
-                id: format!("{}:step:{order}", env_id(env)),
-                order,
-                product,
-                action: Action::Remove,
-                from: Some(version),
-                to: String::new(),
-                release_id: target.release_id.clone(),
-                release_digest: target.digest.clone(),
-                artifact_digest: target.artifact_digest.clone(),
-                workdir: target.workdir.clone(),
-                restore: Some(target),
-            });
+            resolved_steps.insert(
+                product.clone(),
+                Step {
+                    id: String::new(),
+                    order: 0,
+                    product,
+                    action: Action::Remove,
+                    from: Some(version),
+                    to: String::new(),
+                    release_id: target.release_id.clone(),
+                    release_digest: target.digest.clone(),
+                    artifact_digest: target.artifact_digest.clone(),
+                    workdir: target.workdir.clone(),
+                    restore: Some(target),
+                },
+            );
         }
+    }
+    let actions = resolved_steps
+        .iter()
+        .map(|(product, step)| (product.clone(), step.action))
+        .collect::<BTreeMap<_, _>>();
+    for product in
+        transition_execution_order(&current_dependencies, &selected_dependencies, &actions)?
+    {
+        let mut step = resolved_steps
+            .remove(&product)
+            .expect("transition order only contains changed products");
+        step.order = steps.len() as u32;
+        step.id = format!("{}:step:{}", env_id(env), step.order);
+        steps.push(step);
     }
     Ok((inputs, steps))
 }
@@ -1346,15 +1347,50 @@ pub async fn create_rollback(ctx: &mut Ctx, env: &str, product: &str) -> Result<
             },
         );
     }
-    let actions = resolved_steps
-        .iter()
-        .map(|(product, step)| (product.clone(), step.action))
-        .collect::<BTreeMap<_, _>>();
-    let current_dependencies = if actions.len() > 1 {
+    let obsolete = obsolete_dependency_products(
+        &deployed,
+        &env_obj.properties,
+        &desired_products,
+        &subscribed_products,
+    );
+    let current_dependencies = if resolved_steps.len() > 1 || !obsolete.is_empty() {
         deployed_dependencies(ctx, &deployed).await?
     } else {
         BTreeMap::new()
     };
+    if !obsolete.is_empty() {
+        let mut dependencies = current_dependencies.clone();
+        for (selected_product, final_dependencies) in &selected_dependencies {
+            if deployed.contains_key(selected_product) {
+                dependencies.insert(selected_product.clone(), final_dependencies.clone());
+            }
+        }
+        let obsolete = retain_required_dependencies(&deployed, &dependencies, obsolete);
+        for removed_product in removal_order_from_dependencies(obsolete.clone(), dependencies)? {
+            let version = deployed[&removed_product].clone();
+            let target = pin_release(ctx, &release_id(&removed_product, &version)).await?;
+            resolved_steps.insert(
+                removed_product.clone(),
+                Step {
+                    id: String::new(),
+                    order: 0,
+                    product: removed_product,
+                    action: Action::Remove,
+                    from: Some(version),
+                    to: String::new(),
+                    release_id: target.release_id.clone(),
+                    release_digest: target.digest.clone(),
+                    artifact_digest: target.artifact_digest.clone(),
+                    workdir: target.workdir.clone(),
+                    restore: Some(target),
+                },
+            );
+        }
+    }
+    let actions = resolved_steps
+        .iter()
+        .map(|(product, step)| (product.clone(), step.action))
+        .collect::<BTreeMap<_, _>>();
     for selected_product in
         transition_execution_order(&current_dependencies, &selected_dependencies, &actions)?
     {
@@ -1363,39 +1399,6 @@ pub async fn create_rollback(ctx: &mut Ctx, env: &str, product: &str) -> Result<
                 .remove(&selected_product)
                 .expect("rollback order only contains changed products"),
         );
-    }
-
-    let obsolete = obsolete_dependency_products(
-        &deployed,
-        &env_obj.properties,
-        &desired_products,
-        &subscribed_products,
-    );
-    if !obsolete.is_empty() {
-        let mut dependencies = deployed_dependencies(ctx, &deployed).await?;
-        for (selected_product, final_dependencies) in selected_dependencies {
-            if deployed.contains_key(&selected_product) {
-                dependencies.insert(selected_product, final_dependencies);
-            }
-        }
-        let obsolete = retain_required_dependencies(&deployed, &dependencies, obsolete);
-        for removed_product in removal_order_from_dependencies(obsolete.clone(), dependencies)? {
-            let version = deployed[&removed_product].clone();
-            let target = pin_release(ctx, &release_id(&removed_product, &version)).await?;
-            steps.push(Step {
-                id: String::new(),
-                order: steps.len() as u32,
-                product: removed_product,
-                action: Action::Remove,
-                from: Some(version),
-                to: String::new(),
-                release_id: target.release_id.clone(),
-                release_digest: target.digest.clone(),
-                artifact_digest: target.artifact_digest.clone(),
-                workdir: target.workdir.clone(),
-                restore: Some(target),
-            });
-        }
     }
     create_with_content(ctx, env, inputs, &mut steps).await
 }
@@ -1713,6 +1716,25 @@ install = "true"
             transition_execution_order(&current_dependencies, &final_dependencies, &actions,)
                 .unwrap(),
             ["app", "database", "runtime"]
+        );
+    }
+
+    #[test]
+    fn obsolete_dependents_are_removed_before_prerequisites_change() {
+        let current_dependencies = BTreeMap::from([
+            ("app".into(), vec!["runtime".into()]),
+            ("runtime".into(), Vec::new()),
+        ]);
+        let final_dependencies = BTreeMap::from([("runtime".into(), Vec::new())]);
+        let actions = BTreeMap::from([
+            ("app".into(), Action::Remove),
+            ("runtime".into(), Action::Upgrade),
+        ]);
+
+        assert_eq!(
+            transition_execution_order(&current_dependencies, &final_dependencies, &actions,)
+                .unwrap(),
+            ["app", "runtime"]
         );
     }
 
