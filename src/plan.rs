@@ -840,23 +840,35 @@ fn transition_execution_order(
             .get(dependent)
             .into_iter()
             .flatten()
-            .cloned()
+            .map(|dependency| {
+                (
+                    dependency.clone(),
+                    final_dependencies
+                        .get(dependent)
+                        .is_some_and(|finals| finals.contains(dependency)),
+                )
+            })
             .collect::<Vec<_>>();
         let mut current_visited = BTreeSet::new();
-        while let Some(dependency) = current_pending.pop() {
-            if !current_visited.insert(dependency.clone()) {
+        while let Some((dependency, path_retained)) = current_pending.pop() {
+            if !current_visited.insert((dependency.clone(), path_retained)) {
                 continue;
             }
-            if actions.contains_key(&dependency) && !paths.contains_key(&dependency) {
-                paths.insert(dependency.clone(), 0b01);
+            if actions.contains_key(&dependency) && !path_retained {
+                paths
+                    .entry(dependency.clone())
+                    .and_modify(|modes| *modes |= 0b01)
+                    .or_insert(0b01);
             }
-            current_pending.extend(
-                current_dependencies
-                    .get(&dependency)
-                    .into_iter()
-                    .flatten()
-                    .cloned(),
-            );
+            for transitive in current_dependencies.get(&dependency).into_iter().flatten() {
+                current_pending.push((
+                    transitive.clone(),
+                    path_retained
+                        && final_dependencies
+                            .get(&dependency)
+                            .is_some_and(|finals| finals.contains(transitive)),
+                ));
+            }
         }
         for (dependency, path_modes) in paths {
             if path_modes == 0b11 {
@@ -1623,6 +1635,49 @@ install = "true"
             transition_execution_order(&current_dependencies, &final_dependencies, &actions,)
                 .unwrap(),
             ["app", "runtime"]
+        );
+    }
+
+    #[test]
+    fn retained_dependency_paths_allow_prerequisite_upgrades() {
+        let dependencies = BTreeMap::from([
+            ("app".into(), vec!["runtime".into()]),
+            ("runtime".into(), Vec::new()),
+        ]);
+        let actions = BTreeMap::from([
+            ("app".into(), Action::Upgrade),
+            ("runtime".into(), Action::Upgrade),
+        ]);
+
+        assert_eq!(
+            transition_execution_order(&dependencies, &dependencies, &actions).unwrap(),
+            ["runtime", "app"]
+        );
+    }
+
+    #[test]
+    fn rerouted_dependency_paths_fail_on_conflicting_transition_order() {
+        let current_dependencies = BTreeMap::from([
+            ("app".into(), vec!["old_runtime".into()]),
+            ("old_runtime".into(), vec!["database".into()]),
+            ("database".into(), Vec::new()),
+        ]);
+        let final_dependencies = BTreeMap::from([
+            ("app".into(), vec!["sidecar".into()]),
+            ("sidecar".into(), vec!["database".into()]),
+            ("database".into(), Vec::new()),
+        ]);
+        let actions = BTreeMap::from([
+            ("app".into(), Action::Upgrade),
+            ("sidecar".into(), Action::Install),
+            ("database".into(), Action::Upgrade),
+        ]);
+
+        assert!(
+            transition_execution_order(&current_dependencies, &final_dependencies, &actions,)
+                .unwrap_err()
+                .to_string()
+                .contains("conflicting execution order between app and database")
         );
     }
 
