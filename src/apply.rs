@@ -3,7 +3,7 @@
 //! Every execution writes plan and deployment objects into sekai, so the graph
 //! answers "what ran, when, gated by what, and what happened" after the fact.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -874,6 +874,16 @@ async fn validate_preconditions(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
         .with_context(|| format!("environment {} not found", plan.environment))?;
     validate_no_unknown_deployments(&plan.id, &environment)?;
     validate_desired_inputs(&plan.id, &plan.inputs, &environment)?;
+    let has_removals = plan.steps.iter().any(|step| step.action == Action::Remove);
+    let subscribed_products = if has_removals {
+        ctx.linked(&environment.id, REL_SUBSCRIBES, "out")
+            .await?
+            .into_iter()
+            .filter_map(|channel| channel.properties.get("product").cloned())
+            .collect::<BTreeSet<_>>()
+    } else {
+        BTreeSet::new()
+    };
     for input in &plan.inputs {
         validate_release_pin(
             ctx,
@@ -893,6 +903,7 @@ async fn validate_preconditions(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
         })?;
     }
     for step in &plan.steps {
+        validate_remove_preconditions(&plan.id, step, &environment, &subscribed_products)?;
         if environment
             .properties
             .get(&format!("deployment_health.{}", step.product))
@@ -916,6 +927,34 @@ async fn validate_preconditions(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
                 actual
             );
         }
+    }
+    Ok(())
+}
+
+fn validate_remove_preconditions(
+    plan_id: &str,
+    step: &Step,
+    environment: &Object,
+    subscribed_products: &BTreeSet<String>,
+) -> Result<()> {
+    if step.action != Action::Remove {
+        return Ok(());
+    }
+    if environment
+        .properties
+        .get(&format!("dependency_managed.{}", step.product))
+        .is_none_or(|managed| managed != "true")
+    {
+        bail!(
+            "plan {plan_id} is stale for {}: product is no longer dependency-managed",
+            step.product
+        );
+    }
+    if subscribed_products.contains(&step.product) {
+        bail!(
+            "plan {plan_id} is stale for {}: product is now subscribed",
+            step.product
+        );
     }
     Ok(())
 }
@@ -1895,6 +1934,50 @@ mod tests {
             workdir: ".".into(),
             restore: None,
         }
+    }
+
+    #[test]
+    fn remove_steps_require_current_planner_ownership() {
+        let mut remove = step();
+        remove.action = Action::Remove;
+        let mut environment = Object::default();
+        environment
+            .properties
+            .insert("dependency_managed.api".into(), "true".into());
+
+        assert!(
+            validate_remove_preconditions("plan", &remove, &environment, &BTreeSet::new()).is_ok()
+        );
+
+        environment.properties.remove("dependency_managed.api");
+        assert!(
+            validate_remove_preconditions("plan", &remove, &environment, &BTreeSet::new())
+                .unwrap_err()
+                .to_string()
+                .contains("no longer dependency-managed")
+        );
+    }
+
+    #[test]
+    fn remove_steps_reject_new_subscriptions() {
+        let mut remove = step();
+        remove.action = Action::Remove;
+        let mut environment = Object::default();
+        environment
+            .properties
+            .insert("dependency_managed.api".into(), "true".into());
+
+        assert!(
+            validate_remove_preconditions(
+                "plan",
+                &remove,
+                &environment,
+                &BTreeSet::from(["api".into()]),
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("now subscribed")
+        );
     }
 
     struct FakeExecutor {
