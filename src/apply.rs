@@ -530,13 +530,6 @@ async fn validate_release_pin(ctx: &mut Ctx, pin: &ReleasePin) -> Result<Manifes
     }
     let manifest = manifest::parse_raw(&raw)
         .with_context(|| format!("parsing stored manifest of {}", pin.release_id))?;
-    if obj.properties.get("workdir") != Some(&pin.workdir) {
-        bail!(
-            "release {} workdir no longer matches pinned path {}",
-            pin.release_id,
-            pin.workdir
-        );
-    }
     if obj.properties.get("artifact_digest") != Some(&pin.artifact_digest) {
         bail!(
             "release {} stored artifact digest no longer matches pinned digest {}",
