@@ -44,7 +44,7 @@ fn classify_change(current: &str, desired: &str) -> Action {
     }
 }
 
-pub const PLAN_FORMAT_VERSION: u32 = 3;
+pub const PLAN_FORMAT_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Step {
@@ -599,6 +599,34 @@ struct ChannelRoot {
     version: String,
 }
 
+fn add_retained_roots(
+    roots: &mut BTreeMap<String, ChannelRoot>,
+    deployed: &BTreeMap<String, String>,
+    properties: &HashMap<String, String>,
+    subscribed_products: &BTreeSet<String>,
+) {
+    for (product, version) in deployed {
+        if !roots.contains_key(product)
+            && semver::Version::parse(version).is_ok()
+            && (subscribed_products.contains(product)
+                || properties
+                    .get(&format!("dependency_managed.{product}"))
+                    .map(String::as_str)
+                    != Some("true"))
+        {
+            roots.insert(
+                product.clone(),
+                ChannelRoot {
+                    product: product.clone(),
+                    channel: String::new(),
+                    channel_id: String::new(),
+                    version: version.clone(),
+                },
+            );
+        }
+    }
+}
+
 fn rollback_root_version(env: &Object, channel: &Object, product: &str) -> Result<String> {
     if let Some(version) = env
         .properties
@@ -885,7 +913,7 @@ fn dependency_dependents(
         .collect()
 }
 
-pub(crate) async fn validate_legacy_rollback_safety(
+pub(crate) async fn validate_legacy_deployment_isolation(
     ctx: &mut Ctx,
     environment: &Object,
     product: &str,
@@ -908,7 +936,7 @@ pub(crate) async fn validate_legacy_rollback_safety(
         .next()
     {
         bail!(
-            "legacy rollback of {product} cannot remove deployed dependency {dependency}; republish the rollback target with a semver version"
+            "legacy deployment {product}@{version} has deployed dependency {dependency}; reconcile it to a semver release before dependency planning or rollback"
         );
     }
     if let Some(dependent) = dependency_dependents(&current_dependencies, product)
@@ -916,10 +944,55 @@ pub(crate) async fn validate_legacy_rollback_safety(
         .next()
     {
         bail!(
-            "legacy rollback of {product} cannot preserve deployed dependent {dependent}; republish the rollback target with a semver version"
+            "legacy deployment {product}@{version} has deployed dependent {dependent}; reconcile it to a semver release before dependency planning or rollback"
         );
     }
     Ok(())
+}
+
+fn validate_legacy_planned_isolation(
+    candidate: &Candidate,
+    planned_dependencies: &BTreeMap<String, Vec<String>>,
+) -> Result<()> {
+    if let Some(dependency) = candidate
+        .dependencies
+        .iter()
+        .map(|dependency| dependency.product.as_str())
+        .find(|dependency| planned_dependencies.contains_key(*dependency))
+    {
+        bail!(
+            "legacy deployment {}@{} has planned dependency {dependency}; reconcile it to a semver release before dependency planning or rollback",
+            candidate.product,
+            candidate.version
+        );
+    }
+    if let Some(dependent) = dependency_dependents(planned_dependencies, &candidate.product)
+        .into_iter()
+        .next()
+    {
+        bail!(
+            "legacy deployment {}@{} has planned dependent {dependent}; reconcile it to a semver release before dependency planning or rollback",
+            candidate.product,
+            candidate.version
+        );
+    }
+    Ok(())
+}
+
+async fn validate_retained_legacy_isolation(
+    ctx: &mut Ctx,
+    environment: &Object,
+    product: &str,
+    version: &str,
+    planned_dependencies: &BTreeMap<String, Vec<String>>,
+) -> Result<()> {
+    validate_legacy_deployment_isolation(ctx, environment, product, version).await?;
+    let id = release_id(product, version);
+    let release = ctx
+        .get(&id)
+        .await?
+        .with_context(|| format!("deployed release {id} is not published"))?;
+    validate_legacy_planned_isolation(&candidate_from_release(&release)?, planned_dependencies)
 }
 
 fn transition_execution_order(
@@ -1134,6 +1207,20 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
         );
     }
 
+    let deployed = env_obj
+        .properties
+        .iter()
+        .filter_map(|(key, version)| {
+            key.strip_prefix("deployed.")
+                .map(|product| (product.to_string(), version.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    add_retained_roots(
+        &mut roots,
+        &deployed,
+        &env_obj.properties,
+        &subscribed_products,
+    );
     let root_values = roots.values().cloned().collect::<Vec<_>>();
     let candidates = catalog_candidates(ctx, &root_values).await?;
     let resolution = crate::planner::resolve(&Request {
@@ -1164,18 +1251,35 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
         })
         .collect::<BTreeMap<_, _>>();
 
-    let deployed = env_obj
-        .properties
-        .iter()
-        .filter_map(|(key, version)| {
-            key.strip_prefix("deployed.")
-                .map(|product| (product.to_string(), version.clone()))
-        })
-        .collect::<BTreeMap<_, _>>();
+    let desired_products = resolution.selected.keys().cloned().collect::<BTreeSet<_>>();
     let mut inputs = Vec::new();
+    for (product, version) in deployed.iter().filter(|(product, version)| {
+        semver::Version::parse(version).is_err()
+            && !resolution.selected.contains_key(*product)
+            && (subscribed_products.contains(*product)
+                || env_obj
+                    .properties
+                    .get(&format!("dependency_managed.{product}"))
+                    .map(String::as_str)
+                    != Some("true"))
+    }) {
+        validate_retained_legacy_isolation(ctx, &env_obj, product, version, &selected_dependencies)
+            .await?;
+        let pin = pin_release(ctx, &release_id(product, version)).await?;
+        inputs.push(DesiredStateInput {
+            product: product.clone(),
+            channel: String::new(),
+            channel_id: String::new(),
+            desired_version: version.clone(),
+            release_id: pin.release_id,
+            release_digest: pin.digest,
+            artifact_digest: pin.artifact_digest,
+            workdir: pin.workdir,
+            deployed_version: Some(version.clone()),
+        });
+    }
     let mut steps = Vec::new();
     let mut resolved_steps = BTreeMap::<String, Step>::new();
-    let desired_products = resolution.selected.keys().cloned().collect::<BTreeSet<_>>();
     for product in resolution.install_order {
         let desired = resolution
             .selected
@@ -1310,12 +1414,6 @@ pub async fn create(ctx: &mut Ctx, env: &str) -> Result<Plan> {
     create_with_content(ctx, env, inputs, &mut steps).await
 }
 
-/// Persist an explicitly constructed operation, such as a rollback, as a plan.
-pub async fn create_from_steps(ctx: &mut Ctx, env: &str, mut steps: Vec<Step>) -> Result<Plan> {
-    environment(ctx, env).await?;
-    create_with_content(ctx, env, Vec::new(), &mut steps).await
-}
-
 async fn create_with_content(
     ctx: &mut Ctx,
     env: &str,
@@ -1373,7 +1471,7 @@ pub async fn create_rollback(ctx: &mut Ctx, env: &str, product: &str) -> Result<
             .properties
             .get(&format!("deployed.{product}"))
             .cloned();
-        validate_legacy_rollback_safety(ctx, &env_obj, product, &prev).await?;
+        validate_legacy_deployment_isolation(ctx, &env_obj, product, &prev).await?;
         let target_id = release_id(product, &prev);
         let target_object = ctx
             .get(&target_id)
@@ -1438,16 +1536,22 @@ pub async fn create_rollback(ctx: &mut Ctx, env: &str, product: &str) -> Result<
             version: prev,
         },
     );
-    let rollback_root_values = rollback_roots.values().cloned().collect::<Vec<_>>();
-    let candidates = catalog_candidates(ctx, &rollback_root_values).await?;
     let deployed = env_obj
         .properties
         .iter()
         .filter_map(|(key, version)| {
             key.strip_prefix("deployed.")
-                .map(|product| (product.to_string(), version.clone()))
+                .map(|deployed_product| (deployed_product.to_string(), version.clone()))
         })
         .collect::<BTreeMap<_, _>>();
+    add_retained_roots(
+        &mut rollback_roots,
+        &deployed,
+        &env_obj.properties,
+        &subscribed_products,
+    );
+    let rollback_root_values = rollback_roots.values().cloned().collect::<Vec<_>>();
+    let candidates = catalog_candidates(ctx, &rollback_root_values).await?;
     let preferred_versions = deployed.clone();
     let resolution = crate::planner::resolve(&Request {
         roots: rollback_roots
@@ -1481,6 +1585,37 @@ pub async fn create_rollback(ctx: &mut Ctx, env: &str, product: &str) -> Result<
         .collect::<BTreeMap<_, _>>();
     let desired_products = resolution.selected.keys().cloned().collect::<BTreeSet<_>>();
     let mut inputs = Vec::new();
+    for (retained_product, version) in deployed.iter().filter(|(deployed_product, version)| {
+        semver::Version::parse(version).is_err()
+            && !resolution.selected.contains_key(*deployed_product)
+            && (subscribed_products.contains(*deployed_product)
+                || env_obj
+                    .properties
+                    .get(&format!("dependency_managed.{deployed_product}"))
+                    .map(String::as_str)
+                    != Some("true"))
+    }) {
+        validate_retained_legacy_isolation(
+            ctx,
+            &env_obj,
+            retained_product,
+            version,
+            &selected_dependencies,
+        )
+        .await?;
+        let pin = pin_release(ctx, &release_id(retained_product, version)).await?;
+        inputs.push(DesiredStateInput {
+            product: retained_product.clone(),
+            channel: String::new(),
+            channel_id: String::new(),
+            desired_version: version.clone(),
+            release_id: pin.release_id,
+            release_digest: pin.digest,
+            artifact_digest: pin.artifact_digest,
+            workdir: pin.workdir,
+            deployed_version: Some(version.clone()),
+        });
+    }
     let mut steps = Vec::new();
     let install_order = resolution.install_order;
     let mut resolved_steps = BTreeMap::<String, Step>::new();
@@ -1699,6 +1834,122 @@ install = "true"
                 .unwrap_err()
                 .to_string()
                 .contains("does not match manifest identity")
+        );
+    }
+
+    #[test]
+    fn retained_roots_constrain_dependency_selection() {
+        let mut roots = BTreeMap::from([(
+            "app".into(),
+            ChannelRoot {
+                product: "app".into(),
+                channel: "stable".into(),
+                channel_id: "channel:app:stable".into(),
+                version: "1.0.0".into(),
+            },
+        )]);
+        let deployed = BTreeMap::from([
+            ("legacy".into(), "legacy_build".into()),
+            ("worker".into(), "1.0.0".into()),
+            ("runtime".into(), "2.0.0".into()),
+        ]);
+        let properties = HashMap::from([("dependency_managed.runtime".into(), "true".into())]);
+        add_retained_roots(
+            &mut roots,
+            &deployed,
+            &properties,
+            &BTreeSet::from(["app".into()]),
+        );
+
+        let resolution = crate::planner::resolve(&Request {
+            roots: roots
+                .iter()
+                .map(|(product, root)| (product.clone(), root.version.clone()))
+                .collect(),
+            candidates: vec![
+                Candidate {
+                    product: "app".into(),
+                    version: "1.0.0".into(),
+                    dependencies: vec![Dependency {
+                        product: "runtime".into(),
+                        requirement: ">=1".into(),
+                    }],
+                    required_facts: BTreeMap::new(),
+                },
+                Candidate {
+                    product: "worker".into(),
+                    version: "1.0.0".into(),
+                    dependencies: vec![Dependency {
+                        product: "runtime".into(),
+                        requirement: "<2".into(),
+                    }],
+                    required_facts: BTreeMap::new(),
+                },
+                Candidate {
+                    product: "runtime".into(),
+                    version: "2.0.0".into(),
+                    dependencies: Vec::new(),
+                    required_facts: BTreeMap::new(),
+                },
+                Candidate {
+                    product: "runtime".into(),
+                    version: "1.0.0".into(),
+                    dependencies: Vec::new(),
+                    required_facts: BTreeMap::new(),
+                },
+            ],
+            ..Request::default()
+        })
+        .unwrap();
+
+        assert_eq!(resolution.selected["runtime"], "1.0.0");
+        assert!(roots.contains_key("worker"));
+        assert!(!roots.contains_key("legacy"));
+        assert!(!roots.contains_key("runtime"));
+    }
+
+    #[test]
+    fn retained_legacy_rejects_dependencies_introduced_by_the_plan() {
+        let legacy = Candidate {
+            product: "legacy".into(),
+            version: "legacy_build".into(),
+            dependencies: vec![Dependency {
+                product: "runtime".into(),
+                requirement: ">=1".into(),
+            }],
+            required_facts: BTreeMap::new(),
+        };
+        let planned_dependencies = BTreeMap::from([
+            ("app".into(), vec!["runtime".into()]),
+            ("runtime".into(), Vec::new()),
+        ]);
+
+        assert!(
+            validate_legacy_planned_isolation(&legacy, &planned_dependencies)
+                .unwrap_err()
+                .to_string()
+                .contains("planned dependency runtime")
+        );
+    }
+
+    #[test]
+    fn retained_legacy_rejects_dependents_introduced_by_the_plan() {
+        let legacy = Candidate {
+            product: "legacy".into(),
+            version: "legacy_build".into(),
+            dependencies: Vec::new(),
+            required_facts: BTreeMap::new(),
+        };
+        let planned_dependencies = BTreeMap::from([
+            ("app".into(), vec!["worker".into()]),
+            ("worker".into(), vec!["legacy".into()]),
+        ]);
+
+        assert!(
+            validate_legacy_planned_isolation(&legacy, &planned_dependencies)
+                .unwrap_err()
+                .to_string()
+                .contains("planned dependent app")
         );
     }
 

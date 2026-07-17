@@ -884,19 +884,42 @@ async fn validate_preconditions(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
     } else {
         BTreeSet::new()
     };
-    for step in &plan.steps {
-        if step.action == Action::Rollback {
-            plan::validate_legacy_rollback_safety(ctx, &environment, &step.product, &step.to)
-                .await
-                .with_context(|| {
-                    format!(
-                        "plan {} legacy rollback preconditions changed for {}",
-                        plan.id, step.product
-                    )
-                })?;
-        }
-    }
+    let changed_products = plan
+        .steps
+        .iter()
+        .map(|step| step.product.clone())
+        .collect::<BTreeSet<_>>();
     for input in &plan.inputs {
+        if !changed_products.contains(&input.product)
+            && let Some(deployed_version) = input.deployed_version.as_deref()
+        {
+            plan::validate_legacy_deployment_isolation(
+                ctx,
+                &environment,
+                &input.product,
+                deployed_version,
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "plan {} current legacy deployment preconditions changed for {}",
+                    plan.id, input.product
+                )
+            })?;
+        }
+        plan::validate_legacy_deployment_isolation(
+            ctx,
+            &environment,
+            &input.product,
+            &input.desired_version,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "plan {} legacy deployment preconditions changed for {}",
+                plan.id, input.product
+            )
+        })?;
         validate_release_pin(
             ctx,
             &ReleasePin {
