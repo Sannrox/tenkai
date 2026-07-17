@@ -1160,7 +1160,9 @@ pub async fn create_rollback(ctx: &mut Ctx, env: &str, product: &str) -> Result<
             .get(&format!("deployed.{subscribed_product}"))
             .cloned()
         else {
-            continue;
+            bail!(
+                "cannot roll back {product} while subscribed product {subscribed_product} is not deployed; apply its subscription plan first"
+            );
         };
         rollback_roots.insert(
             subscribed_product.clone(),
