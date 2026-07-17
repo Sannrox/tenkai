@@ -860,8 +860,9 @@ fn transition_execution_order(
                         .entry(dependency.clone())
                         .and_modify(|modes| *modes |= 0b01)
                         .or_insert(0b01);
+                } else {
+                    continue;
                 }
-                continue;
             }
             for transitive in current_dependencies.get(&dependency).into_iter().flatten() {
                 current_pending.push((
@@ -1680,6 +1681,31 @@ install = "true"
             transition_execution_order(&current_dependencies, &final_dependencies, &actions,)
                 .unwrap(),
             ["runtime", "database", "app"]
+        );
+    }
+
+    #[test]
+    fn dropped_intermediates_preserve_their_transitive_dependencies() {
+        let current_dependencies = BTreeMap::from([
+            ("app".into(), vec!["runtime".into()]),
+            ("runtime".into(), vec!["database".into()]),
+            ("database".into(), Vec::new()),
+        ]);
+        let final_dependencies = BTreeMap::from([
+            ("app".into(), Vec::new()),
+            ("runtime".into(), vec!["database".into()]),
+            ("database".into(), Vec::new()),
+        ]);
+        let actions = BTreeMap::from([
+            ("app".into(), Action::Upgrade),
+            ("runtime".into(), Action::Upgrade),
+            ("database".into(), Action::Upgrade),
+        ]);
+
+        assert_eq!(
+            transition_execution_order(&current_dependencies, &final_dependencies, &actions,)
+                .unwrap(),
+            ["app", "database", "runtime"]
         );
     }
 
