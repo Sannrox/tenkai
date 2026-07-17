@@ -485,6 +485,29 @@ async fn release_content(
     environment: &str,
     product: &str,
 ) -> Result<ReleaseContent> {
+    let manifest = validate_release_pin(ctx, pin).await?;
+    let workdir = if manifest.deploy.inputs.is_empty() {
+        Path::new(&pin.workdir).canonicalize()?
+    } else {
+        manifest::execution_workdir(
+            Path::new(&pin.workdir),
+            &manifest.deploy.inputs,
+            &pin.artifact_digest,
+            environment,
+            product,
+        )?
+    };
+    Ok(ReleaseContent {
+        release_id: pin.release_id.clone(),
+        manifest,
+        artifact_digest: pin.artifact_digest.clone(),
+        workdir,
+        environment: environment.to_string(),
+        product: product.to_string(),
+    })
+}
+
+async fn validate_release_pin(ctx: &mut Ctx, pin: &ReleasePin) -> Result<Manifest> {
     let Some(obj) = ctx.get(&pin.release_id).await? else {
         bail!("release object {} not found", pin.release_id);
     };
@@ -507,6 +530,20 @@ async fn release_content(
     }
     let manifest = manifest::parse_raw(&raw)
         .with_context(|| format!("parsing stored manifest of {}", pin.release_id))?;
+    if obj.properties.get("workdir") != Some(&pin.workdir) {
+        bail!(
+            "release {} workdir no longer matches pinned path {}",
+            pin.release_id,
+            pin.workdir
+        );
+    }
+    if obj.properties.get("artifact_digest") != Some(&pin.artifact_digest) {
+        bail!(
+            "release {} stored artifact digest no longer matches pinned digest {}",
+            pin.release_id,
+            pin.artifact_digest
+        );
+    }
     let actual_artifact_digest =
         manifest::artifact_digest(Path::new(&pin.workdir), &manifest.deploy.inputs)?;
     if actual_artifact_digest != pin.artifact_digest {
@@ -516,25 +553,7 @@ async fn release_content(
             pin.artifact_digest
         );
     }
-    let workdir = if manifest.deploy.inputs.is_empty() {
-        Path::new(&pin.workdir).canonicalize()?
-    } else {
-        manifest::execution_workdir(
-            Path::new(&pin.workdir),
-            &manifest.deploy.inputs,
-            &pin.artifact_digest,
-            environment,
-            product,
-        )?
-    };
-    Ok(ReleaseContent {
-        release_id: pin.release_id.clone(),
-        manifest,
-        artifact_digest: pin.artifact_digest.clone(),
-        workdir,
-        environment: environment.to_string(),
-        product: product.to_string(),
-    })
+    Ok(manifest)
 }
 
 fn record(id: String, kind: &str, name: String, properties: HashMap<String, String>) -> Object {
@@ -856,7 +875,7 @@ async fn validate_preconditions(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
     validate_no_unknown_deployments(&plan.id, &environment)?;
     validate_desired_inputs(&plan.id, &plan.inputs, &environment)?;
     for input in &plan.inputs {
-        release_content(
+        validate_release_pin(
             ctx,
             &ReleasePin {
                 release_id: input.release_id.clone(),
@@ -864,8 +883,6 @@ async fn validate_preconditions(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
                 artifact_digest: input.artifact_digest.clone(),
                 workdir: input.workdir.clone(),
             },
-            &plan.environment,
-            &input.product,
         )
         .await
         .with_context(|| {

@@ -57,7 +57,6 @@ pub struct Step {
     pub release_id: String,
     pub release_digest: String,
     pub artifact_digest: String,
-    #[serde(default)]
     pub workdir: String,
     pub restore: Option<ReleasePin>,
 }
@@ -79,6 +78,7 @@ pub struct DesiredStateInput {
     pub release_id: String,
     pub release_digest: String,
     pub artifact_digest: String,
+    #[serde(default)]
     pub workdir: String,
     pub deployed_version: Option<String>,
 }
