@@ -623,6 +623,52 @@ fn rollback_root_version(env: &Object, channel: &Object, product: &str) -> Resul
     Ok(version.clone())
 }
 
+fn legacy_rollback_content(
+    product: &str,
+    previous: String,
+    current: Option<String>,
+    target: ReleasePin,
+    restore: Option<ReleasePin>,
+) -> (DesiredStateInput, Step) {
+    (
+        DesiredStateInput {
+            product: product.into(),
+            channel: String::new(),
+            channel_id: String::new(),
+            desired_version: previous.clone(),
+            release_id: target.release_id.clone(),
+            release_digest: target.digest.clone(),
+            artifact_digest: target.artifact_digest.clone(),
+            workdir: target.workdir.clone(),
+            deployed_version: current.clone(),
+        },
+        Step {
+            id: String::new(),
+            order: 0,
+            product: product.into(),
+            action: Action::Rollback,
+            from: current,
+            to: previous,
+            release_id: target.release_id,
+            release_digest: target.digest,
+            artifact_digest: target.artifact_digest,
+            workdir: target.workdir,
+            restore,
+        },
+    )
+}
+
+fn validate_legacy_rollback_release(release: &Object) -> Result<()> {
+    let candidate = candidate_from_release(release)?;
+    if !candidate.dependencies.is_empty() {
+        bail!(
+            "legacy rollback release {} declares dependencies; republish it with a semver version before rollback",
+            release.id
+        );
+    }
+    Ok(())
+}
+
 fn candidate_from_release(release: &Object) -> Result<Candidate> {
     if release.kind != KIND_RELEASE {
         bail!(
@@ -825,6 +871,55 @@ fn dependency_closure(
         }
     }
     closure
+}
+
+fn dependency_dependents(
+    dependencies: &BTreeMap<String, Vec<String>>,
+    target: &str,
+) -> BTreeSet<String> {
+    dependencies
+        .keys()
+        .filter(|product| product.as_str() != target)
+        .filter(|product| dependency_closure(dependencies, product).contains(target))
+        .cloned()
+        .collect()
+}
+
+pub(crate) async fn validate_legacy_rollback_safety(
+    ctx: &mut Ctx,
+    environment: &Object,
+    product: &str,
+    version: &str,
+) -> Result<()> {
+    if semver::Version::parse(version).is_ok() {
+        return Ok(());
+    }
+    let deployed = environment
+        .properties
+        .iter()
+        .filter_map(|(key, deployed_version)| {
+            key.strip_prefix("deployed.")
+                .map(|deployed_product| (deployed_product.to_string(), deployed_version.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let current_dependencies = deployed_dependencies(ctx, &deployed).await?;
+    if let Some(dependency) = dependency_closure(&current_dependencies, product)
+        .into_iter()
+        .next()
+    {
+        bail!(
+            "legacy rollback of {product} cannot remove deployed dependency {dependency}; republish the rollback target with a semver version"
+        );
+    }
+    if let Some(dependent) = dependency_dependents(&current_dependencies, product)
+        .into_iter()
+        .next()
+    {
+        bail!(
+            "legacy rollback of {product} cannot preserve deployed dependent {dependent}; republish the rollback target with a semver version"
+        );
+    }
+    Ok(())
 }
 
 fn transition_execution_order(
@@ -1273,6 +1368,33 @@ pub async fn create_rollback(ctx: &mut Ctx, env: &str, product: &str) -> Result<
     else {
         bail!("no previous version of {product} recorded in {env} — nothing to roll back to");
     };
+    if semver::Version::parse(&prev).is_err() {
+        let current = env_obj
+            .properties
+            .get(&format!("deployed.{product}"))
+            .cloned();
+        validate_legacy_rollback_safety(ctx, &env_obj, product, &prev).await?;
+        let target_id = release_id(product, &prev);
+        let target_object = ctx
+            .get(&target_id)
+            .await?
+            .with_context(|| format!("release object {target_id} not found"))?;
+        if target_object.kind != KIND_RELEASE {
+            bail!(
+                "object {target_id} is {}, not {KIND_RELEASE}",
+                target_object.kind
+            );
+        }
+        validate_legacy_rollback_release(&target_object)?;
+        let target = pin_release(ctx, &target_id).await?;
+        let restore = match current.as_deref() {
+            Some(version) => Some(pin_release(ctx, &release_id(product, version)).await?),
+            None => None,
+        };
+        let (input, step) = legacy_rollback_content(product, prev, current, target, restore);
+        let mut steps = vec![step];
+        return create_with_content(ctx, env, vec![input], &mut steps).await;
+    }
     let mut rollback_roots = BTreeMap::<String, ChannelRoot>::new();
     let mut subscribed_products = BTreeSet::new();
     for channel in ctx.linked(&env_obj.id, REL_SUBSCRIBES, "out").await? {
@@ -1609,6 +1731,79 @@ install = "true"
         assert_eq!(
             rollback_root_version(&env, &channel, "runtime").unwrap(),
             "2.0.0"
+        );
+    }
+
+    #[test]
+    fn legacy_rollback_content_preserves_the_recorded_release() {
+        let target = ReleasePin {
+            release_id: release_id("app", "legacy_build"),
+            digest: "release-digest".into(),
+            artifact_digest: "artifact-digest".into(),
+            workdir: "/tmp/app".into(),
+        };
+        let restore = ReleasePin {
+            release_id: release_id("app", "2.0.0"),
+            digest: "restore-release-digest".into(),
+            artifact_digest: "restore-artifact-digest".into(),
+            workdir: "/tmp/app".into(),
+        };
+
+        let (input, step) = legacy_rollback_content(
+            "app",
+            "legacy_build".into(),
+            Some("2.0.0".into()),
+            target,
+            Some(restore),
+        );
+
+        assert_eq!(input.desired_version, "legacy_build");
+        assert_eq!(input.deployed_version.as_deref(), Some("2.0.0"));
+        assert_eq!(step.action, Action::Rollback);
+        assert_eq!(step.to, "legacy_build");
+        assert_eq!(step.from.as_deref(), Some("2.0.0"));
+        assert!(step.restore.is_some());
+    }
+
+    #[test]
+    fn legacy_rollback_rejects_dependency_bearing_releases() {
+        let manifest = r#"
+[product]
+name = "app"
+version = "legacy_build"
+
+[deploy]
+install = "true"
+
+[[dependencies]]
+product = "runtime"
+version = "<2"
+"#;
+        let release = release_object("app", "legacy_build", manifest);
+
+        assert!(
+            validate_legacy_rollback_release(&release)
+                .unwrap_err()
+                .to_string()
+                .contains("declares dependencies")
+        );
+    }
+
+    #[test]
+    fn legacy_rollback_detects_transitive_deployed_dependents() {
+        let dependencies = BTreeMap::from([
+            ("worker".into(), vec!["app".into()]),
+            ("app".into(), vec!["runtime".into()]),
+            ("runtime".into(), Vec::new()),
+        ]);
+
+        assert_eq!(
+            dependency_dependents(&dependencies, "runtime"),
+            BTreeSet::from(["app".into(), "worker".into()])
+        );
+        assert_eq!(
+            dependency_closure(&dependencies, "app"),
+            BTreeSet::from(["runtime".into()])
         );
     }
 

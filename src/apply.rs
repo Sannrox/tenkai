@@ -884,6 +884,18 @@ async fn validate_preconditions(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
     } else {
         BTreeSet::new()
     };
+    for step in &plan.steps {
+        if step.action == Action::Rollback {
+            plan::validate_legacy_rollback_safety(ctx, &environment, &step.product, &step.to)
+                .await
+                .with_context(|| {
+                    format!(
+                        "plan {} legacy rollback preconditions changed for {}",
+                        plan.id, step.product
+                    )
+                })?;
+        }
+    }
     for input in &plan.inputs {
         validate_release_pin(
             ctx,
