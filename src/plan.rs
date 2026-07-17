@@ -854,11 +854,14 @@ fn transition_execution_order(
             if !current_visited.insert((dependency.clone(), path_retained)) {
                 continue;
             }
-            if actions.contains_key(&dependency) && !path_retained {
-                paths
-                    .entry(dependency.clone())
-                    .and_modify(|modes| *modes |= 0b01)
-                    .or_insert(0b01);
+            if actions.contains_key(&dependency) {
+                if !path_retained {
+                    paths
+                        .entry(dependency.clone())
+                        .and_modify(|modes| *modes |= 0b01)
+                        .or_insert(0b01);
+                }
+                continue;
             }
             for transitive in current_dependencies.get(&dependency).into_iter().flatten() {
                 current_pending.push((
@@ -1652,6 +1655,31 @@ install = "true"
         assert_eq!(
             transition_execution_order(&dependencies, &dependencies, &actions).unwrap(),
             ["runtime", "app"]
+        );
+    }
+
+    #[test]
+    fn changed_intermediates_retire_their_own_dropped_dependencies() {
+        let current_dependencies = BTreeMap::from([
+            ("app".into(), vec!["runtime".into()]),
+            ("runtime".into(), vec!["database".into()]),
+            ("database".into(), Vec::new()),
+        ]);
+        let final_dependencies = BTreeMap::from([
+            ("app".into(), vec!["runtime".into(), "database".into()]),
+            ("runtime".into(), Vec::new()),
+            ("database".into(), Vec::new()),
+        ]);
+        let actions = BTreeMap::from([
+            ("app".into(), Action::Upgrade),
+            ("runtime".into(), Action::Upgrade),
+            ("database".into(), Action::Upgrade),
+        ]);
+
+        assert_eq!(
+            transition_execution_order(&current_dependencies, &final_dependencies, &actions,)
+                .unwrap(),
+            ["runtime", "database", "app"]
         );
     }
 
