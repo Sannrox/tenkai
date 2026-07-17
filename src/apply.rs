@@ -1123,10 +1123,12 @@ async fn execute_locked(
             &env,
             &plan_id,
             &step,
-            dependency_installs.contains(&step.product),
-            cancellation,
-            recovery,
-            mutation_started,
+            StepExecution {
+                mark_dependency_managed: dependency_installs.contains(&step.product),
+                cancellation,
+                recovery,
+                mutation_started,
+            },
         )
         .await
         {
@@ -1494,16 +1496,26 @@ async fn compensate_completed_step(
     Ok(outcome)
 }
 
+struct StepExecution<'a> {
+    mark_dependency_managed: bool,
+    cancellation: &'a Cancellation,
+    recovery: &'a Cancellation,
+    mutation_started: &'a mut bool,
+}
+
 async fn execute_step(
     ctx: &mut Ctx,
     env: &str,
     plan_oid: &str,
     step: &Step,
-    mark_dependency_managed: bool,
-    cancellation: &Cancellation,
-    recovery: &Cancellation,
-    mutation_started: &mut bool,
+    execution: StepExecution<'_>,
 ) -> Result<Outcome> {
+    let StepExecution {
+        mark_dependency_managed,
+        cancellation,
+        recovery,
+        mutation_started,
+    } = execution;
     let mut step_mutation_started = false;
     let target = ReleasePin {
         release_id: step.release_id.clone(),
@@ -1529,8 +1541,11 @@ async fn execute_step(
         )
         .await;
         *mutation_started |= step_mutation_started;
-        if removal.is_err() && !step_mutation_started && cancellation.reason().is_some() {
-            bail!(removal.unwrap_err());
+        if let Err(detail) = &removal
+            && !step_mutation_started
+            && cancellation.reason().is_some()
+        {
+            bail!(detail.clone());
         }
         let outcome = match removal {
             Ok(()) => {
