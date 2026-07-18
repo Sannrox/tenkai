@@ -112,6 +112,8 @@ pub struct Plan {
     pub state: PlanState,
     pub gates_skipped: Option<bool>,
     pub status_detail: String,
+    #[serde(default)]
+    pub maintenance_blocked: bool,
 }
 
 #[derive(Serialize)]
@@ -198,6 +200,12 @@ impl Plan {
                 plan.format_version
             );
         }
+        if plan.maintenance_blocked && plan.state != PlanState::Blocked {
+            bail!(
+                "plan {} has a maintenance-block marker outside the blocked state",
+                plan.id
+            );
+        }
         if plan.id != object.id {
             bail!(
                 "stored plan id {} does not match object id {}",
@@ -243,15 +251,17 @@ impl Plan {
 }
 
 pub async fn store(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
-    if let Some(existing) = ctx.get(&plan.id).await? {
-        let stored = Plan::from_object(&existing)?;
+    let existing = ctx.get(&plan.id).await?;
+    if let Some(existing) = existing.as_ref() {
+        let stored = Plan::from_object(existing)?;
         if stored.executable_digest()? != plan.executable_digest()? {
             bail!("plan {} executable content is immutable", plan.id);
         }
         if stored.state == plan.state
             && stored.state != PlanState::Blocked
             && (stored.gates_skipped != plan.gates_skipped
-                || stored.status_detail != plan.status_detail)
+                || stored.status_detail != plan.status_detail
+                || stored.maintenance_blocked != plan.maintenance_blocked)
         {
             bail!("plan {} lifecycle audit fields are immutable", plan.id);
         }
@@ -274,7 +284,18 @@ pub async fn store(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
             );
         }
     }
-    ctx.put(plan.to_object()?).await?;
+    let mut object = plan.to_object()?;
+    if let Some(existing) = existing.as_ref() {
+        for property in [
+            "last_emergency_override_reason",
+            "last_emergency_override_correlation",
+        ] {
+            if let Some(value) = existing.properties.get(property) {
+                object.properties.insert(property.into(), value.clone());
+            }
+        }
+    }
+    ctx.put(object).await?;
     Ok(())
 }
 
@@ -325,6 +346,7 @@ pub async fn env_add(ctx: &mut Ctx, name: &str, description: &str) -> Result<Str
         if existing.kind != KIND_ENVIRONMENT {
             bail!("object {id} is {}, not {KIND_ENVIRONMENT}", existing.kind);
         }
+        crate::maintenance::ensure_configuration(ctx, name).await?;
         return Ok(format!("environment {name} already registered"));
     }
     let object = environment_record(None, name, description, now)?;
@@ -336,6 +358,7 @@ pub async fn env_add(ctx: &mut Ctx, name: &str, description: &str) -> Result<Str
                     && status.message().contains("UNIQUE")) => {}
         Err(status) => return Err(status.into()),
     }
+    crate::maintenance::ensure_configuration(ctx, name).await?;
     Ok(format!("environment {name} registered"))
 }
 
@@ -615,6 +638,7 @@ async fn create_with_content(
         state: PlanState::Computed,
         gates_skipped: None,
         status_detail: String::new(),
+        maintenance_blocked: false,
     };
     store(ctx, &plan).await?;
     Ok(plan)
@@ -739,6 +763,7 @@ mod tests {
             state: PlanState::Computed,
             gates_skipped: None,
             status_detail: String::new(),
+            maintenance_blocked: false,
         };
         plan.content_id = content_address(
             &plan.environment,
@@ -762,11 +787,17 @@ mod tests {
     #[test]
     fn lifecycle_changes_do_not_change_executable_digest() {
         let plan = example_plan();
-        let mut running = plan.clone();
-        running.state = PlanState::Running;
+        let mut blocked = plan.clone();
+        blocked.state = PlanState::Blocked;
+        blocked.maintenance_blocked = true;
         assert_eq!(
             plan.executable_digest().unwrap(),
-            running.executable_digest().unwrap()
+            blocked.executable_digest().unwrap()
+        );
+        assert!(
+            Plan::from_object(&blocked.to_object().unwrap())
+                .unwrap()
+                .maintenance_blocked
         );
     }
 

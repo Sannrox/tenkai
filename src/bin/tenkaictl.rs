@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 
-use tenkai::{apply, canary, catalog, client, ontology, plan};
+use tenkai::{apply, canary, catalog, client, maintenance, ontology, plan};
 
 #[derive(Parser)]
 #[command(
@@ -47,6 +47,9 @@ enum Command {
         /// Bypass eval gates (recorded like any other apply).
         #[arg(long)]
         skip_gates: bool,
+        /// Start outside maintenance policy and record this reason with the authenticated principal.
+        #[arg(long)]
+        emergency_reason: Option<String>,
     },
     /// Deployed vs channel head, per subscribed product.
     Status {
@@ -58,6 +61,9 @@ enum Command {
         product: String,
         #[arg(long, default_value = "local")]
         env: String,
+        /// Start outside maintenance policy and record this reason with the authenticated principal.
+        #[arg(long)]
+        emergency_reason: Option<String>,
     },
 }
 
@@ -106,6 +112,34 @@ enum EnvCommand {
         #[arg(long)]
         deployed: Option<String>,
     },
+    /// Manage recurring maintenance windows.
+    Maintenance {
+        #[command(subcommand)]
+        command: MaintenanceCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum MaintenanceCommand {
+    /// Create or replace a named recurring window.
+    Set {
+        env: String,
+        identity: String,
+        #[arg(long)]
+        timezone: String,
+        #[arg(long)]
+        weekdays: String,
+        #[arg(long)]
+        start: String,
+        #[arg(long)]
+        duration_minutes: u32,
+    },
+    /// List recurring windows for an environment.
+    List { env: String },
+    /// Remove a named recurring window.
+    Remove { env: String, identity: String },
+    /// Replace an invalid configuration with an empty governed schedule.
+    Repair { env: String },
 }
 
 fn print_steps(steps: &[plan::Step]) {
@@ -138,6 +172,8 @@ async fn main() -> Result<()> {
                 "{}",
                 plan::env_add(&mut ctx, "local", "this machine").await?
             );
+            let migrated = maintenance::migrate_all(&mut ctx).await?;
+            println!("maintenance configuration ready for {migrated} environment(s)");
         }
         Command::Publish { manifest } => {
             println!("{}", catalog::publish(&mut ctx, &manifest).await?);
@@ -203,6 +239,48 @@ async fn main() -> Result<()> {
                         .await?
                 );
             }
+            EnvCommand::Maintenance { command } => match command {
+                MaintenanceCommand::Set {
+                    env,
+                    identity,
+                    timezone,
+                    weekdays,
+                    start,
+                    duration_minutes,
+                } => {
+                    let window = maintenance::Window::new(
+                        identity,
+                        timezone,
+                        maintenance::weekday_values(&weekdays)?,
+                        start,
+                        duration_minutes,
+                    )?;
+                    println!("{}", maintenance::set(&mut ctx, &env, window).await?);
+                }
+                MaintenanceCommand::List { env } => {
+                    let windows = maintenance::list(&mut ctx, &env).await?;
+                    if windows.is_empty() {
+                        println!("{env} has no maintenance windows");
+                    } else {
+                        for window in windows {
+                            println!(
+                                "{}: {} {:?} {} for {} minutes",
+                                window.identity,
+                                window.timezone,
+                                window.weekdays,
+                                window.start,
+                                window.duration_minutes
+                            );
+                        }
+                    }
+                }
+                MaintenanceCommand::Remove { env, identity } => {
+                    println!("{}", maintenance::remove(&mut ctx, &env, &identity).await?);
+                }
+                MaintenanceCommand::Repair { env } => {
+                    println!("{}", maintenance::repair(&mut ctx, &env).await?);
+                }
+            },
         },
         Command::Plan { env } => {
             let stored = plan::create(&mut ctx, &env).await?;
@@ -217,11 +295,12 @@ async fn main() -> Result<()> {
         Command::Apply {
             plan_id,
             skip_gates,
+            emergency_reason,
         } => {
             let stored = plan::load(&mut ctx, &plan_id).await?;
             println!("applying {} to {}:", stored.id, stored.environment);
             print_steps(&stored.steps);
-            run_plan(&mut ctx, &plan_id, skip_gates).await?;
+            run_plan(&mut ctx, &plan_id, skip_gates, emergency_reason.as_deref()).await?;
         }
         Command::Status { env } => {
             let rows = plan::status(&mut ctx, &env).await?;
@@ -252,19 +331,36 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Command::Rollback { product, env } => {
+        Command::Rollback {
+            product,
+            env,
+            emergency_reason,
+        } => {
             let step = plan::rollback_step(&mut ctx, &env, &product).await?;
             let stored = plan::create_from_steps(&mut ctx, &env, vec![step]).await?;
             println!("rolling back in {env}:");
             print_steps(&stored.steps);
-            run_plan(&mut ctx, &stored.id, true).await?;
+            run_plan(&mut ctx, &stored.id, true, emergency_reason.as_deref()).await?;
         }
     }
     Ok(())
 }
 
-async fn run_plan(ctx: &mut client::Ctx, plan_id: &str, skip_gates: bool) -> Result<()> {
-    let outcomes = apply::execute(ctx, plan_id, skip_gates).await?;
+async fn run_plan(
+    ctx: &mut client::Ctx,
+    plan_id: &str,
+    skip_gates: bool,
+    emergency_reason: Option<&str>,
+) -> Result<()> {
+    let outcomes = apply::execute_with_options(
+        ctx,
+        plan_id,
+        apply::ExecutionOptions {
+            skip_gates,
+            emergency_reason,
+        },
+    )
+    .await?;
     let mut failed = false;
     for o in &outcomes {
         match o.status.as_str() {
@@ -324,5 +420,56 @@ mod tests {
         assert_eq!(channel, "stable");
         assert_eq!(cohort, ["canary-a", "canary-b"]);
         assert!(reactivate);
+    }
+
+    #[test]
+    fn parses_maintenance_window_configuration() {
+        let cli = Cli::try_parse_from([
+            "tenkaictl",
+            "env",
+            "maintenance",
+            "set",
+            "prod",
+            "weekday",
+            "--timezone",
+            "Europe/Berlin",
+            "--weekdays",
+            "mon,tue,wed,thu,fri",
+            "--start",
+            "22:00",
+            "--duration-minutes",
+            "120",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Env {
+                command: EnvCommand::Maintenance {
+                    command: MaintenanceCommand::Set {
+                        duration_minutes: 120,
+                        ..
+                    }
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_emergency_override_reason() {
+        let cli = Cli::try_parse_from([
+            "tenkaictl",
+            "apply",
+            "tenkai:plan:prod:1:digest",
+            "--emergency-reason",
+            "restore critical service",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Apply {
+                emergency_reason: Some(ref reason),
+                ..
+            } if reason == "restore critical service"
+        ));
     }
 }

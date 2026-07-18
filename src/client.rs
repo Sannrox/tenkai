@@ -12,10 +12,25 @@ use tonic::{Request, Status};
 use crate::pb::chisei::chisei_service_client::ChiseiServiceClient;
 use crate::pb::sekai::sekai_service_client::SekaiServiceClient;
 use crate::pb::sekai::{
-    ActionRequest, CreateLinkRequest, CreateObjectRequest, DeleteLinkRequest, DeleteObjectRequest,
-    ExecuteActionRequest, FindByPropertyRequest, GetLinkedObjectsRequest, GetLinksRequest,
-    GetObjectRequest, Link, Object, UpdateObjectRequest,
+    ActionRequest, ActionResult, CreateLinkRequest, CreateObjectRequest, Decision,
+    DeleteLinkRequest, DeleteObjectRequest, DenyActionRequest, ExecuteActionRequest,
+    FindByPropertyRequest, GetLinkedObjectsRequest, GetLinksRequest, GetObjectRequest, Link,
+    ListDecisionsRequest, ListFilter, ListObjectChangesRequest, ListObjectsRequest, Object,
+    ObjectChange, UpdateObjectRequest,
 };
+
+fn action_actor_from_changes(
+    changes: &[ObjectChange],
+    field: &str,
+    correlation: &str,
+) -> Option<String> {
+    changes.iter().find_map(|change| {
+        (change.field == field
+            && change.new_value == correlation
+            && !change.changed_by.trim().is_empty())
+        .then(|| change.changed_by.clone())
+    })
+}
 
 /// Attaches auth + caller identity metadata to every request.
 #[derive(Clone)]
@@ -252,17 +267,147 @@ impl Ctx {
             .links)
     }
 
+    pub async fn list_kind(&mut self, kind: &str) -> Result<Vec<Object>> {
+        const PAGE_SIZE: i32 = 100;
+        let mut objects = Vec::new();
+        loop {
+            let response = self
+                .sekai
+                .list_objects(ListObjectsRequest {
+                    filter: Some(ListFilter {
+                        kind: kind.into(),
+                        limit: PAGE_SIZE,
+                        offset: objects.len() as i32,
+                        ..Default::default()
+                    }),
+                })
+                .await?
+                .into_inner();
+            let received = response.objects.len();
+            objects.extend(response.objects);
+            if received < PAGE_SIZE as usize {
+                return Ok(objects);
+            }
+        }
+    }
+
+    pub async fn execute_action_result(
+        &mut self,
+        action: &str,
+        params: std::collections::HashMap<String, String>,
+    ) -> Result<ActionResult> {
+        self.action_result_with_mode(action, params, false).await
+    }
+
+    pub async fn preview_action_result(
+        &mut self,
+        action: &str,
+        params: std::collections::HashMap<String, String>,
+    ) -> Result<ActionResult> {
+        self.action_result_with_mode(action, params, true).await
+    }
+
+    async fn action_result_with_mode(
+        &mut self,
+        action: &str,
+        params: std::collections::HashMap<String, String>,
+        dry_run: bool,
+    ) -> Result<ActionResult> {
+        self.sekai
+            .execute_action(ExecuteActionRequest {
+                request: Some(ActionRequest {
+                    action: action.into(),
+                    params,
+                    actor: String::new(),
+                }),
+                dry_run,
+            })
+            .await?
+            .into_inner()
+            .result
+            .context("governed action returned no result")
+    }
+
     pub async fn execute_action(
         &mut self,
         action: &str,
         params: std::collections::HashMap<String, String>,
     ) -> Result<()> {
+        let result = self.execute_action_result(action, params).await?;
+        if result.decision != "allow" {
+            anyhow::bail!("action {action} was not allowed: {}", result.decision);
+        }
+        Ok(())
+    }
+
+    pub async fn deny_action(&mut self, approval_id: &str, reason: &str) -> Result<()> {
+        self.sekai
+            .deny_action(DenyActionRequest {
+                approval_id: approval_id.into(),
+                reason: reason.into(),
+            })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn action_decisions(
+        &mut self,
+        actor: &str,
+        action: &str,
+        after: i64,
+    ) -> Result<Vec<Decision>> {
+        Ok(self
+            .sekai
+            .list_decisions(ListDecisionsRequest {
+                actor: actor.into(),
+                action: action.into(),
+                after,
+                limit: i32::MAX,
+            })
+            .await?
+            .into_inner()
+            .decisions)
+    }
+
+    pub async fn object_changes(&mut self, object_id: &str) -> Result<Vec<ObjectChange>> {
+        let mut offset = 0;
+        let mut all = Vec::new();
+        loop {
+            let changes = self
+                .sekai
+                .list_object_changes(ListObjectChangesRequest {
+                    object_id: object_id.into(),
+                    limit: 100,
+                    offset,
+                })
+                .await?
+                .into_inner()
+                .changes;
+            let received = changes.len();
+            all.extend(changes);
+            if received < 100 {
+                return Ok(all);
+            }
+            offset += received as i32;
+        }
+    }
+
+    pub async fn authorize_emergency_override(
+        &mut self,
+        plan_id: &str,
+        reason: &str,
+    ) -> Result<String> {
+        let correlation = uuid::Uuid::new_v4().to_string();
         let result = self
             .sekai
             .execute_action(ExecuteActionRequest {
                 request: Some(ActionRequest {
-                    action: action.into(),
-                    params,
+                    action: crate::ontology::ACTION_EMERGENCY_OVERRIDE.into(),
+                    params: std::collections::HashMap::from([
+                        ("id".into(), plan_id.into()),
+                        ("reason".into(), reason.into()),
+                        ("correlation".into(), correlation.clone()),
+                    ]),
                     actor: String::new(),
                 }),
                 dry_run: false,
@@ -270,17 +415,65 @@ impl Ctx {
             .await?
             .into_inner()
             .result
-            .context("governed action returned no result")?;
-        if result.decision != "allow" {
-            anyhow::bail!("action {action} was not allowed: {}", result.decision);
+            .context("governed emergency override returned no result")?;
+        match result.decision.as_str() {
+            "allow" => self
+                .emergency_override_actor(plan_id, &correlation)
+                .await?
+                .context("governed emergency override has no authenticated actor evidence"),
+            "require_approval" => {
+                anyhow::bail!(
+                    "emergency maintenance override requires approval {}; the pinned Sekai API cannot safely resume approved actions, so this apply remains blocked",
+                    result.approval_id,
+                )
+            }
+            decision => {
+                anyhow::bail!("emergency maintenance override was not allowed: {decision}")
+            }
         }
-        Ok(())
+    }
+
+    async fn emergency_override_actor(
+        &mut self,
+        plan_id: &str,
+        correlation: &str,
+    ) -> Result<Option<String>> {
+        let Some(plan) = self.get(plan_id).await? else {
+            return Ok(None);
+        };
+        if plan
+            .properties
+            .get("last_emergency_override_correlation")
+            .is_none_or(|stored| stored != correlation)
+        {
+            return Ok(None);
+        }
+        self.action_actor(
+            plan_id,
+            "properties.last_emergency_override_correlation",
+            correlation,
+        )
+        .await
+    }
+
+    async fn action_actor(
+        &mut self,
+        object_id: &str,
+        field: &str,
+        correlation: &str,
+    ) -> Result<Option<String>> {
+        Ok(action_actor_from_changes(
+            &self.object_changes(object_id).await?,
+            field,
+            correlation,
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::token_transport_is_safe;
+    use super::{action_actor_from_changes, token_transport_is_safe};
+    use crate::pb::sekai::ObjectChange;
 
     #[test]
     fn bearer_tokens_require_tls_or_loopback() {
@@ -292,5 +485,33 @@ mod tests {
         assert!(!token_transport_is_safe(
             "http://localhost:80@attacker.example:50051"
         ));
+    }
+
+    #[test]
+    fn emergency_override_actor_uses_property_change_field() {
+        let changes = vec![ObjectChange {
+            field: "properties.last_emergency_override_correlation".into(),
+            new_value: "correlation-1".into(),
+            changed_by: "authenticated-operator".into(),
+            ..Default::default()
+        }];
+
+        assert_eq!(
+            action_actor_from_changes(
+                &changes,
+                "properties.last_emergency_override_correlation",
+                "correlation-1"
+            )
+            .as_deref(),
+            Some("authenticated-operator")
+        );
+        assert_eq!(
+            action_actor_from_changes(
+                &changes,
+                "properties.last_emergency_override_correlation",
+                "correlation-2"
+            ),
+            None
+        );
     }
 }
