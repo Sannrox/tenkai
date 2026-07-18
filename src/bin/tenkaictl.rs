@@ -35,6 +35,11 @@ enum Command {
         #[arg(long)]
         allow_unsigned_development: bool,
     },
+    /// Inspect or reverify published release trust evidence.
+    Release {
+        #[command(subcommand)]
+        command: ReleaseCommand,
+    },
     /// Point a channel at a published release, e.g. `promote hello@0.1.0 stable`.
     Promote { spec: String, channel: String },
     /// Manage canary designation, promotion policy, and evidence repair.
@@ -102,6 +107,18 @@ enum CanaryCommand {
     Repair { plan_id: String },
     /// Remove an abandoned promotion lock after verifying no operation is running.
     Unlock { product: String, channel: String },
+}
+
+#[derive(Subcommand)]
+enum ReleaseCommand {
+    /// Show stored release verification evidence as JSON.
+    Inspect { spec: String },
+    /// Reverify stored release content and evidence against current trust roots.
+    Verify {
+        spec: String,
+        #[arg(long)]
+        trust_roots: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -199,6 +216,16 @@ async fn main() -> Result<()> {
             };
             println!("{}", catalog::publish(&mut ctx, &manifest, &options).await?);
         }
+        Command::Release { command } => match command {
+            ReleaseCommand::Inspect { spec } => {
+                let evidence = catalog::inspect_release(&mut ctx, &spec).await?;
+                println!("{}", serde_json::to_string_pretty(&evidence)?);
+            }
+            ReleaseCommand::Verify { spec, trust_roots } => {
+                let evidence = catalog::reverify_release(&mut ctx, &spec, &trust_roots).await?;
+                println!("{}", serde_json::to_string_pretty(&evidence)?);
+            }
+        },
         Command::Promote { spec, channel } => {
             println!("{}", catalog::promote(&mut ctx, &spec, &channel).await?);
         }
@@ -532,6 +559,34 @@ mod tests {
                 allow_unsigned_development: true,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn parses_release_inspection_and_reverification() {
+        let inspect =
+            Cli::try_parse_from(["tenkaictl", "release", "inspect", "api@1.2.3"]).unwrap();
+        assert!(matches!(
+            inspect.command,
+            Command::Release {
+                command: ReleaseCommand::Inspect { spec }
+            } if spec == "api@1.2.3"
+        ));
+
+        let verify = Cli::try_parse_from([
+            "tenkaictl",
+            "release",
+            "verify",
+            "api@1.2.3",
+            "--trust-roots",
+            "release-trust.toml",
+        ])
+        .unwrap();
+        assert!(matches!(
+            verify.command,
+            Command::Release {
+                command: ReleaseCommand::Verify { spec, trust_roots }
+            } if spec == "api@1.2.3" && trust_roots == std::path::Path::new("release-trust.toml")
         ));
     }
 }
