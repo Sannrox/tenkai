@@ -81,6 +81,44 @@ current suite definition, so stale evidence cannot authorize changed content.
 `--skip-gates` bypasses, and the bypass is recorded in the graph like any
 other apply.
 
+## Maintenance windows
+
+Recurring windows are configured per environment with an IANA timezone, ISO
+weekdays, a local start time, and an elapsed duration. Schedule changes use a
+governed action so maintenance permissions can be separated from deployment
+permissions.
+
+```bash
+tenkaictl env add prod --description production
+tenkaictl env maintenance set prod weekday \
+  --timezone Europe/Berlin \
+  --weekdays mon,tue,wed,thu,fri \
+  --start 22:00 \
+  --duration-minutes 120
+tenkaictl env maintenance list prod
+```
+
+Plans can be computed outside a window, but `apply` records them as blocked and
+exits nonzero while the window is closed. When a window opens, rerun
+`tenkaictl apply <plan-id>`; blocked plans do not resume automatically. Invalid
+rules and ambiguous or skipped DST starts fail closed. Once execution starts
+inside a window, it may finish after that window closes.
+
+An emergency start requires a non-empty reason and records the authenticated
+principal through a governed action. Denied actions and actions requiring
+out-of-band approval remain blocked.
+
+If configuration audit evidence is incomplete or invalid, normal applies fail
+closed. After inspecting the incident, quiesce deployment automation, reset the
+configuration with `tenkaictl env maintenance repair <env>`, and recreate the
+intended windows before allowing applies again. Repair installs an empty
+schedule, which permits unrestricted execution until the intended windows are
+restored.
+
+```bash
+tenkaictl apply <plan-id> --emergency-reason "restore critical service"
+```
+
 ## Deploying from GitHub
 
 GitHub is the artifact source; tenkai is the local delivery plane. The
@@ -133,9 +171,9 @@ plan. Current state lives on the environment object (`deployed.<product>`).
 ## Status
 
 v0 walking skeleton. Working: publish/promote/subscribe, plan/apply/status,
-eval gates, health probes, auto-rollback, deliberate rollback, full graph
-audit trail. Not yet: multiple environments beyond registration, maintenance
-windows, version constraints, signed releases, agents, disconnected
-environments — see [DESIGN.md](DESIGN.md) for the roadmap.
+eval gates, health probes, auto-rollback, deliberate rollback, recurring
+maintenance windows, and a full graph audit trail. Not yet: multiple
+environments beyond registration, version constraints, signed releases,
+agents, disconnected environments — see [DESIGN.md](DESIGN.md) for the roadmap.
 
 Active implementation work and dependencies are tracked in GitHub Issues.
