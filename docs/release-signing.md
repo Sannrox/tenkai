@@ -68,3 +68,10 @@ the release, avoiding unsafe rewrites of the legacy object. Concurrent claims
 are first-writer-wins; retries with the same evidence are idempotent and
 different evidence is rejected. Partial or conflicting evidence is never
 overwritten, and unsigned publication cannot create a legacy claim.
+
+Use `tenkaictl release inspect <product>@<version>` to query the stored status,
+signer, content digests, statement digest, and provenance. Use
+`tenkaictl release verify <product>@<version> --trust-roots <path>` to recompute
+the manifest and declared-artifact digests, strictly verify the retained
+envelope with the current trust roots, and require the resulting signer,
+digests, statement digest, and provenance to equal the stored evidence.

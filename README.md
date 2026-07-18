@@ -85,6 +85,20 @@ Releases are immutable: re-publishing the same version with different manifest
 content or different declared deploy inputs is rejected — bump
 `product.version`. Runtime state must live outside declared `inputs`.
 
+Release publication fails closed unless `--signature` and `--trust-roots` are
+provided. Local development can opt into `--allow-unsigned-development`.
+Inspect stored trust evidence or reverify signed content against current trust
+roots with:
+
+```bash
+tenkaictl release inspect hello-local@0.1.0
+tenkaictl release verify hello-local@0.1.0 \
+  --trust-roots /etc/tenkai/release-trust.toml
+```
+
+The detached envelope and trust-root formats are documented in
+[`docs/release-signing.md`](docs/release-signing.md).
+
 ## Gates
 
 If a release declares `gate.eval_suite`, `apply` blocks unless the suite's
@@ -198,10 +212,10 @@ that persistence migration is not implemented in v0.
 
 ## Status
 
-v0 walking skeleton. Working: publish/promote/subscribe, plan/apply/status,
+v0 walking skeleton. Working: signed publish/promote/subscribe, plan/apply/status,
 eval gates, health probes, auto-rollback, deliberate rollback, recurring
 maintenance windows, and a full graph audit trail. Not yet: multiple
-environments beyond registration, version constraints, signed releases,
+environments beyond registration, version constraints,
 environment runtimes, disconnected environments — see [DESIGN.md](DESIGN.md)
 for the roadmap.
 
