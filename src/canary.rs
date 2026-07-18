@@ -2021,6 +2021,7 @@ mod tests {
             state,
             gates_skipped: Some(false),
             status_detail: String::new(),
+            maintenance_blocked: false,
         }
     }
 

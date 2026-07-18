@@ -13,6 +13,7 @@ use prost::Message as _;
 use sha2::{Digest as _, Sha256};
 
 use crate::client::Ctx;
+use crate::maintenance::{self, Eligibility};
 use crate::manifest::{self, Manifest};
 use crate::ontology::*;
 use crate::pb::chisei::{
@@ -26,6 +27,111 @@ pub struct Outcome {
     pub step: Step,
     pub status: String, // succeeded | failed | rolled_back
     pub detail: String,
+}
+
+async fn maintenance_decision(
+    ctx: &mut Ctx,
+    environment: &str,
+    emergency_reason: Option<&str>,
+) -> Result<MaintenanceDecision> {
+    let eligibility = match maintenance::list(ctx, environment).await {
+        Ok(windows) => {
+            let now = chrono::DateTime::from_timestamp_millis(crate::now_millis())
+                .context("current time is outside the supported maintenance-window range")?;
+            maintenance::evaluate(&windows, now)
+        }
+        Err(error) => Eligibility::Invalid {
+            detail: format!("maintenance window configuration is invalid: {error}"),
+        },
+    };
+    if let Some(reason) = emergency_reason {
+        return Ok(MaintenanceDecision::EmergencyOverride(reason.into()));
+    }
+    Ok(match eligibility {
+        Eligibility::Open { closes_at, .. } => MaintenanceDecision::Allowed { closes_at },
+        Eligibility::Closed { next_opens_at } => {
+            MaintenanceDecision::Denied(next_opens_at.map_or_else(
+                || "maintenance window is closed".to_string(),
+                |next| {
+                    format!(
+                        "maintenance window is closed; next opens at {}",
+                        format_maintenance_timestamp(next)
+                    )
+                },
+            ))
+        }
+        Eligibility::Invalid { detail } => MaintenanceDecision::Denied(format!(
+            "maintenance window evaluation failed closed: {detail}"
+        )),
+    })
+}
+
+fn format_maintenance_timestamp(timestamp_millis: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(timestamp_millis).map_or_else(
+        || format!("unrepresentable timestamp ({timestamp_millis} ms since epoch)"),
+        |timestamp| timestamp.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    )
+}
+
+async fn record_maintenance_decision(
+    ctx: &mut Ctx,
+    plan: &Plan,
+    decision: &MaintenanceDecision,
+) -> Result<()> {
+    if let MaintenanceDecision::EmergencyOverride(reason) = decision {
+        ctx.authorize_emergency_override(&plan.id, reason).await?;
+    }
+    Ok(())
+}
+
+async fn block_for_maintenance(
+    ctx: &mut Ctx,
+    plan: &mut Plan,
+    skip_gates: bool,
+    detail: &str,
+) -> Result<Vec<Outcome>> {
+    plan.state = PlanState::Blocked;
+    plan.gates_skipped = Some(skip_gates);
+    plan.status_detail = detail.into();
+    plan.maintenance_blocked = true;
+    plan::store(ctx, plan).await?;
+    Err(MaintenanceBlocked(detail.to_string()).into())
+}
+
+#[cfg(test)]
+fn is_maintenance_block_error(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<MaintenanceBlocked>().is_some()
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ExecutionOptions<'a> {
+    pub skip_gates: bool,
+    pub emergency_reason: Option<&'a str>,
+}
+
+enum MaintenanceDecision {
+    Allowed { closes_at: i64 },
+    Denied(String),
+    EmergencyOverride(String),
+}
+
+#[derive(Debug)]
+struct MaintenanceBlocked(String);
+
+impl std::fmt::Display for MaintenanceBlocked {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for MaintenanceBlocked {}
+
+fn validate_emergency_override(reason: Option<&str>) -> Result<Option<&str>> {
+    let reason = reason.map(str::trim);
+    if reason.is_some_and(str::is_empty) {
+        bail!("emergency maintenance override requires a non-empty reason");
+    }
+    Ok(reason)
 }
 
 async fn run_command(
@@ -495,6 +601,7 @@ async fn set_plan_state(
     plan.state = state;
     plan.gates_skipped = Some(gates_skipped);
     plan.status_detail = detail.into();
+    plan.maintenance_blocked = false;
     plan::store(ctx, plan).await
 }
 
@@ -514,6 +621,7 @@ async fn set_plan_state_confirmed(
                 if stored.state == state
                     && stored.gates_skipped == Some(gates_skipped)
                     && stored.status_detail == detail
+                    && !stored.maintenance_blocked
         ) {
             return Err(error);
         }
@@ -682,7 +790,24 @@ async fn validate_preconditions(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
 
 /// Execute a stored plan's ordered steps, one product at a time.
 pub async fn execute(ctx: &mut Ctx, plan_id: &str, skip_gates: bool) -> Result<Vec<Outcome>> {
-    let stored_plan = plan::load(ctx, plan_id).await?;
+    execute_with_options(
+        ctx,
+        plan_id,
+        ExecutionOptions {
+            skip_gates,
+            emergency_reason: None,
+        },
+    )
+    .await
+}
+
+pub async fn execute_with_options(
+    ctx: &mut Ctx,
+    plan_id: &str,
+    options: ExecutionOptions<'_>,
+) -> Result<Vec<Outcome>> {
+    let emergency_reason = validate_emergency_override(options.emergency_reason)?;
+    let mut stored_plan = plan::load(ctx, plan_id).await?;
     if !matches!(stored_plan.state, PlanState::Computed | PlanState::Blocked) {
         bail!(
             "plan {} is {}, only computed or blocked plans can be applied",
@@ -693,8 +818,38 @@ pub async fn execute(ctx: &mut Ctx, plan_id: &str, skip_gates: bool) -> Result<V
     let environment = stored_plan.environment.clone();
     let owner = stored_plan.id.clone();
     let lease = claim_environment(ctx, &environment, &owner).await?;
+    let authorization = async {
+        let initial_maintenance =
+            maintenance_decision(ctx, &stored_plan.environment, emergency_reason).await?;
+        record_maintenance_decision(ctx, &stored_plan, &initial_maintenance).await?;
+        if let MaintenanceDecision::Denied(detail) = &initial_maintenance {
+            block_for_maintenance(ctx, &mut stored_plan, options.skip_gates, detail)
+                .await
+                .map(|_| ())?;
+        }
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    if let Err(error) = authorization {
+        let error = if emergency_reason.is_some() {
+            let detail = format!("emergency maintenance override was not authorized: {error}");
+            match block_for_maintenance(ctx, &mut stored_plan, options.skip_gates, &detail).await {
+                Err(blocked) => blocked.context(detail),
+                Ok(_) => unreachable!("maintenance authorization failure always blocks"),
+            }
+        } else {
+            error
+        };
+        let unlock = release_environment(ctx, &lease).await;
+        return match unlock {
+            Ok(()) => Err(error),
+            Err(unlock) => Err(error.context(format!(
+                "releasing environment apply lease also failed: {unlock}"
+            ))),
+        };
+    }
     let mut canary_finalization_error = None;
-    let result = match crate::canary::begin_attempt(ctx, &stored_plan, skip_gates).await {
+    let result = match crate::canary::begin_attempt(ctx, &stored_plan, options.skip_gates).await {
         Ok(attempt_id) => {
             let start_result = match attempt_id.as_deref() {
                 Some(attempt_id) => crate::canary::mark_attempt_started(ctx, attempt_id)
@@ -705,7 +860,16 @@ pub async fn execute(ctx: &mut Ctx, plan_id: &str, skip_gates: bool) -> Result<V
             match start_result {
                 Err(error) => Err(error),
                 Ok(()) => {
-                    let result = execute_locked(ctx, stored_plan, skip_gates, &lease).await;
+                    let result = execute_locked(
+                        ctx,
+                        stored_plan,
+                        ExecutionOptions {
+                            skip_gates: options.skip_gates,
+                            emergency_reason,
+                        },
+                        &lease,
+                    )
+                    .await;
                     if let Some(attempt_id) = attempt_id
                         // This executor has no reliable post-mutation error boundary. Keep
                         // errored attempts pending until explicit repair so promotion fails closed.
@@ -752,9 +916,10 @@ pub async fn execute(ctx: &mut Ctx, plan_id: &str, skip_gates: bool) -> Result<V
 async fn execute_locked(
     ctx: &mut Ctx,
     mut stored_plan: Plan,
-    skip_gates: bool,
+    options: ExecutionOptions<'_>,
     lease: &EnvironmentLease,
 ) -> Result<Vec<Outcome>> {
+    let skip_gates = options.skip_gates;
     validate_preconditions(ctx, &stored_plan).await?;
     let plan_id = stored_plan.id.clone();
     let env = stored_plan.environment.clone();
@@ -802,7 +967,40 @@ async fn execute_locked(
             return Ok(vec![outcome]);
         }
     }
+    let final_maintenance =
+        maintenance_decision(ctx, &stored_plan.environment, options.emergency_reason).await?;
+    if let MaintenanceDecision::Denied(detail) = &final_maintenance {
+        block_for_maintenance(ctx, &mut stored_plan, skip_gates, detail).await?;
+    }
+    if let MaintenanceDecision::Allowed { closes_at } = &final_maintenance
+        && crate::now_millis() >= *closes_at
+    {
+        block_for_maintenance(
+            ctx,
+            &mut stored_plan,
+            skip_gates,
+            "maintenance window closed while start authorization was being recorded",
+        )
+        .await?;
+    }
     set_plan_state_confirmed(ctx, &mut stored_plan, PlanState::Running, skip_gates, "").await?;
+    let running_maintenance =
+        maintenance_decision(ctx, &stored_plan.environment, options.emergency_reason).await?;
+    match running_maintenance {
+        MaintenanceDecision::Denied(detail) => {
+            block_for_maintenance(ctx, &mut stored_plan, skip_gates, &detail).await?;
+        }
+        MaintenanceDecision::Allowed { closes_at } if crate::now_millis() >= closes_at => {
+            block_for_maintenance(
+                ctx,
+                &mut stored_plan,
+                skip_gates,
+                "maintenance window closed before execution entered the running state",
+            )
+            .await?;
+        }
+        MaintenanceDecision::Allowed { .. } | MaintenanceDecision::EmergencyOverride(_) => {}
+    }
 
     let mut outcomes = Vec::new();
     let mut plan_failed = false;
@@ -1035,6 +1233,33 @@ mod tests {
     use super::*;
     use crate::manifest::{DeploySection, GateSection, ProductSection};
     use crate::pb::chisei::CaseResult;
+
+    #[test]
+    fn emergency_override_requires_a_reason() {
+        assert!(validate_emergency_override(Some("incident 42")).is_ok());
+        assert!(validate_emergency_override(Some("  ")).is_err());
+        assert_eq!(validate_emergency_override(None).unwrap(), None);
+    }
+
+    #[test]
+    fn maintenance_block_errors_are_typed() {
+        let maintenance = anyhow::Error::new(MaintenanceBlocked("window closed".into()));
+        let unrelated = anyhow::anyhow!("maintenance window text from another error");
+        assert!(is_maintenance_block_error(&maintenance));
+        assert!(!is_maintenance_block_error(&unrelated));
+    }
+
+    #[test]
+    fn maintenance_timestamps_are_operator_readable() {
+        let timestamp = "2026-07-21T22:00:00Z"
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .unwrap()
+            .timestamp_millis();
+        assert_eq!(
+            format_maintenance_timestamp(timestamp),
+            "2026-07-21T22:00:00Z"
+        );
+    }
 
     fn test_dir(name: &str) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!(

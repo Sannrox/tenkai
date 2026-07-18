@@ -14,6 +14,7 @@ pub const KIND_PRODUCT: &str = "tenkai.product";
 pub const KIND_RELEASE: &str = "tenkai.release";
 pub const KIND_CHANNEL: &str = "tenkai.channel";
 pub const KIND_ENVIRONMENT: &str = "tenkai.environment";
+pub const KIND_MAINTENANCE_CONFIG: &str = "tenkai.maintenance_config";
 pub const KIND_PLAN: &str = "tenkai.plan";
 pub const KIND_ENVIRONMENT_EXECUTION: &str = "tenkai.environment_execution";
 pub const KIND_DEPLOYMENT: &str = "tenkai.deployment";
@@ -36,6 +37,8 @@ pub const REL_EVIDENCE_FOR_POLICY: &str = "evidence_for_policy";
 pub const REL_AUDITS_PROMOTION: &str = "audits_promotion";
 pub const ACTION_SUBSCRIBE: &str = "tenkai.subscribe";
 pub const ACTION_REPLACE_SUBSCRIPTION: &str = "tenkai.replace_subscription";
+pub const ACTION_CONFIGURE_MAINTENANCE: &str = "tenkai.configure_maintenance_windows";
+pub const ACTION_EMERGENCY_OVERRIDE: &str = "tenkai.emergency_maintenance_override";
 
 pub fn validate_identifier(label: &str, value: &str) -> Result<()> {
     let mut chars = value.chars();
@@ -88,6 +91,56 @@ fn object_type(kind: &str, description: &str, properties: Vec<PropertyDef>) -> O
     }
 }
 
+fn string_param(name: &str) -> ActionParamDef {
+    ActionParamDef {
+        name: name.into(),
+        r#type: "string".into(),
+        required: true,
+        enum_values: vec![],
+    }
+}
+
+fn configure_maintenance_action() -> ActionTypeDef {
+    ActionTypeDef {
+        name: ACTION_CONFIGURE_MAINTENANCE.into(),
+        description: "Authorize and replace an environment's maintenance windows".into(),
+        params: vec![
+            string_param("environment"),
+            string_param("windows"),
+            string_param("revision"),
+            string_param("correlation"),
+        ],
+        ops: vec![
+            ActionOp {
+                op: "set_property".into(),
+                property: "environment".into(),
+                value_from: "environment".into(),
+                relation: String::new(),
+            },
+            ActionOp {
+                op: "set_property".into(),
+                property: "windows".into(),
+                value_from: "windows".into(),
+                relation: String::new(),
+            },
+            ActionOp {
+                op: "set_property".into(),
+                property: "revision".into(),
+                value_from: "revision".into(),
+                relation: String::new(),
+            },
+            ActionOp {
+                op: "set_property".into(),
+                property: "last_update_correlation".into(),
+                value_from: "correlation".into(),
+                relation: String::new(),
+            },
+        ],
+        target_kind: KIND_MAINTENANCE_CONFIG.into(),
+        created: crate::now_millis(),
+    }
+}
+
 /// Register the tenkai schema types; existing types are left untouched.
 pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
     let types = vec![
@@ -132,6 +185,24 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
             vec![prop("description", false, "What this environment is")],
         ),
         object_type(
+            KIND_MAINTENANCE_CONFIG,
+            "Action-controlled maintenance-window configuration for one environment",
+            vec![
+                prop("environment", true, "Environment name"),
+                prop(
+                    "windows",
+                    true,
+                    "JSON list of recurring maintenance windows",
+                ),
+                prop("revision", true, "Digest of the current windows JSON"),
+                prop(
+                    "last_update_correlation",
+                    false,
+                    "Correlation recorded by the most recent governed update",
+                ),
+            ],
+        ),
+        object_type(
             KIND_PLAN,
             "A computed set of steps converging one environment on its channels",
             vec![
@@ -149,6 +220,16 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
                 ),
                 prop("plan", true, "Versioned serialized plan document"),
                 prop("status", true, "computed|running|blocked|succeeded|failed"),
+                prop(
+                    "last_emergency_override_reason",
+                    false,
+                    "Last governed maintenance override reason",
+                ),
+                prop(
+                    "last_emergency_override_correlation",
+                    false,
+                    "Correlation token for the last governed maintenance override",
+                ),
             ],
         ),
         object_type(
@@ -310,12 +391,6 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
             Err(status) => return Err(status.into()),
         }
     }
-    let string_param = |name: &str| ActionParamDef {
-        name: name.into(),
-        r#type: "string".into(),
-        required: true,
-        enum_values: vec![],
-    };
     let actions = [
         ActionTypeDef {
             name: ACTION_SUBSCRIBE.into(),
@@ -328,6 +403,28 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
                 relation: REL_SUBSCRIBES.into(),
             }],
             target_kind: KIND_ENVIRONMENT.into(),
+            created: crate::now_millis(),
+        },
+        configure_maintenance_action(),
+        ActionTypeDef {
+            name: ACTION_EMERGENCY_OVERRIDE.into(),
+            description: "Authorize and audit an emergency maintenance-window override".into(),
+            params: vec![string_param("reason"), string_param("correlation")],
+            ops: vec![
+                ActionOp {
+                    op: "set_property".into(),
+                    property: "last_emergency_override_reason".into(),
+                    value_from: "reason".into(),
+                    relation: String::new(),
+                },
+                ActionOp {
+                    op: "set_property".into(),
+                    property: "last_emergency_override_correlation".into(),
+                    value_from: "correlation".into(),
+                    relation: String::new(),
+                },
+            ],
+            target_kind: KIND_PLAN.into(),
             created: crate::now_millis(),
         },
         ActionTypeDef {
@@ -423,5 +520,24 @@ mod tests {
         assert!(validate_identifier("product", "api@1").is_err());
         assert!(validate_identifier("environment", "prod:eu").is_err());
         assert!(validate_identifier("channel", "stable/eu").is_err());
+    }
+
+    #[test]
+    fn maintenance_action_mutates_the_configuration_object() {
+        let action = configure_maintenance_action();
+        assert_eq!(action.target_kind, KIND_MAINTENANCE_CONFIG);
+        assert_eq!(
+            action
+                .ops
+                .iter()
+                .map(|operation| operation.property.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "environment",
+                "windows",
+                "revision",
+                "last_update_correlation"
+            ]
+        );
     }
 }
