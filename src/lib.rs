@@ -13,6 +13,7 @@ pub mod manifest;
 pub mod ontology;
 pub mod pb;
 pub mod plan;
+pub mod release_signing;
 
 pub fn now_millis() -> i64 {
     std::time::SystemTime::now()
