@@ -64,6 +64,16 @@ pub struct ResolvedSigner {
     pub verifying_key: VerifyingKey,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerificationEvidence {
+    pub signer_identity: String,
+    pub signer_key_id: String,
+    pub manifest_digest: String,
+    pub artifact_digest: String,
+    pub statement_digest: String,
+    pub provenance: Provenance,
+}
+
 impl SignatureEnvelope {
     pub fn load(path: &Path) -> Result<Self> {
         let raw = std::fs::read_to_string(path)
@@ -131,6 +141,35 @@ impl SignatureEnvelope {
             .context("release signature verification failed")?;
         Ok(signer)
     }
+}
+
+pub fn verify_release(
+    envelope: &SignatureEnvelope,
+    roots: &TrustRoots,
+    manifest_digest: &str,
+    artifact_digest: &str,
+) -> Result<VerificationEvidence> {
+    let signer = envelope.authenticate(roots)?;
+    if envelope.statement.manifest_digest != manifest_digest {
+        bail!(
+            "release signature manifest digest does not match the published manifest: signed {}, actual {manifest_digest}",
+            envelope.statement.manifest_digest
+        );
+    }
+    if envelope.statement.artifact_digest != artifact_digest {
+        bail!(
+            "release signature artifact digest does not match the declared deploy inputs: signed {}, actual {artifact_digest}",
+            envelope.statement.artifact_digest
+        );
+    }
+    Ok(VerificationEvidence {
+        signer_identity: signer.identity,
+        signer_key_id: signer.key_id,
+        manifest_digest: manifest_digest.into(),
+        artifact_digest: artifact_digest.into(),
+        statement_digest: envelope.statement_digest()?,
+        provenance: envelope.statement.provenance.clone(),
+    })
 }
 
 impl Provenance {
@@ -448,5 +487,71 @@ mod tests {
             }],
         };
         assert!(roots.validate().is_err());
+    }
+
+    #[test]
+    fn verification_binds_manifest_and_artifact_digests() {
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[11_u8; 32]);
+        let public_key = signing_key.verifying_key().to_bytes();
+        let roots = TrustRoots {
+            version: TRUST_ROOT_VERSION,
+            signers: vec![TrustedSigner {
+                key_id: key_id(&public_key),
+                identity: "release@example.com".into(),
+                public_key: STANDARD.encode(public_key),
+            }],
+        };
+        let mut envelope = SignatureEnvelope {
+            schema: ENVELOPE_SCHEMA.into(),
+            key_id: key_id(&public_key),
+            statement: ReleaseStatement {
+                manifest_digest: "2".repeat(64),
+                artifact_digest: "3".repeat(64),
+                provenance: provenance(),
+            },
+            signature: String::new(),
+        };
+        envelope.signature = STANDARD.encode(
+            signing_key
+                .sign(&envelope.signed_bytes().unwrap())
+                .to_bytes(),
+        );
+
+        let evidence = verify_release(&envelope, &roots, &"2".repeat(64), &"3".repeat(64)).unwrap();
+        assert_eq!(evidence.signer_identity, "release@example.com");
+        assert!(verify_release(&envelope, &roots, &"4".repeat(64), &"3".repeat(64)).is_err());
+        assert!(verify_release(&envelope, &roots, &"2".repeat(64), &"4".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn verification_rejects_an_untrusted_signer() {
+        let trusted_key = ed25519_dalek::SigningKey::from_bytes(&[12_u8; 32]);
+        let untrusted_key = ed25519_dalek::SigningKey::from_bytes(&[13_u8; 32]);
+        let trusted_public_key = trusted_key.verifying_key().to_bytes();
+        let untrusted_public_key = untrusted_key.verifying_key().to_bytes();
+        let roots = TrustRoots {
+            version: TRUST_ROOT_VERSION,
+            signers: vec![TrustedSigner {
+                key_id: key_id(&trusted_public_key),
+                identity: "trusted@example.com".into(),
+                public_key: STANDARD.encode(trusted_public_key),
+            }],
+        };
+        let mut envelope = SignatureEnvelope {
+            schema: ENVELOPE_SCHEMA.into(),
+            key_id: key_id(&untrusted_public_key),
+            statement: ReleaseStatement {
+                manifest_digest: "2".repeat(64),
+                artifact_digest: "3".repeat(64),
+                provenance: provenance(),
+            },
+            signature: String::new(),
+        };
+        envelope.signature = STANDARD.encode(
+            untrusted_key
+                .sign(&envelope.signed_bytes().unwrap())
+                .to_bytes(),
+        );
+        assert!(verify_release(&envelope, &roots, &"2".repeat(64), &"3".repeat(64)).is_err());
     }
 }
