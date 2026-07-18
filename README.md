@@ -32,7 +32,8 @@ cargo build
 ./target/debug/tenkaictl init
 
 # publish an immutable release and promote it to a channel
-./target/debug/tenkaictl publish examples/hello-local/tenkai.toml
+./target/debug/tenkaictl publish examples/hello-local/tenkai.toml \
+  --allow-unsigned-development
 ./target/debug/tenkaictl promote hello-local@0.1.0 stable
 
 # subscribe this machine and converge
@@ -133,8 +134,14 @@ pattern (sekai-chisei itself is the first product using it):
 3. **Publish the manifest straight from the tag** — no checkout required:
 
 ```bash
+release_signature=$(mktemp)
+gh api "repos/Sannrox/sekai-chisei/contents/deploy/tenkai.sig.json?ref=v0.2.0" \
+  --jq .content | base64 -d > "$release_signature"
 gh api "repos/Sannrox/sekai-chisei/contents/deploy/tenkai.toml?ref=v0.2.0" \
-  --jq .content | base64 -d | tenkaictl publish -
+  --jq .content | base64 -d | tenkaictl publish - \
+    --signature "$release_signature" \
+    --trust-roots /etc/tenkai/release-trust.toml
+rm -f "$release_signature"
 tenkaictl promote sekai-chisei@0.2.0 stable
 tenkaictl plan --env local
 tenkaictl apply <plan-id>

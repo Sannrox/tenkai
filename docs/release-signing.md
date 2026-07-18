@@ -38,3 +38,15 @@ public_key = "<base64-encoded-32-byte-Ed25519-public-key>"
 Signer identity comes only from this local trust-root file, never from the
 untrusted signature envelope. Duplicate keys or identities and key ids that do
 not match their public keys are rejected.
+
+## Publication policy
+
+Publication fails closed unless both `--signature` and `--trust-roots` are
+provided. Tenkai strictly verifies the Ed25519 signature and compares both
+signed digests with the manifest and declared deploy inputs before creating a
+snapshot or modifying the catalog.
+
+Unsigned publication is available only through the conspicuous
+`--allow-unsigned-development` flag. It is intended for local development and
+cannot be combined with signature options. Automation and non-development
+publication must omit this escape hatch and therefore remain fail closed.
