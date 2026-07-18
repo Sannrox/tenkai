@@ -23,7 +23,18 @@ enum Command {
     /// Register the tenkai schema in sekai and create the `local` environment.
     Init,
     /// Publish a manifest as an immutable release.
-    Publish { manifest: PathBuf },
+    Publish {
+        manifest: PathBuf,
+        /// Detached tenkai.release-signature.v1 JSON envelope.
+        #[arg(long)]
+        signature: Option<PathBuf>,
+        /// Versioned TOML file containing trusted Ed25519 release signers.
+        #[arg(long)]
+        trust_roots: Option<PathBuf>,
+        /// Permit an unsigned release for local development only.
+        #[arg(long)]
+        allow_unsigned_development: bool,
+    },
     /// Point a channel at a published release, e.g. `promote hello@0.1.0 stable`.
     Promote { spec: String, channel: String },
     /// Manage canary designation, promotion policy, and evidence repair.
@@ -175,8 +186,18 @@ async fn main() -> Result<()> {
             let migrated = maintenance::migrate_all(&mut ctx).await?;
             println!("maintenance configuration ready for {migrated} environment(s)");
         }
-        Command::Publish { manifest } => {
-            println!("{}", catalog::publish(&mut ctx, &manifest).await?);
+        Command::Publish {
+            manifest,
+            signature,
+            trust_roots,
+            allow_unsigned_development,
+        } => {
+            let options = catalog::PublishOptions {
+                signature,
+                trust_roots,
+                allow_unsigned_development,
+            };
+            println!("{}", catalog::publish(&mut ctx, &manifest, &options).await?);
         }
         Command::Promote { spec, channel } => {
             println!("{}", catalog::promote(&mut ctx, &spec, &channel).await?);
@@ -470,6 +491,47 @@ mod tests {
                 emergency_reason: Some(ref reason),
                 ..
             } if reason == "restore critical service"
+        ));
+    }
+
+    #[test]
+    fn parses_signed_and_explicit_unsigned_publication() {
+        let signed = Cli::try_parse_from([
+            "tenkaictl",
+            "publish",
+            "tenkai.toml",
+            "--signature",
+            "tenkai.sig.json",
+            "--trust-roots",
+            "release-trust.toml",
+        ])
+        .unwrap();
+        let Command::Publish {
+            signature,
+            trust_roots,
+            allow_unsigned_development,
+            ..
+        } = signed.command
+        else {
+            panic!("expected publish command");
+        };
+        assert_eq!(signature, Some(PathBuf::from("tenkai.sig.json")));
+        assert_eq!(trust_roots, Some(PathBuf::from("release-trust.toml")));
+        assert!(!allow_unsigned_development);
+
+        let unsigned = Cli::try_parse_from([
+            "tenkaictl",
+            "publish",
+            "tenkai.toml",
+            "--allow-unsigned-development",
+        ])
+        .unwrap();
+        assert!(matches!(
+            unsigned.command,
+            Command::Publish {
+                allow_unsigned_development: true,
+                ..
+            }
         ));
     }
 }

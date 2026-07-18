@@ -1,7 +1,7 @@
 //! Catalog operations: publish immutable releases, promote them into channels.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 
@@ -9,6 +9,41 @@ use crate::client::Ctx;
 use crate::manifest;
 use crate::ontology::*;
 use crate::pb::sekai::Object;
+use crate::release_signing::{self, VerificationEvidence};
+
+#[derive(Debug, Clone, Default)]
+pub struct PublishOptions {
+    pub signature: Option<PathBuf>,
+    pub trust_roots: Option<PathBuf>,
+    pub allow_unsigned_development: bool,
+}
+
+fn verify_publication(
+    options: &PublishOptions,
+    manifest_digest: &str,
+    artifact_digest: &str,
+) -> Result<Option<VerificationEvidence>> {
+    match (&options.signature, &options.trust_roots) {
+        (Some(signature), Some(trust_roots)) => {
+            if options.allow_unsigned_development {
+                bail!("--allow-unsigned-development cannot be combined with signed publication");
+            }
+            let envelope = release_signing::SignatureEnvelope::load(signature)?;
+            let roots = release_signing::TrustRoots::load(trust_roots)?;
+            Ok(Some(release_signing::verify_release(
+                &envelope,
+                &roots,
+                manifest_digest,
+                artifact_digest,
+            )?))
+        }
+        (None, None) if options.allow_unsigned_development => Ok(None),
+        (None, None) => bail!(
+            "release publication requires --signature and --trust-roots; use --allow-unsigned-development only for local development"
+        ),
+        _ => bail!("signed publication requires both --signature and --trust-roots"),
+    }
+}
 
 fn object(id: String, kind: &str, name: String, properties: HashMap<String, String>) -> Object {
     let now = crate::now_millis();
@@ -25,13 +60,18 @@ fn object(id: String, kind: &str, name: String, properties: HashMap<String, Stri
 }
 
 /// Publish the manifest as an immutable release of its product.
-pub async fn publish(ctx: &mut Ctx, manifest_path: &Path) -> Result<String> {
+pub async fn publish(
+    ctx: &mut Ctx,
+    manifest_path: &Path,
+    options: &PublishOptions,
+) -> Result<String> {
     let loaded = manifest::load(manifest_path)?;
     let name = loaded.manifest.product.name.clone();
     let version = loaded.manifest.product.version.clone();
     let digest = manifest::digest(&loaded.raw);
     let artifact_digest =
         manifest::artifact_digest(&loaded.workdir, &loaded.manifest.deploy.inputs)?;
+    let verification = verify_publication(options, &digest, &artifact_digest)?;
     let versioned_workdir = manifest::snapshot_workdir(
         &loaded.workdir,
         &loaded.manifest.deploy.inputs,
@@ -118,7 +158,14 @@ pub async fn publish(ctx: &mut Ctx, manifest_path: &Path) -> Result<String> {
             "{name}@{version} already published (digest unchanged)"
         ))
     } else {
-        Ok(format!("published {name}@{version} ({})", &digest[..12]))
+        let trust = verification
+            .as_ref()
+            .map(|evidence| format!("signed by {}", evidence.signer_identity))
+            .unwrap_or_else(|| "unsigned development release".into());
+        Ok(format!(
+            "published {name}@{version} ({}, {trust})",
+            &digest[..12]
+        ))
     }
 }
 
@@ -182,5 +229,31 @@ pub async fn promote(ctx: &mut Ctx, spec: &str, channel: &str) -> Result<String>
             Err(error.context(format!("releasing promotion lock also failed: {unlock}")))
         }
         (Ok(_), Err(error)) => Err(error.context("releasing promotion lock failed")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn publication_fails_closed_without_signature_configuration() {
+        let error =
+            verify_publication(&PublishOptions::default(), &"a".repeat(64), &"b".repeat(64))
+                .unwrap_err();
+        assert!(error.to_string().contains("requires --signature"));
+    }
+
+    #[test]
+    fn unsigned_development_policy_must_be_explicit() {
+        let options = PublishOptions {
+            allow_unsigned_development: true,
+            ..Default::default()
+        };
+        assert!(
+            verify_publication(&options, &"a".repeat(64), &"b".repeat(64))
+                .unwrap()
+                .is_none()
+        );
     }
 }
