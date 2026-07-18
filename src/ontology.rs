@@ -12,6 +12,7 @@ pub const NS: &str = "tenkai";
 
 pub const KIND_PRODUCT: &str = "tenkai.product";
 pub const KIND_RELEASE: &str = "tenkai.release";
+pub const KIND_RELEASE_VERIFICATION: &str = "tenkai.release_verification";
 pub const KIND_CHANNEL: &str = "tenkai.channel";
 pub const KIND_ENVIRONMENT: &str = "tenkai.environment";
 pub const KIND_MAINTENANCE_CONFIG: &str = "tenkai.maintenance_config";
@@ -27,6 +28,7 @@ pub const KIND_PROMOTION_AUDIT: &str = "tenkai.promotion_audit";
 pub const KIND_PROMOTION_LOCK: &str = "tenkai.promotion_lock";
 
 pub const REL_RELEASE_OF: &str = "release_of";
+pub const REL_HAS_RELEASE_VERIFICATION: &str = "has_release_verification";
 pub const REL_PROMOTES: &str = "promotes";
 pub const REL_SUBSCRIBES: &str = "subscribes";
 pub const REL_DEPLOYED_RELEASE: &str = "deployed_release";
@@ -58,6 +60,9 @@ pub fn product_id(name: &str) -> String {
 pub fn release_id(product: &str, version: &str) -> String {
     format!("tenkai:release:{product}@{version}")
 }
+pub fn release_verification_id(release_id: &str) -> String {
+    format!("{release_id}:verification")
+}
 pub fn channel_id(product: &str, channel: &str) -> String {
     format!("tenkai:channel:{product}/{channel}")
 }
@@ -77,6 +82,7 @@ fn prop(name: &str, required: bool, description: &str) -> PropertyDef {
         r#type: "string".into(),
         required,
         description: description.into(),
+        classification: "public".into(),
         ..Default::default()
     }
 }
@@ -141,7 +147,59 @@ fn configure_maintenance_action() -> ActionTypeDef {
     }
 }
 
-/// Register the tenkai schema types; existing types are left untouched.
+fn schema_includes(actual: &ObjectType, expected: &ObjectType) -> bool {
+    expected.properties.iter().all(|expected_property| {
+        actual.properties.iter().any(|actual_property| {
+            actual_property.name == expected_property.name
+                && actual_property.r#type == expected_property.r#type
+                && actual_property.required == expected_property.required
+        })
+    })
+}
+
+fn evolve_schema(actual: &ObjectType, expected: &ObjectType) -> Result<ObjectType> {
+    let mut evolved = actual.clone();
+    for expected_property in &expected.properties {
+        match actual
+            .properties
+            .iter()
+            .find(|property| property.name == expected_property.name)
+        {
+            Some(property)
+                if property.r#type != expected_property.r#type
+                    || property.required != expected_property.required =>
+            {
+                bail!(
+                    "schema type {} has incompatible property {} (expected type {:?}, required {}; found type {:?}, required {})",
+                    actual.kind,
+                    expected_property.name,
+                    expected_property.r#type,
+                    expected_property.required,
+                    property.r#type,
+                    property.required
+                );
+            }
+            Some(_) => {}
+            None => evolved.properties.push(expected_property.clone()),
+        }
+    }
+    Ok(evolved)
+}
+
+fn schema_preserves(actual: &ObjectType, expected: &ObjectType) -> bool {
+    actual.kind == expected.kind
+        && actual.description == expected.description
+        && actual.is_builtin == expected.is_builtin
+        && actual.implements == expected.implements
+        && expected.properties.iter().all(|expected_property| {
+            actual
+                .properties
+                .iter()
+                .any(|property| property == expected_property)
+        })
+}
+
+/// Register or evolve the tenkai schema types.
 pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
     let types = vec![
         object_type(
@@ -163,6 +221,47 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
                 ),
                 prop("manifest", true, "Raw manifest as published"),
                 prop("workdir", false, "Absolute workdir for deploy commands"),
+                prop(
+                    "verification_status",
+                    false,
+                    "verified|unsigned-development publication trust result",
+                ),
+                prop(
+                    "signature_algorithm",
+                    false,
+                    "Signature algorithm or none for unsigned development",
+                ),
+                prop("signer_identity", false, "Trusted signer identity"),
+                prop("signer_key_id", false, "Trusted signer public-key digest"),
+                prop(
+                    "signature_statement_digest",
+                    false,
+                    "sha256 of the canonical signed release statement",
+                ),
+                prop(
+                    "signature_envelope",
+                    false,
+                    "Detached signature envelope retained for reverification",
+                ),
+                prop("provenance", false, "Canonical signed provenance JSON"),
+            ],
+        ),
+        object_type(
+            KIND_RELEASE_VERIFICATION,
+            "An immutable first-writer claim for legacy release verification evidence",
+            vec![
+                prop("release_id", true, "Verified release object id"),
+                prop("verification_status", true, "verified"),
+                prop("signature_algorithm", true, "Signature algorithm"),
+                prop("signer_identity", true, "Trusted signer identity"),
+                prop("signer_key_id", true, "Trusted signer public-key digest"),
+                prop(
+                    "signature_statement_digest",
+                    true,
+                    "sha256 of the canonical signed release statement",
+                ),
+                prop("signature_envelope", true, "Detached signature envelope"),
+                prop("provenance", true, "Canonical signed provenance JSON"),
             ],
         ),
         object_type(
@@ -377,19 +476,71 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
         ),
     ];
 
+    let current_types = ctx
+        .sekai
+        .list_schema_types(ListSchemaTypesRequest {})
+        .await?
+        .into_inner()
+        .types;
     let mut registered = Vec::new();
     for t in types {
         let kind = t.kind.clone();
+        let schema = match current_types.iter().find(|schema| schema.kind == kind) {
+            Some(current) if schema_includes(current, &t) => continue,
+            Some(current) => evolve_schema(current, &t)?,
+            None => t.clone(),
+        };
         match ctx
             .sekai
-            .create_schema_type(CreateSchemaTypeRequest { r#type: Some(t) })
+            .create_schema_type(CreateSchemaTypeRequest {
+                r#type: Some(schema.clone()),
+            })
             .await
         {
-            Ok(_) => registered.push(kind),
-            Err(status) if status.code() == tonic::Code::AlreadyExists => {}
+            Ok(_) => {
+                let refreshed = ctx
+                    .sekai
+                    .list_schema_types(ListSchemaTypesRequest {})
+                    .await?
+                    .into_inner()
+                    .types;
+                if !refreshed
+                    .iter()
+                    .find(|candidate| candidate.kind == kind)
+                    .is_some_and(|candidate| {
+                        schema_includes(candidate, &t) && schema_preserves(candidate, &schema)
+                    })
+                {
+                    bail!(
+                        "schema type {kind} was replaced during concurrent initialization; rerun tenkaictl init"
+                    );
+                }
+                registered.push(kind)
+            }
             Err(status)
-                if status.code() == tonic::Code::Internal
-                    && status.message().contains("UNIQUE") => {}
+                if status.code() == tonic::Code::AlreadyExists
+                    || (status.code() == tonic::Code::Internal
+                        && status.message().contains("UNIQUE")) =>
+            {
+                let refreshed = ctx
+                    .sekai
+                    .list_schema_types(ListSchemaTypesRequest {})
+                    .await?
+                    .into_inner()
+                    .types;
+                if refreshed
+                    .iter()
+                    .find(|candidate| candidate.kind == kind)
+                    .is_some_and(|candidate| {
+                        schema_includes(candidate, &t) && schema_preserves(candidate, &schema)
+                    })
+                {
+                    continue;
+                }
+                bail!(
+                    "sekai backend cannot evolve existing schema type {kind}; upgrade sekai-chisei and rerun tenkaictl init"
+                );
+            }
             Err(status) => return Err(status.into()),
         }
     }
@@ -537,5 +688,53 @@ mod tests {
                 "last_update_correlation"
             ]
         );
+    }
+
+    #[test]
+    fn schema_evolution_detects_missing_or_incompatible_properties() {
+        let expected = object_type(
+            "example",
+            "expected",
+            vec![prop("existing", true, ""), prop("added", false, "")],
+        );
+        let legacy = object_type("example", "legacy", vec![prop("existing", true, "")]);
+        assert!(!schema_includes(&legacy, &expected));
+
+        let current = object_type(
+            "example",
+            "current",
+            vec![prop("existing", true, ""), prop("added", false, "")],
+        );
+        assert!(schema_includes(&current, &expected));
+
+        let incompatible = object_type(
+            "example",
+            "incompatible",
+            vec![prop("existing", true, ""), prop("added", true, "")],
+        );
+        assert!(!schema_includes(&incompatible, &expected));
+        assert!(evolve_schema(&incompatible, &expected).is_err());
+
+        let mut custom = object_type(
+            "example",
+            "custom description",
+            vec![prop("existing", true, "custom metadata")],
+        );
+        custom.implements.push("custom.interface".into());
+        custom
+            .properties
+            .push(prop("installation_specific", false, "must survive"));
+        let evolved = evolve_schema(&custom, &expected).unwrap();
+        assert_eq!(evolved.description, "custom description");
+        assert_eq!(evolved.implements, vec!["custom.interface"]);
+        assert_eq!(evolved.properties[0].description, "custom metadata");
+        assert!(
+            evolved
+                .properties
+                .iter()
+                .any(|property| property.name == "installation_specific")
+        );
+        assert!(schema_includes(&evolved, &expected));
+        assert!(schema_preserves(&evolved, &custom));
     }
 }
