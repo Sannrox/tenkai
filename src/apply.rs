@@ -431,7 +431,7 @@ async fn compensate_activation(
     failure: &anyhow::Error,
     cancellation: &Cancellation,
     mutation_started: &mut bool,
-) {
+) -> Result<Outcome> {
     let failure = format!("deployment bookkeeping failed after activation: {failure}");
     let target_executor = executor::select(content.manifest.deploy.executor);
     let target_input = executor_input(content, step, step.action, step.from.clone());
@@ -444,7 +444,7 @@ async fn compensate_activation(
     )
     .await
     .is_ok();
-    let mut restored = step.from.is_none();
+    let mut restored = false;
 
     if let (Some(previous), Some(pin)) = (step.from.as_deref(), step.restore.as_ref())
         && let Ok(previous_content) = release_content(ctx, pin, env, &step.product).await
@@ -470,14 +470,19 @@ async fn compensate_activation(
                 .await
                 .is_ok();
         }
+    } else if step.from.is_none() && cleaned {
+        restored = clear_env_deployed(ctx, env, &step.product).await.is_ok();
     }
 
-    // A graph write already failed, so this update is necessarily best effort.
-    // Marking the target unknown is safer than claiming a version that may not
-    // match the external deployment after incomplete compensation.
-    if !cleaned || !restored || step.from.is_none() {
-        let _ = set_env_unknown(ctx, env, &step.product, &failure).await;
+    let recovered = cleaned && restored;
+    if !recovered {
+        set_env_unknown(ctx, env, &step.product, &failure).await?;
     }
+    Ok(Outcome {
+        step: step.clone(),
+        status: if recovered { "rolled_back" } else { "failed" }.into(),
+        detail: failure,
+    })
 }
 
 async fn release_content(
@@ -732,6 +737,15 @@ fn environment_claim_id(environment: &str) -> String {
 }
 
 const ENVIRONMENT_LEASE_MS: i64 = 2 * 60 * 60 * 1000;
+const EXECUTION_PROTOCOL: &str = "durable-attempts-v1";
+
+fn lease_is_expired(object: &Object, now: i64) -> bool {
+    object
+        .properties
+        .get("expires_at")
+        .and_then(|value| value.parse::<i64>().ok())
+        .is_some_and(|expires_at| expires_at <= now)
+}
 
 pub(crate) struct EnvironmentLease {
     id: String,
@@ -778,12 +792,7 @@ pub(crate) async fn claim_environment(
         .get(&lease.id)
         .await?
         .with_context(|| format!("environment lease {} disappeared", lease.id))?;
-    let expires_at = existing
-        .properties
-        .get("expires_at")
-        .and_then(|value| value.parse::<i64>().ok())
-        .unwrap_or(i64::MAX);
-    if expires_at <= now {
+    if lease_is_expired(&existing, now) {
         bail!(
             "environment {environment} has an expired apply lease; verify no apply is running, then run `tenkaictl env unlock {environment}`"
         );
@@ -866,6 +875,191 @@ pub async fn unlock_environment(ctx: &mut Ctx, environment: &str) -> Result<Stri
     }
     ctx.delete(&id).await?;
     Ok(format!("removed apply lease for environment {environment}"))
+}
+
+async fn uses_durable_execution_protocol(ctx: &mut Ctx, plan_id: &str) -> Result<bool> {
+    let object = ctx
+        .get(plan_id)
+        .await?
+        .with_context(|| format!("plan {plan_id} disappeared"))?;
+    if object.kind != KIND_PLAN || object.namespace != NS {
+        bail!("object {plan_id} is not a Tenkai plan");
+    }
+    Ok(object
+        .properties
+        .get("execution_protocol")
+        .is_some_and(|protocol| protocol == EXECUTION_PROTOCOL))
+}
+
+async fn mark_durable_execution_protocol(ctx: &mut Ctx, plan_id: &str) -> Result<()> {
+    let mut object = ctx
+        .get(plan_id)
+        .await?
+        .with_context(|| format!("plan {plan_id} disappeared"))?;
+    if object.kind != KIND_PLAN || object.namespace != NS {
+        bail!("object {plan_id} is not a Tenkai plan");
+    }
+    object
+        .properties
+        .insert("execution_protocol".into(), EXECUTION_PROTOCOL.into());
+    object.updated = crate::now_millis();
+    match ctx.put(object).await {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            if matches!(
+                uses_durable_execution_protocol(ctx, plan_id).await,
+                Ok(true)
+            ) {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+/// Terminate a plan left running by a stopped reconciler.
+///
+/// Ambiguous external mutations are marked unknown and must be observed by an
+/// operator before a later plan may execute. The environment lease is retained
+/// so callers must make a separate, explicit decision to unlock it.
+async fn terminate_interrupted_plan(ctx: &mut Ctx, plan_id: &str) -> Result<String> {
+    let mut interrupted = plan::load(ctx, plan_id).await?;
+    if !matches!(interrupted.state, PlanState::Running | PlanState::Failed) {
+        bail!(
+            "plan {plan_id} is {}, not running or failed",
+            interrupted.state
+        );
+    }
+    let durable_protocol = uses_durable_execution_protocol(ctx, plan_id).await?;
+    let mut ambiguous = Vec::new();
+    let mut attempts = Vec::with_capacity(interrupted.steps.len());
+    for step in &interrupted.steps {
+        attempts.push(ctx.get(&step_deployment_id(&step.id)).await?);
+    }
+    if !durable_protocol && attempts.iter().all(Option::is_none) {
+        for step in &interrupted.steps {
+            let detail = "interrupted legacy execution has no durable step state; observed state is required";
+            set_env_unknown(ctx, &interrupted.environment, &step.product, detail).await?;
+            ambiguous.push(step.product.clone());
+        }
+    }
+    for (step, attempt) in interrupted.steps.iter().zip(attempts) {
+        let Some(attempt) = attempt else { continue };
+        validate_attempt_identity(&attempt, &interrupted.environment, plan_id, step)?;
+        match attempt.properties.get("status").map(String::as_str) {
+            Some("preparing") => {
+                record_not_started(
+                    ctx,
+                    &interrupted.environment,
+                    plan_id,
+                    step,
+                    "reconciler stopped before deployment execution",
+                )
+                .await?;
+            }
+            Some("running" | "compensating") => {
+                let detail =
+                    "reconciler stopped during deployment execution; observed state is required";
+                set_env_unknown(ctx, &interrupted.environment, &step.product, detail).await?;
+                record_not_started(ctx, &interrupted.environment, plan_id, step, detail).await?;
+                ambiguous.push(step.product.clone());
+            }
+            Some("succeeded" | "failed" | "rolled_back") => {}
+            _ => {
+                let status = attempt
+                    .properties
+                    .get("status")
+                    .map(String::as_str)
+                    .unwrap_or("missing");
+                let detail = format!(
+                    "interrupted deployment has unknown attempt status {status:?}; observed state is required"
+                );
+                set_env_unknown(ctx, &interrupted.environment, &step.product, &detail).await?;
+                record_not_started(ctx, &interrupted.environment, plan_id, step, &detail).await?;
+                ambiguous.push(step.product.clone());
+            }
+        }
+    }
+    let detail = if ambiguous.is_empty() {
+        "reconciler stopped between deployment steps".into()
+    } else {
+        format!(
+            "reconciler stopped with unknown deployment state for {}",
+            ambiguous.join(", ")
+        )
+    };
+    if interrupted.state == PlanState::Running {
+        interrupted.state = PlanState::Failed;
+        interrupted.status_detail = detail.clone();
+        plan::store(ctx, &interrupted).await?;
+    }
+    Ok(detail)
+}
+
+/// Terminate interrupted work while retaining its environment fence.
+pub async fn recover_interrupted_plan(
+    ctx: &mut Ctx,
+    plan_id: &str,
+    confirmed_stopped: bool,
+) -> Result<String> {
+    if !confirmed_stopped {
+        bail!("recovery requires confirming that the worker which ran plan {plan_id} is stopped");
+    }
+    let stored = plan::load(ctx, plan_id).await?;
+    let environment = stored.environment.clone();
+    let lease_id = environment_claim_id(&environment);
+    if !matches!(stored.state, PlanState::Running | PlanState::Failed) {
+        return Ok(format!(
+            "plan {plan_id} is {} and has no interrupted execution to recover",
+            stored.state
+        ));
+    }
+    let existing = ctx.get(&lease_id).await?;
+    let _lease = match existing {
+        Some(existing) => {
+            if existing.kind != KIND_ENVIRONMENT_EXECUTION
+                || existing.namespace != NS
+                || existing.properties.get("environment").map(String::as_str)
+                    != Some(environment.as_str())
+                || existing.properties.get("owner").map(String::as_str) != Some(plan_id)
+            {
+                bail!("environment {environment} lease is not owned by plan {plan_id}");
+            }
+            EnvironmentLease {
+                id: lease_id,
+                environment: environment.clone(),
+                owner: plan_id.into(),
+            }
+        }
+        None => {
+            if stored.state == PlanState::Failed {
+                let mut unfinished_attempt = false;
+                for step in &stored.steps {
+                    let Some(attempt) = ctx.get(&step_deployment_id(&step.id)).await? else {
+                        continue;
+                    };
+                    validate_attempt_identity(&attempt, &environment, plan_id, step)?;
+                    if !matches!(
+                        attempt.properties.get("status").map(String::as_str),
+                        Some("succeeded" | "failed" | "rolled_back")
+                    ) {
+                        unfinished_attempt = true;
+                    }
+                }
+                if !unfinished_attempt {
+                    return Ok(format!(
+                        "plan {plan_id} is failed and has no interrupted execution to recover"
+                    ));
+                }
+            }
+            claim_environment(ctx, &environment, plan_id).await?
+        }
+    };
+    let detail = terminate_interrupted_plan(ctx, plan_id).await?;
+    Ok(format!(
+        "{detail}; environment {environment} lease retained until explicit unlock"
+    ))
 }
 
 async fn validate_preconditions(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
@@ -1172,6 +1366,10 @@ async fn execute_locked(
     validate_preconditions(ctx, &stored_plan).await?;
     let plan_id = stored_plan.id.clone();
     let env = stored_plan.environment.clone();
+    ensure_no_interrupted_attempts(ctx, &env, &plan_id, None).await?;
+    mark_durable_execution_protocol(ctx, &plan_id)
+        .await
+        .context("persisting restart-safe execution protocol")?;
     let steps = stored_plan.steps.clone();
     let dependency_installs = stored_plan
         .inputs
@@ -1230,6 +1428,7 @@ async fn execute_locked(
     let mut plan_failed = false;
     let mut plan_blocked = false;
     let mut final_detail = String::new();
+    let mut prior_unwind_attempted = false;
 
     for step in steps {
         stop_running_if_cancelled(
@@ -1266,6 +1465,7 @@ async fn execute_locked(
             mutation_started,
         )
         .await?;
+        let mut unwind_prior_steps = true;
         let outcome = match execute_step(
             ctx,
             &env,
@@ -1276,6 +1476,7 @@ async fn execute_locked(
                 cancellation,
                 recovery,
                 mutation_started,
+                unwind_prior_steps: &mut unwind_prior_steps,
             },
         )
         .await
@@ -1283,17 +1484,21 @@ async fn execute_locked(
             Ok(outcome) => outcome,
             Err(error) => {
                 let mut detail = error.to_string();
-                let compensation = unwind_succeeded_steps(
-                    ctx,
-                    &env,
-                    &plan_id,
-                    &mut outcomes,
-                    &detail,
-                    recovery,
-                    mutation_started,
-                )
-                .await;
-                append_compensation_detail(&mut detail, &compensation);
+                if unwind_prior_steps {
+                    let compensation = unwind_succeeded_steps(
+                        ctx,
+                        &env,
+                        &plan_id,
+                        &mut outcomes,
+                        &detail,
+                        recovery,
+                        mutation_started,
+                    )
+                    .await;
+                    append_compensation_detail(&mut detail, &compensation);
+                } else {
+                    detail.push_str("; prior successful steps retained because current-step compensation did not start");
+                }
                 fail_running_plan(ctx, &mut stored_plan, skip_gates, &detail, mutation_started)
                     .await?;
                 return Err(error.context(detail));
@@ -1303,6 +1508,7 @@ async fn execute_locked(
             outcome.status.as_str(),
             "restore_pending" | "restore_pending_cleanup_failed"
         ) {
+            prior_unwind_attempted = true;
             let compensation_detail = unwind_succeeded_steps(
                 ctx,
                 &env,
@@ -1351,7 +1557,7 @@ async fn execute_locked(
         }
     }
 
-    if plan_failed {
+    if plan_failed && !prior_unwind_attempted {
         let compensation = unwind_succeeded_steps(
             ctx,
             &env,
@@ -1475,6 +1681,13 @@ async fn unwind_succeeded_steps(
     let mut details = Vec::new();
     for index in succeeded_indices_in_reverse(outcomes) {
         let step = outcomes[index].step.clone();
+        if let Err(error) = mark_deployment_compensating(ctx, env, plan_oid, &step).await {
+            let detail = format!("compensation did not start: {error}");
+            details.push(format!("{} {detail}", step.product));
+            outcomes[index].status = "failed".into();
+            outcomes[index].detail = detail;
+            break;
+        }
         match compensate_completed_step(
             ctx,
             env,
@@ -1487,22 +1700,38 @@ async fn unwind_succeeded_steps(
         .await
         {
             Ok(compensation) => {
+                let recovered = compensation.status == "rolled_back";
                 details.push(format!("{} {}", step.product, compensation.detail));
                 outcomes[index].status = compensation.status;
                 outcomes[index].detail = compensation.detail;
+                if !recovered {
+                    break;
+                }
             }
             Err(error) => {
                 let detail = format!("compensation failed: {error}");
-                let _ = set_env_unknown(ctx, env, &step.product, &detail).await;
-                let failed = Outcome {
-                    step,
-                    status: "failed".into(),
-                    detail: detail.clone(),
-                };
-                let _ = record_deployment(ctx, env, plan_oid, &failed).await;
-                details.push(format!("{} {detail}", failed.step.product));
-                outcomes[index].status = failed.status;
-                outcomes[index].detail = failed.detail;
+                match set_env_unknown(ctx, env, &step.product, &detail).await {
+                    Ok(()) => {
+                        let failed = Outcome {
+                            step,
+                            status: "failed".into(),
+                            detail: detail.clone(),
+                        };
+                        let _ = record_deployment(ctx, env, plan_oid, &failed).await;
+                        details.push(format!("{} {detail}", failed.step.product));
+                        outcomes[index].status = failed.status;
+                        outcomes[index].detail = failed.detail;
+                    }
+                    Err(unknown_error) => {
+                        let detail = format!(
+                            "{detail}; recording unknown environment state failed: {unknown_error}"
+                        );
+                        details.push(format!("{} {detail}", step.product));
+                        outcomes[index].status = "compensating".into();
+                        outcomes[index].detail = detail;
+                    }
+                }
+                break;
             }
         }
     }
@@ -1649,6 +1878,7 @@ struct StepExecution<'a> {
     cancellation: &'a Cancellation,
     recovery: &'a Cancellation,
     mutation_started: &'a mut bool,
+    unwind_prior_steps: &'a mut bool,
 }
 
 async fn execute_step(
@@ -1663,6 +1893,7 @@ async fn execute_step(
         cancellation,
         recovery,
         mutation_started,
+        unwind_prior_steps,
     } = execution;
     let mut step_mutation_started = false;
     let target = ReleasePin {
@@ -1676,6 +1907,9 @@ async fn execute_step(
         Some(pin) => Some(release_content(ctx, pin, env, &step.product).await?),
         None => None,
     };
+
+    prepare_deployment(ctx, env, plan_oid, step).await?;
+    mark_deployment_running(ctx, env, plan_oid, step).await?;
 
     if step.action == Action::Remove {
         let target_executor = executor::select(content.manifest.deploy.executor);
@@ -1693,21 +1927,34 @@ async fn execute_step(
             && !step_mutation_started
             && cancellation.reason().is_some()
         {
+            record_not_started(ctx, env, plan_oid, step, detail).await?;
             bail!(detail.clone());
         }
         let outcome = match removal {
             Ok(()) => {
                 if let Err(error) = clear_env_deployed(ctx, env, &step.product).await {
-                    compensate_removal_bookkeeping(
+                    begin_compensation_or_block_unwind(
                         ctx,
                         env,
+                        plan_oid,
                         step,
-                        &content,
-                        &error,
-                        recovery,
-                        mutation_started,
+                        unwind_prior_steps,
                     )
-                    .await;
+                    .await?;
+                    let compensation = retain_prerequisites_unless_rolled_back(
+                        compensate_removal_bookkeeping(
+                            ctx,
+                            env,
+                            step,
+                            &content,
+                            &error,
+                            recovery,
+                            mutation_started,
+                        )
+                        .await,
+                        unwind_prior_steps,
+                    )?;
+                    record_deployment(ctx, env, plan_oid, &compensation).await?;
                     return Err(error);
                 }
                 Outcome {
@@ -1729,16 +1976,22 @@ async fn execute_step(
         };
         if let Err(error) = record_deployment(ctx, env, plan_oid, &outcome).await {
             if outcome.status == "succeeded" {
-                compensate_removal_bookkeeping(
-                    ctx,
-                    env,
-                    step,
-                    &content,
-                    &error,
-                    recovery,
-                    mutation_started,
-                )
-                .await;
+                begin_compensation_or_block_unwind(ctx, env, plan_oid, step, unwind_prior_steps)
+                    .await?;
+                let compensation = retain_prerequisites_unless_rolled_back(
+                    compensate_removal_bookkeeping(
+                        ctx,
+                        env,
+                        step,
+                        &content,
+                        &error,
+                        recovery,
+                        mutation_started,
+                    )
+                    .await,
+                    unwind_prior_steps,
+                )?;
+                record_deployment(ctx, env, plan_oid, &compensation).await?;
             }
             return Err(error);
         }
@@ -1769,6 +2022,7 @@ async fn execute_step(
         *mutation_started |= step_mutation_started;
         if let Some(detail) = cleanup_failure {
             if !step_mutation_started && cancellation.reason().is_some() {
+                record_not_started(ctx, env, plan_oid, step, &detail).await?;
                 bail!(detail);
             }
             let detail = format!("rollback blocked: outgoing release cleanup failed: {detail}");
@@ -1800,6 +2054,7 @@ async fn execute_step(
         && !step_mutation_started
         && cancellation.reason().is_some()
     {
+        record_not_started(ctx, env, plan_oid, step, detail).await?;
         bail!(detail.clone());
     }
     let outcome = match activation {
@@ -1819,13 +2074,41 @@ async fn execute_step(
             )
             .await
             {
-                compensate_activation(ctx, env, step, &content, &error, recovery, mutation_started)
-                    .await;
+                begin_compensation_or_block_unwind(ctx, env, plan_oid, step, unwind_prior_steps)
+                    .await?;
+                let compensation = retain_prerequisites_unless_rolled_back(
+                    compensate_activation(
+                        ctx,
+                        env,
+                        step,
+                        &content,
+                        &error,
+                        recovery,
+                        mutation_started,
+                    )
+                    .await,
+                    unwind_prior_steps,
+                )?;
+                record_deployment(ctx, env, plan_oid, &compensation).await?;
                 return Err(error);
             }
             if let Err(error) = record_deployment(ctx, env, plan_oid, &outcome).await {
-                compensate_activation(ctx, env, step, &content, &error, recovery, mutation_started)
-                    .await;
+                begin_compensation_or_block_unwind(ctx, env, plan_oid, step, unwind_prior_steps)
+                    .await?;
+                let compensation = retain_prerequisites_unless_rolled_back(
+                    compensate_activation(
+                        ctx,
+                        env,
+                        step,
+                        &content,
+                        &error,
+                        recovery,
+                        mutation_started,
+                    )
+                    .await,
+                    unwind_prior_steps,
+                )?;
+                record_deployment(ctx, env, plan_oid, &compensation).await?;
                 return Err(error);
             }
             return Ok(outcome);
@@ -1897,7 +2180,7 @@ async fn compensate_removal_bookkeeping(
     failure: &anyhow::Error,
     recovery: &Cancellation,
     mutation_started: &mut bool,
-) {
+) -> Result<Outcome> {
     let detail = format!("removal bookkeeping failed after deactivation: {failure}");
     let executor = executor::select(content.manifest.deploy.executor);
     let input = executor_input(content, step, Action::Rollback, None);
@@ -1913,8 +2196,54 @@ async fn compensate_removal_bookkeeping(
         false
     };
     if !state_restored {
-        let _ = set_env_unknown(ctx, env, &step.product, &detail).await;
+        set_env_unknown(ctx, env, &step.product, &detail).await?;
     }
+    Ok(Outcome {
+        step: step.clone(),
+        status: if state_restored {
+            "rolled_back"
+        } else {
+            "failed"
+        }
+        .into(),
+        detail,
+    })
+}
+
+fn validate_attempt_identity(
+    attempt: &crate::pb::sekai::Object,
+    env: &str,
+    plan_oid: &str,
+    step: &Step,
+) -> Result<()> {
+    let action = step.action.to_string();
+    let expected = [
+        ("environment", env),
+        ("product", step.product.as_str()),
+        ("step_id", step.id.as_str()),
+        ("plan_id", plan_oid),
+        ("from_version", step.from.as_deref().unwrap_or_default()),
+        ("to_version", step.to.as_str()),
+        ("action", action.as_str()),
+        ("release_id", step.release_id.as_str()),
+        ("release_digest", step.release_digest.as_str()),
+        ("artifact_digest", step.artifact_digest.as_str()),
+        ("workdir", step.workdir.as_str()),
+    ];
+    if attempt.id != step_deployment_id(&step.id)
+        || attempt.kind != KIND_DEPLOYMENT
+        || attempt.namespace != NS
+        || expected
+            .into_iter()
+            .any(|(key, value)| attempt.properties.get(key).map(String::as_str) != Some(value))
+    {
+        bail!(
+            "deployment record {} has invalid immutable identity for step {}",
+            attempt.id,
+            step.id
+        );
+    }
+    Ok(())
 }
 
 async fn record_deployment(
@@ -1923,34 +2252,12 @@ async fn record_deployment(
     plan_oid: &str,
     outcome: &Outcome,
 ) -> Result<()> {
-    let now = crate::now_millis();
-    let did = deployment_id(env, &outcome.step.product, now);
-    let mut deployment = record(
-        did.clone(),
-        KIND_DEPLOYMENT,
-        format!(
-            "{} {} -> {} ({env})",
-            outcome.step.product,
-            outcome.step.from.clone().unwrap_or_else(|| "none".into()),
-            outcome.step.to
-        ),
-        HashMap::from([
-            ("environment".into(), env.to_string()),
-            ("product".into(), outcome.step.product.clone()),
-            (
-                "from_version".into(),
-                outcome.step.from.clone().unwrap_or_default(),
-            ),
-            ("to_version".into(), outcome.step.to.clone()),
-            ("status".into(), "failed".into()),
-            ("detail".into(), "deployment bookkeeping incomplete".into()),
-        ]),
-    );
-    ctx.put(deployment.clone()).await?;
-    ctx.link(&did, &outcome.step.release_id, REL_DEPLOYED_RELEASE)
-        .await?;
-    ctx.link(&did, &env_id(env), REL_IN_ENVIRONMENT).await?;
-    ctx.link(&did, plan_oid, REL_PART_OF_PLAN).await?;
+    let did = step_deployment_id(&outcome.step.id);
+    let mut deployment = ctx
+        .get(&did)
+        .await?
+        .with_context(|| format!("deployment record for step {} disappeared", outcome.step.id))?;
+    validate_attempt_identity(&deployment, env, plan_oid, &outcome.step)?;
     deployment
         .properties
         .insert("status".into(), outcome.status.clone());
@@ -1962,12 +2269,293 @@ async fn record_deployment(
         Ok(_) => Ok(()),
         Err(error) => {
             let persisted = ctx.get(&did).await;
-            if matches!(
-                persisted,
-                Ok(Some(ref object))
-                    if object.properties.get("status") == Some(&outcome.status)
-                        && object.properties.get("detail") == Some(&outcome.detail)
-            ) {
+            if let Ok(Some(ref object)) = persisted
+                && validate_attempt_identity(object, env, plan_oid, &outcome.step).is_ok()
+                && object.properties.get("status") == Some(&outcome.status)
+                && object.properties.get("detail") == Some(&outcome.detail)
+            {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+async fn record_not_started(
+    ctx: &mut Ctx,
+    env: &str,
+    plan_oid: &str,
+    step: &Step,
+    detail: &str,
+) -> Result<()> {
+    record_deployment(
+        ctx,
+        env,
+        plan_oid,
+        &Outcome {
+            step: step.clone(),
+            status: "failed".into(),
+            detail: detail.into(),
+        },
+    )
+    .await
+}
+
+async fn mark_deployment_compensating(
+    ctx: &mut Ctx,
+    env: &str,
+    plan_oid: &str,
+    step: &Step,
+) -> Result<()> {
+    let did = step_deployment_id(&step.id);
+    let mut deployment = ctx
+        .get(&did)
+        .await?
+        .with_context(|| format!("deployment record {did} disappeared"))?;
+    validate_attempt_identity(&deployment, env, plan_oid, step)?;
+    if !matches!(
+        deployment.properties.get("status").map(String::as_str),
+        Some("running" | "succeeded")
+    ) {
+        bail!("deployment record {did} cannot compensate step {}", step.id);
+    }
+    deployment
+        .properties
+        .insert("status".into(), "compensating".into());
+    deployment
+        .properties
+        .insert("detail".into(), "deployment compensation started".into());
+    deployment.updated = crate::now_millis();
+    match ctx.put(deployment).await {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            let persisted = ctx.get(&did).await;
+            if let Ok(Some(ref object)) = persisted
+                && validate_attempt_identity(object, env, plan_oid, step).is_ok()
+                && object.properties.get("status").map(String::as_str) == Some("compensating")
+            {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+async fn begin_compensation(ctx: &mut Ctx, env: &str, plan_oid: &str, step: &Step) -> Result<()> {
+    if let Err(error) = mark_deployment_compensating(ctx, env, plan_oid, step).await {
+        let detail = format!("cannot persist deployment compensation start: {error}");
+        if let Err(unknown_error) = set_env_unknown(ctx, env, &step.product, &detail).await {
+            bail!("{detail}; recording unknown environment state also failed: {unknown_error}");
+        }
+        bail!(detail);
+    }
+    Ok(())
+}
+
+async fn begin_compensation_or_block_unwind(
+    ctx: &mut Ctx,
+    env: &str,
+    plan_oid: &str,
+    step: &Step,
+    unwind_prior_steps: &mut bool,
+) -> Result<()> {
+    match begin_compensation(ctx, env, plan_oid, step).await {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            *unwind_prior_steps = false;
+            Err(error)
+        }
+    }
+}
+
+fn retain_prerequisites_unless_rolled_back(
+    result: Result<Outcome>,
+    unwind_prior_steps: &mut bool,
+) -> Result<Outcome> {
+    match result {
+        Ok(outcome) => {
+            if outcome.status != "rolled_back" {
+                *unwind_prior_steps = false;
+            }
+            Ok(outcome)
+        }
+        Err(error) => {
+            *unwind_prior_steps = false;
+            Err(error)
+        }
+    }
+}
+
+async fn prepare_deployment(ctx: &mut Ctx, env: &str, plan_oid: &str, step: &Step) -> Result<()> {
+    let did = step_deployment_id(&step.id);
+    ensure_no_interrupted_attempts(ctx, env, plan_oid, Some(&did)).await?;
+    let deployment = record(
+        did.clone(),
+        KIND_DEPLOYMENT,
+        format!(
+            "{} {} -> {} ({env})",
+            step.product,
+            step.from.clone().unwrap_or_else(|| "none".into()),
+            step.to
+        ),
+        HashMap::from([
+            ("environment".into(), env.to_string()),
+            ("product".into(), step.product.clone()),
+            ("from_version".into(), step.from.clone().unwrap_or_default()),
+            ("to_version".into(), step.to.clone()),
+            ("status".into(), "preparing".into()),
+            ("detail".into(), "preparing deployment step".into()),
+            ("step_id".into(), step.id.clone()),
+            ("plan_id".into(), plan_oid.to_string()),
+            ("action".into(), step.action.to_string()),
+            ("release_id".into(), step.release_id.clone()),
+            ("release_digest".into(), step.release_digest.clone()),
+            ("artifact_digest".into(), step.artifact_digest.clone()),
+            ("workdir".into(), step.workdir.clone()),
+        ]),
+    );
+    match ctx.create_once(deployment).await {
+        Ok(_) => {}
+        Err(status)
+            if status.code() == tonic::Code::AlreadyExists
+                || (status.code() == tonic::Code::Internal
+                    && status.message().contains("UNIQUE")) =>
+        {
+            let existing = ctx
+                .get(&did)
+                .await?
+                .with_context(|| format!("deployment record {did} disappeared"))?;
+            validate_attempt_identity(&existing, env, plan_oid, step)?;
+            match existing.properties.get("status").map(String::as_str) {
+                Some("preparing") => {}
+                Some("running") => bail!(
+                    "deployment step {} has an ambiguous prior execution; reconcile its observed state before retrying",
+                    step.id
+                ),
+                Some(status) => bail!(
+                    "deployment step {} was already finalized as {status}",
+                    step.id
+                ),
+                None => bail!("deployment record {did} has no status"),
+            }
+        }
+        Err(status) => return Err(status.into()),
+    }
+    let lineage = async {
+        ctx.link(&did, &step.release_id, REL_DEPLOYED_RELEASE)
+            .await?;
+        ctx.link(&did, &env_id(env), REL_IN_ENVIRONMENT).await?;
+        ctx.link(&did, plan_oid, REL_PART_OF_PLAN).await?;
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+    match lineage {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let detail = format!("preparing deployment lineage failed: {error}");
+            record_not_started(ctx, env, plan_oid, step, &detail)
+                .await
+                .context("finalizing deployment after lineage setup failed")?;
+            Err(error.context(detail))
+        }
+    }
+}
+
+async fn ensure_no_interrupted_attempts(
+    ctx: &mut Ctx,
+    env: &str,
+    current_plan_id: &str,
+    exclude_id: Option<&str>,
+) -> Result<()> {
+    if let Some(running) = ctx
+        .find_by_property(KIND_PLAN, "status", "running")
+        .await?
+        .into_iter()
+        .find(|plan| {
+            plan.id != current_plan_id
+                && plan.namespace == NS
+                && plan.properties.get("environment").map(String::as_str) == Some(env)
+        })
+    {
+        bail!(
+            "plan {} is still running for environment {env}; recover it before retrying",
+            running.id
+        );
+    }
+    let mut nonterminal = Vec::new();
+    for status in ["preparing", "running", "compensating"] {
+        nonterminal.extend(
+            ctx.find_by_property(KIND_DEPLOYMENT, "status", status)
+                .await?,
+        );
+    }
+    if let Some(attempt) = nonterminal.into_iter().find(|attempt| {
+        exclude_id != Some(attempt.id.as_str())
+            && attempt.namespace == NS
+            && attempt.properties.get("environment").map(String::as_str) == Some(env)
+            && matches!(
+                attempt.properties.get("status").map(String::as_str),
+                Some("preparing" | "running" | "compensating")
+            )
+    }) {
+        let owner = attempt
+            .properties
+            .get("plan_id")
+            .map(String::as_str)
+            .unwrap_or("unknown");
+        let product = attempt
+            .properties
+            .get("product")
+            .map(String::as_str)
+            .unwrap_or("unknown");
+        bail!(
+            "deployment attempt {} for {}/{} is still {}; recover interrupted plan {} before retrying",
+            attempt.id,
+            env,
+            product,
+            attempt
+                .properties
+                .get("status")
+                .map(String::as_str)
+                .unwrap_or("nonterminal"),
+            owner
+        );
+    }
+    Ok(())
+}
+
+async fn mark_deployment_running(
+    ctx: &mut Ctx,
+    env: &str,
+    plan_oid: &str,
+    step: &Step,
+) -> Result<()> {
+    let did = step_deployment_id(&step.id);
+    let mut deployment = ctx
+        .get(&did)
+        .await?
+        .with_context(|| format!("deployment record {did} disappeared"))?;
+    validate_attempt_identity(&deployment, env, plan_oid, step)?;
+    if deployment.properties.get("status").map(String::as_str) != Some("preparing") {
+        bail!("deployment record {did} cannot start step {}", step.id);
+    }
+    deployment
+        .properties
+        .insert("status".into(), "running".into());
+    deployment
+        .properties
+        .insert("detail".into(), "deployment step started".into());
+    deployment.updated = crate::now_millis();
+    match ctx.put(deployment).await {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            let persisted = ctx.get(&did).await;
+            if let Ok(Some(ref object)) = persisted
+                && validate_attempt_identity(object, env, plan_oid, step).is_ok()
+                && object.properties.get("status").map(String::as_str) == Some("running")
+            {
                 Ok(())
             } else {
                 Err(error)

@@ -65,6 +65,12 @@ pub fn plan_id(env: &str, ts: i64, content_id: &str) -> String {
 pub fn deployment_id(env: &str, product: &str, ts: i64) -> String {
     format!("tenkai:deployment:{env}:{product}:{ts}")
 }
+pub fn step_deployment_id(step_id: &str) -> String {
+    format!(
+        "tenkai:deployment-step:{}",
+        crate::manifest::digest(step_id)
+    )
+}
 
 fn prop(name: &str, required: bool, description: &str) -> PropertyDef {
     PropertyDef {
@@ -199,6 +205,11 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
                 ),
                 prop("plan", true, "Versioned serialized plan document"),
                 prop("status", true, "computed|running|blocked|succeeded|failed"),
+                prop(
+                    "execution_protocol",
+                    false,
+                    "Restart-safety protocol used by execution",
+                ),
             ],
         ),
         object_type(
@@ -216,9 +227,20 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
             vec![
                 prop("environment", true, "Environment name"),
                 prop("product", true, "Product name"),
+                prop("step_id", false, "Immutable plan step identity"),
+                prop("plan_id", false, "Plan that owns this deployment attempt"),
                 prop("from_version", false, "Previously deployed version"),
-                prop("to_version", true, "Applied version"),
-                prop("status", true, "succeeded|failed|rolled_back"),
+                prop("to_version", false, "Applied version; empty for removals"),
+                prop("action", false, "Immutable deployment action"),
+                prop("release_id", false, "Immutable target release identity"),
+                prop("release_digest", false, "Immutable target release digest"),
+                prop("artifact_digest", false, "Immutable target artifact digest"),
+                prop("workdir", false, "Immutable target execution directory"),
+                prop(
+                    "status",
+                    true,
+                    "preparing|running|compensating|succeeded|failed|rolled_back",
+                ),
                 prop("detail", false, "Failure or rollback detail"),
             ],
         ),
@@ -313,5 +335,17 @@ mod tests {
         assert!(validate_identifier("product", "api@1").is_err());
         assert!(validate_identifier("environment", "prod:eu").is_err());
         assert!(validate_identifier("channel", "stable/eu").is_err());
+    }
+
+    #[test]
+    fn step_deployments_have_stable_distinct_ids() {
+        assert_eq!(
+            step_deployment_id("plan:step:0"),
+            step_deployment_id("plan:step:0")
+        );
+        assert_ne!(
+            step_deployment_id("plan:step:0"),
+            step_deployment_id("plan:step:1")
+        );
     }
 }

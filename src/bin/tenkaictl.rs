@@ -74,6 +74,13 @@ enum EnvCommand {
     Subscribe { env: String, spec: String },
     /// Remove an abandoned apply lease after verifying no apply is running.
     Unlock { env: String },
+    /// Terminate interrupted work while retaining its environment lease.
+    Recover {
+        plan_id: String,
+        /// Confirm the worker which ran this plan has stopped.
+        #[arg(long)]
+        confirm_stopped: bool,
+    },
     /// Record manually reconciled deployment state; omit --deployed after cleanup.
     Reconcile {
         env: String,
@@ -223,6 +230,15 @@ async fn main() -> Result<()> {
             }
             EnvCommand::Unlock { env } => {
                 println!("{}", apply::unlock_environment(&mut ctx, &env).await?);
+            }
+            EnvCommand::Recover {
+                plan_id,
+                confirm_stopped,
+            } => {
+                println!(
+                    "{}",
+                    apply::recover_interrupted_plan(&mut ctx, &plan_id, confirm_stopped).await?
+                );
             }
             EnvCommand::Reconcile {
                 env,

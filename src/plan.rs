@@ -286,7 +286,9 @@ impl Plan {
 }
 
 pub async fn store(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
+    let mut execution_protocol = None;
     if let Some(existing) = ctx.get(&plan.id).await? {
+        execution_protocol = existing.properties.get("execution_protocol").cloned();
         let stored = Plan::from_object(&existing)?;
         if stored.executable_digest()? != plan.executable_digest()? {
             bail!("plan {} executable content is immutable", plan.id);
@@ -317,7 +319,13 @@ pub async fn store(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
             );
         }
     }
-    ctx.put(plan.to_object()?).await?;
+    let mut object = plan.to_object()?;
+    if let Some(execution_protocol) = execution_protocol {
+        object
+            .properties
+            .insert("execution_protocol".into(), execution_protocol);
+    }
+    ctx.put(object).await?;
     Ok(())
 }
 

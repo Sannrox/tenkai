@@ -11,8 +11,8 @@ use crate::pb::chisei::chisei_service_client::ChiseiServiceClient;
 use crate::pb::sekai::sekai_service_client::SekaiServiceClient;
 use crate::pb::sekai::{
     ActionRequest, CreateLinkRequest, CreateObjectRequest, DeleteLinkRequest, DeleteObjectRequest,
-    ExecuteActionRequest, GetLinkedObjectsRequest, GetLinksRequest, GetObjectRequest, Link, Object,
-    UpdateObjectRequest,
+    ExecuteActionRequest, FindByPropertyRequest, GetLinkedObjectsRequest, GetLinksRequest,
+    GetObjectRequest, Link, Object, UpdateObjectRequest,
 };
 
 /// Attaches auth + caller identity metadata to every request.
@@ -99,6 +99,24 @@ pub async fn connect() -> Result<Ctx> {
 }
 
 impl Ctx {
+    pub async fn find_by_property(
+        &mut self,
+        kind: &str,
+        key: &str,
+        value: &str,
+    ) -> Result<Vec<Object>> {
+        Ok(self
+            .sekai
+            .find_by_property(FindByPropertyRequest {
+                kind: kind.into(),
+                key: key.into(),
+                value: value.into(),
+            })
+            .await?
+            .into_inner()
+            .objects)
+    }
+
     /// Get an object by id; `None` on not-found.
     pub async fn get(&mut self, id: &str) -> Result<Option<Object>> {
         match self
