@@ -1,0 +1,517 @@
+syntax = "proto3";
+package chisei;
+
+// --- Messages ---
+
+message BudgetUsage {
+  string user_id = 1;
+  int32 tokens_used = 2;
+  int32 max_tokens = 3;
+  string period_type = 4;
+  int64 period_start = 5;
+}
+
+message PolicyResolution {
+  string runtime = 1;
+  string model = 2;
+  bool eval_regressed = 3;
+  string eval_regression_reason = 4;
+  string data_class = 5;
+  // Cost-tier bias applied for this resolution ("cheap" when a bulk task class
+  // was routed to a cheaper model; empty for the default capable tier).
+  string route_bias = 6;
+}
+
+message PipelineRequest {
+  string request_id = 1;
+  string namespace = 2;
+  string spec = 3;
+  string model = 4;
+  string runtime = 5;
+  string task_type = 6;
+  int32 priority = 7;
+  string task_class = 8;
+}
+
+message StepDecision {
+  string step = 1;
+  string action = 2;
+  string reasoning = 3;
+  double confidence = 4;
+  string suggestion = 5;
+  string value = 6;
+}
+
+message PipelineRunResult {
+  string request_id = 1;
+  repeated StepDecision steps = 2;
+  int64 timestamp = 3;
+  string prepared_spec = 4;
+}
+
+message ChatMessage {
+  string role = 1;
+  string content = 2;
+  string tool_call_id = 3;
+  repeated ToolCall tool_calls = 4;
+}
+
+message ToolCall {
+  string id = 1;
+  string name = 2;
+  string args_json = 3;
+}
+
+message ToolDef {
+  string name = 1;
+  string description = 2;
+  string input_schema_json = 3;
+}
+
+message ReviewPolicy {
+  double confidence_threshold = 1;
+  int32 max_cycles = 2;
+  string model = 3;
+}
+
+message BudgetVerdict {
+  bool allowed = 1;
+  BudgetUsage usage = 2;
+  string reason = 3;
+}
+
+message ExecutionInput {
+  string request_id = 1;
+  string namespace = 2;
+  string spec = 3;
+  string preferred_model = 4;
+  string preferred_runtime = 5;
+  string task_type = 6;
+  int32 priority = 7;
+  string user_id = 8;
+  int32 estimated_tokens = 9;
+  repeated ChatMessage messages = 10;
+  repeated ToolDef tools = 11;
+  string system = 12;
+  int32 max_tokens = 13;
+  string task_class = 14;
+  reserved 15;
+  reserved "agent_id";
+}
+
+message ExecutionPlan {
+  string plan_id = 1;
+  ExecutionInput input = 2;
+  string resolved_runtime = 3;
+  string resolved_model = 4;
+  string enriched_spec = 5;
+  string prepared_system = 6;
+  repeated ChatMessage prepared_messages = 7;
+  repeated ToolDef tools = 8;
+  BudgetVerdict budget = 9;
+  repeated StepDecision steps = 10;
+  ReviewPolicy review_policy = 11;
+  double risk_score = 12;
+  bool low_success_namespace = 13;
+  bool executable = 14;
+  repeated string warnings = 15;
+  int32 max_tokens = 16;
+  int64 created_at = 17;
+  repeated string affinity_namespaces = 18;
+  bool eval_regressed = 19;
+  string eval_regression_reason = 20;
+  bool sampled = 21;
+  double sample_rate = 22;
+  string sample_reason = 23;
+  repeated EgressDecision egress_decisions = 24;
+  string task_class = 25;
+}
+
+message EgressDecision {
+  string provider = 1;
+  bool external = 2;
+  repeated string included = 3;
+  repeated string redacted = 4;
+  repeated string reasons = 5;
+}
+
+message PlannedChatResponse {
+  string content = 1;
+  repeated ToolCall tool_calls = 2;
+  int32 input_tokens = 3;
+  int32 output_tokens = 4;
+  string stop_reason = 5;
+  string provider = 6;
+}
+
+message AffinityResult {
+  repeated string namespaces = 1;
+  string best_model = 2;
+  bool low_success = 3;
+}
+
+message EvalAssertion {
+  string type = 1;
+  string value = 2;
+}
+
+message EvalCase {
+  string id = 1;
+  string name = 2;
+  string namespace = 3;
+  string spec = 4;
+  repeated EvalAssertion assertions = 5;
+}
+
+message EvalSuite {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  repeated EvalCase cases = 4;
+}
+
+message CaseResult {
+  string case_id = 1;
+  bool passed = 2;
+  string status = 3;
+  string result = 4;
+  int32 score = 5;
+  string reason = 6;
+  int64 elapsed = 7;
+}
+
+message EvalRun {
+  string id = 1;
+  string suite_id = 2;
+  string config_ref = 3;
+  repeated CaseResult results = 4;
+  int64 timestamp = 5;
+}
+
+message GateDecision {
+  string verdict = 1;
+  string reason = 2;
+  double baseline_score = 3;
+  double candidate_score = 4;
+}
+
+message EvalVarianceCase {
+  string case_id = 1;
+  int32 run_count = 2;
+  double pass_rate = 3;
+  double mean_score = 4;
+  double min_score = 5;
+  double max_score = 6;
+  double std_dev = 7;
+}
+
+message EvalVariance {
+  string suite_id = 1;
+  string config_ref = 2;
+  int32 run_count = 3;
+  double mean_score = 4;
+  double std_dev = 5;
+  double min_score = 6;
+  double max_score = 7;
+  repeated EvalVarianceCase cases = 8;
+}
+
+message EvalModelVariance {
+  string model_id = 1;
+  EvalVariance variance = 2;
+}
+
+message EvalModelComparison {
+  string suite_id = 1;
+  repeated EvalModelVariance models = 2;
+}
+
+message EvalIteration {
+  string id = 1;
+  string run_id = 2;
+  string suite_id = 3;
+  string changed_file = 4;
+  string diff_hash = 5;
+  string parent_iteration_id = 6;
+  string baseline_run_id = 7;
+  string candidate_run_id = 8;
+  double delta = 9;
+  bool regressed = 10;
+  int64 created = 11;
+}
+
+message EvolveRecommendation {
+  string action = 1;
+  string reason = 2;
+}
+
+message EvolveSuggestion {
+  string message = 1;
+  double confidence = 2;
+  string category = 3;
+}
+
+message EvolvePattern {
+  string pattern = 1;
+  int32 occurrences = 2;
+  double success_rate = 3;
+  string category = 4;
+}
+
+message EvolveVarianceWindow {
+  string window = 1;
+  int32 total = 2;
+  int32 succeeded = 3;
+  double success_rate = 4;
+}
+
+message EvolvePatternVariance {
+  string pattern = 1;
+  int32 sample_size = 2;
+  double mean_success_rate = 3;
+  double std_dev = 4;
+  double ci_95_lower = 5;
+  double ci_95_upper = 6;
+  bool risk_flag = 7;
+  string trend = 8;
+  repeated EvolveVarianceWindow windows = 9;
+}
+
+message EvolveVarianceReport {
+  repeated EvolvePatternVariance patterns = 1;
+  repeated string insights = 2;
+}
+
+message EvolveReport {
+  int32 total_tasks = 1;
+  int32 succeeded = 2;
+  int32 failed = 3;
+  double success_rate = 4;
+  repeated EvolvePattern patterns = 5;
+}
+
+message EvolveTemplate {
+  string id = 1;
+  string name = 2;
+  string content = 3;
+  int64 created = 4;
+}
+
+message EvolveAbGroup {
+  int32 total = 1;
+  int32 succeeded = 2;
+  double success_rate = 3;
+}
+
+message EvolveAbReport {
+  EvolveAbGroup enhanced = 1;
+  EvolveAbGroup non_enhanced = 2;
+}
+
+// --- Request/Response wrappers ---
+
+message CheckBudgetRequest {
+  string user_id = 1;
+  int32 estimated_tokens = 2;
+  string subject = 3;
+  string project = 4;
+  string agent = 5;
+  string key_id = 6;
+}
+message CheckBudgetResponse { bool allowed = 1; BudgetUsage usage = 2; }
+message RecordUsageRequest {
+  string user_id = 1;
+  int32 tokens_used = 2;
+  string subject = 3;
+  string project = 4;
+  string agent = 5;
+  string key_id = 6;
+}
+message RecordUsageResponse { BudgetUsage usage = 1; }
+message SetBudgetLimitRequest {
+  string user_id = 1;
+  int32 max_tokens = 2;
+  string period_type = 3;
+  string subject = 4;
+  string project = 5;
+  string agent = 6;
+  string key_id = 7;
+}
+message SetBudgetLimitResponse {}
+
+message SetNamespacePolicyRequest {
+  string namespace = 1;
+  repeated string allowed_runtimes = 2;
+  repeated string allowed_models = 3;
+  string default_runtime = 4;
+  string default_model = 5;
+  string data_class = 6;
+}
+message SetNamespacePolicyResponse { PolicyResolution resolution = 1; }
+
+message ResolvePolicyRequest {
+  string namespace = 1;
+  string preferred_runtime = 2;
+  string preferred_model = 3;
+  string subject = 4;
+  string project = 5;
+  string agent = 6;
+  string key_id = 7;
+  string task_class = 8;
+  string user_id = 9;
+}
+message ResolvePolicyResponse { PolicyResolution resolution = 1; }
+message CheckEgressRequest {
+  string namespace = 1;
+  string payload = 2;
+  string provider = 3;
+  string task_class = 4;
+}
+message CheckEgressResponse {
+  bool allowed = 1;
+  repeated EgressDecision findings = 2;
+}
+
+message RunPipelineRequest { PipelineRequest request = 1; }
+message RunPipelineResponse { PipelineRunResult result = 1; }
+message ListPipelineRunsRequest { int32 limit = 1; }
+message ListPipelineRunsResponse { repeated PipelineRunResult runs = 1; }
+message SampleObservation {
+  string request_id = 1;
+  string namespace = 2;
+  string spec = 3;
+  string resolved_model = 4;
+  string output_content = 5;
+  string sample_reason = 6;
+  int32 input_tokens = 7;
+  int32 output_tokens = 8;
+  string stop_reason = 9;
+  int64 timestamp = 10;
+}
+message RecordSampleObservationRequest { SampleObservation observation = 1; }
+message RecordSampleObservationResponse { bool recorded = 1; }
+message GatewayAuditEvent {
+  string id = 1;
+  int64 timestamp = 2;
+  string actor = 3;
+  string action = 4;
+  string reason = 5;
+  map<string, string> evidence = 6;
+  string target_id = 7;
+  string outcome = 8;
+}
+message RecordGatewayAuditRequest { GatewayAuditEvent event = 1; }
+message RecordGatewayAuditResponse { GatewayAuditEvent event = 1; }
+message PlanExecutionRequest { ExecutionInput input = 1; }
+message PlanExecutionResponse { ExecutionPlan plan = 1; }
+message ExecutePlanRequest { ExecutionPlan plan = 1; }
+message ExecutePlanResponse { PlannedChatResponse response = 1; int64 executed_at = 2; }
+message ExecutePlanStreamEvent {
+  string content_delta = 1;
+  PlannedChatResponse response = 2;
+  bool done = 3;
+  int64 executed_at = 4;
+}
+
+message GetAffinityRequest {
+  reserved 1;
+  reserved "agent_id";
+  string namespace = 2;
+}
+message GetAffinityResponse { AffinityResult result = 1; }
+
+message CreateEvalSuiteRequest { EvalSuite suite = 1; }
+message CreateEvalSuiteResponse { EvalSuite suite = 1; }
+message ListEvalSuitesRequest {}
+message ListEvalSuitesResponse { repeated EvalSuite suites = 1; }
+message GetEvalSuiteRequest { string id = 1; }
+message GetEvalSuiteResponse { EvalSuite suite = 1; }
+message CreateEvalRunRequest {
+  EvalRun run = 1;
+  string changed_file = 2;
+  string diff_hash = 3;
+}
+message CreateEvalRunResponse { EvalRun run = 1; }
+message GetEvalRunRequest { string id = 1; }
+message GetEvalRunResponse { EvalRun run = 1; }
+message ListEvalRunsRequest { string suite_id = 1; }
+message ListEvalRunsResponse { repeated EvalRun runs = 1; }
+message TrackEvalIterationRequest { string suite_id = 1; string run_id = 2; string changed_file = 3; string diff_hash = 4; }
+message TrackEvalIterationResponse { EvalIteration iteration = 1; }
+message GetLatestEvalIterationRequest { string changed_file = 1; }
+message GetLatestEvalIterationResponse { EvalIteration iteration = 1; }
+message ListEvalIterationsRequest { string suite_id = 1; string changed_file = 2; }
+message ListEvalIterationsResponse { repeated EvalIteration iterations = 1; }
+message CompareRunsRequest { string baseline_id = 1; string candidate_id = 2; }
+message CompareRunsResponse { GateDecision decision = 1; }
+message EvalVarianceRequest { string suite_id = 1; string config_ref = 2; }
+message EvalVarianceResponse { EvalVariance variance = 1; }
+message EvalModelCompareRequest { string suite_id = 1; }
+message EvalModelCompareResponse { EvalModelComparison comparison = 1; }
+
+message EvolveSuggestRequest { string request_id = 1; }
+message EvolveSuggestResponse { repeated EvolveSuggestion suggestions = 1; }
+message EvolveEnhanceRequest { string request_id = 1; string spec = 2; }
+message EvolveEnhanceResponse { string enhanced_spec = 1; bool modified = 2; }
+message EvolveRecommendRequest { string request_id = 1; }
+message EvolveRecommendResponse { EvolveRecommendation recommendation = 1; }
+message EvolveReportRequest {}
+message EvolveReportResponse { EvolveReport report = 1; }
+message EvolvePatternsRequest {}
+message EvolvePatternsResponse { repeated EvolvePattern patterns = 1; }
+message EvolveVarianceRequest {}
+message EvolveVarianceResponse { EvolveVarianceReport report = 1; }
+message EvolveAbResultsRequest {}
+message EvolveAbResultsResponse { EvolveAbReport report = 1; }
+message EvolveTemplatesRequest {}
+message EvolveTemplatesResponse { repeated EvolveTemplate templates = 1; }
+
+// --- Service ---
+
+service ChiseiService {
+  // Budget
+  rpc CheckBudget(CheckBudgetRequest) returns (CheckBudgetResponse);
+  rpc RecordUsage(RecordUsageRequest) returns (RecordUsageResponse);
+  rpc SetBudgetLimit(SetBudgetLimitRequest) returns (SetBudgetLimitResponse);
+
+  // Model Policy
+  rpc SetNamespacePolicy(SetNamespacePolicyRequest) returns (SetNamespacePolicyResponse);
+  rpc ResolvePolicy(ResolvePolicyRequest) returns (ResolvePolicyResponse);
+  rpc CheckEgress(CheckEgressRequest) returns (CheckEgressResponse);
+
+  // Pipeline
+  rpc RunPipeline(RunPipelineRequest) returns (RunPipelineResponse);
+  rpc ListPipelineRuns(ListPipelineRunsRequest) returns (ListPipelineRunsResponse);
+  rpc RecordSampleObservation(RecordSampleObservationRequest) returns (RecordSampleObservationResponse);
+  rpc RecordGatewayAudit(RecordGatewayAuditRequest) returns (RecordGatewayAuditResponse);
+  rpc PlanExecution(PlanExecutionRequest) returns (PlanExecutionResponse);
+  rpc ExecutePlan(ExecutePlanRequest) returns (ExecutePlanResponse);
+  rpc ExecutePlanStream(ExecutePlanRequest) returns (stream ExecutePlanStreamEvent);
+
+  // Affinity
+  rpc GetAffinity(GetAffinityRequest) returns (GetAffinityResponse);
+
+  // Eval
+  rpc CreateEvalSuite(CreateEvalSuiteRequest) returns (CreateEvalSuiteResponse);
+  rpc ListEvalSuites(ListEvalSuitesRequest) returns (ListEvalSuitesResponse);
+  rpc GetEvalSuite(GetEvalSuiteRequest) returns (GetEvalSuiteResponse);
+  rpc CreateEvalRun(CreateEvalRunRequest) returns (CreateEvalRunResponse);
+  rpc GetEvalRun(GetEvalRunRequest) returns (GetEvalRunResponse);
+  rpc ListEvalRuns(ListEvalRunsRequest) returns (ListEvalRunsResponse);
+  rpc TrackEvalIteration(TrackEvalIterationRequest) returns (TrackEvalIterationResponse);
+  rpc GetLatestEvalIteration(GetLatestEvalIterationRequest) returns (GetLatestEvalIterationResponse);
+  rpc ListEvalIterations(ListEvalIterationsRequest) returns (ListEvalIterationsResponse);
+  rpc CompareRuns(CompareRunsRequest) returns (CompareRunsResponse);
+  rpc EvalVariance(EvalVarianceRequest) returns (EvalVarianceResponse);
+  rpc EvalModelCompare(EvalModelCompareRequest) returns (EvalModelCompareResponse);
+
+  // Evolve
+  rpc EvolveSuggest(EvolveSuggestRequest) returns (EvolveSuggestResponse);
+  rpc EvolveEnhance(EvolveEnhanceRequest) returns (EvolveEnhanceResponse);
+  rpc EvolveRecommend(EvolveRecommendRequest) returns (EvolveRecommendResponse);
+  rpc EvolveReport(EvolveReportRequest) returns (EvolveReportResponse);
+  rpc EvolvePatterns(EvolvePatternsRequest) returns (EvolvePatternsResponse);
+  rpc EvolveVariance(EvolveVarianceRequest) returns (EvolveVarianceResponse);
+  rpc EvolveAbResults(EvolveAbResultsRequest) returns (EvolveAbResultsResponse);
+  rpc EvolveTemplates(EvolveTemplatesRequest) returns (EvolveTemplatesResponse);
+}
