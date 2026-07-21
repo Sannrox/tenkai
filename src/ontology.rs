@@ -5,7 +5,7 @@ use anyhow::{Result, bail};
 use crate::client::Ctx;
 use crate::pb::sekai::{
     ActionOp, ActionParamDef, ActionTypeDef, CreateActionTypeRequest, CreateSchemaTypeRequest,
-    ObjectType, PropertyDef,
+    ListSchemaTypesRequest, ObjectType, PropertyDef,
 };
 
 pub const NS: &str = "tenkai";
@@ -17,9 +17,13 @@ pub const KIND_ENVIRONMENT: &str = "tenkai.environment";
 pub const KIND_PLAN: &str = "tenkai.plan";
 pub const KIND_ENVIRONMENT_EXECUTION: &str = "tenkai.environment_execution";
 pub const KIND_DEPLOYMENT: &str = "tenkai.deployment";
+pub const KIND_CANARY_DESIGNATION: &str = "tenkai.canary_designation";
 pub const KIND_CANARY_POLICY: &str = "tenkai.canary_policy";
+pub const KIND_CANARY_POLICY_POINTER: &str = "tenkai.canary_policy_pointer";
+pub const KIND_CANARY_ATTEMPT: &str = "tenkai.canary_attempt";
 pub const KIND_CANARY_OUTCOME: &str = "tenkai.canary_outcome";
 pub const KIND_PROMOTION_AUDIT: &str = "tenkai.promotion_audit";
+pub const KIND_PROMOTION_LOCK: &str = "tenkai.promotion_lock";
 
 pub const REL_RELEASE_OF: &str = "release_of";
 pub const REL_PROMOTES: &str = "promotes";
@@ -169,6 +173,11 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
             ],
         ),
         object_type(
+            KIND_CANARY_DESIGNATION,
+            "An explicit fact designating an environment for canary cohorts",
+            vec![prop("environment", true, "Designated environment name")],
+        ),
+        object_type(
             KIND_CANARY_POLICY,
             "The immutable canary cohort and success rule for one release promotion",
             vec![
@@ -179,6 +188,60 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
                 prop("policy_digest", true, "Digest of the canonical policy"),
                 prop("active", true, "Whether policy activation completed"),
                 prop("policy", true, "Canonical JSON policy document"),
+            ],
+        ),
+        object_type(
+            KIND_CANARY_POLICY_POINTER,
+            "The currently active immutable policy for one release promotion",
+            vec![
+                prop("release_id", true, "Release governed by the active policy"),
+                prop("target_channel", true, "Wider channel gated by the policy"),
+                prop("policy_id", true, "Immutable active policy object"),
+                prop("policy_digest", true, "Digest of the active policy"),
+            ],
+        ),
+        object_type(
+            KIND_CANARY_ATTEMPT,
+            "A durable execution-time snapshot of applicable canary policies",
+            vec![
+                prop("plan_id", true, "Plan being executed"),
+                prop(
+                    "initial_plan_state",
+                    true,
+                    "Plan lifecycle state before this execution attempt",
+                ),
+                prop(
+                    "gates_skipped",
+                    true,
+                    "Whether evaluation gates were skipped",
+                ),
+                prop("status", true, "pending|ready|abandoned|complete"),
+                prop(
+                    "execution_started_at",
+                    false,
+                    "Apply start time in Unix milliseconds",
+                ),
+                prop(
+                    "plan_state",
+                    false,
+                    "Terminal state captured for this attempt",
+                ),
+                prop(
+                    "finished_at",
+                    false,
+                    "Attempt finish time in Unix milliseconds",
+                ),
+                prop(
+                    "status_detail",
+                    false,
+                    "Terminal detail captured for this attempt",
+                ),
+                prop(
+                    "outcomes",
+                    false,
+                    "Execution outcomes returned by the apply",
+                ),
+                prop("policies", true, "Policies active when execution began"),
             ],
         ),
         object_type(
@@ -223,6 +286,11 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
                 prop("evaluated_at", true, "Decision time in Unix milliseconds"),
                 prop("evaluation", true, "Canonical JSON decision and evidence"),
             ],
+        ),
+        object_type(
+            KIND_PROMOTION_LOCK,
+            "An exclusive lock serializing policy changes and channel promotion",
+            vec![prop("owner", true, "Operation holding the lock")],
         ),
     ];
 
@@ -307,6 +375,42 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
         }
     }
     Ok(registered)
+}
+
+/// Verify once per connected client that an administrator ran the schema upgrade.
+pub async fn require_canary_schema(ctx: &mut Ctx) -> Result<()> {
+    let preflight = ctx.canary_schema_preflight();
+    preflight
+        .get_or_try_init(|| async {
+            let schemas = ctx
+                .sekai
+                .list_schema_types(ListSchemaTypesRequest {})
+                .await?
+                .into_inner()
+                .types;
+            let required = [
+                KIND_CANARY_DESIGNATION,
+                KIND_CANARY_POLICY,
+                KIND_CANARY_POLICY_POINTER,
+                KIND_CANARY_ATTEMPT,
+                KIND_CANARY_OUTCOME,
+                KIND_PROMOTION_AUDIT,
+                KIND_PROMOTION_LOCK,
+            ];
+            let missing = required
+                .into_iter()
+                .filter(|kind| !schemas.iter().any(|schema| schema.kind == *kind))
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                bail!(
+                    "canary schema upgrade required (missing {}); ask an administrator to run `tenkaictl init`",
+                    missing.join(", ")
+                );
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await?;
+    Ok(())
 }
 
 #[cfg(test)]
