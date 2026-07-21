@@ -134,33 +134,53 @@ pub async fn promote(ctx: &mut Ctx, spec: &str, channel: &str) -> Result<String>
     if ctx.get(&rid).await?.is_none() {
         bail!("release {name}@{version} is not published");
     }
+    let owner = format!("promotion:{spec}:{}", crate::now_millis());
+    let lock = crate::canary::claim_promotion_lock(ctx, name, channel, &owner).await?;
+    let result = async {
+        let canary_authorization =
+            crate::canary::authorize_promotion(ctx, name, version, channel).await?;
 
-    let cid = channel_id(name, channel);
-    let channel_head = object(
-        cid.clone(),
-        KIND_CHANNEL,
-        format!("{name}/{channel}"),
-        HashMap::from([
-            ("product".into(), name.to_string()),
-            ("channel".into(), channel.to_string()),
-            ("current_version".into(), version.to_string()),
-            ("current_release".into(), rid.clone()),
-        ]),
-    );
-    if ctx.get(&cid).await?.is_none() {
-        ctx.create_once(object(
+        let cid = channel_id(name, channel);
+        let channel_head = object(
             cid.clone(),
             KIND_CHANNEL,
             format!("{name}/{channel}"),
             HashMap::from([
                 ("product".into(), name.to_string()),
                 ("channel".into(), channel.to_string()),
+                ("current_version".into(), version.to_string()),
+                ("current_release".into(), rid.clone()),
             ]),
-        ))
-        .await?;
-    }
-    ctx.link(&cid, &rid, REL_PROMOTES).await?;
-    ctx.put(channel_head).await?;
+        );
+        if let Some(expected) = canary_authorization.as_ref() {
+            crate::canary::confirm_policy_active(ctx, expected).await?;
+        }
+        crate::canary::confirm_promotion_lock(ctx, &lock).await?;
+        if ctx.get(&cid).await?.is_none() {
+            ctx.create_once(object(
+                cid.clone(),
+                KIND_CHANNEL,
+                format!("{name}/{channel}"),
+                HashMap::from([
+                    ("product".into(), name.to_string()),
+                    ("channel".into(), channel.to_string()),
+                ]),
+            ))
+            .await?;
+        }
+        ctx.link(&cid, &rid, REL_PROMOTES).await?;
+        ctx.put(channel_head).await?;
 
-    Ok(format!("promoted {name}@{version} to channel {channel}"))
+        Ok::<_, anyhow::Error>(format!("promoted {name}@{version} to channel {channel}"))
+    }
+    .await;
+    let unlock = crate::canary::release_promotion_lock(ctx, &lock).await;
+    match (result, unlock) {
+        (Ok(message), Ok(())) => Ok(message),
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(unlock)) => {
+            Err(error.context(format!("releasing promotion lock also failed: {unlock}")))
+        }
+        (Ok(_), Err(error)) => Err(error.context("releasing promotion lock failed")),
+    }
 }
