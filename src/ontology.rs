@@ -17,6 +17,9 @@ pub const KIND_ENVIRONMENT: &str = "tenkai.environment";
 pub const KIND_PLAN: &str = "tenkai.plan";
 pub const KIND_ENVIRONMENT_EXECUTION: &str = "tenkai.environment_execution";
 pub const KIND_DEPLOYMENT: &str = "tenkai.deployment";
+pub const KIND_CANARY_POLICY: &str = "tenkai.canary_policy";
+pub const KIND_CANARY_OUTCOME: &str = "tenkai.canary_outcome";
+pub const KIND_PROMOTION_AUDIT: &str = "tenkai.promotion_audit";
 
 pub const REL_RELEASE_OF: &str = "release_of";
 pub const REL_PROMOTES: &str = "promotes";
@@ -24,6 +27,9 @@ pub const REL_SUBSCRIBES: &str = "subscribes";
 pub const REL_DEPLOYED_RELEASE: &str = "deployed_release";
 pub const REL_IN_ENVIRONMENT: &str = "in_environment";
 pub const REL_PART_OF_PLAN: &str = "part_of_plan";
+pub const REL_GOVERNS_RELEASE: &str = "governs_release";
+pub const REL_EVIDENCE_FOR_POLICY: &str = "evidence_for_policy";
+pub const REL_AUDITS_PROMOTION: &str = "audits_promotion";
 pub const ACTION_SUBSCRIBE: &str = "tenkai.subscribe";
 pub const ACTION_REPLACE_SUBSCRIPTION: &str = "tenkai.replace_subscription";
 
@@ -160,6 +166,62 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
                 prop("to_version", true, "Applied version"),
                 prop("status", true, "succeeded|failed|rolled_back"),
                 prop("detail", false, "Failure or rollback detail"),
+            ],
+        ),
+        object_type(
+            KIND_CANARY_POLICY,
+            "The immutable canary cohort and success rule for one release promotion",
+            vec![
+                prop("release_id", true, "Release governed by this policy"),
+                prop("release_digest", true, "Pinned release manifest digest"),
+                prop("artifact_digest", true, "Pinned release artifact digest"),
+                prop("target_channel", true, "Wider channel gated by this policy"),
+                prop("policy_digest", true, "Digest of the canonical policy"),
+                prop("active", true, "Whether policy activation completed"),
+                prop("policy", true, "Canonical JSON policy document"),
+            ],
+        ),
+        object_type(
+            KIND_CANARY_OUTCOME,
+            "An immutable canary deployment outcome bound to a release and policy",
+            vec![
+                prop("release_id", true, "Release exercised by the canary"),
+                prop("policy_digest", true, "Policy in force during execution"),
+                prop(
+                    "policy_activated_at",
+                    true,
+                    "Activation time of the policy in force during execution",
+                ),
+                prop("environment", true, "Canary environment"),
+                prop("plan_id", true, "Plan that produced the outcome"),
+                prop("attempt_id", true, "Immutable execution attempt"),
+                prop("step_order", true, "Plan step represented by the outcome"),
+                prop("plan_state", true, "Terminal state of the producing plan"),
+                prop(
+                    "deployment_id",
+                    false,
+                    "Deployment proving a passing outcome",
+                ),
+                prop("executed_at", true, "Execution time in Unix milliseconds"),
+                prop("recorded_at", true, "Outcome time in Unix milliseconds"),
+                prop("outcome", true, "Canonical JSON outcome document"),
+            ],
+        ),
+        object_type(
+            KIND_PROMOTION_AUDIT,
+            "An immutable allow or deny decision with its complete canary evidence",
+            vec![
+                prop("release_id", true, "Release considered for promotion"),
+                prop("target_channel", true, "Destination channel"),
+                prop("policy_digest", true, "Policy evaluated"),
+                prop(
+                    "policy_activated_at",
+                    true,
+                    "Activation time of the policy evaluated",
+                ),
+                prop("allowed", true, "Whether promotion was permitted"),
+                prop("evaluated_at", true, "Decision time in Unix milliseconds"),
+                prop("evaluation", true, "Canonical JSON decision and evidence"),
             ],
         ),
     ];

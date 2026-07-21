@@ -5,6 +5,7 @@
 //! is the gatekeeper: eval suites gate promotions before anything is applied.
 
 pub mod apply;
+pub mod canary;
 pub mod catalog;
 pub mod client;
 pub mod manifest;
