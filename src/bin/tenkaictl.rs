@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 
-use tenkai::{apply, catalog, client, ontology, plan};
+use tenkai::{apply, canary, catalog, client, ontology, plan};
 
 #[derive(Parser)]
 #[command(
@@ -26,6 +26,11 @@ enum Command {
     Publish { manifest: PathBuf },
     /// Point a channel at a published release, e.g. `promote hello@0.1.0 stable`.
     Promote { spec: String, channel: String },
+    /// Manage canary designation, promotion policy, and evidence repair.
+    Canary {
+        #[command(subcommand)]
+        command: CanaryCommand,
+    },
     /// Manage environments.
     Env {
         #[command(subcommand)]
@@ -54,6 +59,32 @@ enum Command {
         #[arg(long, default_value = "local")]
         env: String,
     },
+}
+
+#[derive(Subcommand)]
+enum CanaryCommand {
+    /// Mark an environment as eligible for canary cohorts.
+    Designate {
+        env: String,
+        /// Remove the explicit canary designation.
+        #[arg(long)]
+        remove: bool,
+    },
+    /// Require successful evidence from every named environment before promotion.
+    Policy {
+        spec: String,
+        channel: String,
+        /// Required canary environment; repeat for the complete cohort.
+        #[arg(long = "env", required = true)]
+        cohort: Vec<String>,
+        /// Start a fresh activation; prior evidence remains audited but no longer applies.
+        #[arg(long)]
+        reactivate: bool,
+    },
+    /// Rebuild durable canary outcomes for a completed apply.
+    Repair { plan_id: String },
+    /// Remove an abandoned promotion lock after verifying no operation is running.
+    Unlock { product: String, channel: String },
 }
 
 #[derive(Subcommand)]
@@ -114,6 +145,37 @@ async fn main() -> Result<()> {
         Command::Promote { spec, channel } => {
             println!("{}", catalog::promote(&mut ctx, &spec, &channel).await?);
         }
+        Command::Canary { command } => match command {
+            CanaryCommand::Designate { env, remove } => {
+                println!("{}", canary::set_designated(&mut ctx, &env, !remove).await?);
+            }
+            CanaryCommand::Policy {
+                spec,
+                channel,
+                cohort,
+                reactivate,
+            } => {
+                let active =
+                    canary::configure(&mut ctx, &spec, &channel, cohort, reactivate).await?;
+                println!(
+                    "canary policy {} active for {} -> {} with cohort {}",
+                    active.digest(),
+                    spec,
+                    channel,
+                    active.policy().cohort.join(", ")
+                );
+            }
+            CanaryCommand::Repair { plan_id } => {
+                let repaired = canary::repair_pending(&mut ctx, &plan_id).await?;
+                println!("repaired {repaired} canary attempt(s) for {plan_id}");
+            }
+            CanaryCommand::Unlock { product, channel } => {
+                println!(
+                    "{}",
+                    canary::unlock_promotion(&mut ctx, &product, &channel).await?
+                );
+            }
+        },
         Command::Env { command } => match command {
             EnvCommand::Add { name, description } => {
                 println!("{}", plan::env_add(&mut ctx, &name, &description).await?);
@@ -225,4 +287,42 @@ async fn run_plan(ctx: &mut client::Ctx, plan_id: &str, skip_gates: bool) -> Res
         std::process::exit(1);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_canary_policy_cohort_and_reactivation() {
+        let cli = Cli::try_parse_from([
+            "tenkaictl",
+            "canary",
+            "policy",
+            "api@1.2.3",
+            "stable",
+            "--env",
+            "canary-a",
+            "--env",
+            "canary-b",
+            "--reactivate",
+        ])
+        .unwrap();
+        let Command::Canary {
+            command:
+                CanaryCommand::Policy {
+                    spec,
+                    channel,
+                    cohort,
+                    reactivate,
+                },
+        } = cli.command
+        else {
+            panic!("expected canary policy command");
+        };
+        assert_eq!(spec, "api@1.2.3");
+        assert_eq!(channel, "stable");
+        assert_eq!(cohort, ["canary-a", "canary-b"]);
+        assert!(reactivate);
+    }
 }

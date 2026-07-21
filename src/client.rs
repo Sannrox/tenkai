@@ -1,6 +1,8 @@
 //! Connection to a local sekai-chisei server, plus thin object/link helpers.
 
 use anyhow::{Context as _, Result};
+use std::sync::Arc;
+use tokio::sync::OnceCell;
 use tonic::metadata::MetadataValue;
 use tonic::service::Interceptor;
 use tonic::service::interceptor::InterceptedService;
@@ -11,8 +13,8 @@ use crate::pb::chisei::chisei_service_client::ChiseiServiceClient;
 use crate::pb::sekai::sekai_service_client::SekaiServiceClient;
 use crate::pb::sekai::{
     ActionRequest, CreateLinkRequest, CreateObjectRequest, DeleteLinkRequest, DeleteObjectRequest,
-    ExecuteActionRequest, GetLinkedObjectsRequest, GetLinksRequest, GetObjectRequest, Link, Object,
-    UpdateObjectRequest,
+    ExecuteActionRequest, FindByPropertyRequest, GetLinkedObjectsRequest, GetLinksRequest,
+    GetObjectRequest, Link, Object, UpdateObjectRequest,
 };
 
 /// Attaches auth + caller identity metadata to every request.
@@ -45,6 +47,7 @@ pub type Chisei = ChiseiServiceClient<InterceptedService<Channel, Meta>>;
 pub struct Ctx {
     pub sekai: Sekai,
     pub chisei: Chisei,
+    canary_schema_preflight: Arc<OnceCell<()>>,
 }
 
 fn token_transport_is_safe(url: &str) -> bool {
@@ -95,10 +98,15 @@ pub async fn connect() -> Result<Ctx> {
     Ok(Ctx {
         sekai: SekaiServiceClient::with_interceptor(channel.clone(), meta.clone()),
         chisei: ChiseiServiceClient::with_interceptor(channel, meta),
+        canary_schema_preflight: Arc::new(OnceCell::new()),
     })
 }
 
 impl Ctx {
+    pub(crate) fn canary_schema_preflight(&self) -> Arc<OnceCell<()>> {
+        Arc::clone(&self.canary_schema_preflight)
+    }
+
     /// Get an object by id; `None` on not-found.
     pub async fn get(&mut self, id: &str) -> Result<Option<Object>> {
         match self
@@ -207,6 +215,24 @@ impl Ctx {
                 object_id: object_id.into(),
                 relation: relation.into(),
                 direction: direction.into(),
+            })
+            .await?
+            .into_inner()
+            .objects)
+    }
+
+    pub async fn find_by_property(
+        &mut self,
+        kind: &str,
+        key: &str,
+        value: &str,
+    ) -> Result<Vec<Object>> {
+        Ok(self
+            .sekai
+            .find_by_property(FindByPropertyRequest {
+                kind: kind.into(),
+                key: key.into(),
+                value: value.into(),
             })
             .await?
             .into_inner()

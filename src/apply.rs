@@ -21,6 +21,7 @@ use crate::pb::chisei::{
 use crate::pb::sekai::Object;
 use crate::plan::{self, Action, Plan, PlanState, ReleasePin, Step};
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Outcome {
     pub step: Step,
     pub status: String, // succeeded | failed | rolled_back
@@ -526,7 +527,7 @@ fn environment_claim_id(environment: &str) -> String {
 
 const ENVIRONMENT_LEASE_MS: i64 = 2 * 60 * 60 * 1000;
 
-struct EnvironmentLease {
+pub(crate) struct EnvironmentLease {
     id: String,
     environment: String,
     owner: String,
@@ -548,7 +549,7 @@ fn lease_object(lease: &EnvironmentLease, now: i64) -> Object {
     )
 }
 
-async fn claim_environment(
+pub(crate) async fn claim_environment(
     ctx: &mut Ctx,
     environment: &str,
     owner: &str,
@@ -596,13 +597,37 @@ async fn refresh_environment_lease(ctx: &mut Ctx, lease: &EnvironmentLease) -> R
     Ok(())
 }
 
-async fn release_environment(ctx: &mut Ctx, lease: &EnvironmentLease) -> Result<()> {
+pub(crate) async fn release_environment(ctx: &mut Ctx, lease: &EnvironmentLease) -> Result<()> {
     if let Some(existing) = ctx.get(&lease.id).await?
         && existing.properties.get("owner") == Some(&lease.owner)
     {
         ctx.delete(&lease.id).await?;
     }
     Ok(())
+}
+
+pub(crate) struct EnvironmentLeaseStatus {
+    pub owner: String,
+}
+
+pub(crate) async fn environment_lease_status(
+    ctx: &mut Ctx,
+    environment: &str,
+) -> Result<Option<EnvironmentLeaseStatus>> {
+    let Some(lease) = ctx.get(&environment_claim_id(environment)).await? else {
+        return Ok(None);
+    };
+    if lease.kind != KIND_ENVIRONMENT_EXECUTION
+        || lease.properties.get("environment").map(String::as_str) != Some(environment)
+    {
+        bail!("environment {environment} has an invalid apply lease object");
+    }
+    let owner = lease
+        .properties
+        .get("owner")
+        .cloned()
+        .context("environment apply lease has no owner")?;
+    Ok(Some(EnvironmentLeaseStatus { owner }))
 }
 
 pub async fn unlock_environment(ctx: &mut Ctx, environment: &str) -> Result<String> {
@@ -668,12 +693,59 @@ pub async fn execute(ctx: &mut Ctx, plan_id: &str, skip_gates: bool) -> Result<V
     let environment = stored_plan.environment.clone();
     let owner = stored_plan.id.clone();
     let lease = claim_environment(ctx, &environment, &owner).await?;
-    let result = execute_locked(ctx, stored_plan, skip_gates, &lease).await;
+    let mut canary_finalization_error = None;
+    let result = match crate::canary::begin_attempt(ctx, &stored_plan, skip_gates).await {
+        Ok(attempt_id) => {
+            let start_result = match attempt_id.as_deref() {
+                Some(attempt_id) => crate::canary::mark_attempt_started(ctx, attempt_id)
+                    .await
+                    .context("marking canary attempt as started"),
+                None => Ok(()),
+            };
+            match start_result {
+                Err(error) => Err(error),
+                Ok(()) => {
+                    let result = execute_locked(ctx, stored_plan, skip_gates, &lease).await;
+                    if let Some(attempt_id) = attempt_id
+                        // This executor has no reliable post-mutation error boundary. Keep
+                        // errored attempts pending until explicit repair so promotion fails closed.
+                        && let Err(error) = crate::canary::finish_attempt(
+                            ctx,
+                            plan_id,
+                            &attempt_id,
+                            false,
+                            result.as_ref().ok().map(Vec::as_slice),
+                        )
+                        .await
+                    {
+                        canary_finalization_error = Some(error);
+                    }
+                    result
+                }
+            }
+        }
+        Err(error) => Err(error.context("snapshotting canary policies before execution")),
+    };
     let unlock = release_environment(ctx, &lease).await;
-    match (result, unlock) {
+    let released_result = match (result, unlock) {
         (Ok(outcomes), Ok(())) => Ok(outcomes),
-        (Err(error), _) => Err(error),
-        (Ok(_), Err(error)) => Err(error.context("releasing environment apply lock")),
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(unlock)) => Err(error.context(format!(
+            "releasing environment apply lease also failed: {unlock}; run `tenkaictl env unlock {environment}` after verifying no apply is running"
+        ))),
+        (Ok(_), Err(error)) => Err(error.context(format!(
+            "releasing environment apply lease failed; run `tenkaictl env unlock {environment}` after verifying no apply is running"
+        ))),
+    };
+    match (released_result, canary_finalization_error) {
+        (Ok(outcomes), None) => Ok(outcomes),
+        (Ok(_), Some(error)) => Err(error.context(format!(
+            "apply completed but canary evidence finalization failed; run `tenkaictl canary repair {plan_id}`"
+        ))),
+        (Err(error), None) => Err(error),
+        (Err(error), Some(finalization)) => Err(error.context(format!(
+            "canary evidence finalization also failed: {finalization}"
+        ))),
     }
 }
 
