@@ -573,7 +573,64 @@ message GetCoordinationSnapshotResponse { CoordinationSnapshot snapshot = 1; }
 
 // --- Service ---
 
+// A reusable, namespace-scoped lease. `generation` is a monotonically
+// increasing fencing number and `fencing_token` uniquely identifies the
+// acquisition. Downstream mutation executors must reject a generation older
+// than the highest generation they have observed.
+message Lease {
+  string namespace = 1;
+  string key = 2;
+  uint64 generation = 3;
+  string fencing_token = 4;
+  string owner = 5;
+  string status = 6;
+  int64 acquired_at_ms = 7;
+  int64 refreshed_at_ms = 8;
+  int64 expires_at_ms = 9;
+  int64 released_at_ms = 10;
+}
+message AcquireLeaseRequest {
+  string namespace = 1;
+  string key = 2;
+  string owner = 3;
+  int64 ttl_ms = 4;
+  string request_id = 5;
+}
+message AcquireLeaseResponse { Lease lease = 1; }
+message GetLeaseRequest { string namespace = 1; string key = 2; }
+message GetLeaseResponse { Lease lease = 1; }
+message RefreshLeaseRequest {
+  string namespace = 1;
+  string key = 2;
+  string fencing_token = 3;
+  int64 ttl_ms = 4;
+  string request_id = 5;
+}
+message RefreshLeaseResponse { Lease lease = 1; }
+message ReleaseLeaseRequest {
+  string namespace = 1;
+  string key = 2;
+  string fencing_token = 3;
+  string request_id = 4;
+}
+message ReleaseLeaseResponse { Lease lease = 1; }
+message TakeoverExpiredLeaseRequest {
+  string namespace = 1;
+  string key = 2;
+  string owner = 3;
+  string expected_fencing_token = 4;
+  int64 expected_expires_at_ms = 5;
+  int64 ttl_ms = 6;
+  string request_id = 7;
+}
+message TakeoverExpiredLeaseResponse { Lease lease = 1; }
+
 service SekaiService {
+  rpc AcquireLease(AcquireLeaseRequest) returns (AcquireLeaseResponse);
+  rpc GetLease(GetLeaseRequest) returns (GetLeaseResponse);
+  rpc RefreshLease(RefreshLeaseRequest) returns (RefreshLeaseResponse);
+  rpc ReleaseLease(ReleaseLeaseRequest) returns (ReleaseLeaseResponse);
+  rpc TakeoverExpiredLease(TakeoverExpiredLeaseRequest) returns (TakeoverExpiredLeaseResponse);
   rpc CreateObject(CreateObjectRequest) returns (CreateObjectResponse);
   rpc GetObject(GetObjectRequest) returns (GetObjectResponse);
   rpc UpdateObject(UpdateObjectRequest) returns (UpdateObjectResponse);
