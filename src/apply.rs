@@ -19,7 +19,7 @@ use crate::ontology::*;
 use crate::pb::chisei::{
     EvalRun, EvalSuite, GetEvalRunRequest, GetEvalSuiteRequest, ListEvalRunsRequest,
 };
-use crate::pb::sekai::Object;
+use crate::pb::sekai::{Link, Object};
 use crate::plan::{self, Action, Plan, PlanState, ReleasePin, Step};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -635,6 +635,19 @@ fn environment_claim_id(environment: &str) -> String {
 
 const ENVIRONMENT_LEASE_MS: i64 = 2 * 60 * 60 * 1000;
 const RELEASED_LEASE_OWNER: &str = "released";
+const REL_ACTIVE_ENVIRONMENT_EXECUTION: &str = "active_environment_execution";
+
+fn environment_claim_link(environment: &str) -> Link {
+    let environment_id = env_id(environment);
+    let lease_id = environment_claim_id(environment);
+    Link {
+        id: format!("{environment_id}--{REL_ACTIVE_ENVIRONMENT_EXECUTION}--{lease_id}"),
+        from_id: environment_id,
+        to_id: lease_id,
+        relation: REL_ACTIVE_ENVIRONMENT_EXECUTION.into(),
+        created: crate::now_millis(),
+    }
+}
 
 pub(crate) struct EnvironmentLease {
     id: String,
@@ -669,13 +682,41 @@ pub(crate) async fn claim_environment(
         owner: owner.to_string(),
     };
     let now = crate::now_millis();
-    match ctx.create_once(lease_object(&lease, now)).await {
-        Ok(_) => return Ok(lease),
+    let mut available = lease_object(&lease, now);
+    available
+        .properties
+        .insert("owner".into(), RELEASED_LEASE_OWNER.into());
+    available.properties.insert("expires_at".into(), "0".into());
+    match ctx.create_once(available).await {
+        Ok(_) => {}
         Err(status)
             if status.code() == tonic::Code::AlreadyExists
                 || (status.code() == tonic::Code::Internal
                     && (status.message().contains("UNIQUE")
                         || status.message().contains("object IDs with audit history"))) => {}
+        Err(status) => return Err(status.into()),
+    }
+    match ctx
+        .create_link_once(environment_claim_link(environment))
+        .await
+    {
+        Ok(()) => {
+            if let Err(error) = ctx.put(lease_object(&lease, now)).await {
+                let _ = ctx
+                    .unlink(
+                        &env_id(environment),
+                        &lease.id,
+                        REL_ACTIVE_ENVIRONMENT_EXECUTION,
+                    )
+                    .await;
+                return Err(error);
+            }
+            return Ok(lease);
+        }
+        Err(status)
+            if status.code() == tonic::Code::AlreadyExists
+                || (status.code() == tonic::Code::Internal
+                    && status.message().contains("UNIQUE")) => {}
         Err(status) => return Err(status.into()),
     }
     let existing = ctx
@@ -687,11 +728,6 @@ pub(crate) async fn claim_environment(
         .get("expires_at")
         .and_then(|value| value.parse::<i64>().ok())
         .unwrap_or(i64::MAX);
-    let existing_owner = existing.properties.get("owner").map(String::as_str);
-    if expires_at <= now && existing_owner == Some(RELEASED_LEASE_OWNER) {
-        ctx.put(lease_object(&lease, now)).await?;
-        return Ok(lease);
-    }
     if expires_at <= now {
         bail!(
             "environment {environment} has an expired apply lease; verify no apply is running, then run `tenkaictl env unlock {environment}`"
@@ -722,6 +758,12 @@ pub(crate) async fn release_environment(ctx: &mut Ctx, lease: &EnvironmentLease)
         existing.properties.insert("expires_at".into(), "0".into());
         existing.updated = crate::now_millis();
         ctx.put(existing).await?;
+        ctx.unlink(
+            &env_id(&lease.environment),
+            &lease.id,
+            REL_ACTIVE_ENVIRONMENT_EXECUTION,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -734,7 +776,16 @@ pub(crate) async fn environment_lease_status(
     ctx: &mut Ctx,
     environment: &str,
 ) -> Result<Option<EnvironmentLeaseStatus>> {
-    let Some(lease) = ctx.get(&environment_claim_id(environment)).await? else {
+    let lease_id = environment_claim_id(environment);
+    let active = ctx
+        .links(&env_id(environment), REL_ACTIVE_ENVIRONMENT_EXECUTION)
+        .await?
+        .into_iter()
+        .any(|link| link.to_id == lease_id);
+    if !active {
+        return Ok(None);
+    }
+    let Some(lease) = ctx.get(&lease_id).await? else {
         return Ok(None);
     };
     if lease.kind != KIND_ENVIRONMENT_EXECUTION
@@ -752,6 +803,9 @@ pub(crate) async fn environment_lease_status(
 
 pub async fn unlock_environment(ctx: &mut Ctx, environment: &str) -> Result<String> {
     crate::ontology::validate_identifier("environment", environment)?;
+    if environment_lease_status(ctx, environment).await?.is_none() {
+        return Ok(format!("environment {environment} has no apply lease"));
+    }
     let id = environment_claim_id(environment);
     let Some(existing) = ctx.get(&id).await? else {
         return Ok(format!("environment {environment} has no apply lease"));
@@ -769,6 +823,8 @@ pub async fn unlock_environment(ctx: &mut Ctx, environment: &str) -> Result<Stri
     released.properties.insert("expires_at".into(), "0".into());
     released.updated = crate::now_millis();
     ctx.put(released).await?;
+    ctx.unlink(&env_id(environment), &id, REL_ACTIVE_ENVIRONMENT_EXECUTION)
+        .await?;
     Ok(format!("removed apply lease for environment {environment}"))
 }
 

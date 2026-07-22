@@ -395,7 +395,7 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
         ActionTypeDef {
             name: ACTION_SUBSCRIBE.into(),
             description: "Authorize and create an environment channel subscription".into(),
-            params: vec![string_param("id"), string_param("channel_id")],
+            params: vec![string_param("channel_id")],
             ops: vec![ActionOp {
                 op: "create_link".into(),
                 property: "channel_id".into(),
@@ -431,11 +431,7 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
             name: ACTION_REPLACE_SUBSCRIPTION.into(),
             description: "Authorize and atomically replace an environment channel subscription"
                 .into(),
-            params: vec![
-                string_param("id"),
-                string_param("channel_id"),
-                string_param("old_link_id"),
-            ],
+            params: vec![string_param("channel_id"), string_param("old_link_id")],
             ops: vec![
                 ActionOp {
                     op: "create_link".into(),
