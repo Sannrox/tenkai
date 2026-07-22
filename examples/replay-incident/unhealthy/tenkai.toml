@@ -1,0 +1,12 @@
+[product]
+name = "replay-service"
+version = "0.2.0"
+description = "Deliberately unhealthy release for the recorded rollback incident"
+
+[deploy]
+executor = "local-shell"
+workdir = "."
+install = "mkdir -p .state && printf '0.2.0\\n' > .state/version"
+health = "test \"$(cat .state/version)\" = '0.1.0'"
+uninstall = "rm -rf .state"
+timeout_seconds = 10
