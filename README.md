@@ -17,6 +17,9 @@ executor. Embedded and future server operation share one application core. The
 durable boundary and service-evolution rules are recorded in
 [ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md); see
 [DESIGN.md](DESIGN.md) for the roadmap.
+The versioned Catalog application port, transport conformance requirements,
+cache rules, and failure semantics are documented in
+[the Catalog contract](docs/catalog-contract.md).
 
 ## Quickstart
 
