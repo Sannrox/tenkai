@@ -1,8 +1,8 @@
-//! tenkai — local-first, constraint-based delivery control plane backed by sekai-chisei.
+//! tenkai — local-first, constraint-based delivery control plane.
 //!
-//! sekai is the system of record: every product, release, channel, environment,
-//! plan, and deployment is a typed object with links and audit history. chisei
-//! is the gatekeeper: eval suites gate promotions before anything is applied.
+//! Current v0 uses sekai as its operational store and chisei for eval gates. The
+//! accepted standalone architecture in ADR 0001 moves authority to Tenkai-owned
+//! persistence and makes sekai-chisei an operation-dependent integration.
 
 pub mod apply;
 pub mod canary;
