@@ -6,6 +6,12 @@ that authority. `SqliteStore` is the complete solo-mode adapter; future server
 database adapters must pass the same immutability, lifecycle, idempotency, and
 generation-fencing contract.
 
+The store also owns the provider-event retry queue used for audit and outcome
+projection. Host implementations must add each event atomically with its
+authoritative state change. Provider adapters can acknowledge delivery, but
+cannot change or reconstruct operational truth. See
+[provider contracts](provider-contracts.md) for delivery semantics.
+
 SQLite databases are migrated transactionally when opened. Tenkai refuses to
 open a database whose schema is newer than the binary supports. Back up the
 database and its `-wal`/`-shm` files only while every writer is closed or
