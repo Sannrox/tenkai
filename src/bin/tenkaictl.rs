@@ -1,11 +1,12 @@
 //! tenkaictl — local delivery control plane CLI, backed by sekai-chisei.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 
-use tenkai::{apply, canary, catalog, client, maintenance, ontology, plan};
+use tenkai::{apply, canary, catalog, client, maintenance, ontology, plan, reconciler};
 
 #[derive(Parser)]
 #[command(
@@ -80,6 +81,27 @@ enum Command {
         /// Start outside maintenance policy and record this reason with the authenticated principal.
         #[arg(long)]
         emergency_reason: Option<String>,
+    },
+    /// Continuously converge all registered environments.
+    Reconcile {
+        /// Run one reconciliation tick and exit.
+        #[arg(long)]
+        once: bool,
+        /// Seconds between reconciliation ticks.
+        #[arg(long, default_value_t = 10)]
+        interval: u64,
+        /// Initial retry delay in seconds for a failing environment.
+        #[arg(long, default_value_t = 5)]
+        initial_backoff: u64,
+        /// Maximum retry delay in seconds for a failing environment.
+        #[arg(long, default_value_t = 300)]
+        max_backoff: u64,
+        /// Maximum environments reconciled at the same time.
+        #[arg(long, default_value_t = 8)]
+        max_concurrency: usize,
+        /// Bypass eval gates for automatically created executions.
+        #[arg(long)]
+        skip_gates: bool,
     },
 }
 
@@ -390,8 +412,66 @@ async fn main() -> Result<()> {
             print_steps(&stored.steps);
             run_plan(&mut ctx, &stored.id, true, emergency_reason.as_deref()).await?;
         }
+        Command::Reconcile {
+            once,
+            interval,
+            initial_backoff,
+            max_backoff,
+            max_concurrency,
+            skip_gates,
+        } => {
+            let reconciler = reconciler::Reconciler::new(
+                ctx.clone(),
+                reconciler::Config {
+                    initial_backoff: Duration::from_secs(initial_backoff),
+                    max_backoff: Duration::from_secs(max_backoff),
+                    max_concurrency,
+                    skip_gates,
+                },
+            )?;
+            if once {
+                let report = reconciler.run_once().await?;
+                let failures = report.failures();
+                print_reconcile_report(report);
+                if failures > 0 {
+                    bail!("{failures} environment(s) failed to reconcile");
+                }
+            } else {
+                reconciler
+                    .run_until(Duration::from_secs(interval), |report| match report {
+                        Ok(report) => print_reconcile_report(report),
+                        Err(error) => eprintln!("reconciliation tick failed: {error:#}"),
+                    })
+                    .await?;
+            }
+        }
     }
     Ok(())
+}
+
+fn print_reconcile_report(report: reconciler::TickReport) {
+    for result in report.environments {
+        match result.status {
+            reconciler::EnvironmentStatus::Current => {
+                println!("{:<24} current", result.environment);
+            }
+            reconciler::EnvironmentStatus::Applied { plan_id, steps } => {
+                println!(
+                    "{:<24} applied {steps} step(s) with {plan_id}",
+                    result.environment
+                );
+            }
+            reconciler::EnvironmentStatus::Failed { error } => {
+                eprintln!("{:<24} FAILED {error}", result.environment);
+            }
+            reconciler::EnvironmentStatus::Deferred { retry_at } => {
+                println!("{:<24} deferred until {retry_at}", result.environment);
+            }
+            reconciler::EnvironmentStatus::Busy => {
+                println!("{:<24} already reconciling", result.environment);
+            }
+        }
+    }
 }
 
 async fn run_plan(
@@ -518,6 +598,34 @@ mod tests {
                 emergency_reason: Some(ref reason),
                 ..
             } if reason == "restore critical service"
+        ));
+    }
+
+    #[test]
+    fn parses_one_shot_reconciler_settings() {
+        let cli = Cli::try_parse_from([
+            "tenkaictl",
+            "reconcile",
+            "--once",
+            "--initial-backoff",
+            "3",
+            "--max-backoff",
+            "30",
+            "--max-concurrency",
+            "4",
+            "--skip-gates",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Reconcile {
+                once: true,
+                initial_backoff: 3,
+                max_backoff: 30,
+                max_concurrency: 4,
+                skip_gates: true,
+                ..
+            }
         ));
     }
 
