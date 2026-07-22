@@ -29,8 +29,30 @@ pub struct Outcome {
     pub detail: String,
 }
 
+#[derive(Clone)]
 struct SignalMonitor {
     targets: Arc<ApplySignalTargets>,
+}
+
+#[derive(Clone)]
+pub struct ShutdownSignals {
+    monitor: SignalMonitor,
+}
+
+impl ShutdownSignals {
+    pub(crate) fn forward(&self) -> &Cancellation {
+        &self.monitor.targets.forward
+    }
+
+    pub(crate) fn recovery(&self) -> &Cancellation {
+        &self.monitor.targets.recovery
+    }
+
+    pub async fn wait(&self) {
+        while self.monitor.targets.forward.reason().is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
 }
 
 struct ApplySignalTargets {
@@ -157,6 +179,12 @@ fn monitor_apply_signals() -> Result<SignalMonitor> {
         .expect("signal registry lock")
         .push(Arc::downgrade(&targets));
     Ok(SignalMonitor { targets })
+}
+
+pub fn monitor_shutdown_signals() -> Result<ShutdownSignals> {
+    Ok(ShutdownSignals {
+        monitor: monitor_apply_signals()?,
+    })
 }
 
 enum GateDecision {
@@ -446,9 +474,10 @@ async fn compensate_activation(
     .is_ok();
     let mut restored = false;
 
-    if let (Some(previous), Some(pin)) = (step.from.as_deref(), step.restore.as_ref())
+    if let (Some(_), Some(pin)) = (step.from.as_deref(), step.restore.as_ref())
         && let Ok(previous_content) = release_content(ctx, pin, env, &step.product).await
     {
+        let restore_version = previous_content.manifest.product.version.clone();
         let previous_executor = executor::select(previous_content.manifest.deploy.executor);
         let previous_input = executor_input(
             &previous_content,
@@ -466,11 +495,34 @@ async fn compensate_activation(
         .await
         .is_ok()
         {
-            restored = set_env_deployed(ctx, env, &step.product, previous, Some(&step.to), false)
-                .await
-                .is_ok();
+            restored = set_env_deployed(
+                ctx,
+                env,
+                &step.product,
+                &restore_version,
+                Some(&step.to),
+                false,
+                None,
+            )
+            .await
+            .is_ok();
         }
-    } else if step.from.is_none() && cleaned {
+    } else if step.from.is_none()
+        && let Some(pin) = step.restore.as_ref()
+        && let Ok(previous_content) = release_content(ctx, pin, env, &step.product).await
+    {
+        restored = set_env_deployed(
+            ctx,
+            env,
+            &step.product,
+            &previous_content.manifest.product.version,
+            None,
+            false,
+            None,
+        )
+        .await
+        .is_ok();
+    } else if step.from.is_none() && step.restore.is_none() && cleaned {
         restored = clear_env_deployed(ctx, env, &step.product).await.is_ok();
     }
 
@@ -583,7 +635,41 @@ async fn set_env_deployed(
     version: &str,
     previous: Option<&str>,
     mark_dependency_managed: bool,
+    rollback_binding: Option<(&str, &str, i64)>,
 ) -> Result<()> {
+    if let Some((channel_id, channel_version, channel_updated)) = rollback_binding
+        && !channel_id.is_empty()
+    {
+        let channels = ctx.linked(&env_id(env), REL_SUBSCRIBES, "out").await?;
+        let channel = channels
+            .iter()
+            .find(|channel| channel.id == channel_id)
+            .with_context(|| {
+                format!("rollback channel {channel_id} for {product} is no longer subscribed")
+            })?;
+        let expected_release = if channel_version.is_empty() {
+            String::new()
+        } else {
+            release_id(product, channel_version)
+        };
+        if channel
+            .properties
+            .get("current_version")
+            .map(String::as_str)
+            .unwrap_or_default()
+            != channel_version
+            || channel.properties.get("product").map(String::as_str) != Some(product)
+            || channel
+                .properties
+                .get("current_release")
+                .map(String::as_str)
+                .unwrap_or_default()
+                != expected_release
+            || channel.updated != channel_updated
+        {
+            bail!("rollback channel {channel_id} for {product} changed during execution");
+        }
+    }
     let Some(mut env_obj) = ctx.get(&env_id(env)).await? else {
         bail!("environment {env} disappeared during apply");
     };
@@ -594,15 +680,43 @@ async fn set_env_deployed(
         format!("deployed_release.{product}"),
         release_id(product, version),
     );
-    if let Some(prev) = previous {
-        env_obj
-            .properties
-            .insert(format!("deployed_prev.{product}"), prev.to_string());
-    }
+    update_previous(&mut env_obj.properties, product, version, previous);
     if mark_dependency_managed {
         env_obj
             .properties
             .insert(format!("dependency_managed.{product}"), "true".to_string());
+    }
+    if let Some((channel_id, channel_head, channel_updated)) = rollback_binding
+        && !channel_id.is_empty()
+    {
+        env_obj
+            .properties
+            .insert(format!("rollback_override.{product}"), version.to_string());
+        env_obj.properties.insert(
+            format!("rollback_override_channel.{product}"),
+            channel_id.into(),
+        );
+        env_obj.properties.insert(
+            format!("rollback_override_head.{product}"),
+            channel_head.into(),
+        );
+        env_obj.properties.insert(
+            format!("rollback_override_channel_updated.{product}"),
+            channel_updated.to_string(),
+        );
+    } else if rollback_binding.is_some() {
+        env_obj
+            .properties
+            .remove(&format!("rollback_override.{product}"));
+        env_obj
+            .properties
+            .remove(&format!("rollback_override_channel.{product}"));
+        env_obj
+            .properties
+            .remove(&format!("rollback_override_head.{product}"));
+        env_obj
+            .properties
+            .remove(&format!("rollback_override_channel_updated.{product}"));
     }
     env_obj
         .properties
@@ -610,9 +724,85 @@ async fn set_env_deployed(
     env_obj
         .properties
         .remove(&format!("deployment_error.{product}"));
+    crate::drift::clear_observation_properties(&mut env_obj, product);
     env_obj.updated = crate::now_millis();
     ctx.put(env_obj).await?;
     Ok(())
+}
+
+async fn finalize_rollback_overrides(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
+    let Some(mut environment) = ctx.get(&env_id(&plan.environment)).await? else {
+        bail!("environment {} disappeared during apply", plan.environment);
+    };
+    let mut changed = false;
+    for input in &plan.inputs {
+        if input.rollback_target
+            || environment
+                .properties
+                .get(&format!("rollback_override.{}", input.product))
+                .is_none_or(|target| target == &input.desired_version)
+        {
+            continue;
+        }
+        for prefix in [
+            "rollback_override.",
+            "rollback_override_channel.",
+            "rollback_override_head.",
+            "rollback_override_channel_updated.",
+        ] {
+            environment
+                .properties
+                .remove(&format!("{prefix}{}", input.product));
+        }
+        changed = true;
+    }
+    if changed {
+        environment.updated = crate::now_millis();
+        ctx.put(environment).await?;
+    }
+    Ok(())
+}
+
+async fn persist_rollback_intents(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
+    for input in plan.inputs.iter().filter(|input| input.rollback_target) {
+        set_env_deployed(
+            ctx,
+            &plan.environment,
+            &input.product,
+            &input.desired_version,
+            input.deployed_version.as_deref(),
+            input.dependency_managed,
+            Some((
+                &input.channel_id,
+                &input.channel_version,
+                input.channel_updated,
+            )),
+        )
+        .await
+        .with_context(|| format!("persisting rollback intent for {}", input.product))?;
+    }
+    Ok(())
+}
+
+fn distinct_previous<'a>(version: &str, previous: Option<&'a str>) -> Option<&'a str> {
+    previous.filter(|previous| *previous != version)
+}
+
+fn update_previous(
+    properties: &mut HashMap<String, String>,
+    product: &str,
+    version: &str,
+    previous: Option<&str>,
+) {
+    let key = format!("deployed_prev.{product}");
+    if let Some(previous) = distinct_previous(version, previous) {
+        properties.insert(key, previous.to_string());
+    } else if properties
+        .get(&key)
+        .is_some_and(|previous| previous == version)
+    {
+        properties.remove(&key);
+    }
 }
 
 async fn set_env_unknown(ctx: &mut Ctx, env: &str, product: &str, detail: &str) -> Result<()> {
@@ -630,10 +820,23 @@ async fn set_env_unknown(ctx: &mut Ctx, env: &str, product: &str, detail: &str) 
         .remove(&format!("dependency_managed.{product}"));
     environment
         .properties
+        .remove(&format!("rollback_override.{product}"));
+    environment
+        .properties
+        .remove(&format!("rollback_override_channel.{product}"));
+    environment
+        .properties
+        .remove(&format!("rollback_override_head.{product}"));
+    environment
+        .properties
+        .remove(&format!("rollback_override_channel_updated.{product}"));
+    environment
+        .properties
         .insert(format!("deployment_health.{product}"), "unknown".into());
     environment
         .properties
         .insert(format!("deployment_error.{product}"), detail.to_string());
+    crate::drift::clear_observation_properties(&mut environment, product);
     environment.updated = crate::now_millis();
     ctx.put(environment).await?;
     Ok(())
@@ -661,6 +864,19 @@ async fn clear_env_deployed(ctx: &mut Ctx, env: &str, product: &str) -> Result<(
     environment
         .properties
         .remove(&format!("deployment_error.{product}"));
+    environment
+        .properties
+        .remove(&format!("rollback_override.{product}"));
+    environment
+        .properties
+        .remove(&format!("rollback_override_channel.{product}"));
+    environment
+        .properties
+        .remove(&format!("rollback_override_head.{product}"));
+    environment
+        .properties
+        .remove(&format!("rollback_override_channel_updated.{product}"));
+    crate::drift::clear_observation_properties(&mut environment, product);
     environment.updated = crate::now_millis();
     ctx.put(environment).await?;
     Ok(())
@@ -736,7 +952,15 @@ fn environment_claim_id(environment: &str) -> String {
     format!("{}:execution", env_id(environment))
 }
 
+fn environment_recovery_claim_id(environment: &str) -> String {
+    format!("{}:recovery", environment_claim_id(environment))
+}
+
 const ENVIRONMENT_LEASE_MS: i64 = 2 * 60 * 60 * 1000;
+// Refreshes perform multiple control-plane RPCs, each of which may consume the
+// full request timeout. Keep enough headroom to avoid publishing an expired lease.
+const HEARTBEATED_LEASE_MS: i64 = 5 * 60 * 1000;
+const ENVIRONMENT_LEASE_REFRESH: std::time::Duration = std::time::Duration::from_secs(5);
 const EXECUTION_PROTOCOL: &str = "durable-attempts-v1";
 
 fn lease_is_expired(object: &Object, now: i64) -> bool {
@@ -747,25 +971,34 @@ fn lease_is_expired(object: &Object, now: i64) -> bool {
         .is_some_and(|expires_at| expires_at <= now)
 }
 
+#[derive(Clone)]
 pub(crate) struct EnvironmentLease {
     id: String,
     environment: String,
     owner: String,
+    duration_ms: i64,
+    durable_protocol: bool,
+}
+
+pub(crate) enum ReconcilerRecovery {
+    None,
+    Busy,
 }
 
 fn lease_object(lease: &EnvironmentLease, now: i64) -> Object {
+    let mut properties = HashMap::from([
+        ("environment".into(), lease.environment.clone()),
+        ("owner".into(), lease.owner.clone()),
+        ("expires_at".into(), (now + lease.duration_ms).to_string()),
+    ]);
+    if lease.durable_protocol {
+        properties.insert("execution_protocol".into(), EXECUTION_PROTOCOL.into());
+    }
     record(
         lease.id.clone(),
         KIND_ENVIRONMENT_EXECUTION,
         format!("apply lease for {}", lease.environment),
-        HashMap::from([
-            ("environment".into(), lease.environment.clone()),
-            ("owner".into(), lease.owner.clone()),
-            (
-                "expires_at".into(),
-                (now + ENVIRONMENT_LEASE_MS).to_string(),
-            ),
-        ]),
+        properties,
     )
 }
 
@@ -774,10 +1007,35 @@ pub(crate) async fn claim_environment(
     environment: &str,
     owner: &str,
 ) -> Result<EnvironmentLease> {
+    if let Some(claim) = ctx.get(&environment_recovery_claim_id(environment)).await? {
+        if lease_is_expired(&claim, crate::now_millis()) {
+            bail!(
+                "environment {environment} has an expired recovery claim; run the reconciler to resume recovery or `tenkaictl env unlock {environment}` after verifying no recovery is running"
+            );
+        }
+        bail!("environment {environment} recovery is in progress");
+    }
+    let owner_object = ctx.get(owner).await?;
+    let durable_protocol = owner.starts_with("observe:")
+        || owner_object.is_some_and(|object| {
+            object.kind == KIND_PLAN
+                && object.namespace == NS
+                && object
+                    .properties
+                    .get("format_version")
+                    .and_then(|value| value.parse::<u32>().ok())
+                    == Some(plan::PLAN_FORMAT_VERSION)
+        });
     let lease = EnvironmentLease {
         id: environment_claim_id(environment),
         environment: environment.to_string(),
         owner: owner.to_string(),
+        duration_ms: if durable_protocol {
+            HEARTBEATED_LEASE_MS
+        } else {
+            ENVIRONMENT_LEASE_MS
+        },
+        durable_protocol,
     };
     let now = crate::now_millis();
     match ctx.create_once(lease_object(&lease, now)).await {
@@ -815,6 +1073,23 @@ async fn refresh_environment_lease(
     ctx: &mut Ctx,
     lease: &EnvironmentLease,
 ) -> std::result::Result<(), LeaseRefreshFailure> {
+    if match ctx
+        .get(&environment_recovery_claim_id(&lease.environment))
+        .await
+    {
+        Ok(claim) => claim.is_some(),
+        Err(error) => {
+            return Err(LeaseRefreshFailure {
+                error,
+                ownership_lost: true,
+            });
+        }
+    } {
+        return Err(LeaseRefreshFailure {
+            error: anyhow::anyhow!("environment {} is being recovered", lease.environment),
+            ownership_lost: true,
+        });
+    }
     let existing = match ctx.get(&lease.id).await {
         Ok(Some(existing)) => existing,
         Ok(None) => {
@@ -861,10 +1136,228 @@ pub(crate) async fn release_environment(ctx: &mut Ctx, lease: &EnvironmentLease)
     Ok(())
 }
 
+async fn maintain_environment_lease(
+    mut ctx: Ctx,
+    lease: EnvironmentLease,
+    cancellation: Cancellation,
+    recovery: Option<Cancellation>,
+    stop: Cancellation,
+) -> Result<()> {
+    let mut next_refresh = tokio::time::Instant::now() + ENVIRONMENT_LEASE_REFRESH;
+    loop {
+        if stop.reason().is_some() {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= next_refresh {
+            if let Err(failure) = refresh_environment_lease(&mut ctx, &lease).await {
+                cancellation.cancel(CancelReason::Terminate);
+                if failure.ownership_lost
+                    && let Some(recovery) = &recovery
+                {
+                    recovery.cancel(CancelReason::Terminate);
+                }
+                return Err(failure
+                    .error
+                    .context("refreshing environment execution lease"));
+            }
+            next_refresh = tokio::time::Instant::now() + ENVIRONMENT_LEASE_REFRESH;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
+struct LeaseHeartbeat {
+    stop: Cancellation,
+    task: Option<tokio::task::JoinHandle<Result<()>>>,
+}
+
+impl LeaseHeartbeat {
+    fn spawn(
+        ctx: Ctx,
+        lease: EnvironmentLease,
+        cancellation: Cancellation,
+        recovery: Option<Cancellation>,
+    ) -> Self {
+        let stop = Cancellation::default();
+        let task = tokio::spawn(maintain_environment_lease(
+            ctx,
+            lease,
+            cancellation,
+            recovery,
+            stop.clone(),
+        ));
+        Self {
+            stop,
+            task: Some(task),
+        }
+    }
+
+    async fn finish(mut self) -> Result<()> {
+        self.stop.cancel(CancelReason::Interrupt);
+        self.task
+            .take()
+            .expect("heartbeat task is present")
+            .await
+            .context("environment lease heartbeat task failed")?
+    }
+}
+
+impl Drop for LeaseHeartbeat {
+    fn drop(&mut self) {
+        self.stop.cancel(CancelReason::Interrupt);
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+async fn forward_cancellation(source: Cancellation, target: Cancellation, stop: Cancellation) {
+    loop {
+        if stop.reason().is_some() {
+            return;
+        }
+        if let Some(reason) = source.cancel_reason() {
+            target.cancel(reason);
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
+pub(crate) async fn observe_environment(
+    ctx: &mut Ctx,
+    environment: &str,
+    source: &Cancellation,
+) -> Result<Vec<crate::drift::ObservationReport>> {
+    let owner = format!("observe:{}", crate::now_millis());
+    let lease = claim_environment(ctx, environment, &owner).await?;
+    let cancellation = Cancellation::default();
+    let cancellation_stop = Cancellation::default();
+    let cancellation_forwarder = tokio::spawn(forward_cancellation(
+        source.clone(),
+        cancellation.clone(),
+        cancellation_stop.clone(),
+    ));
+    let heartbeat = LeaseHeartbeat::spawn(ctx.clone(), lease.clone(), cancellation.clone(), None);
+    let result = crate::drift::observe_locked(ctx, environment, &cancellation).await;
+    cancellation_stop.cancel(CancelReason::Interrupt);
+    let forwarder_result = cancellation_forwarder
+        .await
+        .context("observation cancellation forwarder failed");
+    let result = match (result, forwarder_result) {
+        (Ok(reports), Ok(())) => Ok(reports),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(error), Err(forwarder)) => Err(error.context(format!(
+            "observation cancellation forwarder also failed: {forwarder}"
+        ))),
+    };
+    let heartbeat_result = heartbeat.finish().await;
+    let result = match (result, heartbeat_result) {
+        (Ok(reports), Ok(())) => Ok(reports),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(error), Err(heartbeat)) => Err(error.context(format!(
+            "observation lease heartbeat also failed: {heartbeat}"
+        ))),
+    };
+    let unlock = release_environment(ctx, &lease).await;
+    match (result, unlock) {
+        (Ok(reports), Ok(())) => Ok(reports),
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(unlock)) => Err(error.context(format!(
+            "releasing environment observation lease also failed: {unlock}"
+        ))),
+        (Ok(_), Err(error)) => Err(error.context("releasing environment observation lease")),
+    }
+}
+
+/// Fence and terminate work left by an expired reconciler lease.
+pub(crate) async fn recover_reconciler_execution(
+    ctx: &mut Ctx,
+    environment: &str,
+    cancellation: &Cancellation,
+) -> Result<ReconcilerRecovery> {
+    ensure_not_cancelled(cancellation)?;
+    let id = environment_claim_id(environment);
+    let recovery_id = environment_recovery_claim_id(environment);
+    if let Some(claim) = ctx.get(&recovery_id).await? {
+        if !lease_is_expired(&claim, crate::now_millis()) {
+            return Ok(ReconcilerRecovery::Busy);
+        }
+        ctx.delete(&recovery_id).await?;
+    }
+    let Some(existing) = ctx.get(&id).await? else {
+        return Ok(ReconcilerRecovery::None);
+    };
+    if existing.kind != KIND_ENVIRONMENT_EXECUTION
+        || existing.namespace != NS
+        || existing.properties.get("environment").map(String::as_str) != Some(environment)
+    {
+        bail!("environment {environment} has an invalid execution lease {id}");
+    }
+    if !lease_is_expired(&existing, crate::now_millis()) {
+        return Ok(ReconcilerRecovery::Busy);
+    }
+    let owner = existing
+        .properties
+        .get("owner")
+        .filter(|owner| !owner.is_empty())
+        .cloned()
+        .context("expired environment execution lease has no owner")?;
+    let owner_object = ctx.get(&owner).await?;
+    if owner_object
+        .as_ref()
+        .is_some_and(|object| object.kind != KIND_PLAN || object.namespace != NS)
+        || (owner_object.is_none() && !owner.starts_with("observe:"))
+    {
+        bail!("expired environment lease has unsupported owner {owner}");
+    }
+    if owner_object.is_some()
+        && existing
+            .properties
+            .get("execution_protocol")
+            .map(String::as_str)
+            != Some(EXECUTION_PROTOCOL)
+    {
+        bail!(
+            "expired environment lease belongs to a legacy worker; verify it is stopped, then run `tenkaictl env recover {owner} --confirm-stopped`"
+        );
+    }
+    if existing
+        .properties
+        .get("retained")
+        .is_some_and(|retained| retained == "true")
+    {
+        bail!(
+            "environment {environment} has an operator-retained execution lease; run `tenkaictl env unlock {environment}` only after verifying no worker is running"
+        );
+    }
+    if let Some(stored) = owner_object.as_ref() {
+        let stored = plan::load(ctx, &stored.id).await?;
+        if stored.environment != environment {
+            bail!("expired execution owner {owner} belongs to another environment");
+        }
+    }
+    // Expiry and terminal plan state are failure detectors, not fencing
+    // primitives. A paused worker may already have read this fixed-ID lease;
+    // after automatic deletion and reuse it could resume and overwrite or
+    // delete the replacement lease, allowing concurrent external mutations.
+    // Until storage provides conditional generation-token updates/deletes or
+    // atomic takeover, require an operator to confirm that the worker stopped.
+    bail!(
+        "environment {environment} has an expired execution lease; automatic takeover cannot prove the previous worker stopped, so run `tenkaictl env recover {owner} --confirm-stopped` for a plan or `tenkaictl env unlock {environment}` after verifying no observation worker is running"
+    )
+}
+
 pub async fn unlock_environment(ctx: &mut Ctx, environment: &str) -> Result<String> {
     crate::ontology::validate_identifier("environment", environment)?;
     let id = environment_claim_id(environment);
+    let recovery_id = environment_recovery_claim_id(environment);
     let Some(existing) = ctx.get(&id).await? else {
+        if ctx.get(&recovery_id).await?.is_some() {
+            ctx.delete(&recovery_id).await?;
+        }
         return Ok(format!("environment {environment} has no apply lease"));
     };
     if existing.kind != KIND_ENVIRONMENT_EXECUTION {
@@ -874,6 +1367,9 @@ pub async fn unlock_environment(ctx: &mut Ctx, environment: &str) -> Result<Stri
         );
     }
     ctx.delete(&id).await?;
+    if ctx.get(&recovery_id).await?.is_some() {
+        ctx.delete(&recovery_id).await?;
+    }
     Ok(format!("removed apply lease for environment {environment}"))
 }
 
@@ -937,6 +1433,12 @@ async fn terminate_interrupted_plan(ctx: &mut Ctx, plan_id: &str) -> Result<Stri
     for step in &interrupted.steps {
         attempts.push(ctx.get(&step_deployment_id(&step.id)).await?);
     }
+    let all_steps_succeeded = durable_protocol
+        && attempts.iter().all(|attempt| {
+            attempt.as_ref().is_some_and(|attempt| {
+                attempt.properties.get("status").map(String::as_str) == Some("succeeded")
+            })
+        });
     if !durable_protocol && attempts.iter().all(Option::is_none) {
         for step in &interrupted.steps {
             let detail = "interrupted legacy execution has no durable step state; observed state is required";
@@ -981,6 +1483,14 @@ async fn terminate_interrupted_plan(ctx: &mut Ctx, plan_id: &str) -> Result<Stri
             }
         }
     }
+    if all_steps_succeeded
+        && ambiguous.is_empty()
+        && interrupted.inputs.iter().any(|input| input.rollback_target)
+    {
+        persist_rollback_intents(ctx, &interrupted)
+            .await
+            .context("completing interrupted rollback intent")?;
+    }
     let detail = if ambiguous.is_empty() {
         "reconciler stopped between deployment steps".into()
     } else {
@@ -1010,6 +1520,20 @@ pub async fn recover_interrupted_plan(
     let environment = stored.environment.clone();
     let lease_id = environment_claim_id(&environment);
     if !matches!(stored.state, PlanState::Running | PlanState::Failed) {
+        if let Some(existing) = ctx.get(&lease_id).await? {
+            if existing.kind != KIND_ENVIRONMENT_EXECUTION
+                || existing.namespace != NS
+                || existing.properties.get("environment").map(String::as_str)
+                    != Some(environment.as_str())
+                || existing.properties.get("owner").map(String::as_str) != Some(plan_id)
+            {
+                bail!("environment {environment} lease is not owned by plan {plan_id}");
+            }
+            ctx.delete(&lease_id).await?;
+            return Ok(format!(
+                "removed stopped plan {plan_id} lease for environment {environment}"
+            ));
+        }
         return Ok(format!(
             "plan {plan_id} is {} and has no interrupted execution to recover",
             stored.state
@@ -1027,9 +1551,15 @@ pub async fn recover_interrupted_plan(
                 bail!("environment {environment} lease is not owned by plan {plan_id}");
             }
             EnvironmentLease {
-                id: lease_id,
+                id: lease_id.clone(),
                 environment: environment.clone(),
                 owner: plan_id.into(),
+                duration_ms: HEARTBEATED_LEASE_MS,
+                durable_protocol: existing
+                    .properties
+                    .get("execution_protocol")
+                    .map(String::as_str)
+                    == Some(EXECUTION_PROTOCOL),
             }
         }
         None => {
@@ -1057,6 +1587,18 @@ pub async fn recover_interrupted_plan(
         }
     };
     let detail = terminate_interrupted_plan(ctx, plan_id).await?;
+    let mut retained = ctx
+        .get(&lease_id)
+        .await?
+        .with_context(|| format!("environment {environment} lease disappeared during recovery"))?;
+    if retained.properties.get("owner").map(String::as_str) != Some(plan_id) {
+        bail!("environment {environment} lease changed ownership during recovery");
+    }
+    retained.properties.insert("retained".into(), "true".into());
+    retained.updated = crate::now_millis();
+    ctx.put(retained)
+        .await
+        .context("marking recovered environment lease as operator-retained")?;
     Ok(format!(
         "{detail}; environment {environment} lease retained until explicit unlock"
     ))
@@ -1067,8 +1609,11 @@ async fn validate_preconditions(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
         .get(&env_id(&plan.environment))
         .await?
         .with_context(|| format!("environment {} not found", plan.environment))?;
+    validate_subscription_preconditions(ctx, plan, &environment).await?;
     validate_no_unknown_deployments(&plan.id, &environment)?;
     validate_desired_inputs(&plan.id, &plan.inputs, &environment)?;
+    validate_drift_inputs(plan, &environment)?;
+    validate_outgoing_contracts(plan)?;
     let needs_ownership_preconditions = plan.steps.iter().any(|step| {
         step.action == Action::Remove
             || plan
@@ -1155,18 +1700,171 @@ async fn validate_preconditions(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
                 step.product
             );
         }
-        let actual = environment
+        let confirmed_absent = step.action == Action::Remove
+            && step.from.is_none()
+            && environment
+                .properties
+                .get(&format!("observation_status.{}", step.product))
+                .is_some_and(|status| status == "succeeded")
+            && !environment
+                .properties
+                .contains_key(&format!("observed.{}", step.product));
+        if !confirmed_absent && !plan.drift.iter().any(|drift| drift.product == step.product) {
+            let actual = environment
+                .properties
+                .get(&format!("deployed.{}", step.product));
+            if actual != step.from.as_ref() {
+                bail!(
+                    "plan {} is stale for {}: expected deployed version {:?}, found {:?}",
+                    plan.id,
+                    step.product,
+                    step.from,
+                    actual
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn validate_subscription_preconditions(
+    ctx: &mut Ctx,
+    plan: &Plan,
+    environment: &Object,
+) -> Result<()> {
+    let channels = ctx.linked(&environment.id, REL_SUBSCRIBES, "out").await?;
+    let mut actual_ids = channels
+        .iter()
+        .map(|channel| channel.id.clone())
+        .collect::<Vec<_>>();
+    actual_ids.sort();
+    let mut expected_ids = plan.subscription_ids.clone();
+    expected_ids.sort();
+    if actual_ids != expected_ids {
+        bail!(
+            "plan {} is stale: environment subscriptions changed from {:?} to {:?}",
+            plan.id,
+            expected_ids,
+            actual_ids
+        );
+    }
+    for channel in &channels {
+        if plan
+            .inputs
+            .iter()
+            .any(|input| input.channel_id == channel.id)
+        {
+            continue;
+        }
+        let has_head = channel
             .properties
-            .get(&format!("deployed.{}", step.product));
-        if actual != step.from.as_ref() {
+            .get("current_version")
+            .is_some_and(|version| !version.is_empty())
+            || channel
+                .properties
+                .get("current_release")
+                .is_some_and(|release| !release.is_empty());
+        if has_head {
             bail!(
-                "plan {} is stale for {}: expected deployed version {:?}, found {:?}",
+                "plan {} is stale: previously headless channel {} now has a release",
                 plan.id,
-                step.product,
-                step.from,
-                actual
+                channel.id
             );
         }
+    }
+    for input in plan
+        .inputs
+        .iter()
+        .filter(|input| !input.channel_id.is_empty())
+    {
+        let channel = channels
+            .iter()
+            .find(|channel| channel.id == input.channel_id)
+            .with_context(|| {
+                format!(
+                    "plan {} is stale: channel {} for {} is no longer subscribed",
+                    plan.id, input.channel_id, input.product
+                )
+            })?;
+        let current_version = channel
+            .properties
+            .get("current_version")
+            .map(String::as_str)
+            .unwrap_or_default();
+        let current_release = channel
+            .properties
+            .get("current_release")
+            .map(String::as_str)
+            .unwrap_or_default();
+        let expected_release = if input.channel_version.is_empty() {
+            String::new()
+        } else {
+            release_id(&input.product, &input.channel_version)
+        };
+        let override_matches_channel = environment
+            .properties
+            .get(&format!("rollback_override_channel.{}", input.product))
+            == Some(&input.channel_id)
+            && environment
+                .properties
+                .get(&format!("rollback_override_head.{}", input.product))
+                == Some(&input.channel_version)
+            && environment
+                .properties
+                .get(&format!(
+                    "rollback_override_channel_updated.{}",
+                    input.product
+                ))
+                .and_then(|updated| updated.parse::<i64>().ok())
+                == Some(input.channel_updated);
+        let effective_version = override_matches_channel
+            .then(|| {
+                environment
+                    .properties
+                    .get(&format!("rollback_override.{}", input.product))
+                    .map(String::as_str)
+            })
+            .flatten()
+            .unwrap_or(current_version);
+        if current_version != input.channel_version
+            || current_release != expected_release
+            || channel.updated != input.channel_updated
+            || (!input.rollback_target && effective_version != input.desired_version)
+        {
+            bail!(
+                "plan {} is stale: channel {} for {} changed from {}",
+                plan.id,
+                input.channel_id,
+                input.product,
+                input.channel_version
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_outgoing_contracts(plan: &Plan) -> Result<()> {
+    for step in &plan.steps {
+        validate_outgoing_contract(&plan.id, step)?;
+    }
+    Ok(())
+}
+
+fn validate_outgoing_contract(plan_id: &str, step: &Step) -> Result<()> {
+    let Some(observed) = step.from.as_deref() else {
+        return Ok(());
+    };
+    let contract = match step.action {
+        Action::Rollback => step.restore.as_ref().map(|pin| pin.release_id.as_str()),
+        Action::Remove => Some(step.release_id.as_str()),
+        _ => return Ok(()),
+    };
+    if contract != Some(release_id(&step.product, observed).as_str()) {
+        bail!(
+            "plan {plan_id} cannot safely {} {}: observed version {observed} differs from its approved executable contract; reconcile the external target first",
+            step.action,
+            step.product
+        );
     }
     Ok(())
 }
@@ -1249,11 +1947,66 @@ fn validate_desired_inputs(
     Ok(())
 }
 
+fn validate_drift_inputs(plan: &Plan, environment: &Object) -> Result<()> {
+    let desired = plan
+        .inputs
+        .iter()
+        .map(|input| (input.product.clone(), input.desired_version.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let current = crate::drift::classify(&crate::drift::states_from_properties(
+        &environment.properties,
+        &desired,
+    ));
+    let observations = crate::drift::snapshot_from_properties(&environment.properties, &desired);
+    if current != plan.drift || observations != plan.observations {
+        bail!(
+            "plan {} is stale: observed state changed from {:?} / {:?} to {:?} / {:?}",
+            plan.id,
+            plan.drift,
+            plan.observations,
+            current,
+            observations
+        );
+    }
+    Ok(())
+}
+
 /// Execute a stored plan's ordered steps, one product at a time.
 pub async fn execute(ctx: &mut Ctx, plan_id: &str, skip_gates: bool) -> Result<Vec<Outcome>> {
-    let signal_monitor = monitor_apply_signals()?;
-    let cancellation = &signal_monitor.targets.forward;
-    let recovery = &signal_monitor.targets.recovery;
+    execute_with_shutdown(ctx, plan_id, skip_gates, None).await
+}
+
+pub(crate) async fn execute_for_reconciler(
+    ctx: &mut Ctx,
+    plan_id: &str,
+    skip_gates: bool,
+    shutdown: &ShutdownSignals,
+) -> Result<Vec<Outcome>> {
+    execute_with_shutdown(ctx, plan_id, skip_gates, Some(shutdown)).await
+}
+
+async fn execute_with_shutdown(
+    ctx: &mut Ctx,
+    plan_id: &str,
+    skip_gates: bool,
+    shutdown: Option<&ShutdownSignals>,
+) -> Result<Vec<Outcome>> {
+    let signal_monitor = if shutdown.is_none() {
+        Some(monitor_apply_signals()?)
+    } else {
+        None
+    };
+    let (signal_cancellation, signal_recovery) = match shutdown {
+        Some(shutdown) => (shutdown.forward(), shutdown.recovery()),
+        None => {
+            let targets = &signal_monitor
+                .as_ref()
+                .expect("standalone apply signal monitor")
+                .targets;
+            (&targets.forward, &targets.recovery)
+        }
+    };
+    ensure_not_cancelled(signal_cancellation)?;
     let stored_plan = plan::load(ctx, plan_id).await?;
     if stored_plan.format_version != plan::PLAN_FORMAT_VERSION {
         bail!(
@@ -1272,17 +2025,99 @@ pub async fn execute(ctx: &mut Ctx, plan_id: &str, skip_gates: bool) -> Result<V
     let environment = stored_plan.environment.clone();
     let owner = stored_plan.id.clone();
     let lease = claim_environment(ctx, &environment, &owner).await?;
+    let cancellation = Cancellation::default();
+    let recovery = Cancellation::default();
+    let heartbeat = LeaseHeartbeat::spawn(
+        ctx.clone(),
+        lease.clone(),
+        cancellation.clone(),
+        Some(recovery.clone()),
+    );
+    if let Err(error) = mark_durable_execution_protocol(ctx, &owner)
+        .await
+        .context("persisting restart-safe execution protocol")
+    {
+        let heartbeat_result = heartbeat.finish().await;
+        let release_result = release_environment(ctx, &lease).await;
+        return match (heartbeat_result, release_result) {
+            (Ok(()), Ok(())) => Err(error),
+            (Err(heartbeat), Ok(())) => Err(error.context(format!(
+                "stopping environment heartbeat after protocol persistence failed: {heartbeat}"
+            ))),
+            (_, Err(unlock)) => Err(error.context(format!(
+                "releasing environment lease after protocol persistence failed: {unlock}"
+            ))),
+        };
+    }
+    let cancellation_stop = Cancellation::default();
+    let cancellation_forwarder = tokio::spawn(forward_cancellation(
+        signal_cancellation.clone(),
+        cancellation.clone(),
+        cancellation_stop.clone(),
+    ));
+    let recovery_stop = Cancellation::default();
+    let recovery_forwarder = tokio::spawn(forward_cancellation(
+        signal_recovery.clone(),
+        recovery.clone(),
+        recovery_stop.clone(),
+    ));
     let mut mutation_started = false;
-    let result = execute_locked(
-        ctx,
-        stored_plan,
-        skip_gates,
-        &lease,
-        cancellation,
-        recovery,
-        &mut mutation_started,
-    )
+    let result = async {
+        let reports = crate::drift::observe_locked(ctx, &environment, &cancellation).await?;
+        if let Some(report) = reports
+            .iter()
+            .find(|report| report.configured && report.error.is_some())
+        {
+            bail!(
+                "observation failed for {}: {}",
+                report.product,
+                report
+                    .error
+                    .as_deref()
+                    .unwrap_or("unknown observation error")
+            );
+        }
+        execute_locked(
+            ctx,
+            stored_plan,
+            skip_gates,
+            &lease,
+            &cancellation,
+            &recovery,
+            &mut mutation_started,
+        )
+        .await
+    }
     .await;
+    cancellation_stop.cancel(CancelReason::Interrupt);
+    recovery_stop.cancel(CancelReason::Interrupt);
+    let forwarders_result = async {
+        cancellation_forwarder
+            .await
+            .context("deployment cancellation forwarder failed")?;
+        recovery_forwarder
+            .await
+            .context("deployment recovery cancellation forwarder failed")?;
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let result = match (result, forwarders_result) {
+        (Ok(outcomes), Ok(())) => Ok(outcomes),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(error), Err(forwarder)) => Err(error.context(format!(
+            "deployment cancellation forwarding also failed: {forwarder}"
+        ))),
+    };
+    let heartbeat_result = heartbeat.finish().await;
+    let result = match (result, heartbeat_result) {
+        (Ok(outcomes), Ok(())) => Ok(outcomes),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(error), Err(heartbeat)) => Err(error.context(format!(
+            "environment lease heartbeat also failed: {heartbeat}"
+        ))),
+    };
     if result.is_err() && mutation_started {
         return result.map_err(|error| {
             error.context(format!(
@@ -1367,9 +2202,6 @@ async fn execute_locked(
     let plan_id = stored_plan.id.clone();
     let env = stored_plan.environment.clone();
     ensure_no_interrupted_attempts(ctx, &env, &plan_id, None).await?;
-    mark_durable_execution_protocol(ctx, &plan_id)
-        .await
-        .context("persisting restart-safe execution protocol")?;
     let steps = stored_plan.steps.clone();
     let dependency_installs = stored_plan
         .inputs
@@ -1557,6 +2389,55 @@ async fn execute_locked(
         }
     }
 
+    if !plan_blocked
+        && !plan_failed
+        && let Err(error) = finalize_rollback_overrides(ctx, &stored_plan).await
+    {
+        let mut detail = error.to_string();
+        let compensation = unwind_succeeded_steps(
+            ctx,
+            &env,
+            &plan_id,
+            &mut outcomes,
+            &detail,
+            recovery,
+            mutation_started,
+        )
+        .await;
+        append_compensation_detail(&mut detail, &compensation);
+        fail_running_plan(ctx, &mut stored_plan, skip_gates, &detail, mutation_started).await?;
+        return Err(error.context("finalizing rollback overrides"));
+    }
+
+    if !plan_blocked && !plan_failed && stored_plan.inputs.iter().any(|input| input.rollback_target)
+    {
+        stop_running_if_cancelled(
+            ctx,
+            &mut stored_plan,
+            skip_gates,
+            cancellation,
+            mutation_started,
+        )
+        .await?;
+        *mutation_started = true;
+        if let Err(error) = persist_rollback_intents(ctx, &stored_plan).await {
+            let mut detail = error.to_string();
+            let compensation = unwind_succeeded_steps(
+                ctx,
+                &env,
+                &plan_id,
+                &mut outcomes,
+                &detail,
+                recovery,
+                mutation_started,
+            )
+            .await;
+            append_compensation_detail(&mut detail, &compensation);
+            fail_running_plan(ctx, &mut stored_plan, skip_gates, &detail, mutation_started).await?;
+            return Err(error.context(detail));
+        }
+    }
+
     if plan_failed && !prior_unwind_attempted {
         let compensation = unwind_succeeded_steps(
             ctx,
@@ -1605,7 +2486,7 @@ async fn finish_deferred_restore(
     mutation_started: &mut bool,
 ) -> Result<Outcome> {
     let cleaned = outcome.status == "restore_pending";
-    let Some(previous) = outcome.step.from.as_deref() else {
+    let Some(_) = outcome.step.from.as_deref() else {
         return fail_deferred_restore(ctx, env, plan_oid, outcome, "no previous version").await;
     };
     let Some(pin) = outcome.step.restore.as_ref() else {
@@ -1626,6 +2507,7 @@ async fn finish_deferred_restore(
         }
     };
     let previous_executor = executor::select(previous_content.manifest.deploy.executor);
+    let restore_version = previous_content.manifest.product.version.clone();
     let previous_input = executor_input(
         &previous_content,
         &outcome.step,
@@ -1636,14 +2518,21 @@ async fn finish_deferred_restore(
         previous_executor,
         &previous_input,
         &previous_content,
-        previous,
+        &restore_version,
         outcome.detail,
         recovery,
         mutation_started,
     )
     .await;
     let recovered = cleaned && restored;
-    if !recovered {
+    if recovered {
+        let Some(mut environment) = ctx.get(&env_id(env)).await? else {
+            bail!("environment {env} disappeared after deferred restore");
+        };
+        crate::drift::clear_observation_properties(&mut environment, &outcome.step.product);
+        environment.updated = crate::now_millis();
+        ctx.put(environment).await?;
+    } else {
         set_env_unknown(ctx, env, &outcome.step.product, &detail).await?;
     }
     outcome.status = if recovered { "rolled_back" } else { "failed" }.into();
@@ -1757,7 +2646,10 @@ fn succeeded_indices_in_reverse(outcomes: &[Outcome]) -> Vec<usize> {
         .iter()
         .enumerate()
         .rev()
-        .filter(|(_, outcome)| outcome.status == "succeeded")
+        .filter(|(_, outcome)| {
+            outcome.status == "succeeded"
+                && !(outcome.step.action == Action::Remove && outcome.step.from.is_none())
+        })
         .map(|(index, _)| index)
         .collect()
 }
@@ -1780,10 +2672,10 @@ async fn compensate_completed_step(
     let content = release_content(ctx, &target, env, &step.product).await?;
     let failure = format!("later plan step failed: {cause}");
     if step.action == Action::Remove {
-        let previous = step
-            .from
+        step.from
             .as_deref()
             .context("completed removal has no previous version")?;
+        let restore_version = content.manifest.product.version.clone();
         let previous_executor = executor::select(content.manifest.deploy.executor);
         let previous_input = executor_input(&content, step, Action::Rollback, None);
         let mut restore_started = false;
@@ -1791,7 +2683,7 @@ async fn compensate_completed_step(
             previous_executor,
             &previous_input,
             &content,
-            previous,
+            &restore_version,
             failure,
             recovery,
             &mut restore_started,
@@ -1799,7 +2691,7 @@ async fn compensate_completed_step(
         .await;
         *mutation_started |= restore_started;
         let recovered = restored
-            && set_env_deployed(ctx, env, &step.product, previous, None, true)
+            && set_env_deployed(ctx, env, &step.product, &restore_version, None, true, None)
                 .await
                 .is_ok();
         if !recovered {
@@ -1827,8 +2719,9 @@ async fn compensate_completed_step(
     .await;
     *mutation_started |= compensation_started;
     let restored = match (step.from.as_deref(), step.restore.as_ref()) {
-        (Some(previous), Some(pin)) => {
+        (Some(_), Some(pin)) => {
             let previous_content = release_content(ctx, pin, env, &step.product).await?;
+            let restore_version = previous_content.manifest.product.version.clone();
             let previous_executor = executor::select(previous_content.manifest.deploy.executor);
             let previous_input = executor_input(
                 &previous_content,
@@ -1841,7 +2734,7 @@ async fn compensate_completed_step(
                 previous_executor,
                 &previous_input,
                 &previous_content,
-                previous,
+                &restore_version,
                 detail,
                 recovery,
                 &mut restore_started,
@@ -1850,15 +2743,38 @@ async fn compensate_completed_step(
             *mutation_started |= restore_started;
             detail = restore_detail;
             restored
-                && set_env_deployed(ctx, env, &step.product, previous, Some(&step.to), false)
-                    .await
-                    .is_ok()
+                && set_env_deployed(
+                    ctx,
+                    env,
+                    &step.product,
+                    &restore_version,
+                    Some(&step.to),
+                    false,
+                    None,
+                )
+                .await
+                .is_ok()
         }
         (Some(_), None) => {
             detail.push_str("; completed step has no pinned restore release");
             false
         }
-        (None, _) => cleaned && clear_env_deployed(ctx, env, &step.product).await.is_ok(),
+        (None, Some(pin)) => {
+            let previous_content = release_content(ctx, pin, env, &step.product).await?;
+            cleaned
+                && set_env_deployed(
+                    ctx,
+                    env,
+                    &step.product,
+                    &previous_content.manifest.product.version,
+                    None,
+                    false,
+                    None,
+                )
+                .await
+                .is_ok()
+        }
+        (None, None) => cleaned && clear_env_deployed(ctx, env, &step.product).await.is_ok(),
     };
     let recovered = cleaned && restored;
     if !recovered {
@@ -1895,6 +2811,78 @@ async fn execute_step(
         mutation_started,
         unwind_prior_steps,
     } = execution;
+    if matches!(step.action, Action::Remove | Action::Rollback) {
+        let reports = crate::drift::observe_locked(ctx, env, cancellation)
+            .await
+            .context("revalidating live product state before destructive deployment step")?;
+        let report = reports
+            .iter()
+            .find(|report| report.product == step.product)
+            .with_context(|| format!("no fresh observation for product {}", step.product))?;
+        if report.configured {
+            if let Some(error) = report.error.as_deref() {
+                bail!("observation failed for {}: {error}", step.product);
+            }
+            let observed = report
+                .observation
+                .as_ref()
+                .and_then(|observation| observation.installed_version.as_deref());
+            if observed != step.from.as_deref() {
+                bail!(
+                    "product {} live version changed from {:?} to {:?}; create a new plan",
+                    step.product,
+                    step.from,
+                    observed
+                );
+            }
+        } else {
+            // Legacy manifests predate observers. Preserve their pinned
+            // last-applied uninstall/rollback contract, but never infer live
+            // absence without an observer.
+            let environment = ctx
+                .get(&env_id(env))
+                .await?
+                .with_context(|| format!("environment {env} disappeared before deployment"))?;
+            let last_applied = environment
+                .properties
+                .get(&format!("deployed.{}", step.product))
+                .map(String::as_str);
+            if step.from.is_none() || last_applied != step.from.as_deref() {
+                bail!(
+                    "product {} has no configured observer and its pinned last-applied contract changed; create a new plan after reconciling live state",
+                    step.product
+                );
+            }
+        }
+    }
+    if step.action == Action::Remove && step.from.is_none() {
+        prepare_deployment(ctx, env, plan_oid, step).await?;
+        // Once durable attempt state exists, retain the environment lease if
+        // the following transition fails so recovery can finalize `preparing`
+        // rather than leaving an unleased attempt that blocks every new plan.
+        *mutation_started = true;
+        mark_deployment_running(ctx, env, plan_oid, step).await?;
+        let original = ctx
+            .get(&env_id(env))
+            .await?
+            .with_context(|| format!("environment {env} disappeared before removal"))?;
+        clear_env_deployed(ctx, env, &step.product).await?;
+        let outcome = Outcome {
+            step: step.clone(),
+            status: "succeeded".into(),
+            detail: "executor already reported product absent; cleared last-applied state".into(),
+        };
+        if let Err(error) = record_deployment(ctx, env, plan_oid, &outcome).await {
+            if let Err(restore) = ctx.put(original).await {
+                *mutation_started = true;
+                return Err(error.context(format!(
+                    "restoring environment metadata after audit failure also failed: {restore}"
+                )));
+            }
+            return Err(error.context("environment metadata restored after audit failure"));
+        }
+        return Ok(outcome);
+    }
     let mut step_mutation_started = false;
     let target = ReleasePin {
         release_id: step.release_id.clone(),
@@ -1909,6 +2897,9 @@ async fn execute_step(
     };
 
     prepare_deployment(ctx, env, plan_oid, step).await?;
+    // Durable `preparing` state must never outlive its recovery fence. Treat
+    // its creation as recovery-relevant even before an executor is launched.
+    *mutation_started = true;
     mark_deployment_running(ctx, env, plan_oid, step).await?;
 
     if step.action == Action::Remove {
@@ -2064,13 +3055,17 @@ async fn execute_step(
                 status: "succeeded".into(),
                 detail: String::new(),
             };
+            let approved_previous = restore_content
+                .as_ref()
+                .map(|content| content.manifest.product.version.as_str());
             if let Err(error) = set_env_deployed(
                 ctx,
                 env,
                 &step.product,
                 &step.to,
-                step.from.as_deref(),
+                approved_previous,
                 mark_dependency_managed,
+                None,
             )
             .await
             {
@@ -2187,9 +3182,10 @@ async fn compensate_removal_bookkeeping(
     let restored = activate(executor, &input, content, recovery, mutation_started)
         .await
         .is_ok();
-    let state_restored = if let Some(previous) = step.from.as_deref() {
+    let state_restored = if step.from.is_some() {
+        let restore_version = &content.manifest.product.version;
         restored
-            && set_env_deployed(ctx, env, &step.product, previous, None, true)
+            && set_env_deployed(ctx, env, &step.product, restore_version, None, true, None)
                 .await
                 .is_ok()
     } else {
@@ -2605,6 +3601,7 @@ mod tests {
                     install: install.into(),
                     inputs: Vec::new(),
                     uninstall: uninstall.map(str::to_string),
+                    observe: None,
                     health: health.map(str::to_string),
                     timeout_seconds: Some(600),
                 },
@@ -2657,6 +3654,22 @@ mod tests {
     }
 
     #[test]
+    fn destructive_steps_require_contract_for_observed_version() {
+        let mut remove = step();
+        remove.action = Action::Remove;
+        remove.from = Some("2.0.0".into());
+        remove.release_id = release_id("api", "1.0.0");
+        assert!(validate_outgoing_contract("plan", &remove).is_err());
+
+        remove.release_id = release_id("api", "2.0.0");
+        assert!(validate_outgoing_contract("plan", &remove).is_ok());
+
+        remove.action = Action::Upgrade;
+        remove.release_id = release_id("api", "1.0.0");
+        assert!(validate_outgoing_contract("plan", &remove).is_ok());
+    }
+
+    #[test]
     fn remove_steps_reject_new_subscriptions() {
         let mut remove = step();
         remove.action = Action::Remove;
@@ -2688,6 +3701,8 @@ mod tests {
             product: "api".into(),
             channel: String::new(),
             channel_id: String::new(),
+            channel_version: String::new(),
+            channel_updated: 0,
             dependency_managed: true,
             desired_version: "2.0.0".into(),
             release_id: String::new(),
@@ -2695,6 +3710,7 @@ mod tests {
             artifact_digest: String::new(),
             workdir: String::new(),
             deployed_version: Some("1.0.0".into()),
+            rollback_target: false,
         };
         let mut environment = Object::default();
         environment
@@ -3083,6 +4099,10 @@ mod tests {
             outcome("application", "rolled_back"),
         ];
         assert_eq!(succeeded_indices_in_reverse(&outcomes), [1, 0]);
+
+        let mut metadata_only_removal = outcome("obsolete", "succeeded");
+        metadata_only_removal.step.action = Action::Remove;
+        assert!(succeeded_indices_in_reverse(&[metadata_only_removal]).is_empty());
     }
 
     #[test]
@@ -3091,6 +4111,8 @@ mod tests {
             product: "runtime".into(),
             channel: String::new(),
             channel_id: String::new(),
+            channel_version: String::new(),
+            channel_updated: 0,
             dependency_managed: false,
             desired_version: "1.0.0".into(),
             release_id: String::new(),
@@ -3098,6 +4120,7 @@ mod tests {
             artifact_digest: String::new(),
             workdir: String::new(),
             deployed_version: Some("1.0.0".into()),
+            rollback_target: false,
         };
         let mut environment = Object::default();
         environment
@@ -3129,5 +4152,138 @@ mod tests {
                 .to_string()
                 .contains("runtime has unknown deployment state")
         );
+    }
+
+    #[test]
+    fn corrective_drift_validates_last_applied_and_observed_state_separately() {
+        let input = DesiredStateInput {
+            product: "api".into(),
+            channel: "stable".into(),
+            channel_id: "tenkai:channel:api/stable".into(),
+            channel_version: "2.0.0".into(),
+            channel_updated: 1,
+            dependency_managed: false,
+            desired_version: "2.0.0".into(),
+            release_id: String::new(),
+            release_digest: String::new(),
+            artifact_digest: String::new(),
+            workdir: String::new(),
+            deployed_version: Some("2.0.0".into()),
+            rollback_target: false,
+        };
+        let plan = Plan {
+            format_version: plan::PLAN_FORMAT_VERSION,
+            id: "plan".into(),
+            content_id: String::new(),
+            environment: "test".into(),
+            created_at: 1,
+            inputs: vec![input.clone()],
+            subscription_ids: Vec::new(),
+            steps: Vec::new(),
+            drift: vec![crate::drift::Drift {
+                product: "api".into(),
+                kind: crate::drift::DriftKind::Version,
+                desired_version: Some("2.0.0".into()),
+                last_applied_version: Some("2.0.0".into()),
+                observed_version: Some("1.0.0".into()),
+                observed_health: Some(crate::executor::ObservedHealth::Healthy),
+            }],
+            observations: vec![crate::drift::ObservationSnapshot {
+                product: "api".into(),
+                status: Some("succeeded".into()),
+                observed_version: Some("1.0.0".into()),
+                observed_health: Some(crate::executor::ObservedHealth::Healthy),
+            }],
+            constraint_evaluations: Vec::new(),
+            state: PlanState::Computed,
+            gates_skipped: None,
+            status_detail: String::new(),
+        };
+        let mut environment = Object::default();
+        environment
+            .properties
+            .insert("deployed.api".into(), "2.0.0".into());
+        environment
+            .properties
+            .insert("observed.api".into(), "1.0.0".into());
+        environment
+            .properties
+            .insert("observed_health.api".into(), "healthy".into());
+        environment
+            .properties
+            .insert("observation_status.api".into(), "succeeded".into());
+
+        assert!(validate_desired_inputs("plan", &[input], &environment).is_ok());
+        assert!(validate_drift_inputs(&plan, &environment).is_ok());
+
+        environment
+            .properties
+            .insert("observed.api".into(), "0.9.0".into());
+        assert!(
+            validate_drift_inputs(&plan, &environment)
+                .unwrap_err()
+                .to_string()
+                .contains("observed state changed")
+        );
+    }
+
+    #[test]
+    fn successful_observation_invalidates_plan_created_after_failed_probe() {
+        let mut plan = Plan {
+            format_version: plan::PLAN_FORMAT_VERSION,
+            id: "plan".into(),
+            content_id: String::new(),
+            environment: "test".into(),
+            created_at: 1,
+            inputs: Vec::new(),
+            subscription_ids: Vec::new(),
+            steps: Vec::new(),
+            drift: Vec::new(),
+            observations: vec![crate::drift::ObservationSnapshot {
+                product: "api".into(),
+                status: Some("failed".into()),
+                observed_version: Some("1.0.0".into()),
+                observed_health: Some(crate::executor::ObservedHealth::Healthy),
+            }],
+            constraint_evaluations: Vec::new(),
+            state: PlanState::Computed,
+            gates_skipped: None,
+            status_detail: String::new(),
+        };
+        let mut environment = Object::default();
+        environment
+            .properties
+            .insert("deployed.api".into(), "1.0.0".into());
+        environment
+            .properties
+            .insert("observed.api".into(), "1.0.0".into());
+        environment
+            .properties
+            .insert("observed_health.api".into(), "healthy".into());
+        environment
+            .properties
+            .insert("observation_status.api".into(), "failed".into());
+        let desired = std::collections::BTreeMap::new();
+        plan.observations =
+            crate::drift::snapshot_from_properties(&environment.properties, &desired);
+
+        assert!(validate_drift_inputs(&plan, &environment).is_ok());
+        environment
+            .properties
+            .insert("observation_status.api".into(), "succeeded".into());
+        assert!(validate_drift_inputs(&plan, &environment).is_err());
+    }
+
+    #[test]
+    fn same_version_repairs_preserve_rollback_history() {
+        assert_eq!(distinct_previous("2.0.0", Some("1.0.0")), Some("1.0.0"));
+        assert_eq!(distinct_previous("2.0.0", Some("2.0.0")), None);
+
+        let mut properties = HashMap::from([("deployed_prev.api".into(), "1.0.0".into())]);
+        update_previous(&mut properties, "api", "2.0.0", Some("2.0.0"));
+        assert_eq!(properties["deployed_prev.api"], "1.0.0");
+
+        update_previous(&mut properties, "api", "1.0.0", None);
+        assert!(!properties.contains_key("deployed_prev.api"));
     }
 }

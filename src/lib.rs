@@ -8,12 +8,14 @@ pub mod apply;
 pub mod catalog;
 pub mod client;
 pub mod constraint;
+pub mod drift;
 pub mod executor;
 pub mod manifest;
 pub mod ontology;
 pub mod pb;
 pub mod plan;
 pub mod planner;
+pub mod reconciler;
 
 pub fn now_millis() -> i64 {
     std::time::SystemTime::now()

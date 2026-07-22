@@ -52,6 +52,9 @@ pub struct DeploySection {
     /// Optional command that removes the product.
     #[serde(default)]
     pub uninstall: Option<String>,
+    /// Optional command that prints the installed version. Exit code 3 means absent.
+    #[serde(default)]
+    pub observe: Option<String>,
     /// Optional health probe; exit 0 means healthy. Failure triggers rollback.
     #[serde(default)]
     pub health: Option<String>,
@@ -74,6 +77,18 @@ fn default_workdir() -> String {
 
 fn default_timeout_seconds() -> Option<u64> {
     Some(600)
+}
+
+pub const MAX_DEPLOY_TIMEOUT_SECONDS: u64 = 60 * 60;
+
+fn validate_timeout(manifest: &Manifest) -> Result<()> {
+    match manifest.deploy.timeout_seconds {
+        Some(0) => bail!("deploy.timeout_seconds must be greater than zero"),
+        Some(seconds) if seconds > MAX_DEPLOY_TIMEOUT_SECONDS => {
+            bail!("deploy.timeout_seconds must not exceed {MAX_DEPLOY_TIMEOUT_SECONDS} seconds")
+        }
+        _ => Ok(()),
+    }
 }
 
 pub struct LoadedManifest {
@@ -107,9 +122,7 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
     if manifest.deploy.install.trim().is_empty() {
         bail!("manifest needs a non-empty deploy.install command");
     }
-    if manifest.deploy.timeout_seconds == Some(0) {
-        bail!("deploy.timeout_seconds must be greater than zero");
-    }
+    validate_timeout(&manifest)?;
     crate::ontology::validate_identifier("product.name", &manifest.product.name)?;
     crate::ontology::validate_identifier("product.version", &manifest.product.version)?;
     validate_version(&manifest.product.version)?;

@@ -12,7 +12,7 @@ use crate::pb::sekai::sekai_service_client::SekaiServiceClient;
 use crate::pb::sekai::{
     ActionRequest, CreateLinkRequest, CreateObjectRequest, DeleteLinkRequest, DeleteObjectRequest,
     ExecuteActionRequest, FindByPropertyRequest, GetLinkedObjectsRequest, GetLinksRequest,
-    GetObjectRequest, Link, Object, UpdateObjectRequest,
+    GetObjectRequest, Link, ListFilter, ListObjectsRequest, Object, UpdateObjectRequest,
 };
 
 /// Attaches auth + caller identity metadata to every request.
@@ -42,6 +42,9 @@ impl Interceptor for Meta {
 pub type Sekai = SekaiServiceClient<InterceptedService<Channel, Meta>>;
 pub type Chisei = ChiseiServiceClient<InterceptedService<Channel, Meta>>;
 
+pub(crate) const CONTROL_PLANE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[derive(Clone)]
 pub struct Ctx {
     pub sekai: Sekai,
     pub chisei: Chisei,
@@ -81,6 +84,7 @@ pub async fn connect() -> Result<Ctx> {
         );
     }
     let channel = Endpoint::from_shared(url.clone())?
+        .timeout(CONTROL_PLANE_TIMEOUT)
         .connect()
         .await
         .with_context(|| {
@@ -99,6 +103,35 @@ pub async fn connect() -> Result<Ctx> {
 }
 
 impl Ctx {
+    /// List every object of a kind in a namespace, following offset pages.
+    pub async fn list_kind(&mut self, kind: &str, namespace: &str) -> Result<Vec<Object>> {
+        const PAGE_SIZE: i32 = 100;
+        let mut objects = Vec::new();
+        loop {
+            let response = self
+                .sekai
+                .list_objects(ListObjectsRequest {
+                    filter: Some(ListFilter {
+                        kind: kind.into(),
+                        namespace: namespace.into(),
+                        limit: PAGE_SIZE,
+                        offset: objects.len() as i32,
+                        ..Default::default()
+                    }),
+                })
+                .await?
+                .into_inner();
+            let page_len = response.objects.len();
+            objects.extend(response.objects);
+            if page_len < PAGE_SIZE as usize
+                || (response.total > 0 && objects.len() >= response.total as usize)
+            {
+                break;
+            }
+        }
+        Ok(objects)
+    }
+
     pub async fn find_by_property(
         &mut self,
         kind: &str,

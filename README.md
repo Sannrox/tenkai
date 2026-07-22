@@ -63,8 +63,9 @@ executor = "local-shell"          # optional; local-shell is the default
 workdir = "."                    # relative to the manifest
 install = "docker compose up -d" # any command; activates this release
 uninstall = "docker compose down"
+observe = "./observe-version"       # stdout = installed semver; exit 3 = confirmed absent
 health = "curl -sf localhost:8080/healthz"  # exit 0 = healthy; failure rolls back
-inputs = ["compose.yaml"]          # immutable files/directories used by these commands
+inputs = ["compose.yaml", "observe-version"] # immutable files/directories used by these commands
 timeout_seconds = 600              # maximum duration of each deployment command
 
 [gate]
@@ -134,7 +135,9 @@ Everything lives in the sekai graph under namespace `tenkai`:
 `tenkai.product` ← `release_of` — `tenkai.release` ← `promotes` — `tenkai.channel`
 ← `subscribes` — `tenkai.environment`; each apply writes a `tenkai.plan` and
 per-step `tenkai.deployment` records linked to the release, environment, and
-plan. Current state lives on the environment object (`deployed.<product>`).
+plan. Desired channel state, last-applied state (`deployed.<product>`), and
+executor-reported state (`observed.<product>`) remain separate on the
+environment object. `plan` and `status` refresh observations and report drift.
 
 ## Status
 

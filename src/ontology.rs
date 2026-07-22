@@ -132,7 +132,7 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
         ),
         object_type(
             KIND_ENVIRONMENT,
-            "A managed deployment target; deployed.* properties hold current state",
+            "A managed deployment target with separate desired, last-applied, and observed state",
             vec![
                 prop("description", false, "What this environment is"),
                 prop(

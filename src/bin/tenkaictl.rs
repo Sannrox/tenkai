@@ -2,11 +2,12 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 
-use tenkai::{apply, catalog, client, constraint, ontology, plan};
+use tenkai::{apply, catalog, client, constraint, ontology, plan, reconciler};
 
 #[derive(Parser)]
 #[command(
@@ -49,7 +50,7 @@ enum Command {
         #[arg(long)]
         skip_gates: bool,
     },
-    /// Deployed vs channel head, per subscribed product.
+    /// Desired, last-applied, observed, and drift state per product.
     Status {
         #[arg(long, default_value = "local")]
         env: String,
@@ -59,6 +60,27 @@ enum Command {
         product: String,
         #[arg(long, default_value = "local")]
         env: String,
+    },
+    /// Continuously converge all registered environments.
+    Reconcile {
+        /// Run one reconciliation tick and exit.
+        #[arg(long)]
+        once: bool,
+        /// Seconds between reconciliation ticks.
+        #[arg(long, default_value_t = 10)]
+        interval: u64,
+        /// Initial retry delay in seconds for a failing environment.
+        #[arg(long, default_value_t = 5)]
+        initial_backoff: u64,
+        /// Maximum retry delay in seconds for a failing environment.
+        #[arg(long, default_value_t = 300)]
+        max_backoff: u64,
+        /// Maximum environments reconciled at the same time.
+        #[arg(long, default_value_t = 8)]
+        max_concurrency: usize,
+        /// Bypass eval gates for automatically created executions.
+        #[arg(long)]
+        skip_gates: bool,
     },
 }
 
@@ -328,24 +350,47 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             println!(
-                "{:<24} {:<10} {:<12} {:<12} state",
-                "product", "channel", "deployed", "head"
+                "{:<24} {:<10} {:<12} {:<12} {:<12} {:<12} drift",
+                "product", "channel", "desired", "last-applied", "observed", "health"
             );
             for r in rows {
-                let deployed = r.deployed.clone().unwrap_or_else(|| "-".into());
-                let state = match (&r.deployed, r.health.as_deref()) {
-                    (_, Some("unknown")) => "unknown",
-                    (Some(v), _) if *v == r.head => "current",
-                    (Some(_), _) => "behind",
-                    (None, _) => "missing",
+                let fresh_missing = r.desired.is_some()
+                    && r.last_applied.is_none()
+                    && r.observation_status.is_none();
+                let desired = r.desired.unwrap_or_else(|| "-".into());
+                let last_applied = r.last_applied.unwrap_or_else(|| "-".into());
+                let observed = r.observed.unwrap_or_else(|| "-".into());
+                let health = r.observed_health.unwrap_or_else(|| "-".into());
+                let recovery_unknown = r.deployment_health.as_deref() == Some("unknown");
+                let drift = if recovery_unknown || r.desired_error.is_some() || fresh_missing {
+                    "unknown".into()
+                } else if r.drift.is_empty() {
+                    if r.observation_status
+                        .as_deref()
+                        .is_some_and(|status| status != "succeeded")
+                    {
+                        "unknown".into()
+                    } else {
+                        "none".into()
+                    }
+                } else {
+                    r.drift
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(",")
                 };
                 println!(
-                    "{:<24} {:<10} {:<12} {:<12} {state}",
-                    r.product, r.channel, deployed, r.head
+                    "{:<24} {:<10} {:<12} {:<12} {:<12} {:<12} {drift}",
+                    r.product, r.channel, desired, last_applied, observed, health
                 );
-                if state == "unknown"
-                    && let Some(error) = r.error.as_deref()
-                {
+                if let Some(error) = r.observation_error.as_deref() {
+                    println!("  observation failed: {error}");
+                }
+                if let Some(error) = r.desired_error.as_deref() {
+                    println!("  desired state unresolved: {error}");
+                }
+                if recovery_unknown && let Some(error) = r.deployment_error.as_deref() {
                     println!("  recovery required: {error}");
                 }
             }
@@ -357,8 +402,71 @@ async fn main() -> Result<()> {
             print_steps(&stored.steps);
             run_plan(&mut ctx, &stored.id, false).await?;
         }
+        Command::Reconcile {
+            once,
+            interval,
+            initial_backoff,
+            max_backoff,
+            max_concurrency,
+            skip_gates,
+        } => {
+            let reconciler = reconciler::Reconciler::new(
+                ctx.clone(),
+                reconciler::Config {
+                    initial_backoff: Duration::from_secs(initial_backoff),
+                    max_backoff: Duration::from_secs(max_backoff),
+                    max_concurrency,
+                    skip_gates,
+                },
+            )?;
+            if once {
+                let report = reconciler.run_once().await?;
+                let failures = report.failures();
+                print_reconcile_report(report);
+                if failures > 0 {
+                    bail!("{failures} environment(s) failed to reconcile");
+                }
+            } else {
+                let signals = apply::monitor_shutdown_signals()?;
+                reconciler
+                    .run_until(
+                        Duration::from_secs(interval),
+                        signals,
+                        |result| match result {
+                            Ok(report) => print_reconcile_report(report),
+                            Err(error) => eprintln!("reconciliation tick failed: {error:#}"),
+                        },
+                    )
+                    .await?;
+            }
+        }
     }
     Ok(())
+}
+
+fn print_reconcile_report(report: reconciler::TickReport) {
+    for result in report.environments {
+        match result.status {
+            reconciler::EnvironmentStatus::Current => {
+                println!("{:<24} current", result.environment);
+            }
+            reconciler::EnvironmentStatus::Applied { plan_id, steps } => {
+                println!(
+                    "{:<24} applied {steps} step(s) with {plan_id}",
+                    result.environment
+                );
+            }
+            reconciler::EnvironmentStatus::Failed { error } => {
+                eprintln!("{:<24} FAILED {error}", result.environment);
+            }
+            reconciler::EnvironmentStatus::Deferred { retry_at } => {
+                println!("{:<24} deferred until {retry_at}", result.environment);
+            }
+            reconciler::EnvironmentStatus::Busy => {
+                println!("{:<24} already reconciling", result.environment);
+            }
+        }
+    }
 }
 
 async fn run_plan(ctx: &mut client::Ctx, plan_id: &str, skip_gates: bool) -> Result<()> {
@@ -435,5 +543,41 @@ mod tests {
             }
         );
         assert!(parameters(&["key=one".into(), "key=two".into()]).is_err());
+    }
+
+    #[test]
+    fn parses_one_shot_reconciler_settings() {
+        let cli = Cli::try_parse_from([
+            "tenkaictl",
+            "reconcile",
+            "--once",
+            "--interval",
+            "2",
+            "--initial-backoff",
+            "3",
+            "--max-backoff",
+            "30",
+            "--max-concurrency",
+            "4",
+            "--skip-gates",
+        ])
+        .unwrap();
+        let Command::Reconcile {
+            once,
+            interval,
+            initial_backoff,
+            max_backoff,
+            max_concurrency,
+            skip_gates,
+        } = cli.command
+        else {
+            panic!("expected reconcile command");
+        };
+        assert!(once);
+        assert_eq!(interval, 2);
+        assert_eq!(initial_backoff, 3);
+        assert_eq!(max_backoff, 30);
+        assert_eq!(max_concurrency, 4);
+        assert!(skip_gates);
     }
 }

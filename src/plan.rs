@@ -8,6 +8,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::client::Ctx;
 use crate::constraint::{self, ConstraintEvaluation};
+use crate::drift::{Drift, DriftKind, ObservationSnapshot};
 use crate::ontology::*;
 use crate::pb::sekai::Object;
 use crate::planner::{Candidate, Dependency, Request};
@@ -45,7 +46,127 @@ fn classify_change(current: &str, desired: &str) -> Action {
     }
 }
 
-pub const PLAN_FORMAT_VERSION: u32 = 6;
+fn rollback_transition_action(is_rollback_root: bool, current: &str, desired: &str) -> Action {
+    if is_rollback_root && current != desired {
+        Action::Rollback
+    } else {
+        classify_change(current, desired)
+    }
+}
+
+fn corrective_action(
+    current: Option<&str>,
+    desired: &str,
+    unhealthy: bool,
+) -> Option<(Action, Option<String>)> {
+    match current {
+        Some(version) if version == desired && !unhealthy => None,
+        Some(version) => Some((classify_change(version, desired), Some(version.to_string()))),
+        None => Some((Action::Install, None)),
+    }
+}
+
+fn observed_current(
+    environment: &Object,
+    product: &str,
+    last_applied: Option<String>,
+) -> (Option<String>, bool) {
+    if environment
+        .properties
+        .get(&format!("observation_status.{product}"))
+        .is_some_and(|status| status == "succeeded")
+    {
+        let observed = environment
+            .properties
+            .get(&format!("observed.{product}"))
+            .cloned();
+        let health = environment
+            .properties
+            .get(&format!("observed_health.{product}"))
+            .map(String::as_str);
+        let corrective_probe = health == Some("unhealthy")
+            || (health == Some("not_checked") && observed != last_applied);
+        (observed, corrective_probe)
+    } else {
+        (last_applied, false)
+    }
+}
+
+async fn retained_legacy_content(
+    ctx: &mut Ctx,
+    environment: &Object,
+    product: &str,
+    version: &str,
+) -> Result<(DesiredStateInput, Option<Step>)> {
+    let target = pin_release(ctx, &release_id(product, version)).await?;
+    let input = DesiredStateInput {
+        product: product.into(),
+        channel: String::new(),
+        channel_id: String::new(),
+        channel_version: String::new(),
+        channel_updated: 0,
+        dependency_managed: false,
+        desired_version: version.into(),
+        release_id: target.release_id.clone(),
+        release_digest: target.digest.clone(),
+        artifact_digest: target.artifact_digest.clone(),
+        workdir: target.workdir.clone(),
+        deployed_version: Some(version.into()),
+        rollback_target: false,
+    };
+    let (current, unhealthy) = observed_current(environment, product, Some(version.into()));
+    let Some((action, from)) = corrective_action(current.as_deref(), version, unhealthy) else {
+        return Ok((input, None));
+    };
+    let restore = Some(target.clone());
+    Ok((
+        input,
+        Some(Step {
+            id: String::new(),
+            order: 0,
+            product: product.into(),
+            action,
+            from,
+            to: version.into(),
+            release_id: target.release_id,
+            release_digest: target.digest,
+            artifact_digest: target.artifact_digest,
+            workdir: target.workdir,
+            restore,
+        }),
+    ))
+}
+
+fn removal_version(environment: &Object, product: &str, last_applied: &str) -> Option<String> {
+    observed_current(environment, product, Some(last_applied.to_string())).0
+}
+
+fn effective_deployed(
+    environment: &Object,
+    last_applied: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    last_applied
+        .iter()
+        .filter_map(|(product, version)| {
+            observed_current(environment, product, Some(version.clone()))
+                .0
+                .map(|version| (product.clone(), version))
+        })
+        .collect()
+}
+
+fn drift_for_inputs(environment: &Object, inputs: &[DesiredStateInput]) -> Vec<Drift> {
+    let desired = inputs
+        .iter()
+        .map(|input| (input.product.clone(), input.desired_version.clone()))
+        .collect::<BTreeMap<_, _>>();
+    crate::drift::classify(&crate::drift::states_from_properties(
+        &environment.properties,
+        &desired,
+    ))
+}
+
+pub const PLAN_FORMAT_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Step {
@@ -75,6 +196,10 @@ pub struct DesiredStateInput {
     pub product: String,
     pub channel: String,
     pub channel_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub channel_version: String,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub channel_updated: i64,
     pub dependency_managed: bool,
     pub desired_version: String,
     pub release_id: String,
@@ -82,6 +207,12 @@ pub struct DesiredStateInput {
     pub artifact_digest: String,
     pub workdir: String,
     pub deployed_version: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rollback_target: bool,
+}
+
+fn is_zero(value: &i64) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,6 +249,10 @@ pub struct Plan {
     pub subscription_ids: Vec<String>,
     pub steps: Vec<Step>,
     #[serde(default)]
+    pub drift: Vec<Drift>,
+    #[serde(default)]
+    pub observations: Vec<ObservationSnapshot>,
+    #[serde(default)]
     pub constraint_evaluations: Vec<ConstraintEvaluation>,
     pub state: PlanState,
     pub gates_skipped: Option<bool>,
@@ -134,53 +269,104 @@ struct ExecutableContent<'a> {
     inputs: &'a [DesiredStateInput],
     subscription_ids: &'a [String],
     steps: &'a [Step],
+    drift: &'a [Drift],
+    observations: &'a [ObservationSnapshot],
     constraint_evaluations: &'a [ConstraintEvaluation],
 }
 
-fn content_address(
+#[derive(Serialize)]
+struct LegacyExecutableContent<'a> {
     format_version: u32,
-    environment: &str,
+    id: &'a str,
+    content_id: &'a str,
+    environment: &'a str,
     created_at: i64,
-    inputs: &[DesiredStateInput],
-    subscription_ids: &[String],
-    steps: &[Step],
-    constraint_evaluations: &[ConstraintEvaluation],
-) -> Result<String> {
-    let mut normalized_steps = steps.to_vec();
+    inputs: &'a [DesiredStateInput],
+    subscription_ids: &'a [String],
+    steps: &'a [Step],
+    constraint_evaluations: &'a [ConstraintEvaluation],
+}
+
+struct ContentAddressInput<'a> {
+    format_version: u32,
+    environment: &'a str,
+    created_at: i64,
+    inputs: &'a [DesiredStateInput],
+    subscription_ids: &'a [String],
+    steps: &'a [Step],
+    drift: &'a [Drift],
+    observations: &'a [ObservationSnapshot],
+    constraint_evaluations: &'a [ConstraintEvaluation],
+}
+
+fn content_address(input: ContentAddressInput<'_>) -> Result<String> {
+    let mut normalized_steps = input.steps.to_vec();
     for step in &mut normalized_steps {
         step.id.clear();
     }
-    if format_version != PLAN_FORMAT_VERSION {
-        bail!("unsupported plan format version {format_version}");
+    if input.format_version != PLAN_FORMAT_VERSION {
+        bail!("unsupported plan format version {}", input.format_version);
     }
     let bytes = serde_json::to_vec(&(
         PLAN_FORMAT_VERSION,
-        environment,
-        created_at,
-        inputs,
+        input.environment,
+        input.created_at,
+        input.inputs,
         normalized_steps,
-        constraint_evaluations,
-        subscription_ids,
+        input.drift,
+        input.observations,
+        input.constraint_evaluations,
+        input.subscription_ids,
+    ))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn legacy_content_address(plan: &Plan) -> Result<String> {
+    let mut normalized_steps = plan.steps.clone();
+    for step in &mut normalized_steps {
+        step.id.clear();
+    }
+    let bytes = serde_json::to_vec(&(
+        6_u32,
+        &plan.environment,
+        plan.created_at,
+        &plan.inputs,
+        normalized_steps,
+        &plan.constraint_evaluations,
+        &plan.subscription_ids,
     ))?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
 impl Plan {
     fn executable_digest(&self) -> Result<String> {
-        if self.format_version != PLAN_FORMAT_VERSION {
-            bail!("unsupported plan format version {}", self.format_version);
-        }
-        let bytes = serde_json::to_vec(&ExecutableContent {
-            format_version: self.format_version,
-            id: &self.id,
-            content_id: &self.content_id,
-            environment: &self.environment,
-            created_at: self.created_at,
-            inputs: &self.inputs,
-            subscription_ids: &self.subscription_ids,
-            steps: &self.steps,
-            constraint_evaluations: &self.constraint_evaluations,
-        })?;
+        let bytes = match self.format_version {
+            PLAN_FORMAT_VERSION => serde_json::to_vec(&ExecutableContent {
+                format_version: self.format_version,
+                id: &self.id,
+                content_id: &self.content_id,
+                environment: &self.environment,
+                created_at: self.created_at,
+                inputs: &self.inputs,
+                subscription_ids: &self.subscription_ids,
+                steps: &self.steps,
+                drift: &self.drift,
+                observations: &self.observations,
+                constraint_evaluations: &self.constraint_evaluations,
+            })?,
+            6 => serde_json::to_vec(&LegacyExecutableContent {
+                format_version: self.format_version,
+                id: &self.id,
+                content_id: &self.content_id,
+                environment: &self.environment,
+                created_at: self.created_at,
+                inputs: &self.inputs,
+                subscription_ids: &self.subscription_ids,
+                steps: &self.steps,
+                constraint_evaluations: &self.constraint_evaluations,
+            })?,
+            version => bail!("unsupported plan format version {version}"),
+        };
         Ok(format!("{:x}", Sha256::digest(bytes)))
     }
 
@@ -218,7 +404,7 @@ impl Plan {
             .get("format_version")
             .and_then(|value| value.parse::<u32>().ok())
             .unwrap_or(1);
-        if stored_format != PLAN_FORMAT_VERSION {
+        if !matches!(stored_format, 6 | PLAN_FORMAT_VERSION) {
             bail!(
                 "plan {} uses legacy format version {stored_format}; create a new plan with `tenkaictl plan --env {}`",
                 object.id,
@@ -231,7 +417,7 @@ impl Plan {
         }
         let plan: Self = serde_json::from_str(raw)
             .with_context(|| format!("parsing stored plan {}", object.id))?;
-        if plan.format_version != PLAN_FORMAT_VERSION {
+        if plan.format_version != stored_format {
             bail!(
                 "plan {} uses unsupported format version {}",
                 object.id,
@@ -245,15 +431,21 @@ impl Plan {
                 object.id
             );
         }
-        let expected_content_id = content_address(
-            plan.format_version,
-            &plan.environment,
-            plan.created_at,
-            &plan.inputs,
-            &plan.subscription_ids,
-            &plan.steps,
-            &plan.constraint_evaluations,
-        )?;
+        let expected_content_id = if plan.format_version == 6 {
+            legacy_content_address(&plan)?
+        } else {
+            content_address(ContentAddressInput {
+                format_version: plan.format_version,
+                environment: &plan.environment,
+                created_at: plan.created_at,
+                inputs: &plan.inputs,
+                subscription_ids: &plan.subscription_ids,
+                steps: &plan.steps,
+                drift: &plan.drift,
+                observations: &plan.observations,
+                constraint_evaluations: &plan.constraint_evaluations,
+            })?
+        };
         if plan.content_id != expected_content_id
             || plan.id != plan_id(&plan.environment, plan.created_at, &expected_content_id)
         {
@@ -483,6 +675,19 @@ async fn reconcile_deployment_locked(
     object
         .properties
         .remove(&format!("dependency_managed.{product}"));
+    object
+        .properties
+        .remove(&format!("rollback_override.{product}"));
+    object
+        .properties
+        .remove(&format!("rollback_override_channel.{product}"));
+    object
+        .properties
+        .remove(&format!("rollback_override_head.{product}"));
+    object
+        .properties
+        .remove(&format!("rollback_override_channel_updated.{product}"));
+    crate::drift::clear_observation_properties(&mut object, product);
     object.updated = crate::now_millis();
     ctx.put(object).await?;
     Ok(match deployed {
@@ -552,6 +757,22 @@ async fn subscribe_locked(
         ACTION_SUBSCRIBE
     };
     ctx.execute_action(action, params).await?;
+    let mut environment = ctx
+        .get(&env_id(env))
+        .await?
+        .with_context(|| format!("environment {env} disappeared after subscription update"))?;
+    for prefix in [
+        "rollback_override.",
+        "rollback_override_channel.",
+        "rollback_override_head.",
+        "rollback_override_channel_updated.",
+    ] {
+        environment.properties.remove(&format!("{prefix}{product}"));
+    }
+    environment.updated = crate::now_millis();
+    ctx.put(environment)
+        .await
+        .context("invalidating rollback intent after subscription update")?;
     Ok(format!("{env} subscribed to {product}/{channel}"))
 }
 
@@ -627,6 +848,8 @@ struct ChannelRoot {
     product: String,
     channel: String,
     channel_id: String,
+    channel_version: String,
+    channel_updated: i64,
     version: String,
 }
 
@@ -651,6 +874,8 @@ fn add_retained_roots(
                     product: product.clone(),
                     channel: String::new(),
                     channel_id: String::new(),
+                    channel_version: String::new(),
+                    channel_updated: 0,
                     version: version.clone(),
                 },
             );
@@ -685,29 +910,38 @@ fn rollback_root_version(env: &Object, channel: &Object, product: &str) -> Resul
 fn legacy_rollback_content(
     product: &str,
     previous: String,
+    last_applied: Option<String>,
     current: Option<String>,
     dependency_managed: bool,
     target: ReleasePin,
     restore: Option<ReleasePin>,
 ) -> (DesiredStateInput, Step) {
+    let action = if current.is_some() {
+        Action::Rollback
+    } else {
+        Action::Install
+    };
     (
         DesiredStateInput {
             product: product.into(),
             channel: String::new(),
             channel_id: String::new(),
+            channel_version: String::new(),
+            channel_updated: 0,
             dependency_managed,
             desired_version: previous.clone(),
             release_id: target.release_id.clone(),
             release_digest: target.digest.clone(),
             artifact_digest: target.artifact_digest.clone(),
             workdir: target.workdir.clone(),
-            deployed_version: current.clone(),
+            deployed_version: last_applied,
+            rollback_target: true,
         },
         Step {
             id: String::new(),
             order: 0,
             product: product.into(),
-            action: Action::Rollback,
+            action,
             from: current,
             to: previous,
             release_id: target.release_id,
@@ -1190,10 +1424,14 @@ fn action_requires_prerequisites(action: Action) -> bool {
     matches!(action, Action::Install | Action::Upgrade)
 }
 
-async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateInput>, Vec<Step>)> {
+async fn compute_snapshot(
+    ctx: &mut Ctx,
+    env: &str,
+) -> Result<(Vec<DesiredStateInput>, Vec<Step>, Vec<Drift>)> {
     let env_obj = environment(ctx, env).await?;
     let channels = ctx.linked(&env_obj.id, REL_SUBSCRIBES, "out").await?;
     let mut roots = BTreeMap::<String, ChannelRoot>::new();
+    let mut legacy_overrides = BTreeMap::<String, ChannelRoot>::new();
     let mut subscribed_products = BTreeSet::new();
     for channel in channels {
         let product = channel
@@ -1206,7 +1444,7 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
                 "environment {env} has multiple channel subscriptions for {product}; subscribe again after concurrent updates settle"
             );
         }
-        let version = channel
+        let channel_version = channel
             .properties
             .get("current_version")
             .cloned()
@@ -1216,30 +1454,55 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
             .get("current_release")
             .cloned()
             .unwrap_or_default();
-        if version.is_empty() || release.is_empty() {
+        if channel_version.is_empty() || release.is_empty() {
             continue;
         }
-        if release != release_id(&product, &version) {
+        if release != release_id(&product, &channel_version) {
             bail!(
-                "channel {} points to inconsistent release {release} for {product}@{version}",
+                "channel {} points to inconsistent release {release} for {product}@{channel_version}",
                 channel.id
             );
         }
-        roots.insert(
-            product.clone(),
-            ChannelRoot {
-                product,
-                channel: channel
+        let override_matches_channel = env_obj
+            .properties
+            .get(&format!("rollback_override_channel.{product}"))
+            == Some(&channel.id)
+            && env_obj
+                .properties
+                .get(&format!("rollback_override_head.{product}"))
+                == Some(&channel_version)
+            && env_obj
+                .properties
+                .get(&format!("rollback_override_channel_updated.{product}"))
+                .and_then(|updated| updated.parse::<i64>().ok())
+                == Some(channel.updated);
+        let version = override_matches_channel
+            .then(|| {
+                env_obj
                     .properties
-                    .get("channel")
+                    .get(&format!("rollback_override.{product}"))
                     .cloned()
-                    .unwrap_or_default(),
-                channel_id: channel.id,
-                version,
-            },
-        );
+            })
+            .flatten()
+            .unwrap_or_else(|| channel_version.clone());
+        let root = ChannelRoot {
+            product: product.clone(),
+            channel: channel
+                .properties
+                .get("channel")
+                .cloned()
+                .unwrap_or_default(),
+            channel_id: channel.id,
+            channel_version,
+            channel_updated: channel.updated,
+            version,
+        };
+        if override_matches_channel && semver::Version::parse(&root.version).is_err() {
+            legacy_overrides.insert(product, root);
+        } else {
+            roots.insert(product, root);
+        }
     }
-
     let deployed = env_obj
         .properties
         .iter()
@@ -1248,6 +1511,7 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
                 .map(|product| (product.to_string(), version.clone()))
         })
         .collect::<BTreeMap<_, _>>();
+    let current_deployed = effective_deployed(&env_obj, &deployed);
     add_retained_roots(
         &mut roots,
         &deployed,
@@ -1286,6 +1550,8 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
 
     let desired_products = resolution.selected.keys().cloned().collect::<BTreeSet<_>>();
     let mut inputs = Vec::new();
+    let mut steps = Vec::new();
+    let mut resolved_steps = BTreeMap::<String, Step>::new();
     for (product, version) in deployed.iter().filter(|(product, version)| {
         semver::Version::parse(version).is_err()
             && !resolution.selected.contains_key(*product)
@@ -1298,22 +1564,18 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
     }) {
         validate_retained_legacy_isolation(ctx, &env_obj, product, version, &selected_dependencies)
             .await?;
-        let pin = pin_release(ctx, &release_id(product, version)).await?;
-        inputs.push(DesiredStateInput {
-            product: product.clone(),
-            channel: String::new(),
-            channel_id: String::new(),
-            dependency_managed: false,
-            desired_version: version.clone(),
-            release_id: pin.release_id,
-            release_digest: pin.digest,
-            artifact_digest: pin.artifact_digest,
-            workdir: pin.workdir,
-            deployed_version: Some(version.clone()),
-        });
+        let (mut input, step) = retained_legacy_content(ctx, &env_obj, product, version).await?;
+        if let Some(root) = legacy_overrides.get(product) {
+            input.channel = root.channel.clone();
+            input.channel_id = root.channel_id.clone();
+            input.channel_version = root.channel_version.clone();
+            input.channel_updated = root.channel_updated;
+        }
+        inputs.push(input);
+        if let Some(step) = step {
+            resolved_steps.insert(product.clone(), step);
+        }
     }
-    let mut steps = Vec::new();
-    let mut resolved_steps = BTreeMap::<String, Step>::new();
     for product in resolution.install_order {
         let desired = resolution
             .selected
@@ -1334,32 +1596,37 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
                 "deployment state for {product} in {env} is unknown: {detail}; reconcile it or use rollback before creating a new plan"
             );
         }
-        let deployed = env_obj
+        let last_applied = env_obj
             .properties
             .get(&format!("deployed.{product}"))
             .cloned();
+        let (current, unhealthy) = observed_current(&env_obj, &product, last_applied.clone());
         let target = pin_release(ctx, &release_id(&product, &desired)).await?;
         let root = roots.get(&product);
         inputs.push(DesiredStateInput {
             product: product.clone(),
             channel: root.map(|root| root.channel.clone()).unwrap_or_default(),
             channel_id: root.map(|root| root.channel_id.clone()).unwrap_or_default(),
+            channel_version: root
+                .map(|root| root.channel_version.clone())
+                .unwrap_or_default(),
+            channel_updated: root.map_or(0, |root| root.channel_updated),
             dependency_managed: root.is_none(),
             desired_version: desired.clone(),
             release_id: target.release_id.clone(),
             release_digest: target.digest.clone(),
             artifact_digest: target.artifact_digest.clone(),
             workdir: target.workdir.clone(),
-            deployed_version: deployed.clone(),
+            deployed_version: last_applied.clone(),
+            rollback_target: false,
         });
-        let (action, from, restore) = match deployed {
-            Some(version) if version == desired => continue,
-            Some(version) => {
-                let action = classify_change(&version, &desired);
-                let restore = pin_release(ctx, &release_id(&product, &version)).await?;
-                (action, Some(version), Some(restore))
-            }
-            None => (Action::Install, None, None),
+        let Some((action, from)) = corrective_action(current.as_deref(), &desired, unhealthy)
+        else {
+            continue;
+        };
+        let restore = match last_applied.as_deref() {
+            Some(version) => Some(pin_release(ctx, &release_id(&product, version)).await?),
+            None => None,
         };
         resolved_steps.insert(
             product.clone(),
@@ -1385,24 +1652,24 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
         &subscribed_products,
     );
     let current_dependencies = if resolved_steps.len() > 1 || !obsolete.is_empty() {
-        deployed_dependencies(ctx, &deployed).await?
+        deployed_dependencies(ctx, &current_deployed).await?
     } else {
         BTreeMap::new()
     };
     if !obsolete.is_empty() {
         let mut dependencies = current_dependencies.clone();
         for (product, final_dependencies) in &selected_dependencies {
-            if deployed.contains_key(product) {
+            if current_deployed.contains_key(product) {
                 dependencies.insert(product.clone(), final_dependencies.clone());
             }
         }
-        let obsolete = retain_required_dependencies(&deployed, &dependencies, obsolete);
+        let obsolete = retain_required_dependencies(&current_deployed, &dependencies, obsolete);
         for product in removal_order_from_dependencies(obsolete.clone(), dependencies)
             .with_context(|| format!("cannot order removals for environment {env}"))?
             .into_iter()
         {
-            let version = deployed[&product].clone();
-            let target = pin_release(ctx, &release_id(&product, &version)).await?;
+            let current = removal_version(&env_obj, &product, &deployed[&product]);
+            let target = pin_release(ctx, &release_id(&product, &deployed[&product])).await?;
             resolved_steps.insert(
                 product.clone(),
                 Step {
@@ -1410,7 +1677,7 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
                     order: 0,
                     product,
                     action: Action::Remove,
-                    from: Some(version),
+                    from: current,
                     to: String::new(),
                     release_id: target.release_id.clone(),
                     release_digest: target.digest.clone(),
@@ -1435,12 +1702,14 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
         step.id = format!("{}:step:{}", env_id(env), step.order);
         steps.push(step);
     }
-    Ok((inputs, steps))
+    let drift = drift_for_inputs(&env_obj, &inputs);
+    Ok((inputs, steps, drift))
 }
 
 /// Compute the steps that converge the environment on its subscribed channels.
 pub async fn compute(ctx: &mut Ctx, env: &str) -> Result<Vec<Step>> {
     validate_identifier("environment", env)?;
+    crate::drift::observe(ctx, env).await?;
     let owner = format!("plan-preview:{}", crate::now_millis());
     let lease = crate::apply::claim_environment(ctx, env, &owner).await?;
     let result = async {
@@ -1480,6 +1749,7 @@ async fn subscription_ids(ctx: &mut Ctx, env: &str) -> Result<Vec<String>> {
 /// Compute and persist an immutable executable plan before any step is run.
 pub async fn create(ctx: &mut Ctx, env: &str) -> Result<Plan> {
     validate_identifier("environment", env)?;
+    crate::drift::observe(ctx, env).await?;
     let owner = format!("plan-create:{}", crate::now_millis());
     let lease = crate::apply::claim_environment(ctx, env, &owner).await?;
     let result = async {
@@ -1498,12 +1768,22 @@ pub async fn create(ctx: &mut Ctx, env: &str) -> Result<Plan> {
                 Vec::new(),
                 subscription_ids,
                 &mut steps,
+                Vec::new(),
                 evaluations,
             )
             .await;
         }
-        let (inputs, mut steps) = compute_snapshot(ctx, env).await?;
-        create_with_content(ctx, env, inputs, subscription_ids, &mut steps, evaluations).await
+        let (inputs, mut steps, drift) = compute_snapshot(ctx, env).await?;
+        create_with_content(
+            ctx,
+            env,
+            inputs,
+            subscription_ids,
+            &mut steps,
+            drift,
+            evaluations,
+        )
+        .await
     }
     .await;
     let unlock = crate::apply::release_environment(ctx, &lease).await;
@@ -1517,27 +1797,88 @@ pub async fn create(ctx: &mut Ctx, env: &str) -> Result<Plan> {
     }
 }
 
+/// Persist work for an automatic reconciliation without holding a planning lease.
+/// Execution revalidates the snapshot after acquiring the environment lease.
+pub(crate) async fn create_reconciliation(
+    ctx: &mut Ctx,
+    env: &str,
+    cancellation: &crate::executor::Cancellation,
+) -> Result<Option<Plan>> {
+    validate_identifier("environment", env)?;
+    let observations = crate::drift::observe_with_cancellation(ctx, env, cancellation).await?;
+    if let Some(failed) = observations
+        .iter()
+        .find(|report| report.configured && report.observation.is_none())
+    {
+        bail!(
+            "observing {} in {env} failed: {}",
+            failed.product,
+            failed
+                .error
+                .as_deref()
+                .unwrap_or("unknown observation error")
+        );
+    }
+    let subscription_ids = subscription_ids(ctx, env).await?;
+    let evaluations =
+        constraint::evaluate_environment_with_channels(ctx, env, subscription_ids.iter().cloned())
+            .await?;
+    if constraint::denied(&evaluations) {
+        bail!(
+            "plan blocked by constraints: {}",
+            constraint::denial_detail(&evaluations)
+        );
+    }
+    let (inputs, mut steps, drift) = compute_snapshot(ctx, env).await?;
+    if steps.is_empty() {
+        return Ok(None);
+    }
+    create_with_content(
+        ctx,
+        env,
+        inputs,
+        subscription_ids,
+        &mut steps,
+        drift,
+        evaluations,
+    )
+    .await
+    .map(Some)
+}
+
 async fn create_with_content(
     ctx: &mut Ctx,
     env: &str,
     inputs: Vec<DesiredStateInput>,
     subscription_ids: Vec<String>,
     steps: &mut [Step],
+    drift: Vec<Drift>,
     constraint_evaluations: Vec<ConstraintEvaluation>,
 ) -> Result<Plan> {
     let created_at = crate::now_millis();
+    let environment = ctx
+        .get(&env_id(env))
+        .await?
+        .with_context(|| format!("environment {env} is not registered"))?;
+    let desired = inputs
+        .iter()
+        .map(|input| (input.product.clone(), input.desired_version.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let observations = crate::drift::snapshot_from_properties(&environment.properties, &desired);
     for (order, step) in steps.iter_mut().enumerate() {
         step.order = order as u32;
     }
-    let content_id = content_address(
-        PLAN_FORMAT_VERSION,
-        env,
+    let content_id = content_address(ContentAddressInput {
+        format_version: PLAN_FORMAT_VERSION,
+        environment: env,
         created_at,
-        &inputs,
-        &subscription_ids,
+        inputs: &inputs,
+        subscription_ids: &subscription_ids,
         steps,
-        &constraint_evaluations,
-    )?;
+        drift: &drift,
+        observations: &observations,
+        constraint_evaluations: &constraint_evaluations,
+    })?;
     let id = plan_id(env, created_at, &content_id);
     for (order, step) in steps.iter_mut().enumerate() {
         step.id = format!("{id}:step:{order}");
@@ -1551,6 +1892,8 @@ async fn create_with_content(
         inputs,
         subscription_ids,
         steps: steps.to_vec(),
+        drift,
+        observations,
         state: if constraint::denied(&constraint_evaluations) {
             PlanState::Blocked
         } else {
@@ -1568,6 +1911,7 @@ async fn create_with_content(
 pub async fn create_rollback(ctx: &mut Ctx, env: &str, product: &str) -> Result<Plan> {
     validate_identifier("environment", env)?;
     validate_identifier("product", product)?;
+    crate::drift::observe(ctx, env).await?;
     let owner = format!("rollback-plan-create:{}", crate::now_millis());
     let lease = crate::apply::claim_environment(ctx, env, &owner).await?;
     let result = create_rollback_locked(ctx, env, product).await;
@@ -1588,8 +1932,16 @@ async fn create_rollback_locked(ctx: &mut Ctx, env: &str, product: &str) -> Resu
         constraint::evaluate_environment_with_channels(ctx, env, subscription_ids.iter().cloned())
             .await?;
     if constraint::denied(&evaluations) {
-        return create_with_content(ctx, env, Vec::new(), subscription_ids, &mut [], evaluations)
-            .await;
+        return create_with_content(
+            ctx,
+            env,
+            Vec::new(),
+            subscription_ids,
+            &mut [],
+            Vec::new(),
+            evaluations,
+        )
+        .await;
     }
     let env_obj = environment(ctx, env).await?;
     if env_obj
@@ -1621,11 +1973,22 @@ async fn create_rollback_locked(ctx: &mut Ctx, env: &str, product: &str) -> Resu
             bail!("environment {env} has multiple channel subscriptions for {subscribed_product}");
         }
     }
+    if env_obj
+        .properties
+        .get(&format!("dependency_managed.{product}"))
+        .is_some_and(|managed| managed == "true")
+        && !subscribed_products.contains(product)
+    {
+        bail!(
+            "cannot roll back dependency-managed product {product} directly; roll back its subscribed owner instead"
+        );
+    }
     if semver::Version::parse(&prev).is_err() {
-        let current = env_obj
+        let last_applied = env_obj
             .properties
             .get(&format!("deployed.{product}"))
             .cloned();
+        let current = observed_current(&env_obj, product, last_applied.clone()).0;
         validate_legacy_deployment_isolation(ctx, &env_obj, product, &prev).await?;
         let target_id = release_id(product, &prev);
         let target_object = ctx
@@ -1640,7 +2003,7 @@ async fn create_rollback_locked(ctx: &mut Ctx, env: &str, product: &str) -> Resu
         }
         validate_legacy_rollback_release(&target_object)?;
         let target = pin_release(ctx, &target_id).await?;
-        let restore = match current.as_deref() {
+        let restore = match last_applied.as_deref() {
             Some(version) => Some(pin_release(ctx, &release_id(product, version)).await?),
             None => None,
         };
@@ -1649,8 +2012,33 @@ async fn create_rollback_locked(ctx: &mut Ctx, env: &str, product: &str) -> Resu
             .get(&format!("dependency_managed.{product}"))
             .is_some_and(|managed| managed == "true")
             && !subscribed_products.contains(product);
-        let (input, step) =
-            legacy_rollback_content(product, prev, current, dependency_managed, target, restore);
+        let (mut input, step) = legacy_rollback_content(
+            product,
+            prev,
+            last_applied,
+            current,
+            dependency_managed,
+            target,
+            restore,
+        );
+        if let Some(channel) = subscription_channels
+            .iter()
+            .find(|channel| channel.properties.get("product").map(String::as_str) == Some(product))
+        {
+            input.channel = channel
+                .properties
+                .get("channel")
+                .cloned()
+                .unwrap_or_default();
+            input.channel_id = channel.id.clone();
+            input.channel_version = channel
+                .properties
+                .get("current_version")
+                .cloned()
+                .unwrap_or_default();
+            input.channel_updated = channel.updated;
+        }
+        let drift = drift_for_inputs(&env_obj, std::slice::from_ref(&input));
         let mut steps = vec![step];
         return create_with_content(
             ctx,
@@ -1658,12 +2046,13 @@ async fn create_rollback_locked(ctx: &mut Ctx, env: &str, product: &str) -> Resu
             vec![input],
             subscription_ids,
             &mut steps,
+            drift,
             evaluations,
         )
         .await;
     }
     let mut rollback_roots = BTreeMap::<String, ChannelRoot>::new();
-    for channel in subscription_channels {
+    for channel in &subscription_channels {
         let subscribed_product = channel
             .properties
             .get("product")
@@ -1681,23 +2070,46 @@ async fn create_rollback_locked(ctx: &mut Ctx, env: &str, product: &str) -> Resu
                 "cannot roll back {product} while {subscribed_product} has unknown deployment state; reconcile the external target first"
             );
         }
-        let version = rollback_root_version(&env_obj, &channel, &subscribed_product)?;
+        let version = rollback_root_version(&env_obj, channel, &subscribed_product)?;
         rollback_roots.insert(
             subscribed_product.clone(),
             ChannelRoot {
                 product: subscribed_product,
-                channel: String::new(),
-                channel_id: String::new(),
+                channel: channel
+                    .properties
+                    .get("channel")
+                    .cloned()
+                    .unwrap_or_default(),
+                channel_id: channel.id.clone(),
+                channel_version: channel
+                    .properties
+                    .get("current_version")
+                    .cloned()
+                    .unwrap_or_default(),
+                channel_updated: channel.updated,
                 version,
             },
         );
     }
+    let rollback_channel = subscription_channels
+        .iter()
+        .find(|channel| channel.properties.get("product").map(String::as_str) == Some(product));
     rollback_roots.insert(
         product.to_string(),
         ChannelRoot {
             product: product.to_string(),
-            channel: String::new(),
-            channel_id: String::new(),
+            channel: rollback_channel
+                .and_then(|channel| channel.properties.get("channel"))
+                .cloned()
+                .unwrap_or_default(),
+            channel_id: rollback_channel
+                .map(|channel| channel.id.clone())
+                .unwrap_or_default(),
+            channel_version: rollback_channel
+                .and_then(|channel| channel.properties.get("current_version"))
+                .cloned()
+                .unwrap_or_default(),
+            channel_updated: rollback_channel.map_or(0, |channel| channel.updated),
             version: prev,
         },
     );
@@ -1709,6 +2121,7 @@ async fn create_rollback_locked(ctx: &mut Ctx, env: &str, product: &str) -> Resu
                 .map(|deployed_product| (deployed_product.to_string(), version.clone()))
         })
         .collect::<BTreeMap<_, _>>();
+    let current_deployed = effective_deployed(&env_obj, &deployed);
     add_retained_roots(
         &mut rollback_roots,
         &deployed,
@@ -1750,6 +2163,7 @@ async fn create_rollback_locked(ctx: &mut Ctx, env: &str, product: &str) -> Resu
         .collect::<BTreeMap<_, _>>();
     let desired_products = resolution.selected.keys().cloned().collect::<BTreeSet<_>>();
     let mut inputs = Vec::new();
+    let mut resolved_steps = BTreeMap::<String, Step>::new();
     for (retained_product, version) in deployed.iter().filter(|(deployed_product, version)| {
         semver::Version::parse(version).is_err()
             && !resolution.selected.contains_key(*deployed_product)
@@ -1768,34 +2182,41 @@ async fn create_rollback_locked(ctx: &mut Ctx, env: &str, product: &str) -> Resu
             &selected_dependencies,
         )
         .await?;
-        let pin = pin_release(ctx, &release_id(retained_product, version)).await?;
-        inputs.push(DesiredStateInput {
-            product: retained_product.clone(),
-            channel: String::new(),
-            channel_id: String::new(),
-            dependency_managed: false,
-            desired_version: version.clone(),
-            release_id: pin.release_id,
-            release_digest: pin.digest,
-            artifact_digest: pin.artifact_digest,
-            workdir: pin.workdir,
-            deployed_version: Some(version.clone()),
-        });
+        let (input, step) =
+            retained_legacy_content(ctx, &env_obj, retained_product, version).await?;
+        inputs.push(input);
+        if let Some(step) = step {
+            resolved_steps.insert(retained_product.clone(), step);
+        }
     }
     let mut steps = Vec::new();
     let install_order = resolution.install_order;
-    let mut resolved_steps = BTreeMap::<String, Step>::new();
     for selected_product in &install_order {
         let desired = resolution.selected[selected_product].clone();
-        let deployed = env_obj
+        let last_applied = env_obj
             .properties
             .get(&format!("deployed.{selected_product}"))
             .cloned();
+        let (current, unhealthy) =
+            observed_current(&env_obj, selected_product, last_applied.clone());
         let target = pin_release(ctx, &release_id(selected_product, &desired)).await?;
         inputs.push(DesiredStateInput {
             product: selected_product.clone(),
-            channel: String::new(),
-            channel_id: String::new(),
+            channel: rollback_roots
+                .get(selected_product)
+                .map(|root| root.channel.clone())
+                .unwrap_or_default(),
+            channel_id: rollback_roots
+                .get(selected_product)
+                .map(|root| root.channel_id.clone())
+                .unwrap_or_default(),
+            channel_version: rollback_roots
+                .get(selected_product)
+                .map(|root| root.channel_version.clone())
+                .unwrap_or_default(),
+            channel_updated: rollback_roots
+                .get(selected_product)
+                .map_or(0, |root| root.channel_updated),
             dependency_managed: !subscribed_products.contains(selected_product)
                 && (env_obj
                     .properties
@@ -1807,20 +2228,31 @@ async fn create_rollback_locked(ctx: &mut Ctx, env: &str, product: &str) -> Resu
             release_digest: target.digest.clone(),
             artifact_digest: target.artifact_digest.clone(),
             workdir: target.workdir.clone(),
-            deployed_version: deployed.clone(),
+            deployed_version: last_applied.clone(),
+            rollback_target: selected_product == product,
         });
-        let (action, from, restore) = match deployed {
-            Some(version) if version == desired => continue,
+        let (action, from, restore) = match current {
+            Some(version) if version == desired && !unhealthy => continue,
             Some(version) => {
-                let action = if selected_product == product {
-                    Action::Rollback
-                } else {
-                    classify_change(&version, &desired)
+                let action =
+                    rollback_transition_action(selected_product == product, &version, &desired);
+                let restore = match last_applied.as_deref() {
+                    Some(last_applied) => {
+                        Some(pin_release(ctx, &release_id(selected_product, last_applied)).await?)
+                    }
+                    None => None,
                 };
-                let restore = pin_release(ctx, &release_id(selected_product, &version)).await?;
-                (action, Some(version), Some(restore))
+                (action, Some(version), restore)
             }
-            None => (Action::Install, None, None),
+            None => {
+                let restore = match last_applied.as_deref() {
+                    Some(last_applied) => {
+                        Some(pin_release(ctx, &release_id(selected_product, last_applied)).await?)
+                    }
+                    None => None,
+                };
+                (Action::Install, None, restore)
+            }
         };
         resolved_steps.insert(
             selected_product.clone(),
@@ -1846,21 +2278,25 @@ async fn create_rollback_locked(ctx: &mut Ctx, env: &str, product: &str) -> Resu
         &subscribed_products,
     );
     let current_dependencies = if resolved_steps.len() > 1 || !obsolete.is_empty() {
-        deployed_dependencies(ctx, &deployed).await?
+        deployed_dependencies(ctx, &current_deployed).await?
     } else {
         BTreeMap::new()
     };
     if !obsolete.is_empty() {
         let mut dependencies = current_dependencies.clone();
         for (selected_product, final_dependencies) in &selected_dependencies {
-            if deployed.contains_key(selected_product) {
+            if current_deployed.contains_key(selected_product) {
                 dependencies.insert(selected_product.clone(), final_dependencies.clone());
             }
         }
-        let obsolete = retain_required_dependencies(&deployed, &dependencies, obsolete);
+        let obsolete = retain_required_dependencies(&current_deployed, &dependencies, obsolete);
         for removed_product in removal_order_from_dependencies(obsolete.clone(), dependencies)? {
-            let version = deployed[&removed_product].clone();
-            let target = pin_release(ctx, &release_id(&removed_product, &version)).await?;
+            let current = removal_version(&env_obj, &removed_product, &deployed[&removed_product]);
+            let target = pin_release(
+                ctx,
+                &release_id(&removed_product, &deployed[&removed_product]),
+            )
+            .await?;
             resolved_steps.insert(
                 removed_product.clone(),
                 Step {
@@ -1868,7 +2304,7 @@ async fn create_rollback_locked(ctx: &mut Ctx, env: &str, product: &str) -> Resu
                     order: 0,
                     product: removed_product,
                     action: Action::Remove,
-                    from: Some(version),
+                    from: current,
                     to: String::new(),
                     release_id: target.release_id.clone(),
                     release_digest: target.digest.clone(),
@@ -1892,48 +2328,130 @@ async fn create_rollback_locked(ctx: &mut Ctx, env: &str, product: &str) -> Resu
                 .expect("rollback order only contains changed products"),
         );
     }
-    create_with_content(ctx, env, inputs, subscription_ids, &mut steps, evaluations).await
+    let drift = drift_for_inputs(&env_obj, &inputs);
+    create_with_content(
+        ctx,
+        env,
+        inputs,
+        subscription_ids,
+        &mut steps,
+        drift,
+        evaluations,
+    )
+    .await
 }
 
 pub struct StatusRow {
     pub product: String,
     pub channel: String,
-    pub deployed: Option<String>,
-    pub health: Option<String>,
-    pub error: Option<String>,
-    pub head: String,
+    pub desired: Option<String>,
+    pub last_applied: Option<String>,
+    pub observed: Option<String>,
+    pub observed_health: Option<String>,
+    pub observation_status: Option<String>,
+    pub observation_error: Option<String>,
+    pub deployment_health: Option<String>,
+    pub deployment_error: Option<String>,
+    pub desired_error: Option<String>,
+    pub drift: Vec<DriftKind>,
+}
+
+fn status_desired_versions(inputs: &[DesiredStateInput]) -> BTreeMap<String, String> {
+    inputs
+        .iter()
+        .map(|input| (input.product.clone(), input.desired_version.clone()))
+        .collect()
+}
+
+fn fallback_status_desired_versions(
+    channel_state: &BTreeMap<String, (String, Option<String>)>,
+    properties: &HashMap<String, String>,
+) -> BTreeMap<String, String> {
+    channel_state
+        .iter()
+        .filter_map(|(product, (_, version))| {
+            version.clone().map(|version| (product.clone(), version))
+        })
+        .chain(properties.iter().filter_map(|(key, version)| {
+            let product = key.strip_prefix("deployed.")?;
+            (!channel_state.contains_key(product)).then(|| (product.to_string(), version.clone()))
+        }))
+        .collect()
 }
 
 pub async fn status(ctx: &mut Ctx, env: &str) -> Result<Vec<StatusRow>> {
+    crate::drift::observe(ctx, env).await?;
     let env_obj = environment(ctx, env).await?;
     let channels = ctx.linked(&env_obj.id, REL_SUBSCRIBES, "out").await?;
-    let mut rows = Vec::new();
+    let mut channel_state = BTreeMap::new();
     for ch in channels {
         let product = ch.properties.get("product").cloned().unwrap_or_default();
-        rows.push(StatusRow {
-            deployed: env_obj
-                .properties
-                .get(&format!("deployed.{product}"))
-                .cloned(),
-            health: env_obj
-                .properties
-                .get(&format!("deployment_health.{product}"))
-                .cloned(),
-            error: env_obj
-                .properties
-                .get(&format!("deployment_error.{product}"))
-                .cloned(),
-            channel: ch.properties.get("channel").cloned().unwrap_or_default(),
-            head: ch
-                .properties
-                .get("current_version")
-                .cloned()
-                .unwrap_or_else(|| "-".into()),
+        channel_state.insert(
             product,
-        });
+            (
+                ch.properties.get("channel").cloned().unwrap_or_default(),
+                ch.properties.get("current_version").cloned(),
+            ),
+        );
     }
-    rows.sort_by(|a, b| a.product.cmp(&b.product));
-    Ok(rows)
+    let (desired, desired_error) = match compute_snapshot(ctx, env).await {
+        Ok((inputs, _, _)) => (status_desired_versions(&inputs), None),
+        Err(error) => (
+            fallback_status_desired_versions(&channel_state, &env_obj.properties),
+            Some(error.to_string()),
+        ),
+    };
+    let mut states = crate::drift::states_from_properties(&env_obj.properties, &desired);
+    for product in channel_state.keys() {
+        states.entry(product.clone()).or_default();
+    }
+    let mut drift_by_product = BTreeMap::<String, Vec<DriftKind>>::new();
+    if desired_error.is_none() {
+        for drift in crate::drift::classify(&states) {
+            drift_by_product
+                .entry(drift.product)
+                .or_default()
+                .push(drift.kind);
+        }
+    }
+    Ok(states
+        .into_iter()
+        .map(|(product, state)| {
+            let channel = channel_state
+                .get(&product)
+                .map(|(channel, _)| channel.clone())
+                .unwrap_or_default();
+            StatusRow {
+                channel,
+                desired: state.desired_version.clone(),
+                last_applied: state.last_applied_version,
+                observed: state.observed_version,
+                observed_health: env_obj
+                    .properties
+                    .get(&format!("observed_health.{product}"))
+                    .cloned(),
+                observation_status: env_obj
+                    .properties
+                    .get(&format!("observation_status.{product}"))
+                    .cloned(),
+                observation_error: env_obj
+                    .properties
+                    .get(&format!("observation_error.{product}"))
+                    .cloned(),
+                deployment_health: env_obj
+                    .properties
+                    .get(&format!("deployment_health.{product}"))
+                    .cloned(),
+                deployment_error: env_obj
+                    .properties
+                    .get(&format!("deployment_error.{product}"))
+                    .cloned(),
+                desired_error: desired_error.clone(),
+                drift: drift_by_product.remove(&product).unwrap_or_default(),
+                product,
+            }
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -2017,6 +2535,8 @@ install = "true"
                 product: "app".into(),
                 channel: "stable".into(),
                 channel_id: "channel:app:stable".into(),
+                channel_version: "1.0.0".into(),
+                channel_updated: 1,
                 version: "1.0.0".into(),
             },
         )]);
@@ -2175,6 +2695,7 @@ install = "true"
         let (input, step) = legacy_rollback_content(
             "app",
             "legacy_build".into(),
+            Some("last-applied".into()),
             Some("2.0.0".into()),
             true,
             target,
@@ -2182,12 +2703,32 @@ install = "true"
         );
 
         assert_eq!(input.desired_version, "legacy_build");
-        assert_eq!(input.deployed_version.as_deref(), Some("2.0.0"));
+        assert_eq!(input.deployed_version.as_deref(), Some("last-applied"));
         assert!(input.dependency_managed);
         assert_eq!(step.action, Action::Rollback);
         assert_eq!(step.to, "legacy_build");
         assert_eq!(step.from.as_deref(), Some("2.0.0"));
         assert!(step.restore.is_some());
+
+        let target = ReleasePin {
+            release_id: step.release_id.clone(),
+            digest: step.release_digest.clone(),
+            artifact_digest: step.artifact_digest.clone(),
+            workdir: step.workdir.clone(),
+        };
+        let restore = step.restore.clone();
+        let (_, absent_step) = legacy_rollback_content(
+            "app",
+            "legacy_build".into(),
+            Some("2.0.0".into()),
+            None,
+            true,
+            target,
+            restore,
+        );
+        assert_eq!(absent_step.action, Action::Install);
+        assert!(absent_step.from.is_none());
+        assert!(absent_step.restore.is_some());
     }
 
     #[test]
@@ -2602,6 +3143,8 @@ version = "<2"
                 product: "api".into(),
                 channel: "stable".into(),
                 channel_id: "tenkai:channel:api/stable".into(),
+                channel_version: "2.0.0".into(),
+                channel_updated: 1,
                 dependency_managed: false,
                 desired_version: "2.0.0".into(),
                 release_id: "tenkai:release:api@2.0.0".into(),
@@ -2609,6 +3152,7 @@ version = "<2"
                 artifact_digest: "target-artifact-digest".into(),
                 workdir: "/srv/api".into(),
                 deployed_version: Some("1.0.0".into()),
+                rollback_target: false,
             }],
             subscription_ids: vec!["tenkai:channel:api/stable".into()],
             steps: vec![Step {
@@ -2629,20 +3173,24 @@ version = "<2"
                     workdir: "/srv/api".into(),
                 }),
             }],
+            drift: Vec::new(),
+            observations: Vec::new(),
             constraint_evaluations: Vec::new(),
             state: PlanState::Computed,
             gates_skipped: None,
             status_detail: String::new(),
         };
-        plan.content_id = content_address(
-            plan.format_version,
-            &plan.environment,
-            plan.created_at,
-            &plan.inputs,
-            &plan.subscription_ids,
-            &plan.steps,
-            &plan.constraint_evaluations,
-        )
+        plan.content_id = content_address(ContentAddressInput {
+            format_version: plan.format_version,
+            environment: &plan.environment,
+            created_at: plan.created_at,
+            inputs: &plan.inputs,
+            subscription_ids: &plan.subscription_ids,
+            steps: &plan.steps,
+            drift: &plan.drift,
+            observations: &plan.observations,
+            constraint_evaluations: &plan.constraint_evaluations,
+        })
         .unwrap();
         plan.id = plan_id(&plan.environment, plan.created_at, &plan.content_id);
         plan.steps[0].id = format!("{}:step:0", plan.id);
@@ -2707,6 +3255,146 @@ version = "<2"
     fn semantic_version_direction_is_recorded() {
         assert_eq!(classify_change("2.0.0", "1.9.0"), Action::Downgrade);
         assert_eq!(classify_change("1.9.0", "2.0.0"), Action::Upgrade);
+        assert_eq!(
+            rollback_transition_action(true, "2.0.0", "2.0.0"),
+            Action::Upgrade
+        );
+        assert_eq!(
+            rollback_transition_action(true, "2.0.0", "1.0.0"),
+            Action::Rollback
+        );
+    }
+
+    #[test]
+    fn observed_version_mismatch_creates_a_corrective_transition() {
+        assert_eq!(
+            corrective_action(Some("1.0.0"), "2.0.0", false),
+            Some((Action::Upgrade, Some("1.0.0".into())))
+        );
+        assert_eq!(
+            corrective_action(None, "2.0.0", false),
+            Some((Action::Install, None))
+        );
+        assert_eq!(
+            corrective_action(Some("2.0.0"), "2.0.0", true),
+            Some((Action::Upgrade, Some("2.0.0".into())))
+        );
+    }
+
+    #[test]
+    fn rollback_and_removal_use_successfully_observed_state() {
+        let mut environment = Object::default();
+        environment
+            .properties
+            .insert("deployed.api".into(), "2.0.0".into());
+        environment
+            .properties
+            .insert("observed.api".into(), "2.1.0".into());
+        environment
+            .properties
+            .insert("observed_health.api".into(), "healthy".into());
+        environment
+            .properties
+            .insert("observation_status.api".into(), "succeeded".into());
+        let mut input = example_plan().inputs.remove(0);
+        input.desired_version = "1.0.0".into();
+        input.deployed_version = Some("2.0.0".into());
+
+        assert_eq!(
+            removal_version(&environment, "api", "2.0.0"),
+            Some("2.1.0".into())
+        );
+        assert_eq!(
+            effective_deployed(
+                &environment,
+                &BTreeMap::from([("api".into(), "2.0.0".into())])
+            ),
+            BTreeMap::from([("api".into(), "2.1.0".into())])
+        );
+        environment.properties.remove("observed.api");
+        assert_eq!(removal_version(&environment, "api", "2.0.0"), None);
+        assert!(
+            effective_deployed(
+                &environment,
+                &BTreeMap::from([("api".into(), "2.0.0".into())])
+            )
+            .is_empty()
+        );
+        environment
+            .properties
+            .insert("observed.api".into(), "2.1.0".into());
+        assert_eq!(
+            drift_for_inputs(&environment, &[input]),
+            [Drift {
+                product: "api".into(),
+                kind: DriftKind::Version,
+                desired_version: Some("1.0.0".into()),
+                last_applied_version: Some("2.0.0".into()),
+                observed_version: Some("2.1.0".into()),
+                observed_health: Some(crate::executor::ObservedHealth::Healthy),
+            }]
+        );
+    }
+
+    #[test]
+    fn status_uses_resolved_desired_inputs() {
+        let input = |product: &str, version: &str| DesiredStateInput {
+            product: product.into(),
+            channel: String::new(),
+            channel_id: String::new(),
+            channel_version: String::new(),
+            channel_updated: 0,
+            dependency_managed: product == "runtime",
+            desired_version: version.into(),
+            release_id: String::new(),
+            release_digest: String::new(),
+            artifact_digest: String::new(),
+            workdir: String::new(),
+            deployed_version: None,
+            rollback_target: false,
+        };
+
+        assert_eq!(
+            status_desired_versions(&[input("api", "2.0.0"), input("runtime", "4.0.0")]),
+            BTreeMap::from([
+                ("api".into(), "2.0.0".into()),
+                ("runtime".into(), "4.0.0".into()),
+            ])
+        );
+
+        let channels = BTreeMap::from([("api".into(), ("stable".into(), Some("2.0.0".into())))]);
+        let properties = HashMap::from([
+            ("deployed.api".into(), "1.0.0".into()),
+            ("deployed.legacy".into(), "build-7".into()),
+            ("deployed.runtime".into(), "3.0.0".into()),
+            ("dependency_managed.runtime".into(), "true".into()),
+        ]);
+        assert_eq!(
+            fallback_status_desired_versions(&channels, &properties),
+            BTreeMap::from([
+                ("api".into(), "2.0.0".into()),
+                ("legacy".into(), "build-7".into()),
+                ("runtime".into(), "3.0.0".into()),
+            ])
+        );
+    }
+
+    #[test]
+    fn drift_is_immutable_executable_input() {
+        let plan = example_plan();
+        let mut changed = plan.clone();
+        changed.drift.push(Drift {
+            product: "api".into(),
+            kind: DriftKind::Version,
+            desired_version: Some("2.0.0".into()),
+            last_applied_version: Some("2.0.0".into()),
+            observed_version: Some("1.0.0".into()),
+            observed_health: Some(crate::executor::ObservedHealth::Healthy),
+        });
+        assert_ne!(
+            plan.executable_digest().unwrap(),
+            changed.executable_digest().unwrap()
+        );
     }
 
     #[test]
