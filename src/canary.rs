@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::ontology::*;
-use crate::pb::sekai::Object;
+use crate::pb::sekai::{Link, Object};
 use crate::plan::{Action, Plan, PlanState};
 use crate::{apply::Outcome, client::Ctx};
 
@@ -438,10 +438,22 @@ fn designation_id(environment: &str) -> String {
 }
 
 const POLICY_DISCOVERY_LOCK_CHANNEL: &str = "_policy-index";
+const RELEASED_PROMOTION_LOCK_OWNER: &str = "released";
+const REL_ACTIVE_PROMOTION_LOCK: &str = "active_promotion_lock";
 
 pub(crate) struct PromotionLock {
     id: String,
     owner: String,
+}
+
+fn promotion_lock_link(lock_id: &str) -> Link {
+    Link {
+        id: format!("{lock_id}--{REL_ACTIVE_PROMOTION_LOCK}"),
+        from_id: lock_id.into(),
+        to_id: lock_id.into(),
+        relation: REL_ACTIVE_PROMOTION_LOCK.into(),
+        created: crate::now_millis(),
+    }
 }
 
 pub(crate) async fn claim_promotion_lock(
@@ -456,18 +468,38 @@ pub(crate) async fn claim_promotion_lock(
         id: format!("tenkai:promotion-lock:{product}:{target_channel}"),
         owner: owner.into(),
     };
-    let object = Object {
+    let mut object = Object {
         id: lock.id.clone(),
         kind: KIND_PROMOTION_LOCK.into(),
         name: format!("{product}/{target_channel} promotion lock"),
         namespace: NS.into(),
         external_id: String::new(),
-        properties: HashMap::from([("owner".into(), lock.owner.clone())]),
+        properties: HashMap::from([("owner".into(), RELEASED_PROMOTION_LOCK_OWNER.into())]),
         created: now,
         updated: now,
     };
-    match ctx.create_once(object).await {
-        Ok(_) => Ok(lock),
+    if ctx.get(&lock.id).await?.is_none() {
+        match ctx.create_once(object.clone()).await {
+            Ok(_) => {}
+            Err(status)
+                if status.code() == tonic::Code::AlreadyExists
+                    || (status.code() == tonic::Code::Internal
+                        && status.message().contains("UNIQUE")) => {}
+            Err(status) => return Err(status.into()),
+        }
+    }
+    match ctx.create_link_once(promotion_lock_link(&lock.id)).await {
+        Ok(_) => {
+            object.properties.insert("owner".into(), lock.owner.clone());
+            object.updated = crate::now_millis();
+            if let Err(error) = ctx.put(object).await {
+                let _ = ctx
+                    .unlink(&lock.id, &lock.id, REL_ACTIVE_PROMOTION_LOCK)
+                    .await;
+                return Err(error);
+            }
+            Ok(lock)
+        }
         Err(status)
             if status.code() == tonic::Code::AlreadyExists
                 || (status.code() == tonic::Code::Internal
@@ -506,7 +538,13 @@ pub(crate) async fn confirm_promotion_lock(ctx: &mut Ctx, lock: &PromotionLock) 
         .get(&lock.id)
         .await?
         .with_context(|| format!("promotion lock {} was lost", lock.id))?;
-    if object.properties.get("owner") != Some(&lock.owner) {
+    if !ctx
+        .links(&lock.id, REL_ACTIVE_PROMOTION_LOCK)
+        .await?
+        .iter()
+        .any(|link| link.to_id == lock.id)
+        || object.properties.get("owner") != Some(&lock.owner)
+    {
         bail!(
             "promotion lock {} is no longer owned by this operation",
             lock.id
@@ -525,12 +563,25 @@ pub async fn unlock_promotion(
         validate_identifier("channel", target_channel)?;
     }
     let id = format!("tenkai:promotion-lock:{product}:{target_channel}");
-    if ctx.get(&id).await?.is_none() {
+    let active_link = promotion_lock_link(&id);
+    if !ctx
+        .links(&id, REL_ACTIVE_PROMOTION_LOCK)
+        .await?
+        .iter()
+        .any(|link| link.id == active_link.id)
+    {
         return Ok(format!(
             "no promotion lock exists for {product}/{target_channel}"
         ));
     }
-    ctx.delete(&id).await?;
+    if let Some(mut object) = ctx.get(&id).await? {
+        object
+            .properties
+            .insert("owner".into(), RELEASED_PROMOTION_LOCK_OWNER.into());
+        object.updated = crate::now_millis();
+        ctx.put(object).await?;
+    }
+    ctx.unlink(&id, &id, REL_ACTIVE_PROMOTION_LOCK).await?;
     Ok(format!(
         "promotion lock removed for {product}/{target_channel}"
     ))
@@ -540,7 +591,14 @@ pub(crate) async fn release_promotion_lock(ctx: &mut Ctx, lock: &PromotionLock) 
     if let Some(object) = ctx.get(&lock.id).await?
         && object.properties.get("owner") == Some(&lock.owner)
     {
-        ctx.delete(&lock.id).await?;
+        let mut object = object;
+        object
+            .properties
+            .insert("owner".into(), RELEASED_PROMOTION_LOCK_OWNER.into());
+        object.updated = crate::now_millis();
+        ctx.put(object).await?;
+        ctx.unlink(&lock.id, &lock.id, REL_ACTIVE_PROMOTION_LOCK)
+            .await?;
     }
     Ok(())
 }

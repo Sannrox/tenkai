@@ -209,6 +209,17 @@ impl Ctx {
         }
     }
 
+    /// Create one exact link and preserve duplicate errors for lock acquisition.
+    pub(crate) async fn create_link_once(
+        &mut self,
+        link: Link,
+    ) -> std::result::Result<(), tonic::Status> {
+        self.sekai
+            .create_link(CreateLinkRequest { link: Some(link) })
+            .await?;
+        Ok(())
+    }
+
     pub async fn unlink(&mut self, from_id: &str, to_id: &str, relation: &str) -> Result<()> {
         let id = format!("{from_id}--{relation}--{to_id}");
         match self.sekai.delete_link(DeleteLinkRequest { id }).await {
