@@ -441,6 +441,14 @@ const POLICY_DISCOVERY_LOCK_CHANNEL: &str = "_policy-index";
 const RELEASED_PROMOTION_LOCK_OWNER: &str = "released";
 const REL_ACTIVE_PROMOTION_LOCK: &str = "active_promotion_lock";
 
+fn promotion_lock_id(product: &str, target_channel: &str) -> String {
+    format!("tenkai:promotion-lock:v2:{product}:{target_channel}")
+}
+
+fn legacy_promotion_lock_id(product: &str, target_channel: &str) -> String {
+    format!("tenkai:promotion-lock:{product}:{target_channel}")
+}
+
 pub(crate) struct PromotionLock {
     id: String,
     owner: String,
@@ -464,8 +472,17 @@ pub(crate) async fn claim_promotion_lock(
 ) -> Result<PromotionLock> {
     crate::ontology::require_canary_schema(ctx).await?;
     let now = crate::now_millis();
+    if ctx
+        .get(&legacy_promotion_lock_id(product, target_channel))
+        .await?
+        .is_some()
+    {
+        bail!(
+            "legacy promotion or policy update already in progress for {product}/{target_channel}"
+        );
+    }
     let lock = PromotionLock {
-        id: format!("tenkai:promotion-lock:{product}:{target_channel}"),
+        id: promotion_lock_id(product, target_channel),
         owner: owner.into(),
     };
     let mut object = Object {
@@ -562,7 +579,7 @@ pub async fn unlock_promotion(
     if target_channel != POLICY_DISCOVERY_LOCK_CHANNEL {
         validate_identifier("channel", target_channel)?;
     }
-    let id = format!("tenkai:promotion-lock:{product}:{target_channel}");
+    let id = promotion_lock_id(product, target_channel);
     let active_link = promotion_lock_link(&id);
     if !ctx
         .links(&id, REL_ACTIVE_PROMOTION_LOCK)
@@ -570,6 +587,13 @@ pub async fn unlock_promotion(
         .iter()
         .any(|link| link.id == active_link.id)
     {
+        let legacy_id = legacy_promotion_lock_id(product, target_channel);
+        if ctx.get(&legacy_id).await?.is_some() {
+            ctx.delete(&legacy_id).await?;
+            return Ok(format!(
+                "legacy promotion lock removed for {product}/{target_channel}"
+            ));
+        }
         return Ok(format!(
             "no promotion lock exists for {product}/{target_channel}"
         ));
