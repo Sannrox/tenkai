@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use tenkai::{apply, canary, catalog, client, maintenance, ontology, plan, reconciler};
 
@@ -15,8 +15,20 @@ use tenkai::{apply, canary, catalog, client, maintenance, ontology, plan, reconc
     about = "Constraint-based local delivery on sekai-chisei"
 )]
 struct Cli {
+    /// Select the embedded application core or an authenticated remote server.
+    #[arg(long, value_enum, default_value_t = Target::Embedded, global = true)]
+    target: Target,
+    /// Tenkai server URL; required with --target remote.
+    #[arg(long, env = "TENKAI_SERVER_URL", global = true)]
+    server_url: Option<String>,
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Target {
+    Embedded,
+    Remote,
 }
 
 #[derive(Subcommand)]
@@ -208,6 +220,35 @@ fn print_steps(steps: &[plan::Step]) {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if cli.target == Target::Remote {
+        let server_url = cli
+            .server_url
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("--server-url is required with --target remote"))?;
+        let token = std::env::var("TENKAI_MANAGEMENT_TOKEN")
+            .map_err(|_| anyhow::anyhow!("TENKAI_MANAGEMENT_TOKEN is required for remote mode"))?;
+        match cli.command {
+            Command::Reconcile { once: true, .. } => {
+                let report = tenkai::server::RemoteClient::new(server_url, token)?
+                    .reconcile()
+                    .await?;
+                let failures = report.failures();
+                print_reconcile_report(report);
+                if failures > 0 {
+                    bail!("{failures} environment(s) failed to reconcile");
+                }
+                return Ok(());
+            }
+            Command::Reconcile { once: false, .. } => {
+                bail!(
+                    "remote servers reconcile continuously; use --once to request an immediate tick"
+                )
+            }
+            _ => bail!(
+                "this command is not available through the v1 remote API; use --target embedded"
+            ),
+        }
+    }
     let mut ctx = client::connect().await?;
 
     match cli.command {
@@ -461,6 +502,12 @@ fn print_reconcile_report(report: reconciler::TickReport) {
                     result.environment
                 );
             }
+            reconciler::EnvironmentStatus::AwaitingRuntime { plan_id, steps } => {
+                println!(
+                    "{:<24} awaiting runtime for {steps} step(s) in {plan_id}",
+                    result.environment
+                );
+            }
             reconciler::EnvironmentStatus::Failed { error } => {
                 eprintln!("{:<24} FAILED {error}", result.environment);
             }
@@ -599,6 +646,26 @@ mod tests {
                 ..
             } if reason == "restore critical service"
         ));
+    }
+
+    #[test]
+    fn remote_target_is_explicit_and_carries_no_cli_secret() {
+        let cli = Cli::try_parse_from([
+            "tenkaictl",
+            "--target",
+            "remote",
+            "--server-url",
+            "https://tenkai.example.test",
+            "reconcile",
+            "--once",
+        ])
+        .unwrap();
+        assert_eq!(cli.target, Target::Remote);
+        assert_eq!(
+            cli.server_url.as_deref(),
+            Some("https://tenkai.example.test")
+        );
+        assert!(matches!(cli.command, Command::Reconcile { once: true, .. }));
     }
 
     #[test]
