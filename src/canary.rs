@@ -456,7 +456,7 @@ pub(crate) struct PromotionLock {
 
 fn promotion_lock_link(lock_id: &str) -> Link {
     Link {
-        id: format!("{lock_id}--{REL_ACTIVE_PROMOTION_LOCK}"),
+        id: format!("{lock_id}--{REL_ACTIVE_PROMOTION_LOCK}--{lock_id}"),
         from_id: lock_id.into(),
         to_id: lock_id.into(),
         relation: REL_ACTIVE_PROMOTION_LOCK.into(),
