@@ -58,7 +58,9 @@ fail closed.
 Every publication stores `verification_status` and `signature_algorithm` in a
 deterministic immutable verification-claim object linked from the release.
 Verified claims also retain the trust-root signer identity and key id, the
-canonical statement digest, signed provenance JSON, and detached envelope.
+verified public key, canonical statement digest, signed provenance JSON, and
+detached envelope. Non-local planning and apply authenticate that retained
+envelope and compare every content-bound field before trusting the claim.
 Keeping trust evidence separate avoids changing or rewriting the existing
 `tenkai.release` schema.
 

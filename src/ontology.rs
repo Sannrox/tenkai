@@ -181,6 +181,11 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
                 prop("signer_identity", false, "Trusted signer identity"),
                 prop("signer_key_id", false, "Trusted signer public-key digest"),
                 prop(
+                    "signer_public_key",
+                    false,
+                    "Trusted signer Ed25519 public key",
+                ),
+                prop(
                     "signature_statement_digest",
                     false,
                     "sha256 of the canonical signed release statement",

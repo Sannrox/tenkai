@@ -68,6 +68,7 @@ pub struct ResolvedSigner {
 pub struct VerificationEvidence {
     pub signer_identity: String,
     pub signer_key_id: String,
+    pub signer_public_key: String,
     pub manifest_digest: String,
     pub artifact_digest: String,
     pub statement_digest: String,
@@ -165,6 +166,8 @@ pub fn verify_release(
     Ok(VerificationEvidence {
         signer_identity: signer.identity,
         signer_key_id: signer.key_id,
+        signer_public_key: base64::engine::general_purpose::STANDARD
+            .encode(signer.verifying_key.to_bytes()),
         manifest_digest: manifest_digest.into(),
         artifact_digest: artifact_digest.into(),
         statement_digest: envelope.statement_digest()?,

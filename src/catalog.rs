@@ -42,6 +42,10 @@ impl PublicationTrust {
                     verified.evidence.signer_key_id.clone(),
                 ),
                 (
+                    "signer_public_key".into(),
+                    verified.evidence.signer_public_key.clone(),
+                ),
+                (
                     "signature_statement_digest".into(),
                     verified.evidence.statement_digest.clone(),
                 ),
@@ -233,21 +237,42 @@ fn verification_view(
             if algorithm != release_signing::SIGNATURE_ALGORITHM {
                 bail!("verified release has unsupported signature algorithm {algorithm:?}");
             }
+            let envelope: release_signing::SignatureEnvelope =
+                serde_json::from_str(property(properties, "signature_envelope")?)?;
+            let roots = release_signing::TrustRoots {
+                version: release_signing::TRUST_ROOT_VERSION,
+                signers: vec![release_signing::TrustedSigner {
+                    key_id: property(properties, "signer_key_id")?.into(),
+                    identity: property(properties, "signer_identity")?.into(),
+                    public_key: property(properties, "signer_public_key")?.into(),
+                }],
+            };
+            let evidence = release_signing::verify_release(
+                &envelope,
+                &roots,
+                manifest_digest,
+                artifact_digest,
+            )?;
+            if evidence.statement_digest != property(properties, "signature_statement_digest")? {
+                bail!("stored release signature statement digest does not match its envelope");
+            }
             let provenance: release_signing::Provenance =
                 serde_json::from_str(property(properties, "provenance")?)?;
-            provenance.validate()?;
+            if provenance != evidence.provenance {
+                bail!("stored release provenance does not match its signed envelope");
+            }
             Ok(ReleaseVerificationView {
                 release_id: release.id.clone(),
                 product: product.into(),
                 version: version.into(),
                 status: status.into(),
                 algorithm: algorithm.into(),
-                signer_identity: Some(property(properties, "signer_identity")?.into()),
-                signer_key_id: Some(property(properties, "signer_key_id")?.into()),
+                signer_identity: Some(evidence.signer_identity),
+                signer_key_id: Some(evidence.signer_key_id),
                 manifest_digest: manifest_digest.into(),
                 artifact_digest: artifact_digest.into(),
-                statement_digest: Some(property(properties, "signature_statement_digest")?.into()),
-                provenance: Some(provenance),
+                statement_digest: Some(evidence.statement_digest),
+                provenance: Some(evidence.provenance),
             })
         }
         "unsigned-development" => {
@@ -669,6 +694,8 @@ pub async fn promote(ctx: &mut Ctx, spec: &str, channel: &str) -> Result<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
+    use ed25519_dalek::Signer as _;
 
     #[test]
     fn publication_fails_closed_without_signature_configuration() {
@@ -713,23 +740,31 @@ mod tests {
             built_at_unix_ms: 1,
             materials: std::collections::BTreeMap::new(),
         };
-        let envelope = release_signing::SignatureEnvelope {
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[7_u8; 32]);
+        let public_key = signing_key.verifying_key().to_bytes();
+        let mut envelope = release_signing::SignatureEnvelope {
             schema: release_signing::ENVELOPE_SCHEMA.into(),
-            key_id: format!("sha256:{}", "1".repeat(64)),
+            key_id: release_signing::key_id(&public_key),
             statement: release_signing::ReleaseStatement {
                 manifest_digest: "2".repeat(64),
                 artifact_digest: "3".repeat(64),
                 provenance: provenance.clone(),
             },
-            signature: "signature".into(),
+            signature: base64::engine::general_purpose::STANDARD.encode([0_u8; 64]),
         };
+        envelope.signature = base64::engine::general_purpose::STANDARD.encode(
+            signing_key
+                .sign(&envelope.signed_bytes().unwrap())
+                .to_bytes(),
+        );
         let trust = PublicationTrust::Verified(Box::new(VerifiedPublication {
             evidence: VerificationEvidence {
                 signer_identity: "release@example.com".into(),
                 signer_key_id: envelope.key_id.clone(),
+                signer_public_key: base64::engine::general_purpose::STANDARD.encode(public_key),
                 manifest_digest: envelope.statement.manifest_digest.clone(),
                 artifact_digest: envelope.statement.artifact_digest.clone(),
-                statement_digest: "4".repeat(64),
+                statement_digest: envelope.statement_digest().unwrap(),
                 provenance,
             },
             envelope: envelope.clone(),
