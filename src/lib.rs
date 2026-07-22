@@ -13,6 +13,7 @@ pub mod manifest;
 pub mod ontology;
 pub mod pb;
 pub mod plan;
+pub mod providers;
 pub mod release_signing;
 pub mod storage;
 

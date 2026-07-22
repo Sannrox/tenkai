@@ -224,6 +224,12 @@ for the roadmap.
 
 Active implementation work and dependencies are tracked in GitHub Issues.
 
+Governance and intelligence integrations use separate, content-bound provider
+contracts. Required policy or gate decisions fail closed; optional audit and
+outcome exports use a durable retry outbox. The contracts and standalone
+implementations are documented in
+[`docs/provider-contracts.md`](docs/provider-contracts.md).
+
 The standalone architecture and Tenkai-owned operational storage contract are
 documented in [ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md)
 and [Operational storage](docs/operational-storage.md). The current v0 CLI
