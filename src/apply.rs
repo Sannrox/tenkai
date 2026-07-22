@@ -587,6 +587,7 @@ async fn release_content(
             obj.kind
         );
     }
+    crate::catalog::require_deployable_trust(ctx, &obj, environment).await?;
     let raw = obj.properties.get("manifest").cloned().unwrap_or_default();
     let stored_digest = obj.properties.get("digest").cloned().unwrap_or_default();
     let actual_digest = manifest::digest(&raw);
