@@ -1,19 +1,22 @@
 # tenkai
 
 `tenkai` (展開, "deployment / unfolding") is a local-first, constraint-based
-delivery control plane backed by
-[sekai-chisei](https://github.com/Sannrox/sekai-chisei).
+delivery control plane with optional governance, evaluation, and graph
+integration through [sekai-chisei](https://github.com/Sannrox/sekai-chisei).
 
 You don't script deployments. You **publish** immutable releases, **promote**
 them into channels, and **subscribe** environments to channels. `tenkaictl`
 computes the plan that converges an environment on its channels, gates it on
 chisei eval runs, executes it, health-probes it, and rolls back automatically
-on failure. Every product, release, channel, plan, and deployment is a typed
-object in the sekai graph — the full delivery history is queryable and audited.
+on failure. The accepted architecture makes Tenkai the operational owner and
+uses a sekai projection for lineage and audit; current v0 still uses sekai as
+its operational store until that migration is implemented.
 
 This is the **local v0**: one machine, the CLI plays catalog + planner +
-executor. The seams (immutable releases, channels, gates, rollback, the graph
-ontology) are the ones the fleet version grows along — see [DESIGN.md](DESIGN.md).
+executor. Embedded and future server operation share one application core. The
+durable boundary and service-evolution rules are recorded in
+[ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md); see
+[DESIGN.md](DESIGN.md) for the roadmap.
 
 ## Quickstart
 
@@ -93,8 +96,11 @@ latest eval run in chisei exists and every current case passed (fail closed).
 The run's `config_ref` must match the content-bound reference shown in the
 blocked-plan detail; it covers the manifest, immutable deploy inputs, and the
 current suite definition, so stale evidence cannot authorize changed content.
-`--skip-gates` bypasses, and the bypass is recorded in the graph like any
-other apply.
+`--skip-gates` is the current v0 break-glass action, and the bypass is recorded
+in the graph like any other apply. Under the standalone architecture, a bypass
+must carry separately authorized, auditable override evidence; inability to
+authorize the override fails closed. Migrated plans preserve their original
+bypass evidence and version rather than gaining implicit authorization.
 
 ## Maintenance windows
 
@@ -182,12 +188,16 @@ control plane can't safely restart its own backend mid-apply.
 
 ## Ontology
 
-Everything lives in the sekai graph under namespace `tenkai`:
+The current v0 authoritatively encodes domain objects in the sekai graph under
+namespace `tenkai`:
 
 `tenkai.product` ← `release_of` — `tenkai.release` ← `promotes` — `tenkai.channel`
 ← `subscribes` — `tenkai.environment`; each apply writes a `tenkai.plan` and
 per-step `tenkai.deployment` records linked to the release, environment, and
-plan. Current state lives on the environment object (`deployed.<product>`).
+plan. Current v0 state lives on the environment object (`deployed.<product>`).
+The accepted standalone architecture will move operational authority to
+Tenkai-owned persistence while retaining this graph as an optional projection;
+that persistence migration is not implemented in v0.
 
 ## Status
 
@@ -195,7 +205,8 @@ v0 walking skeleton. Working: signed publish/promote/subscribe, plan/apply/statu
 eval gates, health probes, auto-rollback, deliberate rollback, recurring
 maintenance windows, and a full graph audit trail. Not yet: multiple
 environments beyond registration, version constraints,
-agents, disconnected environments — see [DESIGN.md](DESIGN.md) for the roadmap.
+environment runtimes, disconnected environments — see [DESIGN.md](DESIGN.md)
+for the roadmap.
 
 Active implementation work and dependencies are tracked in GitHub Issues.
 
