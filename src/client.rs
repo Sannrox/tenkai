@@ -60,6 +60,7 @@ impl Interceptor for Meta {
 pub type Sekai = SekaiServiceClient<InterceptedService<Channel, Meta>>;
 pub type Chisei = ChiseiServiceClient<InterceptedService<Channel, Meta>>;
 
+#[derive(Clone)]
 pub struct Ctx {
     pub sekai: Sekai,
     pub chisei: Chisei,

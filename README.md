@@ -153,6 +153,22 @@ restored.
 tenkaictl apply <plan-id> --emergency-reason "restore critical service"
 ```
 
+## Continuous reconciliation
+
+Run the controller to converge every registered environment whenever a
+subscribed channel changes:
+
+```bash
+tenkaictl reconcile
+```
+
+Each environment is planned and executed independently. Generation-fenced
+leases prevent overlapping execution, failures use bounded per-environment
+backoff, and an orphaned running plan is terminated after its lease expires so
+a later tick can converge from durable state. For local operation and tests,
+`tenkaictl reconcile --once` performs one deterministic tick and exits nonzero
+when any environment fails.
+
 ## Deploying from GitHub
 
 GitHub is the artifact source; tenkai is the local delivery plane. The
