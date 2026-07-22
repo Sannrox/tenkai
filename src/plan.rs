@@ -464,7 +464,7 @@ async fn environment(ctx: &mut Ctx, env: &str) -> Result<Object> {
     }
 }
 
-async fn pin_release(ctx: &mut Ctx, id: &str) -> Result<ReleasePin> {
+async fn pin_release(ctx: &mut Ctx, id: &str, environment: &str) -> Result<ReleasePin> {
     let object = ctx
         .get(id)
         .await?
@@ -472,6 +472,7 @@ async fn pin_release(ctx: &mut Ctx, id: &str) -> Result<ReleasePin> {
     if object.kind != KIND_RELEASE {
         bail!("object {id} is {}, not {KIND_RELEASE}", object.kind);
     }
+    crate::catalog::require_deployable_trust(ctx, &object, environment).await?;
     let digest = object
         .properties
         .get("digest")
@@ -534,7 +535,7 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
         if desired.is_empty() || release.is_empty() {
             continue; // channel exists but nothing promoted yet
         }
-        let target = pin_release(ctx, &release).await?;
+        let target = pin_release(ctx, &release, env).await?;
         if env_obj
             .properties
             .get(&format!("deployment_health.{product}"))
@@ -567,7 +568,7 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
             Some(v) if v == desired => {}
             Some(v) => {
                 let action = classify_change(&v, &desired);
-                let restore = pin_release(ctx, &release_id(&product, &v)).await?;
+                let restore = pin_release(ctx, &release_id(&product, &v), env).await?;
                 pending.push((product, action, Some(v), desired, target, Some(restore)));
             }
             None => pending.push((product, Action::Install, None, desired, target, None)),
@@ -662,9 +663,9 @@ pub async fn rollback_step(ctx: &mut Ctx, env: &str, product: &str) -> Result<St
     else {
         bail!("no previous version of {product} recorded in {env} — nothing to roll back to");
     };
-    let target = pin_release(ctx, &release_id(product, &prev)).await?;
+    let target = pin_release(ctx, &release_id(product, &prev), env).await?;
     let restore = match current.as_deref() {
-        Some(version) => Some(pin_release(ctx, &release_id(product, version)).await?),
+        Some(version) => Some(pin_release(ctx, &release_id(product, version), env).await?),
         None => None,
     };
     Ok(Step {

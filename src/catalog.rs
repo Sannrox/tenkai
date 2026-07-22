@@ -12,16 +12,6 @@ use crate::ontology::*;
 use crate::pb::sekai::Object;
 use crate::release_signing::{self, VerificationEvidence};
 
-const VERIFICATION_PROPERTY_KEYS: &[&str] = &[
-    "verification_status",
-    "signature_algorithm",
-    "signer_identity",
-    "signer_key_id",
-    "signature_statement_digest",
-    "signature_envelope",
-    "provenance",
-];
-
 #[derive(Debug, Clone)]
 enum PublicationTrust {
     Verified(Box<VerifiedPublication>),
@@ -78,13 +68,6 @@ impl PublicationTrust {
             }
             Self::UnsignedDevelopment => "unsigned development release".into(),
         }
-    }
-
-    fn permits_legacy_backfill(&self, properties: &HashMap<String, String>) -> bool {
-        matches!(self, Self::Verified(_))
-            && VERIFICATION_PROPERTY_KEYS
-                .iter()
-                .all(|key| !properties.contains_key(*key))
     }
 }
 
@@ -153,9 +136,6 @@ async fn stored_verification_properties(
     ctx: &mut Ctx,
     release: &Object,
 ) -> Result<HashMap<String, String>> {
-    if release.properties.contains_key("verification_status") {
-        return Ok(release.properties.clone());
-    }
     let claim_id = release_verification_id(&release.id);
     let claim = ctx.get(&claim_id).await?.ok_or_else(|| {
         anyhow::anyhow!(
@@ -168,16 +148,6 @@ async fn stored_verification_properties(
         || claim.namespace != NS
         || !claim.external_id.is_empty()
         || claim.properties.get("release_id") != Some(&release.id)
-        || claim
-            .properties
-            .get("verification_status")
-            .map(String::as_str)
-            != Some("verified")
-        || claim
-            .properties
-            .get("signature_algorithm")
-            .map(String::as_str)
-            != Some(release_signing::SIGNATURE_ALGORITHM)
     {
         bail!(
             "release {} has malformed linked verification evidence",
@@ -213,6 +183,39 @@ fn property<'a>(properties: &'a HashMap<String, String>, key: &str) -> Result<&'
         .filter(|value| !value.is_empty())
         .map(String::as_str)
         .ok_or_else(|| anyhow::anyhow!("release verification evidence has no {key}"))
+}
+
+/// Unsigned releases are a compatibility escape hatch for the built-in local
+/// development environment, never an authorization for remote deployment.
+fn require_deployable_trust_properties(
+    properties: &HashMap<String, String>,
+    environment: &str,
+) -> Result<()> {
+    if environment == "local" {
+        return Ok(());
+    }
+    match properties.get("verification_status").map(String::as_str) {
+        Some("verified") => Ok(()),
+        Some(status) => bail!(
+            "release trust status {status:?} is not deployable to non-local environment {environment}"
+        ),
+        None => bail!(
+            "release has no verification evidence and is not deployable to non-local environment {environment}"
+        ),
+    }
+}
+
+pub async fn require_deployable_trust(
+    ctx: &mut Ctx,
+    release: &Object,
+    environment: &str,
+) -> Result<()> {
+    if environment == "local" {
+        return Ok(());
+    }
+    let properties = stored_verification_properties(ctx, release).await?;
+    verification_view(release, &properties)?;
+    require_deployable_trust_properties(&properties, environment)
 }
 
 fn verification_view(
@@ -500,18 +503,10 @@ pub async fn publish(
             .get("artifact_digest")
             .cloned()
             .unwrap_or_default();
-        let verification_unchanged = VERIFICATION_PROPERTY_KEYS
-            .iter()
-            .all(|key| existing.properties.get(*key) == verification_properties.get(*key));
-        let legacy_backfill = verification.permits_legacy_backfill(&existing.properties);
         if existing_digest == digest
             && (existing_artifact_digest.is_empty() || existing_artifact_digest == artifact_digest)
-            && (verification_unchanged || legacy_backfill)
         {
-            if legacy_backfill {
-                validate_stored_release_content(&existing, &digest, &artifact_digest)?;
-                backfill_legacy_verification(ctx, &rid, &verification_properties).await?;
-            }
+            validate_stored_release_content(&existing, &digest, &artifact_digest)?;
             existing
                 .properties
                 .insert("artifact_digest".into(), artifact_digest.clone());
@@ -523,11 +518,11 @@ pub async fn publish(
             true
         } else {
             bail!(
-                "release {name}@{version} already exists with different content or verification evidence — releases are immutable, bump product.version"
+                "release {name}@{version} already exists with different content — releases are immutable, bump product.version"
             );
         }
     } else {
-        let mut properties = HashMap::from([
+        let properties = HashMap::from([
             ("product".into(), name.clone()),
             ("version".into(), version.clone()),
             ("digest".into(), digest.clone()),
@@ -535,7 +530,6 @@ pub async fn publish(
             ("manifest".into(), loaded.raw.clone()),
             ("workdir".into(), versioned_workdir.display().to_string()),
         ]);
-        properties.extend(verification_properties.clone());
         let release = object(
             rid.clone(),
             KIND_RELEASE,
@@ -552,46 +546,36 @@ pub async fn publish(
                 let existing = ctx.get(&rid).await?.ok_or_else(|| {
                     anyhow::anyhow!("release {rid} appeared concurrently then vanished")
                 })?;
-                let legacy_backfill = verification.permits_legacy_backfill(&existing.properties);
                 let existing_artifact_digest = existing
                     .properties
                     .get("artifact_digest")
                     .map(String::as_str)
                     .unwrap_or_default();
                 if existing.properties.get("digest") != Some(&digest)
-                    || if legacy_backfill {
-                        !existing_artifact_digest.is_empty()
-                            && existing_artifact_digest != artifact_digest
-                    } else {
-                        existing_artifact_digest != artifact_digest
-                    }
-                    || (!legacy_backfill
-                        && VERIFICATION_PROPERTY_KEYS.iter().any(|key| {
-                            existing.properties.get(*key) != verification_properties.get(*key)
-                        }))
+                    || (!existing_artifact_digest.is_empty()
+                        && existing_artifact_digest != artifact_digest)
                 {
                     bail!(
-                        "release {name}@{version} was concurrently published with different content or verification evidence"
+                        "release {name}@{version} was concurrently published with different content"
                     );
                 }
-                if legacy_backfill {
-                    validate_stored_release_content(&existing, &digest, &artifact_digest)?;
-                    let mut pinned = existing.clone();
-                    pinned
-                        .properties
-                        .insert("artifact_digest".into(), artifact_digest.clone());
-                    pinned
-                        .properties
-                        .insert("workdir".into(), versioned_workdir.display().to_string());
-                    pinned.updated = crate::now_millis();
-                    ctx.put(pinned).await?;
-                    backfill_legacy_verification(ctx, &rid, &verification_properties).await?;
-                }
+                validate_stored_release_content(&existing, &digest, &artifact_digest)?;
+                let mut pinned = existing;
+                pinned
+                    .properties
+                    .insert("artifact_digest".into(), artifact_digest.clone());
+                pinned
+                    .properties
+                    .insert("workdir".into(), versioned_workdir.display().to_string());
+                pinned.updated = crate::now_millis();
+                ctx.put(pinned).await?;
             }
             Err(status) => return Err(status.into()),
         }
         false
     };
+
+    backfill_legacy_verification(ctx, &rid, &verification_properties).await?;
 
     let pid = product_id(&name);
     ctx.put(object(
@@ -709,6 +693,18 @@ mod tests {
     }
 
     #[test]
+    fn unsigned_development_releases_are_confined_to_local_environment() {
+        let unsigned =
+            HashMap::from([("verification_status".into(), "unsigned-development".into())]);
+        assert!(require_deployable_trust_properties(&unsigned, "local").is_ok());
+        assert!(require_deployable_trust_properties(&unsigned, "prod").is_err());
+        assert!(require_deployable_trust_properties(&HashMap::new(), "prod").is_err());
+
+        let verified = HashMap::from([("verification_status".into(), "verified".into())]);
+        assert!(require_deployable_trust_properties(&verified, "prod").is_ok());
+    }
+
+    #[test]
     fn verified_publication_properties_retain_reverification_evidence() {
         let provenance = release_signing::Provenance {
             source_uri: "https://example.com/source".into(),
@@ -754,9 +750,6 @@ mod tests {
             .unwrap(),
             envelope
         );
-        assert!(trust.permits_legacy_backfill(&HashMap::new()));
-        assert!(!trust.permits_legacy_backfill(&properties));
-
         let release = object(
             "tenkai:release:api@1.0.0".into(),
             KIND_RELEASE,
