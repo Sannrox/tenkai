@@ -577,6 +577,11 @@ async fn release_content(
     environment: &str,
     product: &str,
 ) -> Result<ReleaseContent> {
+    use crate::catalog::CatalogReader as _;
+
+    let descriptor = crate::catalog::EmbeddedCatalog::new(ctx)
+        .lookup_release(&pin.release_id, environment)
+        .await?;
     let Some(obj) = ctx.get(&pin.release_id).await? else {
         bail!("release object {} not found", pin.release_id);
     };
@@ -587,11 +592,24 @@ async fn release_content(
             obj.kind
         );
     }
+    if obj
+        .properties
+        .get("recalled_at")
+        .is_some_and(|value| !value.is_empty())
+    {
+        bail!("release {} is recalled", pin.release_id);
+    }
+    // Validate the exact snapshot consumed below as well as the Catalog
+    // descriptor fetched above; the compatibility store does not yet provide
+    // a transactional read spanning those records.
     crate::catalog::require_deployable_trust(ctx, &obj, environment).await?;
     let raw = obj.properties.get("manifest").cloned().unwrap_or_default();
     let stored_digest = obj.properties.get("digest").cloned().unwrap_or_default();
     let actual_digest = manifest::digest(&raw);
-    if stored_digest != pin.digest || actual_digest != pin.digest {
+    if descriptor.manifest_digest != pin.digest
+        || stored_digest != pin.digest
+        || actual_digest != pin.digest
+    {
         bail!(
             "release {} content no longer matches pinned digest {}",
             pin.release_id,
@@ -600,9 +618,15 @@ async fn release_content(
     }
     let manifest = manifest::parse_raw(&raw)
         .with_context(|| format!("parsing stored manifest of {}", pin.release_id))?;
+    if descriptor.artifact_digest != pin.artifact_digest || descriptor.content_path != pin.workdir {
+        bail!(
+            "release {} descriptor no longer matches its plan pin",
+            pin.release_id
+        );
+    }
     let actual_artifact_digest =
-        manifest::artifact_digest(Path::new(&pin.workdir), &manifest.deploy.inputs)?;
-    if actual_artifact_digest != pin.artifact_digest {
+        manifest::artifact_digest(Path::new(&descriptor.content_path), &manifest.deploy.inputs)?;
+    if actual_artifact_digest != descriptor.artifact_digest {
         bail!(
             "release {} immutable deploy inputs no longer match pinned artifact digest {}",
             pin.release_id,
@@ -610,13 +634,13 @@ async fn release_content(
         );
     }
     let workdir = manifest::execution_workdir(
-        Path::new(&pin.workdir),
+        Path::new(&descriptor.content_path),
         &manifest.deploy.inputs,
         &pin.artifact_digest,
         environment,
         product,
     )?;
-    let state_dir = Path::new(&pin.workdir)
+    let state_dir = Path::new(&descriptor.content_path)
         .parent()
         .and_then(Path::parent)
         .context("release snapshot is not inside the Tenkai state directory")?;

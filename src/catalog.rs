@@ -4,13 +4,163 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::client::Ctx;
 use crate::manifest;
 use crate::ontology::*;
 use crate::pb::sekai::Object;
 use crate::release_signing::{self, VerificationEvidence};
+
+/// Version of the transport-independent Catalog application contract.
+pub const CATALOG_CONTRACT_VERSION: u32 = 1;
+
+/// Immutable metadata returned to planners and other Catalog consumers.
+///
+/// Payload bytes remain in the referenced content store. `content_path` is the
+/// embedded filesystem adapter's locator; a remote adapter translates its own
+/// opaque locator without changing the digest identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseDescriptor {
+    pub contract_version: u32,
+    pub release_id: String,
+    pub product: String,
+    pub version: String,
+    pub manifest_digest: String,
+    pub artifact_digest: String,
+    pub content_path: String,
+}
+
+#[derive(Debug)]
+pub enum CatalogLookupError {
+    NotFound { release_id: String },
+    Recalled { release_id: String },
+    Malformed { release_id: String, reason: String },
+    TrustDenied { release_id: String, reason: String },
+    Provider(anyhow::Error),
+}
+
+impl std::fmt::Display for CatalogLookupError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound { release_id } => {
+                write!(formatter, "release object {release_id} not found")
+            }
+            Self::Recalled { release_id } => write!(formatter, "release {release_id} is recalled"),
+            Self::Malformed { release_id, reason } => {
+                write!(formatter, "release {release_id} is malformed: {reason}")
+            }
+            Self::TrustDenied { release_id, reason } => {
+                write!(
+                    formatter,
+                    "release {release_id} is not deployable: {reason}"
+                )
+            }
+            Self::Provider(error) => write!(formatter, "Catalog provider failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for CatalogLookupError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Provider(error) => Some(error.as_ref()),
+            _ => None,
+        }
+    }
+}
+
+pub type CatalogLookupResult<T> = std::result::Result<T, CatalogLookupError>;
+
+/// Stable read port used by planning in embedded and future server hosts.
+///
+/// Implementations must provide immutable lookup and fail closed for recalled
+/// content. Remote transports must preserve the typed not-found/recalled
+/// behavior and run the same conformance cases as the embedded adapter.
+pub trait CatalogReader {
+    fn lookup_release<'a>(
+        &'a mut self,
+        release_id: &'a str,
+        environment: &'a str,
+    ) -> impl std::future::Future<Output = CatalogLookupResult<ReleaseDescriptor>> + Send + 'a;
+}
+
+/// In-process Catalog adapter. This is intentionally an application boundary,
+/// not a service boundary.
+pub struct EmbeddedCatalog<'a> {
+    ctx: &'a mut Ctx,
+}
+
+impl<'a> EmbeddedCatalog<'a> {
+    pub fn new(ctx: &'a mut Ctx) -> Self {
+        Self { ctx }
+    }
+}
+
+impl CatalogReader for EmbeddedCatalog<'_> {
+    // Keep the explicit `Send` bound promised by the public transport seam.
+    #[allow(clippy::manual_async_fn)]
+    fn lookup_release<'a>(
+        &'a mut self,
+        release_id: &'a str,
+        environment: &'a str,
+    ) -> impl std::future::Future<Output = CatalogLookupResult<ReleaseDescriptor>> + Send + 'a {
+        async move {
+            let release = self
+                .ctx
+                .get(release_id)
+                .await
+                .map_err(CatalogLookupError::Provider)?
+                .ok_or_else(|| CatalogLookupError::NotFound {
+                    release_id: release_id.into(),
+                })?;
+            descriptor_from_object(self.ctx, &release, environment).await
+        }
+    }
+}
+
+async fn descriptor_from_object(
+    ctx: &mut Ctx,
+    release: &Object,
+    environment: &str,
+) -> CatalogLookupResult<ReleaseDescriptor> {
+    if release.kind != KIND_RELEASE {
+        return Err(CatalogLookupError::Malformed {
+            release_id: release.id.clone(),
+            reason: format!("object kind is {}, expected {KIND_RELEASE}", release.kind),
+        });
+    }
+    if release
+        .properties
+        .get("recalled_at")
+        .is_some_and(|value| !value.is_empty())
+    {
+        return Err(CatalogLookupError::Recalled {
+            release_id: release.id.clone(),
+        });
+    }
+    require_deployable_trust(ctx, release, environment)
+        .await
+        .map_err(|error| CatalogLookupError::TrustDenied {
+            release_id: release.id.clone(),
+            reason: error.to_string(),
+        })?;
+    let required = |key| {
+        property(&release.properties, key).map_err(|error| CatalogLookupError::Malformed {
+            release_id: release.id.clone(),
+            reason: error.to_string(),
+        })
+    };
+    Ok(ReleaseDescriptor {
+        contract_version: CATALOG_CONTRACT_VERSION,
+        release_id: release.id.clone(),
+        product: required("product")?.into(),
+        version: required("version")?.into(),
+        manifest_digest: required("digest")?.into(),
+        artifact_digest: required("artifact_digest")?.into(),
+        content_path: required("workdir")?.into(),
+    })
+}
 
 #[derive(Debug, Clone)]
 enum PublicationTrust {
