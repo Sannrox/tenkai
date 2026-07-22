@@ -169,6 +169,41 @@ a later tick can converge from durable state. For local operation and tests,
 `tenkaictl reconcile --once` performs one deterministic tick and exits nonzero
 when any environment fails.
 
+## Network server
+
+`tenkai-server` hosts the same reconciliation contract as embedded CLI mode,
+serves unauthenticated liveness (`/healthz`) and readiness (`/readyz`) probes,
+and shuts down gracefully on SIGINT. Management mutations require a bearer
+token and append request and outcome records to the Tenkai operational
+database. Environment runtimes use separate tokens, each scoped server-side to
+exactly one environment.
+
+The server accepts plaintext HTTP only on loopback. Put a TLS reverse proxy in
+front of it for remote access; never pass tokens on a command line.
+
+```sh
+export TENKAI_MANAGEMENT_TOKEN='replace-from-secret-store'
+export TENKAI_RUNTIME_TOKENS='{"runtime-token":"prod"}'
+cargo run --bin tenkai-server -- --database .tenkai-state/tenkai.db
+
+# In another shell, request an immediate server-side tick.
+TENKAI_MANAGEMENT_TOKEN="$TENKAI_MANAGEMENT_TOKEN" \
+  tenkaictl --target remote --server-url http://127.0.0.1:8080 \
+  reconcile --once
+```
+
+The server also reconciles continuously. Remote v1 CLI support is intentionally
+limited to requesting a reconciliation tick; unsupported commands fail with an
+explicit instruction to use `--target embedded` instead of silently changing
+execution mode. Runtime work is polled at
+`GET /v1/runtime/environments/{environment}/work` with the assigned runtime
+bearer token. A returned plan carries a durable, expiring fencing generation;
+the runtime reports one receipt per step to
+`POST /v1/runtime/environments/{environment}/complete`. Completion is
+idempotent, updates verified deployed observations, and makes the plan
+terminal. Environments with runtime tokens are never executed by the embedded
+server executor, preventing split ownership.
+
 ## Deploying from GitHub
 
 GitHub is the artifact source; tenkai is the local delivery plane. The
@@ -215,6 +250,11 @@ control plane can't safely restart its own backend mid-apply.
 | `TENKAI_PRINCIPAL` | `tenkai` | Caller identity (`x-principal`) |
 | `TENKAI_STATE_DIR` | `<workdir-parent>/.tenkai-state` | Immutable deploy-input snapshots and per-environment runtime directories; must be outside the source workdir |
 | `TENKAI_EXECUTOR_GUARD` | installed sibling binary | Explicit path to `tenkai-executor-guard` for applications embedding the Tenkai library |
+| `TENKAI_SERVER_URL` | unset | Remote control-plane URL used with `tenkaictl --target remote` |
+| `TENKAI_MANAGEMENT_TOKEN` | unset | Required bearer secret for server management requests and remote CLI mode |
+| `TENKAI_RUNTIME_TOKENS` | `{}` | Server-only JSON object mapping bearer secrets to one environment each |
+| `TENKAI_DATABASE` | `.tenkai-state/tenkai.db` | Server-owned operational SQLite database, including immutable audit records |
+| `TENKAI_LISTEN` | `127.0.0.1:8080` | Server listen address; must remain loopback behind a TLS proxy |
 
 ## Ontology
 

@@ -11,7 +11,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 5;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -257,6 +257,26 @@ pub struct ProviderEventRecord {
     pub claim_until: Option<i64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditRecord {
+    pub id: String,
+    pub occurred_at: i64,
+    pub principal: String,
+    pub operation: String,
+    pub resource: String,
+    pub outcome: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeClaim {
+    pub plan_id: String,
+    pub environment_id: String,
+    pub owner: String,
+    pub generation: u64,
+    pub expires_at: i64,
+    pub completion_json: Option<String>,
+}
+
 /// Transactional authority used by embedded and future server hosts.
 pub trait OperationalStore: Send + Sync {
     fn publish_release(&self, release: &ReleaseRecord) -> Result<()>;
@@ -311,6 +331,23 @@ pub trait OperationalStore: Send + Sync {
         id: &str,
         claim_token: &str,
         delivered_at: i64,
+    ) -> Result<()>;
+    fn append_audit(&self, event: &AuditRecord) -> Result<()>;
+    fn audit_events(&self) -> Result<Vec<AuditRecord>>;
+    fn check_health(&self) -> Result<()>;
+    fn claim_runtime_plan(
+        &self,
+        environment: &str,
+        plan_id: &str,
+        owner: &str,
+        expires_at: i64,
+    ) -> Result<Option<RuntimeClaim>>;
+    fn complete_runtime_plan(
+        &self,
+        plan_id: &str,
+        owner: &str,
+        generation: u64,
+        completion_json: &str,
     ) -> Result<()>;
 }
 
@@ -407,7 +444,20 @@ fn migrate(connection: &mut Connection) -> Result<()> {
              );
              CREATE INDEX provider_events_delivery
                 ON provider_events(delivered_at, next_attempt_at, id);
-             PRAGMA user_version = 2;",
+             CREATE TABLE audit_events (
+                id TEXT PRIMARY KEY, occurred_at INTEGER NOT NULL,
+                principal TEXT NOT NULL, operation TEXT NOT NULL,
+                resource TEXT NOT NULL, outcome TEXT NOT NULL
+             );
+             CREATE INDEX audit_events_time ON audit_events(occurred_at, id);
+             CREATE TABLE runtime_claims (
+                plan_id TEXT PRIMARY KEY, environment_id TEXT NOT NULL,
+                owner TEXT NOT NULL, generation INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL, completion_json TEXT
+             );
+             CREATE INDEX runtime_claims_environment
+                ON runtime_claims(environment_id, expires_at);
+             PRAGMA user_version = 5;",
         )?;
         tx.commit()?;
     }
@@ -424,7 +474,62 @@ fn migrate(connection: &mut Connection) -> Result<()> {
              );
              CREATE INDEX provider_events_delivery
                 ON provider_events(delivered_at, next_attempt_at, id);
-             PRAGMA user_version = 2;",
+             CREATE TABLE audit_events (
+                id TEXT PRIMARY KEY, occurred_at INTEGER NOT NULL,
+                principal TEXT NOT NULL, operation TEXT NOT NULL,
+                resource TEXT NOT NULL, outcome TEXT NOT NULL
+             );
+             CREATE INDEX audit_events_time ON audit_events(occurred_at, id);
+             CREATE TABLE runtime_claims (
+                plan_id TEXT PRIMARY KEY, environment_id TEXT NOT NULL,
+                owner TEXT NOT NULL, generation INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL, completion_json TEXT
+             );
+             CREATE INDEX runtime_claims_environment
+                ON runtime_claims(environment_id, expires_at);
+             PRAGMA user_version = 5;",
+        )?;
+        tx.commit()?;
+    }
+    if found == 2 {
+        let tx = connection.transaction()?;
+        tx.execute_batch(
+            "CREATE TABLE audit_events (
+                id TEXT PRIMARY KEY, occurred_at INTEGER NOT NULL,
+                principal TEXT NOT NULL, operation TEXT NOT NULL,
+                resource TEXT NOT NULL, outcome TEXT NOT NULL
+             );
+             CREATE INDEX audit_events_time ON audit_events(occurred_at, id);
+             CREATE TABLE runtime_claims (
+                plan_id TEXT PRIMARY KEY, environment_id TEXT NOT NULL,
+                owner TEXT NOT NULL, generation INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL, completion_json TEXT
+             );
+             CREATE INDEX runtime_claims_environment
+                ON runtime_claims(environment_id, expires_at);
+             PRAGMA user_version = 5;",
+        )?;
+        tx.commit()?;
+    }
+    if found == 3 {
+        let tx = connection.transaction()?;
+        tx.execute_batch(
+            "CREATE TABLE runtime_claims (
+                plan_id TEXT PRIMARY KEY, environment_id TEXT NOT NULL,
+                owner TEXT NOT NULL, generation INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL, completion_json TEXT
+             );
+             CREATE INDEX runtime_claims_environment
+                ON runtime_claims(environment_id, expires_at);
+             PRAGMA user_version = 5;",
+        )?;
+        tx.commit()?;
+    }
+    if found == 4 {
+        let tx = connection.transaction()?;
+        tx.execute_batch(
+            "ALTER TABLE runtime_claims ADD COLUMN completion_json TEXT;
+             PRAGMA user_version = 5;",
         )?;
         tx.commit()?;
     }
@@ -1122,6 +1227,214 @@ impl OperationalStore for SqliteStore {
         }
         Ok(())
     }
+
+    fn append_audit(&self, event: &AuditRecord) -> Result<()> {
+        if event.id.is_empty()
+            || event.principal.is_empty()
+            || event.operation.is_empty()
+            || event.outcome.is_empty()
+        {
+            return Err(StoreError::InvalidData {
+                kind: "audit event",
+                detail: "id, principal, operation, and outcome must be non-empty".into(),
+            });
+        }
+        let connection = self.connection()?;
+        connection.execute(
+            "INSERT INTO audit_events(id,occurred_at,principal,operation,resource,outcome)
+             VALUES(?1,?2,?3,?4,?5,?6)",
+            params![
+                event.id,
+                event.occurred_at,
+                event.principal,
+                event.operation,
+                event.resource,
+                event.outcome
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn audit_events(&self) -> Result<Vec<AuditRecord>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT id,occurred_at,principal,operation,resource,outcome
+             FROM audit_events ORDER BY occurred_at,id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(AuditRecord {
+                id: row.get(0)?,
+                occurred_at: row.get(1)?,
+                principal: row.get(2)?,
+                operation: row.get(3)?,
+                resource: row.get(4)?,
+                outcome: row.get(5)?,
+            })
+        })?;
+        rows.map(|row| row.map_err(StoreError::from)).collect()
+    }
+
+    fn check_health(&self) -> Result<()> {
+        let connection = self.connection()?;
+        connection.query_row("SELECT 1", [], |_| Ok(()))?;
+        Ok(())
+    }
+
+    fn claim_runtime_plan(
+        &self,
+        environment: &str,
+        plan_id: &str,
+        owner: &str,
+        expires_at: i64,
+    ) -> Result<Option<RuntimeClaim>> {
+        let now = crate::now_millis();
+        if environment.is_empty() || plan_id.is_empty() || owner.is_empty() || expires_at <= now {
+            return Err(StoreError::InvalidData {
+                kind: "runtime claim",
+                detail: "environment, plan, owner, and future expiry are required".into(),
+            });
+        }
+        let mut connection = self.connection()?;
+        let tx = connection.transaction()?;
+        let current: Option<(String, String, u64, i64, Option<String>)> = tx
+            .query_row(
+                "SELECT environment_id,owner,generation,expires_at,completion_json FROM runtime_claims WHERE plan_id=?1",
+                [plan_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .optional()?;
+        let generation = match current {
+            Some((stored_environment, _, _, _, _)) if stored_environment != environment => {
+                return Err(StoreError::EnvironmentMismatch {
+                    kind: "runtime claim",
+                    id: plan_id.into(),
+                    expected: stored_environment,
+                    actual: environment.into(),
+                });
+            }
+            Some((stored_environment, stored_owner, generation, stored_expiry, completion))
+                if stored_owner == owner && completion.is_some() =>
+            {
+                return Ok(Some(RuntimeClaim {
+                    plan_id: plan_id.into(),
+                    environment_id: stored_environment,
+                    owner: stored_owner,
+                    generation,
+                    expires_at: stored_expiry,
+                    completion_json: completion,
+                }));
+            }
+            Some((_, _, _, _, Some(_))) => return Ok(None),
+            Some((stored_environment, stored_owner, generation, stored_expiry, _))
+                if stored_expiry > now && stored_owner == owner =>
+            {
+                tx.execute(
+                    "UPDATE runtime_claims SET expires_at=?2 WHERE plan_id=?1",
+                    params![plan_id, expires_at],
+                )?;
+                tx.commit()?;
+                return Ok(Some(RuntimeClaim {
+                    plan_id: plan_id.into(),
+                    environment_id: stored_environment,
+                    owner: stored_owner,
+                    generation,
+                    expires_at,
+                    completion_json: None,
+                }));
+            }
+            Some((_, _, _, stored_expiry, _)) if stored_expiry > now => return Ok(None),
+            Some((_, _, generation, _, _)) => generation.saturating_add(1),
+            None => 1,
+        };
+        tx.execute(
+            "INSERT INTO runtime_claims(plan_id,environment_id,owner,generation,expires_at)
+             VALUES(?1,?2,?3,?4,?5)
+             ON CONFLICT(plan_id) DO UPDATE SET owner=excluded.owner,
+               generation=excluded.generation,expires_at=excluded.expires_at",
+            params![plan_id, environment, owner, generation, expires_at],
+        )?;
+        tx.commit()?;
+        Ok(Some(RuntimeClaim {
+            plan_id: plan_id.into(),
+            environment_id: environment.into(),
+            owner: owner.into(),
+            generation,
+            expires_at,
+            completion_json: None,
+        }))
+    }
+
+    fn complete_runtime_plan(
+        &self,
+        plan_id: &str,
+        owner: &str,
+        generation: u64,
+        completion_json: &str,
+    ) -> Result<()> {
+        let connection = self.connection()?;
+        let current: (String, u64, i64, Option<String>) = connection
+            .query_row(
+                "SELECT owner,generation,expires_at,completion_json FROM runtime_claims WHERE plan_id=?1",
+                [plan_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::NotFound {
+                kind: "runtime claim",
+                id: plan_id.into(),
+            })?;
+        if current.0 != owner {
+            return Err(StoreError::LeaseOwnerMismatch {
+                environment: plan_id.into(),
+                expected: current.0,
+                actual: owner.into(),
+            });
+        }
+        if current.1 != generation {
+            return Err(StoreError::StaleLease {
+                environment: plan_id.into(),
+                expected: current.1,
+                actual: generation,
+            });
+        }
+        if let Some(existing) = current.3 {
+            return if existing == completion_json {
+                Ok(())
+            } else {
+                Err(StoreError::ImmutableConflict {
+                    kind: "runtime completion",
+                    id: plan_id.into(),
+                })
+            };
+        }
+        if current.2 <= crate::now_millis() {
+            return Err(StoreError::LeaseExpired {
+                environment: plan_id.into(),
+                generation,
+            });
+        }
+        let changed = connection.execute(
+            "UPDATE runtime_claims SET completion_json=?4
+             WHERE plan_id=?1 AND owner=?2 AND generation=?3 AND completion_json IS NULL",
+            params![plan_id, owner, generation, completion_json],
+        )?;
+        if changed == 1 {
+            return Ok(());
+        }
+        let stored: Option<String> = connection.query_row(
+            "SELECT completion_json FROM runtime_claims WHERE plan_id=?1",
+            [plan_id],
+            |row| row.get(0),
+        )?;
+        if stored.as_deref() == Some(completion_json) {
+            Ok(())
+        } else {
+            Err(StoreError::ImmutableConflict {
+                kind: "runtime completion",
+                id: plan_id.into(),
+            })
+        }
+    }
 }
 
 fn rollback_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RollbackRecord> {
@@ -1195,6 +1508,76 @@ mod tests {
         assert_eq!(
             reopened.get_release("release-1").unwrap().unwrap().version,
             "1.0.0"
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn audit_events_are_durable_and_append_only() {
+        let path = std::env::temp_dir().join(format!("tenkai-audit-{}.db", uuid::Uuid::new_v4()));
+        let event = AuditRecord {
+            id: "audit-1".into(),
+            occurred_at: 42,
+            principal: "operator".into(),
+            operation: "reconcile.requested".into(),
+            resource: "prod".into(),
+            outcome: "requested".into(),
+        };
+        SqliteStore::open(&path)
+            .unwrap()
+            .append_audit(&event)
+            .unwrap();
+        let reopened = SqliteStore::open(&path).unwrap();
+        assert_eq!(reopened.audit_events().unwrap(), vec![event.clone()]);
+        assert!(reopened.append_audit(&event).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn runtime_plan_claims_are_durable_and_exclusive() {
+        let path = std::env::temp_dir().join(format!("tenkai-claim-{}.db", uuid::Uuid::new_v4()));
+        let expiry = crate::now_millis() + 10_000;
+        let first = SqliteStore::open(&path)
+            .unwrap()
+            .claim_runtime_plan("prod", "plan-1", "runtime-a", expiry)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.generation, 1);
+        assert_eq!(first.completion_json, None);
+        let reopened = SqliteStore::open(&path).unwrap();
+        assert_eq!(
+            reopened
+                .claim_runtime_plan("prod", "plan-1", "runtime-a", expiry + 1)
+                .unwrap()
+                .unwrap()
+                .generation,
+            1
+        );
+        assert_eq!(
+            reopened
+                .claim_runtime_plan("prod", "plan-1", "runtime-b", expiry + 1)
+                .unwrap(),
+            None
+        );
+        reopened
+            .complete_runtime_plan("plan-1", "runtime-a", 1, "{\"ok\":true}")
+            .unwrap();
+        assert_eq!(
+            reopened
+                .claim_runtime_plan("prod", "plan-1", "runtime-a", expiry + 2)
+                .unwrap()
+                .unwrap()
+                .completion_json
+                .as_deref(),
+            Some("{\"ok\":true}")
+        );
+        reopened
+            .complete_runtime_plan("plan-1", "runtime-a", 1, "{\"ok\":true}")
+            .unwrap();
+        assert!(
+            reopened
+                .complete_runtime_plan("plan-1", "runtime-a", 1, "{\"ok\":false}")
+                .is_err()
         );
         std::fs::remove_file(path).unwrap();
     }
