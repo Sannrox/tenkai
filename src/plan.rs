@@ -370,8 +370,10 @@ pub async fn reconcile_deployment(
 ) -> Result<String> {
     validate_identifier("environment", env)?;
     validate_identifier("product", product)?;
-    let lease_id = format!("{}:execution", env_id(env));
-    if ctx.get(&lease_id).await?.is_some() {
+    if crate::apply::environment_lease_status(ctx, env)
+        .await?
+        .is_some()
+    {
         bail!("environment {env} has an apply in progress");
     }
     let mut object = environment(ctx, env).await?;
