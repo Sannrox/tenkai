@@ -1,3 +1,6 @@
 /target
 .state/
 .tenkai-state/
+
+.agents/*
+!.agents/skills/
