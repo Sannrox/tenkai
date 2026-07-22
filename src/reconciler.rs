@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 
 use crate::apply;
 use crate::client::Ctx;
@@ -30,24 +31,42 @@ impl Default for Config {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "state")]
 pub enum EnvironmentStatus {
     Current,
     Applied { plan_id: String, steps: usize },
+    AwaitingRuntime { plan_id: String, steps: usize },
     Failed { error: String },
     Deferred { retry_at: i64 },
     Busy,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnvironmentResult {
     pub environment: String,
     pub status: EnvironmentStatus,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TickReport {
     pub environments: Vec<EnvironmentResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeStepReceipt {
+    pub step_id: String,
+    pub succeeded: bool,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeCompletion {
+    pub plan_id: String,
+    pub generation: u64,
+    pub succeeded: bool,
+    pub detail: String,
+    pub receipts: Vec<RuntimeStepReceipt>,
 }
 
 impl TickReport {
@@ -153,6 +172,8 @@ pub struct Reconciler {
     ctx: Ctx,
     config: Config,
     state: Arc<Mutex<SchedulerState>>,
+    tick_lock: Arc<tokio::sync::Mutex<()>>,
+    runtime_environments: Arc<HashSet<String>>,
 }
 
 impl Reconciler {
@@ -170,11 +191,21 @@ impl Reconciler {
             ctx,
             config,
             state: Arc::new(Mutex::new(SchedulerState::default())),
+            tick_lock: Arc::new(tokio::sync::Mutex::new(())),
+            runtime_environments: Arc::new(HashSet::new()),
         })
+    }
+
+    pub fn with_runtime_environments(mut self, environments: HashSet<String>) -> Self {
+        self.runtime_environments = Arc::new(environments);
+        self
     }
 
     /// Reconcile every registered environment once. Environments run concurrently.
     pub async fn run_once(&self) -> Result<TickReport> {
+        // Periodic and requested ticks share this lock so a successful request
+        // always represents a complete tick rather than a transient Busy report.
+        let _tick = self.tick_lock.lock().await;
         let mut listing = self.ctx.clone();
         let mut environments = listing.list_kind(KIND_ENVIRONMENT).await?;
         environments.sort_by(|left, right| left.name.cmp(&right.name));
@@ -201,6 +232,7 @@ impl Reconciler {
                 Admission::Started => {
                     let mut ctx = self.ctx.clone();
                     let config = self.config.clone();
+                    let runtime_managed = self.runtime_environments.contains(&name);
                     let guard = AdmissionGuard {
                         environment: name.clone(),
                         state: Arc::clone(&self.state),
@@ -213,8 +245,13 @@ impl Reconciler {
                             .acquire_owned()
                             .await
                             .expect("semaphore remains open");
-                        let result =
-                            reconcile_environment(&mut ctx, &name, config.skip_gates).await;
+                        let result = reconcile_environment(
+                            &mut ctx,
+                            &name,
+                            config.skip_gates,
+                            runtime_managed,
+                        )
+                        .await;
                         guard.finish(result.is_ok());
                         (name, result)
                     });
@@ -249,6 +286,118 @@ impl Reconciler {
         Ok(report)
     }
 
+    /// Return the oldest executable plan visible to this environment in the
+    /// current operational authority. The server enforces environment scope
+    /// before calling this application operation.
+    pub async fn pending_work(&self, environment: &str) -> Result<Option<plan::Plan>> {
+        let mut ctx = self.ctx.clone();
+        let mut candidates = Vec::new();
+        for object in ctx.list_kind(KIND_PLAN).await? {
+            if object
+                .properties
+                .get("environment")
+                .is_some_and(|value| value == environment)
+                && object
+                    .properties
+                    .get("status")
+                    .is_some_and(|value| value == "computed" || value == "running")
+            {
+                candidates.push(plan::load(&mut ctx, &object.id).await?);
+            }
+        }
+        candidates.sort_by_key(|candidate| candidate.created_at);
+        Ok(candidates.into_iter().next())
+    }
+
+    pub async fn check_provider_health(&self) -> Result<()> {
+        let mut ctx = self.ctx.clone();
+        let _ = ctx.get("tenkai:server:health-probe").await?;
+        Ok(())
+    }
+
+    pub async fn complete_runtime_work(
+        &self,
+        environment: &str,
+        completion: &RuntimeCompletion,
+    ) -> Result<()> {
+        self.validate_runtime_completion(environment, completion)
+            .await?;
+        let mut ctx = self.ctx.clone();
+        let mut stored = plan::load(&mut ctx, &completion.plan_id).await?;
+        let terminal = if completion.succeeded {
+            PlanState::Succeeded
+        } else {
+            PlanState::Failed
+        };
+        if matches!(stored.state, PlanState::Succeeded | PlanState::Failed) {
+            return Ok(());
+        }
+        if stored.state == PlanState::Computed {
+            stored.state = PlanState::Running;
+            stored.status_detail = "claimed by assigned environment runtime".into();
+            plan::store(&mut ctx, &stored).await?;
+        }
+        if completion.succeeded {
+            for step in &stored.steps {
+                plan::reconcile_deployment(&mut ctx, environment, &step.product, Some(&step.to))
+                    .await?;
+            }
+        }
+        stored.state = terminal;
+        stored.status_detail = completion.detail.clone();
+        plan::store(&mut ctx, &stored).await?;
+        Ok(())
+    }
+
+    pub async fn validate_runtime_completion(
+        &self,
+        environment: &str,
+        completion: &RuntimeCompletion,
+    ) -> Result<()> {
+        let mut ctx = self.ctx.clone();
+        let stored = plan::load(&mut ctx, &completion.plan_id).await?;
+        if stored.environment != environment {
+            bail!(
+                "plan {} belongs to {}, not {environment}",
+                completion.plan_id,
+                stored.environment
+            );
+        }
+        let expected = stored
+            .steps
+            .iter()
+            .map(|step| step.id.as_str())
+            .collect::<HashSet<_>>();
+        let received = completion
+            .receipts
+            .iter()
+            .map(|receipt| receipt.step_id.as_str())
+            .collect::<HashSet<_>>();
+        if expected != received || received.len() != completion.receipts.len() {
+            bail!("runtime completion receipts must cover every plan step exactly once");
+        }
+        if completion.succeeded && completion.receipts.iter().any(|receipt| !receipt.succeeded) {
+            bail!("a successful runtime completion cannot contain a failed step receipt");
+        }
+        let terminal = if completion.succeeded {
+            PlanState::Succeeded
+        } else {
+            PlanState::Failed
+        };
+        if matches!(stored.state, PlanState::Succeeded | PlanState::Failed) {
+            anyhow::ensure!(
+                stored.state == terminal,
+                "runtime completion conflicts with terminal plan state"
+            );
+            return Ok(());
+        }
+        anyhow::ensure!(
+            matches!(stored.state, PlanState::Computed | PlanState::Running),
+            "runtime plan is not executable"
+        );
+        Ok(())
+    }
+
     /// Run complete ticks until Ctrl-C. A slow tick never overlaps its successor.
     pub async fn run_until<H>(&self, interval: Duration, mut handle_report: H) -> Result<()>
     where
@@ -275,7 +424,39 @@ async fn reconcile_environment(
     ctx: &mut Ctx,
     environment: &str,
     skip_gates: bool,
+    runtime_managed: bool,
 ) -> Result<EnvironmentStatus> {
+    if runtime_managed {
+        let mut computed = Vec::new();
+        for object in ctx.list_kind(KIND_PLAN).await? {
+            if object
+                .properties
+                .get("environment")
+                .is_some_and(|value| value == environment)
+                && object
+                    .properties
+                    .get("status")
+                    .is_some_and(|value| value == "computed" || value == "running")
+            {
+                computed.push(plan::load(ctx, &object.id).await?);
+            }
+        }
+        computed.sort_by_key(|candidate| candidate.created_at);
+        if let Some(plan) = computed.into_iter().next() {
+            return Ok(EnvironmentStatus::AwaitingRuntime {
+                plan_id: plan.id,
+                steps: plan.steps.len(),
+            });
+        }
+        let stored = plan::create(ctx, environment).await?;
+        if stored.steps.is_empty() {
+            return Ok(EnvironmentStatus::Current);
+        }
+        return Ok(EnvironmentStatus::AwaitingRuntime {
+            plan_id: stored.id,
+            steps: stored.steps.len(),
+        });
+    }
     if recover_or_detect_active_plan(ctx, environment).await? {
         return Ok(EnvironmentStatus::Busy);
     }

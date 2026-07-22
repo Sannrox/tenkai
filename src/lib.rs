@@ -16,6 +16,7 @@ pub mod plan;
 pub mod providers;
 pub mod reconciler;
 pub mod release_signing;
+pub mod server;
 pub mod storage;
 
 pub fn now_millis() -> i64 {
