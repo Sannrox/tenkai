@@ -634,6 +634,7 @@ fn environment_claim_id(environment: &str) -> String {
 }
 
 const ENVIRONMENT_LEASE_MS: i64 = 2 * 60 * 60 * 1000;
+const RELEASED_LEASE_OWNER: &str = "released";
 
 pub(crate) struct EnvironmentLease {
     id: String,
@@ -673,7 +674,8 @@ pub(crate) async fn claim_environment(
         Err(status)
             if status.code() == tonic::Code::AlreadyExists
                 || (status.code() == tonic::Code::Internal
-                    && status.message().contains("UNIQUE")) => {}
+                    && (status.message().contains("UNIQUE")
+                        || status.message().contains("object IDs with audit history"))) => {}
         Err(status) => return Err(status.into()),
     }
     let existing = ctx
@@ -685,6 +687,11 @@ pub(crate) async fn claim_environment(
         .get("expires_at")
         .and_then(|value| value.parse::<i64>().ok())
         .unwrap_or(i64::MAX);
+    let existing_owner = existing.properties.get("owner").map(String::as_str);
+    if expires_at <= now && existing_owner == Some(RELEASED_LEASE_OWNER) {
+        ctx.put(lease_object(&lease, now)).await?;
+        return Ok(lease);
+    }
     if expires_at <= now {
         bail!(
             "environment {environment} has an expired apply lease; verify no apply is running, then run `tenkaictl env unlock {environment}`"
@@ -706,10 +713,15 @@ async fn refresh_environment_lease(ctx: &mut Ctx, lease: &EnvironmentLease) -> R
 }
 
 pub(crate) async fn release_environment(ctx: &mut Ctx, lease: &EnvironmentLease) -> Result<()> {
-    if let Some(existing) = ctx.get(&lease.id).await?
+    if let Some(mut existing) = ctx.get(&lease.id).await?
         && existing.properties.get("owner") == Some(&lease.owner)
     {
-        ctx.delete(&lease.id).await?;
+        existing
+            .properties
+            .insert("owner".into(), RELEASED_LEASE_OWNER.into());
+        existing.properties.insert("expires_at".into(), "0".into());
+        existing.updated = crate::now_millis();
+        ctx.put(existing).await?;
     }
     Ok(())
 }
@@ -750,7 +762,13 @@ pub async fn unlock_environment(ctx: &mut Ctx, environment: &str) -> Result<Stri
             existing.kind
         );
     }
-    ctx.delete(&id).await?;
+    let mut released = existing;
+    released
+        .properties
+        .insert("owner".into(), RELEASED_LEASE_OWNER.into());
+    released.properties.insert("expires_at".into(), "0".into());
+    released.updated = crate::now_millis();
+    ctx.put(released).await?;
     Ok(format!("removed apply lease for environment {environment}"))
 }
 
