@@ -19,7 +19,10 @@ use crate::ontology::*;
 use crate::pb::chisei::{
     EvalRun, EvalSuite, GetEvalRunRequest, GetEvalSuiteRequest, ListEvalRunsRequest,
 };
-use crate::pb::sekai::{Link, Object};
+use crate::pb::sekai::{
+    AcquireLeaseRequest, GetLeaseRequest, Lease, Link, Object, RefreshLeaseRequest,
+    ReleaseLeaseRequest, TakeoverExpiredLeaseRequest,
+};
 use crate::plan::{self, Action, Plan, PlanState, ReleasePin, Step};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -629,21 +632,42 @@ async fn set_plan_state_confirmed(
     Ok(())
 }
 
-fn environment_claim_id(environment: &str) -> String {
-    format!("{}:execution:v2", env_id(environment))
-}
-
 fn legacy_environment_claim_id(environment: &str) -> String {
     format!("{}:execution", env_id(environment))
 }
 
+fn object_environment_claim_id(environment: &str) -> String {
+    format!("{}:execution:v2", env_id(environment))
+}
+
 const ENVIRONMENT_LEASE_MS: i64 = 2 * 60 * 60 * 1000;
-const RELEASED_LEASE_OWNER: &str = "released";
+const MANUAL_UNLOCK_LEASE_MS: i64 = 5_000;
+const ENVIRONMENT_LEASE_NAMESPACE: &str = "tenkai/environment-execution";
 const REL_ACTIVE_ENVIRONMENT_EXECUTION: &str = "active_environment_execution";
 
-fn environment_claim_link(environment: &str) -> Link {
+pub(crate) struct EnvironmentLease {
+    environment: String,
+    owner: String,
+    generation: u64,
+    fencing_token: String,
+}
+
+fn object_environment_claim(environment: &str, owner: &str, expires_at_ms: i64) -> Object {
+    record(
+        object_environment_claim_id(environment),
+        KIND_ENVIRONMENT_EXECUTION,
+        format!("apply lease for {environment}"),
+        HashMap::from([
+            ("environment".into(), environment.into()),
+            ("owner".into(), owner.into()),
+            ("expires_at".into(), expires_at_ms.to_string()),
+        ]),
+    )
+}
+
+fn object_environment_claim_link(environment: &str) -> Link {
     let environment_id = env_id(environment);
-    let lease_id = environment_claim_id(environment);
+    let lease_id = object_environment_claim_id(environment);
     Link {
         id: format!("{environment_id}--{REL_ACTIVE_ENVIRONMENT_EXECUTION}--{lease_id}"),
         from_id: environment_id,
@@ -653,26 +677,23 @@ fn environment_claim_link(environment: &str) -> Link {
     }
 }
 
-pub(crate) struct EnvironmentLease {
-    id: String,
-    environment: String,
-    owner: String,
-}
-
-fn lease_object(lease: &EnvironmentLease, now: i64) -> Object {
-    record(
-        lease.id.clone(),
-        KIND_ENVIRONMENT_EXECUTION,
-        format!("apply lease for {}", lease.environment),
-        HashMap::from([
-            ("environment".into(), lease.environment.clone()),
-            ("owner".into(), lease.owner.clone()),
-            (
-                "expires_at".into(),
-                (now + ENVIRONMENT_LEASE_MS).to_string(),
-            ),
-        ]),
+async fn release_object_environment_claim(ctx: &mut Ctx, environment: &str) -> Result<()> {
+    let claim_id = object_environment_claim_id(environment);
+    if let Some(mut existing) = ctx.get(&claim_id).await? {
+        existing
+            .properties
+            .insert("owner".into(), "released".into());
+        existing.properties.insert("expires_at".into(), "0".into());
+        existing.updated = crate::now_millis();
+        ctx.put(existing).await?;
+    }
+    ctx.unlink(
+        &env_id(environment),
+        &claim_id,
+        REL_ACTIVE_ENVIRONMENT_EXECUTION,
     )
+    .await?;
+    Ok(())
 }
 
 pub(crate) async fn claim_environment(
@@ -680,11 +701,6 @@ pub(crate) async fn claim_environment(
     environment: &str,
     owner: &str,
 ) -> Result<EnvironmentLease> {
-    let lease = EnvironmentLease {
-        id: environment_claim_id(environment),
-        environment: environment.to_string(),
-        owner: owner.to_string(),
-    };
     let now = crate::now_millis();
     if let Some(existing) = ctx.get(&legacy_environment_claim_id(environment)).await? {
         let expires_at = existing
@@ -699,11 +715,68 @@ pub(crate) async fn claim_environment(
         }
         bail!("environment {environment} already has a legacy apply in progress");
     }
-    let mut available = lease_object(&lease, now);
-    available
-        .properties
-        .insert("owner".into(), RELEASED_LEASE_OWNER.into());
-    available.properties.insert("expires_at".into(), "0".into());
+    let object_claim_id = object_environment_claim_id(environment);
+    if ctx
+        .links(&env_id(environment), REL_ACTIVE_ENVIRONMENT_EXECUTION)
+        .await?
+        .into_iter()
+        .any(|link| link.to_id == object_claim_id)
+    {
+        if let Some(existing) = get_environment_lease(ctx, environment).await?
+            && existing.status == "active"
+        {
+            if existing.expires_at_ms <= now {
+                bail!(
+                    "environment {environment} has an expired apply lease; verify no apply is running, then run `tenkaictl env unlock {environment}`"
+                );
+            }
+            bail!(
+                "environment {environment} already has an apply in progress owned by {}",
+                existing.owner
+            );
+        }
+        bail!(
+            "environment {environment} has an object-backed apply lease without an active Sekai lease; finish any older controller, then run `tenkaictl env unlock {environment}`"
+        );
+    }
+    let lease = match ctx
+        .sekai
+        .acquire_lease(AcquireLeaseRequest {
+            namespace: ENVIRONMENT_LEASE_NAMESPACE.into(),
+            key: environment.into(),
+            owner: owner.into(),
+            ttl_ms: ENVIRONMENT_LEASE_MS,
+            request_id: uuid::Uuid::new_v4().to_string(),
+        })
+        .await
+    {
+        Ok(response) => response
+            .into_inner()
+            .lease
+            .context("Sekai returned an empty environment lease")?,
+        Err(status) if status.code() == tonic::Code::AlreadyExists => {
+            if let Some(existing) = get_environment_lease(ctx, environment).await? {
+                if existing.status == "active" && existing.expires_at_ms <= now {
+                    bail!(
+                        "environment {environment} has an expired apply lease; verify no apply is running, then run `tenkaictl env unlock {environment}`"
+                    );
+                }
+                bail!(
+                    "environment {environment} already has an apply in progress owned by {}",
+                    existing.owner
+                );
+            }
+            return Err(status.into());
+        }
+        Err(status) => return Err(status.into()),
+    };
+    let environment_lease = EnvironmentLease {
+        environment: environment.into(),
+        owner: owner.into(),
+        generation: lease.generation,
+        fencing_token: lease.fencing_token,
+    };
+    let available = object_environment_claim(environment, "released", 0);
     match ctx.create_once(available).await {
         Ok(_) => {}
         Err(status)
@@ -711,77 +784,79 @@ pub(crate) async fn claim_environment(
                 || (status.code() == tonic::Code::Internal
                     && (status.message().contains("UNIQUE")
                         || status.message().contains("object IDs with audit history"))) => {}
-        Err(status) => return Err(status.into()),
+        Err(status) => {
+            let _ = release_sekai_environment_lease(ctx, &environment_lease).await;
+            return Err(status.into());
+        }
     }
-    match ctx
-        .create_link_once(environment_claim_link(environment))
+    if let Err(status) = ctx
+        .create_link_once(object_environment_claim_link(environment))
         .await
     {
-        Ok(()) => {
-            if let Err(error) = ctx.put(lease_object(&lease, now)).await {
-                let _ = ctx
-                    .unlink(
-                        &env_id(environment),
-                        &lease.id,
-                        REL_ACTIVE_ENVIRONMENT_EXECUTION,
-                    )
-                    .await;
-                return Err(error);
-            }
-            return Ok(lease);
+        let _ = release_sekai_environment_lease(ctx, &environment_lease).await;
+        if status.code() == tonic::Code::AlreadyExists
+            || (status.code() == tonic::Code::Internal && status.message().contains("UNIQUE"))
+        {
+            bail!("environment {environment} already has an apply in progress");
         }
-        Err(status)
-            if status.code() == tonic::Code::AlreadyExists
-                || (status.code() == tonic::Code::Internal
-                    && status.message().contains("UNIQUE")) => {}
-        Err(status) => return Err(status.into()),
+        return Err(status.into());
     }
-    let existing = ctx
-        .get(&lease.id)
-        .await?
-        .with_context(|| format!("environment lease {} disappeared", lease.id))?;
-    let expires_at = existing
-        .properties
-        .get("expires_at")
-        .and_then(|value| value.parse::<i64>().ok())
-        .unwrap_or(i64::MAX);
-    if expires_at <= now {
-        bail!(
-            "environment {environment} has an expired apply lease; verify no apply is running, then run `tenkaictl env unlock {environment}`"
-        );
+    if let Err(error) = ctx
+        .put(object_environment_claim(
+            environment,
+            owner,
+            lease.expires_at_ms,
+        ))
+        .await
+    {
+        let _ = release_object_environment_claim(ctx, environment).await;
+        let _ = release_sekai_environment_lease(ctx, &environment_lease).await;
+        return Err(error);
     }
-    bail!("environment {environment} already has an apply in progress")
+    Ok(environment_lease)
 }
 
 async fn refresh_environment_lease(ctx: &mut Ctx, lease: &EnvironmentLease) -> Result<()> {
-    let existing = ctx
-        .get(&lease.id)
+    let refreshed = ctx
+        .sekai
+        .refresh_lease(RefreshLeaseRequest {
+            namespace: ENVIRONMENT_LEASE_NAMESPACE.into(),
+            key: lease.environment.clone(),
+            fencing_token: lease.fencing_token.clone(),
+            ttl_ms: ENVIRONMENT_LEASE_MS,
+            request_id: uuid::Uuid::new_v4().to_string(),
+        })
         .await?
-        .with_context(|| format!("environment lease {} disappeared", lease.id))?;
-    if existing.properties.get("owner") != Some(&lease.owner) {
-        bail!("environment lease {} is owned by another apply", lease.id);
+        .into_inner()
+        .lease
+        .context("Sekai returned an empty refreshed environment lease")?;
+    if refreshed.generation != lease.generation || refreshed.owner != lease.owner {
+        bail!("Sekai refreshed a different environment lease generation");
     }
-    ctx.put(lease_object(lease, crate::now_millis())).await?;
+    ctx.put(object_environment_claim(
+        &lease.environment,
+        &lease.owner,
+        refreshed.expires_at_ms,
+    ))
+    .await?;
+    Ok(())
+}
+
+async fn release_sekai_environment_lease(ctx: &mut Ctx, lease: &EnvironmentLease) -> Result<()> {
+    ctx.sekai
+        .release_lease(ReleaseLeaseRequest {
+            namespace: ENVIRONMENT_LEASE_NAMESPACE.into(),
+            key: lease.environment.clone(),
+            fencing_token: lease.fencing_token.clone(),
+            request_id: uuid::Uuid::new_v4().to_string(),
+        })
+        .await?;
     Ok(())
 }
 
 pub(crate) async fn release_environment(ctx: &mut Ctx, lease: &EnvironmentLease) -> Result<()> {
-    if let Some(mut existing) = ctx.get(&lease.id).await?
-        && existing.properties.get("owner") == Some(&lease.owner)
-    {
-        existing
-            .properties
-            .insert("owner".into(), RELEASED_LEASE_OWNER.into());
-        existing.properties.insert("expires_at".into(), "0".into());
-        existing.updated = crate::now_millis();
-        ctx.put(existing).await?;
-        ctx.unlink(
-            &env_id(&lease.environment),
-            &lease.id,
-            REL_ACTIVE_ENVIRONMENT_EXECUTION,
-        )
-        .await?;
-    }
+    release_sekai_environment_lease(ctx, lease).await?;
+    release_object_environment_claim(ctx, &lease.environment).await?;
     Ok(())
 }
 
@@ -789,20 +864,26 @@ pub(crate) struct EnvironmentLeaseStatus {
     pub owner: String,
 }
 
+async fn get_environment_lease(ctx: &mut Ctx, environment: &str) -> Result<Option<Lease>> {
+    match ctx
+        .sekai
+        .get_lease(GetLeaseRequest {
+            namespace: ENVIRONMENT_LEASE_NAMESPACE.into(),
+            key: environment.into(),
+        })
+        .await
+    {
+        Ok(response) => Ok(response.into_inner().lease),
+        Err(status) if status.code() == tonic::Code::NotFound => Ok(None),
+        Err(status) => Err(status.into()),
+    }
+}
+
 pub(crate) async fn environment_lease_status(
     ctx: &mut Ctx,
     environment: &str,
 ) -> Result<Option<EnvironmentLeaseStatus>> {
-    let lease_id = environment_claim_id(environment);
-    let active = ctx
-        .links(&env_id(environment), REL_ACTIVE_ENVIRONMENT_EXECUTION)
-        .await?
-        .into_iter()
-        .any(|link| link.to_id == lease_id);
-    if !active {
-        let Some(lease) = ctx.get(&legacy_environment_claim_id(environment)).await? else {
-            return Ok(None);
-        };
+    if let Some(lease) = ctx.get(&legacy_environment_claim_id(environment)).await? {
         let owner = lease
             .properties
             .get("owner")
@@ -810,58 +891,98 @@ pub(crate) async fn environment_lease_status(
             .context("legacy environment apply lease has no owner")?;
         return Ok(Some(EnvironmentLeaseStatus { owner }));
     }
-    let Some(lease) = ctx.get(&lease_id).await? else {
+    let object_claim_id = object_environment_claim_id(environment);
+    if ctx
+        .links(&env_id(environment), REL_ACTIVE_ENVIRONMENT_EXECUTION)
+        .await?
+        .into_iter()
+        .any(|link| link.to_id == object_claim_id)
+    {
+        let lease = ctx
+            .get(&object_claim_id)
+            .await?
+            .context("object-backed environment apply lease disappeared")?;
+        let owner = lease
+            .properties
+            .get("owner")
+            .cloned()
+            .context("object-backed environment apply lease has no owner")?;
+        return Ok(Some(EnvironmentLeaseStatus { owner }));
+    }
+    let Some(lease) = get_environment_lease(ctx, environment).await? else {
         return Ok(None);
     };
-    if lease.kind != KIND_ENVIRONMENT_EXECUTION
-        || lease.properties.get("environment").map(String::as_str) != Some(environment)
-    {
-        bail!("environment {environment} has an invalid apply lease object");
+    if lease.status != "active" {
+        return Ok(None);
     }
-    let owner = lease
-        .properties
-        .get("owner")
-        .cloned()
-        .context("environment apply lease has no owner")?;
-    Ok(Some(EnvironmentLeaseStatus { owner }))
+    Ok(Some(EnvironmentLeaseStatus { owner: lease.owner }))
 }
 
 pub async fn unlock_environment(ctx: &mut Ctx, environment: &str) -> Result<String> {
     crate::ontology::validate_identifier("environment", environment)?;
-    if environment_lease_status(ctx, environment).await?.is_none() {
-        return Ok(format!("environment {environment} has no apply lease"));
-    }
-    let mut id = environment_claim_id(environment);
-    let mut existing = ctx.get(&id).await?;
-    let legacy = existing.is_none();
-    if legacy {
-        id = legacy_environment_claim_id(environment);
-        existing = ctx.get(&id).await?;
-    }
-    let Some(existing) = existing else {
-        return Ok(format!("environment {environment} has no apply lease"));
-    };
-    if existing.kind != KIND_ENVIRONMENT_EXECUTION {
-        bail!(
-            "object {id} is {}, not {KIND_ENVIRONMENT_EXECUTION}",
-            existing.kind
-        );
-    }
-    if legacy {
-        ctx.delete(&id).await?;
+    let legacy_id = legacy_environment_claim_id(environment);
+    if ctx.get(&legacy_id).await?.is_some() {
+        ctx.delete(&legacy_id).await?;
         return Ok(format!(
             "removed legacy apply lease for environment {environment}"
         ));
     }
-    let mut released = existing;
-    released
-        .properties
-        .insert("owner".into(), RELEASED_LEASE_OWNER.into());
-    released.properties.insert("expires_at".into(), "0".into());
-    released.updated = crate::now_millis();
-    ctx.put(released).await?;
-    ctx.unlink(&env_id(environment), &id, REL_ACTIVE_ENVIRONMENT_EXECUTION)
+    let object_claim_id = object_environment_claim_id(environment);
+    let has_object_claim = ctx.get(&object_claim_id).await?.is_some()
+        && ctx
+            .links(&env_id(environment), REL_ACTIVE_ENVIRONMENT_EXECUTION)
+            .await?
+            .into_iter()
+            .any(|link| link.to_id == object_claim_id);
+    if has_object_claim
+        && get_environment_lease(ctx, environment)
+            .await?
+            .is_none_or(|lease| lease.status != "active")
+    {
+        release_object_environment_claim(ctx, environment).await?;
+        return Ok(format!(
+            "removed object-backed apply lease for environment {environment}"
+        ));
+    }
+    let Some(existing) = get_environment_lease(ctx, environment).await? else {
+        return Ok(format!("environment {environment} has no apply lease"));
+    };
+    if existing.status != "active" {
+        return Ok(format!("environment {environment} has no apply lease"));
+    }
+    if existing.expires_at_ms > crate::now_millis() {
+        bail!(
+            "environment {environment} has an unexpired apply lease owned by {}; stop that controller and retry after lease expiry at {}",
+            existing.owner,
+            existing.expires_at_ms
+        );
+    }
+    let takeover = ctx
+        .sekai
+        .takeover_expired_lease(TakeoverExpiredLeaseRequest {
+            namespace: ENVIRONMENT_LEASE_NAMESPACE.into(),
+            key: environment.into(),
+            owner: format!("manual-unlock:{}", uuid::Uuid::new_v4()),
+            expected_fencing_token: existing.fencing_token,
+            expected_expires_at_ms: existing.expires_at_ms,
+            ttl_ms: MANUAL_UNLOCK_LEASE_MS,
+            request_id: uuid::Uuid::new_v4().to_string(),
+        })
+        .await?
+        .into_inner()
+        .lease
+        .context("Sekai returned an empty takeover lease")?;
+    ctx.sekai
+        .release_lease(ReleaseLeaseRequest {
+            namespace: ENVIRONMENT_LEASE_NAMESPACE.into(),
+            key: environment.into(),
+            fencing_token: takeover.fencing_token,
+            request_id: uuid::Uuid::new_v4().to_string(),
+        })
         .await?;
+    if has_object_claim {
+        release_object_environment_claim(ctx, environment).await?;
+    }
     Ok(format!("removed apply lease for environment {environment}"))
 }
 
@@ -1006,10 +1127,10 @@ pub async fn execute_with_options(
         (Ok(outcomes), Ok(())) => Ok(outcomes),
         (Err(error), Ok(())) => Err(error),
         (Err(error), Err(unlock)) => Err(error.context(format!(
-            "releasing environment apply lease also failed: {unlock}; run `tenkaictl env unlock {environment}` after verifying no apply is running"
+            "releasing environment apply lease also failed: {unlock}; after verifying no apply is running, retry `tenkaictl env unlock {environment}` once the lease expires"
         ))),
         (Ok(_), Err(error)) => Err(error.context(format!(
-            "releasing environment apply lease failed; run `tenkaictl env unlock {environment}` after verifying no apply is running"
+            "releasing environment apply lease failed; after verifying no apply is running, retry `tenkaictl env unlock {environment}` once the lease expires"
         ))),
     };
     match (released_result, canary_finalization_error) {
