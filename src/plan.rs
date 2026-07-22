@@ -465,37 +465,16 @@ async fn environment(ctx: &mut Ctx, env: &str) -> Result<Object> {
 }
 
 async fn pin_release(ctx: &mut Ctx, id: &str, environment: &str) -> Result<ReleasePin> {
-    let object = ctx
-        .get(id)
-        .await?
-        .with_context(|| format!("release object {id} not found"))?;
-    if object.kind != KIND_RELEASE {
-        bail!("object {id} is {}, not {KIND_RELEASE}", object.kind);
-    }
-    crate::catalog::require_deployable_trust(ctx, &object, environment).await?;
-    let digest = object
-        .properties
-        .get("digest")
-        .filter(|value| !value.is_empty())
-        .with_context(|| format!("release object {id} has no digest"))?
-        .clone();
-    let workdir = object
-        .properties
-        .get("workdir")
-        .filter(|value| !value.is_empty())
-        .with_context(|| format!("release object {id} has no workdir"))?
-        .clone();
-    let artifact_digest = object
-        .properties
-        .get("artifact_digest")
-        .filter(|value| !value.is_empty())
-        .with_context(|| format!("release object {id} has no artifact digest"))?
-        .clone();
+    use crate::catalog::CatalogReader as _;
+
+    let descriptor = crate::catalog::EmbeddedCatalog::new(ctx)
+        .lookup_release(id, environment)
+        .await?;
     Ok(ReleasePin {
-        release_id: id.to_string(),
-        digest,
-        artifact_digest,
-        workdir,
+        release_id: descriptor.release_id,
+        digest: descriptor.manifest_digest,
+        artifact_digest: descriptor.artifact_digest,
+        workdir: descriptor.content_path,
     })
 }
 
