@@ -4,8 +4,11 @@
 //! answers "what ran, when, gated by what, and what happened" after the fact.
 
 use std::collections::HashMap;
+use std::fs::OpenOptions;
+use std::io::{Read as _, Write as _};
+use std::os::fd::AsRawFd as _;
 use std::os::unix::process::CommandExt as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use anyhow::{Context as _, Result, bail};
@@ -89,6 +92,7 @@ async fn record_maintenance_decision(
 
 async fn block_for_maintenance(
     ctx: &mut Ctx,
+    lease: &EnvironmentLease,
     plan: &mut Plan,
     skip_gates: bool,
     detail: &str,
@@ -97,7 +101,13 @@ async fn block_for_maintenance(
     plan.gates_skipped = Some(skip_gates);
     plan.status_detail = detail.into();
     plan.maintenance_blocked = true;
-    plan::store(ctx, plan).await?;
+    ctx.guarded_update(
+        plan.to_object()?,
+        ENVIRONMENT_LEASE_NAMESPACE,
+        &lease.environment,
+        &lease.fencing_token,
+    )
+    .await?;
     Err(MaintenanceBlocked(detail.to_string()).into())
 }
 
@@ -137,6 +147,7 @@ fn validate_emergency_override(reason: Option<&str>) -> Result<Option<&str>> {
     Ok(reason)
 }
 
+#[cfg(test)]
 async fn run_command(
     cmd: &str,
     workdir: &Path,
@@ -352,6 +363,7 @@ struct ReleaseContent {
     workdir: std::path::PathBuf,
     environment: String,
     product: String,
+    mutation_lock: std::path::PathBuf,
 }
 
 fn verify_content_integrity(content: &ReleaseContent) -> Result<()> {
@@ -362,6 +374,7 @@ fn verify_content_integrity(content: &ReleaseContent) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 async fn activate(content: &ReleaseContent) -> Result<Result<(), String>> {
     let install = run_command(
         &content.manifest.deploy.install,
@@ -391,6 +404,7 @@ async fn activate(content: &ReleaseContent) -> Result<Result<(), String>> {
     }
 }
 
+#[cfg(test)]
 async fn deactivate(content: &ReleaseContent) -> Result<Result<(), String>> {
     match content.manifest.deploy.uninstall.as_deref() {
         Some(command) if !command.is_empty() => {
@@ -410,6 +424,85 @@ async fn deactivate(content: &ReleaseContent) -> Result<Result<(), String>> {
     }
 }
 
+async fn activate_fenced(
+    ctx: &mut Ctx,
+    lease: &EnvironmentLease,
+    content: &ReleaseContent,
+) -> Result<Result<(), String>> {
+    let install =
+        run_mutation_command(ctx, lease, content, &content.manifest.deploy.install).await?;
+    let result = match install {
+        Ok(()) => match &content.manifest.deploy.health {
+            Some(command) if !command.is_empty() => {
+                run_mutation_command(ctx, lease, content, command).await
+            }
+            _ => Ok(Ok(())),
+        },
+        error => Ok(error),
+    }?;
+    match verify_content_integrity(content) {
+        Ok(()) => Ok(result),
+        Err(error) => Ok(Err(error.to_string())),
+    }
+}
+
+async fn deactivate_fenced(
+    ctx: &mut Ctx,
+    lease: &EnvironmentLease,
+    content: &ReleaseContent,
+) -> Result<Result<(), String>> {
+    match content.manifest.deploy.uninstall.as_deref() {
+        Some(command) if !command.is_empty() => {
+            let result = run_mutation_command(ctx, lease, content, command).await?;
+            match verify_content_integrity(content) {
+                Ok(()) => Ok(result),
+                Err(error) => Ok(Err(error.to_string())),
+            }
+        }
+        _ => Ok(Err("release has no uninstall command".into())),
+    }
+}
+
+async fn restore_previous_fenced(
+    ctx: &mut Ctx,
+    lease: &EnvironmentLease,
+    content: &ReleaseContent,
+    version: &str,
+    failure: String,
+) -> Result<(bool, String)> {
+    Ok(match activate_fenced(ctx, lease, content).await {
+        Ok(Ok(())) => (true, format!("{failure}; restored {version}")),
+        Ok(Err(restore)) => (
+            false,
+            format!("{failure}; restore or health check of {version} also failed: {restore}"),
+        ),
+        Err(error) => (
+            false,
+            format!("{failure}; restore executor failed for {version}: {error}"),
+        ),
+    })
+}
+
+async fn cleanup_failed_install_fenced(
+    ctx: &mut Ctx,
+    lease: &EnvironmentLease,
+    content: &ReleaseContent,
+    failure: String,
+) -> Result<(bool, String)> {
+    Ok(match content.manifest.deploy.uninstall.as_deref() {
+        Some(_) => match deactivate_fenced(ctx, lease, content).await {
+            Ok(Ok(())) => (true, format!("{failure}; cleaned up failed install")),
+            Ok(Err(cleanup)) => (false, format!("{failure}; cleanup also failed: {cleanup}")),
+            Err(error) => (
+                false,
+                format!("{failure}; cleanup executor also failed: {error}"),
+            ),
+        },
+        None => (false, failure),
+    })
+}
+
+#[cfg(test)]
 async fn restore_previous(
     content: &ReleaseContent,
     version: &str,
@@ -428,6 +521,7 @@ async fn restore_previous(
     })
 }
 
+#[cfg(test)]
 async fn cleanup_failed_install(
     content: &ReleaseContent,
     failure: String,
@@ -447,20 +541,24 @@ async fn cleanup_failed_install(
 
 async fn compensate_activation(
     ctx: &mut Ctx,
+    lease: &EnvironmentLease,
     env: &str,
     step: &Step,
     content: &ReleaseContent,
     failure: &anyhow::Error,
 ) {
     let failure = format!("deployment bookkeeping failed after activation: {failure}");
-    let cleaned = matches!(deactivate(content).await, Ok(Ok(())));
+    let cleaned = matches!(deactivate_fenced(ctx, lease, content).await, Ok(Ok(())));
     let mut restored = step.from.is_none();
 
     if let (Some(previous), Some(pin)) = (step.from.as_deref(), step.restore.as_ref())
         && let Ok(previous_content) = release_content(ctx, pin, env, &step.product).await
-        && matches!(activate(&previous_content).await, Ok(Ok(())))
+        && matches!(
+            activate_fenced(ctx, lease, &previous_content).await,
+            Ok(Ok(()))
+        )
     {
-        restored = set_env_deployed(ctx, env, &step.product, previous, Some(&step.to))
+        restored = set_env_deployed(ctx, lease, env, &step.product, previous, Some(&step.to))
             .await
             .is_ok();
     }
@@ -469,7 +567,7 @@ async fn compensate_activation(
     // Marking the target unknown is safer than claiming a version that may not
     // match the external deployment after incomplete compensation.
     if !cleaned || !restored || step.from.is_none() {
-        let _ = set_env_unknown(ctx, env, &step.product, &failure).await;
+        let _ = set_env_unknown(ctx, lease, env, &step.product, &failure).await;
     }
 }
 
@@ -517,12 +615,20 @@ async fn release_content(
         environment,
         product,
     )?;
+    let state_dir = Path::new(&pin.workdir)
+        .parent()
+        .and_then(Path::parent)
+        .context("release snapshot is not inside the Tenkai state directory")?;
     Ok(ReleaseContent {
         manifest,
         artifact_digest: pin.artifact_digest.clone(),
         workdir,
         environment: environment.to_string(),
         product: product.to_string(),
+        mutation_lock: state_dir
+            .join("runtime")
+            .join(environment)
+            .join(".mutation.lock"),
     })
 }
 
@@ -542,6 +648,7 @@ fn record(id: String, kind: &str, name: String, properties: HashMap<String, Stri
 
 async fn set_env_deployed(
     ctx: &mut Ctx,
+    lease: &EnvironmentLease,
     env: &str,
     product: &str,
     version: &str,
@@ -569,11 +676,23 @@ async fn set_env_deployed(
         .properties
         .remove(&format!("deployment_error.{product}"));
     env_obj.updated = crate::now_millis();
-    ctx.put(env_obj).await?;
+    ctx.guarded_update(
+        env_obj,
+        ENVIRONMENT_LEASE_NAMESPACE,
+        &lease.environment,
+        &lease.fencing_token,
+    )
+    .await?;
     Ok(())
 }
 
-async fn set_env_unknown(ctx: &mut Ctx, env: &str, product: &str, detail: &str) -> Result<()> {
+async fn set_env_unknown(
+    ctx: &mut Ctx,
+    lease: &EnvironmentLease,
+    env: &str,
+    product: &str,
+    detail: &str,
+) -> Result<()> {
     let Some(mut environment) = ctx.get(&env_id(env)).await? else {
         bail!("environment {env} disappeared during apply");
     };
@@ -590,12 +709,19 @@ async fn set_env_unknown(ctx: &mut Ctx, env: &str, product: &str, detail: &str) 
         .properties
         .insert(format!("deployment_error.{product}"), detail.to_string());
     environment.updated = crate::now_millis();
-    ctx.put(environment).await?;
+    ctx.guarded_update(
+        environment,
+        ENVIRONMENT_LEASE_NAMESPACE,
+        &lease.environment,
+        &lease.fencing_token,
+    )
+    .await?;
     Ok(())
 }
 
 async fn set_plan_state(
     ctx: &mut Ctx,
+    lease: &EnvironmentLease,
     plan: &mut Plan,
     state: PlanState,
     gates_skipped: bool,
@@ -605,18 +731,27 @@ async fn set_plan_state(
     plan.gates_skipped = Some(gates_skipped);
     plan.status_detail = detail.into();
     plan.maintenance_blocked = false;
-    plan::store(ctx, plan).await
+    ctx.guarded_update(
+        plan.to_object()?,
+        ENVIRONMENT_LEASE_NAMESPACE,
+        &lease.environment,
+        &lease.fencing_token,
+    )
+    .await?;
+    Ok(())
 }
 
 async fn set_plan_state_confirmed(
     ctx: &mut Ctx,
+    lease: &EnvironmentLease,
     plan: &mut Plan,
     state: PlanState,
     gates_skipped: bool,
     detail: impl Into<String>,
 ) -> Result<()> {
     let detail = detail.into();
-    if let Err(error) = set_plan_state(ctx, plan, state, gates_skipped, detail.clone()).await {
+    if let Err(error) = set_plan_state(ctx, lease, plan, state, gates_skipped, detail.clone()).await
+    {
         let persisted = plan::load(ctx, &plan.id).await;
         if !matches!(
             persisted,
@@ -641,6 +776,7 @@ fn object_environment_claim_id(environment: &str) -> String {
 }
 
 const ENVIRONMENT_LEASE_MS: i64 = 2 * 60 * 60 * 1000;
+const EXECUTION_LEASE_MS: i64 = 30_000;
 const MANUAL_UNLOCK_LEASE_MS: i64 = 5_000;
 const ENVIRONMENT_LEASE_NAMESPACE: &str = "tenkai/environment-execution";
 const REL_ACTIVE_ENVIRONMENT_EXECUTION: &str = "active_environment_execution";
@@ -650,6 +786,7 @@ pub(crate) struct EnvironmentLease {
     owner: String,
     generation: u64,
     fencing_token: String,
+    ttl_ms: i64,
 }
 
 fn object_environment_claim(environment: &str, owner: &str, expires_at_ms: i64) -> Object {
@@ -663,6 +800,14 @@ fn object_environment_claim(environment: &str, owner: &str, expires_at_ms: i64) 
             ("expires_at".into(), expires_at_ms.to_string()),
         ]),
     )
+}
+
+fn object_environment_claim_for_lease(lease: &EnvironmentLease, expires_at_ms: i64) -> Object {
+    let mut object = object_environment_claim(&lease.environment, &lease.owner, expires_at_ms);
+    object
+        .properties
+        .insert("generation".into(), lease.generation.to_string());
+    object
 }
 
 fn object_environment_claim_link(environment: &str) -> Link {
@@ -696,10 +841,49 @@ async fn release_object_environment_claim(ctx: &mut Ctx, environment: &str) -> R
     Ok(())
 }
 
+async fn mark_object_environment_claim_released(
+    ctx: &mut Ctx,
+    lease: &EnvironmentLease,
+) -> Result<()> {
+    let mut claim = ctx
+        .get(&object_environment_claim_id(&lease.environment))
+        .await?
+        .context("object-backed environment apply lease disappeared")?;
+    claim.properties.insert("owner".into(), "released".into());
+    claim.properties.insert("expires_at".into(), "0".into());
+    claim.updated = crate::now_millis();
+    ctx.guarded_update(
+        claim,
+        ENVIRONMENT_LEASE_NAMESPACE,
+        &lease.environment,
+        &lease.fencing_token,
+    )
+    .await?;
+    Ok(())
+}
+
 pub(crate) async fn claim_environment(
     ctx: &mut Ctx,
     environment: &str,
     owner: &str,
+) -> Result<EnvironmentLease> {
+    claim_environment_with_options(ctx, environment, owner, ENVIRONMENT_LEASE_MS, false).await
+}
+
+async fn claim_execution_environment(
+    ctx: &mut Ctx,
+    environment: &str,
+    owner: &str,
+) -> Result<EnvironmentLease> {
+    claim_environment_with_options(ctx, environment, owner, EXECUTION_LEASE_MS, true).await
+}
+
+async fn claim_environment_with_options(
+    ctx: &mut Ctx,
+    environment: &str,
+    owner: &str,
+    ttl_ms: i64,
+    automatic_takeover: bool,
 ) -> Result<EnvironmentLease> {
     let now = crate::now_millis();
     if let Some(existing) = ctx.get(&legacy_environment_claim_id(environment)).await? {
@@ -716,37 +900,43 @@ pub(crate) async fn claim_environment(
         bail!("environment {environment} already has a legacy apply in progress");
     }
     let object_claim_id = object_environment_claim_id(environment);
-    if ctx
+    let has_object_claim = ctx
         .links(&env_id(environment), REL_ACTIVE_ENVIRONMENT_EXECUTION)
         .await?
         .into_iter()
-        .any(|link| link.to_id == object_claim_id)
-    {
-        if let Some(existing) = get_environment_lease(ctx, environment).await?
-            && existing.status == "active"
-        {
-            if existing.expires_at_ms <= now {
-                bail!(
-                    "environment {environment} has an expired apply lease; verify no apply is running, then run `tenkaictl env unlock {environment}`"
-                );
+        .any(|link| link.to_id == object_claim_id);
+    if has_object_claim {
+        match get_environment_lease(ctx, environment).await? {
+            Some(existing) if existing.status == "active" => {
+                if existing.expires_at_ms > now {
+                    bail!(
+                        "environment {environment} already has an apply in progress owned by {}",
+                        existing.owner
+                    );
+                }
             }
-            bail!(
-                "environment {environment} already has an apply in progress owned by {}",
-                existing.owner
-            );
+            _ => {
+                let claim = ctx
+                    .get(&object_claim_id)
+                    .await?
+                    .context("object-backed environment apply lease disappeared")?;
+                if claim.properties.get("owner").map(String::as_str) != Some("released") {
+                    bail!(
+                        "environment {environment} has an object-backed apply lease without an active Sekai lease; finish any older controller, then run `tenkaictl env unlock {environment}`"
+                    );
+                }
+            }
         }
-        bail!(
-            "environment {environment} has an object-backed apply lease without an active Sekai lease; finish any older controller, then run `tenkaictl env unlock {environment}`"
-        );
     }
+    let acquire_request_id = uuid::Uuid::new_v4().to_string();
     let lease = match ctx
         .sekai
         .acquire_lease(AcquireLeaseRequest {
             namespace: ENVIRONMENT_LEASE_NAMESPACE.into(),
             key: environment.into(),
             owner: owner.into(),
-            ttl_ms: ENVIRONMENT_LEASE_MS,
-            request_id: uuid::Uuid::new_v4().to_string(),
+            ttl_ms,
+            request_id: acquire_request_id,
         })
         .await
     {
@@ -757,16 +947,34 @@ pub(crate) async fn claim_environment(
         Err(status) if status.code() == tonic::Code::AlreadyExists => {
             if let Some(existing) = get_environment_lease(ctx, environment).await? {
                 if existing.status == "active" && existing.expires_at_ms <= now {
+                    if !automatic_takeover {
+                        bail!(
+                            "environment {environment} has an expired apply lease; verify no operation is running, then run `tenkaictl env unlock {environment}`"
+                        );
+                    }
+                    ctx.sekai
+                        .takeover_expired_lease(TakeoverExpiredLeaseRequest {
+                            namespace: ENVIRONMENT_LEASE_NAMESPACE.into(),
+                            key: environment.into(),
+                            owner: owner.into(),
+                            expected_fencing_token: existing.fencing_token,
+                            expected_expires_at_ms: existing.expires_at_ms,
+                            ttl_ms,
+                            request_id: uuid::Uuid::new_v4().to_string(),
+                        })
+                        .await?
+                        .into_inner()
+                        .lease
+                        .context("Sekai returned an empty takeover lease")?
+                } else {
                     bail!(
-                        "environment {environment} has an expired apply lease; verify no apply is running, then run `tenkaictl env unlock {environment}`"
+                        "environment {environment} already has an apply in progress owned by {}",
+                        existing.owner
                     );
                 }
-                bail!(
-                    "environment {environment} already has an apply in progress owned by {}",
-                    existing.owner
-                );
+            } else {
+                return Err(status.into());
             }
-            return Err(status.into());
         }
         Err(status) => return Err(status.into()),
     };
@@ -775,6 +983,7 @@ pub(crate) async fn claim_environment(
         owner: owner.into(),
         generation: lease.generation,
         fencing_token: lease.fencing_token,
+        ttl_ms,
     };
     let available = object_environment_claim(environment, "released", 0);
     match ctx.create_once(available).await {
@@ -789,9 +998,10 @@ pub(crate) async fn claim_environment(
             return Err(status.into());
         }
     }
-    if let Err(status) = ctx
-        .create_link_once(object_environment_claim_link(environment))
-        .await
+    if !has_object_claim
+        && let Err(status) = ctx
+            .create_link_once(object_environment_claim_link(environment))
+            .await
     {
         let _ = release_sekai_environment_lease(ctx, &environment_lease).await;
         if status.code() == tonic::Code::AlreadyExists
@@ -802,14 +1012,14 @@ pub(crate) async fn claim_environment(
         return Err(status.into());
     }
     if let Err(error) = ctx
-        .put(object_environment_claim(
-            environment,
-            owner,
-            lease.expires_at_ms,
-        ))
+        .guarded_update(
+            object_environment_claim_for_lease(&environment_lease, lease.expires_at_ms),
+            ENVIRONMENT_LEASE_NAMESPACE,
+            &environment_lease.environment,
+            &environment_lease.fencing_token,
+        )
         .await
     {
-        let _ = release_object_environment_claim(ctx, environment).await;
         let _ = release_sekai_environment_lease(ctx, &environment_lease).await;
         return Err(error);
     }
@@ -823,7 +1033,7 @@ async fn refresh_environment_lease(ctx: &mut Ctx, lease: &EnvironmentLease) -> R
             namespace: ENVIRONMENT_LEASE_NAMESPACE.into(),
             key: lease.environment.clone(),
             fencing_token: lease.fencing_token.clone(),
-            ttl_ms: ENVIRONMENT_LEASE_MS,
+            ttl_ms: lease.ttl_ms,
             request_id: uuid::Uuid::new_v4().to_string(),
         })
         .await?
@@ -833,13 +1043,218 @@ async fn refresh_environment_lease(ctx: &mut Ctx, lease: &EnvironmentLease) -> R
     if refreshed.generation != lease.generation || refreshed.owner != lease.owner {
         bail!("Sekai refreshed a different environment lease generation");
     }
-    ctx.put(object_environment_claim(
+    ctx.guarded_update(
+        object_environment_claim_for_lease(lease, refreshed.expires_at_ms),
+        ENVIRONMENT_LEASE_NAMESPACE,
         &lease.environment,
-        &lease.owner,
-        refreshed.expires_at_ms,
-    ))
+        &lease.fencing_token,
+    )
     .await?;
     Ok(())
+}
+
+fn executor_guard_executable() -> Result<PathBuf> {
+    if let Some(configured) = std::env::var_os("TENKAI_EXECUTOR_GUARD") {
+        let configured = PathBuf::from(configured);
+        if configured.is_file() {
+            return Ok(configured);
+        }
+        bail!(
+            "TENKAI_EXECUTOR_GUARD does not identify a file: {}",
+            configured.display()
+        );
+    }
+    let current = std::env::current_exe()?;
+    for directory in current.ancestors().skip(1).take(2) {
+        let candidate = directory.join("tenkai-executor-guard");
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    bail!(
+        "tenkai-executor-guard was not found beside {}; install both Tenkai binaries or set TENKAI_EXECUTOR_GUARD",
+        current.display()
+    )
+}
+
+async fn run_mutation_command(
+    ctx: &mut Ctx,
+    lease: &EnvironmentLease,
+    content: &ReleaseContent,
+    cmd: &str,
+) -> Result<Result<(), String>> {
+    refresh_environment_lease(ctx, lease).await?;
+    if let Some(parent) = content.mutation_lock.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut guard_command = tokio::process::Command::new(executor_guard_executable()?);
+    guard_command
+        .arg("--lock")
+        .arg(&content.mutation_lock)
+        .arg("--workdir")
+        .arg(&content.workdir)
+        .arg("--environment")
+        .arg(&content.environment)
+        .arg("--product")
+        .arg(&content.product)
+        .arg("--generation")
+        .arg(lease.generation.to_string())
+        .arg("--command")
+        .arg(cmd)
+        .kill_on_drop(true)
+        .env_remove("SEKAI_AUTH_TOKEN")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut guard = guard_command
+        .spawn()
+        .context("spawning deployment command guard")?;
+    let mut control = guard
+        .stdin
+        .take()
+        .context("deployment guard has no control pipe")?;
+    let mut readiness = guard
+        .stdout
+        .take()
+        .context("deployment guard has no readiness pipe")?;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let mut ready = [0_u8; 1];
+    let mut ready_read = Box::pin(readiness.read_exact(&mut ready));
+    let mut waiting_refresh = tokio::time::interval(std::time::Duration::from_secs(10));
+    waiting_refresh.tick().await;
+    loop {
+        tokio::select! {
+            result = &mut ready_read => {
+                result?;
+                break;
+            }
+            _ = waiting_refresh.tick() => refresh_environment_lease(ctx, lease).await?,
+        }
+    }
+    drop(ready_read);
+    if ready != [b'R'] {
+        bail!("deployment command guard failed to acquire the mutation fence");
+    }
+    refresh_environment_lease(ctx, lease).await?;
+    control.write_all(b"G").await?;
+    let mut wait = Box::pin(guard.wait());
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let timeout = tokio::time::sleep(std::time::Duration::from_secs(600));
+    tokio::pin!(timeout);
+    let mut refresh = tokio::time::interval(std::time::Duration::from_secs(10));
+    refresh.tick().await;
+    let (status, interrupted) = loop {
+        tokio::select! {
+            status = &mut wait => break (Some(status?), None),
+            _ = &mut timeout => break (None, Some("deployment command exceeded the 10 minute timeout".to_string())),
+            _ = interrupt.recv() => break (None, Some("deployment command interrupted".to_string())),
+            _ = terminate.recv() => break (None, Some("deployment command terminated".to_string())),
+            _ = refresh.tick() => {
+                if let Err(error) = refresh_environment_lease(ctx, lease).await {
+                    break (None, Some(format!("deployment command lost its environment fence: {error}")));
+                }
+            }
+        }
+    };
+    if let Some(reason) = interrupted {
+        drop(control);
+        let _ = wait.await;
+        return Ok(Err(reason));
+    }
+    refresh_environment_lease(ctx, lease).await?;
+    let status = status.expect("completed command has an exit status");
+    Ok(if status.success() {
+        Ok(())
+    } else {
+        Err(format!("deployment command exited with {status}"))
+    })
+}
+
+/// Hidden executor supervisor used by `tenkaictl` itself. It owns the local
+/// mutation lock, starts only after the controller proves its lease generation,
+/// and kills the complete command group when the controller pipe closes.
+pub async fn executor_guard(
+    lock_path: &Path,
+    workdir: &Path,
+    environment: &str,
+    product: &str,
+    generation: u64,
+    command: &str,
+) -> Result<()> {
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)?;
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    std::io::stdout().write_all(b"R")?;
+    std::io::stdout().flush()?;
+    let mut go = [0_u8; 1];
+    std::io::stdin().read_exact(&mut go)?;
+    if go != [b'G'] {
+        bail!("executor guard did not receive start authorization");
+    }
+
+    let identity_digest = manifest::digest(&format!("{environment}\0{product}"));
+    let mut child = tokio::process::Command::new("sh");
+    child
+        .arg("-c")
+        .arg(command)
+        .current_dir(workdir)
+        .kill_on_drop(true)
+        .env_remove("SEKAI_AUTH_TOKEN")
+        .env("TENKAI_ENVIRONMENT", environment)
+        .env("TENKAI_PRODUCT", product)
+        .env("TENKAI_FENCING_GENERATION", generation.to_string())
+        .env(
+            "COMPOSE_PROJECT_NAME",
+            format!("tenkai-{}", &identity_digest[..16]),
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    child.as_std_mut().process_group(0);
+    let mut child = child.spawn().context("spawning deployment command")?;
+    let process_group = child.id().context("deployment command has no process id")? as i32;
+    let (closed_tx, mut controller_closed) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let mut sink = Vec::new();
+        let result = std::io::stdin().read_to_end(&mut sink);
+        let _ = closed_tx.send(result);
+    });
+    tokio::select! {
+        status = child.wait() => {
+            let status = status?;
+            // Shell completion is not command-group completion: ordinary shell
+            // background jobs retain the group. Terminate them before the
+            // supervisor releases the environment mutation lock.
+            unsafe { libc::kill(-process_group, libc::SIGKILL) };
+            wait_for_process_group_exit(process_group).await?;
+            if status.success() { Ok(()) } else { bail!("deployment command exited with {status}") }
+        }
+        _ = &mut controller_closed => {
+            unsafe { libc::kill(-process_group, libc::SIGKILL) };
+            let _ = child.wait().await;
+            wait_for_process_group_exit(process_group).await?;
+            bail!("deployment controller exited")
+        }
+    }
+}
+
+async fn wait_for_process_group_exit(process_group: i32) -> Result<()> {
+    loop {
+        if unsafe { libc::kill(-process_group, 0) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(());
+            }
+            return Err(error.into());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 }
 
 async fn release_sekai_environment_lease(ctx: &mut Ctx, lease: &EnvironmentLease) -> Result<()> {
@@ -855,8 +1270,8 @@ async fn release_sekai_environment_lease(ctx: &mut Ctx, lease: &EnvironmentLease
 }
 
 pub(crate) async fn release_environment(ctx: &mut Ctx, lease: &EnvironmentLease) -> Result<()> {
+    mark_object_environment_claim_released(ctx, lease).await?;
     release_sekai_environment_lease(ctx, lease).await?;
-    release_object_environment_claim(ctx, &lease.environment).await?;
     Ok(())
 }
 
@@ -907,7 +1322,20 @@ pub(crate) async fn environment_lease_status(
             .get("owner")
             .cloned()
             .context("object-backed environment apply lease has no owner")?;
-        return Ok(Some(EnvironmentLeaseStatus { owner }));
+        if owner != "released" {
+            return Ok(Some(EnvironmentLeaseStatus { owner }));
+        }
+        // New controllers retain the compatibility link so an older binary
+        // fails closed. The authoritative Sekai lease determines whether the
+        // released marker is merely idle or a new generation is being adopted.
+        if let Some(active) = get_environment_lease(ctx, environment).await?
+            && active.status == "active"
+        {
+            return Ok(Some(EnvironmentLeaseStatus {
+                owner: active.owner,
+            }));
+        }
+        return Ok(None);
     }
     let Some(lease) = get_environment_lease(ctx, environment).await? else {
         return Ok(None);
@@ -1049,13 +1477,13 @@ pub async fn execute_with_options(
     }
     let environment = stored_plan.environment.clone();
     let owner = stored_plan.id.clone();
-    let lease = claim_environment(ctx, &environment, &owner).await?;
+    let lease = claim_execution_environment(ctx, &environment, &owner).await?;
     let authorization = async {
         let initial_maintenance =
             maintenance_decision(ctx, &stored_plan.environment, emergency_reason).await?;
         record_maintenance_decision(ctx, &stored_plan, &initial_maintenance).await?;
         if let MaintenanceDecision::Denied(detail) = &initial_maintenance {
-            block_for_maintenance(ctx, &mut stored_plan, options.skip_gates, detail)
+            block_for_maintenance(ctx, &lease, &mut stored_plan, options.skip_gates, detail)
                 .await
                 .map(|_| ())?;
         }
@@ -1065,7 +1493,9 @@ pub async fn execute_with_options(
     if let Err(error) = authorization {
         let error = if emergency_reason.is_some() {
             let detail = format!("emergency maintenance override was not authorized: {error}");
-            match block_for_maintenance(ctx, &mut stored_plan, options.skip_gates, &detail).await {
+            match block_for_maintenance(ctx, &lease, &mut stored_plan, options.skip_gates, &detail)
+                .await
+            {
                 Err(blocked) => blocked.context(detail),
                 Ok(_) => unreachable!("maintenance authorization failure always blocks"),
             }
@@ -1190,6 +1620,7 @@ async fn execute_locked(
             };
             set_plan_state_confirmed(
                 ctx,
+                lease,
                 &mut stored_plan,
                 PlanState::Blocked,
                 skip_gates,
@@ -1202,29 +1633,39 @@ async fn execute_locked(
     let final_maintenance =
         maintenance_decision(ctx, &stored_plan.environment, options.emergency_reason).await?;
     if let MaintenanceDecision::Denied(detail) = &final_maintenance {
-        block_for_maintenance(ctx, &mut stored_plan, skip_gates, detail).await?;
+        block_for_maintenance(ctx, lease, &mut stored_plan, skip_gates, detail).await?;
     }
     if let MaintenanceDecision::Allowed { closes_at } = &final_maintenance
         && crate::now_millis() >= *closes_at
     {
         block_for_maintenance(
             ctx,
+            lease,
             &mut stored_plan,
             skip_gates,
             "maintenance window closed while start authorization was being recorded",
         )
         .await?;
     }
-    set_plan_state_confirmed(ctx, &mut stored_plan, PlanState::Running, skip_gates, "").await?;
+    set_plan_state_confirmed(
+        ctx,
+        lease,
+        &mut stored_plan,
+        PlanState::Running,
+        skip_gates,
+        "",
+    )
+    .await?;
     let running_maintenance =
         maintenance_decision(ctx, &stored_plan.environment, options.emergency_reason).await?;
     match running_maintenance {
         MaintenanceDecision::Denied(detail) => {
-            block_for_maintenance(ctx, &mut stored_plan, skip_gates, &detail).await?;
+            block_for_maintenance(ctx, lease, &mut stored_plan, skip_gates, &detail).await?;
         }
         MaintenanceDecision::Allowed { closes_at } if crate::now_millis() >= closes_at => {
             block_for_maintenance(
                 ctx,
+                lease,
                 &mut stored_plan,
                 skip_gates,
                 "maintenance window closed before execution entered the running state",
@@ -1244,6 +1685,7 @@ async fn execute_locked(
             let detail = format!("refreshing environment apply lease failed: {error}");
             set_plan_state(
                 ctx,
+                lease,
                 &mut stored_plan,
                 PlanState::Failed,
                 skip_gates,
@@ -1252,11 +1694,12 @@ async fn execute_locked(
             .await?;
             return Err(error.context(detail));
         }
-        let outcome = match execute_step(ctx, &env, &plan_id, &step).await {
+        let outcome = match execute_step(ctx, lease, &env, &plan_id, &step).await {
             Ok(outcome) => outcome,
             Err(error) => {
                 set_plan_state(
                     ctx,
+                    lease,
                     &mut stored_plan,
                     PlanState::Failed,
                     skip_gates,
@@ -1286,12 +1729,26 @@ async fn execute_locked(
     } else {
         PlanState::Succeeded
     };
-    set_plan_state_confirmed(ctx, &mut stored_plan, final_state, skip_gates, final_detail).await?;
+    set_plan_state_confirmed(
+        ctx,
+        lease,
+        &mut stored_plan,
+        final_state,
+        skip_gates,
+        final_detail,
+    )
+    .await?;
 
     Ok(outcomes)
 }
 
-async fn execute_step(ctx: &mut Ctx, env: &str, plan_oid: &str, step: &Step) -> Result<Outcome> {
+async fn execute_step(
+    ctx: &mut Ctx,
+    lease: &EnvironmentLease,
+    env: &str,
+    plan_oid: &str,
+    step: &Step,
+) -> Result<Outcome> {
     let target = ReleasePin {
         release_id: step.release_id.clone(),
         digest: step.release_digest.clone(),
@@ -1313,25 +1770,25 @@ async fn execute_step(ctx: &mut Ctx, env: &str, plan_oid: &str, step: &Step) -> 
             .as_deref()
             .is_some_and(|command| !command.is_empty())
     {
-        let cleanup_failure = match deactivate(outgoing).await {
+        let cleanup_failure = match deactivate_fenced(ctx, lease, outgoing).await {
             Ok(Ok(())) => None,
             Ok(Err(detail)) => Some(detail),
             Err(error) => Some(format!("cleanup executor failed: {error}")),
         };
         if let Some(detail) = cleanup_failure {
             let detail = format!("rollback blocked: outgoing release cleanup failed: {detail}");
-            set_env_unknown(ctx, env, &step.product, &detail).await?;
+            set_env_unknown(ctx, lease, env, &step.product, &detail).await?;
             let outcome = Outcome {
                 step: step.clone(),
                 status: "failed".into(),
                 detail,
             };
-            record_deployment(ctx, env, plan_oid, &outcome).await?;
+            record_deployment(ctx, lease, env, plan_oid, &outcome).await?;
             return Ok(outcome);
         }
     }
 
-    let activation = match activate(&content).await {
+    let activation = match activate_fenced(ctx, lease, &content).await {
         Ok(result) => result,
         Err(error) => Err(format!("deployment executor failed: {error}")),
     };
@@ -1342,14 +1799,21 @@ async fn execute_step(ctx: &mut Ctx, env: &str, plan_oid: &str, step: &Step) -> 
                 status: "succeeded".into(),
                 detail: String::new(),
             };
-            if let Err(error) =
-                set_env_deployed(ctx, env, &step.product, &step.to, step.from.as_deref()).await
+            if let Err(error) = set_env_deployed(
+                ctx,
+                lease,
+                env,
+                &step.product,
+                &step.to,
+                step.from.as_deref(),
+            )
+            .await
             {
-                compensate_activation(ctx, env, step, &content, &error).await;
+                compensate_activation(ctx, lease, env, step, &content, &error).await;
                 return Err(error);
             }
-            if let Err(error) = record_deployment(ctx, env, plan_oid, &outcome).await {
-                compensate_activation(ctx, env, step, &content, &error).await;
+            if let Err(error) = record_deployment(ctx, lease, env, plan_oid, &outcome).await {
+                compensate_activation(ctx, lease, env, step, &content, &error).await;
                 return Err(error);
             }
             return Ok(outcome);
@@ -1358,23 +1822,25 @@ async fn execute_step(ctx: &mut Ctx, env: &str, plan_oid: &str, step: &Step) -> 
             // Install or health failed: try to restore the previous release.
             match &step.from {
                 Some(prev) => {
-                    let (cleaned, detail) = cleanup_failed_install(&content, detail).await?;
+                    let (cleaned, detail) =
+                        cleanup_failed_install_fenced(ctx, lease, &content, detail).await?;
                     let Some(prev_content) = restore_content.as_ref() else {
                         let detail =
                             format!("{detail}; step {} has no pinned restore release", step.id);
-                        set_env_unknown(ctx, env, &step.product, &detail).await?;
+                        set_env_unknown(ctx, lease, env, &step.product, &detail).await?;
                         let outcome = Outcome {
                             step: step.clone(),
                             status: "failed".into(),
                             detail,
                         };
-                        record_deployment(ctx, env, plan_oid, &outcome).await?;
+                        record_deployment(ctx, lease, env, plan_oid, &outcome).await?;
                         return Ok(outcome);
                     };
-                    let (restored, detail) = restore_previous(prev_content, prev, detail).await?;
+                    let (restored, detail) =
+                        restore_previous_fenced(ctx, lease, prev_content, prev, detail).await?;
                     let recovered = cleaned && restored;
                     if !recovered {
-                        set_env_unknown(ctx, env, &step.product, &detail).await?;
+                        set_env_unknown(ctx, lease, env, &step.product, &detail).await?;
                     }
                     Outcome {
                         step: step.clone(),
@@ -1383,9 +1849,10 @@ async fn execute_step(ctx: &mut Ctx, env: &str, plan_oid: &str, step: &Step) -> 
                     }
                 }
                 None => {
-                    let (cleaned, detail) = cleanup_failed_install(&content, detail).await?;
+                    let (cleaned, detail) =
+                        cleanup_failed_install_fenced(ctx, lease, &content, detail).await?;
                     if !cleaned {
-                        set_env_unknown(ctx, env, &step.product, &detail).await?;
+                        set_env_unknown(ctx, lease, env, &step.product, &detail).await?;
                     }
                     Outcome {
                         step: step.clone(),
@@ -1397,12 +1864,13 @@ async fn execute_step(ctx: &mut Ctx, env: &str, plan_oid: &str, step: &Step) -> 
         }
     };
 
-    record_deployment(ctx, env, plan_oid, &outcome).await?;
+    record_deployment(ctx, lease, env, plan_oid, &outcome).await?;
     Ok(outcome)
 }
 
 async fn record_deployment(
     ctx: &mut Ctx,
+    lease: &EnvironmentLease,
     env: &str,
     plan_oid: &str,
     outcome: &Outcome,
@@ -1428,12 +1896,26 @@ async fn record_deployment(
             ("to_version".into(), outcome.step.to.clone()),
             ("status".into(), "failed".into()),
             ("detail".into(), "deployment bookkeeping incomplete".into()),
+            ("lease_generation".into(), lease.generation.to_string()),
         ]),
     );
-    ctx.put(deployment.clone()).await?;
+    ctx.guarded_create(
+        deployment.clone(),
+        ENVIRONMENT_LEASE_NAMESPACE,
+        &lease.environment,
+        &lease.fencing_token,
+    )
+    .await?;
+    // Links are append-only, deterministic audit enrichment for this immutable
+    // generation-tagged attempt; they cannot overwrite active environment or
+    // plan state. If takeover happens here, guarded finalization below fails
+    // closed and leaves the attempt explicitly marked bookkeeping-incomplete.
+    refresh_environment_lease(ctx, lease).await?;
     ctx.link(&did, &outcome.step.release_id, REL_DEPLOYED_RELEASE)
         .await?;
+    refresh_environment_lease(ctx, lease).await?;
     ctx.link(&did, &env_id(env), REL_IN_ENVIRONMENT).await?;
+    refresh_environment_lease(ctx, lease).await?;
     ctx.link(&did, plan_oid, REL_PART_OF_PLAN).await?;
     deployment
         .properties
@@ -1442,7 +1924,15 @@ async fn record_deployment(
         .properties
         .insert("detail".into(), outcome.detail.clone());
     deployment.updated = crate::now_millis();
-    match ctx.put(deployment).await {
+    match ctx
+        .guarded_update(
+            deployment,
+            ENVIRONMENT_LEASE_NAMESPACE,
+            &lease.environment,
+            &lease.fencing_token,
+        )
+        .await
+    {
         Ok(_) => Ok(()),
         Err(error) => {
             let persisted = ctx.get(&did).await;
@@ -1529,6 +2019,7 @@ mod tests {
             workdir,
             environment: "test".into(),
             product: "api".into(),
+            mutation_lock: std::env::temp_dir().join("tenkai-test-mutation.lock"),
         }
     }
 

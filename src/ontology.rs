@@ -239,6 +239,7 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
                 prop("environment", true, "Locked environment name"),
                 prop("owner", true, "Plan id holding the lease"),
                 prop("expires_at", true, "Lease expiry in Unix milliseconds"),
+                prop("generation", false, "Sekai lease fencing generation"),
             ],
         ),
         object_type(
@@ -251,6 +252,7 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
                 prop("to_version", true, "Applied version"),
                 prop("status", true, "succeeded|failed|rolled_back"),
                 prop("detail", false, "Failure or rollback detail"),
+                prop("lease_generation", false, "Mutation fencing generation"),
             ],
         ),
         object_type(
