@@ -192,7 +192,10 @@ impl Ctx {
         };
         match self
             .sekai
-            .create_link(CreateLinkRequest { link: Some(link) })
+            .create_link(CreateLinkRequest {
+                link: Some(link),
+                fail_if_exists: false,
+            })
             .await
         {
             Ok(_) => Ok(()),
@@ -215,7 +218,10 @@ impl Ctx {
         link: Link,
     ) -> std::result::Result<(), tonic::Status> {
         self.sekai
-            .create_link(CreateLinkRequest { link: Some(link) })
+            .create_link(CreateLinkRequest {
+                link: Some(link),
+                fail_if_exists: true,
+            })
             .await?;
         Ok(())
     }

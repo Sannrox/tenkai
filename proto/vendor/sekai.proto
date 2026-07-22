@@ -279,7 +279,7 @@ message ResolveObjectSetRequest {
   optional int32 offset = 3;
 }
 
-message CreateLinkRequest { Link link = 1; }
+message CreateLinkRequest { Link link = 1; bool fail_if_exists = 2; }
 message CreateLinkResponse { Link link = 1; }
 message DeleteLinkRequest { string id = 1; }
 message DeleteLinkResponse {}
