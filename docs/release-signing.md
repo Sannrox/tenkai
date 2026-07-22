@@ -48,26 +48,25 @@ snapshot or modifying the catalog.
 
 Unsigned publication is available only through the conspicuous
 `--allow-unsigned-development` flag. It is intended for local development and
-cannot be combined with signature options. Automation and non-development
-publication must omit this escape hatch and therefore remain fail closed.
+cannot be combined with signature options. Unsigned releases can only be
+planned and applied to the built-in `local` environment. Automation and
+non-development publication must omit this escape hatch and therefore remain
+fail closed.
 
 ## Stored evidence
 
-Every release records `verification_status` and `signature_algorithm`. Verified
-releases also retain the trust-root signer identity and key id, the canonical
-statement digest, signed provenance JSON, and the detached envelope. These
-fields live on the immutable `tenkai.release` object alongside the independently
-computed manifest and artifact digests. Republishing a version with different
-content or different verification evidence is rejected.
+Every publication stores `verification_status` and `signature_algorithm` in a
+deterministic immutable verification-claim object linked from the release.
+Verified claims also retain the trust-root signer identity and key id, the
+canonical statement digest, signed provenance JSON, and detached envelope.
+Keeping trust evidence separate avoids changing or rewriting the existing
+`tenkai.release` schema.
 
-After upgrading Tenkai, run `tenkaictl init` to evolve an existing release
-schema. A legacy release without any verification fields may be verified by
-republishing its unchanged content with a valid trusted signature. Its evidence
-is retained in a deterministic immutable verification-claim object linked from
-the release, avoiding unsafe rewrites of the legacy object. Concurrent claims
-are first-writer-wins; retries with the same evidence are idempotent and
-different evidence is rejected. Partial or conflicting evidence is never
-overwritten, and unsigned publication cannot create a legacy claim.
+After upgrading Tenkai, run `tenkaictl init` to register the verification-claim
+schema. An existing release may be verified by republishing its unchanged
+content with a valid trusted signature. Concurrent claims are
+first-writer-wins; retries with the same evidence are idempotent and different
+evidence is rejected. Partial or conflicting evidence is never overwritten.
 
 Use `tenkaictl release inspect <product>@<version>` to query the stored status,
 signer, content digests, statement digest, and provenance. Use
