@@ -221,6 +221,12 @@ for the roadmap.
 
 Active implementation work and dependencies are tracked in GitHub Issues.
 
+The standalone architecture and Tenkai-owned operational storage contract are
+documented in [ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md)
+and [Operational storage](docs/operational-storage.md). The current v0 CLI
+continues to use sekai-chisei until the documented import and explicit authority
+cutover; it never mixes writers implicitly.
+
 ## Recorded rollback replay
 
 The deterministic replay capture runs a healthy deployment followed by a
