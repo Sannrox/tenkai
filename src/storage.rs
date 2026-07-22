@@ -11,7 +11,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -242,6 +242,21 @@ pub struct RollbackRecord {
     pub status_detail: String,
 }
 
+/// Durable delivery record for optional provider side effects.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderEventRecord {
+    pub id: String,
+    pub provider_kind: String,
+    pub binding_digest: String,
+    pub payload_json: String,
+    pub attempts: u32,
+    pub next_attempt_at: i64,
+    pub delivered_at: Option<i64>,
+    pub last_error: String,
+    pub claim_token: Option<String>,
+    pub claim_until: Option<i64>,
+}
+
 /// Transactional authority used by embedded and future server hosts.
 pub trait OperationalStore: Send + Sync {
     fn publish_release(&self, release: &ReleaseRecord) -> Result<()>;
@@ -274,6 +289,29 @@ pub trait OperationalStore: Send + Sync {
         detail: &str,
     ) -> Result<RollbackRecord>;
     fn pending_rollbacks(&self) -> Result<Vec<RollbackRecord>>;
+    fn enqueue_provider_event(&self, event: &ProviderEventRecord) -> Result<()>;
+    fn claim_provider_events(
+        &self,
+        now: i64,
+        limit: usize,
+        claim_token: &str,
+        claim_until: i64,
+    ) -> Result<Vec<ProviderEventRecord>>;
+    fn record_provider_failure(
+        &self,
+        provider_kind: &str,
+        id: &str,
+        claim_token: &str,
+        next_attempt_at: i64,
+        error: &str,
+    ) -> Result<()>;
+    fn mark_provider_event_delivered(
+        &self,
+        provider_kind: &str,
+        id: &str,
+        claim_token: &str,
+        delivered_at: i64,
+    ) -> Result<()>;
 }
 
 pub struct SqliteStore {
@@ -359,7 +397,34 @@ fn migrate(connection: &mut Connection) -> Result<()> {
                 checkpoint_json TEXT NOT NULL, status TEXT NOT NULL, status_detail TEXT NOT NULL
              );
              CREATE INDEX rollbacks_recovery ON rollbacks(status, environment_id);
-             PRAGMA user_version = 1;",
+             CREATE TABLE provider_events (
+                id TEXT NOT NULL, provider_kind TEXT NOT NULL,
+                binding_digest TEXT NOT NULL, payload_json TEXT NOT NULL,
+                attempts INTEGER NOT NULL, next_attempt_at INTEGER NOT NULL,
+                delivered_at INTEGER, last_error TEXT NOT NULL,
+                claim_token TEXT, claim_until INTEGER,
+                PRIMARY KEY(provider_kind,id)
+             );
+             CREATE INDEX provider_events_delivery
+                ON provider_events(delivered_at, next_attempt_at, id);
+             PRAGMA user_version = 2;",
+        )?;
+        tx.commit()?;
+    }
+    if found == 1 {
+        let tx = connection.transaction()?;
+        tx.execute_batch(
+            "CREATE TABLE provider_events (
+                id TEXT NOT NULL, provider_kind TEXT NOT NULL,
+                binding_digest TEXT NOT NULL, payload_json TEXT NOT NULL,
+                attempts INTEGER NOT NULL, next_attempt_at INTEGER NOT NULL,
+                delivered_at INTEGER, last_error TEXT NOT NULL,
+                claim_token TEXT, claim_until INTEGER,
+                PRIMARY KEY(provider_kind,id)
+             );
+             CREATE INDEX provider_events_delivery
+                ON provider_events(delivered_at, next_attempt_at, id);
+             PRAGMA user_version = 2;",
         )?;
         tx.commit()?;
     }
@@ -899,6 +964,164 @@ impl OperationalStore for SqliteStore {
         rows.map(|row| row.map_err(StoreError::from))
             .collect::<Result<Vec<_>>>()
     }
+
+    fn enqueue_provider_event(&self, event: &ProviderEventRecord) -> Result<()> {
+        if event.attempts != 0
+            || event.delivered_at.is_some()
+            || !event.last_error.is_empty()
+            || event.claim_token.is_some()
+            || event.claim_until.is_some()
+        {
+            return Err(StoreError::InvalidData {
+                kind: "provider event",
+                detail: "new events must have pristine delivery state".into(),
+            });
+        }
+        let connection = self.connection()?;
+        let existing: Option<(String, String, String)> = connection
+            .query_row(
+                "SELECT provider_kind,binding_digest,payload_json FROM provider_events WHERE provider_kind=?1 AND id=?2",
+                params![event.provider_kind, event.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        if let Some(existing) = existing {
+            if existing
+                != (
+                    event.provider_kind.clone(),
+                    event.binding_digest.clone(),
+                    event.payload_json.clone(),
+                )
+            {
+                return Err(StoreError::ImmutableConflict {
+                    kind: "provider event",
+                    id: event.id.clone(),
+                });
+            }
+            return Ok(());
+        }
+        connection.execute(
+            "INSERT INTO provider_events(id,provider_kind,binding_digest,payload_json,attempts,next_attempt_at,delivered_at,last_error,claim_token,claim_until)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![event.id, event.provider_kind, event.binding_digest, event.payload_json,
+                event.attempts, event.next_attempt_at, event.delivered_at, event.last_error,
+                event.claim_token, event.claim_until],
+        )?;
+        Ok(())
+    }
+
+    fn claim_provider_events(
+        &self,
+        now: i64,
+        limit: usize,
+        claim_token: &str,
+        claim_until: i64,
+    ) -> Result<Vec<ProviderEventRecord>> {
+        if claim_token.is_empty() || claim_until <= now {
+            return Err(StoreError::InvalidData {
+                kind: "provider event claim",
+                detail: "claim token must be non-empty and expiry must be in the future".into(),
+            });
+        }
+        let mut connection = self.connection()?;
+        let tx = connection.transaction()?;
+        tx.execute(
+            "UPDATE provider_events SET claim_token=NULL,claim_until=NULL
+             WHERE delivered_at IS NULL AND claim_until<=?1",
+            [now],
+        )?;
+        let token_in_use: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM provider_events WHERE delivered_at IS NULL AND claim_token=?1)",
+            [claim_token],
+            |row| row.get(0),
+        )?;
+        if token_in_use {
+            return Err(StoreError::InvalidData {
+                kind: "provider event claim",
+                detail:
+                    "claim token is already active; every claim operation requires a fresh token"
+                        .into(),
+            });
+        }
+        tx.execute(
+            "UPDATE provider_events SET claim_token=?3,claim_until=?4
+             WHERE (provider_kind,id) IN (
+               SELECT provider_kind,id FROM provider_events
+               WHERE delivered_at IS NULL AND next_attempt_at<=?1
+                 AND (claim_until IS NULL OR claim_until<=?1)
+               ORDER BY next_attempt_at,provider_kind,id LIMIT ?2
+             )",
+            params![now, limit as u64, claim_token, claim_until],
+        )?;
+        let mut statement = tx.prepare(
+            "SELECT id,provider_kind,binding_digest,payload_json,attempts,next_attempt_at,delivered_at,last_error,claim_token,claim_until
+             FROM provider_events WHERE delivered_at IS NULL AND claim_token=?1
+             ORDER BY next_attempt_at,provider_kind,id",
+        )?;
+        let rows = statement.query_map([claim_token], |row| {
+            Ok(ProviderEventRecord {
+                id: row.get(0)?,
+                provider_kind: row.get(1)?,
+                binding_digest: row.get(2)?,
+                payload_json: row.get(3)?,
+                attempts: row.get(4)?,
+                next_attempt_at: row.get(5)?,
+                delivered_at: row.get(6)?,
+                last_error: row.get(7)?,
+                claim_token: row.get(8)?,
+                claim_until: row.get(9)?,
+            })
+        })?;
+        let claimed = rows.map(|row| row.map_err(StoreError::from)).collect();
+        drop(statement);
+        tx.commit()?;
+        claimed
+    }
+
+    fn record_provider_failure(
+        &self,
+        provider_kind: &str,
+        id: &str,
+        claim_token: &str,
+        next_attempt_at: i64,
+        error: &str,
+    ) -> Result<()> {
+        let connection = self.connection()?;
+        let changed = connection.execute(
+            "UPDATE provider_events SET attempts=attempts+1,next_attempt_at=?4,last_error=?5,claim_token=NULL,claim_until=NULL
+             WHERE provider_kind=?1 AND id=?2 AND claim_token=?3 AND delivered_at IS NULL",
+            params![provider_kind, id, claim_token, next_attempt_at, error],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound {
+                kind: "pending provider event",
+                id: id.into(),
+            });
+        }
+        Ok(())
+    }
+
+    fn mark_provider_event_delivered(
+        &self,
+        provider_kind: &str,
+        id: &str,
+        claim_token: &str,
+        delivered_at: i64,
+    ) -> Result<()> {
+        let connection = self.connection()?;
+        let changed = connection.execute(
+            "UPDATE provider_events SET delivered_at=?4,last_error='',claim_token=NULL,claim_until=NULL
+             WHERE provider_kind=?1 AND id=?2 AND claim_token=?3 AND delivered_at IS NULL",
+            params![provider_kind, id, claim_token, delivered_at],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound {
+                kind: "provider event",
+                id: id.into(),
+            });
+        }
+        Ok(())
+    }
 }
 
 fn rollback_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RollbackRecord> {
@@ -1168,6 +1391,26 @@ mod tests {
             migrate(&mut connection),
             Err(StoreError::UnsupportedSchema { .. })
         ));
+    }
+
+    #[test]
+    fn version_one_schema_migrates_provider_outbox_transactionally() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection.pragma_update(None, "user_version", 1).unwrap();
+        migrate(&mut connection).unwrap();
+        assert_eq!(
+            connection
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+                .unwrap(),
+            SCHEMA_VERSION
+        );
+        connection
+            .execute(
+                "INSERT INTO provider_events(id,provider_kind,binding_digest,payload_json,attempts,next_attempt_at,last_error)
+                 VALUES('event-1','audit','sha256:x','{}',0,0,'')",
+                [],
+            )
+            .unwrap();
     }
 
     #[test]
