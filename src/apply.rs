@@ -1132,7 +1132,7 @@ async fn run_mutation_command(
         }
     }
     drop(ready_read);
-    if ready != [b'R'] {
+    if ready != *b"R" {
         bail!("deployment command guard failed to acquire the mutation fence");
     }
     refresh_environment_lease(ctx, lease).await?;
@@ -1195,7 +1195,7 @@ pub async fn executor_guard(
     std::io::stdout().flush()?;
     let mut go = [0_u8; 1];
     std::io::stdin().read_exact(&mut go)?;
-    if go != [b'G'] {
+    if go != *b"G" {
         bail!("executor guard did not receive start authorization");
     }
 
