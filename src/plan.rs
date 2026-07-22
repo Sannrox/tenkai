@@ -162,7 +162,7 @@ impl Plan {
         Ok(format!("{:x}", Sha256::digest(bytes)))
     }
 
-    fn to_object(&self) -> Result<Object> {
+    pub(crate) fn to_object(&self) -> Result<Object> {
         let now = crate::now_millis();
         Ok(Object {
             id: self.id.clone(),

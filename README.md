@@ -52,6 +52,16 @@ If failed cleanup leaves deployment state unknown, reconcile the external
 target manually, then run `tenkaictl env reconcile <env> <product>` after
 cleanup or add `--deployed <version>` to record the verified live version.
 
+Environment execution uses short-lived, generation-fenced Sekai leases. An
+expired lease is taken over atomically; a paused older controller cannot
+refresh or release the replacement generation and revalidates ownership before
+each deployment step. A local supervisor holds the process fence while mutation
+commands receive `TENKAI_FENCING_GENERATION`; controller death closes its
+control pipe, terminates the complete command group, and releases the fence
+before replacement work starts. Legacy object-only leases are never taken over
+automatically: stop the old controller and its children, then use
+`tenkaictl env unlock <environment>` as the explicit compatibility fallback.
+
 ## The manifest (`tenkai.toml`)
 
 ```toml
@@ -164,6 +174,7 @@ control plane can't safely restart its own backend mid-apply.
 | `SEKAI_AUTH_TOKEN` | unset | Bearer token, when the server requires auth |
 | `TENKAI_PRINCIPAL` | `tenkai` | Caller identity (`x-principal`) |
 | `TENKAI_STATE_DIR` | `<workdir-parent>/.tenkai-state` | Immutable deploy-input snapshots and per-environment runtime directories; must be outside the source workdir |
+| `TENKAI_EXECUTOR_GUARD` | installed sibling binary | Explicit path to `tenkai-executor-guard` for applications embedding the Tenkai library |
 
 ## Ontology
 
