@@ -630,6 +630,10 @@ async fn set_plan_state_confirmed(
 }
 
 fn environment_claim_id(environment: &str) -> String {
+    format!("{}:execution:v2", env_id(environment))
+}
+
+fn legacy_environment_claim_id(environment: &str) -> String {
     format!("{}:execution", env_id(environment))
 }
 
@@ -682,6 +686,19 @@ pub(crate) async fn claim_environment(
         owner: owner.to_string(),
     };
     let now = crate::now_millis();
+    if let Some(existing) = ctx.get(&legacy_environment_claim_id(environment)).await? {
+        let expires_at = existing
+            .properties
+            .get("expires_at")
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(i64::MAX);
+        if expires_at <= now {
+            bail!(
+                "environment {environment} has an expired legacy apply lease; verify no apply is running, then run `tenkaictl env unlock {environment}`"
+            );
+        }
+        bail!("environment {environment} already has a legacy apply in progress");
+    }
     let mut available = lease_object(&lease, now);
     available
         .properties
@@ -783,7 +800,15 @@ pub(crate) async fn environment_lease_status(
         .into_iter()
         .any(|link| link.to_id == lease_id);
     if !active {
-        return Ok(None);
+        let Some(lease) = ctx.get(&legacy_environment_claim_id(environment)).await? else {
+            return Ok(None);
+        };
+        let owner = lease
+            .properties
+            .get("owner")
+            .cloned()
+            .context("legacy environment apply lease has no owner")?;
+        return Ok(Some(EnvironmentLeaseStatus { owner }));
     }
     let Some(lease) = ctx.get(&lease_id).await? else {
         return Ok(None);
@@ -806,8 +831,14 @@ pub async fn unlock_environment(ctx: &mut Ctx, environment: &str) -> Result<Stri
     if environment_lease_status(ctx, environment).await?.is_none() {
         return Ok(format!("environment {environment} has no apply lease"));
     }
-    let id = environment_claim_id(environment);
-    let Some(existing) = ctx.get(&id).await? else {
+    let mut id = environment_claim_id(environment);
+    let mut existing = ctx.get(&id).await?;
+    let legacy = existing.is_none();
+    if legacy {
+        id = legacy_environment_claim_id(environment);
+        existing = ctx.get(&id).await?;
+    }
+    let Some(existing) = existing else {
         return Ok(format!("environment {environment} has no apply lease"));
     };
     if existing.kind != KIND_ENVIRONMENT_EXECUTION {
@@ -815,6 +846,12 @@ pub async fn unlock_environment(ctx: &mut Ctx, environment: &str) -> Result<Stri
             "object {id} is {}, not {KIND_ENVIRONMENT_EXECUTION}",
             existing.kind
         );
+    }
+    if legacy {
+        ctx.delete(&id).await?;
+        return Ok(format!(
+            "removed legacy apply lease for environment {environment}"
+        ));
     }
     let mut released = existing;
     released
