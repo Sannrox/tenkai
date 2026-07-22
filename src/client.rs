@@ -14,7 +14,8 @@ use crate::pb::sekai::sekai_service_client::SekaiServiceClient;
 use crate::pb::sekai::{
     ActionRequest, ActionResult, CreateLinkRequest, CreateObjectRequest, Decision,
     DeleteLinkRequest, DeleteObjectRequest, DenyActionRequest, ExecuteActionRequest,
-    FindByPropertyRequest, GetLinkedObjectsRequest, GetLinksRequest, GetObjectRequest, Link,
+    FindByPropertyRequest, GetLinkedObjectsRequest, GetLinksRequest, GetObjectRequest,
+    GuardedCreateObjectRequest, GuardedUpdateObjectRequest, LeasePrecondition, Link,
     ListDecisionsRequest, ListFilter, ListObjectChangesRequest, ListObjectsRequest, Object,
     ObjectChange, UpdateObjectRequest,
 };
@@ -179,6 +180,74 @@ impl Ctx {
                 .object
         };
         Ok(resp.unwrap_or_default())
+    }
+
+    pub(crate) async fn guarded_create(
+        &mut self,
+        object: Object,
+        lease_namespace: &str,
+        lease_key: &str,
+        fencing_token: &str,
+    ) -> Result<Object> {
+        let request = GuardedCreateObjectRequest {
+            object: Some(object),
+            lease_precondition: Some(LeasePrecondition {
+                namespace: lease_namespace.into(),
+                key: lease_key.into(),
+                fencing_token: fencing_token.into(),
+                request_id: uuid::Uuid::new_v4().to_string(),
+            }),
+        };
+        let response = match self.sekai.guarded_create_object(request.clone()).await {
+            Ok(response) => response,
+            Err(status)
+                if matches!(
+                    status.code(),
+                    tonic::Code::Unavailable | tonic::Code::DeadlineExceeded
+                ) =>
+            {
+                self.sekai.guarded_create_object(request).await?
+            }
+            Err(status) => return Err(status.into()),
+        };
+        response
+            .into_inner()
+            .object
+            .context("Sekai returned an empty guarded create result")
+    }
+
+    pub(crate) async fn guarded_update(
+        &mut self,
+        object: Object,
+        lease_namespace: &str,
+        lease_key: &str,
+        fencing_token: &str,
+    ) -> Result<Object> {
+        let request = GuardedUpdateObjectRequest {
+            object: Some(object),
+            lease_precondition: Some(LeasePrecondition {
+                namespace: lease_namespace.into(),
+                key: lease_key.into(),
+                fencing_token: fencing_token.into(),
+                request_id: uuid::Uuid::new_v4().to_string(),
+            }),
+        };
+        let response = match self.sekai.guarded_update_object(request.clone()).await {
+            Ok(response) => response,
+            Err(status)
+                if matches!(
+                    status.code(),
+                    tonic::Code::Unavailable | tonic::Code::DeadlineExceeded
+                ) =>
+            {
+                self.sekai.guarded_update_object(request).await?
+            }
+            Err(status) => return Err(status.into()),
+        };
+        response
+            .into_inner()
+            .object
+            .context("Sekai returned an empty guarded update result")
     }
 
     /// Create a link with a deterministic id; already-exists is treated as success.

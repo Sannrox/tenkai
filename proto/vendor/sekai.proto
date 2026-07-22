@@ -625,12 +625,40 @@ message TakeoverExpiredLeaseRequest {
 }
 message TakeoverExpiredLeaseResponse { Lease lease = 1; }
 
+// Authorizes one idempotent graph mutation while the referenced lease
+// generation remains active. The fencing token is opaque and is never copied
+// into object audit history.
+message LeasePrecondition {
+  string namespace = 1;
+  string key = 2;
+  string fencing_token = 3;
+  string request_id = 4;
+}
+message GuardedCreateObjectRequest {
+  Object object = 1;
+  LeasePrecondition lease_precondition = 2;
+}
+message GuardedCreateObjectResponse { Object object = 1; }
+message GuardedUpdateObjectRequest {
+  Object object = 1;
+  LeasePrecondition lease_precondition = 2;
+}
+message GuardedUpdateObjectResponse { Object object = 1; }
+message GuardedDeleteObjectRequest {
+  string id = 1;
+  LeasePrecondition lease_precondition = 2;
+}
+message GuardedDeleteObjectResponse {}
+
 service SekaiService {
   rpc AcquireLease(AcquireLeaseRequest) returns (AcquireLeaseResponse);
   rpc GetLease(GetLeaseRequest) returns (GetLeaseResponse);
   rpc RefreshLease(RefreshLeaseRequest) returns (RefreshLeaseResponse);
   rpc ReleaseLease(ReleaseLeaseRequest) returns (ReleaseLeaseResponse);
   rpc TakeoverExpiredLease(TakeoverExpiredLeaseRequest) returns (TakeoverExpiredLeaseResponse);
+  rpc GuardedCreateObject(GuardedCreateObjectRequest) returns (GuardedCreateObjectResponse);
+  rpc GuardedUpdateObject(GuardedUpdateObjectRequest) returns (GuardedUpdateObjectResponse);
+  rpc GuardedDeleteObject(GuardedDeleteObjectRequest) returns (GuardedDeleteObjectResponse);
   rpc CreateObject(CreateObjectRequest) returns (CreateObjectResponse);
   rpc GetObject(GetObjectRequest) returns (GetObjectResponse);
   rpc UpdateObject(UpdateObjectRequest) returns (UpdateObjectResponse);
