@@ -177,3 +177,17 @@ environments beyond registration, version constraints, signed releases,
 agents, disconnected environments — see [DESIGN.md](DESIGN.md) for the roadmap.
 
 Active implementation work and dependencies are tracked in GitHub Issues.
+
+## Recorded rollback replay
+
+The deterministic replay capture runs a healthy deployment followed by a
+deliberately unhealthy upgrade, records Tenkai's automatic rollback, and asks
+`sekaictl replay export` for a static JSON bundle rooted at the incident plan:
+
+```sh
+./scripts/capture-rollback-replay.sh
+```
+
+By default it expects `../sekai-chisei`, uses an isolated temporary database,
+and writes `artifacts/replay/rollback-incident.json`. Override the repository
+with `SEKAI_CHISEI_DIR` or the destination with `REPLAY_OUTPUT_DIR`.
