@@ -1,6 +1,7 @@
 /target
 .state/
 .tenkai-state/
+/artifacts/replay/
 
 .agents/*
 !.agents/skills/
