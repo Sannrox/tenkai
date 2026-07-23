@@ -1,0 +1,159 @@
+syntax = "proto3";
+
+package tenkai.runtime.v1;
+
+// RuntimeService is pull-only: runtimes initiate every exchange.
+service RuntimeService {
+  rpc Negotiate(NegotiateRequest) returns (NegotiateResponse);
+  rpc Pull(PullRequest) returns (PullResponse);
+  rpc ReportObservation(ReportObservationRequest) returns (ReportObservationResponse);
+  rpc CompleteStep(CompleteStepRequest) returns (CompleteStepResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+}
+
+message ProtocolVersion {
+  uint32 major = 1;
+  uint32 minor = 2;
+}
+
+message RuntimeIdentity {
+  string runtime_id = 1;
+  string environment_id = 2;
+  string instance_id = 3;
+}
+
+message Capability {
+  string name = 1;
+  uint32 version = 2;
+}
+
+message NegotiateRequest {
+  RuntimeIdentity identity = 1;
+  repeated ProtocolVersion supported_versions = 2;
+  repeated Capability capabilities = 3;
+}
+
+message NegotiateResponse {
+  ProtocolVersion selected_version = 1;
+  string session_id = 2;
+  int64 heartbeat_interval_ms = 3;
+  repeated Capability required_capabilities = 4;
+}
+
+message Observation {
+  string observation_id = 1;
+  string environment_id = 2;
+  int64 observed_at_unix_ms = 3;
+  bytes state_digest = 4;
+}
+
+message ReportObservationRequest {
+  string session_id = 1;
+  RuntimeIdentity identity = 2;
+  Observation observation = 3;
+}
+
+message ReportObservationResponse {
+  bool accepted = 1;
+}
+
+message PullRequest {
+  string session_id = 1;
+  RuntimeIdentity identity = 2;
+  repeated string completed_receipt_ids = 3;
+}
+
+message Lease {
+  string lease_id = 1;
+  uint64 generation = 2;
+  int64 expires_at_unix_ms = 3;
+}
+
+message PlanDelivery {
+  string delivery_id = 1;
+  string environment_id = 2;
+  string plan_id = 3;
+  uint32 plan_format_version = 4;
+  bytes plan_digest = 5;
+  Lease lease = 6;
+  repeated Step steps = 7;
+}
+
+message Step {
+  string step_id = 1;
+  uint32 attempt = 2;
+  string action = 3;
+  bytes input_digest = 4;
+  repeated Capability required_capabilities = 5;
+}
+
+message Cancellation {
+  string environment_id = 1;
+  string plan_id = 2;
+  string reason_code = 3;
+}
+
+message PullResponse {
+  oneof directive {
+    PlanDelivery plan = 1;
+    Cancellation cancellation = 2;
+    NoWork no_work = 3;
+  }
+}
+
+message NoWork {
+  int64 retry_after_ms = 1;
+}
+
+enum StepResult {
+  STEP_RESULT_UNSPECIFIED = 0;
+  STEP_RESULT_SUCCEEDED = 1;
+  STEP_RESULT_FAILED = 2;
+  STEP_RESULT_CANCELLED = 3;
+}
+
+message StepReceipt {
+  string receipt_id = 1;
+  string environment_id = 2;
+  string plan_id = 3;
+  string step_id = 4;
+  uint32 attempt = 5;
+  StepResult result = 6;
+  bytes result_digest = 7;
+  string lease_id = 8;
+  uint64 lease_generation = 9;
+  int64 completed_at_unix_ms = 10;
+}
+
+message CompleteStepRequest {
+  string session_id = 1;
+  RuntimeIdentity identity = 2;
+  StepReceipt receipt = 3;
+}
+
+enum CompletionDisposition {
+  COMPLETION_DISPOSITION_UNSPECIFIED = 0;
+  COMPLETION_DISPOSITION_ACCEPTED = 1;
+  COMPLETION_DISPOSITION_ALREADY_COMPLETED = 2;
+  COMPLETION_DISPOSITION_STALE_LEASE = 3;
+  COMPLETION_DISPOSITION_REJECTED = 4;
+}
+
+message CompleteStepResponse {
+  CompletionDisposition disposition = 1;
+  StepReceipt canonical_receipt = 2;
+}
+
+message HeartbeatRequest {
+  string session_id = 1;
+  RuntimeIdentity identity = 2;
+  string lease_id = 3;
+  uint64 lease_generation = 4;
+  int64 sent_at_unix_ms = 5;
+}
+
+message HeartbeatResponse {
+  bool lease_active = 1;
+  int64 lease_expires_at_unix_ms = 2;
+  Cancellation cancellation = 3;
+}
