@@ -11,6 +11,7 @@ pub mod client;
 pub mod embedded;
 pub mod maintenance;
 pub mod manifest;
+pub mod offline_bundle;
 pub mod ontology;
 pub mod pb;
 pub mod plan;
