@@ -17,11 +17,12 @@ use sha2::{Digest as _, Sha256};
 
 use crate::client::Ctx;
 use crate::maintenance::{self, Eligibility};
-use crate::manifest::{self, Manifest};
+use crate::manifest::{self, Manifest, ProductKind};
 use crate::ontology::*;
 use crate::pb::chisei::{EvalRun, EvalSuite};
 use crate::pb::sekai::{Lease, Link, Object};
 use crate::plan::{self, Action, Plan, PlanState, ReleasePin, Step};
+use crate::routing::RoutingConfigExecutor as _;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Outcome {
@@ -337,10 +338,11 @@ struct ReleaseContent {
     environment: String,
     product: String,
     mutation_lock: std::path::PathBuf,
+    routing_state: std::path::PathBuf,
 }
 
 fn verify_content_integrity(content: &ReleaseContent) -> Result<()> {
-    let actual = manifest::artifact_digest(&content.workdir, &content.manifest.deploy.inputs)?;
+    let actual = manifest::artifact_digest(&content.workdir, &content.manifest.immutable_inputs())?;
     if actual != content.artifact_digest {
         bail!("immutable deployment inputs changed while executing release");
     }
@@ -402,6 +404,25 @@ async fn activate_fenced(
     lease: &EnvironmentLease,
     content: &ReleaseContent,
 ) -> Result<Result<(), String>> {
+    if content.manifest.product.kind == ProductKind::RoutingConfig {
+        refresh_environment_lease(ctx, lease).await?;
+        verify_content_integrity(content)?;
+        let routing = content
+            .manifest
+            .routing
+            .as_ref()
+            .context("routing release has no routing contract")?;
+        let config = crate::routing::load_and_validate(
+            &content.workdir.join(&routing.config),
+            &routing.allowed_providers,
+        )?;
+        let executor =
+            crate::routing::LocalRoutingConfigExecutor::new(content.routing_state.clone());
+        return Ok(executor
+            .apply(&config)
+            .map(|_| ())
+            .map_err(|error| error.to_string()));
+    }
     let install =
         run_mutation_command(ctx, lease, content, &content.manifest.deploy.install).await?;
     let result = match install {
@@ -424,6 +445,14 @@ async fn deactivate_fenced(
     lease: &EnvironmentLease,
     content: &ReleaseContent,
 ) -> Result<Result<(), String>> {
+    if content.manifest.product.kind == ProductKind::RoutingConfig {
+        refresh_environment_lease(ctx, lease).await?;
+        return Ok(
+            crate::routing::LocalRoutingConfigExecutor::new(content.routing_state.clone())
+                .remove()
+                .map_err(|error| error.to_string()),
+        );
+    }
     match content.manifest.deploy.uninstall.as_deref() {
         Some(command) if !command.is_empty() => {
             let result = run_mutation_command(ctx, lease, content, command).await?;
@@ -462,6 +491,11 @@ async fn cleanup_failed_install_fenced(
     content: &ReleaseContent,
     failure: String,
 ) -> Result<(bool, String)> {
+    if content.manifest.product.kind == ProductKind::RoutingConfig {
+        // Routing validation is pre-mutation and the local adapter publishes
+        // atomically, so a failed target cannot require destructive cleanup.
+        return Ok((true, failure));
+    }
     Ok(match content.manifest.deploy.uninstall.as_deref() {
         Some(_) => match deactivate_fenced(ctx, lease, content).await {
             Ok(Ok(())) => (true, format!("{failure}; cleaned up failed install")),
@@ -597,8 +631,10 @@ async fn release_content(
             pin.release_id
         );
     }
-    let actual_artifact_digest =
-        manifest::artifact_digest(Path::new(&descriptor.content_path), &manifest.deploy.inputs)?;
+    let actual_artifact_digest = manifest::artifact_digest(
+        Path::new(&descriptor.content_path),
+        &manifest.immutable_inputs(),
+    )?;
     if actual_artifact_digest != descriptor.artifact_digest {
         bail!(
             "release {} immutable deploy inputs no longer match pinned artifact digest {}",
@@ -608,7 +644,7 @@ async fn release_content(
     }
     let workdir = manifest::execution_workdir(
         Path::new(&descriptor.content_path),
-        &manifest.deploy.inputs,
+        &manifest.immutable_inputs(),
         &pin.artifact_digest,
         environment,
         product,
@@ -627,6 +663,11 @@ async fn release_content(
             .join("runtime")
             .join(environment)
             .join(".mutation.lock"),
+        routing_state: state_dir
+            .join("runtime")
+            .join(environment)
+            .join("routing")
+            .join(format!("{product}.json")),
     })
 }
 
@@ -2021,6 +2062,7 @@ mod tests {
                     name: "api".into(),
                     version: "1.0.0".into(),
                     description: String::new(),
+                    kind: ProductKind::Software,
                 },
                 deploy: DeploySection {
                     workdir: ".".into(),
@@ -2029,6 +2071,7 @@ mod tests {
                     uninstall: uninstall.map(str::to_string),
                     health: health.map(str::to_string),
                 },
+                routing: None,
                 gate: GateSection::default(),
             },
             artifact_digest: manifest::artifact_digest(&workdir, &[]).unwrap(),
@@ -2036,6 +2079,7 @@ mod tests {
             environment: "test".into(),
             product: "api".into(),
             mutation_lock: std::env::temp_dir().join("tenkai-test-mutation.lock"),
+            routing_state: std::env::temp_dir().join("tenkai-test-routing-state.json"),
         }
     }
 

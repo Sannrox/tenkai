@@ -10,9 +10,20 @@ use sha2::{Digest as _, Sha256};
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub product: ProductSection,
+    #[serde(default)]
     pub deploy: DeploySection,
     #[serde(default)]
+    pub routing: Option<RoutingSection>,
+    #[serde(default)]
     pub gate: GateSection,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductKind {
+    #[default]
+    Software,
+    RoutingConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,6 +33,8 @@ pub struct ProductSection {
     pub version: String,
     #[serde(default)]
     pub description: String,
+    #[serde(default)]
+    pub kind: ProductKind,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,6 +54,27 @@ pub struct DeploySection {
     /// Optional health probe; exit 0 means healthy. Failure triggers rollback.
     #[serde(default)]
     pub health: Option<String>,
+}
+
+impl Default for DeploySection {
+    fn default() -> Self {
+        Self {
+            workdir: default_workdir(),
+            install: String::new(),
+            inputs: Vec::new(),
+            uninstall: None,
+            health: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoutingSection {
+    /// Immutable routing configuration JSON, relative to `deploy.workdir`.
+    pub config: String,
+    /// Providers admitted by this release. An empty list fails closed.
+    pub allowed_providers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -83,8 +117,31 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
     if manifest.product.name.is_empty() || manifest.product.version.is_empty() {
         bail!("manifest needs product.name and product.version");
     }
-    if manifest.deploy.install.trim().is_empty() {
-        bail!("manifest needs a non-empty deploy.install command");
+    match manifest.product.kind {
+        ProductKind::Software => {
+            if manifest.routing.is_some() {
+                bail!("software manifests cannot declare a routing section");
+            }
+            if manifest.deploy.install.trim().is_empty() {
+                bail!("software manifest needs a non-empty deploy.install command");
+            }
+        }
+        ProductKind::RoutingConfig => {
+            if !manifest.deploy.install.trim().is_empty()
+                || manifest.deploy.uninstall.is_some()
+                || manifest.deploy.health.is_some()
+            {
+                bail!("routing_config manifests cannot declare shell deployment commands");
+            }
+            let routing = manifest
+                .routing
+                .as_ref()
+                .context("routing_config manifest needs a routing section")?;
+            if routing.allowed_providers.is_empty() {
+                bail!("routing.allowed_providers must not be empty");
+            }
+            validate_input_path("routing.config", &routing.config)?;
+        }
     }
     crate::ontology::validate_identifier("product.name", &manifest.product.name)?;
     crate::ontology::validate_identifier("product.version", &manifest.product.version)?;
@@ -92,6 +149,16 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
         .join(&manifest.deploy.workdir)
         .canonicalize()
         .with_context(|| format!("resolving workdir {:?}", manifest.deploy.workdir))?;
+    if manifest.product.kind == ProductKind::RoutingConfig {
+        crate::routing::load_and_validate(
+            &workdir.join(&manifest.routing.as_ref().expect("validated routing").config),
+            &manifest
+                .routing
+                .as_ref()
+                .expect("validated routing")
+                .allowed_providers,
+        )?;
+    }
     Ok(LoadedManifest {
         manifest,
         raw,
@@ -101,6 +168,31 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
 
 pub fn parse_raw(raw: &str) -> Result<Manifest> {
     Ok(toml::from_str(raw)?)
+}
+
+impl Manifest {
+    pub fn immutable_inputs(&self) -> Vec<String> {
+        let mut inputs = self.deploy.inputs.clone();
+        if let Some(routing) = &self.routing
+            && !inputs.contains(&routing.config)
+        {
+            inputs.push(routing.config.clone());
+        }
+        inputs
+    }
+}
+
+fn validate_input_path(field: &str, value: &str) -> Result<()> {
+    let path = Path::new(value);
+    if value.is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
+        bail!("{field} must be a safe relative path");
+    }
+    Ok(())
 }
 
 pub fn digest(raw: &str) -> String {
@@ -395,6 +487,25 @@ pub fn execution_workdir(
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn routing_manifest_binds_configuration_as_an_immutable_input() {
+        let manifest = Manifest {
+            product: ProductSection {
+                name: "routing".into(),
+                version: "1.0.0".into(),
+                description: String::new(),
+                kind: ProductKind::RoutingConfig,
+            },
+            deploy: DeploySection::default(),
+            routing: Some(RoutingSection {
+                config: "routing.json".into(),
+                allowed_providers: vec!["local".into()],
+            }),
+            gate: GateSection::default(),
+        };
+        assert_eq!(manifest.immutable_inputs(), vec!["routing.json"]);
+    }
 
     #[test]
     fn artifact_digest_changes_with_executable_inputs() {

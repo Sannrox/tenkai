@@ -1,0 +1,9 @@
+[product]
+name = "model-routing"
+version = "1.0.0"
+kind = "routing_config"
+description = "Standalone model-routing configuration"
+
+[routing]
+config = "routing.json"
+allowed_providers = ["local"]
