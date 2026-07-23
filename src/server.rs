@@ -121,6 +121,12 @@ pub struct RuntimeWork {
     pub claim: Option<crate::storage::RuntimeClaim>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RuntimeHeartbeat {
+    pub plan_id: String,
+    pub generation: u64,
+}
+
 #[derive(Debug, Serialize)]
 struct ErrorBody {
     error: String,
@@ -143,6 +149,10 @@ pub fn router(
         .route(
             "/v1/runtime/environments/{environment}/complete",
             post(runtime_complete),
+        )
+        .route(
+            "/v1/runtime/environments/{environment}/heartbeat",
+            post(runtime_heartbeat),
         )
         .with_state(Arc::new(AppState {
             config,
@@ -214,6 +224,9 @@ async fn runtime_work(
     let Some(assigned) = state.config.runtime_assignments.get(token) else {
         return error_response(StatusCode::FORBIDDEN, "invalid runtime credential");
     };
+    let Some(instance) = runtime_instance(&headers) else {
+        return error_response(StatusCode::BAD_REQUEST, "missing runtime instance identity");
+    };
     if assigned != &environment {
         return error_response(
             StatusCode::FORBIDDEN,
@@ -222,7 +235,7 @@ async fn runtime_work(
     }
     match state.reconciler.pending_work(environment.clone()).await {
         Ok(Some(plan)) => {
-            let owner = runtime_owner(token);
+            let owner = runtime_owner(token, instance);
             let expires_at = crate::now_millis().saturating_add(2 * 60 * 1000);
             match state
                 .store
@@ -265,6 +278,9 @@ async fn runtime_complete(
     let Some(assigned) = state.config.runtime_assignments.get(token) else {
         return error_response(StatusCode::FORBIDDEN, "invalid runtime credential");
     };
+    let Some(instance) = runtime_instance(&headers) else {
+        return error_response(StatusCode::BAD_REQUEST, "missing runtime instance identity");
+    };
     if assigned != &environment {
         return error_response(
             StatusCode::FORBIDDEN,
@@ -284,7 +300,7 @@ async fn runtime_complete(
     }
     if let Err(error) = state.store.complete_runtime_plan(
         &completion.plan_id,
-        &runtime_owner(token),
+        &runtime_owner(token, instance),
         completion.generation,
         &completion_json,
     ) {
@@ -300,8 +316,51 @@ async fn runtime_complete(
     }
 }
 
-fn runtime_owner(token: &str) -> String {
-    format!("runtime:{:x}", Sha256::digest(token.as_bytes()))
+async fn runtime_heartbeat(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+    Json(heartbeat): Json<RuntimeHeartbeat>,
+) -> Response {
+    let Some(token) = bearer(&headers) else {
+        return error_response(StatusCode::UNAUTHORIZED, "missing bearer token");
+    };
+    let Some(assigned) = state.config.runtime_assignments.get(token) else {
+        return error_response(StatusCode::FORBIDDEN, "invalid runtime credential");
+    };
+    let Some(instance) = runtime_instance(&headers) else {
+        return error_response(StatusCode::BAD_REQUEST, "missing runtime instance identity");
+    };
+    if assigned != &environment {
+        return error_response(
+            StatusCode::FORBIDDEN,
+            "runtime credential is not assigned to this environment",
+        );
+    }
+    let expires_at = crate::now_millis().saturating_add(2 * 60 * 1000);
+    match state.store.renew_runtime_plan(
+        &heartbeat.plan_id,
+        &runtime_owner(token, instance),
+        heartbeat.generation,
+        expires_at,
+    ) {
+        Ok(Some(claim)) => Json(claim).into_response(),
+        Ok(_) => error_response(StatusCode::CONFLICT, "runtime claim is no longer active"),
+        Err(error) => error_response(StatusCode::CONFLICT, error.to_string()),
+    }
+}
+
+fn runtime_owner(token: &str, instance: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(token.as_bytes());
+    digest.update([0]);
+    digest.update(instance.as_bytes());
+    format!("runtime:{:x}", digest.finalize())
+}
+
+fn runtime_instance(headers: &HeaderMap) -> Option<&str> {
+    let instance = headers.get("x-tenkai-runtime-instance")?.to_str().ok()?;
+    (!instance.is_empty() && instance.len() <= 128 && instance.is_ascii()).then_some(instance)
 }
 
 fn bearer(headers: &HeaderMap) -> Option<&str> {
@@ -507,6 +566,7 @@ mod tests {
             .oneshot(
                 Request::get("/v1/runtime/environments/staging/work")
                     .header("authorization", "Bearer runtime-secret")
+                    .header("x-tenkai-runtime-instance", "instance-a")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -519,6 +579,7 @@ mod tests {
             .oneshot(
                 Request::get("/v1/runtime/environments/prod/work")
                     .header("authorization", "Bearer runtime-secret")
+                    .header("x-tenkai-runtime-instance", "instance-a")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -533,11 +594,30 @@ mod tests {
         let generation = first.claim.unwrap().generation;
         assert_eq!(generation, 1);
 
+        let overlapping = app
+            .clone()
+            .oneshot(
+                Request::get("/v1/runtime/environments/prod/work")
+                    .header("authorization", "Bearer runtime-secret")
+                    .header("x-tenkai-runtime-instance", "instance-b")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(overlapping.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let overlapping: RuntimeWork = serde_json::from_slice(&bytes).unwrap();
+        assert!(overlapping.plan.is_none());
+        assert!(overlapping.claim.is_none());
+
         let completed = app
             .clone()
             .oneshot(
                 Request::post("/v1/runtime/environments/prod/complete")
                     .header("authorization", "Bearer runtime-secret")
+                    .header("x-tenkai-runtime-instance", "instance-a")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&crate::reconciler::RuntimeCompletion {
@@ -559,6 +639,7 @@ mod tests {
             .oneshot(
                 Request::get("/v1/runtime/environments/prod/work")
                     .header("authorization", "Bearer runtime-secret")
+                    .header("x-tenkai-runtime-instance", "instance-a")
                     .body(Body::empty())
                     .unwrap(),
             )

@@ -342,6 +342,13 @@ pub trait OperationalStore: Send + Sync {
         owner: &str,
         expires_at: i64,
     ) -> Result<Option<RuntimeClaim>>;
+    fn renew_runtime_plan(
+        &self,
+        plan_id: &str,
+        owner: &str,
+        generation: u64,
+        expires_at: i64,
+    ) -> Result<Option<RuntimeClaim>>;
     fn complete_runtime_plan(
         &self,
         plan_id: &str,
@@ -1364,6 +1371,48 @@ impl OperationalStore for SqliteStore {
         }))
     }
 
+    fn renew_runtime_plan(
+        &self,
+        plan_id: &str,
+        owner: &str,
+        generation: u64,
+        expires_at: i64,
+    ) -> Result<Option<RuntimeClaim>> {
+        let now = crate::now_millis();
+        if plan_id.is_empty() || owner.is_empty() || generation == 0 || expires_at <= now {
+            return Err(StoreError::InvalidData {
+                kind: "runtime heartbeat",
+                detail: "plan, owner, generation, and future expiry are required".into(),
+            });
+        }
+        let connection = self.connection()?;
+        let changed = connection.execute(
+            "UPDATE runtime_claims SET expires_at=?4
+             WHERE plan_id=?1 AND owner=?2 AND generation=?3
+               AND expires_at>?5 AND completion_json IS NULL",
+            params![plan_id, owner, generation, expires_at, now],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        let claim = connection.query_row(
+            "SELECT plan_id,environment_id,owner,generation,expires_at,completion_json
+             FROM runtime_claims WHERE plan_id=?1",
+            [plan_id],
+            |row| {
+                Ok(RuntimeClaim {
+                    plan_id: row.get(0)?,
+                    environment_id: row.get(1)?,
+                    owner: row.get(2)?,
+                    generation: row.get(3)?,
+                    expires_at: row.get(4)?,
+                    completion_json: row.get(5)?,
+                })
+            },
+        )?;
+        Ok(Some(claim))
+    }
+
     fn complete_runtime_plan(
         &self,
         plan_id: &str,
@@ -1559,6 +1608,18 @@ mod tests {
                 .unwrap(),
             None
         );
+        assert_eq!(
+            reopened
+                .renew_runtime_plan("plan-1", "runtime-b", 1, expiry + 2)
+                .unwrap(),
+            None
+        );
+        let renewed = reopened
+            .renew_runtime_plan("plan-1", "runtime-a", 1, expiry + 2)
+            .unwrap()
+            .unwrap();
+        assert_eq!(renewed.generation, 1);
+        assert_eq!(renewed.expires_at, expiry + 2);
         reopened
             .complete_runtime_plan("plan-1", "runtime-a", 1, "{\"ok\":true}")
             .unwrap();
