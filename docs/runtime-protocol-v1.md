@@ -4,6 +4,9 @@ The public contract is `proto/tenkai/runtime/v1/runtime.proto`. An environment
 runtime initiates every RPC; the server never pushes work into an environment.
 Transport authentication maps a principal to exactly one `environment_id`, and
 the server rejects any request whose payload identity differs from that scope.
+Each runtime process also presents a fresh instance identity. Authentication
+remains token-based, while durable lease ownership binds both the authenticated
+scope and that instance so overlapping processes cannot share one generation.
 
 ## Negotiation and rolling upgrades
 
@@ -41,6 +44,12 @@ identity atomically. Re-delivery, including a conflicting later result, returns
 the first canonical receipt with `ALREADY_COMPLETED`; it must not invoke the
 executor again. A plan cannot become successful until every step has an
 accepted success receipt.
+
+The v0 HTTP runtime host supplies the executor with a stable
+`<plan-id>:<step-id>` idempotency key. Executors must durably claim that key
+before mutation and return the previously recorded outcome after reconnect.
+This closes the ambiguous interval where a runtime process can stop after the
+target changed but before its receipt reached Tenkai.
 
 Cancellation is advisory until observed by the runtime. Losing a lease is a
 hard fence: the runtime must stop work, and a completion from that generation
