@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "routes": [
+    {
+      "name": "chat",
+      "model": "model-v2",
+      "provider": "local",
+      "weight": 100
+    }
+  ]
+}

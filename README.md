@@ -97,6 +97,34 @@ tenkaictl release verify hello-local@0.1.0 \
 The detached envelope and trust-root formats are documented in
 [`docs/release-signing.md`](docs/release-signing.md).
 
+### Routing-configuration products
+
+Tenkai can deliver a versioned model-routing document without sekai-chisei.
+The manifest declares `product.kind = "routing_config"`, a JSON configuration,
+and the providers admitted by that release:
+
+```toml
+[product]
+name = "model-routing"
+version = "1.0.0"
+kind = "routing_config"
+
+[routing]
+config = "routing.json"
+allowed_providers = ["local"]
+```
+
+The JSON contract is versioned and rejects unknown fields, invalid references,
+duplicate routes, unsupported providers, and invalid weights before mutation.
+The local executor publishes atomically, observes the resulting digest, and
+uses the normal pinned-release plan path for rollback. See
+[`examples/routing-local`](examples/routing-local) and
+[ADR 0002](docs/decisions/0002-tenkai-owned-routing-configuration.md).
+
+sekai-chisei may supply policy, evaluation, provenance, or an explicitly
+configured adapter, but it is not required for standalone routing delivery and
+does not own release, plan, apply, rollback, or recovery state.
+
 Plan execution likewise fails closed unless it has a signed, unexpired approval
 bound to the exact executable plan and environment. The provider-independent
 format, current-trust-root key rotation behavior, standalone policy boundary,
