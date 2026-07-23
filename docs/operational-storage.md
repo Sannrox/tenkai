@@ -20,10 +20,12 @@ outcomes only; bearer credentials and request secrets are never persisted.
 Remote runtime claims are durable, environment-scoped, expiring, and
 generation-fenced. Their completion payload retains per-step receipts and is
 immutable after the first accepted completion. Tokens are represented only by
-a one-way owner digest; raw runtime credentials are not stored. Polling renews
-an active claim for the same owner. If completion persistence wins before the
-authoritative plan transition finishes, the same owner receives the completed
-claim again and can replay the identical completion until the plan is terminal.
+a one-way owner digest bound to a fresh process instance; raw runtime
+credentials are not stored. Heartbeats atomically renew only an unexpired claim
+with the same owner and generation and never acquire work. If completion
+persistence wins before the authoritative plan transition finishes, the same
+owner receives the completed claim again and can replay the identical
+completion until the plan is terminal.
 
 SQLite databases are migrated transactionally when opened. Tenkai refuses to
 open a database whose schema is newer than the binary supports. Use

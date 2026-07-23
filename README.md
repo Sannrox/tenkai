@@ -232,6 +232,26 @@ idempotent, updates verified deployed observations, and makes the plan
 terminal. Environments with runtime tokens are never executed by the embedded
 server executor, preventing split ownership.
 
+Run one pull-only runtime per assigned environment. The bearer token is read
+only from runtime configuration and is not passed to the executor:
+
+```sh
+export TENKAI_SERVER_URL=https://tenkai.example.internal
+export TENKAI_RUNTIME_ENVIRONMENT=prod
+export TENKAI_RUNTIME_TOKEN='replace-from-secret-store'
+export TENKAI_RUNTIME_EXECUTOR=/opt/tenkai/bin/environment-executor
+tenkai-runtime
+```
+
+The configured executor receives only non-secret arguments:
+`--action`, `--product`, `--target-version`, `--release-digest`,
+`--artifact-digest`, `--workdir`, and `--idempotency-key`. It must durably
+deduplicate the idempotency key before mutating its target. The runtime renews
+its generation-fenced claim while the executor runs, terminates the executor
+when renewal fails, and reports one fixed-shape receipt per step without
+capturing command output. `tenkai-runtime --once` performs one deterministic
+pull for supervisors and tests.
+
 ## Deploying from GitHub
 
 GitHub is the artifact source; tenkai is the local delivery plane. The
@@ -281,6 +301,9 @@ control plane can't safely restart its own backend mid-apply.
 | `TENKAI_SERVER_URL` | unset | Remote control-plane URL used with `tenkaictl --target remote` |
 | `TENKAI_MANAGEMENT_TOKEN` | unset | Required bearer secret for server management requests and remote CLI mode |
 | `TENKAI_RUNTIME_TOKENS` | `{}` | Server-only JSON object mapping bearer secrets to one environment each |
+| `TENKAI_RUNTIME_ENVIRONMENT` | unset | The one environment assigned to an environment-runtime process |
+| `TENKAI_RUNTIME_TOKEN` | unset | Runtime-only bearer secret; kept out of command-line arguments and executor state |
+| `TENKAI_RUNTIME_EXECUTOR` | unset | Absolute path to the environment executor implementing the idempotency contract |
 | `TENKAI_DATABASE` | `.tenkai-state/tenkai.db` | Embedded or server-owned operational SQLite database |
 | `TENKAI_LISTEN` | `127.0.0.1:8080` | Server listen address; must remain loopback behind a TLS proxy |
 
@@ -300,9 +323,9 @@ providers without transferring operational authority.
 
 v0 walking skeleton. Working: signed publish/promote/subscribe, plan/apply/status,
 eval gates, health probes, auto-rollback, deliberate rollback, recurring
-maintenance windows, and a full graph audit trail. Not yet: multiple
-environments beyond registration, version constraints,
-environment runtimes, disconnected environments — see [DESIGN.md](DESIGN.md)
+maintenance windows, scoped environment runtimes, and a full graph audit trail.
+Not yet: multiple environments beyond registration, version constraints, or
+disconnected environments — see [DESIGN.md](DESIGN.md)
 for the roadmap.
 
 Active implementation work and dependencies are tracked in GitHub Issues.
