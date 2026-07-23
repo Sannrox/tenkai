@@ -3,10 +3,7 @@
 use anyhow::{Result, bail};
 
 use crate::client::Ctx;
-use crate::pb::sekai::{
-    ActionOp, ActionParamDef, ActionTypeDef, CreateActionTypeRequest, CreateSchemaTypeRequest,
-    ListSchemaTypesRequest, ObjectType, PropertyDef,
-};
+use crate::pb::sekai::{ActionOp, ActionParamDef, ActionTypeDef, ObjectType, PropertyDef};
 
 pub const NS: &str = "tenkai";
 
@@ -409,12 +406,8 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
     let mut registered = Vec::new();
     for t in types {
         let kind = t.kind.clone();
-        match ctx
-            .sekai
-            .create_schema_type(CreateSchemaTypeRequest { r#type: Some(t) })
-            .await
-        {
-            Ok(_) => registered.push(kind),
+        match ctx.register_schema(t).await {
+            Ok(()) => registered.push(kind),
             Err(status)
                 if status.code() == tonic::Code::AlreadyExists
                     || (status.code() == tonic::Code::Internal
@@ -483,14 +476,8 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
     ];
     for action in actions {
         let name = action.name.clone();
-        match ctx
-            .sekai
-            .create_action_type(CreateActionTypeRequest {
-                action_type: Some(action),
-            })
-            .await
-        {
-            Ok(_) => registered.push(name),
+        match ctx.register_action(action).await {
+            Ok(()) => registered.push(name),
             Err(status) if status.code() == tonic::Code::AlreadyExists => {}
             Err(status)
                 if status.code() == tonic::Code::Internal
@@ -506,12 +493,7 @@ pub async fn require_canary_schema(ctx: &mut Ctx) -> Result<()> {
     let preflight = ctx.canary_schema_preflight();
     preflight
         .get_or_try_init(|| async {
-            let schemas = ctx
-                .sekai
-                .list_schema_types(ListSchemaTypesRequest {})
-                .await?
-                .into_inner()
-                .types;
+            let schemas = ctx.schemas().await?;
             let required = [
                 KIND_CANARY_DESIGNATION,
                 KIND_CANARY_POLICY,

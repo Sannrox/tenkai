@@ -1,6 +1,7 @@
 //! Connection to a local sekai-chisei server, plus thin object/link helpers.
 
 use anyhow::{Context as _, Result};
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 use tonic::metadata::MetadataValue;
@@ -10,14 +11,17 @@ use tonic::transport::{Channel, Endpoint};
 use tonic::{Request, Status};
 
 use crate::pb::chisei::chisei_service_client::ChiseiServiceClient;
+use crate::pb::chisei::{
+    EvalRun, EvalSuite, GetEvalRunRequest, GetEvalSuiteRequest, ListEvalRunsRequest,
+};
 use crate::pb::sekai::sekai_service_client::SekaiServiceClient;
 use crate::pb::sekai::{
-    ActionRequest, ActionResult, CreateLinkRequest, CreateObjectRequest, Decision,
+    ActionRequest, ActionResult, ActionTypeDef, CreateLinkRequest, CreateObjectRequest, Decision,
     DeleteLinkRequest, DeleteObjectRequest, DenyActionRequest, ExecuteActionRequest,
     FindByPropertyRequest, GetLinkedObjectsRequest, GetLinksRequest, GetObjectRequest,
-    GuardedCreateObjectRequest, GuardedUpdateObjectRequest, LeasePrecondition, Link,
+    GuardedCreateObjectRequest, GuardedUpdateObjectRequest, Lease, LeasePrecondition, Link,
     ListDecisionsRequest, ListFilter, ListObjectChangesRequest, ListObjectsRequest, Object,
-    ObjectChange, UpdateObjectRequest,
+    ObjectChange, ObjectType, UpdateObjectRequest,
 };
 
 fn action_actor_from_changes(
@@ -62,9 +66,17 @@ pub type Chisei = ChiseiServiceClient<InterceptedService<Channel, Meta>>;
 
 #[derive(Clone)]
 pub struct Ctx {
-    pub sekai: Sekai,
-    pub chisei: Chisei,
+    backend: Backend,
     canary_schema_preflight: Arc<OnceCell<()>>,
+}
+
+#[derive(Clone)]
+enum Backend {
+    Remote {
+        sekai: Box<Sekai>,
+        chisei: Box<Chisei>,
+    },
+    Embedded(Arc<crate::embedded::EmbeddedStore>),
 }
 
 fn token_transport_is_safe(url: &str) -> bool {
@@ -113,28 +125,293 @@ pub async fn connect() -> Result<Ctx> {
         principal: std::env::var("TENKAI_PRINCIPAL").unwrap_or_else(|_| "tenkai".into()),
     };
     Ok(Ctx {
-        sekai: SekaiServiceClient::with_interceptor(channel.clone(), meta.clone()),
-        chisei: ChiseiServiceClient::with_interceptor(channel, meta),
+        backend: Backend::Remote {
+            sekai: Box::new(SekaiServiceClient::with_interceptor(
+                channel.clone(),
+                meta.clone(),
+            )),
+            chisei: Box::new(ChiseiServiceClient::with_interceptor(channel, meta)),
+        },
         canary_schema_preflight: Arc::new(OnceCell::new()),
     })
 }
 
 impl Ctx {
+    /// Open the complete in-process backend used by the solo CLI.
+    pub fn embedded(path: impl AsRef<Path>) -> Result<Self> {
+        let principal = std::env::var("TENKAI_PRINCIPAL").unwrap_or_else(|_| "tenkai".into());
+        Ok(Self {
+            backend: Backend::Embedded(Arc::new(crate::embedded::EmbeddedStore::open(
+                path, principal,
+            )?)),
+            canary_schema_preflight: Arc::new(OnceCell::new()),
+        })
+    }
+
+    pub fn is_embedded(&self) -> bool {
+        matches!(self.backend, Backend::Embedded(_))
+    }
+
+    pub fn backup_embedded(&self, destination: impl AsRef<Path>) -> Result<()> {
+        self.embedded_store()
+            .context("backup is available only in embedded mode")?
+            .backup(destination)
+    }
+
+    fn remote(&mut self) -> Result<(&mut Sekai, &mut Chisei)> {
+        match &mut self.backend {
+            Backend::Remote { sekai, chisei } => Ok((sekai.as_mut(), chisei.as_mut())),
+            Backend::Embedded(_) => {
+                anyhow::bail!("operation requires a configured remote provider")
+            }
+        }
+    }
+
+    fn embedded_store(&self) -> Option<&crate::embedded::EmbeddedStore> {
+        match &self.backend {
+            Backend::Embedded(store) => Some(store),
+            Backend::Remote { .. } => None,
+        }
+    }
+
+    pub(crate) async fn register_schema(
+        &mut self,
+        schema: ObjectType,
+    ) -> std::result::Result<(), tonic::Status> {
+        if let Some(store) = self.embedded_store() {
+            return store.register_schema(schema);
+        }
+        let (sekai, _) = self
+            .remote()
+            .map_err(|error| tonic::Status::internal(error.to_string()))?;
+        sekai
+            .create_schema_type(crate::pb::sekai::CreateSchemaTypeRequest {
+                r#type: Some(schema),
+            })
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn schemas(&mut self) -> Result<Vec<ObjectType>> {
+        if let Some(store) = self.embedded_store() {
+            return store.schemas();
+        }
+        let (sekai, _) = self.remote()?;
+        Ok(sekai
+            .list_schema_types(crate::pb::sekai::ListSchemaTypesRequest {})
+            .await?
+            .into_inner()
+            .types)
+    }
+
+    pub(crate) async fn register_action(
+        &mut self,
+        action: ActionTypeDef,
+    ) -> std::result::Result<(), tonic::Status> {
+        if let Some(store) = self.embedded_store() {
+            return store.register_action(action);
+        }
+        let (sekai, _) = self
+            .remote()
+            .map_err(|error| tonic::Status::internal(error.to_string()))?;
+        sekai
+            .create_action_type(crate::pb::sekai::CreateActionTypeRequest {
+                action_type: Some(action),
+            })
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn eval_suite(&mut self, id: &str) -> Result<Option<EvalSuite>> {
+        if self.is_embedded() {
+            anyhow::bail!(
+                "embedded mode has no governance provider; configure remote provider mode for eval suite {id}"
+            );
+        }
+        let (_, chisei) = self.remote()?;
+        match chisei
+            .get_eval_suite(GetEvalSuiteRequest { id: id.into() })
+            .await
+        {
+            Ok(response) => Ok(response.into_inner().suite),
+            Err(status) if status.code() == tonic::Code::NotFound => Ok(None),
+            Err(status) => Err(status.into()),
+        }
+    }
+
+    pub(crate) async fn eval_runs(&mut self, suite_id: &str) -> Result<Vec<EvalRun>> {
+        if self.is_embedded() {
+            anyhow::bail!(
+                "embedded mode has no governance provider; configure remote provider mode for eval suite {suite_id}"
+            );
+        }
+        let (_, chisei) = self.remote()?;
+        Ok(chisei
+            .list_eval_runs(ListEvalRunsRequest {
+                suite_id: suite_id.into(),
+            })
+            .await?
+            .into_inner()
+            .runs)
+    }
+
+    pub(crate) async fn eval_run(&mut self, id: &str) -> Result<Option<EvalRun>> {
+        if self.is_embedded() {
+            anyhow::bail!("embedded mode has no governance provider; cannot load eval run {id}");
+        }
+        let (_, chisei) = self.remote()?;
+        match chisei
+            .get_eval_run(GetEvalRunRequest { id: id.into() })
+            .await
+        {
+            Ok(response) => Ok(response.into_inner().run),
+            Err(status) if status.code() == tonic::Code::NotFound => Ok(None),
+            Err(status) => Err(status.into()),
+        }
+    }
+
+    pub(crate) async fn acquire_lease(
+        &mut self,
+        namespace: &str,
+        key: &str,
+        owner: &str,
+        ttl_ms: i64,
+    ) -> Result<Lease> {
+        if let Some(store) = self.embedded_store() {
+            return store.acquire_lease(namespace, key, owner, ttl_ms);
+        }
+        let (sekai, _) = self.remote()?;
+        sekai
+            .acquire_lease(crate::pb::sekai::AcquireLeaseRequest {
+                namespace: namespace.into(),
+                key: key.into(),
+                owner: owner.into(),
+                ttl_ms,
+                request_id: uuid::Uuid::new_v4().to_string(),
+            })
+            .await?
+            .into_inner()
+            .lease
+            .context("provider returned an empty lease")
+    }
+
+    pub(crate) async fn get_lease(&mut self, namespace: &str, key: &str) -> Result<Option<Lease>> {
+        if let Some(store) = self.embedded_store() {
+            return store.get_lease(namespace, key);
+        }
+        let (sekai, _) = self.remote()?;
+        match sekai
+            .get_lease(crate::pb::sekai::GetLeaseRequest {
+                namespace: namespace.into(),
+                key: key.into(),
+            })
+            .await
+        {
+            Ok(response) => Ok(response.into_inner().lease),
+            Err(status) if status.code() == tonic::Code::NotFound => Ok(None),
+            Err(status) => Err(status.into()),
+        }
+    }
+
+    pub(crate) async fn refresh_lease(
+        &mut self,
+        namespace: &str,
+        key: &str,
+        fencing_token: &str,
+        ttl_ms: i64,
+    ) -> Result<Lease> {
+        if let Some(store) = self.embedded_store() {
+            return store.refresh_lease(namespace, key, fencing_token, ttl_ms);
+        }
+        let (sekai, _) = self.remote()?;
+        sekai
+            .refresh_lease(crate::pb::sekai::RefreshLeaseRequest {
+                namespace: namespace.into(),
+                key: key.into(),
+                fencing_token: fencing_token.into(),
+                ttl_ms,
+                request_id: uuid::Uuid::new_v4().to_string(),
+            })
+            .await?
+            .into_inner()
+            .lease
+            .context("provider returned an empty refreshed lease")
+    }
+
+    pub(crate) async fn release_lease(
+        &mut self,
+        namespace: &str,
+        key: &str,
+        fencing_token: &str,
+    ) -> Result<Lease> {
+        if let Some(store) = self.embedded_store() {
+            return store.release_lease(namespace, key, fencing_token);
+        }
+        let (sekai, _) = self.remote()?;
+        sekai
+            .release_lease(crate::pb::sekai::ReleaseLeaseRequest {
+                namespace: namespace.into(),
+                key: key.into(),
+                fencing_token: fencing_token.into(),
+                request_id: uuid::Uuid::new_v4().to_string(),
+            })
+            .await?
+            .into_inner()
+            .lease
+            .context("provider returned an empty released lease")
+    }
+
+    pub(crate) async fn takeover_expired_lease(
+        &mut self,
+        namespace: &str,
+        key: &str,
+        owner: &str,
+        expected_fencing_token: &str,
+        expected_expires_at_ms: i64,
+        ttl_ms: i64,
+    ) -> Result<Lease> {
+        if let Some(store) = self.embedded_store() {
+            return store.takeover_lease(
+                namespace,
+                key,
+                owner,
+                expected_fencing_token,
+                expected_expires_at_ms,
+                ttl_ms,
+            );
+        }
+        let (sekai, _) = self.remote()?;
+        sekai
+            .takeover_expired_lease(crate::pb::sekai::TakeoverExpiredLeaseRequest {
+                namespace: namespace.into(),
+                key: key.into(),
+                owner: owner.into(),
+                expected_fencing_token: expected_fencing_token.into(),
+                expected_expires_at_ms,
+                ttl_ms,
+                request_id: uuid::Uuid::new_v4().to_string(),
+            })
+            .await?
+            .into_inner()
+            .lease
+            .context("provider returned an empty takeover lease")
+    }
+
     pub(crate) fn canary_schema_preflight(&self) -> Arc<OnceCell<()>> {
         Arc::clone(&self.canary_schema_preflight)
     }
 
     /// Get an object by id; `None` on not-found.
     pub async fn get(&mut self, id: &str) -> Result<Option<Object>> {
-        match self
-            .sekai
-            .get_object(GetObjectRequest { id: id.into() })
-            .await
-        {
-            Ok(resp) => Ok(resp.into_inner().object),
-            Err(status) if status.code() == tonic::Code::NotFound => Ok(None),
-            Err(status) => Err(status.into()),
-        }
+        let Some(store) = self.embedded_store() else {
+            let (sekai, _) = self.remote()?;
+            return match sekai.get_object(GetObjectRequest { id: id.into() }).await {
+                Ok(resp) => Ok(resp.into_inner().object),
+                Err(status) if status.code() == tonic::Code::NotFound => Ok(None),
+                Err(status) => Err(status.into()),
+            };
+        };
+        store.get(id)
     }
 
     /// Create an object without falling back to update when its id exists.
@@ -142,8 +419,13 @@ impl Ctx {
         &mut self,
         object: Object,
     ) -> std::result::Result<Object, tonic::Status> {
-        Ok(self
-            .sekai
+        if let Some(store) = self.embedded_store() {
+            return store.create(object);
+        }
+        let (sekai, _) = self
+            .remote()
+            .map_err(|error| tonic::Status::internal(error.to_string()))?;
+        Ok(sekai
             .create_object(CreateObjectRequest {
                 object: Some(object),
             })
@@ -154,7 +436,11 @@ impl Ctx {
     }
 
     pub async fn delete(&mut self, id: &str) -> Result<()> {
-        self.sekai
+        if let Some(store) = self.embedded_store() {
+            return store.delete(id);
+        }
+        let (sekai, _) = self.remote()?;
+        sekai
             .delete_object(DeleteObjectRequest { id: id.into() })
             .await?;
         Ok(())
@@ -162,9 +448,13 @@ impl Ctx {
 
     /// Create the object, or update it if the id already exists.
     pub async fn put(&mut self, object: Object) -> Result<Object> {
+        if let Some(store) = self.embedded_store() {
+            return store.put(object);
+        }
         let existing = self.get(&object.id).await?;
+        let (sekai, _) = self.remote()?;
         let resp = if existing.is_some() {
-            self.sekai
+            sekai
                 .update_object(UpdateObjectRequest {
                     object: Some(object),
                 })
@@ -172,7 +462,7 @@ impl Ctx {
                 .into_inner()
                 .object
         } else {
-            self.sekai
+            sekai
                 .create_object(CreateObjectRequest {
                     object: Some(object),
                 })
@@ -190,6 +480,9 @@ impl Ctx {
         lease_key: &str,
         fencing_token: &str,
     ) -> Result<Object> {
+        if let Some(store) = self.embedded_store() {
+            return store.guarded_put(object, lease_namespace, lease_key, fencing_token, true);
+        }
         let request = GuardedCreateObjectRequest {
             object: Some(object),
             lease_precondition: Some(LeasePrecondition {
@@ -199,7 +492,8 @@ impl Ctx {
                 request_id: uuid::Uuid::new_v4().to_string(),
             }),
         };
-        let response = match self.sekai.guarded_create_object(request.clone()).await {
+        let (sekai, _) = self.remote()?;
+        let response = match sekai.guarded_create_object(request.clone()).await {
             Ok(response) => response,
             Err(status)
                 if matches!(
@@ -207,7 +501,7 @@ impl Ctx {
                     tonic::Code::Unavailable | tonic::Code::DeadlineExceeded
                 ) =>
             {
-                self.sekai.guarded_create_object(request).await?
+                sekai.guarded_create_object(request).await?
             }
             Err(status) => return Err(status.into()),
         };
@@ -224,6 +518,9 @@ impl Ctx {
         lease_key: &str,
         fencing_token: &str,
     ) -> Result<Object> {
+        if let Some(store) = self.embedded_store() {
+            return store.guarded_put(object, lease_namespace, lease_key, fencing_token, false);
+        }
         let request = GuardedUpdateObjectRequest {
             object: Some(object),
             lease_precondition: Some(LeasePrecondition {
@@ -233,7 +530,8 @@ impl Ctx {
                 request_id: uuid::Uuid::new_v4().to_string(),
             }),
         };
-        let response = match self.sekai.guarded_update_object(request.clone()).await {
+        let (sekai, _) = self.remote()?;
+        let response = match sekai.guarded_update_object(request.clone()).await {
             Ok(response) => response,
             Err(status)
                 if matches!(
@@ -241,7 +539,7 @@ impl Ctx {
                     tonic::Code::Unavailable | tonic::Code::DeadlineExceeded
                 ) =>
             {
-                self.sekai.guarded_update_object(request).await?
+                sekai.guarded_update_object(request).await?
             }
             Err(status) => return Err(status.into()),
         };
@@ -260,8 +558,11 @@ impl Ctx {
             relation: relation.into(),
             created: crate::now_millis(),
         };
-        match self
-            .sekai
+        if let Some(store) = self.embedded_store() {
+            return store.create_link(link, false).map_err(anyhow::Error::from);
+        }
+        let (sekai, _) = self.remote()?;
+        match sekai
             .create_link(CreateLinkRequest {
                 link: Some(link),
                 fail_if_exists: false,
@@ -287,7 +588,13 @@ impl Ctx {
         &mut self,
         link: Link,
     ) -> std::result::Result<(), tonic::Status> {
-        self.sekai
+        if let Some(store) = self.embedded_store() {
+            return store.create_link(link, true);
+        }
+        let (sekai, _) = self
+            .remote()
+            .map_err(|error| tonic::Status::internal(error.to_string()))?;
+        sekai
             .create_link(CreateLinkRequest {
                 link: Some(link),
                 fail_if_exists: true,
@@ -298,7 +605,11 @@ impl Ctx {
 
     pub async fn unlink(&mut self, from_id: &str, to_id: &str, relation: &str) -> Result<()> {
         let id = format!("{from_id}--{relation}--{to_id}");
-        match self.sekai.delete_link(DeleteLinkRequest { id }).await {
+        if let Some(store) = self.embedded_store() {
+            return store.unlink(&id);
+        }
+        let (sekai, _) = self.remote()?;
+        match sekai.delete_link(DeleteLinkRequest { id }).await {
             Ok(_) => Ok(()),
             Err(status) if status.code() == tonic::Code::NotFound => Ok(()),
             Err(status) => Err(status.into()),
@@ -311,8 +622,11 @@ impl Ctx {
         relation: &str,
         direction: &str,
     ) -> Result<Vec<Object>> {
-        Ok(self
-            .sekai
+        if let Some(store) = self.embedded_store() {
+            return store.linked(object_id, relation, direction);
+        }
+        let (sekai, _) = self.remote()?;
+        Ok(sekai
             .get_linked_objects(GetLinkedObjectsRequest {
                 object_id: object_id.into(),
                 relation: relation.into(),
@@ -329,8 +643,11 @@ impl Ctx {
         key: &str,
         value: &str,
     ) -> Result<Vec<Object>> {
-        Ok(self
-            .sekai
+        if let Some(store) = self.embedded_store() {
+            return store.find_by_property(kind, key, value);
+        }
+        let (sekai, _) = self.remote()?;
+        Ok(sekai
             .find_by_property(FindByPropertyRequest {
                 kind: kind.into(),
                 key: key.into(),
@@ -342,8 +659,11 @@ impl Ctx {
     }
 
     pub async fn links(&mut self, object_id: &str, relation: &str) -> Result<Vec<Link>> {
-        Ok(self
-            .sekai
+        if let Some(store) = self.embedded_store() {
+            return store.links(object_id, relation, "out");
+        }
+        let (sekai, _) = self.remote()?;
+        Ok(sekai
             .get_links(GetLinksRequest {
                 object_id: object_id.into(),
                 relation: relation.into(),
@@ -355,11 +675,14 @@ impl Ctx {
     }
 
     pub async fn list_kind(&mut self, kind: &str) -> Result<Vec<Object>> {
+        if let Some(store) = self.embedded_store() {
+            return store.list_kind(kind);
+        }
         const PAGE_SIZE: i32 = 100;
         let mut objects = Vec::new();
+        let (sekai, _) = self.remote()?;
         loop {
-            let response = self
-                .sekai
+            let response = sekai
                 .list_objects(ListObjectsRequest {
                     filter: Some(ListFilter {
                         kind: kind.into(),
@@ -400,7 +723,11 @@ impl Ctx {
         params: std::collections::HashMap<String, String>,
         dry_run: bool,
     ) -> Result<ActionResult> {
-        self.sekai
+        if let Some(store) = self.embedded_store() {
+            return store.execute_action(action, params, dry_run);
+        }
+        let (sekai, _) = self.remote()?;
+        sekai
             .execute_action(ExecuteActionRequest {
                 request: Some(ActionRequest {
                     action: action.into(),
@@ -428,7 +755,13 @@ impl Ctx {
     }
 
     pub async fn deny_action(&mut self, approval_id: &str, reason: &str) -> Result<()> {
-        self.sekai
+        if self.is_embedded() {
+            anyhow::bail!(
+                "embedded mode has no deferred approvals; action {approval_id} cannot be denied"
+            );
+        }
+        let (sekai, _) = self.remote()?;
+        sekai
             .deny_action(DenyActionRequest {
                 approval_id: approval_id.into(),
                 reason: reason.into(),
@@ -443,8 +776,11 @@ impl Ctx {
         action: &str,
         after: i64,
     ) -> Result<Vec<Decision>> {
-        Ok(self
-            .sekai
+        if let Some(store) = self.embedded_store() {
+            return store.decisions(actor, action, after);
+        }
+        let (sekai, _) = self.remote()?;
+        Ok(sekai
             .list_decisions(ListDecisionsRequest {
                 actor: actor.into(),
                 action: action.into(),
@@ -457,11 +793,14 @@ impl Ctx {
     }
 
     pub async fn object_changes(&mut self, object_id: &str) -> Result<Vec<ObjectChange>> {
+        if let Some(store) = self.embedded_store() {
+            return store.changes(object_id);
+        }
         let mut offset = 0;
         let mut all = Vec::new();
+        let (sekai, _) = self.remote()?;
         loop {
-            let changes = self
-                .sekai
+            let changes = sekai
                 .list_object_changes(ListObjectChangesRequest {
                     object_id: object_id.into(),
                     limit: 100,
@@ -486,23 +825,15 @@ impl Ctx {
     ) -> Result<String> {
         let correlation = uuid::Uuid::new_v4().to_string();
         let result = self
-            .sekai
-            .execute_action(ExecuteActionRequest {
-                request: Some(ActionRequest {
-                    action: crate::ontology::ACTION_EMERGENCY_OVERRIDE.into(),
-                    params: std::collections::HashMap::from([
-                        ("id".into(), plan_id.into()),
-                        ("reason".into(), reason.into()),
-                        ("correlation".into(), correlation.clone()),
-                    ]),
-                    actor: String::new(),
-                }),
-                dry_run: false,
-            })
-            .await?
-            .into_inner()
-            .result
-            .context("governed emergency override returned no result")?;
+            .execute_action_result(
+                crate::ontology::ACTION_EMERGENCY_OVERRIDE,
+                std::collections::HashMap::from([
+                    ("id".into(), plan_id.into()),
+                    ("reason".into(), reason.into()),
+                    ("correlation".into(), correlation.clone()),
+                ]),
+            )
+            .await?;
         match result.decision.as_str() {
             "allow" => self
                 .emergency_override_actor(plan_id, &correlation)
@@ -559,7 +890,7 @@ impl Ctx {
 
 #[cfg(test)]
 mod tests {
-    use super::{action_actor_from_changes, token_transport_is_safe};
+    use super::{Ctx, action_actor_from_changes, token_transport_is_safe};
     use crate::pb::sekai::ObjectChange;
 
     #[test]
@@ -600,5 +931,19 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn embedded_gate_lookup_fails_locally_without_networking() {
+        let path =
+            std::env::temp_dir().join(format!("tenkai-embedded-gate-{}.db", uuid::Uuid::new_v4()));
+        let mut ctx = Ctx::embedded(&path).unwrap();
+        let error = ctx.eval_suite("required-suite").await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("embedded mode has no governance provider")
+        );
+        std::fs::remove_file(path).unwrap();
     }
 }
