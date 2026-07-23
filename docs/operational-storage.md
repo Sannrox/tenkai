@@ -27,6 +27,13 @@ persistence wins before the authoritative plan transition finishes, the same
 owner receives the completed claim again and can replay the identical
 completion until the plan is terminal.
 
+Offline receipt imports persist the first verified completion under the signed
+bundle digest before applying it through the normal plan lifecycle. Repeating
+the same canonical receipt is idempotent; different receipt content for that
+bundle digest is an immutable conflict. This record survives a restart between
+verification and lifecycle completion, so an identical import can safely
+finish recovery.
+
 SQLite databases are migrated transactionally when opened. Tenkai refuses to
 open a database whose schema is newer than the binary supports. Use
 `tenkaictl backup <destination>` for a live, consistent snapshot; do not copy a

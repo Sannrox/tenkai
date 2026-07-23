@@ -11,7 +11,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -187,6 +187,25 @@ pub struct ReceiptRecord {
     pub payload_json: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OfflineImportRecord {
+    pub bundle_digest: String,
+    pub environment_id: String,
+    pub plan_id: String,
+    pub receipt_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OfflineStepImportRecord {
+    pub receipt_id: String,
+    pub environment_id: String,
+    pub plan_id: String,
+    pub step_id: String,
+    pub attempt: u32,
+    pub result_digest: String,
+    pub succeeded: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RollbackStatus {
@@ -298,6 +317,12 @@ pub trait OperationalStore: Send + Sync {
     fn current_lease(&self, environment: &str) -> Result<Option<LeaseRecord>>;
     fn record_receipt(&self, owner: &str, receipt: &ReceiptRecord) -> Result<()>;
     fn get_receipt(&self, id: &str) -> Result<Option<ReceiptRecord>>;
+    fn record_offline_import(
+        &self,
+        receipt: &OfflineImportRecord,
+        steps: &[OfflineStepImportRecord],
+    ) -> Result<()>;
+    fn get_offline_import(&self, bundle_digest: &str) -> Result<Option<OfflineImportRecord>>;
     fn create_rollback(&self, owner: &str, rollback: &RollbackRecord) -> Result<()>;
     fn transition_rollback(
         &self,
@@ -464,7 +489,17 @@ fn migrate(connection: &mut Connection) -> Result<()> {
              );
              CREATE INDEX runtime_claims_environment
                 ON runtime_claims(environment_id, expires_at);
-             PRAGMA user_version = 5;",
+             CREATE TABLE offline_imports (
+                bundle_digest TEXT PRIMARY KEY, environment_id TEXT NOT NULL,
+                plan_id TEXT NOT NULL, receipt_json TEXT NOT NULL
+             );
+             CREATE TABLE offline_step_receipts (
+                receipt_id TEXT PRIMARY KEY, environment_id TEXT NOT NULL,
+                plan_id TEXT NOT NULL, step_id TEXT NOT NULL,
+                attempt INTEGER NOT NULL, result_digest TEXT NOT NULL,
+                succeeded INTEGER NOT NULL
+             );
+             PRAGMA user_version = 6;",
         )?;
         tx.commit()?;
     }
@@ -494,7 +529,17 @@ fn migrate(connection: &mut Connection) -> Result<()> {
              );
              CREATE INDEX runtime_claims_environment
                 ON runtime_claims(environment_id, expires_at);
-             PRAGMA user_version = 5;",
+             CREATE TABLE offline_imports (
+                bundle_digest TEXT PRIMARY KEY, environment_id TEXT NOT NULL,
+                plan_id TEXT NOT NULL, receipt_json TEXT NOT NULL
+             );
+             CREATE TABLE offline_step_receipts (
+                receipt_id TEXT PRIMARY KEY, environment_id TEXT NOT NULL,
+                plan_id TEXT NOT NULL, step_id TEXT NOT NULL,
+                attempt INTEGER NOT NULL, result_digest TEXT NOT NULL,
+                succeeded INTEGER NOT NULL
+             );
+             PRAGMA user_version = 6;",
         )?;
         tx.commit()?;
     }
@@ -514,7 +559,17 @@ fn migrate(connection: &mut Connection) -> Result<()> {
              );
              CREATE INDEX runtime_claims_environment
                 ON runtime_claims(environment_id, expires_at);
-             PRAGMA user_version = 5;",
+             CREATE TABLE offline_imports (
+                bundle_digest TEXT PRIMARY KEY, environment_id TEXT NOT NULL,
+                plan_id TEXT NOT NULL, receipt_json TEXT NOT NULL
+             );
+             CREATE TABLE offline_step_receipts (
+                receipt_id TEXT PRIMARY KEY, environment_id TEXT NOT NULL,
+                plan_id TEXT NOT NULL, step_id TEXT NOT NULL,
+                attempt INTEGER NOT NULL, result_digest TEXT NOT NULL,
+                succeeded INTEGER NOT NULL
+             );
+             PRAGMA user_version = 6;",
         )?;
         tx.commit()?;
     }
@@ -528,7 +583,17 @@ fn migrate(connection: &mut Connection) -> Result<()> {
              );
              CREATE INDEX runtime_claims_environment
                 ON runtime_claims(environment_id, expires_at);
-             PRAGMA user_version = 5;",
+             CREATE TABLE offline_imports (
+                bundle_digest TEXT PRIMARY KEY, environment_id TEXT NOT NULL,
+                plan_id TEXT NOT NULL, receipt_json TEXT NOT NULL
+             );
+             CREATE TABLE offline_step_receipts (
+                receipt_id TEXT PRIMARY KEY, environment_id TEXT NOT NULL,
+                plan_id TEXT NOT NULL, step_id TEXT NOT NULL,
+                attempt INTEGER NOT NULL, result_digest TEXT NOT NULL,
+                succeeded INTEGER NOT NULL
+             );
+             PRAGMA user_version = 6;",
         )?;
         tx.commit()?;
     }
@@ -536,7 +601,34 @@ fn migrate(connection: &mut Connection) -> Result<()> {
         let tx = connection.transaction()?;
         tx.execute_batch(
             "ALTER TABLE runtime_claims ADD COLUMN completion_json TEXT;
-             PRAGMA user_version = 5;",
+             CREATE TABLE offline_imports (
+                bundle_digest TEXT PRIMARY KEY, environment_id TEXT NOT NULL,
+                plan_id TEXT NOT NULL, receipt_json TEXT NOT NULL
+             );
+             CREATE TABLE offline_step_receipts (
+                receipt_id TEXT PRIMARY KEY, environment_id TEXT NOT NULL,
+                plan_id TEXT NOT NULL, step_id TEXT NOT NULL,
+                attempt INTEGER NOT NULL, result_digest TEXT NOT NULL,
+                succeeded INTEGER NOT NULL
+             );
+             PRAGMA user_version = 6;",
+        )?;
+        tx.commit()?;
+    }
+    if found == 5 {
+        let tx = connection.transaction()?;
+        tx.execute_batch(
+            "CREATE TABLE offline_imports (
+                bundle_digest TEXT PRIMARY KEY, environment_id TEXT NOT NULL,
+                plan_id TEXT NOT NULL, receipt_json TEXT NOT NULL
+             );
+             CREATE TABLE offline_step_receipts (
+                receipt_id TEXT PRIMARY KEY, environment_id TEXT NOT NULL,
+                plan_id TEXT NOT NULL, step_id TEXT NOT NULL,
+                attempt INTEGER NOT NULL, result_digest TEXT NOT NULL,
+                succeeded INTEGER NOT NULL
+             );
+             PRAGMA user_version = 6;",
         )?;
         tx.commit()?;
     }
@@ -986,6 +1078,131 @@ impl OperationalStore for SqliteStore {
             "SELECT id,environment_id,plan_id,step_id,lease_generation,payload_json FROM receipts WHERE id=?1", [id],
             |row| Ok(ReceiptRecord { id: row.get(0)?, environment_id: row.get(1)?, plan_id: row.get(2)?, step_id: row.get(3)?, lease_generation: row.get(4)?, payload_json: row.get(5)? }),
         ).optional()?)
+    }
+
+    fn record_offline_import(
+        &self,
+        receipt: &OfflineImportRecord,
+        steps: &[OfflineStepImportRecord],
+    ) -> Result<()> {
+        let mut connection = self.connection()?;
+        let tx = connection.transaction()?;
+        let existing = tx
+            .query_row(
+                "SELECT environment_id,plan_id,receipt_json FROM offline_imports WHERE bundle_digest=?1",
+                [&receipt.bundle_digest],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some(existing) = existing
+            && existing
+                != (
+                    receipt.environment_id.clone(),
+                    receipt.plan_id.clone(),
+                    receipt.receipt_json.clone(),
+                )
+        {
+            return Err(StoreError::ImmutableConflict {
+                kind: "offline import",
+                id: receipt.bundle_digest.clone(),
+            });
+        }
+        for step in steps {
+            let existing = tx
+                .query_row(
+                    "SELECT environment_id,plan_id,step_id,attempt,result_digest,succeeded
+                     FROM offline_step_receipts WHERE receipt_id=?1",
+                    [&step.receipt_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, u32>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, bool>(5)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            if let Some(existing) = existing
+                && existing
+                    != (
+                        step.environment_id.clone(),
+                        step.plan_id.clone(),
+                        step.step_id.clone(),
+                        step.attempt,
+                        step.result_digest.clone(),
+                        step.succeeded,
+                    )
+            {
+                return Err(StoreError::ImmutableConflict {
+                    kind: "offline step receipt",
+                    id: step.receipt_id.clone(),
+                });
+            }
+        }
+        require_plan_environment(
+            &tx,
+            &receipt.plan_id,
+            &receipt.environment_id,
+            "offline import",
+        )?;
+        tx.execute(
+            "INSERT INTO offline_imports(bundle_digest,environment_id,plan_id,receipt_json)
+             VALUES(?1,?2,?3,?4)
+             ON CONFLICT(bundle_digest) DO NOTHING",
+            params![
+                receipt.bundle_digest,
+                receipt.environment_id,
+                receipt.plan_id,
+                receipt.receipt_json
+            ],
+        )?;
+        for step in steps {
+            tx.execute(
+                "INSERT INTO offline_step_receipts(
+                    receipt_id,environment_id,plan_id,step_id,attempt,result_digest,succeeded
+                 ) VALUES(?1,?2,?3,?4,?5,?6,?7)
+                 ON CONFLICT(receipt_id) DO NOTHING",
+                params![
+                    step.receipt_id,
+                    step.environment_id,
+                    step.plan_id,
+                    step.step_id,
+                    step.attempt,
+                    step.result_digest,
+                    step.succeeded
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn get_offline_import(&self, bundle_digest: &str) -> Result<Option<OfflineImportRecord>> {
+        let connection = self.connection()?;
+        Ok(connection
+            .query_row(
+                "SELECT bundle_digest,environment_id,plan_id,receipt_json
+                 FROM offline_imports WHERE bundle_digest=?1",
+                [bundle_digest],
+                |row| {
+                    Ok(OfflineImportRecord {
+                        bundle_digest: row.get(0)?,
+                        environment_id: row.get(1)?,
+                        plan_id: row.get(2)?,
+                        receipt_json: row.get(3)?,
+                    })
+                },
+            )
+            .optional()?)
     }
 
     fn create_rollback(&self, owner: &str, rollback: &RollbackRecord) -> Result<()> {
@@ -1640,6 +1857,64 @@ mod tests {
                 .complete_runtime_plan("plan-1", "runtime-a", 1, "{\"ok\":false}")
                 .is_err()
         );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn offline_imports_are_durable_idempotent_and_conflict_safe() {
+        let path = std::env::temp_dir().join(format!("tenkai-offline-{}.db", uuid::Uuid::new_v4()));
+        let record = OfflineImportRecord {
+            bundle_digest: "sha256:bundle".into(),
+            environment_id: "prod".into(),
+            plan_id: "plan-1".into(),
+            receipt_json: "{\"result\":\"succeeded\"}".into(),
+        };
+        let step = OfflineStepImportRecord {
+            receipt_id: "receipt-1".into(),
+            environment_id: "prod".into(),
+            plan_id: "plan-1".into(),
+            step_id: "step-1".into(),
+            attempt: 1,
+            result_digest: "sha256:result".into(),
+            succeeded: true,
+        };
+        {
+            let store = SqliteStore::open(&path).unwrap();
+            environment(&store);
+            plan(&store);
+            store
+                .record_offline_import(&record, std::slice::from_ref(&step))
+                .unwrap();
+            store
+                .record_offline_import(&record, std::slice::from_ref(&step))
+                .unwrap();
+        }
+        let reopened = SqliteStore::open(&path).unwrap();
+        assert_eq!(
+            reopened.get_offline_import(&record.bundle_digest).unwrap(),
+            Some(record.clone())
+        );
+        let mut conflict = record.clone();
+        conflict.receipt_json = "{\"result\":\"failed\"}".into();
+        assert!(matches!(
+            reopened.record_offline_import(&conflict, std::slice::from_ref(&step)),
+            Err(StoreError::ImmutableConflict {
+                kind: "offline import",
+                ..
+            })
+        ));
+        let mut reexport = record;
+        reexport.bundle_digest = "sha256:other-bundle".into();
+        reexport.receipt_json = "{\"result\":\"other\"}".into();
+        let mut conflicting_step = step;
+        conflicting_step.result_digest = "sha256:different".into();
+        assert!(matches!(
+            reopened.record_offline_import(&reexport, &[conflicting_step]),
+            Err(StoreError::ImmutableConflict {
+                kind: "offline step receipt",
+                ..
+            })
+        ));
         std::fs::remove_file(path).unwrap();
     }
 
