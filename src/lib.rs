@@ -18,6 +18,7 @@ pub mod plan_approval;
 pub mod providers;
 pub mod reconciler;
 pub mod release_signing;
+pub mod routing;
 pub mod runtime_agent;
 pub mod runtime_protocol;
 pub mod server;

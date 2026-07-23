@@ -480,7 +480,7 @@ pub async fn reverify_release(
     }
     let actual_manifest_digest = manifest::digest(raw_manifest);
     let workdir = Path::new(property(&release.properties, "workdir")?);
-    let actual_artifact_digest = manifest::artifact_digest(workdir, &manifest.deploy.inputs)?;
+    let actual_artifact_digest = manifest::artifact_digest(workdir, &manifest.immutable_inputs())?;
     let evidence = release_signing::verify_release(
         &envelope,
         &roots,
@@ -629,7 +629,7 @@ fn validate_stored_release_content(
         .filter(|value| !value.is_empty())
         .ok_or_else(|| anyhow::anyhow!("legacy release {} has no stored workdir", release.id))?;
     let actual_artifact_digest =
-        manifest::artifact_digest(Path::new(workdir), &stored_manifest.deploy.inputs)?;
+        manifest::artifact_digest(Path::new(workdir), &stored_manifest.immutable_inputs())?;
     if actual_artifact_digest != expected_artifact_digest
         || release
             .properties
@@ -656,12 +656,12 @@ pub async fn publish(
     let version = loaded.manifest.product.version.clone();
     let digest = manifest::digest(&loaded.raw);
     let artifact_digest =
-        manifest::artifact_digest(&loaded.workdir, &loaded.manifest.deploy.inputs)?;
+        manifest::artifact_digest(&loaded.workdir, &loaded.manifest.immutable_inputs())?;
     let verification = verify_publication(options, &digest, &artifact_digest)?;
     let verification_properties = verification.properties()?;
     let versioned_workdir = manifest::snapshot_workdir(
         &loaded.workdir,
-        &loaded.manifest.deploy.inputs,
+        &loaded.manifest.immutable_inputs(),
         &digest,
         &artifact_digest,
     )?;
