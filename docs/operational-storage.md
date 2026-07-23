@@ -26,27 +26,37 @@ authoritative plan transition finishes, the same owner receives the completed
 claim again and can replay the identical completion until the plan is terminal.
 
 SQLite databases are migrated transactionally when opened. Tenkai refuses to
-open a database whose schema is newer than the binary supports. Back up the
-database and its `-wal`/`-shm` files only while every writer is closed or
-quiesced, or through an atomic filesystem snapshot. For a live database, use
-SQLite's online backup API rather than sequential file copies. Restore testing
-does not require sekai-chisei or another optional provider.
+open a database whose schema is newer than the binary supports. Use
+`tenkaictl backup <destination>` for a live, consistent snapshot; do not copy a
+database and its WAL files sequentially. Stop every writer before
+`tenkaictl restore <source>`. Restore and integrity checks require no provider.
 
-## Existing v0 installations
+## Embedded-to-server migration
 
-Existing v0 authority remains in sekai-chisei until an importer and host wiring
-perform the ADR 0001 shadow-validation and explicit cutover. Issue #17 does not
-silently introduce mixed writers. Operators have two supported paths:
+Embedded and server hosts use the same SQLite file and domain contracts. The
+cutover is operational rather than a data reinterpretation:
 
-- Keep using the v0 CLI until the import/cutover command is available. Do not
-  point another Tenkai writer at the same environments.
-- For a disposable solo installation, archive the old graph for audit, create a
-  new SQLite database, republish releases, recreate channels/environments, and
-  explicitly reconcile each verified deployed version before applying plans.
+1. Stop embedded reconcile loops and wait for active applies to finish.
+2. Run `tenkaictl inspect` and reconcile any environment whose deployment state
+   is unknown.
+3. Run `tenkaictl backup /secure/tenkai-cutover.db`.
+4. Copy that backup to the server host and restore it into the configured
+   `TENKAI_DATABASE`.
+5. Start `tenkai-server` in its default embedded-provider mode. Verify
+   `/readyz`, inspect the first reconciliation result, and only then enable
+   environment runtime credentials.
+6. Keep the pre-cutover database read-only until rollback testing is complete.
 
-Deleting a SQLite database is reinitialization, not migration: it discards
-Tenkai-owned operational history. Never reinitialize an installation with an
-active or uncertain deployment; reconcile the target first.
+Do not run the embedded CLI and server as concurrent mutation controllers for
+the same environments. SQLite prevents database corruption, but it cannot make
+two hosts a highly available control plane. Development-only unsigned release
+permission is a per-publish CLI choice and is never enabled implicitly by
+server startup.
+
+Older sekai-backed v0 installations require an explicit republish and
+reconciliation cutover: archive the graph for audit, initialize embedded state,
+republish releases, recreate channels and environments, and record each
+verified deployed version with `tenkaictl env reconcile` before applying.
 
 Release payloads and runtime files do not belong in this database. The database
 stores content descriptors and recovery authority; content remains in a

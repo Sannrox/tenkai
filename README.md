@@ -6,14 +6,14 @@ integration through [sekai-chisei](https://github.com/Sannrox/sekai-chisei).
 
 You don't script deployments. You **publish** immutable releases, **promote**
 them into channels, and **subscribe** environments to channels. `tenkaictl`
-computes the plan that converges an environment on its channels, gates it on
-chisei eval runs, executes it, health-probes it, and rolls back automatically
-on failure. The accepted architecture makes Tenkai the operational owner and
-uses a sekai projection for lineage and audit; current v0 still uses sekai as
-its operational store until that migration is implemented.
+computes the plan that converges an environment on its channels, executes it,
+health-probes it, and rolls back automatically on failure. Optional governance
+providers can add evaluation gates; Tenkai remains the operational owner.
 
-This is the **local v0**: one machine, the CLI plays catalog + planner +
-executor. Embedded and future server operation share one application core. The
+The default **embedded mode** runs the application core, SQLite store, Catalog,
+and executor through one `tenkaictl` binary. It opens no network connection and
+requires no database or provider service. Embedded and server operation share
+the same application core. The
 durable boundary and service-evolution rules are recorded in
 [ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md); see
 [DESIGN.md](DESIGN.md) for the roadmap.
@@ -23,18 +23,10 @@ cache rules, and failure semantics are documented in
 
 ## Quickstart
 
-Run a sekai-chisei server in one terminal:
-
 ```bash
-cd ../sekai-chisei && SEKAI_INSECURE=1 cargo run --bin sekai-chisei
-```
+cargo build --bin tenkaictl
 
-Then:
-
-```bash
-cargo build
-
-# register the tenkai schema in sekai + create the `local` environment
+# initialize .tenkai-state/tenkai.db and create the local environment
 ./target/debug/tenkaictl init
 
 # publish an immutable release and promote it to a channel
@@ -47,6 +39,7 @@ cargo build
 ./target/debug/tenkaictl plan --env local
 ./target/debug/tenkaictl apply <plan-id-from-previous-command>
 ./target/debug/tenkaictl status
+./target/debug/tenkaictl inspect
 ```
 
 Publish a new version and `apply` again to upgrade. If the health probe of a
@@ -56,7 +49,7 @@ If failed cleanup leaves deployment state unknown, reconcile the external
 target manually, then run `tenkaictl env reconcile <env> <product>` after
 cleanup or add `--deployed <version>` to record the verified live version.
 
-Environment execution uses short-lived, generation-fenced Sekai leases. An
+Environment execution uses short-lived, generation-fenced Tenkai leases. An
 expired lease is taken over atomically; a paused older controller cannot
 refresh or release the replacement generation and revalidates ownership before
 each deployment step. A local supervisor holds the process fence while mutation
@@ -169,6 +162,30 @@ a later tick can converge from durable state. For local operation and tests,
 `tenkaictl reconcile --once` performs one deterministic tick and exits nonzero
 when any environment fails.
 
+## Embedded state operations
+
+Embedded mode stores its complete control-plane state in
+`.tenkai-state/tenkai.db` by default. Inspect and back it up without starting a
+service:
+
+```sh
+tenkaictl inspect
+tenkaictl backup /secure/backups/tenkai.db
+```
+
+`backup` uses SQLite's online backup API and is consistent while another
+embedded command is reading. Restore only when every Tenkai writer using the
+database is stopped:
+
+```sh
+tenkaictl restore /secure/backups/tenkai.db
+tenkaictl inspect
+```
+
+The backup contains operational records and Catalog descriptors. Deployment
+runtime directories and external artifact payloads must be backed up according
+to their own storage policy.
+
 ## Network server
 
 `tenkai-server` hosts the same reconciliation contract as embedded CLI mode,
@@ -179,7 +196,10 @@ database. Environment runtimes use separate tokens, each scoped server-side to
 exactly one environment.
 
 The server accepts plaintext HTTP only on loopback. Put a TLS reverse proxy in
-front of it for remote access; never pass tokens on a command line.
+front of it for remote access; never pass tokens on a command line. By default
+the server opens the same in-process state backend as `tenkaictl` and requires
+no provider service. `--provider-mode remote` is explicit and never inherits
+embedded development permissions.
 
 ```sh
 export TENKAI_MANAGEMENT_TOKEN='replace-from-secret-store'
@@ -244,30 +264,29 @@ control plane can't safely restart its own backend mid-apply.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `TENKAI_SEKAI_URL` | `http://127.0.0.1:$GRPC_PORT` | sekai-chisei gRPC endpoint |
-| `GRPC_PORT` | `50051` | Port used for the default URL |
-| `SEKAI_AUTH_TOKEN` | unset | Bearer token, when the server requires auth |
-| `TENKAI_PRINCIPAL` | `tenkai` | Caller identity (`x-principal`) |
+| `TENKAI_SEKAI_URL` | `http://127.0.0.1:$GRPC_PORT` | Optional provider endpoint used by the server host |
+| `GRPC_PORT` | `50051` | Port used for the optional provider URL |
+| `SEKAI_AUTH_TOKEN` | unset | Optional provider bearer token |
+| `TENKAI_PRINCIPAL` | `tenkai` | Embedded audit principal or remote provider caller identity |
 | `TENKAI_STATE_DIR` | `<workdir-parent>/.tenkai-state` | Immutable deploy-input snapshots and per-environment runtime directories; must be outside the source workdir |
-| `TENKAI_EXECUTOR_GUARD` | installed sibling binary | Explicit path to `tenkai-executor-guard` for applications embedding the Tenkai library |
+| `TENKAI_EXECUTOR_GUARD` | current `tenkaictl` binary | Optional explicit guard path for applications embedding the Tenkai library |
 | `TENKAI_SERVER_URL` | unset | Remote control-plane URL used with `tenkaictl --target remote` |
 | `TENKAI_MANAGEMENT_TOKEN` | unset | Required bearer secret for server management requests and remote CLI mode |
 | `TENKAI_RUNTIME_TOKENS` | `{}` | Server-only JSON object mapping bearer secrets to one environment each |
-| `TENKAI_DATABASE` | `.tenkai-state/tenkai.db` | Server-owned operational SQLite database, including immutable audit records |
+| `TENKAI_DATABASE` | `.tenkai-state/tenkai.db` | Embedded or server-owned operational SQLite database |
 | `TENKAI_LISTEN` | `127.0.0.1:8080` | Server listen address; must remain loopback behind a TLS proxy |
 
 ## Ontology
 
-The current v0 authoritatively encodes domain objects in the sekai graph under
+Tenkai authoritatively encodes domain objects in its embedded store under
 namespace `tenkai`:
 
 `tenkai.product` ← `release_of` — `tenkai.release` ← `promotes` — `tenkai.channel`
 ← `subscribes` — `tenkai.environment`; each apply writes a `tenkai.plan` and
 per-step `tenkai.deployment` records linked to the release, environment, and
-plan. Current v0 state lives on the environment object (`deployed.<product>`).
-The accepted standalone architecture will move operational authority to
-Tenkai-owned persistence while retaining this graph as an optional projection;
-that persistence migration is not implemented in v0.
+plan. Current state lives on the environment object (`deployed.<product>`).
+Server mode uses the same domain contracts and may project events to optional
+providers without transferring operational authority.
 
 ## Status
 
@@ -286,11 +305,14 @@ outcome exports use a durable retry outbox. The contracts and standalone
 implementations are documented in
 [`docs/provider-contracts.md`](docs/provider-contracts.md).
 
+An embedded apply containing `[gate].eval_suite` fails closed with a local
+diagnostic because no governance provider is configured. Select an explicitly
+configured remote provider host when gate evidence is required; ordinary
+ungated solo deployments never attempt a network connection.
+
 The standalone architecture and Tenkai-owned operational storage contract are
 documented in [ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md)
-and [Operational storage](docs/operational-storage.md). The current v0 CLI
-continues to use sekai-chisei until the documented import and explicit authority
-cutover; it never mixes writers implicitly.
+and [Operational storage](docs/operational-storage.md).
 
 ## Recorded rollback replay
 
