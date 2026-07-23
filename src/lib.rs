@@ -8,6 +8,7 @@ pub mod apply;
 pub mod canary;
 pub mod catalog;
 pub mod client;
+pub mod embedded;
 pub mod maintenance;
 pub mod manifest;
 pub mod ontology;

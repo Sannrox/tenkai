@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use tenkai::reconciler::{Config as ReconcilerConfig, Reconciler};
 use tenkai::server::{ServerConfig, router};
 use tenkai::storage::SqliteStore;
@@ -31,6 +31,15 @@ struct Cli {
     reconcile_interval: u64,
     #[arg(long, default_value_t = 8)]
     max_concurrency: usize,
+    /// Use Tenkai's in-process state or an explicitly configured remote provider.
+    #[arg(long, value_enum, default_value_t = ProviderMode::Embedded)]
+    provider_mode: ProviderMode,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ProviderMode {
+    Embedded,
+    Remote,
 }
 
 #[tokio::main]
@@ -60,9 +69,13 @@ async fn main() -> Result<()> {
         SqliteStore::open(&cli.database)
             .with_context(|| format!("opening {}", cli.database.display()))?,
     );
-    let ctx = tenkai::client::connect()
-        .await
-        .context("connecting required sekai provider")?;
+    let ctx = match cli.provider_mode {
+        ProviderMode::Embedded => tenkai::client::Ctx::embedded(&cli.database)
+            .context("opening embedded application state")?,
+        ProviderMode::Remote => tenkai::client::connect()
+            .await
+            .context("connecting explicitly configured remote provider")?,
+    };
     let runtime_environments = runtime_assignments
         .values()
         .cloned()

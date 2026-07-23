@@ -1,4 +1,4 @@
-//! tenkaictl — local delivery control plane CLI, backed by sekai-chisei.
+//! tenkaictl — embedded and remote delivery control-plane CLI.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -9,11 +9,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use tenkai::{apply, canary, catalog, client, maintenance, ontology, plan, reconciler};
 
 #[derive(Parser)]
-#[command(
-    name = "tenkaictl",
-    version,
-    about = "Constraint-based local delivery on sekai-chisei"
-)]
+#[command(name = "tenkaictl", version, about = "Constraint-based local delivery")]
 struct Cli {
     /// Select the embedded application core or an authenticated remote server.
     #[arg(long, value_enum, default_value_t = Target::Embedded, global = true)]
@@ -21,6 +17,14 @@ struct Cli {
     /// Tenkai server URL; required with --target remote.
     #[arg(long, env = "TENKAI_SERVER_URL", global = true)]
     server_url: Option<String>,
+    /// Embedded SQLite state file. Ignored by remote mode.
+    #[arg(
+        long,
+        env = "TENKAI_DATABASE",
+        default_value = ".tenkai-state/tenkai.db",
+        global = true
+    )]
+    database: PathBuf,
     #[command(subcommand)]
     command: Command,
 }
@@ -33,7 +37,22 @@ enum Target {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Register the tenkai schema in sekai and create the `local` environment.
+    #[command(name = "__executor-guard", hide = true)]
+    ExecutorGuard {
+        #[arg(long)]
+        lock: PathBuf,
+        #[arg(long)]
+        workdir: PathBuf,
+        #[arg(long)]
+        environment: String,
+        #[arg(long)]
+        product: String,
+        #[arg(long)]
+        generation: u64,
+        #[arg(long)]
+        command: String,
+    },
+    /// Initialize Tenkai state and create the `local` environment.
     Init,
     /// Publish a manifest as an immutable release.
     Publish {
@@ -85,6 +104,12 @@ enum Command {
         #[arg(long, default_value = "local")]
         env: String,
     },
+    /// Inspect the embedded control-plane state without distributed diagnostics.
+    Inspect,
+    /// Create a transactionally consistent embedded-state backup.
+    Backup { destination: PathBuf },
+    /// Replace embedded state from a verified backup. The CLI must be the only writer.
+    Restore { source: PathBuf },
     /// Roll a product back to its previously deployed version.
     Rollback {
         product: String,
@@ -220,6 +245,25 @@ fn print_steps(steps: &[plan::Step]) {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Command::ExecutorGuard {
+        lock,
+        workdir,
+        environment,
+        product,
+        generation,
+        command,
+    } = &cli.command
+    {
+        return tenkai::apply::executor_guard(
+            lock,
+            workdir,
+            environment,
+            product,
+            *generation,
+            command,
+        )
+        .await;
+    }
     if cli.target == Target::Remote {
         let server_url = cli
             .server_url
@@ -249,7 +293,16 @@ async fn main() -> Result<()> {
             ),
         }
     }
-    let mut ctx = client::connect().await?;
+    if let Command::Restore { source } = &cli.command {
+        tenkai::embedded::EmbeddedStore::restore(source, &cli.database)?;
+        println!(
+            "restored embedded state from {} to {}",
+            source.display(),
+            cli.database.display()
+        );
+        return Ok(());
+    }
+    let mut ctx = client::Ctx::embedded(&cli.database)?;
 
     match cli.command {
         Command::Init => {
@@ -441,6 +494,26 @@ async fn main() -> Result<()> {
                     println!("  recovery required: {error}");
                 }
             }
+        }
+        Command::Inspect => {
+            let summary = serde_json::json!({
+                "mode": "embedded",
+                "database": cli.database,
+                "products": ctx.list_kind(tenkai::ontology::KIND_PRODUCT).await?.len(),
+                "releases": ctx.list_kind(tenkai::ontology::KIND_RELEASE).await?.len(),
+                "channels": ctx.list_kind(tenkai::ontology::KIND_CHANNEL).await?.len(),
+                "environments": ctx.list_kind(tenkai::ontology::KIND_ENVIRONMENT).await?.len(),
+                "plans": ctx.list_kind(tenkai::ontology::KIND_PLAN).await?.len(),
+            });
+            println!("{}", serde_json::to_string_pretty(&summary)?);
+        }
+        Command::Backup { destination } => {
+            ctx.backup_embedded(&destination)?;
+            println!("backed up embedded state to {}", destination.display());
+        }
+        Command::Restore { .. } => unreachable!("restore is handled before opening the database"),
+        Command::ExecutorGuard { .. } => {
+            unreachable!("executor guard is handled before opening the database")
         }
         Command::Rollback {
             product,
