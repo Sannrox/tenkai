@@ -1,6 +1,7 @@
 //! Concurrent, retrying convergence of registered environments.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -18,6 +19,9 @@ pub struct Config {
     pub max_backoff: Duration,
     pub max_concurrency: usize,
     pub skip_gates: bool,
+    pub unapproved_development_reason: Option<String>,
+    pub approval_directory: Option<PathBuf>,
+    pub approval_trust_roots: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -27,6 +31,10 @@ impl Default for Config {
             max_backoff: Duration::from_secs(5 * 60),
             max_concurrency: 8,
             skip_gates: false,
+            unapproved_development_reason: None,
+            approval_directory: std::env::var_os("TENKAI_PLAN_APPROVAL_DIR").map(PathBuf::from),
+            approval_trust_roots: std::env::var_os("TENKAI_PLAN_APPROVAL_TRUST_ROOTS")
+                .map(PathBuf::from),
         }
     }
 }
@@ -37,6 +45,7 @@ pub enum EnvironmentStatus {
     Current,
     Applied { plan_id: String, steps: usize },
     AwaitingRuntime { plan_id: String, steps: usize },
+    AwaitingApproval { plan_id: String, steps: usize },
     Failed { error: String },
     Deferred { retry_at: i64 },
     Busy,
@@ -250,6 +259,9 @@ impl Reconciler {
                             &name,
                             config.skip_gates,
                             runtime_managed,
+                            config.unapproved_development_reason.as_deref(),
+                            config.approval_directory.as_deref(),
+                            config.approval_trust_roots.as_deref(),
                         )
                         .await;
                         guard.finish(result.is_ok());
@@ -425,6 +437,9 @@ async fn reconcile_environment(
     environment: &str,
     skip_gates: bool,
     runtime_managed: bool,
+    unapproved_development_reason: Option<&str>,
+    approval_directory: Option<&std::path::Path>,
+    approval_trust_roots: Option<&std::path::Path>,
 ) -> Result<EnvironmentStatus> {
     if runtime_managed {
         let mut computed = Vec::new();
@@ -460,13 +475,87 @@ async fn reconcile_environment(
     if recover_or_detect_active_plan(ctx, environment).await? {
         return Ok(EnvironmentStatus::Busy);
     }
-    let stored = plan::create(ctx, environment).await?;
+    let approval_required =
+        unapproved_development_reason.is_none() || environment != "local" || !ctx.is_embedded();
+    let stored = if approval_required {
+        let mut computed = Vec::new();
+        for object in ctx.list_kind(KIND_PLAN).await? {
+            if object
+                .properties
+                .get("environment")
+                .is_some_and(|value| value == environment)
+                && object
+                    .properties
+                    .get("status")
+                    .is_some_and(|value| value == "computed")
+            {
+                let candidate = plan::load(ctx, &object.id).await?;
+                if !candidate.steps.is_empty()
+                    && apply::validate_preconditions(ctx, &candidate).await.is_ok()
+                {
+                    computed.push(candidate);
+                }
+            }
+        }
+        computed.sort_by_key(|candidate| candidate.created_at);
+        match computed.into_iter().next() {
+            Some(stored) => stored,
+            None => plan::create(ctx, environment).await?,
+        }
+    } else {
+        plan::create(ctx, environment).await?
+    };
     if stored.steps.is_empty() {
         return Ok(EnvironmentStatus::Current);
     }
     let plan_id = stored.id;
     let steps = stored.steps.len();
-    let outcomes = apply::execute(ctx, &plan_id, skip_gates).await?;
+    if approval_required {
+        let (Some(directory), Some(roots)) = (approval_directory, approval_trust_roots) else {
+            return Ok(EnvironmentStatus::AwaitingApproval { plan_id, steps });
+        };
+        let envelope = directory.join(format!("{plan_id}.json"));
+        if !envelope.is_file() {
+            return Ok(EnvironmentStatus::AwaitingApproval { plan_id, steps });
+        }
+        let outcomes = apply::execute_with_options(
+            ctx,
+            &plan_id,
+            apply::ExecutionOptions {
+                skip_gates,
+                emergency_reason: None,
+                approval: Some(&envelope),
+                approval_trust_roots: Some(roots),
+                unapproved_development_reason: None,
+            },
+        )
+        .await?;
+        if let Some(failed) = outcomes
+            .iter()
+            .find(|outcome| outcome.status != "succeeded")
+        {
+            bail!(
+                "environment {environment} failed while reconciling {}: {}",
+                failed.step.product,
+                failed.detail
+            );
+        }
+        return Ok(EnvironmentStatus::Applied { plan_id, steps });
+    }
+    let reason = unapproved_development_reason
+        .expect("authorization was classified as an embedded local-development bypass");
+    let outcomes = apply::execute_with_options(
+        ctx,
+        &plan_id,
+        apply::ExecutionOptions {
+            skip_gates,
+            emergency_reason: None,
+            approval: None,
+            approval_trust_roots: None,
+            unapproved_development_reason: Some(reason),
+        },
+    )
+    .await?;
     if let Some(failed) = outcomes
         .iter()
         .find(|outcome| outcome.status != "succeeded")
@@ -526,6 +615,9 @@ mod tests {
             max_backoff: Duration::from_millis(250),
             max_concurrency: 2,
             skip_gates: false,
+            unapproved_development_reason: Some("reconciler test".into()),
+            approval_directory: None,
+            approval_trust_roots: None,
         }
     }
 

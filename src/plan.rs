@@ -148,7 +148,7 @@ fn content_address(
 }
 
 impl Plan {
-    fn executable_digest(&self) -> Result<String> {
+    pub fn executable_digest(&self) -> Result<String> {
         let content = ExecutableContent {
             format_version: self.format_version,
             id: &self.id,

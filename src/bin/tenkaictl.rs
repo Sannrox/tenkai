@@ -72,6 +72,11 @@ enum Command {
         #[command(subcommand)]
         command: ReleaseCommand,
     },
+    /// Inspect recorded plan-approval verification evidence.
+    Approval {
+        #[command(subcommand)]
+        command: ApprovalCommand,
+    },
     /// Point a channel at a published release, e.g. `promote hello@0.1.0 stable`.
     Promote { spec: String, channel: String },
     /// Manage canary designation, promotion policy, and evidence repair.
@@ -92,6 +97,26 @@ enum Command {
     /// Execute a stored plan: gates, install, health probe, auto-rollback.
     Apply {
         plan_id: String,
+        /// Detached tenkai.plan-approval.v1 JSON envelope.
+        #[arg(
+            long,
+            requires = "approval_trust_roots",
+            conflicts_with = "allow_unapproved_development"
+        )]
+        approval: Option<PathBuf>,
+        /// Current Ed25519 trust roots for plan approvers.
+        #[arg(
+            long,
+            requires = "approval",
+            conflicts_with = "allow_unapproved_development"
+        )]
+        approval_trust_roots: Option<PathBuf>,
+        /// Explicitly bypass signed approval for the built-in local environment.
+        #[arg(long, requires = "development_reason")]
+        allow_unapproved_development: bool,
+        /// Audited justification for the local-development bypass.
+        #[arg(long, requires = "allow_unapproved_development")]
+        development_reason: Option<String>,
         /// Bypass eval gates (recorded like any other apply).
         #[arg(long)]
         skip_gates: bool,
@@ -115,6 +140,12 @@ enum Command {
         product: String,
         #[arg(long, default_value = "local")]
         env: String,
+        /// Execute immediately using the explicit local-development bypass.
+        #[arg(long, requires = "development_reason")]
+        allow_unapproved_development: bool,
+        /// Audited justification for the local-development bypass.
+        #[arg(long, requires = "allow_unapproved_development")]
+        development_reason: Option<String>,
         /// Start outside maintenance policy and record this reason with the authenticated principal.
         #[arg(long)]
         emergency_reason: Option<String>,
@@ -139,6 +170,12 @@ enum Command {
         /// Bypass eval gates for automatically created executions.
         #[arg(long)]
         skip_gates: bool,
+        /// Explicitly permit automatic execution only for the built-in local environment.
+        #[arg(long, requires = "development_reason")]
+        allow_unapproved_development: bool,
+        /// Audited justification for automatic local-development execution.
+        #[arg(long, requires = "allow_unapproved_development")]
+        development_reason: Option<String>,
     },
 }
 
@@ -178,6 +215,12 @@ enum ReleaseCommand {
         #[arg(long)]
         trust_roots: PathBuf,
     },
+}
+
+#[derive(Subcommand)]
+enum ApprovalCommand {
+    /// Show signer, policy, scope, expiry, and bypass evidence without credentials.
+    Inspect { plan_id: String },
 }
 
 #[derive(Subcommand)]
@@ -272,7 +315,17 @@ async fn main() -> Result<()> {
         let token = std::env::var("TENKAI_MANAGEMENT_TOKEN")
             .map_err(|_| anyhow::anyhow!("TENKAI_MANAGEMENT_TOKEN is required for remote mode"))?;
         match cli.command {
-            Command::Reconcile { once: true, .. } => {
+            Command::Reconcile {
+                once: true,
+                allow_unapproved_development,
+                development_reason,
+                ..
+            } => {
+                if allow_unapproved_development || development_reason.is_some() {
+                    bail!(
+                        "the local-development reconciliation bypass is available only with --target embedded"
+                    );
+                }
                 let report = tenkai::server::RemoteClient::new(server_url, token)?
                     .reconcile()
                     .await?;
@@ -339,6 +392,27 @@ async fn main() -> Result<()> {
             }
             ReleaseCommand::Verify { spec, trust_roots } => {
                 let evidence = catalog::reverify_release(&mut ctx, &spec, &trust_roots).await?;
+                println!("{}", serde_json::to_string_pretty(&evidence)?);
+            }
+        },
+        Command::Approval { command } => match command {
+            ApprovalCommand::Inspect { plan_id } => {
+                let mut evidence = ctx
+                    .list_kind(ontology::KIND_PLAN_APPROVAL_VERIFICATION)
+                    .await?
+                    .into_iter()
+                    .filter(|object| {
+                        object
+                            .properties
+                            .get("plan_id")
+                            .is_some_and(|id| id == &plan_id)
+                    })
+                    .filter_map(|object| object.properties.get("evidence").cloned())
+                    .map(|raw| serde_json::from_str::<serde_json::Value>(&raw))
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                evidence.sort_by_key(|item| {
+                    item.get("verified_at").and_then(serde_json::Value::as_i64)
+                });
                 println!("{}", serde_json::to_string_pretty(&evidence)?);
             }
         },
@@ -458,13 +532,30 @@ async fn main() -> Result<()> {
         }
         Command::Apply {
             plan_id,
+            approval,
+            approval_trust_roots,
+            allow_unapproved_development,
+            development_reason,
             skip_gates,
             emergency_reason,
         } => {
             let stored = plan::load(&mut ctx, &plan_id).await?;
             println!("applying {} to {}:", stored.id, stored.environment);
             print_steps(&stored.steps);
-            run_plan(&mut ctx, &plan_id, skip_gates, emergency_reason.as_deref()).await?;
+            run_plan(
+                &mut ctx,
+                &plan_id,
+                skip_gates,
+                emergency_reason.as_deref(),
+                approval.as_deref(),
+                approval_trust_roots.as_deref(),
+                allow_unapproved_development.then_some(
+                    development_reason
+                        .as_deref()
+                        .expect("clap requires a development reason"),
+                ),
+            )
+            .await?;
         }
         Command::Status { env } => {
             let rows = plan::status(&mut ctx, &env).await?;
@@ -518,13 +609,41 @@ async fn main() -> Result<()> {
         Command::Rollback {
             product,
             env,
+            allow_unapproved_development,
+            development_reason,
             emergency_reason,
         } => {
             let step = plan::rollback_step(&mut ctx, &env, &product).await?;
             let stored = plan::create_from_steps(&mut ctx, &env, vec![step]).await?;
             println!("rolling back in {env}:");
             print_steps(&stored.steps);
-            run_plan(&mut ctx, &stored.id, true, emergency_reason.as_deref()).await?;
+            if allow_unapproved_development {
+                run_plan(
+                    &mut ctx,
+                    &stored.id,
+                    true,
+                    emergency_reason.as_deref(),
+                    None,
+                    None,
+                    Some(
+                        development_reason
+                            .as_deref()
+                            .expect("clap requires a development reason"),
+                    ),
+                )
+                .await?;
+            } else {
+                bail!(
+                    "rollback was not executed; plan {} requires signed approval. Run `tenkaictl apply {}` with --approval and --approval-trust-roots{}",
+                    stored.id,
+                    stored.id,
+                    if emergency_reason.is_some() {
+                        " and repeat --emergency-reason"
+                    } else {
+                        ""
+                    }
+                );
+            }
         }
         Command::Reconcile {
             once,
@@ -533,6 +652,8 @@ async fn main() -> Result<()> {
             max_backoff,
             max_concurrency,
             skip_gates,
+            allow_unapproved_development,
+            development_reason,
         } => {
             let reconciler = reconciler::Reconciler::new(
                 ctx.clone(),
@@ -541,6 +662,15 @@ async fn main() -> Result<()> {
                     max_backoff: Duration::from_secs(max_backoff),
                     max_concurrency,
                     skip_gates,
+                    unapproved_development_reason: allow_unapproved_development.then_some(
+                        development_reason
+                            .clone()
+                            .expect("clap requires a development reason"),
+                    ),
+                    approval_directory: std::env::var_os("TENKAI_PLAN_APPROVAL_DIR")
+                        .map(PathBuf::from),
+                    approval_trust_roots: std::env::var_os("TENKAI_PLAN_APPROVAL_TRUST_ROOTS")
+                        .map(PathBuf::from),
                 },
             )?;
             if once {
@@ -581,6 +711,12 @@ fn print_reconcile_report(report: reconciler::TickReport) {
                     result.environment
                 );
             }
+            reconciler::EnvironmentStatus::AwaitingApproval { plan_id, steps } => {
+                println!(
+                    "{:<24} awaiting signed approval for {steps} step(s) in {plan_id}",
+                    result.environment
+                );
+            }
             reconciler::EnvironmentStatus::Failed { error } => {
                 eprintln!("{:<24} FAILED {error}", result.environment);
             }
@@ -599,6 +735,9 @@ async fn run_plan(
     plan_id: &str,
     skip_gates: bool,
     emergency_reason: Option<&str>,
+    approval: Option<&std::path::Path>,
+    approval_trust_roots: Option<&std::path::Path>,
+    unapproved_development_reason: Option<&str>,
 ) -> Result<()> {
     let outcomes = apply::execute_with_options(
         ctx,
@@ -606,6 +745,9 @@ async fn run_plan(
         apply::ExecutionOptions {
             skip_gates,
             emergency_reason,
+            approval,
+            approval_trust_roots,
+            unapproved_development_reason,
         },
     )
     .await?;

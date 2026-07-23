@@ -37,7 +37,9 @@ cargo build --bin tenkaictl
 # subscribe this machine and converge
 ./target/debug/tenkaictl env subscribe local hello-local=stable
 ./target/debug/tenkaictl plan --env local
-./target/debug/tenkaictl apply <plan-id-from-previous-command>
+./target/debug/tenkaictl apply <plan-id-from-previous-command> \
+  --allow-unapproved-development \
+  --development-reason "local quickstart"
 ./target/debug/tenkaictl status
 ./target/debug/tenkaictl inspect
 ```
@@ -94,6 +96,12 @@ tenkaictl release verify hello-local@0.1.0 \
 
 The detached envelope and trust-root formats are documented in
 [`docs/release-signing.md`](docs/release-signing.md).
+
+Plan execution likewise fails closed unless it has a signed, unexpired approval
+bound to the exact executable plan and environment. The provider-independent
+format, current-trust-root key rotation behavior, standalone policy boundary,
+and local-only development bypass are documented in
+[`docs/plan-approval.md`](docs/plan-approval.md).
 
 ## Gates
 
