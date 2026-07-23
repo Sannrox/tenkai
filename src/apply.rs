@@ -115,6 +115,9 @@ fn is_maintenance_block_error(error: &anyhow::Error) -> bool {
 pub struct ExecutionOptions<'a> {
     pub skip_gates: bool,
     pub emergency_reason: Option<&'a str>,
+    pub approval: Option<&'a Path>,
+    pub approval_trust_roots: Option<&'a Path>,
+    pub unapproved_development_reason: Option<&'a str>,
 }
 
 enum MaintenanceDecision {
@@ -1387,7 +1390,7 @@ pub async fn unlock_environment(ctx: &mut Ctx, environment: &str) -> Result<Stri
     Ok(format!("removed apply lease for environment {environment}"))
 }
 
-async fn validate_preconditions(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
+pub(crate) async fn validate_preconditions(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
     let environment = ctx
         .get(&env_id(&plan.environment))
         .await?
@@ -1418,22 +1421,35 @@ async fn validate_preconditions(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
             );
         }
     }
+    for input in &plan.inputs {
+        let channel = ctx
+            .get(&input.channel_id)
+            .await?
+            .with_context(|| format!("channel {} not found", input.channel_id))?;
+        if channel.properties.get("current_version") != Some(&input.desired_version)
+            || channel.properties.get("current_release") != Some(&input.release_id)
+        {
+            bail!(
+                "plan {} is stale for {}: channel {} no longer selects the approved release",
+                plan.id,
+                input.product,
+                input.channel
+            );
+        }
+    }
     Ok(())
 }
 
-/// Execute a stored plan's ordered steps, one product at a time.
-pub async fn execute(ctx: &mut Ctx, plan_id: &str, skip_gates: bool) -> Result<Vec<Outcome>> {
-    execute_with_options(
-        ctx,
-        plan_id,
-        ExecutionOptions {
-            skip_gates,
-            emergency_reason: None,
-        },
+/// Compatibility entry point retained so downstream crates receive an
+/// actionable authorization error instead of a compile failure.
+#[deprecated(note = "use execute_with_options with explicit plan approval")]
+pub async fn execute(_ctx: &mut Ctx, _plan_id: &str, _skip_gates: bool) -> Result<Vec<Outcome>> {
+    bail!(
+        "plan execution now requires explicit approval; use execute_with_options with signed approval or a recorded local-development bypass"
     )
-    .await
 }
 
+/// Execute a stored plan's ordered steps after explicit authorization.
 pub async fn execute_with_options(
     ctx: &mut Ctx,
     plan_id: &str,
@@ -1448,6 +1464,30 @@ pub async fn execute_with_options(
             stored_plan.state
         );
     }
+    let now = crate::now_millis();
+    let approval_evidence = match (
+        options.approval,
+        options.approval_trust_roots,
+        options.unapproved_development_reason,
+    ) {
+        (Some(envelope), Some(roots), None) => {
+            crate::plan_approval::verify(&stored_plan, envelope, roots, now, options.skip_gates)?
+        }
+        (None, None, Some(reason)) if ctx.is_embedded() => {
+            crate::plan_approval::local_bypass(&stored_plan, reason, now)?
+        }
+        (None, None, Some(_)) => {
+            bail!("unapproved development execution is available only in embedded mode")
+        }
+        (None, None, None) => bail!(
+            "plan execution requires --approval and --approval-trust-roots; local development may explicitly use --allow-unapproved-development with --development-reason"
+        ),
+        (Some(_), None, _) | (None, Some(_), _) => {
+            bail!("signed plan execution requires both an approval and approval trust roots")
+        }
+        _ => bail!("signed approval and the local-development bypass are mutually exclusive"),
+    };
+    crate::plan_approval::record(ctx, &approval_evidence).await?;
     let environment = stored_plan.environment.clone();
     let owner = stored_plan.id.clone();
     let lease = claim_execution_environment(ctx, &environment, &owner).await?;
@@ -1501,6 +1541,9 @@ pub async fn execute_with_options(
                         ExecutionOptions {
                             skip_gates: options.skip_gates,
                             emergency_reason,
+                            approval: options.approval,
+                            approval_trust_roots: options.approval_trust_roots,
+                            unapproved_development_reason: options.unapproved_development_reason,
                         },
                         &lease,
                     )

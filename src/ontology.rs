@@ -14,6 +14,7 @@ pub const KIND_CHANNEL: &str = "tenkai.channel";
 pub const KIND_ENVIRONMENT: &str = "tenkai.environment";
 pub const KIND_MAINTENANCE_CONFIG: &str = "tenkai.maintenance_config";
 pub const KIND_PLAN: &str = "tenkai.plan";
+pub const KIND_PLAN_APPROVAL_VERIFICATION: &str = "tenkai.plan_approval_verification";
 pub const KIND_ENVIRONMENT_EXECUTION: &str = "tenkai.environment_execution";
 pub const KIND_DEPLOYMENT: &str = "tenkai.deployment";
 pub const KIND_CANARY_DESIGNATION: &str = "tenkai.canary_designation";
@@ -255,6 +256,37 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
                     "last_emergency_override_correlation",
                     false,
                     "Correlation token for the last governed maintenance override",
+                ),
+            ],
+        ),
+        object_type(
+            KIND_PLAN_APPROVAL_VERIFICATION,
+            "Immutable evidence that an exact plan approval was verified before execution",
+            vec![
+                prop("evidence", true, "Redacted versioned verification evidence"),
+                prop("plan_id", true, "Approved plan object id"),
+                prop("plan_digest", true, "Approved executable plan digest"),
+                prop("environment", true, "Approved environment"),
+                prop(
+                    "signer_identity",
+                    true,
+                    "Trusted signer identity or development bypass",
+                ),
+                prop(
+                    "policy_provider",
+                    true,
+                    "Provider that produced the policy decision",
+                ),
+                prop("policy_evidence_id", true, "Provider decision evidence id"),
+                prop(
+                    "policy_digest",
+                    true,
+                    "Digest of the applied approval policy",
+                ),
+                prop(
+                    "verified_at",
+                    true,
+                    "Verification time in Unix milliseconds",
                 ),
             ],
         ),
