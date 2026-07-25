@@ -41,8 +41,53 @@ HTTP: `GET /v1/fleet/status` (management bearer). Domain type:
 `plan::FleetStatusReport`. Complements `env list` / `env inspect` / per-env
 `status`. Does not include reconcile tick counters (this page).
 
+## Fleet drift watch
+
+`tenkaictl fleet watch` repeatedly samples fleet posture (same rows as
+`fleet status`), compares to a previous sample or optional JSON baseline file,
+and prints a deterministic delta: which environments entered or left
+`behind` / `unhealthy` / `empty` / `current`.
+
+```bash
+# one-shot vs empty baseline (embedded)
+tenkaictl fleet watch --once
+
+# continuous poll; write baseline for next automation run
+tenkaictl fleet watch --interval 30 --write-baseline /var/tmp/tenkai-fleet-baseline.json
+
+# compare to saved baseline; default exit non-zero only on *new* hard drift
+tenkaictl fleet watch --once --baseline /var/tmp/tenkai-fleet-baseline.json
+
+# fail if any environment is currently behind or unhealthy
+tenkaictl fleet watch --once --exit-on-any-hard-drift
+
+# fail on any posture change (including recoveries and empty↔current)
+tenkaictl fleet watch --once --exit-on-any-posture-change
+
+# remote (same management token as fleet status)
+tenkaictl --target remote --server-url http://127.0.0.1:8080 fleet watch --once
+```
+
+**Exit codes (default):** non-zero when an environment *newly* becomes `behind`
+or `unhealthy` relative to the baseline (or prior sample in a continuous run).
+Existing hard drift that was already in the baseline does not fail by default.
+
+**Baseline file:** optional JSON schema `tenkai.fleet-posture.v1` mapping
+environment names to postures only. No SQLite persistence of samples; no
+management or runtime tokens in output.
+
+**Relation to other surfaces:**
+
+| Surface | Role |
+| --- | --- |
+| `fleet status` / `GET /v1/fleet/status` | One-shot operator table |
+| `fleet watch` | Delta / alert summary over time (this section) |
+| Reconcile diagnostics (above) | Per-tick apply counters, not posture table |
+| Rollout waves (`tenkaictl wave`) | Ordered cohort observation during a wave |
+
 ## Related
 
 - Capability advertisement on `/healthz` and `/readyz` (runtime capabilities)
 - Multi-env inspect via `tenkaictl env list` / `env inspect`
 - Fleet status via `tenkaictl fleet status` / `GET /v1/fleet/status`
+- Fleet drift watch via `tenkaictl fleet watch`
