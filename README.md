@@ -250,7 +250,9 @@ records ownership between the browser-facing enterprise plane and Tenkai’s
 delivery authority without coupling community mode to private components.
 [Federated identity](docs/federated-identity.md) maps stable opaque identifiers
 with issuer and audience binding; governance providers stay authoritative only
-for their own evidence.
+for their own evidence. Open-weight
+[model runtime](docs/model-runtime.md) products describe engines and
+content-addressed weights while inference plugins remain outside the core.
 
 The server accepts plaintext HTTP only on loopback. Put a TLS reverse proxy in
 front of it for remote access; never pass tokens on a command line. By default

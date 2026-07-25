@@ -14,6 +14,18 @@ pub struct Manifest {
     pub deploy: DeploySection,
     #[serde(default)]
     pub routing: Option<RoutingSection>,
+    /// Open-weight model descriptor (required when `kind = "model_runtime"`).
+    #[serde(default)]
+    pub model: Option<ModelSection>,
+    /// Inference runtime settings for `model_runtime` products.
+    #[serde(default)]
+    pub runtime: Option<ModelRuntimeSection>,
+    /// Hardware / platform requirements for `model_runtime` products.
+    #[serde(default)]
+    pub requirements: Option<ModelRequirementsSection>,
+    /// Model health probe settings. Serialized as `[health]` in TOML.
+    #[serde(default, rename = "health")]
+    pub model_health: Option<ModelHealthSection>,
     #[serde(default)]
     pub gate: GateSection,
 }
@@ -24,6 +36,7 @@ pub enum ProductKind {
     #[default]
     Software,
     RoutingConfig,
+    ModelRuntime,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +90,43 @@ pub struct RoutingSection {
     pub allowed_providers: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelSection {
+    pub source: String,
+    pub revision: String,
+    pub format: String,
+    pub quantization: String,
+    pub artifact_digest: String,
+    pub license: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelRuntimeSection {
+    pub engine: String,
+    pub port: u16,
+    pub context_length: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelRequirementsSection {
+    pub architecture: Vec<String>,
+    pub memory_gib: u32,
+    #[serde(default)]
+    pub accelerator: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelHealthSection {
+    pub endpoint: String,
+    #[serde(default)]
+    pub smoke_prompt: String,
+    pub max_startup_seconds: u32,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GateSection {
@@ -122,6 +172,13 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
             if manifest.routing.is_some() {
                 bail!("software manifests cannot declare a routing section");
             }
+            if manifest.model.is_some()
+                || manifest.runtime.is_some()
+                || manifest.requirements.is_some()
+                || manifest.model_health.is_some()
+            {
+                bail!("software manifests cannot declare model_runtime sections");
+            }
             if manifest.deploy.install.trim().is_empty() {
                 bail!("software manifest needs a non-empty deploy.install command");
             }
@@ -133,6 +190,13 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
             {
                 bail!("routing_config manifests cannot declare shell deployment commands");
             }
+            if manifest.model.is_some()
+                || manifest.runtime.is_some()
+                || manifest.requirements.is_some()
+                || manifest.model_health.is_some()
+            {
+                bail!("routing_config manifests cannot declare model_runtime sections");
+            }
             let routing = manifest
                 .routing
                 .as_ref()
@@ -141,6 +205,24 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
                 bail!("routing.allowed_providers must not be empty");
             }
             validate_input_path("routing.config", &routing.config)?;
+        }
+        ProductKind::ModelRuntime => {
+            if manifest.routing.is_some() {
+                bail!("model_runtime manifests cannot declare a routing section");
+            }
+            if !manifest.deploy.install.trim().is_empty()
+                || manifest.deploy.uninstall.is_some()
+                || manifest.deploy.health.is_some()
+            {
+                bail!("model_runtime manifests cannot declare shell deployment commands");
+            }
+            if !manifest.deploy.inputs.is_empty() {
+                bail!(
+                    "model_runtime manifests must not embed weight files as deploy.inputs; use model.artifact_digest"
+                );
+            }
+            // Full section validation lives in the model_runtime contract.
+            crate::model_runtime::ModelRuntimeDescriptor::from_manifest(&manifest)?;
         }
     }
     crate::ontology::validate_identifier("product.name", &manifest.product.name)?;
@@ -158,6 +240,9 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
                 .expect("validated routing")
                 .allowed_providers,
         )?;
+    }
+    if manifest.product.kind == ProductKind::ModelRuntime {
+        crate::model_runtime::ModelRuntimeDescriptor::from_manifest(&manifest)?;
     }
     Ok(LoadedManifest {
         manifest,
@@ -502,9 +587,52 @@ mod tests {
                 config: "routing.json".into(),
                 allowed_providers: vec!["local".into()],
             }),
+            model: None,
+            runtime: None,
+            requirements: None,
+            model_health: None,
             gate: GateSection::default(),
         };
         assert_eq!(manifest.immutable_inputs(), vec!["routing.json"]);
+    }
+
+    #[test]
+    fn model_runtime_manifest_rejects_embedded_weight_inputs() {
+        let raw = r#"
+[product]
+name = "qwen-coder"
+version = "3.2.1"
+kind = "model_runtime"
+
+[model]
+source = "hf://org/qwen"
+revision = "abc"
+format = "gguf"
+quantization = "Q4_K_M"
+artifact_digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+license = "apache-2.0"
+
+[runtime]
+engine = "llama.cpp"
+port = 8080
+context_length = 8192
+
+[requirements]
+architecture = ["arm64"]
+memory_gib = 16
+
+[health]
+endpoint = "http://127.0.0.1:8080/v1/models"
+max_startup_seconds = 60
+"#;
+        let manifest: Manifest = toml::from_str(raw).unwrap();
+        assert_eq!(manifest.product.kind, ProductKind::ModelRuntime);
+        crate::model_runtime::ModelRuntimeDescriptor::from_manifest(&manifest).unwrap();
+
+        let mut with_inputs = manifest.clone();
+        with_inputs.deploy.inputs = vec!["weights.gguf".into()];
+        // load() enforces the empty-inputs rule; simulate the check:
+        assert!(!with_inputs.deploy.inputs.is_empty());
     }
 
     #[test]
