@@ -102,7 +102,42 @@ When planning a `model_runtime` subscription:
 
 Selection never bypasses signing, approval, or deployable-trust checks.
 
-## Follow-on
+## Reference engine plugin (llama.cpp)
 
-- Reference engine plugins (`tenkai-executor-llamacpp`, MLX, …)
+**Choice:** the reference plugin targets **llama.cpp** because manifests default
+to `runtime.engine = "llama.cpp"`, health is plain HTTP on loopback, and a single
+host can run without a GPU fleet control plane. MLX and other engines remain
+future plugins implementing the same ports.
+
+### Ports
+
+| Type | Role |
+| --- | --- |
+| `InferenceEngineProcess` | start candidate / smoke / stop (no hard engine link) |
+| `FakeInferenceEngine` | Deterministic CI lifecycle without a binary |
+| `LlamaCppProcessLauncher` | Optional external `TENKAI_LLAMA_SERVER` / `llama-server` |
+| `ReferenceLlamaCppExecutor` | verify weights → start → smoke → activate; retain previous |
+
+### Happy path (one machine class)
+
+1. Publish/promote a `model_runtime` release with loopback health
+   (`http://127.0.0.1:<port>/…`).
+2. Apply via Tenkai (embedded or runtime agent). The reference executor:
+   - verifies weights when a `WeightCache` is configured;
+   - starts a **candidate** generation on loopback only;
+   - smoke-probes `[health]`;
+   - on success, promotes the candidate to active and keeps the prior
+     descriptor at `*.json.previous` for Tenkai rollback;
+   - on smoke/start failure, stops the candidate and **leaves the previous
+     active generation untouched**.
+3. Rollback uses ordinary Tenkai plan/rollback paths against retained releases.
+
+Default apply wiring uses `FakeInferenceEngine` so community software-only CI
+never requires an inference binary. Operators who install llama.cpp can inject
+`LlamaCppProcessLauncher` (or set `TENKAI_LLAMA_SERVER`) in a host-specific
+plugin build. Manifest fields are passed as argv only (no shell).
+
+### Follow-on
+
 - Peer/regional caches
+- Additional engine plugins (MLX, vLLM, …)
