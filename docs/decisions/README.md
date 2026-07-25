@@ -8,3 +8,4 @@
 - [0006 — Federated identity across Tenkai and external planes](0006-federated-identity.md)
 - [0007 — Open-weight model fleet control plane](0007-model-runtime-fleet-control-plane.md)
 - [0008 — Production tenant-capable OperationalStore criteria](0008-production-tenant-operational-store.md)
+- [0009 — Multi-replica reconcile and HA capability profile](0009-multi-replica-reconcile-and-ha-profile.md)
