@@ -68,6 +68,36 @@ data:
 Unauthenticated health probes (`/healthz`, `/readyz`) are not tenant-visible
 and are not registered.
 
+### HTTP exposure vs registry (#112)
+
+| Set | Meaning |
+| --- | --- |
+| `tenant_visible_rpcs()` | Full isolation matrix (harness + future routes) |
+| `http_exposed_tenant_rpc_ids()` | Subset that is **live on management/runtime HTTP** and enforced in `src/server.rs` |
+
+**HTTP-enforced today**
+
+| RPC id | Route | Tenant-mode enforcement |
+| --- | --- | --- |
+| `management.reconcile` | `POST /v1/reconcile` | Require tenant context; filter tick report to tenant envs |
+| `management.fleet_status` | `GET /v1/fleet/status` | Filter rows to tenant envs |
+| `environment.list` | `GET /v1/environments` | List only tenant partition ids |
+| `environment.get` | `GET /v1/environments/{env}` | Non-disclosing deny on cross-tenant |
+| `environment.status` | `GET /v1/environments/{env}/status` | Same as get |
+| `runtime.work` / `complete` / `heartbeat` | `/v1/runtime/environments/{env}/…` | Runtime credential scoped to exactly one environment |
+
+**Registered but not exposed on HTTP** (harness / in-process enterprise surfaces only; not advertised as public routes):
+
+- `catalog.list_products`, `catalog.get_product`
+- `plan.list`, `plan.get`
+- `deployment.list`, `agent.list`, `event.list`
+- `aggregate.status`, `aggregate.counts`, `aggregate.metric_labels`,
+  `aggregate.cache_lookup`, `aggregate.audit_list`
+
+Adding a new HTTP route that returns tenant-scoped data requires both registry
+registration and an `http_exposed_tenant_rpc_ids` entry plus server enforcement
+tests. Community tenant-free profile remains the default.
+
 ## Fixture shape
 
 `TwoTenantFixture` creates `tenant-a` and `tenant-b`, each with distinct:

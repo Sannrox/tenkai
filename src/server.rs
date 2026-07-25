@@ -601,12 +601,33 @@ async fn reconcile(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Re
         Ok(context) => context,
         Err(response) => return *response,
     };
+    if let Err(response) = require_tenant_scope(&state, &context, None) {
+        return *response;
+    }
     let actor = context.principal_id();
     if let Err(error) = audit(&*state.store, actor, "reconcile.requested", "*") {
         return error_response(StatusCode::SERVICE_UNAVAILABLE, error.to_string());
     }
     match state.reconciler.reconcile().await {
-        Ok(report) => {
+        Ok(mut report) => {
+            if state.config.requirements.tenant_mode {
+                let Some(tenant_store) = state.tenant_store.as_ref() else {
+                    return error_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "tenant mode is enabled but no tenant store is configured",
+                    );
+                };
+                let allowed = match tenant_store.list_environment_ids_for(&context) {
+                    Ok(ids) => ids,
+                    Err(error) => {
+                        return error_response(StatusCode::FORBIDDEN, error.public_message());
+                    }
+                };
+                // Non-leakage: foreign environment names never appear in the tick report.
+                report
+                    .environments
+                    .retain(|row| allowed.iter().any(|id| id == &row.environment));
+            }
             let outcome = if report.failures() == 0 {
                 "reconcile.completed"
             } else {
@@ -1403,6 +1424,81 @@ mod tests {
         assert!(!cross_body.contains("tenant-b"));
         assert!(!cross_body.contains("env-b"));
 
+        // environment.status is HTTP-exposed and must use the same non-disclosing deny.
+        let status_cross = tenant_app
+            .clone()
+            .oneshot(
+                Request::get("/v1/environments/env-b/status")
+                    .header(
+                        "x-tenkai-assertion",
+                        r#"{"tenant":"tenant-a","principal":"user-a"}"#,
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(status_cross.status(), StatusCode::NOT_FOUND);
+        let status_body = String::from_utf8(
+            axum::body::to_bytes(status_cross.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(status_body.contains(NON_DISCLOSING_DENY));
+        assert!(!status_body.contains("tenant-b"));
+        assert!(!status_body.contains("env-b"));
+
+        let fleet_a = tenant_app
+            .clone()
+            .oneshot(
+                Request::get("/v1/fleet/status")
+                    .header(
+                        "x-tenkai-assertion",
+                        r#"{"tenant":"tenant-a","principal":"user-a"}"#,
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fleet_a.status(), StatusCode::OK);
+        let fleet_body = String::from_utf8(
+            axum::body::to_bytes(fleet_a.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(!fleet_body.contains("env-b"));
+        assert!(!fleet_body.contains("tenant-b"));
+
+        let reconcile_a = tenant_app
+            .clone()
+            .oneshot(
+                Request::post("/v1/reconcile")
+                    .header(
+                        "x-tenkai-assertion",
+                        r#"{"tenant":"tenant-a","principal":"user-a"}"#,
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reconcile_a.status(), StatusCode::OK);
+        let reconcile_body = String::from_utf8(
+            axum::body::to_bytes(reconcile_a.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(!reconcile_body.contains("env-b"));
+        assert!(!reconcile_body.contains("tenant-b"));
+        assert!(!reconcile_body.contains("management-secret"));
+
         // Community profile still starts without tenant mode.
         let (community_app, _) = app();
         let health = community_app
@@ -1410,6 +1506,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(health.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn http_exposed_tenant_rpcs_are_subset_of_registry() {
+        use crate::tenant_isolation::{http_exposed_tenant_rpc_ids, tenant_visible_rpcs};
+        let registered: std::collections::BTreeSet<_> =
+            tenant_visible_rpcs().iter().map(|rpc| rpc.id).collect();
+        for id in http_exposed_tenant_rpc_ids() {
+            assert!(
+                registered.contains(id),
+                "http-exposed rpc {id} must appear in tenant_visible_rpcs()"
+            );
+        }
+        // Catalog/plan/aggregate registry entries stay non-HTTP until routes exist.
+        assert!(!http_exposed_tenant_rpc_ids().contains(&"catalog.list_products"));
+        assert!(!http_exposed_tenant_rpc_ids().contains(&"plan.list"));
+        assert!(!http_exposed_tenant_rpc_ids().contains(&"aggregate.audit_list"));
     }
 
     #[test]

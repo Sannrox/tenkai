@@ -428,6 +428,7 @@ it ([ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md),
 | AuthStack management HTTP + federation accept path | [Auth context](docs/auth-request-context.md), [federated identity](docs/federated-identity.md); #68, #71 |
 | JWT EdDSA enterprise assertion verifier (static keys) | [Auth context](docs/auth-request-context.md#reference-jwt-assertion-verifier-110); #110 |
 | Tenant-isolation harness + in-memory tenant store | [Tenant isolation](docs/tenant-isolation-conformance.md); #37, #69, #70 |
+| Tenant isolation on all HTTP management surfaces | [Tenant isolation HTTP exposure](docs/tenant-isolation-conformance.md#http-exposure-vs-registry-112); #112 |
 | Backup/restore drill and server reconcile diagnostics | [operational storage](docs/operational-storage.md); [server diagnostics](docs/server-diagnostics.md); #59, #60 |
 | Release readiness checklist | [release readiness](docs/release-readiness.md); #72 |
 
