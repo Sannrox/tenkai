@@ -22,6 +22,7 @@ pub mod reconciler;
 pub mod release_signing;
 pub mod routing;
 pub mod runtime_agent;
+pub mod runtime_capabilities;
 pub mod runtime_protocol;
 pub mod server;
 pub mod storage;

@@ -241,7 +241,10 @@ and derives optional tenant context through the versioned
 remains authoritative for catalog, planning, reconciliation, and recovery.
 Tenant mode must pass the deterministic
 [tenant isolation conformance](docs/tenant-isolation-conformance.md) harness
-before release.
+before release. Hosts negotiate storage and extension
+[runtime capabilities](docs/runtime-capabilities.md) at startup so tenant mode,
+multi-replica, HA, and enterprise authentication cannot be requested from a
+tenant-free SQLite profile.
 
 The server accepts plaintext HTTP only on loopback. Put a TLS reverse proxy in
 front of it for remote access; never pass tokens on a command line. By default
