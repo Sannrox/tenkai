@@ -235,7 +235,7 @@ pub trait CredentialAuthenticator: Send + Sync {
     ) -> Result<AuthenticatedRequestContext, AuthError>;
 }
 
-/// Enterprise auth extension (for example Aldunis assertion verification).
+/// Enterprise auth extension (assertion verification adapter).
 ///
 /// Extensions verify short-lived, audience-bound credentials and may attach
 /// tenant context using the host-granted authority. They never own catalog,
@@ -581,7 +581,7 @@ mod tests {
         )
     }
 
-    struct StubAldunis {
+    struct StubEnterpriseAuth {
         id: String,
         version: u32,
         audience: String,
@@ -589,7 +589,7 @@ mod tests {
         principal_id: String,
     }
 
-    impl EnterpriseAuthExtension for StubAldunis {
+    impl EnterpriseAuthExtension for StubEnterpriseAuth {
         fn extension_id(&self) -> &str {
             &self.id
         }
@@ -677,21 +677,21 @@ mod tests {
 
     #[test]
     fn enterprise_extension_derives_tenant_only_after_verification() {
-        let extension: Arc<dyn EnterpriseAuthExtension> = Arc::new(StubAldunis {
-            id: "aldunis".into(),
+        let extension: Arc<dyn EnterpriseAuthExtension> = Arc::new(StubEnterpriseAuth {
+            id: "enterprise-auth".into(),
             version: AUTH_CONTEXT_CONTRACT_VERSION,
             audience: "tenkai-server".into(),
             tenant_id: "tenant-a".into(),
             principal_id: "user:42".into(),
         });
         let config = AuthHostConfig {
-            required_extension_id: Some("aldunis".into()),
+            required_extension_id: Some("enterprise-auth".into()),
             expected_contract_version: AUTH_CONTEXT_CONTRACT_VERSION,
             expected_audience: Some("tenkai-server".into()),
         };
         let stack = build_auth_stack(&config, Some(extension), community_auth()).unwrap();
         assert_eq!(stack.mode(), AuthMode::Enterprise);
-        assert_eq!(stack.tenant_authority().unwrap().extension_id(), "aldunis");
+        assert_eq!(stack.tenant_authority().unwrap().extension_id(), "enterprise-auth");
 
         let denied = stack.authenticate(&CredentialMaterial {
             request_id: "req-3".into(),
@@ -709,13 +709,13 @@ mod tests {
             .unwrap();
         assert_eq!(context.principal_id(), "user:42");
         assert_eq!(context.tenant().unwrap().tenant_id(), "tenant-a");
-        assert_eq!(context.tenant().unwrap().extension_id(), "aldunis");
+        assert_eq!(context.tenant().unwrap().extension_id(), "enterprise-auth");
     }
 
     #[test]
     fn missing_required_extension_fails_at_startup() {
         let config = AuthHostConfig {
-            required_extension_id: Some("aldunis".into()),
+            required_extension_id: Some("enterprise-auth".into()),
             expected_contract_version: AUTH_CONTEXT_CONTRACT_VERSION,
             expected_audience: Some("tenkai-server".into()),
         };
@@ -723,22 +723,22 @@ mod tests {
         assert_eq!(
             error,
             AuthStartupError::MissingRequiredExtension {
-                extension_id: "aldunis".into(),
+                extension_id: "enterprise-auth".into(),
             }
         );
     }
 
     #[test]
     fn incompatible_extension_contract_fails_at_startup() {
-        let extension: Arc<dyn EnterpriseAuthExtension> = Arc::new(StubAldunis {
-            id: "aldunis".into(),
+        let extension: Arc<dyn EnterpriseAuthExtension> = Arc::new(StubEnterpriseAuth {
+            id: "enterprise-auth".into(),
             version: 99,
             audience: "tenkai-server".into(),
             tenant_id: "tenant-a".into(),
             principal_id: "user:42".into(),
         });
         let config = AuthHostConfig {
-            required_extension_id: Some("aldunis".into()),
+            required_extension_id: Some("enterprise-auth".into()),
             expected_contract_version: AUTH_CONTEXT_CONTRACT_VERSION,
             expected_audience: Some("tenkai-server".into()),
         };
@@ -751,15 +751,15 @@ mod tests {
 
     #[test]
     fn audience_mismatch_fails_at_startup() {
-        let extension: Arc<dyn EnterpriseAuthExtension> = Arc::new(StubAldunis {
-            id: "aldunis".into(),
+        let extension: Arc<dyn EnterpriseAuthExtension> = Arc::new(StubEnterpriseAuth {
+            id: "enterprise-auth".into(),
             version: AUTH_CONTEXT_CONTRACT_VERSION,
             audience: "other-service".into(),
             tenant_id: "tenant-a".into(),
             principal_id: "user:42".into(),
         });
         let config = AuthHostConfig {
-            required_extension_id: Some("aldunis".into()),
+            required_extension_id: Some("enterprise-auth".into()),
             expected_contract_version: AUTH_CONTEXT_CONTRACT_VERSION,
             expected_audience: Some("tenkai-server".into()),
         };

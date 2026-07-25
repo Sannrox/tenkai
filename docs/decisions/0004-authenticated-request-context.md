@@ -7,11 +7,12 @@
 ## Context
 
 Tenkai must stay fully operable as a tenant-free community runtime while
-allowing an enterprise composition (Aldunis as identity/tenant authority in
-front of the standalone Tenkai service) to present short-lived, audience-bound
-assertions. Folding Aldunis into the Tenkai process, or allowing callers to
-select tenant membership through ordinary metadata, would either force
-enterprise identity on community users or create a forgeable authority path.
+allowing an enterprise composition (an external identity/tenant plane in front
+of the standalone Tenkai service) to present short-lived, audience-bound
+assertions. Folding that identity plane into the Tenkai process, or allowing
+callers to select tenant membership through ordinary metadata, would either
+force enterprise identity on community users or create a forgeable authority
+path.
 
 ADR 0001 already requires each use case to carry a principal and keeps Tenkai
 authoritative for operational state. Provider ports (issue #18) authorize
@@ -45,7 +46,7 @@ Documented in `docs/auth-request-context.md` and implemented in
 ## Consequences
 
 - Community embedded and server hosts keep a tenant-free surface.
-- Enterprise hosts can plug Aldunis (or another verifier) without a second
+- Enterprise hosts can plug an external assertion verifier without a second
   delivery backend.
 - Forged tenant strings outside verified authentication cannot select Tenkai
   authority.
@@ -60,5 +61,5 @@ Documented in `docs/auth-request-context.md` and implemented in
   experience and couples community users to enterprise identity.
 - **Caller-supplied `X-Tenant-Id` trusted after any authn:** rejected; forges
   tenant authority from ordinary metadata.
-- **Hard-link Aldunis into Tenkai:** rejected; makes enterprise identity a
-  required dependency and confuses process boundaries.
+- **Hard-link an identity provider into Tenkai:** rejected; makes enterprise
+  identity a required dependency and confuses process boundaries.
