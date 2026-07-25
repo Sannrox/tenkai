@@ -79,8 +79,30 @@ Eviction: `WeightCache::evict(protected_digests, keep)` removes oldest
 unprotected blobs until at most `keep` files remain. Active digests must be
 passed in `protected` and are never deleted.
 
+## Planner variant selection
+
+Related hardware variants of a model are **published releases of the same
+product name** (for example `qwen-coder@1.0.0` Q4 and `qwen-coder@1.1.0` Q8).
+Each release declares `[requirements]` (`architecture`, `memory_gib`,
+`accelerator`).
+
+When planning a `model_runtime` subscription:
+
+1. Environment capability facts (`architecture`, `memory_gib`, and
+   `accelerator` when required) are read from the environment.
+2. Candidates are published releases of that product at or below the channel
+   head, optionally filtered by `constraint.version_range.<product>`.
+3. A candidate fits when facts satisfy its requirements (architecture and
+   accelerator membership; `memory_gib` ≥ requirement).
+4. Plan selects the **highest semver** among feasible candidates.
+5. `constraint.version_pin.<product>` forces that version and fails closed if
+   it does not fit — no silent fallback.
+6. If no candidate fits, plan creation fails closed with a named
+   fact/requirement error (no unconstrained “latest”).
+
+Selection never bypasses signing, approval, or deployable-trust checks.
+
 ## Follow-on
 
 - Reference engine plugins (`tenkai-executor-llamacpp`, MLX, …)
-- Planner hardware-class variant selection
 - Peer/regional caches
