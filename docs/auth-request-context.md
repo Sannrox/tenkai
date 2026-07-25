@@ -8,6 +8,9 @@ console.
 
 Source of truth for types and startup composition: `src/auth_context.rs`.
 Architecture decision: [ADR 0004](decisions/0004-authenticated-request-context.md).
+Product composition boundary:
+[ADR 0005](decisions/0005-enterprise-integration-boundary.md) and
+[enterprise integration boundary](enterprise-integration-boundary.md).
 
 ## Ownership
 

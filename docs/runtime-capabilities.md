@@ -9,6 +9,7 @@ Source of truth: `src/runtime_capabilities.rs`. Related contracts:
 
 - [Authenticated request context](auth-request-context.md)
 - [Tenant isolation conformance](tenant-isolation-conformance.md)
+- [Enterprise integration boundary](enterprise-integration-boundary.md)
 - [Operational storage](operational-storage.md)
 
 ## Why this exists
