@@ -14,6 +14,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::reconciler::{Reconciler, TickReport};
+use crate::runtime_capabilities::{
+    ProvidedCapabilities, RuntimeRequirements, community_auth_capabilities,
+    community_sqlite_profile, validate_runtime_capabilities,
+};
 use crate::storage::{AuditRecord, OperationalStore};
 
 pub type ReconcileFuture<'a> =
@@ -79,9 +83,26 @@ pub struct ServerConfig {
     pub management_token: String,
     /// Maps a runtime bearer token to its one assigned environment.
     pub runtime_assignments: HashMap<String, String>,
+    /// Host capability requirements validated before the router accepts traffic.
+    pub requirements: RuntimeRequirements,
+    /// Composed capabilities advertised by storage and extensions.
+    pub capabilities: ProvidedCapabilities,
 }
 
 impl ServerConfig {
+    /// Community server defaults: SQLite store profile and community auth.
+    pub fn community(
+        management_token: impl Into<String>,
+        runtime_assignments: HashMap<String, String>,
+    ) -> Self {
+        Self {
+            management_token: management_token.into(),
+            runtime_assignments,
+            requirements: RuntimeRequirements::community(),
+            capabilities: community_sqlite_profile(community_auth_capabilities()),
+        }
+    }
+
     pub fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
             !self.management_token.is_empty(),
@@ -99,6 +120,8 @@ impl ServerConfig {
                 .contains_key(&self.management_token),
             "management and runtime credentials must be distinct"
         );
+        validate_runtime_capabilities(&self.capabilities, &self.requirements)
+            .map_err(|error| anyhow::anyhow!("runtime capability negotiation failed: {error}"))?;
         Ok(())
     }
 }
@@ -112,6 +135,8 @@ struct AppState {
 #[derive(Debug, Serialize)]
 struct ServiceStatus {
     status: &'static str,
+    profile: String,
+    capabilities: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -161,8 +186,16 @@ pub fn router(
         })))
 }
 
-async fn health() -> Json<ServiceStatus> {
-    Json(ServiceStatus { status: "ok" })
+fn service_status(status: &'static str, config: &ServerConfig) -> ServiceStatus {
+    ServiceStatus {
+        status,
+        profile: config.capabilities.profile.clone(),
+        capabilities: config.capabilities.diagnostic_names(),
+    }
+}
+
+async fn health(State(state): State<Arc<AppState>>) -> Json<ServiceStatus> {
+    Json(service_status("ok", &state.config))
 }
 
 async fn ready(State(state): State<Arc<AppState>>) -> Response {
@@ -171,7 +204,7 @@ async fn ready(State(state): State<Arc<AppState>>) -> Response {
         return error_response(StatusCode::SERVICE_UNAVAILABLE, "service is not ready");
     }
     match state.reconciler.check_health().await {
-        Ok(()) => Json(ServiceStatus { status: "ready" }).into_response(),
+        Ok(()) => Json(service_status("ready", &state.config)).into_response(),
         Err(error) => error_response(StatusCode::SERVICE_UNAVAILABLE, {
             eprintln!("required provider readiness check failed: {error:#}");
             "service is not ready"
@@ -525,10 +558,10 @@ mod tests {
             })
             .unwrap();
         let app = router(
-            ServerConfig {
-                management_token: "management-secret".into(),
-                runtime_assignments: HashMap::from([("runtime-secret".into(), "prod".into())]),
-            },
+            ServerConfig::community(
+                "management-secret",
+                HashMap::from([("runtime-secret".into(), "prod".into())]),
+            ),
             Arc::new(FixedReconciler),
             store.clone(),
         )
@@ -655,11 +688,54 @@ mod tests {
 
     #[test]
     fn rejects_credential_reuse_across_trust_scopes() {
-        let config = ServerConfig {
-            management_token: "same".into(),
-            runtime_assignments: HashMap::from([("same".into(), "prod".into())]),
-        };
+        let config =
+            ServerConfig::community("same", HashMap::from([("same".into(), "prod".into())]));
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_tenant_mode_without_tenant_isolation_capability() {
+        let mut config = ServerConfig::community(
+            "management-secret",
+            HashMap::from([("runtime-secret".into(), "prod".into())]),
+        );
+        config.requirements.tenant_mode = true;
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("runtime capability negotiation failed"));
+        assert!(error.contains("tenant_isolation"));
+    }
+
+    #[test]
+    fn rejects_multi_replica_without_shared_replica_capability() {
+        let mut config = ServerConfig::community(
+            "management-secret",
+            HashMap::from([("runtime-secret".into(), "prod".into())]),
+        );
+        config.requirements.replica_count = 2;
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("shared_replica_state"));
+    }
+
+    #[tokio::test]
+    async fn health_and_ready_advertise_capability_names() {
+        let (app, _) = app();
+        for path in ["/healthz", "/readyz"] {
+            let response = app
+                .clone()
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body = String::from_utf8(bytes.to_vec()).unwrap();
+            assert!(body.contains("community-sqlite"));
+            assert!(body.contains("operational_store_migration"));
+            assert!(!body.contains("management-secret"));
+            assert!(!body.contains("runtime-secret"));
+            assert!(!body.contains("tenant-a"));
+        }
     }
 
     #[test]
