@@ -51,6 +51,7 @@ pub trait ReconcilePort: Send + Sync {
     fn list_environments(&self) -> ListEnvFuture<'_>;
     fn inspect_environment(&self, environment: String) -> InspectEnvFuture<'_>;
     fn environment_status(&self, environment: String) -> StatusEnvFuture<'_>;
+    fn fleet_status(&self) -> FleetStatusFuture<'_>;
 }
 
 pub type WorkFuture<'a> =
@@ -65,6 +66,8 @@ pub type InspectEnvFuture<'a> = Pin<
 >;
 pub type StatusEnvFuture<'a> =
     Pin<Box<dyn Future<Output = anyhow::Result<Vec<crate::plan::StatusRow>>> + Send + 'a>>;
+pub type FleetStatusFuture<'a> =
+    Pin<Box<dyn Future<Output = anyhow::Result<crate::plan::FleetStatusReport>> + Send + 'a>>;
 
 impl ReconcilePort for Reconciler {
     fn reconcile(&self) -> ReconcileFuture<'_> {
@@ -116,6 +119,13 @@ impl ReconcilePort for Reconciler {
         Box::pin(async move {
             let mut ctx = self.ctx_clone();
             crate::plan::status(&mut ctx, &environment).await
+        })
+    }
+
+    fn fleet_status(&self) -> FleetStatusFuture<'_> {
+        Box::pin(async move {
+            let mut ctx = self.ctx_clone();
+            crate::plan::fleet_status(&mut ctx).await
         })
     }
 }
@@ -279,6 +289,7 @@ pub fn router(
         .route("/healthz", get(health))
         .route("/readyz", get(ready))
         .route("/v1/reconcile", post(reconcile))
+        .route("/v1/fleet/status", get(fleet_status))
         .route("/v1/environments", get(list_environments))
         .route("/v1/environments/{environment}", get(inspect_environment))
         .route(
@@ -418,6 +429,45 @@ fn authenticate_management(
                 "invalid management credential",
             )))
         }
+    }
+}
+
+async fn fleet_status(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    let context = match authenticate_management(&state, &headers) {
+        Ok(context) => context,
+        Err(response) => return *response,
+    };
+    if let Err(response) = require_tenant_scope(&state, &context, None) {
+        return *response;
+    }
+    if state.config.requirements.tenant_mode {
+        let Some(tenant_store) = state.tenant_store.as_ref() else {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "tenant mode is enabled but no tenant store is configured",
+            );
+        };
+        // Tenant mode: only environments in the tenant partition (non-leaking).
+        let allowed = match tenant_store.list_environment_ids_for(&context) {
+            Ok(ids) => ids,
+            Err(error) => {
+                return error_response(StatusCode::FORBIDDEN, error.public_message());
+            }
+        };
+        return match state.reconciler.fleet_status().await {
+            Ok(mut report) => {
+                report
+                    .environments
+                    .retain(|row| allowed.iter().any(|id| id == &row.name));
+                let rebuilt = crate::plan::fleet_status_from_rows(report.environments);
+                Json(rebuilt).into_response()
+            }
+            Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")),
+        };
+    }
+    match state.reconciler.fleet_status().await {
+        Ok(report) => Json(report).into_response(),
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")),
     }
 }
 
@@ -851,6 +901,11 @@ impl RemoteClient {
         .await
     }
 
+    pub async fn fleet_status(&self) -> anyhow::Result<crate::plan::FleetStatusReport> {
+        self.request_json(reqwest::Method::GET, "/v1/fleet/status")
+            .await
+    }
+
     async fn request_json<T: serde::de::DeserializeOwned>(
         &self,
         method: reqwest::Method,
@@ -966,6 +1021,32 @@ mod tests {
 
         fn environment_status(&self, _environment: String) -> StatusEnvFuture<'_> {
             Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn fleet_status(&self) -> FleetStatusFuture<'_> {
+            Box::pin(async {
+                Ok(crate::plan::FleetStatusReport {
+                    environments: vec![crate::plan::FleetEnvironmentRow {
+                        name: "prod".into(),
+                        id: "tenkai:env:prod".into(),
+                        description: "fixture".into(),
+                        subscription_count: 0,
+                        products_current: 0,
+                        products_behind: 0,
+                        products_missing: 0,
+                        unhealthy: false,
+                        health_summary: "n/a".into(),
+                        lease_held: false,
+                        latest_plan_state: None,
+                        posture: "empty".into(),
+                    }],
+                    environment_count: 1,
+                    environments_current: 0,
+                    environments_behind: 0,
+                    environments_unhealthy: 0,
+                    environments_empty: 1,
+                })
+            })
         }
     }
 
@@ -1362,6 +1443,40 @@ mod tests {
             assert!(!body.contains("runtime-secret"));
             assert!(!body.contains("tenant-a"));
         }
+    }
+
+    #[tokio::test]
+    async fn fleet_status_requires_auth_and_returns_report() {
+        let (app, _) = app();
+        let denied = app
+            .clone()
+            .oneshot(
+                Request::get("/v1/fleet/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+
+        let allowed = app
+            .oneshot(
+                Request::get("/v1/fleet/status")
+                    .header("authorization", "Bearer management-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(allowed.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(allowed.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(body.contains("prod"));
+        assert!(body.contains("environment_count"));
+        assert!(!body.contains("management-secret"));
+        assert!(!body.contains("runtime-secret"));
     }
 
     #[tokio::test]

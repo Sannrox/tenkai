@@ -89,6 +89,11 @@ enum Command {
         #[command(subcommand)]
         command: EnvCommand,
     },
+    /// Fleet-wide delivery posture across all registered environments.
+    Fleet {
+        #[command(subcommand)]
+        command: FleetCommand,
+    },
     /// Show the steps that would converge the environment (dry run).
     Plan {
         #[arg(long, default_value = "local")]
@@ -221,6 +226,12 @@ enum ReleaseCommand {
 enum ApprovalCommand {
     /// Show signer, policy, scope, expiry, and bypass evidence without credentials.
     Inspect { plan_id: String },
+}
+
+#[derive(Subcommand)]
+enum FleetCommand {
+    /// Summarize delivery posture for every environment (embedded or remote).
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -383,6 +394,13 @@ async fn main() -> Result<()> {
                 bail!(
                     "remote servers reconcile continuously; use --once to request an immediate tick"
                 )
+            }
+            Command::Fleet {
+                command: FleetCommand::Status,
+            } => {
+                let report = client.fleet_status().await?;
+                print_fleet_status(&report);
+                return Ok(());
             }
             Command::Env {
                 command: EnvCommand::List,
@@ -550,6 +568,12 @@ async fn main() -> Result<()> {
                 );
             }
         },
+        Command::Fleet {
+            command: FleetCommand::Status,
+        } => {
+            let report = plan::fleet_status(&mut ctx).await?;
+            print_fleet_status(&report);
+        }
         Command::Env { command } => match command {
             EnvCommand::Add { name, description } => {
                 println!("{}", plan::env_add(&mut ctx, &name, &description).await?);
@@ -877,6 +901,40 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+fn print_fleet_status(report: &plan::FleetStatusReport) {
+    println!(
+        "fleet environments={} current={} behind={} unhealthy={} empty={}",
+        report.environment_count,
+        report.environments_current,
+        report.environments_behind,
+        report.environments_unhealthy,
+        report.environments_empty
+    );
+    if report.environments.is_empty() {
+        println!("no environments registered (tenkaictl env add <name>)");
+        return;
+    }
+    println!(
+        "{:<16} {:<10} {:<6} {:<6} {:<6} {:<6} {:<8} {:<10} plan",
+        "name", "posture", "subs", "cur", "behind", "miss", "health", "lease"
+    );
+    for row in &report.environments {
+        let lease = if row.lease_held { "held" } else { "-" };
+        let plan = row.latest_plan_state.as_deref().unwrap_or("-");
+        println!(
+            "{:<16} {:<10} {:<6} {:<6} {:<6} {:<6} {:<8} {:<10} {plan}",
+            row.name,
+            row.posture,
+            row.subscription_count,
+            row.products_current,
+            row.products_behind,
+            row.products_missing,
+            row.health_summary,
+            lease
+        );
+    }
+}
+
 fn print_reconcile_report(report: reconciler::TickReport) {
     for result in report.environments {
         match result.status {
@@ -1065,6 +1123,34 @@ mod tests {
             Some("https://tenkai.example.test")
         );
         assert!(matches!(cli.command, Command::Reconcile { once: true, .. }));
+    }
+
+    #[test]
+    fn parses_fleet_status() {
+        let cli = Cli::try_parse_from(["tenkaictl", "fleet", "status"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Fleet {
+                command: FleetCommand::Status
+            }
+        ));
+        let remote = Cli::try_parse_from([
+            "tenkaictl",
+            "--target",
+            "remote",
+            "--server-url",
+            "http://127.0.0.1:8080",
+            "fleet",
+            "status",
+        ])
+        .unwrap();
+        assert_eq!(remote.target, Target::Remote);
+        assert!(matches!(
+            remote.command,
+            Command::Fleet {
+                command: FleetCommand::Status
+            }
+        ));
     }
 
     #[test]
