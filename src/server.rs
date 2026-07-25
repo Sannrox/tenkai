@@ -27,6 +27,8 @@ use crate::runtime_capabilities::{
     community_sqlite_profile, validate_runtime_capabilities,
 };
 use crate::storage::{AuditRecord, OperationalStore};
+use crate::tenant_isolation::NON_DISCLOSING_DENY;
+use crate::tenant_store::InMemoryTenantOperationalStore;
 
 pub type ReconcileFuture<'a> =
     Pin<Box<dyn Future<Output = anyhow::Result<TickReport>> + Send + 'a>>;
@@ -137,6 +139,8 @@ pub struct ServerConfig {
     pub federation: FederationConfig,
     /// Local correlation + replay directory (never shared with an identity plane DB).
     pub identity_directory: Arc<IdentityDirectory>,
+    /// Optional tenant-isolating operational store. Required when `tenant_mode` is on.
+    pub tenant_store: Option<Arc<InMemoryTenantOperationalStore>>,
 }
 
 impl ServerConfig {
@@ -154,6 +158,7 @@ impl ServerConfig {
             enterprise_auth: None,
             federation: FederationConfig::community(),
             identity_directory: Arc::new(IdentityDirectory::new()),
+            tenant_store: None,
         }
     }
 
@@ -176,6 +181,11 @@ impl ServerConfig {
         );
         validate_runtime_capabilities(&self.capabilities, &self.requirements)
             .map_err(|error| anyhow::anyhow!("runtime capability negotiation failed: {error}"))?;
+        if self.requirements.tenant_mode && self.tenant_store.is_none() {
+            anyhow::bail!(
+                "tenant mode requires a tenant-isolating operational store adapter (tenant_store)"
+            );
+        }
         // Compose AuthStack at validation time so missing required enterprise
         // extensions fail before the router accepts traffic.
         let _ = self.build_auth_stack()?;
@@ -230,6 +240,7 @@ struct AppState {
     auth: AuthStack,
     reconciler: Arc<dyn ReconcilePort>,
     store: Arc<dyn OperationalStore>,
+    tenant_store: Option<Arc<InMemoryTenantOperationalStore>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -287,11 +298,52 @@ pub fn router(
             post(runtime_heartbeat),
         )
         .with_state(Arc::new(AppState {
+            tenant_store: config.tenant_store.clone(),
             config,
             auth,
             reconciler,
             store,
         })))
+}
+
+/// When tenant mode is enabled, require authenticated tenant membership and
+/// optionally verify an environment id is visible to that tenant.
+fn require_tenant_scope(
+    state: &AppState,
+    context: &AuthenticatedRequestContext,
+    environment: Option<&str>,
+) -> Result<(), Box<Response>> {
+    if !state.config.requirements.tenant_mode {
+        return Ok(());
+    }
+    let Some(tenant_store) = state.tenant_store.as_ref() else {
+        return Err(Box::new(error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "tenant mode is enabled but no tenant store is configured",
+        )));
+    };
+    if context.tenant().is_none() {
+        return Err(Box::new(error_response(
+            StatusCode::FORBIDDEN,
+            "unauthenticated",
+        )));
+    }
+    if let Some(environment) = environment {
+        match tenant_store.get_environment_for(context, environment) {
+            Ok(_) => Ok(()),
+            Err(crate::tenant_isolation::IsolationError::NotFound)
+            | Err(crate::tenant_isolation::IsolationError::Unauthenticated) => Err(Box::new(
+                error_response(StatusCode::NOT_FOUND, NON_DISCLOSING_DENY),
+            )),
+            Err(error) => Err(Box::new(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                error.public_message(),
+            ))),
+        }
+    } else {
+        let _ = tenant_store;
+        Ok(())
+    }
 }
 
 /// Authenticate a management HTTP request through the composed [`AuthStack`].
@@ -316,12 +368,18 @@ fn authenticate_management(
             "caller metadata cannot select tenant authority",
         )));
     }
-    let Some(token) = bearer(headers) else {
+    let bearer_token = bearer(headers).map(str::to_string);
+    let assertion = headers
+        .get("x-tenkai-assertion")
+        .and_then(|value| value.to_str().ok())
+        .map(|raw| raw.as_bytes().to_vec())
+        .filter(|bytes| !bytes.is_empty());
+    if bearer_token.is_none() && assertion.is_none() {
         return Err(Box::new(error_response(
             StatusCode::UNAUTHORIZED,
             "missing bearer token",
         )));
-    };
+    }
     let request_id = headers
         .get("x-request-id")
         .and_then(|value| value.to_str().ok())
@@ -331,8 +389,8 @@ fn authenticate_management(
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let credential = CredentialMaterial {
         request_id,
-        bearer_token: Some(token.to_string()),
-        assertion: None,
+        bearer_token,
+        assertion,
     };
     match state.auth.authenticate(&credential) {
         Ok(context) => {
@@ -364,8 +422,38 @@ fn authenticate_management(
 }
 
 async fn list_environments(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    if let Err(response) = authenticate_management(&state, &headers) {
+    let context = match authenticate_management(&state, &headers) {
+        Ok(context) => context,
+        Err(response) => return *response,
+    };
+    if let Err(response) = require_tenant_scope(&state, &context, None) {
         return *response;
+    }
+    if state.config.requirements.tenant_mode {
+        let Some(tenant_store) = state.tenant_store.as_ref() else {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "tenant mode is enabled but no tenant store is configured",
+            );
+        };
+        return match tenant_store.list_environment_ids_for(&context) {
+            Ok(ids) => {
+                let entries: Vec<crate::plan::EnvironmentListEntry> = ids
+                    .into_iter()
+                    .map(|name| crate::plan::EnvironmentListEntry {
+                        name: name.clone(),
+                        id: format!("tenkai:env:{name}"),
+                        description: String::new(),
+                        subscription_count: 0,
+                        deployed_product_count: 0,
+                        lease_held: false,
+                    })
+                    .collect();
+                // Non-leakage: foreign tenant markers never appear.
+                Json(entries).into_response()
+            }
+            Err(error) => error_response(StatusCode::FORBIDDEN, error.public_message()),
+        };
     }
     match state.reconciler.list_environments().await {
         Ok(entries) => Json(entries).into_response(),
@@ -378,7 +466,11 @@ async fn inspect_environment(
     Path(environment): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(response) = authenticate_management(&state, &headers) {
+    let context = match authenticate_management(&state, &headers) {
+        Ok(context) => context,
+        Err(response) => return *response,
+    };
+    if let Err(response) = require_tenant_scope(&state, &context, Some(&environment)) {
         return *response;
     }
     match state.reconciler.inspect_environment(environment).await {
@@ -386,7 +478,12 @@ async fn inspect_environment(
         Err(error) => {
             let message = format!("{error:#}");
             if message.contains("not registered") {
-                error_response(StatusCode::NOT_FOUND, message)
+                // Preserve non-disclosing posture under tenant mode.
+                if state.config.requirements.tenant_mode {
+                    error_response(StatusCode::NOT_FOUND, NON_DISCLOSING_DENY)
+                } else {
+                    error_response(StatusCode::NOT_FOUND, message)
+                }
             } else {
                 error_response(StatusCode::INTERNAL_SERVER_ERROR, message)
             }
@@ -399,7 +496,11 @@ async fn environment_status(
     Path(environment): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(response) = authenticate_management(&state, &headers) {
+    let context = match authenticate_management(&state, &headers) {
+        Ok(context) => context,
+        Err(response) => return *response,
+    };
+    if let Err(response) = require_tenant_scope(&state, &context, Some(&environment)) {
         return *response;
     }
     match state.reconciler.environment_status(environment).await {
@@ -407,7 +508,11 @@ async fn environment_status(
         Err(error) => {
             let message = format!("{error:#}");
             if message.contains("not registered") {
-                error_response(StatusCode::NOT_FOUND, message)
+                if state.config.requirements.tenant_mode {
+                    error_response(StatusCode::NOT_FOUND, NON_DISCLOSING_DENY)
+                } else {
+                    error_response(StatusCode::NOT_FOUND, message)
+                }
             } else {
                 error_response(StatusCode::INTERNAL_SERVER_ERROR, message)
             }
@@ -1019,6 +1124,211 @@ mod tests {
         let error = config.validate().unwrap_err().to_string();
         assert!(error.contains("runtime capability negotiation failed"));
         assert!(error.contains("tenant_isolation"));
+    }
+
+    #[test]
+    fn rejects_tenant_mode_without_tenant_store_adapter() {
+        let mut config = ServerConfig::community(
+            "management-secret",
+            HashMap::from([("runtime-secret".into(), "prod".into())]),
+        );
+        config.requirements.tenant_mode = true;
+        config.capabilities = crate::runtime_capabilities::ProvidedCapabilities::assemble(
+            "enterprise-tenant-memory",
+            [
+                crate::tenant_store::tenant_memory_store_capabilities(),
+                community_auth_capabilities(),
+            ],
+        );
+        let error = config.validate().unwrap_err().to_string();
+        assert!(
+            error.contains("tenant-isolating operational store"),
+            "{error}"
+        );
+    }
+
+    /// Enterprise extension that maps a JSON assertion `{"tenant":"...","principal":"..."}`
+    /// into authenticated tenant context for router isolation tests.
+    struct TenantAssertionExtension;
+
+    impl EnterpriseAuthExtension for TenantAssertionExtension {
+        fn extension_id(&self) -> &str {
+            "auth.enterprise"
+        }
+        fn contract_version(&self) -> u32 {
+            crate::auth_context::AUTH_CONTEXT_CONTRACT_VERSION
+        }
+        fn expected_audience(&self) -> &str {
+            "tenkai-server"
+        }
+        fn authenticate(
+            &self,
+            credential: &CredentialMaterial,
+            authority: &crate::auth_context::TenantDerivationAuthority,
+        ) -> Result<AuthenticatedRequestContext, crate::auth_context::AuthError> {
+            let raw = credential.assertion.as_ref().ok_or_else(|| {
+                crate::auth_context::AuthError::InvalidCredential("assertion required".into())
+            })?;
+            let value: serde_json::Value = serde_json::from_slice(raw).map_err(|error| {
+                crate::auth_context::AuthError::InvalidCredential(error.to_string())
+            })?;
+            let tenant = value
+                .get("tenant")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    crate::auth_context::AuthError::InvalidCredential(
+                        "tenant claim required".into(),
+                    )
+                })?;
+            let principal = value
+                .get("principal")
+                .and_then(|v| v.as_str())
+                .unwrap_or("enterprise-user");
+            crate::auth_context::AuthenticatedRequestContextBuilder::new(
+                credential.request_id.clone(),
+                PrincipalIdentity {
+                    id: principal.into(),
+                    kind: PrincipalKind::Human,
+                },
+                self.extension_id(),
+            )
+            .with_tenant(tenant, authority)?
+            .build()
+        }
+    }
+
+    #[tokio::test]
+    async fn tenant_mode_management_apis_isolate_environments() {
+        use crate::runtime_capabilities::enterprise_auth_capabilities;
+        use crate::storage::EnvironmentRecord;
+        use crate::tenant_store::tenant_memory_store_capabilities;
+
+        let tenant_store = Arc::new(InMemoryTenantOperationalStore::new());
+        let mut config = ServerConfig::community(
+            "management-secret",
+            HashMap::from([("runtime-secret".into(), "prod".into())]),
+        );
+        config.requirements.tenant_mode = true;
+        config.requirements.require_enterprise_authentication = true;
+        config.capabilities = crate::runtime_capabilities::ProvidedCapabilities::assemble(
+            "enterprise-tenant-memory",
+            [
+                tenant_memory_store_capabilities(),
+                enterprise_auth_capabilities(),
+            ],
+        );
+        config.auth_host = AuthHostConfig {
+            required_extension_id: Some("auth.enterprise".into()),
+            expected_contract_version: crate::auth_context::AUTH_CONTEXT_CONTRACT_VERSION,
+            expected_audience: Some("tenkai-server".into()),
+        };
+        // No federation issuer: wrap not applied; pure enterprise extension.
+        config.enterprise_auth = Some(Arc::new(TenantAssertionExtension));
+        config.tenant_store = Some(tenant_store.clone());
+
+        // Seed partitions via authenticated contexts.
+        let authority = crate::auth_context::TenantDerivationAuthority::new("auth.enterprise");
+        let ctx_a = TenantAssertionExtension
+            .authenticate(
+                &CredentialMaterial {
+                    request_id: "seed-a".into(),
+                    bearer_token: None,
+                    assertion: Some(br#"{"tenant":"tenant-a","principal":"user-a"}"#.to_vec()),
+                },
+                &authority,
+            )
+            .unwrap();
+        let ctx_b = TenantAssertionExtension
+            .authenticate(
+                &CredentialMaterial {
+                    request_id: "seed-b".into(),
+                    bearer_token: None,
+                    assertion: Some(br#"{"tenant":"tenant-b","principal":"user-b"}"#.to_vec()),
+                },
+                &authority,
+            )
+            .unwrap();
+        tenant_store
+            .put_environment_for(
+                &ctx_a,
+                &EnvironmentRecord {
+                    id: "env-a".into(),
+                    revision: 0,
+                    configuration_json: "{}".into(),
+                },
+            )
+            .unwrap();
+        tenant_store
+            .put_environment_for(
+                &ctx_b,
+                &EnvironmentRecord {
+                    id: "env-b".into(),
+                    revision: 0,
+                    configuration_json: "{}".into(),
+                },
+            )
+            .unwrap();
+
+        let store = Arc::new(crate::storage::SqliteStore::open_in_memory().unwrap());
+        let tenant_app = router(config, Arc::new(FixedReconciler), store).unwrap();
+
+        let list_a = tenant_app
+            .clone()
+            .oneshot(
+                Request::get("/v1/environments")
+                    .header(
+                        "x-tenkai-assertion",
+                        r#"{"tenant":"tenant-a","principal":"user-a"}"#,
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list_a.status(), StatusCode::OK);
+        let body = String::from_utf8(
+            axum::body::to_bytes(list_a.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(body.contains("env-a"));
+        assert!(!body.contains("env-b"));
+        assert!(!body.contains("tenant-b"));
+
+        let cross = tenant_app
+            .clone()
+            .oneshot(
+                Request::get("/v1/environments/env-b")
+                    .header(
+                        "x-tenkai-assertion",
+                        r#"{"tenant":"tenant-a","principal":"user-a"}"#,
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cross.status(), StatusCode::NOT_FOUND);
+        let cross_body = String::from_utf8(
+            axum::body::to_bytes(cross.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(cross_body.contains(NON_DISCLOSING_DENY));
+        assert!(!cross_body.contains("tenant-b"));
+        assert!(!cross_body.contains("env-b"));
+
+        // Community profile still starts without tenant mode.
+        let (community_app, _) = app();
+        let health = community_app
+            .oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(health.status(), StatusCode::OK);
     }
 
     #[test]

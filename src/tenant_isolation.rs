@@ -141,12 +141,12 @@ pub fn tenant_visible_rpcs() -> &'static [TenantVisibleRpc] {
         },
         TenantVisibleRpc {
             id: "environment.list",
-            path_template: "LIST environments",
+            path_template: "GET /v1/environments",
             surface: TenantVisibleSurface::Environment,
         },
         TenantVisibleRpc {
             id: "environment.get",
-            path_template: "GET environments/{id}",
+            path_template: "GET /v1/environments/{environment}",
             surface: TenantVisibleSurface::Environment,
         },
         TenantVisibleRpc {

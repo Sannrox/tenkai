@@ -107,6 +107,20 @@ Run `InMemoryTenantOperationalStore::run_conformance` (or
 `cargo test tenant_store`) to exercise harness coverage plus store-partition
 isolation.
 
+## Live management HTTP (tenant mode)
+
+When `ServerConfig.requirements.tenant_mode` is true and a
+`tenant_store` (`InMemoryTenantOperationalStore` or equivalent) is configured:
+
+| Route | Isolation |
+| --- | --- |
+| `GET /v1/environments` | Lists only the authenticated tenant's environments |
+| `GET /v1/environments/{environment}` | Cross-tenant ids → non-disclosing `resource not found` |
+| `GET /v1/environments/{environment}/status` | Same non-disclosing deny |
+
+Community tenant-free hosts leave `tenant_mode` false and `tenant_store` unset.
+Startup fails closed if tenant mode is requested without store + capability.
+
 ## Relationship to community mode
 
 Community hosts use `AuthHostConfig::community()` and never attach tenant
