@@ -13,6 +13,7 @@ pub mod embedded;
 pub mod federated_identity;
 pub mod maintenance;
 pub mod manifest;
+pub mod model_runtime;
 pub mod offline_bundle;
 pub mod ontology;
 pub mod pb;
