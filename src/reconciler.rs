@@ -85,6 +85,100 @@ impl TickReport {
             .filter(|result| matches!(result.status, EnvironmentStatus::Failed { .. }))
             .count()
     }
+
+    pub fn successes(&self) -> usize {
+        self.environments
+            .len()
+            .saturating_sub(self.failures())
+            .saturating_sub(
+                self.environments
+                    .iter()
+                    .filter(|result| {
+                        matches!(
+                            result.status,
+                            EnvironmentStatus::Busy | EnvironmentStatus::Deferred { .. }
+                        )
+                    })
+                    .count(),
+            )
+    }
+
+    /// Operator diagnostics without secrets or tenant identifiers beyond env names.
+    pub fn diagnostics(&self) -> TickDiagnostics {
+        let mut failed = 0usize;
+        let mut busy = 0usize;
+        let mut deferred = 0usize;
+        let mut applied = 0usize;
+        let mut current = 0usize;
+        let mut awaiting_runtime = 0usize;
+        let mut awaiting_approval = 0usize;
+        for result in &self.environments {
+            match &result.status {
+                EnvironmentStatus::Failed { .. } => failed += 1,
+                EnvironmentStatus::Busy => busy += 1,
+                EnvironmentStatus::Deferred { .. } => deferred += 1,
+                EnvironmentStatus::Applied { .. } => applied += 1,
+                EnvironmentStatus::Current => current += 1,
+                EnvironmentStatus::AwaitingRuntime { .. } => awaiting_runtime += 1,
+                EnvironmentStatus::AwaitingApproval { .. } => awaiting_approval += 1,
+            }
+        }
+        TickDiagnostics {
+            environments_total: self.environments.len(),
+            environments_failed: failed,
+            environments_busy: busy,
+            environments_deferred: deferred,
+            environments_applied: applied,
+            environments_current: current,
+            environments_awaiting_runtime: awaiting_runtime,
+            environments_awaiting_approval: awaiting_approval,
+            outcome: if failed == 0 { "ok" } else { "degraded" },
+        }
+    }
+}
+
+/// Stable diagnostic fields for logging and operator tooling.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TickDiagnostics {
+    pub environments_total: usize,
+    pub environments_failed: usize,
+    pub environments_busy: usize,
+    pub environments_deferred: usize,
+    pub environments_applied: usize,
+    pub environments_current: usize,
+    pub environments_awaiting_runtime: usize,
+    pub environments_awaiting_approval: usize,
+    /// `ok` when no environment failed this tick; otherwise `degraded`.
+    pub outcome: &'static str,
+}
+
+/// Cumulative counters retained across ticks for `/v1/diagnostics`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReconcileDiagnostics {
+    pub ticks_total: u64,
+    pub ticks_failed: u64,
+    pub last_outcome: String,
+    pub last_environments_total: usize,
+    pub last_environments_failed: usize,
+}
+
+impl ReconcileDiagnostics {
+    pub fn record_tick(&mut self, report: &TickReport) {
+        self.ticks_total = self.ticks_total.saturating_add(1);
+        let diag = report.diagnostics();
+        if diag.environments_failed > 0 {
+            self.ticks_failed = self.ticks_failed.saturating_add(1);
+        }
+        self.last_outcome = diag.outcome.into();
+        self.last_environments_total = diag.environments_total;
+        self.last_environments_failed = diag.environments_failed;
+    }
+
+    pub fn record_tick_error(&mut self) {
+        self.ticks_total = self.ticks_total.saturating_add(1);
+        self.ticks_failed = self.ticks_failed.saturating_add(1);
+        self.last_outcome = "error".into();
+    }
 }
 
 #[derive(Default)]
@@ -183,6 +277,7 @@ pub struct Reconciler {
     state: Arc<Mutex<SchedulerState>>,
     tick_lock: Arc<tokio::sync::Mutex<()>>,
     runtime_environments: Arc<HashSet<String>>,
+    diagnostics: Arc<Mutex<ReconcileDiagnostics>>,
 }
 
 impl Reconciler {
@@ -202,12 +297,20 @@ impl Reconciler {
             state: Arc::new(Mutex::new(SchedulerState::default())),
             tick_lock: Arc::new(tokio::sync::Mutex::new(())),
             runtime_environments: Arc::new(HashSet::new()),
+            diagnostics: Arc::new(Mutex::new(ReconcileDiagnostics::default())),
         })
     }
 
     pub fn with_runtime_environments(mut self, environments: HashSet<String>) -> Self {
         self.runtime_environments = Arc::new(environments);
         self
+    }
+
+    pub fn diagnostics_snapshot(&self) -> ReconcileDiagnostics {
+        self.diagnostics
+            .lock()
+            .expect("reconciler diagnostics lock")
+            .clone()
     }
 
     /// Reconcile every registered environment once. Environments run concurrently.
@@ -295,6 +398,10 @@ impl Reconciler {
         report
             .environments
             .sort_by(|left, right| left.environment.cmp(&right.environment));
+        self.diagnostics
+            .lock()
+            .expect("reconciler diagnostics lock")
+            .record_tick(&report);
         Ok(report)
     }
 
@@ -654,5 +761,54 @@ mod tests {
             state.finish("prod", false, now, &config);
         }
         assert!(matches!(state.begin("prod", 799), Admission::Deferred(800)));
+    }
+
+    #[test]
+    fn tick_diagnostics_report_ok_without_secrets() {
+        let report = TickReport {
+            environments: vec![
+                EnvironmentResult {
+                    environment: "alpha".into(),
+                    status: EnvironmentStatus::Current,
+                },
+                EnvironmentResult {
+                    environment: "beta".into(),
+                    status: EnvironmentStatus::Applied {
+                        plan_id: "plan-1".into(),
+                        steps: 1,
+                    },
+                },
+            ],
+        };
+        let diag = report.diagnostics();
+        assert_eq!(diag.outcome, "ok");
+        assert_eq!(diag.environments_total, 2);
+        assert_eq!(diag.environments_failed, 0);
+        let encoded = serde_json::to_string(&diag).unwrap();
+        assert!(!encoded.contains("Bearer"));
+        assert!(!encoded.contains("secret"));
+
+        let mut cumulative = ReconcileDiagnostics::default();
+        cumulative.record_tick(&report);
+        assert_eq!(cumulative.ticks_total, 1);
+        assert_eq!(cumulative.ticks_failed, 0);
+        assert_eq!(cumulative.last_outcome, "ok");
+    }
+
+    #[test]
+    fn failed_environment_marks_tick_degraded() {
+        let report = TickReport {
+            environments: vec![EnvironmentResult {
+                environment: "prod".into(),
+                status: EnvironmentStatus::Failed {
+                    error: "boom".into(),
+                },
+            }],
+        };
+        assert_eq!(report.diagnostics().outcome, "degraded");
+        let mut cumulative = ReconcileDiagnostics::default();
+        cumulative.record_tick(&report);
+        assert_eq!(cumulative.ticks_failed, 1);
+        assert_eq!(cumulative.last_outcome, "degraded");
     }
 }

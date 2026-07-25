@@ -175,8 +175,27 @@ async fn main() -> Result<()> {
                     }
                 }
                 _ = timer.tick() => {
-                    if let Err(error) = reconciler.run_once().await {
-                        eprintln!("reconciliation tick failed: {error:#}");
+                    match reconciler.run_once().await {
+                        Ok(report) => {
+                            let diag = report.diagnostics();
+                            // Structured diagnostics: stable field names, no secrets.
+                            eprintln!(
+                                "tenkai.reconcile outcome={} environments_total={} environments_failed={} environments_current={} environments_applied={} environments_busy={} environments_deferred={} environments_awaiting_runtime={} environments_awaiting_approval={}",
+                                diag.outcome,
+                                diag.environments_total,
+                                diag.environments_failed,
+                                diag.environments_current,
+                                diag.environments_applied,
+                                diag.environments_busy,
+                                diag.environments_deferred,
+                                diag.environments_awaiting_runtime,
+                                diag.environments_awaiting_approval
+                            );
+                        }
+                        Err(error) => {
+                            eprintln!("tenkai.reconcile outcome=error detail=tick_failed");
+                            eprintln!("reconciliation tick failed: {error:#}");
+                        }
                     }
                 }
             }
