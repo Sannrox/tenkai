@@ -170,6 +170,12 @@ tenkaictl env maintenance list prod
 summary. `env inspect <name>` prints JSON for subscriptions, deployed versions,
 lease/fencing state, and the latest plan—never bearer tokens.
 
+For a scripted two-environment walkthrough (list/inspect/status), run:
+
+```bash
+./scripts/demo-multi-env.sh
+```
+
 Plans can be computed outside a window, but `apply` records them as blocked and
 exits nonzero while the window is closed. When a window opens, rerun
 `tenkaictl apply <plan-id>`; blocked plans do not resume automatically. Invalid
