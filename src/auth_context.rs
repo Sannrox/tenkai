@@ -67,6 +67,12 @@ pub struct TenantDerivationAuthority {
 }
 
 impl TenantDerivationAuthority {
+    pub fn new(extension_id: impl Into<String>) -> Self {
+        Self {
+            extension_id: extension_id.into(),
+        }
+    }
+
     pub fn extension_id(&self) -> &str {
         &self.extension_id
     }
