@@ -239,6 +239,9 @@ may plug an auth extension that verifies short-lived, audience-bound assertions
 and derives optional tenant context through the versioned
 [authenticated request context](docs/auth-request-context.md) contract; Tenkai
 remains authoritative for catalog, planning, reconciliation, and recovery.
+Tenant mode must pass the deterministic
+[tenant isolation conformance](docs/tenant-isolation-conformance.md) harness
+before release.
 
 The server accepts plaintext HTTP only on loopback. Put a TLS reverse proxy in
 front of it for remote access; never pass tokens on a command line. By default
