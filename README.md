@@ -409,13 +409,23 @@ it ([ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md),
 | Catalog application boundary | [Catalog contract](docs/catalog-contract.md); ADR 0001 |
 | Health probes, auto-rollback, deliberate rollback | Quickstart; apply/reconciler |
 | Maintenance windows | CLI `env maintenance` |
+| Canary cohort promotion evidence | #7; `src/canary.rs` |
+| Multi-environment list/inspect | `tenkaictl env list` / `env inspect`; #56 |
+| Authenticated remote status/inspect | `--target remote`; #58 |
+| Fleet status (embedded and remote) | `tenkaictl fleet status`; [server diagnostics](docs/server-diagnostics.md); #91 |
+| Environment capability facts + planner constraints | `env facts` / `env constraints`; #63, #57 |
+| Planner model_runtime variant selection by facts | [Model runtime](docs/model-runtime.md); #66 |
+| Ordered model_runtime → routing_config rollout | [examples/model-routing-rollout](examples/model-routing-rollout/); #67 |
 | Governed `routing_config` products | [ADR 0002](docs/decisions/0002-tenkai-owned-routing-configuration.md) |
-| `model_runtime` product kind (descriptor + executor port) | [Model runtime](docs/model-runtime.md); [ADR 0007](docs/decisions/0007-model-runtime-fleet-control-plane.md) |
+| `model_runtime` product kind + weight cache/eviction | [Model runtime](docs/model-runtime.md); [ADR 0007](docs/decisions/0007-model-runtime-fleet-control-plane.md); #48, #62, #65 |
+| Reference llama.cpp engine plugin (fake for CI) | [Model runtime](docs/model-runtime.md); #64 |
 | Self-verifying offline bundles | [Offline bundles](docs/offline-bundles.md); [ADR 0003](docs/decisions/0003-canonical-offline-delivery-archives.md) |
 | Optional governance/intelligence provider ports | [Provider contracts](docs/provider-contracts.md) |
 | Runtime capability negotiation at startup | [Runtime capabilities](docs/runtime-capabilities.md) |
-| Auth request context + enterprise composition contracts | [Auth context](docs/auth-request-context.md), [enterprise boundary](docs/enterprise-integration-boundary.md), [federated identity](docs/federated-identity.md) |
-| Tenant-isolation conformance harness (enterprise bar) | [Tenant isolation](docs/tenant-isolation-conformance.md) |
+| AuthStack management HTTP + federation accept path | [Auth context](docs/auth-request-context.md), [federated identity](docs/federated-identity.md); #68, #71 |
+| Tenant-isolation harness + in-memory tenant store | [Tenant isolation](docs/tenant-isolation-conformance.md); #37, #69, #70 |
+| Backup/restore drill and server reconcile diagnostics | [operational storage](docs/operational-storage.md); [server diagnostics](docs/server-diagnostics.md); #59, #60 |
+| Release readiness checklist | [release readiness](docs/release-readiness.md); #72 |
 
 Governance integrations remain optional. Required policy or gate decisions fail
 closed; optional audit/outcome exports use a durable retry outbox. An embedded
@@ -424,22 +434,24 @@ is explicitly configured; ungated solo deploys never open a network connection.
 
 ### Deferred (next-era product work)
 
-Tracked in open GitHub Issues (for example #56–#60 and follow-on model/enterprise
-items). Not missing from the closed architecture program:
+Tracked in open GitHub Issues. The architecture program (ADRs 0001–0007) is
+landed; remaining work is product depth (DESIGN Phase 5+), for example:
 
-- Multi-environment operator list/inspect depth and remote management CLI
-- Planner version pins and capability-constraint solving beyond current baseline
-- Real model engine plugins (weight download/serve)—not only the descriptor port
-- Enterprise HTTP wiring of auth/tenant mode on live APIs (community stays tenant-free)
-- Backup/restore drills and structured server diagnostics (ops hardening)
+- Multi-environment rollout waves (#94)
+- Kubernetes (or Argo-backed) software apply path (#95)
+- llama.cpp operator golden path beyond CI fake (#96)
+- Hardware inventory fact reporter (#97)
+- Production tenant-capable store criteria / adapter (#98 and follow-ons)
+- Peer/regional weight caches; additional inference engines
+- Remote chisei eval gates and outcome→planner learning loop
 
 Founding product intent and long-range roadmap remain in [DESIGN.md](DESIGN.md);
 accepted architecture decisions are the decision log under
 [docs/decisions/](docs/decisions/README.md).
 
-Active implementation work and dependencies are tracked in GitHub Issues.
-Before tagging a release, follow the
-[release readiness checklist](docs/release-readiness.md).
+Active implementation work and dependencies are tracked in **GitHub Issues**
+(source of truth for readiness and assignment). Before tagging a release, follow
+the [release readiness checklist](docs/release-readiness.md).
 
 ## Recorded rollback replay
 
