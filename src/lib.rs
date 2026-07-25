@@ -31,6 +31,7 @@ pub mod runtime_capabilities;
 pub mod runtime_protocol;
 pub mod server;
 pub mod software_executor;
+pub mod staged_artifact;
 pub mod storage;
 pub mod tenant_isolation;
 pub mod tenant_store;
