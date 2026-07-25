@@ -6,7 +6,9 @@
 //! payloads are never stored in Tenkai operational state—only content-addressed
 //! digests and descriptors.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -204,6 +206,82 @@ impl WeightCache {
             }
         }
     }
+
+    /// Evict oldest unprotected weight blobs until at most `keep` files remain.
+    ///
+    /// Digests listed in `protected` are never deleted, even when that means
+    /// more than `keep` blobs remain. Returns digests removed as `sha256:<hex>`.
+    /// Eviction failures are actionable and never touch protected active digests.
+    pub fn evict(&self, protected: &[String], keep: usize) -> Result<Vec<String>> {
+        let mut protected_set = HashSet::new();
+        for digest in protected {
+            let hex = artifact_digest_hex(digest)?;
+            protected_set.insert(hex.to_string());
+        }
+
+        let mut entries = self.list_cached_blobs()?;
+        // Oldest first so eviction prefers prior generations.
+        entries.sort_by_key(|entry| entry.modified);
+
+        let mut total = entries.len();
+        let mut removed = Vec::new();
+        for entry in entries {
+            if total <= keep {
+                break;
+            }
+            if protected_set.contains(&entry.hex) {
+                continue;
+            }
+            let path = self.root.join("sha256").join(&entry.hex);
+            std::fs::remove_file(&path).with_context(|| {
+                format!(
+                    "evicting unprotected weight cache entry {} (sha256:{})",
+                    path.display(),
+                    entry.hex
+                )
+            })?;
+            removed.push(format!("sha256:{}", entry.hex));
+            total = total.saturating_sub(1);
+        }
+        Ok(removed)
+    }
+
+    fn list_cached_blobs(&self) -> Result<Vec<CachedBlob>> {
+        let dir = self.root.join("sha256");
+        if !dir.is_dir() {
+            return Ok(Vec::new());
+        }
+        let mut entries = Vec::new();
+        for entry in std::fs::read_dir(&dir)
+            .with_context(|| format!("listing weight cache {}", dir.display()))?
+        {
+            let entry = entry.with_context(|| format!("reading weight cache {}", dir.display()))?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(name) if name.len() == 64 && name.chars().all(|c| c.is_ascii_hexdigit()) => {
+                    name.to_ascii_lowercase()
+                }
+                _ => continue,
+            };
+            let modified = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            entries.push(CachedBlob {
+                hex: name,
+                modified,
+            });
+        }
+        Ok(entries)
+    }
+}
+
+struct CachedBlob {
+    hex: String,
+    modified: SystemTime,
 }
 
 fn fetch_source_to(source: &str, destination: &Path) -> Result<()> {
