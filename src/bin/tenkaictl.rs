@@ -358,6 +358,7 @@ async fn main() -> Result<()> {
             .ok_or_else(|| anyhow::anyhow!("--server-url is required with --target remote"))?;
         let token = std::env::var("TENKAI_MANAGEMENT_TOKEN")
             .map_err(|_| anyhow::anyhow!("TENKAI_MANAGEMENT_TOKEN is required for remote mode"))?;
+        let client = tenkai::server::RemoteClient::new(server_url, token)?;
         match cli.command {
             Command::Reconcile {
                 once: true,
@@ -370,9 +371,7 @@ async fn main() -> Result<()> {
                         "the local-development reconciliation bypass is available only with --target embedded"
                     );
                 }
-                let report = tenkai::server::RemoteClient::new(server_url, token)?
-                    .reconcile()
-                    .await?;
+                let report = client.reconcile().await?;
                 let failures = report.failures();
                 print_reconcile_report(report);
                 if failures > 0 {
@@ -384,6 +383,63 @@ async fn main() -> Result<()> {
                 bail!(
                     "remote servers reconcile continuously; use --once to request an immediate tick"
                 )
+            }
+            Command::Env {
+                command: EnvCommand::List,
+            } => {
+                let entries = client.list_environments().await?;
+                if entries.is_empty() {
+                    println!("no environments registered");
+                } else {
+                    println!(
+                        "{:<20} {:<8} {:<10} {:<6} description",
+                        "name", "subs", "deployed", "lease"
+                    );
+                    for entry in entries {
+                        let lease = if entry.lease_held { "held" } else { "-" };
+                        println!(
+                            "{:<20} {:<8} {:<10} {:<6} {}",
+                            entry.name,
+                            entry.subscription_count,
+                            entry.deployed_product_count,
+                            lease,
+                            entry.description
+                        );
+                    }
+                }
+                return Ok(());
+            }
+            Command::Env {
+                command: EnvCommand::Inspect { env },
+            } => {
+                let report = client.inspect_environment(&env).await?;
+                println!("{}", serde_json::to_string_pretty(&report)?);
+                return Ok(());
+            }
+            Command::Status { env } => {
+                let rows = client.environment_status(&env).await?;
+                if rows.is_empty() {
+                    println!("{env} has no channel subscriptions");
+                } else {
+                    println!(
+                        "{:<24} {:<10} {:<12} {:<12} state",
+                        "product", "channel", "deployed", "head"
+                    );
+                    for r in rows {
+                        let deployed = r.deployed.clone().unwrap_or_else(|| "-".into());
+                        let state = match (&r.deployed, r.health.as_deref()) {
+                            (_, Some("unknown")) => "unknown",
+                            (Some(v), _) if *v == r.head => "current",
+                            (Some(_), _) => "behind",
+                            (None, _) => "missing",
+                        };
+                        println!(
+                            "{:<24} {:<10} {:<12} {:<12} {state}",
+                            r.product, r.channel, deployed, r.head
+                        );
+                    }
+                }
+                return Ok(());
             }
             _ => bail!(
                 "this command is not available through the v1 remote API; use --target embedded"
