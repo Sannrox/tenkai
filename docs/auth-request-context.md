@@ -112,6 +112,54 @@ Extension duties:
 Non-duties: minting Tenkai plans, mutating operational state, or bypassing
 Tenkai authorization.
 
+### Reference JWT assertion verifier (#110)
+
+Production-shaped verification lives in `src/assertion_verifier.rs`:
+
+| Type | Role |
+| --- | --- |
+| `AssertionVerifier` | Object-safe port: verify opaque assertion → claims |
+| `JwtAssertionVerifier` | Compact JWT + **EdDSA (Ed25519)** with static trust roots |
+| `JwtEnterpriseAuthExtension` | Wraps a verifier for `build_auth_stack` |
+
+**Trust config (TOML file or env path — not argv secrets):**
+
+```toml
+issuer = "https://idp.example.test/"
+audience = "tenkai-control-plane"
+clock_skew_secs = 60
+
+[[keys]]
+key_id = "k1"
+public_key = "<base64-encoded-32-byte-Ed25519-public-key>"
+```
+
+Load with `JwtVerifierConfig::load(path)` / `JwtAssertionVerifier::from_path`.
+Required claims: `iss`, `aud`, `sub`, `exp`. Optional: `nbf`, `principal_kind`,
+`tenant_id` (or `tenkai_tenant`). Fail closed on bad signature, wrong audience,
+wrong issuer, or expiry outside clock skew.
+
+**Wire vs stub:**
+
+```text
+# Community (default): no verifier
+build_auth_stack(AuthHostConfig::community(), None, community_auth)
+
+# Enterprise reference JWT
+let verifier = JwtAssertionVerifier::from_path(&trust_toml)?;
+let extension = Arc::new(JwtEnterpriseAuthExtension::from_jwt_verifier(
+    "jwt-ref", verifier, /* require_tenant */ true,
+));
+build_auth_stack(&AuthHostConfig { required_extension_id: Some("jwt-ref".into()),
+    expected_audience: Some("tenkai-control-plane".into()), .. }, Some(extension), community)
+```
+
+Advertise `enterprise_authentication` only when a real verifier/extension is
+configured (existing capability negotiation). Deterministic tests use fixture
+Ed25519 keys; live network JWKS/IdP is optional and not default CI.
+
+Community bearer-token mode is unchanged when no extension is loaded.
+
 ## Lifecycle and version compatibility
 
 | Stage | Behavior |
