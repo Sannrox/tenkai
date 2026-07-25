@@ -691,7 +691,10 @@ mod tests {
         };
         let stack = build_auth_stack(&config, Some(extension), community_auth()).unwrap();
         assert_eq!(stack.mode(), AuthMode::Enterprise);
-        assert_eq!(stack.tenant_authority().unwrap().extension_id(), "enterprise-auth");
+        assert_eq!(
+            stack.tenant_authority().unwrap().extension_id(),
+            "enterprise-auth"
+        );
 
         let denied = stack.authenticate(&CredentialMaterial {
             request_id: "req-3".into(),
