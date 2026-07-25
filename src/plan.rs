@@ -478,6 +478,166 @@ async fn pin_release(ctx: &mut Ctx, id: &str, environment: &str) -> Result<Relea
     })
 }
 
+/// Resolve channel head against environment version pin/range constraints.
+///
+/// - `constraint.version_pin.<product>` forces that exact published version
+///   (overrides channel head when different).
+/// - `constraint.version_range.<product>` is `min..max` (semver, min inclusive,
+///   max exclusive). Selected version must lie in the range.
+async fn resolve_constrained_release(
+    ctx: &mut Ctx,
+    env_obj: &Object,
+    env: &str,
+    product: &str,
+    channel_version: &str,
+    channel_release: &str,
+) -> Result<(String, String)> {
+    let pin_key = format!("constraint.version_pin.{product}");
+    let range_key = format!("constraint.version_range.{product}");
+    if let Some(pin) = env_obj.properties.get(&pin_key) {
+        if pin.trim().is_empty() {
+            bail!("constraint version pin for {product} must not be empty");
+        }
+        let pinned_release = release_id(product, pin);
+        if ctx.get(&pinned_release).await?.is_none() {
+            bail!(
+                "version pin {pin} for {product} in {env} is not published (constraint {pin_key})"
+            );
+        }
+        if pin != channel_version {
+            // Pin selects a specific release; channel head is advisory when it differs.
+            return Ok((pin.clone(), pinned_release));
+        }
+        return Ok((channel_version.into(), channel_release.into()));
+    }
+    if let Some(range) = env_obj.properties.get(&range_key)
+        && !version_in_range(channel_version, range)?
+    {
+        bail!(
+            "channel head {channel_version} for {product} in {env} violates version range constraint {range:?} ({range_key})"
+        );
+    }
+    Ok((channel_version.into(), channel_release.into()))
+}
+
+fn version_in_range(version: &str, range: &str) -> Result<bool> {
+    let Some((min, max)) = range.split_once("..") else {
+        bail!("version range must be min..max, got {range:?}");
+    };
+    let version =
+        semver::Version::parse(version).with_context(|| format!("invalid version {version:?}"))?;
+    let min = semver::Version::parse(min.trim())
+        .with_context(|| format!("invalid version range minimum in {range:?}"))?;
+    let max = semver::Version::parse(max.trim())
+        .with_context(|| format!("invalid version range maximum in {range:?}"))?;
+    if min >= max {
+        bail!("version range minimum must be less than maximum in {range:?}");
+    }
+    Ok(version >= min && version < max)
+}
+
+async fn enforce_capability_constraints(ctx: &mut Ctx, env_obj: &Object, env: &str) -> Result<()> {
+    for (key, expected) in &env_obj.properties {
+        let Some(fact_key) = key.strip_prefix("constraint.require_fact.") else {
+            continue;
+        };
+        validate_fact_key(fact_key)?;
+        let actual = require_environment_fact(ctx, env, fact_key).await?;
+        if expected != "*" && expected != &actual {
+            bail!(
+                "environment {env} fact {fact_key}={actual} does not satisfy constraint {expected:?} ({key})"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Set a version pin, version range, or required-fact constraint.
+pub async fn set_environment_constraint(
+    ctx: &mut Ctx,
+    env: &str,
+    kind: &str,
+    name: &str,
+    value: &str,
+) -> Result<String> {
+    validate_identifier("environment", env)?;
+    if value.trim().is_empty() {
+        bail!("constraint value must not be empty");
+    }
+    let property = match kind {
+        "version_pin" => {
+            validate_identifier("product", name)?;
+            semver::Version::parse(value)
+                .with_context(|| format!("version pin must be valid semver, got {value:?}"))?;
+            format!("constraint.version_pin.{name}")
+        }
+        "version_range" => {
+            validate_identifier("product", name)?;
+            let (min, max) = value
+                .split_once("..")
+                .context("version range must be min..max")?;
+            let min_v = semver::Version::parse(min.trim())
+                .with_context(|| format!("invalid version range minimum in {value:?}"))?;
+            let max_v = semver::Version::parse(max.trim())
+                .with_context(|| format!("invalid version range maximum in {value:?}"))?;
+            if min_v >= max_v {
+                bail!("version range minimum must be less than maximum");
+            }
+            format!("constraint.version_range.{name}")
+        }
+        "require_fact" => {
+            validate_fact_key(name)?;
+            if value != "*" {
+                validate_fact_value(name, value)?;
+            }
+            format!("constraint.require_fact.{name}")
+        }
+        other => bail!(
+            "unknown constraint kind {other:?}; expected version_pin, version_range, or require_fact"
+        ),
+    };
+    let mut env_obj = environment(ctx, env).await?;
+    env_obj.properties.insert(property.clone(), value.into());
+    env_obj.updated = crate::now_millis();
+    ctx.put(env_obj).await?;
+    Ok(format!("set {env} constraint {property}={value}"))
+}
+
+pub async fn clear_environment_constraint(
+    ctx: &mut Ctx,
+    env: &str,
+    kind: &str,
+    name: &str,
+) -> Result<String> {
+    let property = match kind {
+        "version_pin" => format!("constraint.version_pin.{name}"),
+        "version_range" => format!("constraint.version_range.{name}"),
+        "require_fact" => format!("constraint.require_fact.{name}"),
+        other => bail!("unknown constraint kind {other:?}"),
+    };
+    let mut env_obj = environment(ctx, env).await?;
+    if env_obj.properties.remove(&property).is_none() {
+        bail!("environment {env} has no constraint {property}");
+    }
+    env_obj.updated = crate::now_millis();
+    ctx.put(env_obj).await?;
+    Ok(format!("cleared {env} constraint {property}"))
+}
+
+pub async fn list_environment_constraints(
+    ctx: &mut Ctx,
+    env: &str,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    let env_obj = environment(ctx, env).await?;
+    let mut out = std::collections::BTreeMap::new();
+    for (key, value) in &env_obj.properties {
+        if key.starts_with("constraint.") {
+            out.insert(key.clone(), value.clone());
+        }
+    }
+    Ok(out)
+}
+
 async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateInput>, Vec<Step>)> {
     let env_obj = environment(ctx, env).await?;
     let channels = ctx.linked(&env_obj.id, REL_SUBSCRIBES, "out").await?;
@@ -501,19 +661,29 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
     for ch in channels {
         let product = ch.properties.get("product").cloned().unwrap_or_default();
         let channel = ch.properties.get("channel").cloned().unwrap_or_default();
-        let desired = ch
+        let channel_version = ch
             .properties
             .get("current_version")
             .cloned()
             .unwrap_or_default();
-        let release = ch
+        let channel_release = ch
             .properties
             .get("current_release")
             .cloned()
             .unwrap_or_default();
-        if desired.is_empty() || release.is_empty() {
+        if channel_version.is_empty() || channel_release.is_empty() {
             continue; // channel exists but nothing promoted yet
         }
+        let (desired, release) = resolve_constrained_release(
+            ctx,
+            &env_obj,
+            env,
+            &product,
+            &channel_version,
+            &channel_release,
+        )
+        .await?;
+        enforce_capability_constraints(ctx, &env_obj, env).await?;
         let target = pin_release(ctx, &release, env).await?;
         if env_obj
             .properties
@@ -1050,6 +1220,16 @@ mod tests {
     fn semantic_version_direction_is_recorded() {
         assert_eq!(classify_change("2.0.0", "1.9.0"), Action::Downgrade);
         assert_eq!(classify_change("1.9.0", "2.0.0"), Action::Upgrade);
+    }
+
+    #[test]
+    fn version_range_is_half_open() {
+        assert!(version_in_range("1.0.0", "1.0.0..2.0.0").unwrap());
+        assert!(version_in_range("1.9.9", "1.0.0..2.0.0").unwrap());
+        assert!(!version_in_range("2.0.0", "1.0.0..2.0.0").unwrap());
+        assert!(!version_in_range("0.9.0", "1.0.0..2.0.0").unwrap());
+        assert!(version_in_range("bad", "1.0.0..2.0.0").is_err());
+        assert!(version_in_range("1.0.0", "2.0.0..1.0.0").is_err());
     }
 
     #[test]

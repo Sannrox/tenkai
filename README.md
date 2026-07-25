@@ -161,6 +161,8 @@ tenkaictl env inspect prod
 tenkaictl env facts set prod architecture=arm64
 tenkaictl env facts set prod memory_gib=32
 tenkaictl env facts list prod
+tenkaictl env constraints set prod version_range hello-local 1.0.0..2.0.0
+tenkaictl env constraints set prod require_fact architecture arm64
 tenkaictl env maintenance set prod weekday \
   --timezone Europe/Berlin \
   --weekdays mon,tue,wed,thu,fri \
