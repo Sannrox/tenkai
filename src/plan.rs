@@ -1282,6 +1282,170 @@ pub async fn list_environments(ctx: &mut Ctx) -> Result<Vec<EnvironmentListEntry
     Ok(entries)
 }
 
+/// One environment row in a fleet-wide delivery status report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetEnvironmentRow {
+    pub name: String,
+    pub id: String,
+    pub description: String,
+    pub subscription_count: usize,
+    /// Subscribed products whose deployed version matches channel head.
+    pub products_current: usize,
+    /// Subscribed products with a deployment that is not the channel head.
+    pub products_behind: usize,
+    /// Subscribed products with no deployed version.
+    pub products_missing: usize,
+    /// True when any subscription has health `unknown` or a non-empty error.
+    pub unhealthy: bool,
+    /// `ok` | `unknown` | `error` | `n/a` (no subscriptions).
+    pub health_summary: String,
+    pub lease_held: bool,
+    /// Latest plan state when a plan exists.
+    pub latest_plan_state: Option<String>,
+    /// Aggregate posture: `empty` | `unhealthy` | `behind` | `current`.
+    pub posture: String,
+}
+
+/// Fleet-wide delivery posture (no credentials).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetStatusReport {
+    pub environments: Vec<FleetEnvironmentRow>,
+    pub environment_count: usize,
+    pub environments_current: usize,
+    pub environments_behind: usize,
+    pub environments_unhealthy: usize,
+    pub environments_empty: usize,
+}
+
+/// Summarize delivery posture for every registered environment.
+///
+/// Complements `list_environments` / `inspect_environment` and server reconcile
+/// diagnostics: this is the operator fleet table (drift, health, lease, plan).
+pub async fn fleet_status(ctx: &mut Ctx) -> Result<FleetStatusReport> {
+    let listed = list_environments(ctx).await?;
+    let mut environments = Vec::with_capacity(listed.len());
+    for entry in listed {
+        let report = inspect_environment(ctx, &entry.name).await?;
+        environments.push(fleet_row_from_inspect(&report));
+    }
+    environments.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(aggregate_fleet_report(environments))
+}
+
+/// Build a fleet report from inspect reports (used by tests and filtered hosts).
+pub fn fleet_status_from_inspects(reports: Vec<EnvironmentInspectReport>) -> FleetStatusReport {
+    let mut environments: Vec<_> = reports.iter().map(fleet_row_from_inspect).collect();
+    environments.sort_by(|left, right| left.name.cmp(&right.name));
+    aggregate_fleet_report(environments)
+}
+
+fn fleet_row_from_inspect(report: &EnvironmentInspectReport) -> FleetEnvironmentRow {
+    let mut products_current = 0usize;
+    let mut products_behind = 0usize;
+    let mut products_missing = 0usize;
+    let mut saw_unknown = false;
+    let mut saw_error = false;
+    for sub in &report.subscriptions {
+        match sub.state.as_str() {
+            "current" => products_current += 1,
+            "behind" => products_behind += 1,
+            "missing" => products_missing += 1,
+            "unknown" => {
+                // Health unknown: still count version drift when known.
+                if sub.deployed.as_ref() == Some(&sub.head) {
+                    products_current += 1;
+                } else if sub.deployed.is_some() {
+                    products_behind += 1;
+                } else {
+                    products_missing += 1;
+                }
+            }
+            _ => {
+                if sub.deployed.as_ref() == Some(&sub.head) {
+                    products_current += 1;
+                } else if sub.deployed.is_some() {
+                    products_behind += 1;
+                } else {
+                    products_missing += 1;
+                }
+            }
+        }
+        if sub.health.as_deref() == Some("unknown") {
+            saw_unknown = true;
+        }
+        if sub.error.as_ref().is_some_and(|error| !error.is_empty()) {
+            saw_error = true;
+        }
+    }
+    let unhealthy = saw_unknown || saw_error;
+    let health_summary = if report.subscriptions.is_empty() {
+        "n/a".into()
+    } else if saw_error {
+        "error".into()
+    } else if saw_unknown {
+        "unknown".into()
+    } else {
+        "ok".into()
+    };
+    let posture = if report.subscriptions.is_empty() {
+        "empty"
+    } else if unhealthy {
+        "unhealthy"
+    } else if products_behind > 0 || products_missing > 0 {
+        "behind"
+    } else {
+        "current"
+    }
+    .to_string();
+    FleetEnvironmentRow {
+        name: report.name.clone(),
+        id: report.id.clone(),
+        description: report.description.clone(),
+        subscription_count: report.subscriptions.len(),
+        products_current,
+        products_behind,
+        products_missing,
+        unhealthy,
+        health_summary,
+        lease_held: report.lease.held,
+        latest_plan_state: report.latest_plan.as_ref().map(|plan| plan.state.clone()),
+        posture,
+    }
+}
+
+/// Recompute fleet aggregates after filtering rows (e.g. tenant scope).
+pub fn fleet_status_from_rows(environments: Vec<FleetEnvironmentRow>) -> FleetStatusReport {
+    aggregate_fleet_report(environments)
+}
+
+fn aggregate_fleet_report(environments: Vec<FleetEnvironmentRow>) -> FleetStatusReport {
+    let environment_count = environments.len();
+    let environments_current = environments
+        .iter()
+        .filter(|row| row.posture == "current")
+        .count();
+    let environments_behind = environments
+        .iter()
+        .filter(|row| row.posture == "behind")
+        .count();
+    let environments_unhealthy = environments
+        .iter()
+        .filter(|row| row.posture == "unhealthy")
+        .count();
+    let environments_empty = environments
+        .iter()
+        .filter(|row| row.posture == "empty")
+        .count();
+    FleetStatusReport {
+        environments,
+        environment_count,
+        environments_current,
+        environments_behind,
+        environments_unhealthy,
+        environments_empty,
+    }
+}
+
 /// Inspect one environment's subscriptions, lease/fence, and latest plan.
 pub async fn inspect_environment(ctx: &mut Ctx, env: &str) -> Result<EnvironmentInspectReport> {
     let env_obj = environment(ctx, env).await?;
@@ -1566,6 +1730,125 @@ mod tests {
         assert_eq!(record.properties.get("description").unwrap(), "production");
         assert_eq!(record.created, 20);
         assert_eq!(record.updated, 20);
+    }
+
+    #[test]
+    fn fleet_status_classifies_current_behind_unhealthy_and_empty() {
+        let current = EnvironmentInspectReport {
+            name: "alpha".into(),
+            id: "tenkai:env:alpha".into(),
+            description: "ok".into(),
+            subscriptions: vec![EnvironmentSubscriptionView {
+                product: "api".into(),
+                channel: "stable".into(),
+                head: "1.0.0".into(),
+                deployed: Some("1.0.0".into()),
+                health: Some("healthy".into()),
+                error: None,
+                state: "current".into(),
+            }],
+            facts: Default::default(),
+            lease: crate::apply::EnvironmentLeaseInspect {
+                held: false,
+                owner: None,
+                generation: None,
+                expires_at_ms: None,
+                status: "absent".into(),
+            },
+            latest_plan: Some(EnvironmentPlanSummary {
+                id: "plan-a".into(),
+                state: "succeeded".into(),
+                created_at: 1,
+                step_count: 1,
+            }),
+            execution_note: "fixture".into(),
+        };
+        let behind = EnvironmentInspectReport {
+            name: "beta".into(),
+            id: "tenkai:env:beta".into(),
+            description: "drift".into(),
+            subscriptions: vec![EnvironmentSubscriptionView {
+                product: "api".into(),
+                channel: "stable".into(),
+                head: "2.0.0".into(),
+                deployed: Some("1.0.0".into()),
+                health: Some("healthy".into()),
+                error: None,
+                state: "behind".into(),
+            }],
+            facts: Default::default(),
+            lease: crate::apply::EnvironmentLeaseInspect {
+                held: true,
+                owner: Some("owner".into()),
+                generation: Some(1),
+                expires_at_ms: Some(99),
+                status: "active".into(),
+            },
+            latest_plan: None,
+            execution_note: "fixture".into(),
+        };
+        let unhealthy = EnvironmentInspectReport {
+            name: "gamma".into(),
+            id: "tenkai:env:gamma".into(),
+            description: "bad".into(),
+            subscriptions: vec![EnvironmentSubscriptionView {
+                product: "api".into(),
+                channel: "stable".into(),
+                head: "1.0.0".into(),
+                deployed: Some("1.0.0".into()),
+                health: Some("unknown".into()),
+                error: Some("probe failed".into()),
+                state: "unknown".into(),
+            }],
+            facts: Default::default(),
+            lease: crate::apply::EnvironmentLeaseInspect {
+                held: false,
+                owner: None,
+                generation: None,
+                expires_at_ms: None,
+                status: "absent".into(),
+            },
+            latest_plan: None,
+            execution_note: "fixture".into(),
+        };
+        let empty = EnvironmentInspectReport {
+            name: "delta".into(),
+            id: "tenkai:env:delta".into(),
+            description: "idle".into(),
+            subscriptions: Vec::new(),
+            facts: Default::default(),
+            lease: crate::apply::EnvironmentLeaseInspect {
+                held: false,
+                owner: None,
+                generation: None,
+                expires_at_ms: None,
+                status: "absent".into(),
+            },
+            latest_plan: None,
+            execution_note: "fixture".into(),
+        };
+        let report = fleet_status_from_inspects(vec![behind, empty, unhealthy, current]);
+        assert_eq!(report.environment_count, 4);
+        assert_eq!(report.environments_current, 1);
+        assert_eq!(report.environments_behind, 1);
+        assert_eq!(report.environments_unhealthy, 1);
+        assert_eq!(report.environments_empty, 1);
+        let by_name = |name: &str| {
+            report
+                .environments
+                .iter()
+                .find(|row| row.name == name)
+                .unwrap()
+        };
+        assert_eq!(by_name("alpha").posture, "current");
+        assert_eq!(by_name("beta").posture, "behind");
+        assert!(by_name("beta").lease_held);
+        assert_eq!(by_name("gamma").posture, "unhealthy");
+        assert_eq!(by_name("gamma").health_summary, "error");
+        assert_eq!(by_name("delta").posture, "empty");
+        let encoded = serde_json::to_string(&report).unwrap();
+        assert!(!encoded.contains("Bearer"));
+        assert!(!encoded.contains("token="));
     }
 
     #[tokio::test]
