@@ -430,7 +430,9 @@ async fn activate_fenced(
         verify_content_integrity(content)?;
         let descriptor =
             crate::model_runtime::ModelRuntimeDescriptor::from_manifest(&content.manifest)?;
-        let executor = crate::model_runtime::LocalModelRuntimeExecutor::new(
+        // Reference llama.cpp plugin: fake process in CI/default; optional real
+        // binary via TENKAI_LLAMA_SERVER. Not a hard dependency of software deploys.
+        let executor = crate::model_runtime::ReferenceLlamaCppExecutor::with_fake(
             content.model_runtime_state.clone(),
         );
         return Ok(executor
@@ -470,7 +472,7 @@ async fn deactivate_fenced(
     }
     if content.manifest.product.kind == ProductKind::ModelRuntime {
         refresh_environment_lease(ctx, lease).await?;
-        return Ok(crate::model_runtime::LocalModelRuntimeExecutor::new(
+        return Ok(crate::model_runtime::ReferenceLlamaCppExecutor::with_fake(
             content.model_runtime_state.clone(),
         )
         .remove()

@@ -8,6 +8,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use anyhow::{Context as _, Result, bail};
@@ -440,6 +441,404 @@ impl ModelRuntimeExecutor for LocalModelRuntimeExecutor {
     }
 }
 
+/// Request to start a candidate inference engine process for one generation.
+#[derive(Debug, Clone)]
+pub struct EngineStartRequest {
+    pub product_name: String,
+    pub product_version: String,
+    pub weights_path: Option<PathBuf>,
+    pub port: u16,
+    /// Must be loopback for the reference plugin.
+    pub bind_host: String,
+    pub engine: String,
+    pub health_endpoint: String,
+    pub generation_id: String,
+}
+
+/// Opaque handle for a started candidate or active engine process.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EngineHandle {
+    pub generation_id: String,
+    pub port: u16,
+    pub bind_host: String,
+    /// Plugin-private marker (pid file path, fake id, …). Never a secret.
+    pub marker: String,
+}
+
+/// Process control port for inference engines. Tenkai core never links a
+/// specific engine binary; plugins implement start/smoke/stop.
+pub trait InferenceEngineProcess: Send + Sync {
+    fn start_candidate(&self, request: &EngineStartRequest) -> Result<EngineHandle>;
+    fn smoke(&self, handle: &EngineHandle, health: &ModelHealthSection) -> Result<()>;
+    fn stop(&self, handle: &EngineHandle) -> Result<()>;
+}
+
+/// Deterministic fake engine for CI. Does not open sockets or spawn processes.
+///
+/// Rationale for choosing **llama.cpp** as the reference real plugin: it is the
+/// default `runtime.engine` in model_runtime manifests, exposes a simple HTTP
+/// health surface, and runs on a single machine without a GPU control plane.
+/// This fake implements the same lifecycle contract without requiring the binary.
+#[derive(Debug, Clone, Default)]
+pub struct FakeInferenceEngine {
+    /// When true, smoke fails after start so apply must leave the prior generation.
+    pub fail_smoke: bool,
+    /// When true, start fails before smoke.
+    pub fail_start: bool,
+}
+
+impl InferenceEngineProcess for FakeInferenceEngine {
+    fn start_candidate(&self, request: &EngineStartRequest) -> Result<EngineHandle> {
+        require_loopback_bind(&request.bind_host, request.port)?;
+        if self.fail_start {
+            bail!(
+                "fake engine refused to start candidate generation {}",
+                request.generation_id
+            );
+        }
+        if request.engine != "llama.cpp" {
+            bail!(
+                "reference plugin supports runtime.engine=llama.cpp only, got {}",
+                request.engine
+            );
+        }
+        Ok(EngineHandle {
+            generation_id: request.generation_id.clone(),
+            port: request.port,
+            bind_host: request.bind_host.clone(),
+            marker: format!("fake:{}", request.generation_id),
+        })
+    }
+
+    fn smoke(&self, handle: &EngineHandle, health: &ModelHealthSection) -> Result<()> {
+        require_loopback_health_endpoint(&health.endpoint)?;
+        if self.fail_smoke {
+            bail!(
+                "fake engine smoke failed for generation {} at {}",
+                handle.generation_id,
+                health.endpoint
+            );
+        }
+        Ok(())
+    }
+
+    fn stop(&self, _handle: &EngineHandle) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// Optional real llama.cpp process launcher (external binary, not a crate dep).
+///
+/// Spawns `TENKAI_LLAMA_SERVER` (default `llama-server`) bound to loopback.
+/// Community software-only deploys do not require this binary; use
+/// [`FakeInferenceEngine`] in tests and default apply wiring when unset.
+#[derive(Debug, Clone)]
+pub struct LlamaCppProcessLauncher {
+    pub binary: PathBuf,
+}
+
+impl Default for LlamaCppProcessLauncher {
+    fn default() -> Self {
+        let binary = std::env::var_os("TENKAI_LLAMA_SERVER")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("llama-server"));
+        Self { binary }
+    }
+}
+
+impl InferenceEngineProcess for LlamaCppProcessLauncher {
+    fn start_candidate(&self, request: &EngineStartRequest) -> Result<EngineHandle> {
+        require_loopback_bind(&request.bind_host, request.port)?;
+        if request.engine != "llama.cpp" {
+            bail!(
+                "llama.cpp launcher only supports runtime.engine=llama.cpp, got {}",
+                request.engine
+            );
+        }
+        let weights = request
+            .weights_path
+            .as_ref()
+            .context("llama.cpp launcher requires verified weights path")?;
+        // Avoid shell injection: argv only, no `sh -c`.
+        let mut command = std::process::Command::new(&self.binary);
+        command
+            .arg("--host")
+            .arg(&request.bind_host)
+            .arg("--port")
+            .arg(request.port.to_string())
+            .arg("--model")
+            .arg(weights)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let child = command.spawn().with_context(|| {
+            format!(
+                "starting llama.cpp candidate via {} (set TENKAI_LLAMA_SERVER or use FakeInferenceEngine)",
+                self.binary.display()
+            )
+        })?;
+        Ok(EngineHandle {
+            generation_id: request.generation_id.clone(),
+            port: request.port,
+            bind_host: request.bind_host.clone(),
+            marker: format!("pid:{}", child.id()),
+        })
+    }
+
+    fn smoke(&self, handle: &EngineHandle, health: &ModelHealthSection) -> Result<()> {
+        require_loopback_health_endpoint(&health.endpoint)?;
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(u64::from(
+                health.max_startup_seconds.clamp(1, 60),
+            )))
+            .build()
+            .context("building llama.cpp health client")?;
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(health.max_startup_seconds.max(1) as u64);
+        let mut last_error = String::from("health probe did not run");
+        while std::time::Instant::now() < deadline {
+            match client.get(&health.endpoint).send() {
+                Ok(response) if response.status().is_success() => return Ok(()),
+                Ok(response) => {
+                    last_error = format!(
+                        "health endpoint {} returned {}",
+                        health.endpoint,
+                        response.status()
+                    );
+                }
+                Err(error) => last_error = error.to_string(),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        bail!(
+            "llama.cpp smoke failed for generation {} at {}: {last_error}",
+            handle.generation_id,
+            health.endpoint
+        );
+    }
+
+    fn stop(&self, handle: &EngineHandle) -> Result<()> {
+        if let Some(pid) = handle.marker.strip_prefix("pid:")
+            && let Ok(pid) = pid.parse::<i32>()
+        {
+            // Best-effort; generation fencing remains Tenkai-authoritative.
+            let _ = std::process::Command::new("kill")
+                .arg("-TERM")
+                .arg(pid.to_string())
+                .status();
+        }
+        Ok(())
+    }
+}
+
+fn require_loopback_bind(host: &str, port: u16) -> Result<()> {
+    if port == 0 {
+        bail!("model runtime port must not be zero");
+    }
+    let host = host.trim();
+    if host != "127.0.0.1" && host != "::1" && host != "localhost" {
+        bail!("reference model engine must bind loopback only, got host {host:?}");
+    }
+    Ok(())
+}
+
+fn require_loopback_health_endpoint(endpoint: &str) -> Result<()> {
+    let endpoint = endpoint.trim();
+    if !(endpoint.starts_with("http://127.0.0.1")
+        || endpoint.starts_with("http://localhost")
+        || endpoint.starts_with("http://[::1]"))
+    {
+        bail!("reference model engine health endpoint must use loopback HTTP, got {endpoint:?}");
+    }
+    Ok(())
+}
+
+fn bind_host_from_health_endpoint(endpoint: &str) -> Result<String> {
+    require_loopback_health_endpoint(endpoint)?;
+    if endpoint.contains("[::1]") {
+        Ok("::1".into())
+    } else {
+        Ok("127.0.0.1".into())
+    }
+}
+
+/// Reference llama.cpp model_runtime executor: verify weights → start candidate →
+/// smoke → activate, retaining the previous generation for Tenkai rollback.
+///
+/// The engine process is injected ([`FakeInferenceEngine`] or
+/// [`LlamaCppProcessLauncher`]); the core crate never hard-depends on an
+/// inference binary.
+pub struct ReferenceLlamaCppExecutor {
+    state_path: PathBuf,
+    weight_cache: Option<WeightCache>,
+    engine: Arc<dyn InferenceEngineProcess>,
+}
+
+impl ReferenceLlamaCppExecutor {
+    pub fn new(state_path: PathBuf, engine: Arc<dyn InferenceEngineProcess>) -> Self {
+        Self {
+            state_path,
+            weight_cache: None,
+            engine,
+        }
+    }
+
+    /// Community/CI default: fake process, full lifecycle contract.
+    pub fn with_fake(state_path: PathBuf) -> Self {
+        Self::new(state_path, Arc::new(FakeInferenceEngine::default()))
+    }
+
+    pub fn with_weight_cache(mut self, cache: WeightCache) -> Self {
+        self.weight_cache = Some(cache);
+        self
+    }
+
+    pub fn state_path(&self) -> &Path {
+        &self.state_path
+    }
+
+    fn previous_path(&self) -> PathBuf {
+        self.state_path.with_extension("json.previous")
+    }
+
+    fn active_handle_path(&self) -> PathBuf {
+        self.state_path.with_extension("engine.json")
+    }
+
+    fn write_descriptor(&self, path: &Path, descriptor: &ModelRuntimeDescriptor) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let temporary = path.with_extension("pending");
+        std::fs::write(&temporary, serde_json::to_vec_pretty(descriptor)?)?;
+        let observed: ModelRuntimeDescriptor = serde_json::from_slice(&std::fs::read(&temporary)?)?;
+        observed.validate()?;
+        if observed.digest()? != descriptor.digest()? {
+            let _ = std::fs::remove_file(&temporary);
+            bail!("model_runtime post-mutation verification failed");
+        }
+        std::fs::rename(&temporary, path)?;
+        Ok(())
+    }
+
+    fn load_descriptor(path: &Path) -> Result<Option<ModelRuntimeDescriptor>> {
+        match std::fs::read(path) {
+            Ok(bytes) => {
+                let descriptor: ModelRuntimeDescriptor = serde_json::from_slice(&bytes)?;
+                descriptor.validate()?;
+                Ok(Some(descriptor))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn load_handle(path: &Path) -> Result<Option<EngineHandle>> {
+        match std::fs::read(path) {
+            Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+impl ModelRuntimeExecutor for ReferenceLlamaCppExecutor {
+    fn apply(&self, descriptor: &ModelRuntimeDescriptor) -> Result<String> {
+        descriptor.validate()?;
+        if descriptor.runtime.engine != "llama.cpp" {
+            bail!(
+                "ReferenceLlamaCppExecutor requires runtime.engine=llama.cpp, got {}",
+                descriptor.runtime.engine
+            );
+        }
+        let weights_path =
+            if let Some(cache) = &self.weight_cache {
+                Some(cache.fetch_and_verify(
+                    &descriptor.model.source,
+                    &descriptor.model.artifact_digest,
+                )?)
+            } else {
+                None
+            };
+
+        let previous_active = Self::load_descriptor(&self.state_path)?;
+        let previous_handle = Self::load_handle(&self.active_handle_path())?;
+        let expected = descriptor.digest()?;
+        let generation_id = expected.clone();
+        let bind_host = bind_host_from_health_endpoint(&descriptor.health.endpoint)?;
+
+        let start = EngineStartRequest {
+            product_name: descriptor.product_name.clone(),
+            product_version: descriptor.product_version.clone(),
+            weights_path,
+            port: descriptor.runtime.port,
+            bind_host,
+            engine: descriptor.runtime.engine.clone(),
+            health_endpoint: descriptor.health.endpoint.clone(),
+            generation_id: generation_id.clone(),
+        };
+
+        let candidate = match self.engine.start_candidate(&start) {
+            Ok(handle) => handle,
+            Err(error) => {
+                // Candidate never became active; prior generation untouched.
+                return Err(error)
+                    .context("model_runtime candidate start failed; active generation retained");
+            }
+        };
+
+        if let Err(error) = self.engine.smoke(&candidate, &descriptor.health) {
+            let _ = self.engine.stop(&candidate);
+            return Err(error).context(
+                "model_runtime smoke failed; candidate stopped and previous generation retained for rollback",
+            );
+        }
+
+        // Promote: retain previous descriptor for Tenkai rollback, then activate.
+        if let Some(prev) = previous_active.as_ref() {
+            self.write_descriptor(&self.previous_path(), prev)?;
+        }
+        self.write_descriptor(&self.state_path, descriptor)?;
+        if let Some(parent) = self.active_handle_path().parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(
+            self.active_handle_path(),
+            serde_json::to_vec_pretty(&candidate)?,
+        )?;
+
+        if let Some(prev_handle) = previous_handle
+            && prev_handle.generation_id != candidate.generation_id
+        {
+            let _ = self.engine.stop(&prev_handle);
+        }
+
+        if self.observe()?.as_deref() != Some(expected.as_str()) {
+            bail!("model_runtime post-activation observation differs from requested descriptor");
+        }
+        Ok(expected)
+    }
+
+    fn remove(&self) -> Result<()> {
+        if let Some(handle) = Self::load_handle(&self.active_handle_path())? {
+            let _ = self.engine.stop(&handle);
+        }
+        let _ = std::fs::remove_file(self.active_handle_path());
+        let _ = std::fs::remove_file(self.previous_path());
+        match std::fs::remove_file(&self.state_path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn observe(&self) -> Result<Option<String>> {
+        Self::load_descriptor(&self.state_path)?
+            .map(|descriptor| descriptor.digest())
+            .transpose()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -612,5 +1011,73 @@ mod tests {
         assert!(!removed.iter().any(|d| d == &digests[2]));
         assert!(cache.blob_path(&digests[2]).unwrap().exists());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reference_executor_activates_after_smoke_and_retains_previous() {
+        let root = std::env::temp_dir().join(format!("tenkai-ref-engine-{}", uuid::Uuid::new_v4()));
+        let state = root.join("active.json");
+        let executor = ReferenceLlamaCppExecutor::with_fake(state.clone());
+        let mut first = sample_descriptor();
+        first.product_version = "1.0.0".into();
+        first.health.endpoint = "http://127.0.0.1:8080/v1/models".into();
+        let first_digest = executor.apply(&first).unwrap();
+        assert_eq!(
+            executor.observe().unwrap().as_deref(),
+            Some(first_digest.as_str())
+        );
+
+        let mut second = sample_descriptor();
+        second.product_version = "2.0.0".into();
+        second.health.endpoint = "http://127.0.0.1:8081/v1/models".into();
+        second.runtime.port = 8081;
+        let second_digest = executor.apply(&second).unwrap();
+        assert_eq!(
+            executor.observe().unwrap().as_deref(),
+            Some(second_digest.as_str())
+        );
+        let previous: ModelRuntimeDescriptor =
+            serde_json::from_slice(&std::fs::read(state.with_extension("json.previous")).unwrap())
+                .unwrap();
+        assert_eq!(previous.digest().unwrap(), first_digest);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reference_executor_smoke_failure_retains_active_generation() {
+        let root = std::env::temp_dir().join(format!("tenkai-ref-fail-{}", uuid::Uuid::new_v4()));
+        let state = root.join("active.json");
+        let ok = ReferenceLlamaCppExecutor::with_fake(state.clone());
+        let mut good = sample_descriptor();
+        good.health.endpoint = "http://127.0.0.1:8080/v1/models".into();
+        let active = ok.apply(&good).unwrap();
+
+        let failing = ReferenceLlamaCppExecutor::new(
+            state.clone(),
+            Arc::new(FakeInferenceEngine {
+                fail_smoke: true,
+                fail_start: false,
+            }),
+        );
+        let mut bad = sample_descriptor();
+        bad.product_version = "9.9.9".into();
+        bad.health.endpoint = "http://127.0.0.1:8080/v1/models".into();
+        let err = failing.apply(&bad).unwrap_err().to_string();
+        assert!(
+            err.contains("smoke failed") || err.contains("retained"),
+            "{err}"
+        );
+        assert_eq!(ok.observe().unwrap().as_deref(), Some(active.as_str()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reference_executor_rejects_non_loopback_health() {
+        let root = std::env::temp_dir().join(format!("tenkai-ref-bind-{}", uuid::Uuid::new_v4()));
+        let executor = ReferenceLlamaCppExecutor::with_fake(root.join("active.json"));
+        let mut descriptor = sample_descriptor();
+        descriptor.health.endpoint = "http://0.0.0.0:8080/v1/models".into();
+        assert!(executor.apply(&descriptor).is_err());
+        let _ = std::fs::remove_dir_all(root);
     }
 }
