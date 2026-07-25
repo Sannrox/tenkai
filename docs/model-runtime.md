@@ -198,6 +198,48 @@ TENKAI_LLAMA_SERVER=/path/to/llama-server \
   cargo test --locked llama_cpp_operator_golden_path -- --ignored --nocapture
 ```
 
+## Canary promotion evidence (model_runtime)
+
+`model_runtime` uses the **same** canary promotion gate as software products
+(#7). Waves (`tenkaictl wave`) and fleet status only observe posture; they
+never authorize a wider channel promotion.
+
+Documented path (embedded; FakeInferenceEngine is fine for CI):
+
+```bash
+# 0. Init + canary host
+tenkaictl init
+tenkaictl canary designate local
+
+# 1. Publish model_runtime and put it on a free "canary" channel first
+tenkaictl publish examples/model-runtime-local/tenkai.toml --allow-unsigned-development
+tenkaictl promote qwen-coder@0.1.0 canary
+
+# 2. Require complete canary evidence before promoting to stable
+tenkaictl canary policy qwen-coder@0.1.0 stable --env local
+
+# 3. Apply on the canary cohort (do NOT --skip-gates: pass evidence needs
+#    GateOutcome::Satisfied). Unsigned apply is local-only; use signed
+#    releases + plan approval for non-local canary environments.
+tenkaictl env subscribe local qwen-coder=canary
+tenkaictl env facts probe local --apply   # architecture / memory / accelerator
+tenkaictl plan --env local
+tenkaictl apply <plan-id> \
+  --allow-unapproved-development \
+  --development-reason "local model_runtime canary"
+
+# 4. Wider promote succeeds only with complete passing evidence
+tenkaictl promote qwen-coder@0.1.0 stable
+
+# Missing, failed, or rolled-back canary outcomes block promote with an
+# actionable error. `canary policy ... --reactivate` invalidates prior evidence.
+```
+
+Deterministic suite: `model_runtime_canary_evidence_gates_stable_promotion` in
+`src/canary.rs` (missing blocks; passing permits; reactivate stale-blocks;
+incomplete multi-env cohort blocks). Related: [rollout waves](rollout-waves.md),
+[fleet status](server-diagnostics.md#fleet-status-operator-table).
+
 ## Ordered rollout with routing_config
 
 When an environment runs both `model_runtime` and `routing_config`, plan

@@ -2340,6 +2340,211 @@ mod tests {
         assert!(!result.allowed);
     }
 
+    fn write_model_runtime_manifest(dir: &std::path::Path, product: &str, version: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        let body = format!(
+            r#"[product]
+name = "{product}"
+version = "{version}"
+kind = "model_runtime"
+description = "canary e2e fixture"
+
+[model]
+source = "hf://example/{product}"
+revision = "fixture"
+format = "gguf"
+quantization = "Q4_K_M"
+artifact_digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+license = "apache-2.0"
+
+[runtime]
+engine = "llama.cpp"
+port = 18080
+context_length = 4096
+
+[requirements]
+architecture = ["arm64", "x86_64"]
+memory_gib = 8
+accelerator = ["apple-metal", "cpu"]
+
+[health]
+endpoint = "http://127.0.0.1:18080/v1/models"
+smoke_prompt = "OK"
+max_startup_seconds = 30
+"#
+        );
+        std::fs::write(dir.join("tenkai.toml"), body).unwrap();
+    }
+
+    async fn publish_unsigned_model(ctx: &mut Ctx, dir: &std::path::Path) -> String {
+        let options = crate::catalog::PublishOptions {
+            signature: None,
+            trust_roots: None,
+            allow_unsigned_development: true,
+        };
+        crate::catalog::publish(ctx, &dir.join("tenkai.toml"), &options)
+            .await
+            .unwrap()
+    }
+
+    async fn apply_local_model_canary(ctx: &mut Ctx, product: &str, channel: &str) -> String {
+        crate::plan::subscribe(ctx, "local", product, channel)
+            .await
+            .unwrap();
+        crate::plan::set_environment_fact(ctx, "local", "architecture", "arm64")
+            .await
+            .unwrap();
+        crate::plan::set_environment_fact(ctx, "local", "accelerator", "cpu")
+            .await
+            .unwrap();
+        crate::plan::set_environment_fact(ctx, "local", "memory_gib", "16")
+            .await
+            .unwrap();
+        let plan = crate::plan::create(ctx, "local").await.unwrap();
+        assert!(
+            !plan.steps.is_empty(),
+            "expected model_runtime plan steps for local canary"
+        );
+        assert_eq!(plan.steps[0].product, product);
+        let plan_id = plan.id.clone();
+        // Do not skip gates: canary pass evidence requires GateOutcome::Satisfied.
+        crate::apply::execute_with_options(
+            ctx,
+            &plan_id,
+            crate::apply::ExecutionOptions {
+                skip_gates: false,
+                emergency_reason: None,
+                approval: None,
+                approval_trust_roots: None,
+                unapproved_development_reason: Some("model_runtime canary e2e fixture"),
+            },
+        )
+        .await
+        .unwrap();
+        plan_id
+    }
+
+    /// End-to-end: canary policy gates model_runtime promotion to a wider channel.
+    ///
+    /// Uses the built-in `local` environment (unsigned release + development apply
+    /// bypass) and FakeInferenceEngine so default CI never needs a real llama binary.
+    #[tokio::test]
+    async fn model_runtime_canary_evidence_gates_stable_promotion() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-model-canary-e2e-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let database = root.join("tenkai.db");
+        let manifest_dir = root.join("model");
+        std::fs::create_dir_all(&manifest_dir).unwrap();
+        write_model_runtime_manifest(&manifest_dir, "qwen-canary", "1.0.0");
+
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::plan::env_add(&mut ctx, "local", "canary host")
+            .await
+            .unwrap();
+        // Second env exists for fleet realism; cohort uses only `local` because
+        // unsigned development apply is restricted to that environment.
+        crate::plan::env_add(&mut ctx, "stage", "wider env")
+            .await
+            .unwrap();
+
+        publish_unsigned_model(&mut ctx, &manifest_dir).await;
+        // Canary channel is free of promotion policy so the cohort can apply first.
+        crate::catalog::promote(&mut ctx, "qwen-canary@1.0.0", "canary")
+            .await
+            .unwrap();
+
+        set_designated(&mut ctx, "local", true).await.unwrap();
+        configure(
+            &mut ctx,
+            "qwen-canary@1.0.0",
+            "stable",
+            vec!["local".into()],
+            false,
+        )
+        .await
+        .unwrap();
+
+        // Missing canary evidence blocks wider promote with an actionable error.
+        let missing = crate::catalog::promote(&mut ctx, "qwen-canary@1.0.0", "stable")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            missing.contains("canary promotion blocked") && missing.contains("local"),
+            "expected missing-cohort error, got: {missing}"
+        );
+
+        // Successful model_runtime apply on the canary records policy-bound evidence.
+        apply_local_model_canary(&mut ctx, "qwen-canary", "canary").await;
+
+        let promoted = crate::catalog::promote(&mut ctx, "qwen-canary@1.0.0", "stable")
+            .await
+            .unwrap();
+        assert!(
+            promoted.contains("promoted") && promoted.contains("stable"),
+            "{promoted}"
+        );
+
+        // Content/policy reactivation invalidates prior evidence (#7 invariant).
+        configure(
+            &mut ctx,
+            "qwen-canary@1.0.0",
+            "stable",
+            vec!["local".into()],
+            true,
+        )
+        .await
+        .unwrap();
+        let stale = crate::catalog::promote(&mut ctx, "qwen-canary@1.0.0", "stable")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            stale.contains("canary promotion blocked"),
+            "expected stale evidence block after reactivate, got: {stale}"
+        );
+
+        // Failed cohort member: configure two-member policy; second env never applies.
+        set_designated(&mut ctx, "stage", true).await.unwrap();
+        // Promote a second model version without canary evidence to exercise missing.
+        write_model_runtime_manifest(&manifest_dir, "qwen-canary", "1.1.0");
+        publish_unsigned_model(&mut ctx, &manifest_dir).await;
+        crate::catalog::promote(&mut ctx, "qwen-canary@1.1.0", "canary")
+            .await
+            .unwrap();
+        configure(
+            &mut ctx,
+            "qwen-canary@1.1.0",
+            "stable",
+            vec!["local".into(), "stage".into()],
+            false,
+        )
+        .await
+        .unwrap();
+        apply_local_model_canary(&mut ctx, "qwen-canary", "canary").await;
+        let incomplete = crate::catalog::promote(&mut ctx, "qwen-canary@1.1.0", "stable")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            incomplete.contains("canary promotion blocked") && incomplete.contains("stage"),
+            "expected incomplete multi-env cohort block, got: {incomplete}"
+        );
+
+        // No secrets in promote error text.
+        for sample in [&missing, &stale, &incomplete] {
+            assert!(!sample.contains("Bearer"));
+            assert!(!sample.contains("token="));
+            assert!(!sample.contains("TENKAI_MANAGEMENT_TOKEN"));
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn contradictory_release_and_unlinked_evidence_are_rejected() {
         let mut contradictory = policy();
