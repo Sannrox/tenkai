@@ -75,8 +75,12 @@ mismatch never activates the model.
 Wire a cache into the local executor with
 `LocalModelRuntimeExecutor::with_weight_cache(...)`.
 
+Eviction: `WeightCache::evict(protected_digests, keep)` removes oldest
+unprotected blobs until at most `keep` files remain. Active digests must be
+passed in `protected` and are never deleted.
+
 ## Follow-on
 
 - Reference engine plugins (`tenkai-executor-llamacpp`, MLX, …)
 - Planner hardware-class variant selection
-- Peer/regional caches and eviction policy
+- Peer/regional caches
