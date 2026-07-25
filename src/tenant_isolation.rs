@@ -155,6 +155,11 @@ pub fn tenant_visible_rpcs() -> &'static [TenantVisibleRpc] {
             surface: TenantVisibleSurface::Environment,
         },
         TenantVisibleRpc {
+            id: "environment.status",
+            path_template: "GET /v1/environments/{environment}/status",
+            surface: TenantVisibleSurface::Environment,
+        },
+        TenantVisibleRpc {
             id: "plan.list",
             path_template: "LIST plans",
             surface: TenantVisibleSurface::Plan,
@@ -205,6 +210,30 @@ pub fn tenant_visible_rpcs() -> &'static [TenantVisibleRpc] {
             surface: TenantVisibleSurface::Aggregate,
         },
     ]
+}
+
+/// Tenant-visible RPCs that are **live on management HTTP** today and must be
+/// enforced in `src/server.rs` under tenant mode.
+///
+/// All other entries in [`tenant_visible_rpcs`] remain harness/registry surfaces
+/// for future routes or in-process enterprise adapters; they are not advertised
+/// as public HTTP unless listed here.
+pub fn http_exposed_tenant_rpc_ids() -> &'static [&'static str] {
+    &[
+        "management.reconcile",
+        "management.fleet_status",
+        "runtime.work",
+        "runtime.complete",
+        "runtime.heartbeat",
+        "environment.list",
+        "environment.get",
+        "environment.status",
+    ]
+}
+
+/// True when the RPC id is a live HTTP management/runtime route.
+pub fn is_http_exposed_tenant_rpc(rpc_id: &str) -> bool {
+    http_exposed_tenant_rpc_ids().contains(&rpc_id)
 }
 
 /// Declares which isolation cases the harness exercises for each registered RPC.
