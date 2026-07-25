@@ -231,6 +231,10 @@ enum EnvCommand {
         #[arg(long, default_value = "")]
         description: String,
     },
+    /// List registered environments with compact delivery summaries.
+    List,
+    /// Inspect one environment: subscriptions, deployed versions, lease/fence, latest plan.
+    Inspect { env: String },
     /// Subscribe an environment to a product channel, e.g. `subscribe local hello=stable`.
     Subscribe { env: String, spec: String },
     /// Remove an abandoned apply lease after verifying no apply is running.
@@ -453,6 +457,33 @@ async fn main() -> Result<()> {
         Command::Env { command } => match command {
             EnvCommand::Add { name, description } => {
                 println!("{}", plan::env_add(&mut ctx, &name, &description).await?);
+            }
+            EnvCommand::List => {
+                let entries = plan::list_environments(&mut ctx).await?;
+                if entries.is_empty() {
+                    println!("no environments registered (tenkaictl env add <name>)");
+                    return Ok(());
+                }
+                println!(
+                    "{:<20} {:<8} {:<10} {:<6} description",
+                    "name", "subs", "deployed", "lease"
+                );
+                for entry in entries {
+                    let lease = if entry.lease_held { "held" } else { "-" };
+                    println!(
+                        "{:<20} {:<8} {:<10} {:<6} {}",
+                        entry.name,
+                        entry.subscription_count,
+                        entry.deployed_product_count,
+                        lease,
+                        entry.description
+                    );
+                }
+            }
+            EnvCommand::Inspect { env } => {
+                let report = plan::inspect_environment(&mut ctx, &env).await?;
+                // JSON keeps multi-env inspect machine-readable without secrets.
+                println!("{}", serde_json::to_string_pretty(&report)?);
             }
             EnvCommand::Subscribe { env, spec } => {
                 let Some((product, channel)) = spec.split_once('=') else {
@@ -881,6 +912,24 @@ mod tests {
             Some("https://tenkai.example.test")
         );
         assert!(matches!(cli.command, Command::Reconcile { once: true, .. }));
+    }
+
+    #[test]
+    fn parses_env_list_and_inspect() {
+        let list = Cli::try_parse_from(["tenkaictl", "env", "list"]).unwrap();
+        assert!(matches!(
+            list.command,
+            Command::Env {
+                command: EnvCommand::List
+            }
+        ));
+        let inspect = Cli::try_parse_from(["tenkaictl", "env", "inspect", "prod"]).unwrap();
+        assert!(matches!(
+            inspect.command,
+            Command::Env {
+                command: EnvCommand::Inspect { ref env }
+            } if env == "prod"
+        ));
     }
 
     #[test]

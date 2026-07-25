@@ -671,6 +671,50 @@ pub struct StatusRow {
     pub head: String,
 }
 
+/// Summary row for fleet listing (no credentials).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvironmentListEntry {
+    pub name: String,
+    pub id: String,
+    pub description: String,
+    pub subscription_count: usize,
+    pub deployed_product_count: usize,
+    pub lease_held: bool,
+}
+
+/// Detailed inspect report for one environment (no credentials).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvironmentInspectReport {
+    pub name: String,
+    pub id: String,
+    pub description: String,
+    pub subscriptions: Vec<EnvironmentSubscriptionView>,
+    pub lease: crate::apply::EnvironmentLeaseInspect,
+    /// Most recent plan for this environment by `created_at`, if any.
+    pub latest_plan: Option<EnvironmentPlanSummary>,
+    /// Execution ownership note: Tenkai never prints runtime bearer tokens.
+    pub execution_note: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvironmentSubscriptionView {
+    pub product: String,
+    pub channel: String,
+    pub head: String,
+    pub deployed: Option<String>,
+    pub health: Option<String>,
+    pub error: Option<String>,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvironmentPlanSummary {
+    pub id: String,
+    pub state: String,
+    pub created_at: i64,
+    pub step_count: usize,
+}
+
 pub async fn status(ctx: &mut Ctx, env: &str) -> Result<Vec<StatusRow>> {
     let env_obj = environment(ctx, env).await?;
     let channels = ctx.linked(&env_obj.id, REL_SUBSCRIBES, "out").await?;
@@ -701,6 +745,106 @@ pub async fn status(ctx: &mut Ctx, env: &str) -> Result<Vec<StatusRow>> {
     }
     rows.sort_by(|a, b| a.product.cmp(&b.product));
     Ok(rows)
+}
+
+/// List registered environments with compact delivery summaries.
+pub async fn list_environments(ctx: &mut Ctx) -> Result<Vec<EnvironmentListEntry>> {
+    let mut environments = ctx.list_kind(KIND_ENVIRONMENT).await?;
+    environments.sort_by(|left, right| left.name.cmp(&right.name));
+    let mut entries = Vec::with_capacity(environments.len());
+    for env_obj in environments {
+        let name = env_obj.name.clone();
+        let channels = ctx.linked(&env_obj.id, REL_SUBSCRIBES, "out").await?;
+        let deployed_product_count = env_obj
+            .properties
+            .keys()
+            .filter(|key| key.starts_with("deployed.") && !key.starts_with("deployed_"))
+            .count();
+        let lease = crate::apply::inspect_environment_lease(ctx, &name).await?;
+        entries.push(EnvironmentListEntry {
+            name,
+            id: env_obj.id,
+            description: env_obj
+                .properties
+                .get("description")
+                .cloned()
+                .unwrap_or_default(),
+            subscription_count: channels.len(),
+            deployed_product_count,
+            lease_held: lease.held,
+        });
+    }
+    Ok(entries)
+}
+
+/// Inspect one environment's subscriptions, lease/fence, and latest plan.
+pub async fn inspect_environment(ctx: &mut Ctx, env: &str) -> Result<EnvironmentInspectReport> {
+    let env_obj = environment(ctx, env).await?;
+    let rows = status(ctx, env).await?;
+    let subscriptions = rows
+        .into_iter()
+        .map(|row| {
+            let state = match (&row.deployed, row.health.as_deref()) {
+                (_, Some("unknown")) => "unknown",
+                (Some(version), _) if *version == row.head => "current",
+                (Some(_), _) => "behind",
+                (None, _) => "missing",
+            }
+            .to_string();
+            EnvironmentSubscriptionView {
+                product: row.product,
+                channel: row.channel,
+                head: row.head,
+                deployed: row.deployed,
+                health: row.health,
+                error: row.error,
+                state,
+            }
+        })
+        .collect();
+    let lease = crate::apply::inspect_environment_lease(ctx, env).await?;
+    let latest_plan = latest_plan_for_environment(ctx, env).await?;
+    Ok(EnvironmentInspectReport {
+        name: env_obj.name,
+        id: env_obj.id,
+        description: env_obj
+            .properties
+            .get("description")
+            .cloned()
+            .unwrap_or_default(),
+        subscriptions,
+        lease,
+        latest_plan,
+        execution_note: "Apply leases and runtime credentials are distinct; inspect never prints bearer tokens. Server-side runtime-token environments are not executed by the embedded server executor."
+            .into(),
+    })
+}
+
+async fn latest_plan_for_environment(
+    ctx: &mut Ctx,
+    env: &str,
+) -> Result<Option<EnvironmentPlanSummary>> {
+    let plans = ctx.list_kind(KIND_PLAN).await?;
+    let mut best: Option<EnvironmentPlanSummary> = None;
+    for object in plans {
+        let Ok(plan) = Plan::from_object(&object) else {
+            continue;
+        };
+        if plan.environment != env {
+            continue;
+        }
+        let summary = EnvironmentPlanSummary {
+            id: plan.id,
+            state: plan.state.to_string(),
+            created_at: plan.created_at,
+            step_count: plan.steps.len(),
+        };
+        match &best {
+            Some(current) if current.created_at >= summary.created_at => {}
+            _ => best = Some(summary),
+        }
+    }
+    Ok(best)
 }
 
 #[cfg(test)]
@@ -808,5 +952,54 @@ mod tests {
         assert_eq!(record.properties.get("description").unwrap(), "production");
         assert_eq!(record.created, 20);
         assert_eq!(record.updated, 20);
+    }
+
+    #[tokio::test]
+    async fn list_and_inspect_cover_multiple_environments() {
+        let database = std::env::temp_dir().join(format!(
+            "tenkai-env-list-{}-{}.db",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let _ = std::fs::remove_file(&database);
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        assert!(list_environments(&mut ctx).await.unwrap().is_empty());
+
+        env_add(&mut ctx, "alpha", "first").await.unwrap();
+        env_add(&mut ctx, "beta", "second").await.unwrap();
+        let listed = list_environments(&mut ctx).await.unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].name, "alpha");
+        assert_eq!(listed[1].name, "beta");
+        assert!(!listed[0].lease_held);
+        assert_eq!(listed[0].subscription_count, 0);
+        assert_eq!(listed[0].deployed_product_count, 0);
+
+        let missing = inspect_environment(&mut ctx, "missing").await;
+        assert!(missing.is_err());
+        assert!(missing.unwrap_err().to_string().contains("not registered"));
+
+        let report = inspect_environment(&mut ctx, "alpha").await.unwrap();
+        assert_eq!(report.name, "alpha");
+        assert!(report.subscriptions.is_empty());
+        assert!(!report.lease.held);
+        // No active apply: either no lease row ("absent") or a non-active row
+        // (e.g. "released") — never held.
+        assert!(
+            report.lease.status == "absent" || report.lease.status == "released",
+            "unexpected lease status {}",
+            report.lease.status
+        );
+        assert!(report.latest_plan.is_none());
+        assert!(!report.execution_note.contains("Bearer"));
+        assert!(!report.execution_note.to_lowercase().contains("token="));
+        // Runtime-token vs embedded executor split is documented, not a secret surface.
+        assert!(report.execution_note.contains("runtime-token"));
+
+        let encoded = serde_json::to_string(&report).unwrap();
+        assert!(!encoded.contains("Bearer "));
+        assert!(!encoded.contains("management-secret"));
+        let _ = std::fs::remove_file(&database);
     }
 }

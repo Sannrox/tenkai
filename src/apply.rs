@@ -1344,9 +1344,64 @@ pub(crate) struct EnvironmentLeaseStatus {
     pub owner: String,
 }
 
+/// Operator-facing lease/fence summary. Never includes credentials.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct EnvironmentLeaseInspect {
+    /// Whether an active apply/execution lease is held.
+    pub held: bool,
+    /// Lease owner identity (controller id), never a bearer token.
+    pub owner: Option<String>,
+    pub generation: Option<u64>,
+    pub expires_at_ms: Option<i64>,
+    pub status: String,
+}
+
 async fn get_environment_lease(ctx: &mut Ctx, environment: &str) -> Result<Option<Lease>> {
     ctx.get_lease(ENVIRONMENT_LEASE_NAMESPACE, environment)
         .await
+}
+
+/// Inspect generation-fenced execution lease state for an environment.
+pub async fn inspect_environment_lease(
+    ctx: &mut Ctx,
+    environment: &str,
+) -> Result<EnvironmentLeaseInspect> {
+    crate::ontology::validate_identifier("environment", environment)?;
+    if let Some(active) = get_environment_lease(ctx, environment).await? {
+        if active.status == "active" {
+            return Ok(EnvironmentLeaseInspect {
+                held: true,
+                owner: Some(active.owner),
+                generation: Some(active.generation),
+                expires_at_ms: Some(active.expires_at_ms),
+                status: active.status,
+            });
+        }
+        return Ok(EnvironmentLeaseInspect {
+            held: false,
+            owner: Some(active.owner),
+            generation: Some(active.generation),
+            expires_at_ms: Some(active.expires_at_ms),
+            status: active.status,
+        });
+    }
+    // Compatibility path: object/legacy claim without Tenkai generation lease.
+    if let Some(status) = environment_lease_status(ctx, environment).await? {
+        return Ok(EnvironmentLeaseInspect {
+            held: true,
+            owner: Some(status.owner),
+            generation: None,
+            expires_at_ms: None,
+            status: "active".into(),
+        });
+    }
+    Ok(EnvironmentLeaseInspect {
+        held: false,
+        owner: None,
+        generation: None,
+        expires_at_ms: None,
+        status: "absent".into(),
+    })
 }
 
 pub(crate) async fn environment_lease_status(
