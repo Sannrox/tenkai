@@ -440,6 +440,57 @@ async fn activate_fenced(
             .map(|_| ())
             .map_err(|error| error.to_string()));
     }
+    if matches!(
+        content.manifest.product.kind,
+        ProductKind::PolicyBundle | ProductKind::EvalSuite | ProductKind::AgentDefinition
+    ) {
+        refresh_environment_lease(ctx, lease).await?;
+        verify_content_integrity(content)?;
+        let relative = match crate::staged_artifact::staged_document_path(&content.manifest) {
+            Ok(path) => path,
+            Err(error) => return Ok(Err(error.to_string())),
+        };
+        let path = content.workdir.join(relative);
+        let state_root = content
+            .routing_state
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let state = crate::staged_artifact::state_path_for(
+            content.manifest.product.kind,
+            state_root,
+            &content.product,
+        );
+        let executor = crate::staged_artifact::LocalStagedArtifactExecutor::new(state);
+        let result = match content.manifest.product.kind {
+            ProductKind::PolicyBundle => match crate::staged_artifact::load_policy_bundle(&path) {
+                Ok(doc) => executor
+                    .apply_serializable(&doc)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string()),
+                Err(error) => Err(error.to_string()),
+            },
+            ProductKind::EvalSuite => {
+                match crate::staged_artifact::load_eval_suite_document(&path) {
+                    Ok(doc) => executor
+                        .apply_serializable(&doc)
+                        .map(|_| ())
+                        .map_err(|error| error.to_string()),
+                    Err(error) => Err(error.to_string()),
+                }
+            }
+            ProductKind::AgentDefinition => {
+                match crate::staged_artifact::load_agent_definition(&path) {
+                    Ok(doc) => executor
+                        .apply_serializable(&doc)
+                        .map(|_| ())
+                        .map_err(|error| error.to_string()),
+                    Err(error) => Err(error.to_string()),
+                }
+            }
+            _ => unreachable!(),
+        };
+        return Ok(result);
+    }
     if let Some(executor) = crate::software_executor::selected_software_executor() {
         refresh_environment_lease(ctx, lease).await?;
         verify_content_integrity(content)?;
@@ -505,6 +556,26 @@ async fn deactivate_fenced(
             .map_err(|error| error.to_string()),
         );
     }
+    if matches!(
+        content.manifest.product.kind,
+        ProductKind::PolicyBundle | ProductKind::EvalSuite | ProductKind::AgentDefinition
+    ) {
+        refresh_environment_lease(ctx, lease).await?;
+        let state_root = content
+            .routing_state
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let state = crate::staged_artifact::state_path_for(
+            content.manifest.product.kind,
+            state_root,
+            &content.product,
+        );
+        return Ok(
+            crate::staged_artifact::LocalStagedArtifactExecutor::new(state)
+                .remove()
+                .map_err(|error| error.to_string()),
+        );
+    }
     if let Some(executor) = crate::software_executor::selected_software_executor() {
         refresh_environment_lease(ctx, lease).await?;
         let request = crate::software_executor::request_from_parts(
@@ -557,12 +628,16 @@ async fn cleanup_failed_install_fenced(
     content: &ReleaseContent,
     failure: String,
 ) -> Result<(bool, String)> {
-    if content.manifest.product.kind == ProductKind::RoutingConfig
-        || content.manifest.product.kind == ProductKind::ModelRuntime
-    {
-        // Routing/model descriptor validation is pre-mutation and the local
-        // adapters publish atomically, so a failed target cannot require
-        // destructive cleanup of multi-GB weight caches here.
+    if matches!(
+        content.manifest.product.kind,
+        ProductKind::RoutingConfig
+            | ProductKind::ModelRuntime
+            | ProductKind::PolicyBundle
+            | ProductKind::EvalSuite
+            | ProductKind::AgentDefinition
+    ) {
+        // Descriptor validation is pre-mutation and local adapters publish
+        // atomically, so a failed target does not require shell uninstall cleanup.
         return Ok((true, failure));
     }
     Ok(match content.manifest.deploy.uninstall.as_deref() {
@@ -2205,6 +2280,9 @@ mod tests {
                 runtime: None,
                 requirements: None,
                 model_health: None,
+                policy: None,
+                eval_suite_product: None,
+                agent: None,
                 gate: GateSection::default(),
             },
             artifact_digest: manifest::artifact_digest(&workdir, &[]).unwrap(),

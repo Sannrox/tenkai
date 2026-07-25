@@ -26,8 +26,38 @@ pub struct Manifest {
     /// Model health probe settings. Serialized as `[health]` in TOML.
     #[serde(default, rename = "health")]
     pub model_health: Option<ModelHealthSection>,
+    /// Policy document path for `policy_bundle` products (`[policy]`).
+    #[serde(default)]
+    pub policy: Option<PolicySection>,
+    /// Eval suite document path for `eval_suite` products (`[eval_suite_product]`).
+    #[serde(default)]
+    pub eval_suite_product: Option<EvalSuiteProductSection>,
+    /// Agent descriptor path for `agent_definition` products (`[agent]`).
+    #[serde(default)]
+    pub agent: Option<AgentSection>,
     #[serde(default)]
     pub gate: GateSection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicySection {
+    /// Immutable policy JSON relative to `deploy.workdir`.
+    pub document: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvalSuiteProductSection {
+    /// Immutable eval suite JSON relative to `deploy.workdir`.
+    pub document: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSection {
+    /// Immutable agent descriptor JSON relative to `deploy.workdir`.
+    pub document: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,6 +67,12 @@ pub enum ProductKind {
     Software,
     RoutingConfig,
     ModelRuntime,
+    /// Versioned policy document staged for an environment (not an IdP).
+    PolicyBundle,
+    /// Versioned evaluation contract pin for gates.
+    EvalSuite,
+    /// Versioned agent runtime descriptor (not an orchestrator).
+    AgentDefinition,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,6 +215,12 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
             {
                 bail!("software manifests cannot declare model_runtime sections");
             }
+            if manifest.policy.is_some()
+                || manifest.eval_suite_product.is_some()
+                || manifest.agent.is_some()
+            {
+                bail!("software manifests cannot declare staged-product sections");
+            }
             if manifest.deploy.install.trim().is_empty() {
                 bail!("software manifest needs a non-empty deploy.install command");
             }
@@ -196,6 +238,12 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
                 || manifest.model_health.is_some()
             {
                 bail!("routing_config manifests cannot declare model_runtime sections");
+            }
+            if manifest.policy.is_some()
+                || manifest.eval_suite_product.is_some()
+                || manifest.agent.is_some()
+            {
+                bail!("routing_config manifests cannot declare staged-product sections");
             }
             let routing = manifest
                 .routing
@@ -221,8 +269,71 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
                     "model_runtime manifests must not embed weight files as deploy.inputs; use model.artifact_digest"
                 );
             }
+            if manifest.policy.is_some()
+                || manifest.eval_suite_product.is_some()
+                || manifest.agent.is_some()
+            {
+                bail!("model_runtime manifests cannot declare staged-product sections");
+            }
             // Full section validation lives in the model_runtime contract.
             crate::model_runtime::ModelRuntimeDescriptor::from_manifest(&manifest)?;
+        }
+        ProductKind::PolicyBundle | ProductKind::EvalSuite | ProductKind::AgentDefinition => {
+            if manifest.routing.is_some()
+                || manifest.model.is_some()
+                || manifest.runtime.is_some()
+                || manifest.requirements.is_some()
+                || manifest.model_health.is_some()
+            {
+                bail!(
+                    "{:?} manifests cannot declare routing or model_runtime sections",
+                    manifest.product.kind
+                );
+            }
+            if !manifest.deploy.install.trim().is_empty()
+                || manifest.deploy.uninstall.is_some()
+                || manifest.deploy.health.is_some()
+            {
+                bail!(
+                    "{:?} manifests cannot declare shell deployment commands",
+                    manifest.product.kind
+                );
+            }
+            match manifest.product.kind {
+                ProductKind::PolicyBundle => {
+                    if manifest.eval_suite_product.is_some() || manifest.agent.is_some() {
+                        bail!("policy_bundle cannot declare eval_suite_product or agent sections");
+                    }
+                    let section = manifest
+                        .policy
+                        .as_ref()
+                        .context("policy_bundle needs a [policy] section")?;
+                    validate_input_path("policy.document", &section.document)?;
+                }
+                ProductKind::EvalSuite => {
+                    if manifest.policy.is_some() || manifest.agent.is_some() {
+                        bail!("eval_suite cannot declare policy or agent sections");
+                    }
+                    let section = manifest
+                        .eval_suite_product
+                        .as_ref()
+                        .context("eval_suite needs an [eval_suite_product] section")?;
+                    validate_input_path("eval_suite_product.document", &section.document)?;
+                }
+                ProductKind::AgentDefinition => {
+                    if manifest.policy.is_some() || manifest.eval_suite_product.is_some() {
+                        bail!(
+                            "agent_definition cannot declare policy or eval_suite_product sections"
+                        );
+                    }
+                    let section = manifest
+                        .agent
+                        .as_ref()
+                        .context("agent_definition needs an [agent] section")?;
+                    validate_input_path("agent.document", &section.document)?;
+                }
+                _ => unreachable!(),
+            }
         }
     }
     crate::ontology::validate_identifier("product.name", &manifest.product.name)?;
@@ -244,6 +355,12 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
     if manifest.product.kind == ProductKind::ModelRuntime {
         crate::model_runtime::ModelRuntimeDescriptor::from_manifest(&manifest)?;
     }
+    if matches!(
+        manifest.product.kind,
+        ProductKind::PolicyBundle | ProductKind::EvalSuite | ProductKind::AgentDefinition
+    ) {
+        crate::staged_artifact::validate_staged_manifest(&manifest, &workdir)?;
+    }
     Ok(LoadedManifest {
         manifest,
         raw,
@@ -263,11 +380,26 @@ impl Manifest {
         {
             inputs.push(routing.config.clone());
         }
+        if let Some(policy) = &self.policy
+            && !inputs.contains(&policy.document)
+        {
+            inputs.push(policy.document.clone());
+        }
+        if let Some(eval) = &self.eval_suite_product
+            && !inputs.contains(&eval.document)
+        {
+            inputs.push(eval.document.clone());
+        }
+        if let Some(agent) = &self.agent
+            && !inputs.contains(&agent.document)
+        {
+            inputs.push(agent.document.clone());
+        }
         inputs
     }
 }
 
-fn validate_input_path(field: &str, value: &str) -> Result<()> {
+pub(crate) fn validate_input_path(field: &str, value: &str) -> Result<()> {
     let path = Path::new(value);
     if value.is_empty()
         || path.is_absolute()
@@ -591,6 +723,9 @@ mod tests {
             runtime: None,
             requirements: None,
             model_health: None,
+            policy: None,
+            eval_suite_product: None,
+            agent: None,
             gate: GateSection::default(),
         };
         assert_eq!(manifest.immutable_inputs(), vec!["routing.json"]);
