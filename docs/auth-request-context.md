@@ -73,6 +73,21 @@ AuthHostConfig::community() + build_auth_stack(..., extension = None, ...)
 Embedded mode and the loopback community server use this path. No enterprise
 identity binary is required.
 
+### Management HTTP wiring
+
+`tenkai-server` management routes (`/v1/reconcile`, `/v1/environments/*`)
+authenticate through the composed `AuthStack` in `src/server.rs`:
+
+1. Extract the bearer token (runtime tokens remain on separate routes).
+2. Build `CredentialMaterial` with a request id (`x-request-id` or generated).
+3. Call `AuthStack::authenticate` — never raw token equality alone.
+4. Use the returned principal for audit; optional tenant is only present when an
+   enterprise extension derived it under host authority.
+
+Caller-selected headers such as `x-tenkai-tenant` cannot attach tenant context.
+When enterprise authentication is required, startup fails if the extension is
+missing (capability negotiation and `build_auth_stack` both fail closed).
+
 ## Enterprise authentication extension
 
 `EnterpriseAuthExtension` is an object-safe port for verifying audience-bound

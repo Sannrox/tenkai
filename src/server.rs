@@ -13,6 +13,11 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::auth_context::{
+    AuthHostConfig, AuthMode, AuthStack, AuthenticatedRequestContext, CommunityTokenAuthenticator,
+    CredentialMaterial, EnterpriseAuthExtension, PrincipalIdentity, PrincipalKind,
+    build_auth_stack,
+};
 use crate::reconciler::{Reconciler, TickReport};
 use crate::runtime_capabilities::{
     ProvidedCapabilities, RuntimeRequirements, community_auth_capabilities,
@@ -119,6 +124,11 @@ pub struct ServerConfig {
     pub requirements: RuntimeRequirements,
     /// Composed capabilities advertised by storage and extensions.
     pub capabilities: ProvidedCapabilities,
+    /// Auth host composition (community default; set required extension for enterprise).
+    pub auth_host: AuthHostConfig,
+    /// Optional enterprise auth extension. Required when `auth_host` demands one
+    /// or when `requirements.require_enterprise_authentication` is set.
+    pub enterprise_auth: Option<Arc<dyn EnterpriseAuthExtension>>,
 }
 
 impl ServerConfig {
@@ -132,6 +142,8 @@ impl ServerConfig {
             runtime_assignments,
             requirements: RuntimeRequirements::community(),
             capabilities: community_sqlite_profile(community_auth_capabilities()),
+            auth_host: AuthHostConfig::community(),
+            enterprise_auth: None,
         }
     }
 
@@ -154,12 +166,51 @@ impl ServerConfig {
         );
         validate_runtime_capabilities(&self.capabilities, &self.requirements)
             .map_err(|error| anyhow::anyhow!("runtime capability negotiation failed: {error}"))?;
+        // Compose AuthStack at validation time so missing required enterprise
+        // extensions fail before the router accepts traffic.
+        let _ = self.build_auth_stack()?;
         Ok(())
+    }
+
+    fn resolved_auth_host(&self) -> AuthHostConfig {
+        let mut host = self.auth_host.clone();
+        if self.requirements.require_enterprise_authentication
+            && host.required_extension_id.is_none()
+        {
+            host.required_extension_id = Some(
+                self.enterprise_auth
+                    .as_ref()
+                    .map(|extension| extension.extension_id().to_string())
+                    .unwrap_or_else(|| "auth.enterprise".into()),
+            );
+        }
+        host
+    }
+
+    fn build_auth_stack(&self) -> anyhow::Result<AuthStack> {
+        let community = CommunityTokenAuthenticator::new(
+            "auth.community",
+            [(
+                self.management_token.clone(),
+                PrincipalIdentity {
+                    id: "management".into(),
+                    kind: PrincipalKind::Management,
+                },
+            )],
+        )
+        .map_err(|error| anyhow::anyhow!("community management authenticator: {error}"))?;
+        build_auth_stack(
+            &self.resolved_auth_host(),
+            self.enterprise_auth.clone(),
+            Arc::new(community),
+        )
+        .map_err(|error| anyhow::anyhow!("auth stack composition failed: {error}"))
     }
 }
 
 struct AppState {
     config: ServerConfig,
+    auth: AuthStack,
     reconciler: Arc<dyn ReconcilePort>,
     store: Arc<dyn OperationalStore>,
 }
@@ -195,6 +246,7 @@ pub fn router(
     store: Arc<dyn OperationalStore>,
 ) -> anyhow::Result<Router> {
     config.validate()?;
+    let auth = config.build_auth_stack()?;
     Ok(Router::new()
         .route("/healthz", get(health))
         .route("/readyz", get(ready))
@@ -219,30 +271,70 @@ pub fn router(
         )
         .with_state(Arc::new(AppState {
             config,
+            auth,
             reconciler,
             store,
         })))
 }
 
-fn management_auth_error(state: &AppState, headers: &HeaderMap) -> Option<Response> {
+/// Authenticate a management HTTP request through the composed [`AuthStack`].
+///
+/// Caller-selected tenant headers are intentionally ignored: only the
+/// authenticator may attach tenant context after credential verification.
+fn authenticate_management(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<AuthenticatedRequestContext, Box<Response>> {
     let Some(token) = bearer(headers) else {
-        return Some(error_response(
+        return Err(Box::new(error_response(
             StatusCode::UNAUTHORIZED,
             "missing bearer token",
-        ));
+        )));
     };
-    if !constant_time_eq(token.as_bytes(), state.config.management_token.as_bytes()) {
-        return Some(error_response(
+    let request_id = headers
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let credential = CredentialMaterial {
+        request_id,
+        bearer_token: Some(token.to_string()),
+        assertion: None,
+    };
+    match state.auth.authenticate(&credential) {
+        Ok(context) => {
+            if state.auth.mode() == AuthMode::Community && context.tenant().is_some() {
+                // Community stack must never surface tenant authority.
+                return Err(Box::new(error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "community auth stack produced tenant context",
+                )));
+            }
+            Ok(context)
+        }
+        Err(crate::auth_context::AuthError::Unauthorized(_)) => Err(Box::new(error_response(
             StatusCode::FORBIDDEN,
             "invalid management credential",
-        ));
+        ))),
+        Err(crate::auth_context::AuthError::InvalidCredential(_)) => Err(Box::new(error_response(
+            StatusCode::UNAUTHORIZED,
+            "invalid management credential",
+        ))),
+        Err(error) => {
+            eprintln!("management authentication failed: {error}");
+            Err(Box::new(error_response(
+                StatusCode::FORBIDDEN,
+                "invalid management credential",
+            )))
+        }
     }
-    None
 }
 
 async fn list_environments(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    if let Some(response) = management_auth_error(&state, &headers) {
-        return response;
+    if let Err(response) = authenticate_management(&state, &headers) {
+        return *response;
     }
     match state.reconciler.list_environments().await {
         Ok(entries) => Json(entries).into_response(),
@@ -255,8 +347,8 @@ async fn inspect_environment(
     Path(environment): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    if let Some(response) = management_auth_error(&state, &headers) {
-        return response;
+    if let Err(response) = authenticate_management(&state, &headers) {
+        return *response;
     }
     match state.reconciler.inspect_environment(environment).await {
         Ok(report) => Json(report).into_response(),
@@ -276,8 +368,8 @@ async fn environment_status(
     Path(environment): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    if let Some(response) = management_auth_error(&state, &headers) {
-        return response;
+    if let Err(response) = authenticate_management(&state, &headers) {
+        return *response;
     }
     match state.reconciler.environment_status(environment).await {
         Ok(rows) => Json(rows).into_response(),
@@ -319,13 +411,12 @@ async fn ready(State(state): State<Arc<AppState>>) -> Response {
 }
 
 async fn reconcile(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    let Some(token) = bearer(&headers) else {
-        return error_response(StatusCode::UNAUTHORIZED, "missing bearer token");
+    let context = match authenticate_management(&state, &headers) {
+        Ok(context) => context,
+        Err(response) => return *response,
     };
-    if !constant_time_eq(token.as_bytes(), state.config.management_token.as_bytes()) {
-        return error_response(StatusCode::FORBIDDEN, "invalid management credential");
-    }
-    if let Err(error) = audit(&*state.store, "management", "reconcile.requested", "*") {
+    let actor = context.principal_id();
+    if let Err(error) = audit(&*state.store, actor, "reconcile.requested", "*") {
         return error_response(StatusCode::SERVICE_UNAVAILABLE, error.to_string());
     }
     match state.reconciler.reconcile().await {
@@ -335,12 +426,12 @@ async fn reconcile(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Re
             } else {
                 "reconcile.failed"
             };
-            if let Err(error) = audit(&*state.store, "management", outcome, "*") {
+            if let Err(error) = audit(&*state.store, actor, outcome, "*") {
                 return error_response(StatusCode::SERVICE_UNAVAILABLE, error.to_string());
             }
             Json(report).into_response()
         }
-        Err(error) => match audit(&*state.store, "management", "reconcile.failed", "*") {
+        Err(error) => match audit(&*state.store, actor, "reconcile.failed", "*") {
             Ok(()) => error_response(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")),
             Err(audit_error) => error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -360,13 +451,13 @@ async fn runtime_work(
     let Some(token) = bearer(&headers) else {
         return error_response(StatusCode::UNAUTHORIZED, "missing bearer token");
     };
-    let Some(assigned) = state.config.runtime_assignments.get(token) else {
+    let Some(assigned) = runtime_assignment(&state.config, token) else {
         return error_response(StatusCode::FORBIDDEN, "invalid runtime credential");
     };
     let Some(instance) = runtime_instance(&headers) else {
         return error_response(StatusCode::BAD_REQUEST, "missing runtime instance identity");
     };
-    if assigned != &environment {
+    if assigned != environment {
         return error_response(
             StatusCode::FORBIDDEN,
             "runtime credential is not assigned to this environment",
@@ -414,13 +505,13 @@ async fn runtime_complete(
     let Some(token) = bearer(&headers) else {
         return error_response(StatusCode::UNAUTHORIZED, "missing bearer token");
     };
-    let Some(assigned) = state.config.runtime_assignments.get(token) else {
+    let Some(assigned) = runtime_assignment(&state.config, token) else {
         return error_response(StatusCode::FORBIDDEN, "invalid runtime credential");
     };
     let Some(instance) = runtime_instance(&headers) else {
         return error_response(StatusCode::BAD_REQUEST, "missing runtime instance identity");
     };
-    if assigned != &environment {
+    if assigned != environment {
         return error_response(
             StatusCode::FORBIDDEN,
             "runtime credential is not assigned to this environment",
@@ -464,13 +555,13 @@ async fn runtime_heartbeat(
     let Some(token) = bearer(&headers) else {
         return error_response(StatusCode::UNAUTHORIZED, "missing bearer token");
     };
-    let Some(assigned) = state.config.runtime_assignments.get(token) else {
+    let Some(assigned) = runtime_assignment(&state.config, token) else {
         return error_response(StatusCode::FORBIDDEN, "invalid runtime credential");
     };
     let Some(instance) = runtime_instance(&headers) else {
         return error_response(StatusCode::BAD_REQUEST, "missing runtime instance identity");
     };
-    if assigned != &environment {
+    if assigned != environment {
         return error_response(
             StatusCode::FORBIDDEN,
             "runtime credential is not assigned to this environment",
@@ -518,6 +609,18 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
         difference |= usize::from(*left.get(index).unwrap_or(&0) ^ *right.get(index).unwrap_or(&0));
     }
     difference == 0
+}
+
+/// Match a runtime bearer against configured assignments without short-circuiting
+/// on the first unequal length comparison alone.
+fn runtime_assignment(config: &ServerConfig, token: &str) -> Option<String> {
+    let mut matched = None;
+    for (candidate, environment) in &config.runtime_assignments {
+        if constant_time_eq(candidate.as_bytes(), token.as_bytes()) {
+            matched = Some(environment.clone());
+        }
+    }
+    matched
 }
 
 fn audit(
@@ -934,6 +1037,18 @@ mod tests {
             .unwrap();
         assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
 
+        let bad = app
+            .clone()
+            .oneshot(
+                Request::get("/v1/environments")
+                    .header("authorization", "Bearer wrong-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), StatusCode::FORBIDDEN);
+
         let allowed = app
             .oneshot(
                 Request::get("/v1/environments")
@@ -951,6 +1066,50 @@ mod tests {
         assert!(body.contains("prod"));
         assert!(!body.contains("management-secret"));
         assert!(!body.contains("runtime-secret"));
+    }
+
+    #[test]
+    fn enterprise_auth_required_fails_closed_without_extension() {
+        let mut config = ServerConfig::community(
+            "management-secret",
+            HashMap::from([("runtime-secret".into(), "prod".into())]),
+        );
+        config.requirements.require_enterprise_authentication = true;
+        config.capabilities =
+            community_sqlite_profile(crate::runtime_capabilities::enterprise_auth_capabilities());
+        config.auth_host.required_extension_id = Some("auth.enterprise".into());
+        // Capability claim is present, but no extension is wired — AuthStack
+        // composition must still fail before accepting traffic.
+        let error = config.validate().unwrap_err().to_string();
+        assert!(
+            error.contains("auth stack composition failed")
+                || error.contains("required auth extension"),
+            "{error}"
+        );
+        assert!(!error.contains("management-secret"));
+    }
+
+    #[tokio::test]
+    async fn forged_tenant_header_does_not_select_authority() {
+        let (app, store) = app();
+        let response = app
+            .oneshot(
+                Request::post("/v1/reconcile")
+                    .header("authorization", "Bearer management-secret")
+                    .header("x-tenkai-tenant", "forged-tenant")
+                    .header("x-tenant-id", "forged-tenant")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        // Community AuthStack principal is used; no secret leakage.
+        let events = store.audit_events().unwrap();
+        let encoded = serde_json::to_string(&events).unwrap();
+        assert!(encoded.contains("management"));
+        assert!(!encoded.contains("forged-tenant"));
+        assert!(!encoded.contains("management-secret"));
     }
 
     #[test]
