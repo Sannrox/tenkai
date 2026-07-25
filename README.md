@@ -234,6 +234,12 @@ token and append request and outcome records to the Tenkai operational
 database. Environment runtimes use separate tokens, each scoped server-side to
 exactly one environment.
 
+Community embedded and server modes are tenant-free. Enterprise compositions
+may plug an auth extension that verifies short-lived, audience-bound assertions
+and derives optional tenant context through the versioned
+[authenticated request context](docs/auth-request-context.md) contract; Tenkai
+remains authoritative for catalog, planning, reconciliation, and recovery.
+
 The server accepts plaintext HTTP only on loopback. Put a TLS reverse proxy in
 front of it for remote access; never pass tokens on a command line. By default
 the server opens the same in-process state backend as `tenkaictl` and requires
