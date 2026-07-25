@@ -46,6 +46,11 @@ They do **not** advertise tenant isolation, shared replica state, high
 availability, or enterprise authentication. Community operation is intentionally
 tenant-free.
 
+**HA profile:** single-replica operation means process restart + backup/restore
+only — not multi-writer reconcile. Multi-replica and HA flags fail closed until
+a store honestly advertises the matching capabilities. Decision:
+[ADR 0009](decisions/0009-multi-replica-reconcile-and-ha-profile.md).
+
 ## Host requirements
 
 `RuntimeRequirements` captures what the operator configured:
