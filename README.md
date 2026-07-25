@@ -231,11 +231,13 @@ database is stopped:
 ```sh
 tenkaictl restore /secure/backups/tenkai.db
 tenkaictl inspect
+tenkaictl env list
 ```
 
 The backup contains operational records and Catalog descriptors. Deployment
 runtime directories and external artifact payloads must be backed up according
-to their own storage policy.
+to their own storage policy. Full operator runbook:
+[backup and restore](docs/backup-restore.md).
 
 ## Network server
 
