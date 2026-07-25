@@ -40,6 +40,20 @@ open a database whose schema is newer than the binary supports. Use
 database and its WAL files sequentially. Stop every writer before
 `tenkaictl restore <source>`. Restore and integrity checks require no provider.
 
+## Tenant isolation adapter
+
+Community SQLite (`SqliteStore`) is tenant-free. Enterprise hosts that require
+tenant mode must compose a store that advertises `tenant_isolation` and enforces
+tenant-scoped access. The public repository ships an in-memory multi-tenant
+adapter for conformance and host wiring:
+
+- Source: `src/tenant_store.rs`
+- Capability helper: `tenant_memory_store_capabilities()`
+- Isolation outcomes: [tenant-isolation-conformance.md](tenant-isolation-conformance.md)
+
+Do not enable tenant mode against community SQLite. Do not co-locate identity
+plane tables with Tenkai operational partitions.
+
 ## Embedded-to-server migration
 
 Embedded and server hosts use the same SQLite file and domain contracts. The
