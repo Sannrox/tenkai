@@ -838,4 +838,48 @@ mod tests {
         assert!(reopened.get("tenkai:env:local").unwrap().is_some());
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn backup_restore_preserves_multiple_environments() {
+        let root =
+            std::env::temp_dir().join(format!("tenkai-backup-multi-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let database = root.join("tenkai.db");
+        let backup = root.join("backup.db");
+        let restored = root.join("restored.db");
+        let store = EmbeddedStore::open(&database, "test".into()).unwrap();
+        for (id, name) in [("tenkai:env:alpha", "alpha"), ("tenkai:env:beta", "beta")] {
+            store
+                .create(Object {
+                    id: id.into(),
+                    kind: "tenkai.environment".into(),
+                    name: name.into(),
+                    properties: [("description".into(), format!("env {name}"))]
+                        .into_iter()
+                        .collect(),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        store.backup(&backup).unwrap();
+        drop(store);
+
+        EmbeddedStore::restore(&backup, &restored).unwrap();
+        let reopened = EmbeddedStore::open(&restored, "test".into()).unwrap();
+        let alpha = reopened.get("tenkai:env:alpha").unwrap().unwrap();
+        let beta = reopened.get("tenkai:env:beta").unwrap().unwrap();
+        assert_eq!(alpha.name, "alpha");
+        assert_eq!(beta.name, "beta");
+        assert_eq!(
+            alpha.properties.get("description").map(String::as_str),
+            Some("env alpha")
+        );
+
+        // Corrupt / missing backup fails closed.
+        assert!(EmbeddedStore::restore(root.join("missing.db"), root.join("out.db")).is_err());
+        std::fs::write(root.join("corrupt.db"), b"not-a-sqlite-database").unwrap();
+        assert!(EmbeddedStore::restore(root.join("corrupt.db"), root.join("out2.db")).is_err());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
