@@ -114,6 +114,9 @@ pub struct Plan {
     pub status_detail: String,
     #[serde(default)]
     pub maintenance_blocked: bool,
+    /// Advisory prior warnings (optional planner intelligence). Never hard-blocks.
+    #[serde(default)]
+    pub prior_warnings: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -1118,7 +1121,17 @@ async fn create_with_content(
         gates_skipped: None,
         status_detail: String::new(),
         maintenance_blocked: false,
+        prior_warnings: Vec::new(),
     };
+    // Optional advisory priors (default off). Never hard-block or change steps.
+    let mut plan = plan;
+    if let Ok(inspect) = inspect_environment(ctx, env).await {
+        let _ = crate::plan_priors::annotate_plan_with_priors(
+            &mut plan,
+            &inspect,
+            &crate::plan_priors::PriorConfig::from_env(),
+        );
+    }
     store(ctx, &plan).await?;
     Ok(plan)
 }
@@ -1904,6 +1917,7 @@ mod tests {
             gates_skipped: None,
             status_detail: String::new(),
             maintenance_blocked: false,
+            prior_warnings: Vec::new(),
         };
         plan.content_id = content_address(
             &plan.environment,
