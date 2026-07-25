@@ -59,8 +59,24 @@ Engine plugins that download multi-GB weights implement `ModelRuntimeExecutor`.
 
 Coordinate both with ordinary multi-step plans.
 
-## Follow-on (not in first delivery)
+## Weight cache
+
+`WeightCache` stores verified blobs under a content-addressed path outside
+operational SQLite:
+
+```text
+<cache-root>/sha256/<64-hex>
+```
+
+Supported fetch schemes today: `file://` (absolute), `http://`, `https://`.
+`hf://` and `oci://` are reserved and fail closed until implemented. Digest
+mismatch never activates the model.
+
+Wire a cache into the local executor with
+`LocalModelRuntimeExecutor::with_weight_cache(...)`.
+
+## Follow-on
 
 - Reference engine plugins (`tenkai-executor-llamacpp`, MLX, …)
-- Planner constraints for hardware-class variant selection
-- Peer/regional weight caches and eviction policy
+- Planner hardware-class variant selection
+- Peer/regional caches and eviction policy
