@@ -102,6 +102,15 @@ When planning a `model_runtime` subscription:
 
 Selection never bypasses signing, approval, or deployable-trust checks.
 
+Populate facts with a local inventory probe (dry-run by default):
+
+```bash
+tenkaictl env facts probe local
+tenkaictl env facts probe local --apply
+```
+
+See `src/inventory.rs`. Probes never leave the host or invent unknown keys.
+
 ## Reference engine plugin (llama.cpp)
 
 **Choice:** the reference plugin targets **llama.cpp** because manifests default
