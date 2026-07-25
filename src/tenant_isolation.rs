@@ -115,6 +115,11 @@ pub fn tenant_visible_rpcs() -> &'static [TenantVisibleRpc] {
             surface: TenantVisibleSurface::Management,
         },
         TenantVisibleRpc {
+            id: "management.fleet_status",
+            path_template: "GET /v1/fleet/status",
+            surface: TenantVisibleSurface::Management,
+        },
+        TenantVisibleRpc {
             id: "runtime.work",
             path_template: "GET /v1/runtime/environments/{environment}/work",
             surface: TenantVisibleSurface::RuntimeAgent,
