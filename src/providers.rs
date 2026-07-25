@@ -138,6 +138,111 @@ pub struct LocalGateProvider {
     pub passing_evidence_id: Option<String>,
 }
 
+/// Remote gate provider over the generic HTTP JSON decision contract.
+///
+/// POSTs a [`DecisionRequest`] to `endpoint` and expects a [`ProviderDecision`]
+/// body. Used for chisei-compatible (or other) evaluation hosts. Community
+/// ungated deploys never construct this adapter, so they never open a network
+/// connection.
+///
+/// Auth: optional bearer from constructor (host loads from env/file — never
+/// commit tokens). Timeouts fail closed when used with [`required_decision`].
+#[derive(Debug, Clone)]
+pub struct HttpRemoteGateProvider {
+    /// Absolute URL of the decision endpoint (e.g. `https://eval.example/v1/gate/decide`).
+    pub endpoint: String,
+    /// Per-request timeout for the HTTP call (not including outer required_decision).
+    pub timeout: Duration,
+    /// Optional `Authorization: Bearer` token (opaque; never logged by this type).
+    pub bearer_token: Option<String>,
+    client: reqwest::Client,
+}
+
+impl HttpRemoteGateProvider {
+    pub fn new(
+        endpoint: impl Into<String>,
+        timeout: Duration,
+        bearer_token: Option<String>,
+    ) -> Result<Self, ProviderError> {
+        let endpoint = endpoint.into();
+        if endpoint.trim().is_empty() {
+            return Err(ProviderError::InvalidEvidence(
+                "remote gate endpoint must not be empty".into(),
+            ));
+        }
+        if timeout.is_zero() {
+            return Err(ProviderError::InvalidEvidence(
+                "remote gate timeout must be positive".into(),
+            ));
+        }
+        if bearer_token.as_ref().is_some_and(|t| t.trim().is_empty()) {
+            return Err(ProviderError::InvalidEvidence(
+                "remote gate bearer token must not be empty when set".into(),
+            ));
+        }
+        let client = reqwest::Client::builder()
+            .timeout(timeout)
+            .user_agent("tenkai-gate-provider/1")
+            .build()
+            .map_err(|error| {
+                ProviderError::Unavailable(format!("failed to build HTTP client: {error}"))
+            })?;
+        Ok(Self {
+            endpoint,
+            timeout,
+            bearer_token,
+            client,
+        })
+    }
+}
+
+impl GateProvider for HttpRemoteGateProvider {
+    async fn evaluate(&self, request: &DecisionRequest) -> Result<ProviderDecision, ProviderError> {
+        request.binding.validate()?;
+        let mut builder = self
+            .client
+            .post(&self.endpoint)
+            .header("content-type", "application/json")
+            .header("accept", "application/json")
+            .json(request);
+        if let Some(token) = &self.bearer_token {
+            builder = builder.bearer_auth(token);
+        }
+        let response = builder.send().await.map_err(|error| {
+            if error.is_timeout() {
+                ProviderError::Timeout(self.timeout)
+            } else {
+                ProviderError::Unavailable(format!("remote gate transport failed: {error}"))
+            }
+        })?;
+        let status = response.status();
+        if !status.is_success() {
+            // Do not include response body (may contain secrets); status only.
+            return Err(ProviderError::Unavailable(format!(
+                "remote gate returned HTTP {status}"
+            )));
+        }
+        let decision: ProviderDecision = response.json().await.map_err(|error| {
+            ProviderError::InvalidEvidence(format!(
+                "remote gate response is not valid JSON: {error}"
+            ))
+        })?;
+        if decision.evidence_id.trim().is_empty() {
+            return Err(ProviderError::InvalidEvidence(
+                "remote gate decision is missing evidence_id".into(),
+            ));
+        }
+        // Full binding/request checks live in required_decision; surface clear
+        // errors early for obvious mismatches.
+        if decision.request_id != request.request_id {
+            return Err(ProviderError::InvalidEvidence(
+                "remote gate decision request_id does not match".into(),
+            ));
+        }
+        Ok(decision)
+    }
+}
+
 impl GateProvider for LocalGateProvider {
     async fn evaluate(&self, request: &DecisionRequest) -> Result<ProviderDecision, ProviderError> {
         request.binding.validate()?;
@@ -395,6 +500,162 @@ mod tests {
             allowed_actions: ["deploy".into()].into_iter().collect(),
         };
         assert!(policy.authorize(&request).await.unwrap().allowed);
+    }
+
+    #[tokio::test]
+    async fn remote_gate_provider_accepts_valid_http_decision() {
+        use axum::{Json, Router, routing::post};
+        use std::net::SocketAddr;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/v1/gate/decide",
+            post(|Json(req): Json<DecisionRequest>| async move {
+                let binding_digest = req.binding.digest();
+                Json(ProviderDecision {
+                    allowed: true,
+                    reason: "suite passed".into(),
+                    evidence_id: format!("remote-eval:{}", req.request_id),
+                    binding_digest,
+                    request_id: req.request_id,
+                    action: req.action,
+                    principal: req.principal,
+                })
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+
+        let endpoint = format!("http://{addr}/v1/gate/decide");
+        let gate = HttpRemoteGateProvider::new(endpoint, Duration::from_secs(2), None).unwrap();
+        let request = request();
+        let decision = required_decision(&request, Duration::from_secs(3), gate.evaluate(&request))
+            .await
+            .unwrap();
+        assert!(decision.allowed);
+        assert_eq!(decision.binding_digest, request.binding.digest());
+        assert!(decision.evidence_id.starts_with("remote-eval:"));
+        assert!(!format!("{decision:?}").contains("Bearer"));
+    }
+
+    #[tokio::test]
+    async fn remote_gate_provider_fails_closed_on_5xx_and_invalid_binding() {
+        use axum::{Json, Router, http::StatusCode, routing::post};
+        use std::net::SocketAddr;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route(
+                "/fail",
+                post(|| async { StatusCode::INTERNAL_SERVER_ERROR }),
+            )
+            .route(
+                "/bad-binding",
+                post(|Json(req): Json<DecisionRequest>| async move {
+                    Json(ProviderDecision {
+                        allowed: true,
+                        reason: "forged".into(),
+                        evidence_id: "e".into(),
+                        binding_digest: "sha256:not-the-binding".into(),
+                        request_id: req.request_id,
+                        action: req.action,
+                        principal: req.principal,
+                    })
+                }),
+            );
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+
+        let request = request();
+        let fail = HttpRemoteGateProvider::new(
+            format!("http://{addr}/fail"),
+            Duration::from_secs(2),
+            None,
+        )
+        .unwrap();
+        let err = required_decision(&request, Duration::from_secs(3), fail.evaluate(&request))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("unavailable") || err.contains("HTTP 500"),
+            "{err}"
+        );
+
+        let forged = HttpRemoteGateProvider::new(
+            format!("http://{addr}/bad-binding"),
+            Duration::from_secs(2),
+            None,
+        )
+        .unwrap();
+        let forged_err =
+            required_decision(&request, Duration::from_secs(3), forged.evaluate(&request))
+                .await
+                .unwrap_err();
+        assert!(
+            matches!(forged_err, ProviderError::InvalidEvidence(_)),
+            "{forged_err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_gate_provider_times_out() {
+        use axum::{Router, routing::post};
+        use std::net::SocketAddr;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/slow",
+            post(|| async {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                "ok"
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+
+        let request = request();
+        let gate = HttpRemoteGateProvider::new(
+            format!("http://{addr}/slow"),
+            Duration::from_millis(50),
+            None,
+        )
+        .unwrap();
+        let err = required_decision(
+            &request,
+            Duration::from_millis(200),
+            gate.evaluate(&request),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, ProviderError::Timeout(_)) || err.to_string().contains("timed out"),
+            "{err}"
+        );
     }
 
     #[tokio::test]
