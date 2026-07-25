@@ -31,6 +31,7 @@ pub mod server;
 pub mod storage;
 pub mod tenant_isolation;
 pub mod tenant_store;
+pub mod wave;
 
 pub fn now_millis() -> i64 {
     std::time::SystemTime::now()
