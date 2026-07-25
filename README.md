@@ -158,6 +158,9 @@ permissions.
 tenkaictl env add prod --description production
 tenkaictl env list
 tenkaictl env inspect prod
+tenkaictl env facts set prod architecture=arm64
+tenkaictl env facts set prod memory_gib=32
+tenkaictl env facts list prod
 tenkaictl env maintenance set prod weekday \
   --timezone Europe/Berlin \
   --weekdays mon,tue,wed,thu,fri \
