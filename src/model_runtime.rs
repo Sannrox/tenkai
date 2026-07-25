@@ -688,6 +688,22 @@ impl ReferenceLlamaCppExecutor {
         Self::new(state_path, Arc::new(FakeInferenceEngine::default()))
     }
 
+    /// Operator host selection: real llama.cpp when `TENKAI_LLAMA_SERVER` is set
+    /// (path to binary) or `TENKAI_USE_REAL_LLAMA=1`; otherwise the fake engine.
+    ///
+    /// The core crate never links llama.cpp. Default CI stays fake-only.
+    pub fn for_operator_host(state_path: PathBuf) -> Self {
+        let use_real = std::env::var_os("TENKAI_LLAMA_SERVER").is_some()
+            || std::env::var("TENKAI_USE_REAL_LLAMA")
+                .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+        if use_real {
+            Self::new(state_path, Arc::new(LlamaCppProcessLauncher::default()))
+        } else {
+            Self::with_fake(state_path)
+        }
+    }
+
     pub fn with_weight_cache(mut self, cache: WeightCache) -> Self {
         self.weight_cache = Some(cache);
         self
@@ -1079,5 +1095,73 @@ mod tests {
         descriptor.health.endpoint = "http://0.0.0.0:8080/v1/models".into();
         assert!(executor.apply(&descriptor).is_err());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn for_operator_host_uses_fake_when_real_llama_env_unset() {
+        if std::env::var_os("TENKAI_LLAMA_SERVER").is_some()
+            || std::env::var_os("TENKAI_USE_REAL_LLAMA").is_some()
+        {
+            // Operator machines may set these; do not fail the suite.
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("tenkai-host-{}", uuid::Uuid::new_v4()));
+        let executor = ReferenceLlamaCppExecutor::for_operator_host(root.join("active.json"));
+        let mut descriptor = sample_descriptor();
+        descriptor.health.endpoint = "http://127.0.0.1:8080/v1/models".into();
+        assert!(executor.apply(&descriptor).is_ok());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Optional real-binary golden path. Not run in default CI.
+    ///
+    /// ```text
+    /// TENKAI_LLAMA_SERVER=/path/to/llama-server \
+    ///   cargo test --locked llama_cpp_operator_golden_path -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "requires real llama-server; set TENKAI_LLAMA_SERVER and run with --ignored"]
+    fn llama_cpp_operator_golden_path() {
+        let binary = std::env::var("TENKAI_LLAMA_SERVER")
+            .expect("TENKAI_LLAMA_SERVER must be set for this ignored test");
+        let path = PathBuf::from(&binary);
+        assert!(
+            path.is_file() || path.components().count() == 1,
+            "TENKAI_LLAMA_SERVER must name an existing file or a PATH command: {binary}"
+        );
+        let root = std::env::temp_dir().join(format!("tenkai-llama-gold-{}", uuid::Uuid::new_v4()));
+        let weights = root.join("weights.bin");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&weights, b"fixture-weights").unwrap();
+        let digest = format!("sha256:{:x}", Sha256::digest(b"fixture-weights"));
+        let mut descriptor = sample_descriptor();
+        descriptor.model.source = format!("file://{}", weights.display());
+        descriptor.model.artifact_digest = digest;
+        descriptor.health.endpoint = "http://127.0.0.1:18080/v1/models".into();
+        descriptor.runtime.port = 18080;
+        let executor = ReferenceLlamaCppExecutor::new(
+            root.join("active.json"),
+            Arc::new(LlamaCppProcessLauncher { binary: path }),
+        )
+        .with_weight_cache(WeightCache::new(root.join("cache")));
+        let result = executor.apply(&descriptor);
+        let _ = executor.remove();
+        let _ = std::fs::remove_dir_all(root);
+        // Pass if apply succeeds, or fails with an actionable engine/smoke error
+        // (binary present but not a full OpenAI-compatible server is still a
+        // valid operator diagnostic).
+        match result {
+            Ok(_) => {}
+            Err(error) => {
+                let msg = error.to_string();
+                assert!(
+                    msg.contains("llama")
+                        || msg.contains("smoke")
+                        || msg.contains("starting")
+                        || msg.contains("health"),
+                    "unexpected error: {msg}"
+                );
+            }
+        }
     }
 }

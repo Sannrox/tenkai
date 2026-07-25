@@ -133,9 +133,61 @@ future plugins implementing the same ports.
 3. Rollback uses ordinary Tenkai plan/rollback paths against retained releases.
 
 Default apply wiring uses `FakeInferenceEngine` so community software-only CI
-never requires an inference binary. Operators who install llama.cpp can inject
-`LlamaCppProcessLauncher` (or set `TENKAI_LLAMA_SERVER`) in a host-specific
-plugin build. Manifest fields are passed as argv only (no shell).
+never requires an inference binary. Operators enable the real process via env
+(see golden path below). Manifest fields are passed as argv only (no shell).
+
+### Operator golden path (real llama.cpp)
+
+One machine class: local host with loopback networking. The core crate still
+does **not** link llama.cpp.
+
+**Prerequisites**
+
+- A `llama-server` (or equivalent) binary that accepts:
+  `--host`, `--port`, `--model <weights-path>`
+- Open-weight file on disk (or `file://` / `http(s)://` source for `WeightCache`)
+- Health endpoint on loopback only, e.g. `http://127.0.0.1:8080/v1/models`
+
+**Environment**
+
+| Variable | Meaning |
+| --- | --- |
+| `TENKAI_LLAMA_SERVER` | Absolute or PATH path to the server binary (enables real engine) |
+| `TENKAI_USE_REAL_LLAMA=1` | Use default binary name `llama-server` from `PATH` |
+
+When neither is set, apply uses `FakeInferenceEngine` (CI-safe).
+
+**Sequence (embedded)**
+
+```bash
+export TENKAI_LLAMA_SERVER=/usr/local/bin/llama-server   # or TENKAI_USE_REAL_LLAMA=1
+
+# 1. Publish / promote a model_runtime with loopback health and file:// weights
+tenkaictl publish examples/model-runtime-local/tenkai.toml --allow-unsigned-development
+tenkaictl promote qwen-coder@0.1.0 stable
+tenkaictl env subscribe local qwen-coder=stable   # if not already subscribed
+
+# 2. Plan + apply (weights verify when cache is configured; smoke via HTTP)
+tenkaictl reconcile --once
+
+# 3. On smoke failure the previous active generation remains; retry or rollback
+#    with ordinary Tenkai plan/rollback — do not delete *.json.previous by hand.
+```
+
+**Security**
+
+- Bind host is forced to loopback (`127.0.0.1` / `::1` / `localhost`).
+- Process is spawned with argv only (no `sh -c`); never put credentials in the
+  manifest.
+- Do not expose the inference port beyond loopback in the reference path.
+
+**Optional integration test**
+
+```bash
+# Requires a real binary; skipped in default CI
+TENKAI_LLAMA_SERVER=/path/to/llama-server \
+  cargo test --locked llama_cpp_operator_golden_path -- --ignored --nocapture
+```
 
 ## Ordered rollout with routing_config
 
