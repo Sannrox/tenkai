@@ -251,6 +251,21 @@ enum EnvCommand {
         #[command(subcommand)]
         command: MaintenanceCommand,
     },
+    /// Manage environment capability / inventory facts (architecture, memory, …).
+    Facts {
+        #[command(subcommand)]
+        command: FactsCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum FactsCommand {
+    /// List capability facts for an environment.
+    List { env: String },
+    /// Set a fact, e.g. `set prod architecture=arm64`.
+    Set { env: String, spec: String },
+    /// Clear one fact key.
+    Clear { env: String, key: String },
 }
 
 #[derive(Subcommand)]
@@ -548,6 +563,33 @@ async fn main() -> Result<()> {
                 }
                 MaintenanceCommand::Repair { env } => {
                     println!("{}", maintenance::repair(&mut ctx, &env).await?);
+                }
+            },
+            EnvCommand::Facts { command } => match command {
+                FactsCommand::List { env } => {
+                    let facts = plan::list_environment_facts(&mut ctx, &env).await?;
+                    if facts.is_empty() {
+                        println!("{env} has no capability facts");
+                    } else {
+                        for (key, value) in facts {
+                            println!("{key}={value}");
+                        }
+                    }
+                }
+                FactsCommand::Set { env, spec } => {
+                    let Some((key, value)) = spec.split_once('=') else {
+                        bail!("expected <key>=<value>, got {spec:?}");
+                    };
+                    println!(
+                        "{}",
+                        plan::set_environment_fact(&mut ctx, &env, key, value).await?
+                    );
+                }
+                FactsCommand::Clear { env, key } => {
+                    println!(
+                        "{}",
+                        plan::clear_environment_fact(&mut ctx, &env, &key).await?
+                    );
                 }
             },
         },
