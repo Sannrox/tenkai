@@ -856,7 +856,9 @@ mod tests {
             ),
             Err(FederationError::UnauthorizedMapping)
         ));
-        directory.revoke(&mapping_authority, &principal(), now).unwrap();
+        directory
+            .revoke(&mapping_authority, &principal(), now)
+            .unwrap();
         assert!(matches!(
             directory.resolve(&principal(), now),
             Err(FederationError::Revoked)
