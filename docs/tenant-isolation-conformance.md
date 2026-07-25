@@ -83,6 +83,30 @@ database. Enterprise implementations must satisfy the same isolation outcomes
 when wiring real persistence. Commercial quotas and noisy-neighbor performance
 isolation are out of scope.
 
+## Tenant-isolating operational store adapter
+
+`src/tenant_store.rs` provides the enterprise store port used when hosts enable
+tenant mode:
+
+| Type | Role |
+| --- | --- |
+| `InMemoryTenantOperationalStore` | Multi-tenant factory; one isolated in-memory SQLite partition per tenant |
+| `TenantPartition` | `OperationalStore` for a single authenticated tenant |
+| `tenant_memory_store_capabilities()` | Advertises `tenant_isolation` and an honest migration level |
+
+Rules:
+
+- Community `SqliteStore` remains tenant-free and must not claim `tenant_isolation`.
+- Partitions are opened only through `AuthenticatedRequestContext` tenant
+  membership derived by the auth stack — never from caller-selected headers.
+- Cross-tenant environment get/list uses the non-disclosing deny posture.
+- The adapter does **not** share a database with an identity plane (ADR 0005).
+- Production PostgreSQL remains out of scope for this public repository surface.
+
+Run `InMemoryTenantOperationalStore::run_conformance` (or
+`cargo test tenant_store`) to exercise harness coverage plus store-partition
+isolation.
+
 ## Relationship to community mode
 
 Community hosts use `AuthHostConfig::community()` and never attach tenant

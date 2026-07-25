@@ -29,6 +29,7 @@ pub mod runtime_protocol;
 pub mod server;
 pub mod storage;
 pub mod tenant_isolation;
+pub mod tenant_store;
 
 pub fn now_millis() -> i64 {
     std::time::SystemTime::now()

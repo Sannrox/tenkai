@@ -418,6 +418,35 @@ impl SqliteStore {
     fn connection(&self) -> Result<MutexGuard<'_, Connection>> {
         self.connection.lock().map_err(|_| StoreError::Poisoned)
     }
+
+    /// Load one environment by id (used by tenant-scoped adapters and inspect paths).
+    pub fn get_environment(&self, id: &str) -> Result<Option<EnvironmentRecord>> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare("SELECT id, revision, configuration_json FROM environments WHERE id=?1")?;
+        let mut rows = statement.query(rusqlite::params![id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(EnvironmentRecord {
+                id: row.get(0)?,
+                revision: row.get(1)?,
+                configuration_json: row.get(2)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// List environment ids in stable order (no configuration payloads).
+    pub fn list_environment_ids(&self) -> Result<Vec<String>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare("SELECT id FROM environments ORDER BY id ASC")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(row?);
+        }
+        Ok(ids)
+    }
 }
 
 fn migrate(connection: &mut Connection) -> Result<()> {
