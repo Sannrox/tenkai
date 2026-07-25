@@ -246,7 +246,8 @@ serves unauthenticated liveness (`/healthz`) and readiness (`/readyz`) probes,
 and shuts down gracefully on SIGINT. Management mutations require a bearer
 token and append request and outcome records to the Tenkai operational
 database. Environment runtimes use separate tokens, each scoped server-side to
-exactly one environment.
+exactly one environment. Continuous reconcile ticks emit structured diagnostics
+documented in [server diagnostics](docs/server-diagnostics.md).
 
 Community embedded and server modes are tenant-free. Enterprise compositions
 may plug an auth extension that verifies short-lived, audience-bound assertions
