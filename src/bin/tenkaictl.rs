@@ -6,7 +6,9 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 
-use tenkai::{apply, canary, catalog, client, inventory, maintenance, ontology, plan, reconciler};
+use tenkai::{
+    apply, canary, catalog, client, inventory, maintenance, ontology, plan, reconciler, wave,
+};
 
 #[derive(Parser)]
 #[command(name = "tenkaictl", version, about = "Constraint-based local delivery")]
@@ -93,6 +95,11 @@ enum Command {
     Fleet {
         #[command(subcommand)]
         command: FleetCommand,
+    },
+    /// Ordered multi-environment rollout wave observation.
+    Wave {
+        #[command(subcommand)]
+        command: WaveCommand,
     },
     /// Show the steps that would converge the environment (dry run).
     Plan {
@@ -232,6 +239,18 @@ enum ApprovalCommand {
 enum FleetCommand {
     /// Summarize delivery posture for every environment (embedded or remote).
     Status,
+}
+
+#[derive(Subcommand)]
+enum WaveCommand {
+    /// Observe an ordered environment cohort (embedded).
+    Run {
+        /// Comma-separated environment names in wave order, e.g. `canary,stage,prod`.
+        cohort: String,
+        /// Continue after failures (default: stop and skip remaining).
+        #[arg(long)]
+        continue_on_failure: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -580,6 +599,26 @@ async fn main() -> Result<()> {
         } => {
             let report = plan::fleet_status(&mut ctx).await?;
             print_fleet_status(&report);
+        }
+        Command::Wave {
+            command:
+                WaveCommand::Run {
+                    cohort,
+                    continue_on_failure,
+                },
+        } => {
+            let environments: Vec<String> = cohort
+                .split(',')
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .collect();
+            let spec = wave::WaveSpec::new(environments, !continue_on_failure)?;
+            let report = wave::run_wave_observe(&mut ctx, &spec).await?;
+            println!("{}", wave::format_report(&report));
+            if report.failed_count > 0 {
+                bail!("wave failed for {} environment(s)", report.failed_count);
+            }
         }
         Command::Env { command } => match command {
             EnvCommand::Add { name, description } => {
