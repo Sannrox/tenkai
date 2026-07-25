@@ -10,6 +10,7 @@ pub mod canary;
 pub mod catalog;
 pub mod client;
 pub mod embedded;
+pub mod federated_identity;
 pub mod maintenance;
 pub mod manifest;
 pub mod offline_bundle;
