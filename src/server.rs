@@ -18,6 +18,9 @@ use crate::auth_context::{
     CredentialMaterial, EnterpriseAuthExtension, PrincipalIdentity, PrincipalKind,
     build_auth_stack,
 };
+use crate::federated_identity::{
+    FederatingAuthExtension, FederationConfig, IdentityDirectory, reject_caller_selected_tenant,
+};
 use crate::reconciler::{Reconciler, TickReport};
 use crate::runtime_capabilities::{
     ProvidedCapabilities, RuntimeRequirements, community_auth_capabilities,
@@ -129,6 +132,11 @@ pub struct ServerConfig {
     /// Optional enterprise auth extension. Required when `auth_host` demands one
     /// or when `requirements.require_enterprise_authentication` is set.
     pub enterprise_auth: Option<Arc<dyn EnterpriseAuthExtension>>,
+    /// Federation accept rules (issuer/audience/replay). Community hosts leave
+    /// the enterprise issuer unset so federation is not required.
+    pub federation: FederationConfig,
+    /// Local correlation + replay directory (never shared with an identity plane DB).
+    pub identity_directory: Arc<IdentityDirectory>,
 }
 
 impl ServerConfig {
@@ -144,6 +152,8 @@ impl ServerConfig {
             capabilities: community_sqlite_profile(community_auth_capabilities()),
             auth_host: AuthHostConfig::community(),
             enterprise_auth: None,
+            federation: FederationConfig::community(),
+            identity_directory: Arc::new(IdentityDirectory::new()),
         }
     }
 
@@ -199,12 +209,19 @@ impl ServerConfig {
             )],
         )
         .map_err(|error| anyhow::anyhow!("community management authenticator: {error}"))?;
-        build_auth_stack(
-            &self.resolved_auth_host(),
-            self.enterprise_auth.clone(),
-            Arc::new(community),
-        )
-        .map_err(|error| anyhow::anyhow!("auth stack composition failed: {error}"))
+        let enterprise = self.enterprise_auth.clone().map(|extension| {
+            if self.federation.required_enterprise_issuer.is_some() {
+                Arc::new(FederatingAuthExtension::new(
+                    extension,
+                    self.identity_directory.clone(),
+                    self.federation.clone(),
+                )) as Arc<dyn EnterpriseAuthExtension>
+            } else {
+                extension
+            }
+        });
+        build_auth_stack(&self.resolved_auth_host(), enterprise, Arc::new(community))
+            .map_err(|error| anyhow::anyhow!("auth stack composition failed: {error}"))
     }
 }
 
@@ -285,6 +302,20 @@ fn authenticate_management(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<AuthenticatedRequestContext, Box<Response>> {
+    // Caller-selected tenant metadata cannot select federation/tenant authority.
+    if reject_caller_selected_tenant(
+        headers
+            .get("x-tenkai-tenant")
+            .or_else(|| headers.get("x-tenant-id"))
+            .and_then(|value| value.to_str().ok()),
+    )
+    .is_err()
+    {
+        return Err(Box::new(error_response(
+            StatusCode::FORBIDDEN,
+            "caller metadata cannot select tenant authority",
+        )));
+    }
     let Some(token) = bearer(headers) else {
         return Err(Box::new(error_response(
             StatusCode::UNAUTHORIZED,
@@ -1092,7 +1123,9 @@ mod tests {
     #[tokio::test]
     async fn forged_tenant_header_does_not_select_authority() {
         let (app, store) = app();
-        let response = app
+        // Caller-selected tenant headers are rejected; they cannot select authority.
+        let denied = app
+            .clone()
             .oneshot(
                 Request::post("/v1/reconcile")
                     .header("authorization", "Bearer management-secret")
@@ -1103,8 +1136,18 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+
+        let response = app
+            .oneshot(
+                Request::post("/v1/reconcile")
+                    .header("authorization", "Bearer management-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        // Community AuthStack principal is used; no secret leakage.
         let events = store.audit_events().unwrap();
         let encoded = serde_json::to_string(&events).unwrap();
         assert!(encoded.contains("management"));

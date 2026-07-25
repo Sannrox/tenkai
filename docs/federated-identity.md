@@ -63,6 +63,22 @@ authentication or recovery.
 | Community | Not configured | Not used |
 | Enterprise | Required when enterprise auth is enabled | Via signed context + mappings only |
 
+### Management HTTP accept path
+
+When `ServerConfig.federation` sets `required_enterprise_issuer`, the host wraps
+the enterprise auth extension with `FederatingAuthExtension`:
+
+1. Extension verifies the signed assertion (ADR 0004).
+2. Host parses federation claims as `SignedIdentityContext`.
+3. `IdentityDirectory::accept_signed_context` binds issuer/audience and records
+   the assertion id (replay fails closed).
+4. Optional mapping resolve/put uses `MappingAuthority` only.
+5. Audit uses `audit_correlation_token` (hash of assertion id) — no secrets.
+
+Community servers keep `FederationConfig::community()` and the management bearer
+path unchanged. Caller headers such as `x-tenkai-tenant` are rejected and never
+select authority.
+
 ## Security checklist
 
 - [ ] Issuer and audience bound on every signed context  
