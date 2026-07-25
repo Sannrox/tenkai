@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 
-use tenkai::{apply, canary, catalog, client, maintenance, ontology, plan, reconciler};
+use tenkai::{apply, canary, catalog, client, inventory, maintenance, ontology, plan, reconciler};
 
 #[derive(Parser)]
 #[command(name = "tenkaictl", version, about = "Constraint-based local delivery")]
@@ -282,6 +282,13 @@ enum FactsCommand {
     Set { env: String, spec: String },
     /// Clear one fact key.
     Clear { env: String, key: String },
+    /// Probe local hardware inventory (dry-run by default).
+    Probe {
+        env: String,
+        /// Write probed facts via the normal fact API.
+        #[arg(long)]
+        apply: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -695,6 +702,23 @@ async fn main() -> Result<()> {
                         "{}",
                         plan::clear_environment_fact(&mut ctx, &env, &key).await?
                     );
+                }
+                FactsCommand::Probe { env, apply } => {
+                    let facts = inventory::probe_local_inventory()?;
+                    if !apply {
+                        println!("{}", inventory::format_dry_run(&env, &facts));
+                    } else if facts.is_empty() {
+                        println!("no inventory facts detected for {env}");
+                    } else {
+                        for fact in &facts {
+                            println!(
+                                "{}",
+                                plan::set_environment_fact(&mut ctx, &env, &fact.key, &fact.value)
+                                    .await?
+                            );
+                        }
+                        println!("applied {} local-probe fact(s) to {env}", facts.len());
+                    }
                 }
             },
             EnvCommand::Constraints { command } => match command {

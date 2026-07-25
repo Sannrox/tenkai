@@ -11,6 +11,7 @@ pub mod catalog;
 pub mod client;
 pub mod embedded;
 pub mod federated_identity;
+pub mod inventory;
 pub mod maintenance;
 pub mod manifest;
 pub mod model_runtime;
