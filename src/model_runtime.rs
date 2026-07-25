@@ -918,6 +918,9 @@ mod tests {
             runtime: Some(sample.runtime.clone()),
             requirements: Some(sample.requirements.clone()),
             model_health: Some(sample.health.clone()),
+            policy: None,
+            eval_suite_product: None,
+            agent: None,
             gate: GateSection::default(),
         };
         let descriptor = ModelRuntimeDescriptor::from_manifest(&manifest).unwrap();
