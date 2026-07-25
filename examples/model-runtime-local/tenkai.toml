@@ -1,0 +1,29 @@
+[product]
+name = "qwen-coder"
+version = "0.1.0"
+kind = "model_runtime"
+description = "Example open-weight model runtime descriptor (weights stay external)"
+
+[model]
+source = "hf://example/qwen-coder"
+revision = "demo-revision"
+format = "gguf"
+quantization = "Q4_K_M"
+# Placeholder digest for schema/examples only — replace before production use.
+artifact_digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+license = "apache-2.0"
+
+[runtime]
+engine = "llama.cpp"
+port = 8080
+context_length = 8192
+
+[requirements]
+architecture = ["arm64", "x86_64"]
+memory_gib = 16
+accelerator = ["apple-metal"]
+
+[health]
+endpoint = "http://127.0.0.1:8080/v1/models"
+smoke_prompt = "Return exactly: OK"
+max_startup_seconds = 120

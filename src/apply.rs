@@ -18,6 +18,7 @@ use sha2::{Digest as _, Sha256};
 use crate::client::Ctx;
 use crate::maintenance::{self, Eligibility};
 use crate::manifest::{self, Manifest, ProductKind};
+use crate::model_runtime::ModelRuntimeExecutor as _;
 use crate::ontology::*;
 use crate::pb::chisei::{EvalRun, EvalSuite};
 use crate::pb::sekai::{Lease, Link, Object};
@@ -339,6 +340,7 @@ struct ReleaseContent {
     product: String,
     mutation_lock: std::path::PathBuf,
     routing_state: std::path::PathBuf,
+    model_runtime_state: std::path::PathBuf,
 }
 
 fn verify_content_integrity(content: &ReleaseContent) -> Result<()> {
@@ -423,6 +425,19 @@ async fn activate_fenced(
             .map(|_| ())
             .map_err(|error| error.to_string()));
     }
+    if content.manifest.product.kind == ProductKind::ModelRuntime {
+        refresh_environment_lease(ctx, lease).await?;
+        verify_content_integrity(content)?;
+        let descriptor =
+            crate::model_runtime::ModelRuntimeDescriptor::from_manifest(&content.manifest)?;
+        let executor = crate::model_runtime::LocalModelRuntimeExecutor::new(
+            content.model_runtime_state.clone(),
+        );
+        return Ok(executor
+            .apply(&descriptor)
+            .map(|_| ())
+            .map_err(|error| error.to_string()));
+    }
     let install =
         run_mutation_command(ctx, lease, content, &content.manifest.deploy.install).await?;
     let result = match install {
@@ -452,6 +467,14 @@ async fn deactivate_fenced(
                 .remove()
                 .map_err(|error| error.to_string()),
         );
+    }
+    if content.manifest.product.kind == ProductKind::ModelRuntime {
+        refresh_environment_lease(ctx, lease).await?;
+        return Ok(crate::model_runtime::LocalModelRuntimeExecutor::new(
+            content.model_runtime_state.clone(),
+        )
+        .remove()
+        .map_err(|error| error.to_string()));
     }
     match content.manifest.deploy.uninstall.as_deref() {
         Some(command) if !command.is_empty() => {
@@ -491,9 +514,12 @@ async fn cleanup_failed_install_fenced(
     content: &ReleaseContent,
     failure: String,
 ) -> Result<(bool, String)> {
-    if content.manifest.product.kind == ProductKind::RoutingConfig {
-        // Routing validation is pre-mutation and the local adapter publishes
-        // atomically, so a failed target cannot require destructive cleanup.
+    if content.manifest.product.kind == ProductKind::RoutingConfig
+        || content.manifest.product.kind == ProductKind::ModelRuntime
+    {
+        // Routing/model descriptor validation is pre-mutation and the local
+        // adapters publish atomically, so a failed target cannot require
+        // destructive cleanup of multi-GB weight caches here.
         return Ok((true, failure));
     }
     Ok(match content.manifest.deploy.uninstall.as_deref() {
@@ -667,6 +693,11 @@ async fn release_content(
             .join("runtime")
             .join(environment)
             .join("routing")
+            .join(format!("{product}.json")),
+        model_runtime_state: state_dir
+            .join("runtime")
+            .join(environment)
+            .join("model_runtime")
             .join(format!("{product}.json")),
     })
 }
@@ -2072,6 +2103,10 @@ mod tests {
                     health: health.map(str::to_string),
                 },
                 routing: None,
+                model: None,
+                runtime: None,
+                requirements: None,
+                model_health: None,
                 gate: GateSection::default(),
             },
             artifact_digest: manifest::artifact_digest(&workdir, &[]).unwrap(),
@@ -2080,6 +2115,7 @@ mod tests {
             product: "api".into(),
             mutation_lock: std::env::temp_dir().join("tenkai-test-mutation.lock"),
             routing_state: std::env::temp_dir().join("tenkai-test-routing-state.json"),
+            model_runtime_state: std::env::temp_dir().join("tenkai-test-model-runtime-state.json"),
         }
     }
 
