@@ -5,6 +5,7 @@
 //! persistence and makes sekai-chisei an operation-dependent integration.
 
 pub mod apply;
+pub mod auth_context;
 pub mod canary;
 pub mod catalog;
 pub mod client;
