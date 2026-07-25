@@ -440,6 +440,31 @@ async fn activate_fenced(
             .map(|_| ())
             .map_err(|error| error.to_string()));
     }
+    if let Some(executor) = crate::software_executor::selected_software_executor() {
+        refresh_environment_lease(ctx, lease).await?;
+        verify_content_integrity(content)?;
+        let request = crate::software_executor::request_from_parts(
+            content.product.clone(),
+            content.manifest.product.version.clone(),
+            content.environment.clone(),
+            &content.workdir,
+            format!(
+                "tenkai:release:{}@{}",
+                content.product, content.manifest.product.version
+            ),
+        );
+        let install = executor.apply(&request).map_err(|error| error.to_string());
+        let result = match install {
+            Ok(()) => match &content.manifest.deploy.health {
+                Some(command) if !command.is_empty() => {
+                    run_mutation_command(ctx, lease, content, command).await?
+                }
+                _ => Ok(()),
+            },
+            Err(error) => Err(error),
+        };
+        return Ok(result);
+    }
     let install =
         run_mutation_command(ctx, lease, content, &content.manifest.deploy.install).await?;
     let result = match install {
@@ -479,6 +504,20 @@ async fn deactivate_fenced(
             .remove()
             .map_err(|error| error.to_string()),
         );
+    }
+    if let Some(executor) = crate::software_executor::selected_software_executor() {
+        refresh_environment_lease(ctx, lease).await?;
+        let request = crate::software_executor::request_from_parts(
+            content.product.clone(),
+            content.manifest.product.version.clone(),
+            content.environment.clone(),
+            &content.workdir,
+            format!(
+                "tenkai:release:{}@{}",
+                content.product, content.manifest.product.version
+            ),
+        );
+        return Ok(executor.remove(&request).map_err(|error| error.to_string()));
     }
     match content.manifest.deploy.uninstall.as_deref() {
         Some(command) if !command.is_empty() => {
