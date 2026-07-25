@@ -8,6 +8,9 @@ description: Prepare a tenkai release by auditing version scope, compatibility, 
 Assemble decision-ready release evidence. Do not tag, push, publish, or alter
 GitHub state unless the maintainer explicitly authorizes that action.
 
+Use the maintained operator checklist in `docs/release-readiness.md` as the
+canonical gate list for versions, contracts, security, and validation commands.
+
 ## Procedure
 
 1. Identify the target version, base tag, target commit, and milestone or merged

@@ -424,6 +424,8 @@ accepted architecture decisions are the decision log under
 [docs/decisions/](docs/decisions/README.md).
 
 Active implementation work and dependencies are tracked in GitHub Issues.
+Before tagging a release, follow the
+[release readiness checklist](docs/release-readiness.md).
 
 ## Recorded rollback replay
 
