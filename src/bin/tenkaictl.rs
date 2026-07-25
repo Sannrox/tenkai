@@ -239,6 +239,33 @@ enum ApprovalCommand {
 enum FleetCommand {
     /// Summarize delivery posture for every environment (embedded or remote).
     Status,
+    /// Poll fleet status and report posture drift versus a baseline or prior sample.
+    Watch {
+        /// Seconds between samples when not using --once.
+        #[arg(long, default_value_t = 10)]
+        interval: u64,
+        /// Take one sample, compare, print, and exit (embedded automation / tests).
+        #[arg(long)]
+        once: bool,
+        /// Optional JSON posture baseline (`tenkai.fleet-posture.v1`). Missing file = empty.
+        #[arg(long)]
+        baseline: Option<PathBuf>,
+        /// Write the latest posture snapshot as JSON after each sample.
+        #[arg(long)]
+        write_baseline: Option<PathBuf>,
+        /// Exit non-zero on any posture change (not only new behind/unhealthy).
+        #[arg(long)]
+        exit_on_any_posture_change: bool,
+        /// Exit non-zero when any environment is currently behind or unhealthy.
+        #[arg(long)]
+        exit_on_any_hard_drift: bool,
+        /// Emit the drift summary as JSON (default is human text).
+        #[arg(long)]
+        json: bool,
+        /// Maximum samples before exit (0 = unlimited). Implies continuous watch.
+        #[arg(long, default_value_t = 0)]
+        max_samples: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -428,6 +455,38 @@ async fn main() -> Result<()> {
                 print_fleet_status(&report);
                 return Ok(());
             }
+            Command::Fleet {
+                command:
+                    FleetCommand::Watch {
+                        interval,
+                        once,
+                        baseline,
+                        write_baseline,
+                        exit_on_any_posture_change,
+                        exit_on_any_hard_drift,
+                        json,
+                        max_samples,
+                    },
+            } => {
+                run_fleet_watch(
+                    || {
+                        let client = client.clone();
+                        async move { client.fleet_status().await }
+                    },
+                    FleetWatchOptions {
+                        interval,
+                        once,
+                        baseline,
+                        write_baseline,
+                        exit_on_any_posture_change,
+                        exit_on_any_hard_drift,
+                        json,
+                        max_samples,
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
             Command::Env {
                 command: EnvCommand::List,
             } => {
@@ -599,6 +658,41 @@ async fn main() -> Result<()> {
         } => {
             let report = plan::fleet_status(&mut ctx).await?;
             print_fleet_status(&report);
+        }
+        Command::Fleet {
+            command:
+                FleetCommand::Watch {
+                    interval,
+                    once,
+                    baseline,
+                    write_baseline,
+                    exit_on_any_posture_change,
+                    exit_on_any_hard_drift,
+                    json,
+                    max_samples,
+                },
+        } => {
+            run_fleet_watch(
+                || {
+                    // Re-open embedded ctx per sample so long watches see durable writes.
+                    let database = cli.database.clone();
+                    async move {
+                        let mut sample_ctx = client::Ctx::embedded(&database)?;
+                        plan::fleet_status(&mut sample_ctx).await
+                    }
+                },
+                FleetWatchOptions {
+                    interval,
+                    once,
+                    baseline,
+                    write_baseline,
+                    exit_on_any_posture_change,
+                    exit_on_any_hard_drift,
+                    json,
+                    max_samples,
+                },
+            )
+            .await?;
         }
         Command::Wave {
             command:
@@ -998,6 +1092,109 @@ fn print_fleet_status(report: &plan::FleetStatusReport) {
     }
 }
 
+struct FleetWatchOptions {
+    interval: u64,
+    once: bool,
+    baseline: Option<PathBuf>,
+    write_baseline: Option<PathBuf>,
+    exit_on_any_posture_change: bool,
+    exit_on_any_hard_drift: bool,
+    json: bool,
+    max_samples: u64,
+}
+
+async fn run_fleet_watch<F, Fut>(mut sample: F, opts: FleetWatchOptions) -> Result<()>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<plan::FleetStatusReport>>,
+{
+    let mut previous = if let Some(path) = &opts.baseline {
+        plan::load_fleet_posture_baseline(path)?
+    } else {
+        plan::FleetPostureSnapshot::default()
+    };
+    let mut samples = 0u64;
+    loop {
+        let report = sample().await?;
+        let current = plan::fleet_posture_snapshot(&report);
+        let delta = plan::compare_fleet_posture(&previous, &current);
+        if opts.json {
+            println!("{}", serde_json::to_string_pretty(&delta)?);
+        } else {
+            print_fleet_drift(&delta, &report);
+        }
+        if let Some(path) = &opts.write_baseline {
+            plan::write_fleet_posture_baseline(path, &current)?;
+        }
+        samples += 1;
+        let should_exit_error = if opts.exit_on_any_posture_change {
+            delta.has_any_posture_change
+        } else if opts.exit_on_any_hard_drift {
+            delta.has_any_hard_drift
+        } else {
+            // Default: non-zero only when *new* hard drift appears vs baseline/prior sample.
+            delta.has_new_hard_drift
+        };
+        if should_exit_error {
+            bail!(
+                "fleet drift watch: new hard drift detected ({})",
+                if delta.new_hard_drift.is_empty() {
+                    if delta.has_any_hard_drift {
+                        "hard drift present".to_string()
+                    } else {
+                        "posture changed".to_string()
+                    }
+                } else {
+                    delta.new_hard_drift.join(",")
+                }
+            );
+        }
+        if opts.once || (opts.max_samples > 0 && samples >= opts.max_samples) {
+            return Ok(());
+        }
+        previous = current;
+        tokio::time::sleep(Duration::from_secs(opts.interval.max(1))).await;
+    }
+}
+
+fn print_fleet_drift(delta: &plan::FleetDriftSummary, report: &plan::FleetStatusReport) {
+    let change = if delta.has_any_posture_change {
+        "changed"
+    } else {
+        "stable"
+    };
+    println!(
+        "fleet watch {change} new_hard_drift={} any_hard_drift={} environments={} current={} behind={} unhealthy={} empty={}",
+        delta.has_new_hard_drift,
+        delta.has_any_hard_drift,
+        report.environment_count,
+        report.environments_current,
+        report.environments_behind,
+        report.environments_unhealthy,
+        report.environments_empty
+    );
+    if !delta.has_any_posture_change {
+        println!("no posture drift vs baseline");
+        return;
+    }
+    let print_list = |label: &str, names: &[String]| {
+        if !names.is_empty() {
+            println!("{label}: {}", names.join(", "));
+        }
+    };
+    print_list("entered behind", &delta.entered_behind);
+    print_list("left behind", &delta.left_behind);
+    print_list("entered unhealthy", &delta.entered_unhealthy);
+    print_list("left unhealthy", &delta.left_unhealthy);
+    print_list("entered empty", &delta.entered_empty);
+    print_list("left empty", &delta.left_empty);
+    print_list("entered current", &delta.entered_current);
+    print_list("left current", &delta.left_current);
+    print_list("appeared", &delta.appeared);
+    print_list("disappeared", &delta.disappeared);
+    print_list("new hard drift", &delta.new_hard_drift);
+}
+
 fn print_reconcile_report(report: reconciler::TickReport) {
     for result in report.environments {
         match result.status {
@@ -1214,6 +1411,51 @@ mod tests {
                 command: FleetCommand::Status
             }
         ));
+    }
+
+    #[test]
+    fn parses_fleet_watch() {
+        let cli = Cli::try_parse_from([
+            "tenkaictl",
+            "fleet",
+            "watch",
+            "--once",
+            "--baseline",
+            "/tmp/baseline.json",
+            "--write-baseline",
+            "/tmp/out.json",
+            "--exit-on-any-hard-drift",
+            "--json",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Fleet {
+                command:
+                    FleetCommand::Watch {
+                        once,
+                        baseline,
+                        write_baseline,
+                        exit_on_any_hard_drift,
+                        json,
+                        interval,
+                        ..
+                    },
+            } => {
+                assert!(once);
+                assert_eq!(
+                    baseline.as_deref(),
+                    Some(std::path::Path::new("/tmp/baseline.json"))
+                );
+                assert_eq!(
+                    write_baseline.as_deref(),
+                    Some(std::path::Path::new("/tmp/out.json"))
+                );
+                assert!(exit_on_any_hard_drift);
+                assert!(json);
+                assert_eq!(interval, 10);
+            }
+            _ => panic!("expected fleet watch command"),
+        }
     }
 
     #[test]
