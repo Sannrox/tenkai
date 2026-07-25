@@ -137,6 +137,19 @@ never requires an inference binary. Operators who install llama.cpp can inject
 `LlamaCppProcessLauncher` (or set `TENKAI_LLAMA_SERVER`) in a host-specific
 plugin build. Manifest fields are passed as argv only (no shell).
 
+## Ordered rollout with routing_config
+
+When an environment runs both `model_runtime` and `routing_config`, plan
+computation **orders** steps (it does not merge kinds):
+
+| Direction | Order |
+| --- | --- |
+| Install / upgrade | `model_runtime` → `routing_config` |
+| Downgrade / rollback | `routing_config` → `model_runtime` |
+
+Unsafe orders are rejected (`validate_model_routing_rollout_order`). See
+[examples/model-routing-rollout](../examples/model-routing-rollout/README.md).
+
 ### Follow-on
 
 - Peer/regional caches

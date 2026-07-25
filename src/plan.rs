@@ -931,6 +931,7 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
             .properties
             .get(&format!("deployed.{product}"))
             .cloned();
+        let kind = release_product_kind(ctx, &release).await?;
         inputs.push(DesiredStateInput {
             product: product.clone(),
             channel,
@@ -946,18 +947,37 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
             Some(v) => {
                 let action = classify_change(&v, &desired);
                 let restore = pin_release(ctx, &release_id(&product, &v), env).await?;
-                pending.push((product, action, Some(v), desired, target, Some(restore)));
+                pending.push((
+                    product,
+                    action,
+                    Some(v),
+                    desired,
+                    target,
+                    Some(restore),
+                    kind,
+                ));
             }
-            None => pending.push((product, Action::Install, None, desired, target, None)),
+            None => pending.push((product, Action::Install, None, desired, target, None, kind)),
         }
     }
     inputs.sort_by(|a, b| a.product.cmp(&b.product));
-    pending.sort_by(|a, b| a.0.cmp(&b.0));
+    // Enforce model_runtime ↔ routing_config rollout order (see docs).
+    pending.sort_by(|a, b| {
+        model_routing_rollout_rank(a.6, a.1)
+            .cmp(&model_routing_rollout_rank(b.6, b.1))
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    validate_model_routing_rollout_order(
+        &pending
+            .iter()
+            .map(|entry| (entry.6, entry.1))
+            .collect::<Vec<_>>(),
+    )?;
     let steps = pending
         .into_iter()
         .enumerate()
         .map(
-            |(index, (product, action, from, to, release, restore))| Step {
+            |(index, (product, action, from, to, release, restore, _kind))| Step {
                 id: format!("{}:step:{index}", env_id(env)),
                 order: index as u32,
                 product,
@@ -973,6 +993,85 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
         )
         .collect();
     Ok((inputs, steps))
+}
+
+async fn release_product_kind(
+    ctx: &mut Ctx,
+    release: &str,
+) -> Result<crate::manifest::ProductKind> {
+    let object = ctx
+        .get(release)
+        .await?
+        .with_context(|| format!("release {release} not found for product kind lookup"))?;
+    let raw = object
+        .properties
+        .get("manifest")
+        .with_context(|| format!("release {release} has no stored manifest"))?;
+    let manifest = crate::manifest::parse_raw(raw)
+        .with_context(|| format!("parsing stored manifest of {release}"))?;
+    Ok(manifest.product.kind)
+}
+
+/// Deterministic step ranking for coordinated model_runtime + routing_config
+/// rollouts without merging the product kinds.
+///
+/// Forward (install/upgrade): model_runtime first, then routing_config.
+/// Reverse (downgrade/rollback): routing_config first (drain traffic), then
+/// model_runtime (retire generation). Other products keep a neutral rank and
+/// sort by product name among themselves.
+pub fn model_routing_rollout_rank(kind: crate::manifest::ProductKind, action: Action) -> u8 {
+    use crate::manifest::ProductKind;
+    match (kind, action) {
+        (ProductKind::ModelRuntime, Action::Install | Action::Upgrade) => 0,
+        (ProductKind::RoutingConfig, Action::Install | Action::Upgrade) => 1,
+        (ProductKind::RoutingConfig, Action::Downgrade | Action::Rollback) => 0,
+        (ProductKind::ModelRuntime, Action::Downgrade | Action::Rollback) => 1,
+        _ => 2,
+    }
+}
+
+/// Reject unsafe model/routing step order (routing switch before model ready,
+/// or model retire while routes still target it).
+pub fn validate_model_routing_rollout_order(
+    steps: &[(crate::manifest::ProductKind, Action)],
+) -> Result<()> {
+    use crate::manifest::ProductKind;
+    let mut last_forward_model = None;
+    let mut last_forward_routing = None;
+    let mut last_reverse_routing = None;
+    let mut last_reverse_model = None;
+    for (index, (kind, action)) in steps.iter().enumerate() {
+        match (kind, action) {
+            (ProductKind::ModelRuntime, Action::Install | Action::Upgrade) => {
+                last_forward_model = Some(index);
+            }
+            (ProductKind::RoutingConfig, Action::Install | Action::Upgrade) => {
+                last_forward_routing = Some(index);
+            }
+            (ProductKind::RoutingConfig, Action::Downgrade | Action::Rollback) => {
+                last_reverse_routing = Some(index);
+            }
+            (ProductKind::ModelRuntime, Action::Downgrade | Action::Rollback) => {
+                last_reverse_model = Some(index);
+            }
+            _ => {}
+        }
+    }
+    if let (Some(model_i), Some(routing_i)) = (last_forward_model, last_forward_routing)
+        && model_i > routing_i
+    {
+        bail!(
+            "unsafe rollout order: routing_config step at {routing_i} precedes model_runtime step at {model_i}; install/verify model before switching routes"
+        );
+    }
+    if let (Some(routing_i), Some(model_i)) = (last_reverse_routing, last_reverse_model)
+        && routing_i > model_i
+    {
+        bail!(
+            "unsafe rollback order: model_runtime step at {model_i} precedes routing_config step at {routing_i}; switch routes away before retiring the model"
+        );
+    }
+    Ok(())
 }
 
 /// Compute the steps that converge the environment on its subscribed channels.
@@ -1563,6 +1662,53 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&database);
+    }
+
+    #[test]
+    fn model_routing_forward_order_requires_model_before_routing() {
+        use crate::manifest::ProductKind;
+        validate_model_routing_rollout_order(&[
+            (ProductKind::ModelRuntime, Action::Install),
+            (ProductKind::RoutingConfig, Action::Upgrade),
+        ])
+        .unwrap();
+        let err = validate_model_routing_rollout_order(&[
+            (ProductKind::RoutingConfig, Action::Upgrade),
+            (ProductKind::ModelRuntime, Action::Install),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("unsafe rollout order"), "{err}");
+    }
+
+    #[test]
+    fn model_routing_rollback_order_requires_routing_before_model() {
+        use crate::manifest::ProductKind;
+        validate_model_routing_rollout_order(&[
+            (ProductKind::RoutingConfig, Action::Rollback),
+            (ProductKind::ModelRuntime, Action::Downgrade),
+        ])
+        .unwrap();
+        let err = validate_model_routing_rollout_order(&[
+            (ProductKind::ModelRuntime, Action::Downgrade),
+            (ProductKind::RoutingConfig, Action::Rollback),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("unsafe rollback order"), "{err}");
+    }
+
+    #[test]
+    fn model_routing_rank_orders_forward_and_reverse() {
+        use crate::manifest::ProductKind;
+        assert!(
+            model_routing_rollout_rank(ProductKind::ModelRuntime, Action::Install)
+                < model_routing_rollout_rank(ProductKind::RoutingConfig, Action::Install)
+        );
+        assert!(
+            model_routing_rollout_rank(ProductKind::RoutingConfig, Action::Rollback)
+                < model_routing_rollout_rank(ProductKind::ModelRuntime, Action::Rollback)
+        );
     }
 
     #[test]
