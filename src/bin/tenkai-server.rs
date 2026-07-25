@@ -146,6 +146,8 @@ async fn main() -> Result<()> {
             runtime_assignments,
             requirements,
             capabilities: capabilities.clone(),
+            auth_host: tenkai::auth_context::AuthHostConfig::community(),
+            enterprise_auth: None,
         },
         reconciler.clone(),
         store,
