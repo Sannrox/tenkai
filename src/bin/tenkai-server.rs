@@ -148,6 +148,10 @@ async fn main() -> Result<()> {
             capabilities: capabilities.clone(),
             auth_host: tenkai::auth_context::AuthHostConfig::community(),
             enterprise_auth: None,
+            federation: tenkai::federated_identity::FederationConfig::community(),
+            identity_directory: std::sync::Arc::new(
+                tenkai::federated_identity::IdentityDirectory::new(),
+            ),
         },
         reconciler.clone(),
         store,

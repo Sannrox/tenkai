@@ -8,9 +8,10 @@
 //! agents, plans, and deployment history.
 
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
 /// Version of the federated-identity contract.
@@ -558,6 +559,104 @@ pub fn reject_caller_selected_tenant(
     Ok(())
 }
 
+/// Non-secret audit correlation token for an accepted assertion.
+///
+/// Derived from the assertion id only (SHA-256 hex). Never includes bearer
+/// tokens, raw assertions, or mapping private material.
+pub fn audit_correlation_token(assertion_id: &str) -> String {
+    format!("fed:{:x}", Sha256::digest(assertion_id.as_bytes()))
+}
+
+/// Wraps an enterprise auth extension so accepted requests also pass federation
+/// accept rules (issuer/audience bind + replay cache) and optional local
+/// correlation mappings under [`MappingAuthority`].
+pub struct FederatingAuthExtension {
+    inner: Arc<dyn crate::auth_context::EnterpriseAuthExtension>,
+    directory: Arc<IdentityDirectory>,
+    config: FederationConfig,
+}
+
+impl FederatingAuthExtension {
+    pub fn new(
+        inner: Arc<dyn crate::auth_context::EnterpriseAuthExtension>,
+        directory: Arc<IdentityDirectory>,
+        config: FederationConfig,
+    ) -> Self {
+        Self {
+            inner,
+            directory,
+            config,
+        }
+    }
+
+    pub fn directory(&self) -> &IdentityDirectory {
+        &self.directory
+    }
+
+    pub fn config(&self) -> &FederationConfig {
+        &self.config
+    }
+}
+
+impl crate::auth_context::EnterpriseAuthExtension for FederatingAuthExtension {
+    fn extension_id(&self) -> &str {
+        self.inner.extension_id()
+    }
+
+    fn contract_version(&self) -> u32 {
+        self.inner.contract_version()
+    }
+
+    fn expected_audience(&self) -> &str {
+        self.inner.expected_audience()
+    }
+
+    fn authenticate(
+        &self,
+        credential: &crate::auth_context::CredentialMaterial,
+        authority: &crate::auth_context::TenantDerivationAuthority,
+    ) -> Result<crate::auth_context::AuthenticatedRequestContext, crate::auth_context::AuthError>
+    {
+        // Caller-selected tenant metadata is forbidden on the federation path.
+        // Transport may still pass headers; the host must not interpret them as authority.
+        let context = self.inner.authenticate(credential, authority)?;
+        let Some(assertion) = credential.assertion.as_ref() else {
+            // Community-style bearer on an enterprise host: no federation claims.
+            return Ok(context);
+        };
+        let signed: SignedIdentityContext = serde_json::from_slice(assertion).map_err(|error| {
+            crate::auth_context::AuthError::InvalidCredential(format!(
+                "signed identity context is not valid federation JSON: {error}"
+            ))
+        })?;
+        let now = crate::now_millis();
+        self.directory
+            .accept_signed_context(&self.config, &signed, now)
+            .map_err(federation_to_auth_error)?;
+        // Optional local correlation mapping lookup (read); writes require MappingAuthority.
+        let _correlation = audit_correlation_token(&signed.assertion_id);
+        let _ = self.directory.resolve(&signed.principal, now);
+        Ok(context)
+    }
+}
+
+fn federation_to_auth_error(error: FederationError) -> crate::auth_context::AuthError {
+    match error {
+        FederationError::Replay => {
+            crate::auth_context::AuthError::Unauthorized("replayed assertion id".into())
+        }
+        FederationError::Expired | FederationError::NotYetValid => {
+            crate::auth_context::AuthError::Unauthorized(error.to_string())
+        }
+        FederationError::IssuerMismatch { .. }
+        | FederationError::AudienceMismatch { .. }
+        | FederationError::EnterpriseIssuerNotConfigured => {
+            crate::auth_context::AuthError::Unauthorized(error.to_string())
+        }
+        other => crate::auth_context::AuthError::InvalidCredential(other.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -645,6 +744,127 @@ mod tests {
         assert!(matches!(
             dir.accept_signed_context(&config, &context, 2_000),
             Err(FederationError::Replay)
+        ));
+    }
+
+    #[test]
+    fn audit_correlation_token_contains_no_secrets() {
+        let token = audit_correlation_token("assert-secret-material");
+        assert!(token.starts_with("fed:"));
+        assert!(!token.contains("assert-secret-material"));
+        assert!(!token.contains("Bearer"));
+        assert_eq!(token.len(), 4 + 64);
+    }
+
+    struct StubEnterpriseAuth;
+
+    impl crate::auth_context::EnterpriseAuthExtension for StubEnterpriseAuth {
+        fn extension_id(&self) -> &str {
+            "auth.enterprise"
+        }
+        fn contract_version(&self) -> u32 {
+            crate::auth_context::AUTH_CONTEXT_CONTRACT_VERSION
+        }
+        fn expected_audience(&self) -> &str {
+            "tenkai-server"
+        }
+        fn authenticate(
+            &self,
+            credential: &crate::auth_context::CredentialMaterial,
+            authority: &crate::auth_context::TenantDerivationAuthority,
+        ) -> Result<crate::auth_context::AuthenticatedRequestContext, crate::auth_context::AuthError>
+        {
+            let signed: SignedIdentityContext =
+                serde_json::from_slice(credential.assertion.as_ref().ok_or_else(|| {
+                    crate::auth_context::AuthError::InvalidCredential("need assertion".into())
+                })?)
+                .map_err(|e| crate::auth_context::AuthError::InvalidCredential(e.to_string()))?;
+            crate::auth_context::AuthenticatedRequestContextBuilder::new(
+                credential.request_id.clone(),
+                crate::auth_context::PrincipalIdentity {
+                    id: signed.principal.subject.clone(),
+                    kind: crate::auth_context::PrincipalKind::Human,
+                },
+                self.extension_id(),
+            )
+            .with_tenant(signed.tenant.as_ref().unwrap().subject.clone(), authority)?
+            .build()
+        }
+    }
+
+    #[test]
+    fn federating_extension_replays_fail_closed_and_mappings_need_authority() {
+        use crate::auth_context::EnterpriseAuthExtension as _;
+
+        let config = enterprise_config();
+        let directory = Arc::new(IdentityDirectory::new());
+        let extension = FederatingAuthExtension::new(
+            Arc::new(StubEnterpriseAuth),
+            directory.clone(),
+            config.clone(),
+        );
+        let authority = crate::auth_context::TenantDerivationAuthority::new("auth.enterprise");
+        let now = crate::now_millis();
+        let mut signed = signed_context("assert-live-1");
+        signed.issued_at = now - 1_000;
+        signed.not_before = now - 1_000;
+        signed.expires_at = now + 60_000;
+        let credential = crate::auth_context::CredentialMaterial {
+            request_id: "req-1".into(),
+            bearer_token: None,
+            assertion: Some(serde_json::to_vec(&signed).unwrap()),
+        };
+        extension.authenticate(&credential, &authority).unwrap();
+        let replay = extension.authenticate(&credential, &authority).unwrap_err();
+        assert!(
+            matches!(replay, crate::auth_context::AuthError::Unauthorized(ref msg) if msg.contains("replay")),
+            "{replay:?}"
+        );
+
+        let mapping_authority = directory.mapping_authority(&config).unwrap();
+        directory
+            .put_mapping(
+                &mapping_authority,
+                IdentityMapping {
+                    external: principal(),
+                    local_handle: "tenkai-principal-local".into(),
+                    created_at: now,
+                    expires_at: None,
+                    revoked_at: None,
+                    generation: 1,
+                },
+                now,
+            )
+            .unwrap();
+        // Foreign authority rejected.
+        let foreign = MappingAuthority {
+            issuer: "https://other".into(),
+            audience: "tenkai-server".into(),
+        };
+        assert!(matches!(
+            directory.put_mapping(
+                &foreign,
+                IdentityMapping {
+                    external: principal(),
+                    local_handle: "hijack".into(),
+                    created_at: now,
+                    expires_at: None,
+                    revoked_at: None,
+                    generation: 2,
+                },
+                now,
+            ),
+            Err(FederationError::UnauthorizedMapping)
+        ));
+        directory.revoke(&mapping_authority, &principal(), now).unwrap();
+        assert!(matches!(
+            directory.resolve(&principal(), now),
+            Err(FederationError::Revoked)
+        ));
+        directory.delete(&mapping_authority, &principal()).unwrap();
+        assert!(matches!(
+            directory.resolve(&principal(), now),
+            Err(FederationError::NotFound)
         ));
     }
 
