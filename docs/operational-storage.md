@@ -50,9 +50,12 @@ adapter for conformance and host wiring:
 - Source: `src/tenant_store.rs`
 - Capability helper: `tenant_memory_store_capabilities()`
 - Isolation outcomes: [tenant-isolation-conformance.md](tenant-isolation-conformance.md)
+- Production criteria: [ADR 0008](decisions/0008-production-tenant-operational-store.md)
 
 Do not enable tenant mode against community SQLite. Do not co-locate identity
-plane tables with Tenkai operational partitions.
+plane tables with Tenkai operational partitions. Production PostgreSQL (or
+equivalent) is deferred per ADR 0008 unless an optional/out-of-tree adapter is
+explicitly adopted.
 
 ## Embedded-to-server migration
 
