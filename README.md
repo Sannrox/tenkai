@@ -424,6 +424,7 @@ it ([ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md),
 | Self-verifying offline bundles | [Offline bundles](docs/offline-bundles.md); [ADR 0003](docs/decisions/0003-canonical-offline-delivery-archives.md) |
 | Optional governance/intelligence provider ports | [Provider contracts](docs/provider-contracts.md) |
 | Runtime capability negotiation at startup | [Runtime capabilities](docs/runtime-capabilities.md) |
+| Multi-replica / HA capability profile (decision) | [ADR 0009](docs/decisions/0009-multi-replica-reconcile-and-ha-profile.md); #109 |
 | AuthStack management HTTP + federation accept path | [Auth context](docs/auth-request-context.md), [federated identity](docs/federated-identity.md); #68, #71 |
 | Tenant-isolation harness + in-memory tenant store | [Tenant isolation](docs/tenant-isolation-conformance.md); #37, #69, #70 |
 | Backup/restore drill and server reconcile diagnostics | [operational storage](docs/operational-storage.md); [server diagnostics](docs/server-diagnostics.md); #59, #60 |
@@ -436,7 +437,7 @@ is explicitly configured; ungated solo deploys never open a network connection.
 
 ### Deferred (next-era product work)
 
-Tracked in open GitHub Issues. The architecture program (ADRs 0001–0007) is
+Tracked in open GitHub Issues. The architecture program (ADRs 0001–0009) is
 landed; remaining work is product depth (DESIGN Phase 5+), for example:
 
 - Multi-environment rollout waves (#94)
