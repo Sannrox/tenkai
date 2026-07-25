@@ -682,6 +682,12 @@ pub struct EnvironmentListEntry {
     pub lease_held: bool,
 }
 
+/// Initial capability/inventory fact keys admitted for environments.
+pub const ENVIRONMENT_FACT_KEYS: &[&str] =
+    &["architecture", "memory_gib", "accelerator", "free_disk_gib"];
+
+const ENVIRONMENT_FACT_PREFIX: &str = "fact.";
+
 /// Detailed inspect report for one environment (no credentials).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnvironmentInspectReport {
@@ -689,6 +695,7 @@ pub struct EnvironmentInspectReport {
     pub id: String,
     pub description: String,
     pub subscriptions: Vec<EnvironmentSubscriptionView>,
+    pub facts: std::collections::BTreeMap<String, String>,
     pub lease: crate::apply::EnvironmentLeaseInspect,
     /// Most recent plan for this environment by `created_at`, if any.
     pub latest_plan: Option<EnvironmentPlanSummary>,
@@ -802,6 +809,7 @@ pub async fn inspect_environment(ctx: &mut Ctx, env: &str) -> Result<Environment
             }
         })
         .collect();
+    let facts = environment_facts_from_object(&env_obj);
     let lease = crate::apply::inspect_environment_lease(ctx, env).await?;
     let latest_plan = latest_plan_for_environment(ctx, env).await?;
     Ok(EnvironmentInspectReport {
@@ -813,10 +821,108 @@ pub async fn inspect_environment(ctx: &mut Ctx, env: &str) -> Result<Environment
             .cloned()
             .unwrap_or_default(),
         subscriptions,
+        facts,
         lease,
         latest_plan,
         execution_note: "Apply leases and runtime credentials are distinct; inspect never prints bearer tokens. Server-side runtime-token environments are not executed by the embedded server executor."
             .into(),
+    })
+}
+
+fn environment_facts_from_object(env_obj: &Object) -> std::collections::BTreeMap<String, String> {
+    let mut facts = std::collections::BTreeMap::new();
+    for (key, value) in &env_obj.properties {
+        if let Some(name) = key.strip_prefix(ENVIRONMENT_FACT_PREFIX) {
+            facts.insert(name.to_string(), value.clone());
+        }
+    }
+    facts
+}
+
+fn validate_fact_key(key: &str) -> Result<()> {
+    if !ENVIRONMENT_FACT_KEYS.contains(&key) {
+        bail!(
+            "unknown environment fact {key:?}; allowed: {}",
+            ENVIRONMENT_FACT_KEYS.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn validate_fact_value(key: &str, value: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        bail!("environment fact {key} must not be empty");
+    }
+    if value
+        .chars()
+        .any(|c| c.is_control() || c == '\n' || c == '\r')
+    {
+        bail!("environment fact {key} must not contain control characters");
+    }
+    // Reject values that look like secrets/credentials.
+    let lower = value.to_ascii_lowercase();
+    for needle in ["bearer ", "password=", "secret=", "token="] {
+        if lower.contains(needle) {
+            bail!("environment fact {key} must not contain credential material");
+        }
+    }
+    if matches!(key, "memory_gib" | "free_disk_gib") {
+        let parsed: u64 = value
+            .parse()
+            .with_context(|| format!("environment fact {key} must be a non-negative integer"))?;
+        if parsed == 0 {
+            bail!("environment fact {key} must be greater than zero");
+        }
+    }
+    Ok(())
+}
+
+/// Set a capability/inventory fact on an environment.
+pub async fn set_environment_fact(
+    ctx: &mut Ctx,
+    env: &str,
+    key: &str,
+    value: &str,
+) -> Result<String> {
+    validate_fact_key(key)?;
+    validate_fact_value(key, value)?;
+    let mut env_obj = environment(ctx, env).await?;
+    env_obj
+        .properties
+        .insert(format!("{ENVIRONMENT_FACT_PREFIX}{key}"), value.to_string());
+    env_obj.updated = crate::now_millis();
+    ctx.put(env_obj).await?;
+    Ok(format!("set {env} fact {key}={value}"))
+}
+
+/// Clear one capability/inventory fact from an environment.
+pub async fn clear_environment_fact(ctx: &mut Ctx, env: &str, key: &str) -> Result<String> {
+    validate_fact_key(key)?;
+    let mut env_obj = environment(ctx, env).await?;
+    let property = format!("{ENVIRONMENT_FACT_PREFIX}{key}");
+    if env_obj.properties.remove(&property).is_none() {
+        bail!("environment {env} has no fact {key}");
+    }
+    env_obj.updated = crate::now_millis();
+    ctx.put(env_obj).await?;
+    Ok(format!("cleared {env} fact {key}"))
+}
+
+/// List capability/inventory facts for an environment.
+pub async fn list_environment_facts(
+    ctx: &mut Ctx,
+    env: &str,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    let env_obj = environment(ctx, env).await?;
+    Ok(environment_facts_from_object(&env_obj))
+}
+
+/// Require a named fact for planning; fail closed when missing.
+pub async fn require_environment_fact(ctx: &mut Ctx, env: &str, key: &str) -> Result<String> {
+    validate_fact_key(key)?;
+    let facts = list_environment_facts(ctx, env).await?;
+    facts.get(key).cloned().with_context(|| {
+        format!("environment {env} is missing required fact {key}; set it with `tenkaictl env facts set {env} {key}=…`")
     })
 }
 
@@ -1000,6 +1106,53 @@ mod tests {
         let encoded = serde_json::to_string(&report).unwrap();
         assert!(!encoded.contains("Bearer "));
         assert!(!encoded.contains("management-secret"));
+
+        set_environment_fact(&mut ctx, "alpha", "architecture", "arm64")
+            .await
+            .unwrap();
+        set_environment_fact(&mut ctx, "alpha", "memory_gib", "32")
+            .await
+            .unwrap();
+        assert!(
+            set_environment_fact(&mut ctx, "alpha", "memory_gib", "0")
+                .await
+                .is_err()
+        );
+        assert!(
+            set_environment_fact(&mut ctx, "alpha", "token", "x")
+                .await
+                .is_err()
+        );
+        assert!(
+            set_environment_fact(&mut ctx, "alpha", "architecture", "token=abc")
+                .await
+                .is_err()
+        );
+        let facts = list_environment_facts(&mut ctx, "alpha").await.unwrap();
+        assert_eq!(facts.get("architecture").map(String::as_str), Some("arm64"));
+        assert_eq!(
+            require_environment_fact(&mut ctx, "alpha", "architecture")
+                .await
+                .unwrap(),
+            "arm64"
+        );
+        assert!(
+            require_environment_fact(&mut ctx, "alpha", "accelerator")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("missing required fact")
+        );
+        clear_environment_fact(&mut ctx, "alpha", "architecture")
+            .await
+            .unwrap();
+        assert!(
+            !list_environment_facts(&mut ctx, "alpha")
+                .await
+                .unwrap()
+                .contains_key("architecture")
+        );
+
         let _ = std::fs::remove_file(&database);
     }
 }
