@@ -152,6 +152,7 @@ async fn main() -> Result<()> {
             identity_directory: std::sync::Arc::new(
                 tenkai::federated_identity::IdentityDirectory::new(),
             ),
+            tenant_store: None,
         },
         reconciler.clone(),
         store,
