@@ -27,10 +27,13 @@ operation.
 
 In the accepted target architecture, `sekai-chisei` provides optional graph
 projection, governance, evaluation, and learning while Tenkai is the operational
-system of record. Current v0 still uses sekai as its operational store pending
-the migration in ADR 0001. chisei evidence is required, and failure is closed,
-only when an environment policy or approved plan makes that evidence part of
-the operation's contract.
+system of record ([ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md)).
+**Current main implements Tenkai-owned operational storage** (embedded SQLite /
+`OperationalStore`); sekai is not the recovery path. Historical prototype notes
+in this document that still mention sekai-backed operational objects describe
+pre-ADR-0001 v0 and should be read as background, not as live authority.
+chisei evidence is required, and failure is closed, only when an environment
+policy or approved plan makes that evidence part of the operation's contract.
 
 ## Why this product
 
@@ -60,12 +63,12 @@ the operation's contract.
 
 ## Core concepts (the ontology)
 
-These are Tenkai domain types. Current v0 authoritatively encodes them as
-**sekai schema types** in a `tenkai` namespace, where links provide lineage
-(release → artifacts → SBOM; deployment → plan → release → publisher) via
-`Traverse`. After ADR 0001's persistence migration and explicit authority
-cutover, the graph becomes an optional integration projection of Tenkai-owned
-operational state.
+These are Tenkai domain types. **Authoritative operational encoding** lives in
+Tenkai-owned persistence (ADR 0001; see also the README Ontology section for the
+embedded `tenkai` namespace objects). An optional sekai graph projection may
+still represent lineage (release → artifacts → SBOM; deployment → plan → release
+→ publisher) for audit, policy, and learning via `Traverse`, but it is not
+required to recover a deployment.
 
 | Concept | What it is |
 | --- | --- |
@@ -177,9 +180,15 @@ depends on these integrations:
 ## Phasing
 
 The phase narrative below captures the product evolution. Active,
-dependency-aware work is maintained in GitHub Issues.
+dependency-aware work is maintained in GitHub Issues. The standalone-core,
+server/runtime, offline-bundle, and enterprise-composition **architecture**
+phases are largely landed on main (see ADRs 0001–0007 and the README Status
+table). Remaining work is product depth (multi-env ops tooling, planner
+constraints, model executors, enterprise host wiring)—not re-litigating
+operational ownership.
 
-Walking skeleton first; every phase ends with something demoable.
+Historical note: early phases began as a walking skeleton; every phase still
+ends with something demoable.
 
 - **Phase 0 — Contracts.** Establish transport-independent application ports,
   an in-process Catalog boundary, Tenkai-owned plan/step formats, optional sekai
