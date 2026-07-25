@@ -244,7 +244,10 @@ Tenant mode must pass the deterministic
 before release. Hosts negotiate storage and extension
 [runtime capabilities](docs/runtime-capabilities.md) at startup so tenant mode,
 multi-replica, HA, and enterprise authentication cannot be requested from a
-tenant-free SQLite profile.
+tenant-free SQLite profile. The public
+[enterprise integration boundary](docs/enterprise-integration-boundary.md)
+records ownership between the browser-facing enterprise plane and Tenkai’s
+delivery authority without coupling community mode to private components.
 
 The server accepts plaintext HTTP only on loopback. Put a TLS reverse proxy in
 front of it for remote access; never pass tokens on a command line. By default
