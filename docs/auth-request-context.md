@@ -2,7 +2,7 @@
 
 Tenkai authenticates transports and authorizes delivery-domain use cases. This
 document defines the backend-neutral request-context contract used by community
-hosts and by enterprise compositions that verify short-lived Aldunis (or other)
+hosts and by enterprise compositions that verify short-lived, audience-bound
 assertions. It does not implement OIDC, tenant lifecycle, billing, or a
 console.
 
@@ -18,7 +18,7 @@ Architecture decision: [ADR 0004](decisions/0004-authenticated-request-context.m
 | Operational recovery state | Tenkai |
 | Principal identity on a call | Authenticator that verified credentials |
 | Optional tenant membership | Enterprise auth extension after verification |
-| Identity provider UX / token minting | External (for example Aldunis) |
+| Identity provider UX / token minting | External identity plane |
 
 Authentication adapters never become authoritative for operational objects.
 Tenkai remains the delivery-domain authority even when an enterprise gateway
@@ -64,8 +64,8 @@ never attaches tenant context. Community hosts call:
 AuthHostConfig::community() + build_auth_stack(..., extension = None, ...)
 ```
 
-Embedded mode and the loopback community server use this path. No Aldunis (or
-other enterprise) binary is required.
+Embedded mode and the loopback community server use this path. No enterprise
+identity binary is required.
 
 ## Enterprise authentication extension
 
@@ -126,7 +126,7 @@ management or runtime work.
 
 `CredentialAuthenticator` and `EnterpriseAuthExtension` are object-safe
 (`Send + Sync`, no generic methods). Hosts store `Arc<dyn …>` and can substitute
-community tokens, Aldunis assertion verification, or test doubles without
+community tokens, enterprise assertion verification, or test doubles without
 linking Tenkai domain logic to one identity product.
 
 ## Security invariants
