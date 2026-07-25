@@ -313,6 +313,10 @@ impl Reconciler {
             .clone()
     }
 
+    pub fn ctx_clone(&self) -> Ctx {
+        self.ctx.clone()
+    }
+
     /// Reconcile every registered environment once. Environments run concurrently.
     pub async fn run_once(&self) -> Result<TickReport> {
         // Periodic and requested ticks share this lock so a successful request

@@ -832,6 +832,7 @@ pub async fn rollback_step(ctx: &mut Ctx, env: &str, product: &str) -> Result<St
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusRow {
     pub product: String,
     pub channel: String,

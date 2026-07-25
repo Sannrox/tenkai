@@ -38,12 +38,23 @@ pub trait ReconcilePort: Send + Sync {
         environment: String,
         completion: crate::reconciler::RuntimeCompletion,
     ) -> CompletionFuture<'_>;
+    fn list_environments(&self) -> ListEnvFuture<'_>;
+    fn inspect_environment(&self, environment: String) -> InspectEnvFuture<'_>;
+    fn environment_status(&self, environment: String) -> StatusEnvFuture<'_>;
 }
 
 pub type WorkFuture<'a> =
     Pin<Box<dyn Future<Output = anyhow::Result<Option<crate::plan::Plan>>> + Send + 'a>>;
 pub type HealthFuture<'a> = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>;
 pub type CompletionFuture<'a> = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>;
+pub type ListEnvFuture<'a> = Pin<
+    Box<dyn Future<Output = anyhow::Result<Vec<crate::plan::EnvironmentListEntry>>> + Send + 'a>,
+>;
+pub type InspectEnvFuture<'a> = Pin<
+    Box<dyn Future<Output = anyhow::Result<crate::plan::EnvironmentInspectReport>> + Send + 'a>,
+>;
+pub type StatusEnvFuture<'a> =
+    Pin<Box<dyn Future<Output = anyhow::Result<Vec<crate::plan::StatusRow>>> + Send + 'a>>;
 
 impl ReconcilePort for Reconciler {
     fn reconcile(&self) -> ReconcileFuture<'_> {
@@ -74,6 +85,27 @@ impl ReconcilePort for Reconciler {
         Box::pin(async move {
             self.validate_runtime_completion(&environment, &completion)
                 .await
+        })
+    }
+
+    fn list_environments(&self) -> ListEnvFuture<'_> {
+        Box::pin(async move {
+            let mut ctx = self.ctx_clone();
+            crate::plan::list_environments(&mut ctx).await
+        })
+    }
+
+    fn inspect_environment(&self, environment: String) -> InspectEnvFuture<'_> {
+        Box::pin(async move {
+            let mut ctx = self.ctx_clone();
+            crate::plan::inspect_environment(&mut ctx, &environment).await
+        })
+    }
+
+    fn environment_status(&self, environment: String) -> StatusEnvFuture<'_> {
+        Box::pin(async move {
+            let mut ctx = self.ctx_clone();
+            crate::plan::status(&mut ctx, &environment).await
         })
     }
 }
@@ -167,6 +199,12 @@ pub fn router(
         .route("/healthz", get(health))
         .route("/readyz", get(ready))
         .route("/v1/reconcile", post(reconcile))
+        .route("/v1/environments", get(list_environments))
+        .route("/v1/environments/{environment}", get(inspect_environment))
+        .route(
+            "/v1/environments/{environment}/status",
+            get(environment_status),
+        )
         .route(
             "/v1/runtime/environments/{environment}/work",
             get(runtime_work),
@@ -184,6 +222,74 @@ pub fn router(
             reconciler,
             store,
         })))
+}
+
+fn management_auth_error(state: &AppState, headers: &HeaderMap) -> Option<Response> {
+    let Some(token) = bearer(headers) else {
+        return Some(error_response(
+            StatusCode::UNAUTHORIZED,
+            "missing bearer token",
+        ));
+    };
+    if !constant_time_eq(token.as_bytes(), state.config.management_token.as_bytes()) {
+        return Some(error_response(
+            StatusCode::FORBIDDEN,
+            "invalid management credential",
+        ));
+    }
+    None
+}
+
+async fn list_environments(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(response) = management_auth_error(&state, &headers) {
+        return response;
+    }
+    match state.reconciler.list_environments().await {
+        Ok(entries) => Json(entries).into_response(),
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")),
+    }
+}
+
+async fn inspect_environment(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(response) = management_auth_error(&state, &headers) {
+        return response;
+    }
+    match state.reconciler.inspect_environment(environment).await {
+        Ok(report) => Json(report).into_response(),
+        Err(error) => {
+            let message = format!("{error:#}");
+            if message.contains("not registered") {
+                error_response(StatusCode::NOT_FOUND, message)
+            } else {
+                error_response(StatusCode::INTERNAL_SERVER_ERROR, message)
+            }
+        }
+    }
+}
+
+async fn environment_status(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(response) = management_auth_error(&state, &headers) {
+        return response;
+    }
+    match state.reconciler.environment_status(environment).await {
+        Ok(rows) => Json(rows).into_response(),
+        Err(error) => {
+            let message = format!("{error:#}");
+            if message.contains("not registered") {
+                error_response(StatusCode::NOT_FOUND, message)
+            } else {
+                error_response(StatusCode::INTERNAL_SERVER_ERROR, message)
+            }
+        }
+    }
 }
 
 fn service_status(status: &'static str, config: &ServerConfig) -> ServiceStatus {
@@ -473,9 +579,47 @@ impl RemoteClient {
     }
 
     pub async fn reconcile(&self) -> anyhow::Result<TickReport> {
+        self.request_json(reqwest::Method::POST, "/v1/reconcile")
+            .await
+    }
+
+    pub async fn list_environments(
+        &self,
+    ) -> anyhow::Result<Vec<crate::plan::EnvironmentListEntry>> {
+        self.request_json(reqwest::Method::GET, "/v1/environments")
+            .await
+    }
+
+    pub async fn inspect_environment(
+        &self,
+        environment: &str,
+    ) -> anyhow::Result<crate::plan::EnvironmentInspectReport> {
+        self.request_json(
+            reqwest::Method::GET,
+            &format!("/v1/environments/{environment}"),
+        )
+        .await
+    }
+
+    pub async fn environment_status(
+        &self,
+        environment: &str,
+    ) -> anyhow::Result<Vec<crate::plan::StatusRow>> {
+        self.request_json(
+            reqwest::Method::GET,
+            &format!("/v1/environments/{environment}/status"),
+        )
+        .await
+    }
+
+    async fn request_json<T: serde::de::DeserializeOwned>(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+    ) -> anyhow::Result<T> {
         let response = self
             .http
-            .post(format!("{}/v1/reconcile", self.base_url))
+            .request(method, format!("{}{path}", self.base_url))
             .bearer_auth(&self.token)
             .send()
             .await?;
@@ -545,6 +689,44 @@ mod tests {
             _completion: crate::reconciler::RuntimeCompletion,
         ) -> CompletionFuture<'_> {
             Box::pin(async { Ok(()) })
+        }
+
+        fn list_environments(&self) -> ListEnvFuture<'_> {
+            Box::pin(async {
+                Ok(vec![crate::plan::EnvironmentListEntry {
+                    name: "prod".into(),
+                    id: "tenkai:env:prod".into(),
+                    description: "fixture".into(),
+                    subscription_count: 0,
+                    deployed_product_count: 0,
+                    lease_held: false,
+                }])
+            })
+        }
+
+        fn inspect_environment(&self, environment: String) -> InspectEnvFuture<'_> {
+            Box::pin(async move {
+                Ok(crate::plan::EnvironmentInspectReport {
+                    name: environment,
+                    id: "tenkai:env:prod".into(),
+                    description: "fixture".into(),
+                    subscriptions: Vec::new(),
+                    facts: Default::default(),
+                    lease: crate::apply::EnvironmentLeaseInspect {
+                        held: false,
+                        owner: None,
+                        generation: None,
+                        expires_at_ms: None,
+                        status: "absent".into(),
+                    },
+                    latest_plan: None,
+                    execution_note: "fixture".into(),
+                })
+            })
+        }
+
+        fn environment_status(&self, _environment: String) -> StatusEnvFuture<'_> {
+            Box::pin(async { Ok(Vec::new()) })
         }
     }
 
@@ -736,6 +918,39 @@ mod tests {
             assert!(!body.contains("runtime-secret"));
             assert!(!body.contains("tenant-a"));
         }
+    }
+
+    #[tokio::test]
+    async fn management_env_list_requires_auth_and_returns_rows() {
+        let (app, _) = app();
+        let denied = app
+            .clone()
+            .oneshot(
+                Request::get("/v1/environments")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+
+        let allowed = app
+            .oneshot(
+                Request::get("/v1/environments")
+                    .header("authorization", "Bearer management-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(allowed.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(allowed.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(body.contains("prod"));
+        assert!(!body.contains("management-secret"));
+        assert!(!body.contains("runtime-secret"));
     }
 
     #[test]
