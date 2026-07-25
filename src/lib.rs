@@ -28,6 +28,7 @@ pub mod runtime_agent;
 pub mod runtime_capabilities;
 pub mod runtime_protocol;
 pub mod server;
+pub mod software_executor;
 pub mod storage;
 pub mod tenant_isolation;
 pub mod tenant_store;
