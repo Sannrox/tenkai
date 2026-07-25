@@ -142,6 +142,133 @@ fn validate_artifact_digest(value: &str) -> Result<()> {
     Ok(())
 }
 
+fn artifact_digest_hex(value: &str) -> Result<&str> {
+    validate_artifact_digest(value)?;
+    Ok(value
+        .strip_prefix("sha256:")
+        .expect("validated digest has sha256: prefix"))
+}
+
+/// Content-addressed weight cache outside the operational SQLite database.
+#[derive(Debug, Clone)]
+pub struct WeightCache {
+    root: PathBuf,
+}
+
+impl WeightCache {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn blob_path(&self, artifact_digest: &str) -> Result<PathBuf> {
+        let hex = artifact_digest_hex(artifact_digest)?;
+        Ok(self.root.join("sha256").join(hex))
+    }
+
+    /// Fetch weights from a supported source and verify `artifact_digest`.
+    ///
+    /// Supported sources for this release:
+    /// - `file://` absolute local path
+    /// - `http://` / `https://` URL (uses blocking reqwest)
+    ///
+    /// Unknown schemes fail closed. On digest mismatch the incomplete file is
+    /// removed and the model is not considered active.
+    pub fn fetch_and_verify(&self, source: &str, artifact_digest: &str) -> Result<PathBuf> {
+        validate_artifact_digest(artifact_digest)?;
+        let destination = self.blob_path(artifact_digest)?;
+        if destination.is_file() {
+            verify_file_digest(&destination, artifact_digest)?;
+            return Ok(destination);
+        }
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating weight cache {}", parent.display()))?;
+        }
+        let temporary = destination.with_extension("partial");
+        let _ = std::fs::remove_file(&temporary);
+        fetch_source_to(source, &temporary)?;
+        match verify_file_digest(&temporary, artifact_digest) {
+            Ok(()) => {
+                std::fs::rename(&temporary, &destination).with_context(|| {
+                    format!("promoting verified weights to {}", destination.display())
+                })?;
+                Ok(destination)
+            }
+            Err(error) => {
+                let _ = std::fs::remove_file(&temporary);
+                Err(error).context("weight digest verification failed; model not activated")
+            }
+        }
+    }
+}
+
+fn fetch_source_to(source: &str, destination: &Path) -> Result<()> {
+    if let Some(path) = source.strip_prefix("file://") {
+        let path = Path::new(path);
+        if !path.is_absolute() {
+            bail!("file:// model.source must be an absolute path");
+        }
+        std::fs::copy(path, destination).with_context(|| {
+            format!(
+                "copying model weights from {} to {}",
+                path.display(),
+                destination.display()
+            )
+        })?;
+        return Ok(());
+    }
+    if source.starts_with("http://") || source.starts_with("https://") {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .context("building weight download client")?;
+        let mut response = client
+            .get(source)
+            .send()
+            .with_context(|| format!("downloading model weights from {source}"))?
+            .error_for_status()
+            .with_context(|| format!("weight download from {source} failed"))?;
+        let mut file = std::fs::File::create(destination)
+            .with_context(|| format!("creating {}", destination.display()))?;
+        std::io::copy(&mut response, &mut file)
+            .with_context(|| format!("writing downloaded weights to {}", destination.display()))?;
+        return Ok(());
+    }
+    if source.starts_with("hf://") || source.starts_with("oci://") {
+        bail!(
+            "model.source scheme is reserved but not implemented in this build: {source}; use file:// or http(s):// for verified fetch"
+        );
+    }
+    bail!("unsupported model.source scheme (need file:// or http(s)://): {source}");
+}
+
+fn verify_file_digest(path: &Path, artifact_digest: &str) -> Result<()> {
+    let expected = artifact_digest_hex(artifact_digest)?;
+    let mut file =
+        std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = std::io::Read::read(&mut file, &mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let actual = format!("{:x}", hasher.finalize());
+    if actual != expected {
+        bail!(
+            "weight digest mismatch for {}: expected sha256:{expected}, got sha256:{actual}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 /// Pluggable inference-engine adapter. Engines download/verify weights, start
 /// servers, probe health, and free resources. Tenkai never links a specific
 /// engine into the core binary as a hard dependency.
@@ -157,18 +284,28 @@ pub trait ModelRuntimeExecutor: Send + Sync {
     fn observe(&self) -> Result<Option<String>>;
 }
 
-/// Local reference executor that stages the validated descriptor only.
+/// Local reference executor that stages the validated descriptor and, when a
+/// [`WeightCache`] is configured, fetches and verifies weight digests.
 ///
-/// It does **not** download multi-GB weights or start an inference server.
-/// Real `tenkai-executor-*` plugins implement [`ModelRuntimeExecutor`] and
-/// perform download, verify, start, smoke-test, and switch steps.
+/// It does **not** start an inference server. Real `tenkai-executor-*` plugins
+/// implement [`ModelRuntimeExecutor`] and add start/smoke/switch steps after
+/// using the same cache verify path.
 pub struct LocalModelRuntimeExecutor {
     state_path: PathBuf,
+    weight_cache: Option<WeightCache>,
 }
 
 impl LocalModelRuntimeExecutor {
     pub fn new(state_path: PathBuf) -> Self {
-        Self { state_path }
+        Self {
+            state_path,
+            weight_cache: None,
+        }
+    }
+
+    pub fn with_weight_cache(mut self, cache: WeightCache) -> Self {
+        self.weight_cache = Some(cache);
+        self
     }
 
     pub fn state_path(&self) -> &Path {
@@ -179,6 +316,10 @@ impl LocalModelRuntimeExecutor {
 impl ModelRuntimeExecutor for LocalModelRuntimeExecutor {
     fn apply(&self, descriptor: &ModelRuntimeDescriptor) -> Result<String> {
         descriptor.validate()?;
+        if let Some(cache) = &self.weight_cache {
+            // Fail closed before descriptor activation when digest mismatches.
+            cache.fetch_and_verify(&descriptor.model.source, &descriptor.model.artifact_digest)?;
+        }
         let expected = descriptor.digest()?;
         let parent = self
             .state_path
@@ -320,6 +461,48 @@ mod tests {
         let next_digest = executor.apply(&next).unwrap();
         assert_ne!(previous_digest, next_digest);
         assert_eq!(executor.apply(&previous).unwrap(), previous_digest);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn weight_cache_verifies_file_source_and_rejects_mismatch() {
+        let root = std::env::temp_dir().join(format!("tenkai-weights-{}", uuid::Uuid::new_v4()));
+        let source_dir = root.join("src");
+        let cache_dir = root.join("cache");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let payload = b"tiny-model-bytes";
+        let source_file = source_dir.join("model.bin");
+        std::fs::write(&source_file, payload).unwrap();
+        let digest = format!("sha256:{:x}", Sha256::digest(payload));
+        let cache = WeightCache::new(&cache_dir);
+        let stored = cache
+            .fetch_and_verify(&format!("file://{}", source_file.display()), &digest)
+            .unwrap();
+        assert!(stored.is_file());
+        // Second fetch hits cache.
+        let again = cache
+            .fetch_and_verify(&format!("file://{}", source_file.display()), &digest)
+            .unwrap();
+        assert_eq!(stored, again);
+
+        let bad = format!("sha256:{}", "00".repeat(32));
+        let err = cache
+            .fetch_and_verify(&format!("file://{}", source_file.display()), &bad)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("digest mismatch") || err.contains("verification failed"));
+        assert!(!cache.blob_path(&bad).unwrap().exists());
+
+        let mut descriptor = sample_descriptor();
+        descriptor.model.source = format!("file://{}", source_file.display());
+        descriptor.model.artifact_digest = digest;
+        let executor =
+            LocalModelRuntimeExecutor::new(root.join("active.json")).with_weight_cache(cache);
+        executor.apply(&descriptor).unwrap();
+        assert!(executor.state_path().is_file());
+
+        descriptor.model.artifact_digest = format!("sha256:{}", "11".repeat(32));
+        assert!(executor.apply(&descriptor).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 }
