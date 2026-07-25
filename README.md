@@ -426,6 +426,7 @@ it ([ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md),
 | Runtime capability negotiation at startup | [Runtime capabilities](docs/runtime-capabilities.md) |
 | Multi-replica / HA capability profile (decision) | [ADR 0009](docs/decisions/0009-multi-replica-reconcile-and-ha-profile.md); #109 |
 | AuthStack management HTTP + federation accept path | [Auth context](docs/auth-request-context.md), [federated identity](docs/federated-identity.md); #68, #71 |
+| JWT EdDSA enterprise assertion verifier (static keys) | [Auth context](docs/auth-request-context.md#reference-jwt-assertion-verifier-110); #110 |
 | Tenant-isolation harness + in-memory tenant store | [Tenant isolation](docs/tenant-isolation-conformance.md); #37, #69, #70 |
 | Backup/restore drill and server reconcile diagnostics | [operational storage](docs/operational-storage.md); [server diagnostics](docs/server-diagnostics.md); #59, #60 |
 | Release readiness checklist | [release readiness](docs/release-readiness.md); #72 |
