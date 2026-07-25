@@ -2104,6 +2104,7 @@ mod tests {
             gates_skipped: Some(false),
             status_detail: String::new(),
             maintenance_blocked: false,
+            prior_warnings: Vec::new(),
         }
     }
 

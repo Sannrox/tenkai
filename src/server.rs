@@ -982,6 +982,7 @@ mod tests {
                     gates_skipped: None,
                     status_detail: String::new(),
                     maintenance_blocked: false,
+                    prior_warnings: Vec::new(),
                 }))
             })
         }
