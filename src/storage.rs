@@ -360,6 +360,8 @@ pub trait OperationalStore: Send + Sync {
     fn append_audit(&self, event: &AuditRecord) -> Result<()>;
     fn audit_events(&self) -> Result<Vec<AuditRecord>>;
     fn check_health(&self) -> Result<()>;
+    /// Versioned runtime capabilities this store implementation provides.
+    fn runtime_capabilities(&self) -> crate::runtime_capabilities::ComponentCapabilities;
     fn claim_runtime_plan(
         &self,
         environment: &str,
@@ -1502,6 +1504,10 @@ impl OperationalStore for SqliteStore {
         let connection = self.connection()?;
         connection.query_row("SELECT 1", [], |_| Ok(()))?;
         Ok(())
+    }
+
+    fn runtime_capabilities(&self) -> crate::runtime_capabilities::ComponentCapabilities {
+        crate::runtime_capabilities::sqlite_store_capabilities()
     }
 
     fn claim_runtime_plan(
