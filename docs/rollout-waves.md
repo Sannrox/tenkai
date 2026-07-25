@@ -5,6 +5,7 @@ delivery posture. It does not invent a second control plane and does not
 replace canary promotion evidence.
 
 Related: [fleet status](server-diagnostics.md#fleet-status-operator-table),
+[fleet drift watch](server-diagnostics.md#fleet-drift-watch),
 canary promotion (`src/canary.rs`, closed #7), `src/wave.rs`.
 
 ## Happy path
