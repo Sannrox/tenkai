@@ -5,6 +5,7 @@
 //! apply writes through existing `env facts` APIs.
 
 use std::collections::BTreeMap;
+#[cfg(target_os = "macos")]
 use std::process::Command;
 
 use anyhow::{Context as _, Result, bail};
