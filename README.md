@@ -372,29 +372,52 @@ providers without transferring operational authority.
 
 ## Status
 
-v0 walking skeleton. Working: signed publish/promote/subscribe, plan/apply/status,
-eval gates, health probes, auto-rollback, deliberate rollback, recurring
-maintenance windows, scoped environment runtimes, and a full graph audit trail.
-Not yet: multiple environments beyond registration, version constraints, or
-disconnected environments — see [DESIGN.md](DESIGN.md)
-for the roadmap.
+**v0 control-plane kernel** (architecture program complete; product depth still
+growing). Tenkai owns operational recovery state; optional providers never own
+it ([ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md),
+[operational storage](docs/operational-storage.md)).
+
+### Shipped
+
+| Capability | Where to read |
+| --- | --- |
+| Embedded one-binary mode (no required network/provider) | Quickstart above; ADR 0001 |
+| Networked server + continuous reconciliation | [Network server](#network-server); #19 |
+| Scoped pull-based environment runtimes + fencing | [Runtime protocol](docs/runtime-protocol-v1.md); #5, #20 |
+| Signed release publication and provenance | [Release signing](docs/release-signing.md) |
+| Signed plan execution approval | [Plan approval](docs/plan-approval.md) |
+| Catalog application boundary | [Catalog contract](docs/catalog-contract.md); ADR 0001 |
+| Health probes, auto-rollback, deliberate rollback | Quickstart; apply/reconciler |
+| Maintenance windows | CLI `env maintenance` |
+| Governed `routing_config` products | [ADR 0002](docs/decisions/0002-tenkai-owned-routing-configuration.md) |
+| `model_runtime` product kind (descriptor + executor port) | [Model runtime](docs/model-runtime.md); [ADR 0007](docs/decisions/0007-model-runtime-fleet-control-plane.md) |
+| Self-verifying offline bundles | [Offline bundles](docs/offline-bundles.md); [ADR 0003](docs/decisions/0003-canonical-offline-delivery-archives.md) |
+| Optional governance/intelligence provider ports | [Provider contracts](docs/provider-contracts.md) |
+| Runtime capability negotiation at startup | [Runtime capabilities](docs/runtime-capabilities.md) |
+| Auth request context + enterprise composition contracts | [Auth context](docs/auth-request-context.md), [enterprise boundary](docs/enterprise-integration-boundary.md), [federated identity](docs/federated-identity.md) |
+| Tenant-isolation conformance harness (enterprise bar) | [Tenant isolation](docs/tenant-isolation-conformance.md) |
+
+Governance integrations remain optional. Required policy or gate decisions fail
+closed; optional audit/outcome exports use a durable retry outbox. An embedded
+apply with `[gate].eval_suite` fails closed locally unless a remote provider host
+is explicitly configured; ungated solo deploys never open a network connection.
+
+### Deferred (next-era product work)
+
+Tracked in open GitHub Issues (for example #56–#60 and follow-on model/enterprise
+items). Not missing from the closed architecture program:
+
+- Multi-environment operator list/inspect depth and remote management CLI
+- Planner version pins and capability-constraint solving beyond current baseline
+- Real model engine plugins (weight download/serve)—not only the descriptor port
+- Enterprise HTTP wiring of auth/tenant mode on live APIs (community stays tenant-free)
+- Backup/restore drills and structured server diagnostics (ops hardening)
+
+Founding product intent and long-range roadmap remain in [DESIGN.md](DESIGN.md);
+accepted architecture decisions are the decision log under
+[docs/decisions/](docs/decisions/README.md).
 
 Active implementation work and dependencies are tracked in GitHub Issues.
-
-Governance and intelligence integrations use separate, content-bound provider
-contracts. Required policy or gate decisions fail closed; optional audit and
-outcome exports use a durable retry outbox. The contracts and standalone
-implementations are documented in
-[`docs/provider-contracts.md`](docs/provider-contracts.md).
-
-An embedded apply containing `[gate].eval_suite` fails closed with a local
-diagnostic because no governance provider is configured. Select an explicitly
-configured remote provider host when gate evidence is required; ordinary
-ungated solo deployments never attempt a network connection.
-
-The standalone architecture and Tenkai-owned operational storage contract are
-documented in [ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md)
-and [Operational storage](docs/operational-storage.md).
 
 ## Recorded rollback replay
 
