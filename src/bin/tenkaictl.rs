@@ -256,6 +256,11 @@ enum EnvCommand {
         #[command(subcommand)]
         command: FactsCommand,
     },
+    /// Manage planning constraints (version pins/ranges, required facts).
+    Constraints {
+        #[command(subcommand)]
+        command: ConstraintsCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -266,6 +271,26 @@ enum FactsCommand {
     Set { env: String, spec: String },
     /// Clear one fact key.
     Clear { env: String, key: String },
+}
+
+#[derive(Subcommand)]
+enum ConstraintsCommand {
+    /// List constraints for an environment.
+    List { env: String },
+    /// Set a constraint: `set <env> version_pin <product> <version>`,
+    /// `version_range <product> <min>..<max>`, or `require_fact <key> <value|*>`.
+    Set {
+        env: String,
+        kind: String,
+        name: String,
+        value: String,
+    },
+    /// Clear a constraint.
+    Clear {
+        env: String,
+        kind: String,
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -589,6 +614,36 @@ async fn main() -> Result<()> {
                     println!(
                         "{}",
                         plan::clear_environment_fact(&mut ctx, &env, &key).await?
+                    );
+                }
+            },
+            EnvCommand::Constraints { command } => match command {
+                ConstraintsCommand::List { env } => {
+                    let constraints = plan::list_environment_constraints(&mut ctx, &env).await?;
+                    if constraints.is_empty() {
+                        println!("{env} has no planning constraints");
+                    } else {
+                        for (key, value) in constraints {
+                            println!("{key}={value}");
+                        }
+                    }
+                }
+                ConstraintsCommand::Set {
+                    env,
+                    kind,
+                    name,
+                    value,
+                } => {
+                    println!(
+                        "{}",
+                        plan::set_environment_constraint(&mut ctx, &env, &kind, &name, &value)
+                            .await?
+                    );
+                }
+                ConstraintsCommand::Clear { env, kind, name } => {
+                    println!(
+                        "{}",
+                        plan::clear_environment_constraint(&mut ctx, &env, &kind, &name).await?
                     );
                 }
             },
