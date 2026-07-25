@@ -423,6 +423,7 @@ it ([ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md),
 | Reference llama.cpp engine plugin (fake for CI) | [Model runtime](docs/model-runtime.md); #64 |
 | Self-verifying offline bundles | [Offline bundles](docs/offline-bundles.md); [ADR 0003](docs/decisions/0003-canonical-offline-delivery-archives.md) |
 | Optional governance/intelligence provider ports | [Provider contracts](docs/provider-contracts.md) |
+| Remote HTTP GateProvider (chisei-compatible JSON) | [Provider contracts](docs/provider-contracts.md#remote-gate-http-json-contract-113); #113 |
 | Runtime capability negotiation at startup | [Runtime capabilities](docs/runtime-capabilities.md) |
 | Multi-replica / HA capability profile (decision) | [ADR 0009](docs/decisions/0009-multi-replica-reconcile-and-ha-profile.md); #109 |
 | AuthStack management HTTP + federation accept path | [Auth context](docs/auth-request-context.md), [federated identity](docs/federated-identity.md); #68, #71 |

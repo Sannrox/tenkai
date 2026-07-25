@@ -66,3 +66,41 @@ External sekai/chisei or other adapters translate their protocol into these
 ports. They must enforce transport authentication, bounded payloads and
 deadlines, redact credentials, validate returned evidence, and pass the same
 binding, denial, timeout, idempotency, and retry tests as the local adapters.
+
+## Remote gate HTTP JSON contract (#113)
+
+Reference adapter: `HttpRemoteGateProvider` in `src/providers.rs`.
+
+| Field | Value |
+| --- | --- |
+| Method | `POST` |
+| Body | JSON [`DecisionRequest`] (request_id, action, principal, binding) |
+| Success | `2xx` with JSON [`ProviderDecision`] |
+| Failure | non-2xx, timeout, invalid JSON, or mismatched binding → fail closed when required |
+
+Example decision response:
+
+```json
+{
+  "allowed": true,
+  "reason": "eval suite passed",
+  "evidence_id": "chisei:run:…",
+  "binding_digest": "sha256:…",
+  "request_id": "…",
+  "action": "deploy",
+  "principal": "operator"
+}
+```
+
+`binding_digest` must equal `EvidenceBinding::digest()` for the request.
+`request_id` / `action` / `principal` must match. Hosts wrap the call in
+`required_decision` so denials, timeouts, and forged bindings block apply.
+
+**Chisei mapping (compatible, not hard lock):** a chisei eval host may implement
+this endpoint by evaluating the named suite against the bound digests and
+returning its run id as `evidence_id`. Other eval products can use the same
+JSON without vendored protocols.
+
+**Configuration:** endpoint URL + optional bearer (env/file). Community
+ungated products never construct the remote adapter and never open a network
+connection for gates.
