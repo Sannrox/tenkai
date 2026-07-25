@@ -34,7 +34,8 @@ Hard failures: environment missing or **unhealthy** posture.
 | Canary policy | Gate **channel promotion** on complete cohort evidence |
 
 Waves never authorize a wider channel promotion. Use canary configure /
-promotion after canary envs are healthy.
+promotion after canary envs are healthy. For `model_runtime` products, the same
+canary evidence rules apply; see [model runtime canary path](model-runtime.md#canary-promotion-evidence-model_runtime).
 
 ## Non-goals (this surface)
 
