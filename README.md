@@ -156,6 +156,8 @@ permissions.
 
 ```bash
 tenkaictl env add prod --description production
+tenkaictl env list
+tenkaictl env inspect prod
 tenkaictl env maintenance set prod weekday \
   --timezone Europe/Berlin \
   --weekdays mon,tue,wed,thu,fri \
@@ -163,6 +165,10 @@ tenkaictl env maintenance set prod weekday \
   --duration-minutes 120
 tenkaictl env maintenance list prod
 ```
+
+`env list` shows every registered environment with subscription and lease
+summary. `env inspect <name>` prints JSON for subscriptions, deployed versions,
+lease/fencing state, and the latest plan—never bearer tokens.
 
 Plans can be computed outside a window, but `apply` records them as blocked and
 exits nonzero while the window is closed. When a window opens, rerun
