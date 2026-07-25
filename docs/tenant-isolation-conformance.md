@@ -1,0 +1,91 @@
+# Tenant isolation conformance
+
+Enterprise hosts that enable tenant mode must pass Tenkai's deterministic
+two-tenant isolation harness before release. Community embedded and server
+modes remain tenant-free and do not load this surface in production.
+
+Source of truth: `src/tenant_isolation.rs`. Authenticated request context:
+[auth-request-context.md](auth-request-context.md) and
+[ADR 0004](decisions/0004-authenticated-request-context.md).
+
+## Purpose
+
+Tenant isolation cannot depend on each endpoint remembering ad-hoc checks.
+Catalog, environment, plan, agent, event, aggregate, and runtime-agent surfaces
+can leak identifiers even when direct object reads are protected. This harness:
+
+1. Builds two isolated tenants with distinct products, environments, agents,
+   plans, deployments, and credentials.
+2. Exercises valid, missing, mismatched, forged, expired, wrong-audience,
+   suspended, and revoked contexts.
+3. Verifies list/count/status/event/metric-label/cache/audit responses never
+   reveal foreign tenant markers.
+4. Ensures runtime agent credentials cannot poll, acknowledge, or heartbeat
+   for another tenant or environment.
+5. Requires every tenant-visible RPC to register isolation cases so CI fails
+   when a new surface is added without coverage.
+
+The harness runs in-process without external policy, evaluation, or identity
+providers.
+
+## Non-disclosing error posture
+
+Cross-tenant or unauthorized resource access returns:
+
+```text
+resource not found
+```
+
+(`NON_DISCLOSING_DENY`)
+
+Rules:
+
+- Do not distinguish "missing" from "exists in another tenant".
+- Do not echo foreign tenant ids, product ids, plan ids, or tokens in the
+  public error body.
+- Authentication failures may say `unauthenticated` or `invalid credential`
+  without naming foreign resources.
+
+## Registry and CI coverage
+
+| Symbol | Role |
+| --- | --- |
+| `tenant_visible_rpcs()` | Canonical list of tenant-visible public operations |
+| `required_isolation_cases()` | Cases every RPC must cover |
+| `conformance_case_matrix()` | Per-RPC case registration |
+| `assert_conformance_coverage()` | Fails when a registered RPC lacks a required case |
+
+When adding a tenant-visible RPC or HTTP route that can return tenant-scoped
+data:
+
+1. Append a `TenantVisibleRpc` entry to `tenant_visible_rpcs()`.
+2. Ensure `conformance_case_matrix()` includes every required isolation case
+   for that id (today the matrix assigns the full required set to each RPC).
+3. Extend `TenantIsolationHarness::run_conformance` (or surface methods) so the
+   case is actually exercised.
+4. Run `cargo test --lib tenant_isolation`.
+
+Unauthenticated health probes (`/healthz`, `/readyz`) are not tenant-visible
+and are not registered.
+
+## Fixture shape
+
+`TwoTenantFixture` creates `tenant-a` and `tenant-b`, each with distinct:
+
+- product, environment, agent, plan, deployment identifiers
+- runtime credentials
+- event, audit, cache, and metric-label values
+
+## Reference surface
+
+`InMemoryTenantSurface` is a **conformance model**, not a production multi-tenant
+database. Enterprise implementations must satisfy the same isolation outcomes
+when wiring real persistence. Commercial quotas and noisy-neighbor performance
+isolation are out of scope.
+
+## Relationship to community mode
+
+Community hosts use `AuthHostConfig::community()` and never attach tenant
+context. They are not expected to pass the enterprise harness surface; the
+harness itself starts in enterprise auth mode and fails closed without a
+required extension.
