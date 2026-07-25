@@ -7,3 +7,4 @@
 - [0005 — Enterprise integration boundary](0005-enterprise-integration-boundary.md)
 - [0006 — Federated identity across Tenkai and external planes](0006-federated-identity.md)
 - [0007 — Open-weight model fleet control plane](0007-model-runtime-fleet-control-plane.md)
+- [0008 — Production tenant-capable OperationalStore criteria](0008-production-tenant-operational-store.md)
