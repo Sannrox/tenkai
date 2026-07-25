@@ -505,4 +505,34 @@ mod tests {
         assert!(executor.apply(&descriptor).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn weight_cache_evicts_unprotected_oldest_first() {
+        let root = std::env::temp_dir().join(format!("tenkai-evict-{}", uuid::Uuid::new_v4()));
+        let cache = WeightCache::new(root.join("cache"));
+        let digests = (0..3)
+            .map(|i| {
+                let bytes = [i as u8; 16];
+                let digest = format!("sha256:{:x}", Sha256::digest(bytes));
+                let path = cache.blob_path(&digest).unwrap();
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, bytes).unwrap();
+                // ensure mtime ordering
+                std::thread::sleep(std::time::Duration::from_millis(15));
+                digest
+            })
+            .collect::<Vec<_>>();
+        let protected = vec![digests[2].clone()];
+        let removed = cache.evict(&protected, 2).unwrap();
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0], digests[0]);
+        assert!(!cache.blob_path(&digests[0]).unwrap().exists());
+        assert!(cache.blob_path(&digests[1]).unwrap().exists());
+        assert!(cache.blob_path(&digests[2]).unwrap().exists());
+        // Protected never removed even if keep is 0.
+        let removed = cache.evict(&protected, 0).unwrap();
+        assert!(!removed.iter().any(|d| d == &digests[2]));
+        assert!(cache.blob_path(&digests[2]).unwrap().exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
