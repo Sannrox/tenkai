@@ -115,3 +115,9 @@ cargo test --locked software_executor
 ```
 
 Default CI does not require a cluster, helm, or kubectl binary.
+
+## Local dogfood
+
+Laptop path (embedded `tenkaictl`, minikube, no remote server):
+[local-dogfood-minikube.md](local-dogfood-minikube.md) and
+[examples/hello-minikube/](../examples/hello-minikube/).
