@@ -76,9 +76,9 @@ clean tree.
    cargo clippy --all-targets --locked -- -D warnings
    ```
 
-3. Run the available pre-ship code-review workflow before committing. Fix
-   actionable findings and rerun affected checks until no material finding
-   remains or a documented blocker requires maintainer judgment.
+3. Run `autoreview` before committing. Fix actionable findings and rerun the
+   relevant checks until no material finding remains or a documented blocker
+   requires maintainer judgment.
 4. Inspect the final diff for scope, generated artifacts, secrets, databases,
    `.tenkai-state`, and accidental runtime state.
 
