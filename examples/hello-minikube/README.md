@@ -42,41 +42,33 @@ export TENKAI_DATABASE=$PWD/.tenkai-dogfood-minikube/tenkai.db
 ### Signed multi-env (stage needs signatures)
 
 ```bash
-export TENKAI_DEV_SIGNING_SEED=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-export TENKAI_DEV_APPROVAL_SEED=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
 export TENKAI_SOFTWARE_EXECUTOR=kubernetes
 DB=$PWD/.tenkai-dogfood-minikube/tenkai.db
-DOG=$PWD/.tenkai-dogfood-minikube
+BIN=./target/debug/tenkaictl
+KEYS=.tenkai-dev-keys
 
-# 1) Sign + publish a release (dev helper, not production KMS)
-cargo run --example dev_sign_release -- \
-  path/to/tenkai.toml $DOG/trust.toml $DOG/rel.sig.json
-./target/debug/tenkaictl --database $DB publish path/to/tenkai.toml \
-  --signature $DOG/rel.sig.json --trust-roots $DOG/trust.toml
-./target/debug/tenkaictl --database $DB promote hello-minikube@X.Y.Z stable
+$BIN dev init-keys --dir $KEYS
+$BIN dev sign-release path/to/tenkai.toml \
+  --keys $KEYS --signature /tmp/rel.sig.json --trust-roots /tmp/rel-trust.toml
+$BIN --database $DB publish path/to/tenkai.toml \
+  --signature /tmp/rel.sig.json --trust-roots /tmp/rel-trust.toml
+$BIN --database $DB promote hello-minikube@X.Y.Z stable
 
-# 2) Env stage + plan
-./target/debug/tenkaictl --database $DB env add stage
-./target/debug/tenkaictl --database $DB env subscribe stage hello-minikube=stable
-PLAN=$(./target/debug/tenkaictl --database $DB plan --env stage | sed -n 's/^plan id: //p')
+$BIN --database $DB env add stage
+$BIN --database $DB env subscribe stage hello-minikube=stable
+PLAN=$($BIN --database $DB plan --env stage | sed -n 's/^plan id: //p')
 
-# 3) Sign plan approval (non-local apply cannot use --allow-unapproved-development)
-cargo run --example dev_sign_plan_approval -- \
-  --database $DB --plan-id "$PLAN" \
-  --trust-roots $DOG/approval-trust.toml --out $DOG/approval.json
-./target/debug/tenkaictl --database $DB apply "$PLAN" \
-  --approval $DOG/approval.json --approval-trust-roots $DOG/approval-trust.toml
+$BIN --database $DB dev sign-approval "$PLAN" \
+  --keys $KEYS --approval /tmp/approval.json --trust-roots /tmp/approval-trust.toml
+$BIN --database $DB apply "$PLAN" \
+  --approval /tmp/approval.json --approval-trust-roots /tmp/approval-trust.toml
 
-./target/debug/tenkaictl --database $DB fleet status
-./target/debug/tenkaictl --database $DB wave run local,stage
+$BIN --database $DB fleet status
+$BIN --database $DB wave run local,stage
 ```
 
-Dev helpers:
-
-- `examples/dev_sign_release.rs` — trust roots + release signature
-- `examples/dev_sign_plan_approval.rs` — plan-approval envelope
-
-Keys are ephemeral unless you set the seed env vars (dogfood only).
+`tenkaictl dev …` is development-only (not production KMS). See also
+`docs/local-dogfood-minikube.md`.
 
 ## Tear down
 

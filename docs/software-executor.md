@@ -121,3 +121,10 @@ Default CI does not require a cluster, helm, or kubectl binary.
 Laptop path (embedded `tenkaictl`, minikube, no remote server):
 [local-dogfood-minikube.md](local-dogfood-minikube.md) and
 [examples/hello-minikube/](../examples/hello-minikube/).
+
+## Failure diagnostics (#150)
+
+Kubernetes apply/remove capture kubectl stderr (sanitized). Operator errors
+include **phase** (`apply` / `health` / `restore`), product@version, and
+environment/namespace. Auto-rollback does not rewrite channel head — status may
+show `behind` until re-promote.
