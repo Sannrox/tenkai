@@ -1036,6 +1036,7 @@ async fn main() -> Result<()> {
                         .map(PathBuf::from),
                     approval_trust_roots: std::env::var_os("TENKAI_PLAN_APPROVAL_TRUST_ROOTS")
                         .map(PathBuf::from),
+                    ..reconciler::Config::default()
                 },
             )?;
             if once {
