@@ -23,6 +23,32 @@ tenkai.reconcile outcome=ok environments_total=2 environments_failed=0 ...
 Cumulative counters are available from `Reconciler::diagnostics_snapshot()` for
 host wiring. Logs never include bearer tokens or raw secrets.
 
+## Optional OpenMetrics (`GET /metrics`) (#137)
+
+When enabled, `tenkai-server` exposes Prometheus/OpenMetrics text at `/metrics`
+**without** a bearer token. The binary still binds loopback-only in plaintext
+mode; do not expose this port on an untrusted network without a proxy.
+
+```bash
+tenkai-server --enable-metrics
+# or: TENKAI_ENABLE_METRICS=1
+curl -s http://127.0.0.1:8080/metrics
+```
+
+Default: **disabled** (route returns 404).
+
+| Series | Type | Meaning |
+| --- | --- | --- |
+| `tenkai_reconcile_ticks_total` | counter | Ticks attempted |
+| `tenkai_reconcile_ticks_failed_total` | counter | Ticks with env failures or tick errors |
+| `tenkai_reconcile_last_environments` | gauge | Envs on last tick |
+| `tenkai_reconcile_last_environments_failed` | gauge | Failed envs on last tick |
+| `tenkai_reconcile_last_outcome{outcome=…}` | gauge | Last outcome (`ok` / `degraded` / `error` / `none`) |
+| `tenkai_reconcile_environments_busy_total` | counter | Cumulative Busy admissions (in-flight or fence) |
+
+Labels are low-cardinality only. **No** `tenant_id`, environment names, tokens,
+or plan bodies. Not a metrics TSDB; scrape and store externally.
+
 ## Fleet status (operator table)
 
 Cross-environment delivery posture is **not** the same as tick counters above.

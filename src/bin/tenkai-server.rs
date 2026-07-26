@@ -60,6 +60,9 @@ struct Cli {
     /// Advertise enterprise authentication capability (host-wired extension present).
     #[arg(long, default_value_t = false)]
     with_enterprise_auth: bool,
+    /// Expose unauthenticated `GET /metrics` OpenMetrics on the loopback listener (#137).
+    #[arg(long, env = "TENKAI_ENABLE_METRICS", default_value_t = false)]
+    enable_metrics: bool,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -181,6 +184,7 @@ async fn main() -> Result<()> {
                 tenkai::federated_identity::IdentityDirectory::new(),
             ),
             tenant_store,
+            metrics_enabled: cli.enable_metrics,
         },
         reconciler.clone(),
         store,

@@ -58,6 +58,8 @@ pub trait ReconcilePort: Send + Sync {
         environment: String,
         facts: std::collections::BTreeMap<String, String>,
     ) -> InventoryFuture<'_>;
+    /// Cumulative reconcile diagnostics for OpenMetrics (#137).
+    fn diagnostics_snapshot(&self) -> crate::reconciler::ReconcileDiagnostics;
 }
 
 pub type WorkFuture<'a> =
@@ -141,6 +143,10 @@ impl ReconcilePort for Reconciler {
         })
     }
 
+    fn diagnostics_snapshot(&self) -> crate::reconciler::ReconcileDiagnostics {
+        Reconciler::diagnostics_snapshot(self)
+    }
+
     fn fleet_status(&self) -> FleetStatusFuture<'_> {
         Box::pin(async move {
             let mut ctx = self.ctx_clone();
@@ -171,6 +177,9 @@ pub struct ServerConfig {
     /// Optional tenant-isolating operational store. Required when `tenant_mode` is on.
     /// In-memory for tests; Postgres hub adapter for durable multi-tenant recovery.
     pub tenant_store: Option<Arc<dyn TenantOperationalStore>>,
+    /// When true, expose unauthenticated `GET /metrics` OpenMetrics (#137).
+    /// Intended for loopback scrapes only (server already binds loopback).
+    pub metrics_enabled: bool,
 }
 
 impl ServerConfig {
@@ -189,6 +198,7 @@ impl ServerConfig {
             federation: FederationConfig::community(),
             identity_directory: Arc::new(IdentityDirectory::new()),
             tenant_store: None,
+            metrics_enabled: false,
         }
     }
 
@@ -326,7 +336,8 @@ pub fn router(
 ) -> anyhow::Result<Router> {
     config.validate()?;
     let auth = config.build_auth_stack()?;
-    Ok(Router::new()
+    let metrics_enabled = config.metrics_enabled;
+    let mut router = Router::new()
         .route("/healthz", get(health))
         .route("/readyz", get(ready))
         .route("/v1/reconcile", post(reconcile))
@@ -352,14 +363,17 @@ pub fn router(
         .route(
             "/v1/runtime/environments/{environment}/inventory",
             post(runtime_inventory),
-        )
-        .with_state(Arc::new(AppState {
-            tenant_store: config.tenant_store.clone(),
-            config,
-            auth,
-            reconciler,
-            store,
-        })))
+        );
+    if metrics_enabled {
+        router = router.route("/metrics", get(openmetrics));
+    }
+    Ok(router.with_state(Arc::new(AppState {
+        tenant_store: config.tenant_store.clone(),
+        config,
+        auth,
+        reconciler,
+        store,
+    })))
 }
 
 /// When tenant mode is enabled, require authenticated tenant membership and
@@ -621,6 +635,25 @@ fn service_status(status: &'static str, config: &ServerConfig) -> ServiceStatus 
         profile: config.capabilities.profile.clone(),
         capabilities: config.capabilities.diagnostic_names(),
     }
+}
+
+/// Unauthenticated OpenMetrics scrape when `metrics_enabled` (#137).
+/// No bearer required: intended for loopback Prometheus scrapes only.
+async fn openmetrics(State(state): State<Arc<AppState>>) -> Response {
+    if !state.config.metrics_enabled {
+        return error_response(StatusCode::NOT_FOUND, "metrics disabled");
+    }
+    let body =
+        crate::metrics::render_reconcile_openmetrics(&state.reconciler.diagnostics_snapshot());
+    (
+        StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/openmetrics-text; version=1.0.0; charset=utf-8",
+        )],
+        body,
+    )
+        .into_response()
 }
 
 async fn health(State(state): State<Arc<AppState>>) -> Json<ServiceStatus> {
@@ -1186,6 +1219,17 @@ mod tests {
                 Ok(applied)
             })
         }
+
+        fn diagnostics_snapshot(&self) -> crate::reconciler::ReconcileDiagnostics {
+            crate::reconciler::ReconcileDiagnostics {
+                ticks_total: 1,
+                ticks_failed: 0,
+                last_outcome: "ok".into(),
+                last_environments_total: 1,
+                last_environments_failed: 0,
+                environments_busy_total: 0,
+            }
+        }
     }
 
     fn app() -> (Router, Arc<crate::storage::SqliteStore>) {
@@ -1207,6 +1251,43 @@ mod tests {
         )
         .unwrap();
         (app, store)
+    }
+
+    #[tokio::test]
+    async fn openmetrics_enabled_exposes_series_without_secrets() {
+        let store = Arc::new(crate::storage::SqliteStore::open_in_memory().unwrap());
+        let mut config = ServerConfig::community(
+            "management-secret",
+            HashMap::from([("runtime-secret".into(), "prod".into())]),
+        );
+        config.metrics_enabled = true;
+        let app = router(config, Arc::new(FixedReconciler), store).unwrap();
+        let response = app
+            .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(body.contains("tenkai_reconcile_ticks_total"));
+        assert!(body.contains("tenkai_reconcile_ticks_failed_total"));
+        assert!(!crate::metrics::body_leaks_secret(
+            &body,
+            &["management-secret", "runtime-secret", "Bearer "]
+        ));
+        assert!(!body.contains("tenant_id"));
+    }
+
+    #[tokio::test]
+    async fn openmetrics_disabled_by_default() {
+        let (app, _store) = app();
+        let response = app
+            .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
