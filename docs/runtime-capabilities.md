@@ -51,6 +51,11 @@ only — not multi-writer reconcile. Multi-replica and HA flags fail closed unti
 a store honestly advertises the matching capabilities. Decision:
 [ADR 0009](decisions/0009-multi-replica-reconcile-and-ha-profile.md).
 
+Optional Postgres hub store (`--features postgres`) advertises
+`shared_replica_state` under a **single-active-writer** model (failover on
+shared DB). Multi-active reconcile still needs tick fencing; see
+[postgres-tenant-store.md](postgres-tenant-store.md#shared-replica-state-128).
+
 ## Host requirements
 
 `RuntimeRequirements` captures what the operator configured:

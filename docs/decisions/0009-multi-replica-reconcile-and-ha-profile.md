@@ -95,9 +95,9 @@ Do not invent multi-primary SQLite for community defaults.
 Do not implement in this decision:
 
 1. `feat(storage): optional shared OperationalStore with shared_replica_state`  
-   (depends on ADR 0008 path choice / #111 commitment).
-2. `feat(reconciler): multi-replica tick fencing with shared_replica_state store`
-3. `docs(ops): multi-replica runbook and failover drill` (after 1–2).
+   — **landed as #128** on Postgres hub (single-active-writer model).
+2. `feat(reconciler): multi-replica tick fencing with shared_replica_state store` (#129)
+3. `docs(ops): multi-replica runbook and failover drill` (#130, after 2).
 
 ## Consequences
 
