@@ -32,7 +32,8 @@ remains separate per ADR 0009).
 | Claim | Meaning |
 | --- | --- |
 | `shared_replica_state` | Shared durable ops state; safe for single-active writer + standby failover |
-| Not claimed yet | Multi-active reconcile, automatic multi-AZ product HA |
+| Tick fence table | `tenkai_reconcile_tick_claims` for multi-host reconcile (#135); not a HA product claim |
+| Not claimed yet | Product `high_availability`, automatic multi-AZ failover |
 
 Community SQLite never advertises `shared_replica_state`.
 

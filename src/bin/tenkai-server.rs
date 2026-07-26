@@ -8,7 +8,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
-use tenkai::postgres_tenant::{resolve_server_tenant_store, tenant_postgres_store_capabilities};
+use tenkai::postgres_tenant::{
+    resolve_reconcile_fence_for_replicas, resolve_server_tenant_store,
+    tenant_postgres_store_capabilities,
+};
 use tenkai::reconciler::{Config as ReconcilerConfig, Reconciler};
 use tenkai::runtime_capabilities::{
     RuntimeRequirements, community_auth_capabilities, community_sqlite_profile,
@@ -157,11 +160,11 @@ async fn main() -> Result<()> {
         },
     )?
     .with_runtime_environments(runtime_environments);
-    // Multi-host tick fencing (#129): shared fence when replica_count > 1.
-    // Same-process hosts share one fence; multi-process should use the same
-    // SharedReconcileFence port (durable store backend can plug in later).
-    if cli.replica_count > 1 {
-        let fence = tenkai::reconcile_fence::SharedReconcileFence::new().into_arc();
+    // Multi-host tick fencing (#129 / #135): durable Postgres fence when
+    // TENKAI_POSTGRES_URL + features postgres; otherwise process-shared only.
+    if let Some(fence) = resolve_reconcile_fence_for_replicas(cli.replica_count)
+        .context("resolving multi-replica reconcile tick fence")?
+    {
         reconciler = reconciler.with_shared_fence(fence);
     }
     let reconciler = Arc::new(reconciler);
