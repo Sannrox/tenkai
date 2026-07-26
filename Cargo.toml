@@ -49,6 +49,13 @@ rusqlite = { version = "0.32", features = ["backup", "bundled"] }
 thiserror = "2"
 axum = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+# Optional production multi-tenant operational store (hub control plane). Off by default.
+postgres = { version = "0.19", optional = true }
+
+[features]
+default = []
+# Enable with: cargo build --features postgres
+postgres = ["dep:postgres"]
 
 [build-dependencies]
 tonic-prost-build = "0.14"

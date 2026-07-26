@@ -89,8 +89,8 @@ Any production tenant store **must**:
 | Action | Status |
 | --- | --- |
 | Use `InMemoryTenantOperationalStore` for conformance and unit wiring | **Keep** |
-| Production Postgres (or other) | **Defer**; implement only after an explicit follow-on issue chooses path 1/2/3 above |
-| Next implementation issue (if needed) | Title only: `feat(storage): optional PostgreSQL tenant OperationalStore adapter` — open when maintainers commit |
+| Production Postgres (or other) | **Optional in-tree** behind feature `postgres` (`src/postgres_tenant.rs`, #111) — not community default |
+| Follow-on | Multi-replica fencing + `shared_replica_state` (ADR 0009); optional out-of-tree commercial packaging remains allowed |
 
 ## Consequences
 
