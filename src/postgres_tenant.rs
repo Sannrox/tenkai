@@ -29,9 +29,25 @@ use crate::storage::{EnvironmentRecord, Result, SCHEMA_VERSION, StoreError};
 use crate::tenant_isolation::IsolationError;
 use crate::tenant_store::TenantOperationalStore;
 
+/// Writer model claimed with `shared_replica_state` for the Postgres hub store.
+///
+/// First slice (#128): shared durable DB with **at most one active control-plane
+/// writer** (failover / cold standby). Multi-active concurrent reconcile
+/// still requires tick fencing (#129) and must not be assumed from this claim alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SharedReplicaWriterModel {
+    /// One active writer; standbys share the same Postgres URL for failover.
+    SingleActiveWriter,
+}
+
+/// Contract description for operators and capability honesty checks.
+pub const POSTGRES_SHARED_REPLICA_WRITER_MODEL: SharedReplicaWriterModel =
+    SharedReplicaWriterModel::SingleActiveWriter;
+
 /// Capability advertisement for the optional Postgres tenant store.
 ///
-/// Advertises `tenant_isolation` and migration level only — not HA/shared replica.
+/// Claims `tenant_isolation`, migration level, and `shared_replica_state` under
+/// the single-active-writer model (#128). Does **not** claim `high_availability`.
 pub fn tenant_postgres_store_capabilities() -> ComponentCapabilities {
     ComponentCapabilities::new(
         "store.tenant_postgres",
@@ -40,8 +56,22 @@ pub fn tenant_postgres_store_capabilities() -> ComponentCapabilities {
                 CapabilityName::TenantIsolation,
                 RUNTIME_CAPABILITY_CONTRACT_VERSION,
             ),
+            Capability::named(
+                CapabilityName::SharedReplicaState,
+                RUNTIME_CAPABILITY_CONTRACT_VERSION,
+            ),
             Capability::migration(SCHEMA_VERSION),
         ],
+    )
+}
+
+/// Compose a host capability profile: community auth + Postgres tenant hub store.
+pub fn enterprise_postgres_hub_profile(
+    auth: ComponentCapabilities,
+) -> crate::runtime_capabilities::ProvidedCapabilities {
+    crate::runtime_capabilities::ProvidedCapabilities::assemble(
+        "enterprise-tenant-postgres",
+        [tenant_postgres_store_capabilities(), auth],
     )
 }
 
@@ -2020,13 +2050,63 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_advertise_tenant_not_ha() {
+    fn capabilities_advertise_tenant_and_shared_replica_not_ha() {
         let caps = tenant_postgres_store_capabilities();
         let names = caps.names().join(",");
         assert!(names.contains("tenant_isolation"));
         assert!(names.contains("operational_store_migration"));
+        assert!(names.contains("shared_replica_state"));
         assert!(!names.contains("high_availability"));
-        assert!(!names.contains("shared_replica_state"));
+        assert_eq!(
+            POSTGRES_SHARED_REPLICA_WRITER_MODEL,
+            SharedReplicaWriterModel::SingleActiveWriter
+        );
+    }
+
+    #[test]
+    fn multi_replica_requirement_accepts_postgres_hub_profile() {
+        use crate::runtime_capabilities::{
+            RuntimeRequirements, community_auth_capabilities, community_sqlite_profile,
+            validate_runtime_capabilities,
+        };
+
+        // SQLite still fails closed for replica_count > 1.
+        let sqlite = community_sqlite_profile(community_auth_capabilities());
+        assert!(
+            validate_runtime_capabilities(
+                &sqlite,
+                &RuntimeRequirements {
+                    replica_count: 2,
+                    ..RuntimeRequirements::community()
+                },
+            )
+            .is_err()
+        );
+
+        // Postgres hub profile satisfies shared_replica_state (single-active-writer).
+        let postgres = enterprise_postgres_hub_profile(community_auth_capabilities());
+        validate_runtime_capabilities(
+            &postgres,
+            &RuntimeRequirements {
+                replica_count: 2,
+                tenant_mode: true,
+                ..RuntimeRequirements::community()
+            },
+        )
+        .expect("postgres hub must allow multi-replica capability gate");
+        // HA product flag still requires separate high_availability capability.
+        assert!(
+            validate_runtime_capabilities(
+                &postgres,
+                &RuntimeRequirements {
+                    replica_count: 2,
+                    tenant_mode: true,
+                    require_high_availability: true,
+                    ..RuntimeRequirements::community()
+                },
+            )
+            .is_err()
+        );
     }
 
     #[test]
