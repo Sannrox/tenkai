@@ -20,54 +20,79 @@ Related contracts: [software executor](software-executor.md),
 ```bash
 minikube start --driver=docker   # once
 export TENKAI_SOFTWARE_EXECUTOR=kubernetes
+
+# Default: unsigned install to built-in `local` only
 ./scripts/dogfood-minikube.sh
+
+# Signed multi-env (local + stage) with tenkaictl dev signing (#149)
+# Prefer a fresh DB if you already ran the unsigned path for 0.1.0:
+#   rm -rf .tenkai-dogfood-minikube
+TENKAI_DOGFOOD_MODE=signed-multi-env ./scripts/dogfood-minikube.sh
 ```
 
-State defaults to `.tenkai-dogfood-minikube/tenkai.db` (gitignored). Namespace
-matches the environment name (`local`).
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `TENKAI_DOGFOOD_MODE` | `local` | `local` or `signed-multi-env` |
+| `TENKAI_DATABASE` | `.tenkai-dogfood-minikube/tenkai.db` | Embedded SQLite |
+| `TENKAI_DEV_KEYS` | `.tenkai-dev-keys` | Dev-only Ed25519 seeds (gitignored) |
+| `TENKAI_SOFTWARE_EXECUTOR` | forced to `kubernetes` by the script | Native kubectl apply |
+| `TENKAI_KUBECTL_BIN` | `kubectl` on `PATH` | Override kubectl binary |
+
+State and script artifacts under `.tenkai-dogfood-minikube/` are gitignored.
+Development keys under `.tenkai-dev-keys/` are gitignored. **Not production KMS.**
+
+The script exits non-zero if `minikube` or `kubectl` is missing, or if the
+cluster is unreachable.
 
 ## Paths worth running
 
-| Path | What you learn |
-| --- | --- |
-| Happy install | publish → promote → plan → apply → `status` current |
-| Bad upgrade | non-existent image + `rollout status` health → **auto-rollback** to previous |
-| Good upgrade | healthy newer version → cluster + Tenkai both current |
-| Fleet / wave | second env + `fleet status` / `wave run local,stage` (observe posture) |
-| Signed multi-env | non-`local` env requires **signed release** + **signed plan approval** |
+| Path | How | What you learn |
+| --- | --- | --- |
+| Happy install (`local`) | `./scripts/dogfood-minikube.sh` | publish → promote → plan → apply → `status` current |
+| **Signed multi-env** | `TENKAI_DOGFOOD_MODE=signed-multi-env ./scripts/dogfood-minikube.sh` | signed publish; `stage` apply with plan approval only |
+| Bad upgrade | manual (broken image) | auto-rollback; **phase=health/restore** diagnostics (#150) |
+| Good upgrade | manual newer healthy version | cluster + Tenkai both current |
+| Fleet / wave | included in signed mode; or `fleet status` / `wave run local,stage` | observe posture (waves do not apply) |
 
-Details and command templates: [hello-minikube README](../examples/hello-minikube/README.md).
+Manual command templates: [hello-minikube README](../examples/hello-minikube/README.md).
 
 ### Apply / health / restore diagnostics (#150)
 
-Software k8s failures name the **phase** (`apply`, `health`, or `restore`),
-product@version, and environment/namespace, with credential-like snippets
-redacted. Auto-rollback restores the previous **deployed** release; **channel
-head is not rewritten** (status may show `behind` until you re-promote).
+Software k8s failures name the **phase** (`apply`, `health`, `restore`, or
+`remove`), product@version, and environment/namespace, with credential-like
+snippets redacted. Auto-rollback restores the previous **deployed** release;
+**channel head is not rewritten** (status may show `behind` until you re-promote).
+
+To force a health failure after a good install: publish a version with a
+non-existent image tag, promote to `stable`, plan, and apply. Expect non-zero
+exit and a `phase=health` (then often `phase=restore`) message without secrets.
 
 ### First-class dogfood signing (#149)
 
+Prefer the **scripted** path above. Manual equivalent:
+
 ```bash
 tenkaictl dev init-keys --dir .tenkai-dev-keys
-tenkaictl dev sign-release path/to/tenkai.toml \
+tenkaictl dev sign-release examples/hello-minikube/tenkai.toml \
   --keys .tenkai-dev-keys \
-  --signature /tmp/rel.sig.json \
-  --trust-roots /tmp/rel-trust.toml
-tenkaictl publish path/to/tenkai.toml \
-  --signature /tmp/rel.sig.json --trust-roots /tmp/rel-trust.toml
+  --signature .tenkai-dogfood-minikube/artifacts/rel.sig.json \
+  --trust-roots .tenkai-dogfood-minikube/artifacts/rel-trust.toml
+tenkaictl publish examples/hello-minikube/tenkai.toml \
+  --signature .tenkai-dogfood-minikube/artifacts/rel.sig.json \
+  --trust-roots .tenkai-dogfood-minikube/artifacts/rel-trust.toml
 
 # after plan --env stage:
-tenkaictl dev sign-approval "$PLAN_ID" \
+tenkaictl --database .tenkai-dogfood-minikube/tenkai.db dev sign-approval "$PLAN_ID" \
   --keys .tenkai-dev-keys \
-  --approval /tmp/approval.json \
-  --trust-roots /tmp/approval-trust.toml
-tenkaictl apply "$PLAN_ID" \
-  --approval /tmp/approval.json \
-  --approval-trust-roots /tmp/approval-trust.toml
+  --approval .tenkai-dogfood-minikube/artifacts/approval.json \
+  --trust-roots .tenkai-dogfood-minikube/artifacts/approval-trust.toml
+tenkaictl --database .tenkai-dogfood-minikube/tenkai.db apply "$PLAN_ID" \
+  --approval .tenkai-dogfood-minikube/artifacts/approval.json \
+  --approval-trust-roots .tenkai-dogfood-minikube/artifacts/approval-trust.toml
 ```
 
-Development keys only — not production KMS. Default keys dir: `.tenkai-dev-keys/`
-(gitignored).
+Cargo examples `examples/dev_sign_*.rs` are **deprecated stubs**; use
+`tenkaictl dev …`.
 
 ## Findings from Mac dogfood (v0.2)
 
@@ -98,6 +123,8 @@ These are intentional product rules, not minikube quirks:
 
 ## Out of scope for this dogfood path
 
+- Canary cohort policy drills (software or `model_runtime`)
+- Inventory fact probe → `env facts` automation
 - Multi-replica `tenkai-server` + Postgres hub HA ([runbook](multi-replica-hub-runbook.md))
 - OpenMetrics scrape on a hub process
 - Remote GateProvider / outcome→priors intelligence loop

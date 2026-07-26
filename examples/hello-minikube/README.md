@@ -10,70 +10,91 @@ Fully **on your machine**:
 
 No `tenkai-server`, no Postgres, no cloud.
 
-## One-shot (unsigned, `local` only)
+## One-shot scripts
 
 ```bash
 minikube start --driver=docker   # once
+export TENKAI_SOFTWARE_EXECUTOR=kubernetes
+
+# Unsigned install to built-in `local` only
 ./scripts/dogfood-minikube.sh
 kubectl -n local get deploy,pods
+
+# Signed multi-env: local + stage (tenkaictl dev signing, no unapproved stage)
+# Use a fresh DB if 0.1.0 was already published unsigned:
+#   rm -rf .tenkai-dogfood-minikube
+TENKAI_DOGFOOD_MODE=signed-multi-env ./scripts/dogfood-minikube.sh
+kubectl -n stage get deploy,pods
 ```
+
+| Mode | Env var | Trust |
+| --- | --- | --- |
+| `local` (default) | — | `--allow-unsigned-development` / unapproved apply on `local` only |
+| `signed-multi-env` | `TENKAI_DOGFOOD_MODE=signed-multi-env` | signed publish + plan approval on `stage` |
 
 Unsigned releases **only** apply to the built-in `local` environment. That is
 intentional trust policy, not a minikube limitation.
 
+Full ops notes: [`docs/local-dogfood-minikube.md`](../../docs/local-dogfood-minikube.md).
+
 ## Full dogfood paths exercised on a Mac
 
-1. **Happy install** — publish → promote → plan → apply → `current`
-2. **Bad upgrade + auto-rollback** — broken image / health fail → restore previous
-3. **Good upgrade** — healthy newer version → `current`
-4. **Signed multi-env** — `local` + `stage` with release signatures + plan approvals
-5. **Fleet + wave** — `fleet status`, `wave run local,stage`
+1. **Happy install** — script `local` mode → `current`
+2. **Signed multi-env** — script `signed-multi-env` → `local` + `stage` current
+3. **Bad upgrade + auto-rollback** — broken image / health fail → restore previous
+   (expect `phase=health` / `phase=restore` in errors; channel may stay `behind`)
+4. **Good upgrade** — healthy newer version → `current`
+5. **Fleet + wave** — scripted in signed mode; or `fleet status` / `wave run local,stage`
 
-### Deliberate bad upgrade (rollback)
+### Deliberate bad upgrade (rollback + diagnostics)
 
 ```bash
 export TENKAI_SOFTWARE_EXECUTOR=kubernetes
 export TENKAI_DATABASE=$PWD/.tenkai-dogfood-minikube/tenkai.db
 # Publish a 0.x.y with a non-existent image tag, promote to stable, plan, apply.
 # Expect: apply exits non-zero, ROLLBACK … restored <previous>, cluster back on good image.
+# Error text names phase=health (and often phase=restore) without secrets (#150).
 # Channel head may still show the bad version (behind) until you re-promote a good release.
 ```
 
-### Signed multi-env (stage needs signatures)
+### Manual signed multi-env (same as script)
 
 ```bash
 export TENKAI_SOFTWARE_EXECUTOR=kubernetes
 DB=$PWD/.tenkai-dogfood-minikube/tenkai.db
 BIN=./target/debug/tenkaictl
 KEYS=.tenkai-dev-keys
+ART=.tenkai-dogfood-minikube/artifacts
+mkdir -p "$ART"
 
 $BIN dev init-keys --dir $KEYS
-$BIN dev sign-release path/to/tenkai.toml \
-  --keys $KEYS --signature /tmp/rel.sig.json --trust-roots /tmp/rel-trust.toml
-$BIN --database $DB publish path/to/tenkai.toml \
-  --signature /tmp/rel.sig.json --trust-roots /tmp/rel-trust.toml
-$BIN --database $DB promote hello-minikube@X.Y.Z stable
+$BIN dev sign-release examples/hello-minikube/tenkai.toml \
+  --keys $KEYS --signature $ART/rel.sig.json --trust-roots $ART/rel-trust.toml
+$BIN --database $DB publish examples/hello-minikube/tenkai.toml \
+  --signature $ART/rel.sig.json --trust-roots $ART/rel-trust.toml
+$BIN --database $DB promote hello-minikube@0.1.0 stable
 
 $BIN --database $DB env add stage
+$BIN --database $DB env subscribe local hello-minikube=stable
 $BIN --database $DB env subscribe stage hello-minikube=stable
 PLAN=$($BIN --database $DB plan --env stage | sed -n 's/^plan id: //p')
 
 $BIN --database $DB dev sign-approval "$PLAN" \
-  --keys $KEYS --approval /tmp/approval.json --trust-roots /tmp/approval-trust.toml
+  --keys $KEYS --approval $ART/approval.json --trust-roots $ART/approval-trust.toml
 $BIN --database $DB apply "$PLAN" \
-  --approval /tmp/approval.json --approval-trust-roots /tmp/approval-trust.toml
+  --approval $ART/approval.json --approval-trust-roots $ART/approval-trust.toml
 
 $BIN --database $DB fleet status
 $BIN --database $DB wave run local,stage
 ```
 
-`tenkaictl dev …` is development-only (not production KMS). See also
-`docs/local-dogfood-minikube.md`.
+`tenkaictl dev …` is development-only (not production KMS). Deprecated cargo
+examples `examples/dev_sign_*.rs` are stubs only.
 
 ## Tear down
 
 ```bash
 kubectl delete ns local stage --ignore-not-found
 minikube stop   # optional
-rm -rf .tenkai-dogfood-minikube
+rm -rf .tenkai-dogfood-minikube .tenkai-dev-keys
 ```

@@ -75,20 +75,23 @@ The file-based quickstart above uses shell install commands. To exercise the
 export TENKAI_SOFTWARE_EXECUTOR=kubernetes
 ./scripts/dogfood-minikube.sh
 kubectl -n local get deploy,pods
+
+# Signed multi-env (local + stage) with tenkaictl dev signing:
+# TENKAI_DOGFOOD_MODE=signed-multi-env ./scripts/dogfood-minikube.sh
 ```
 
 | Path | Notes |
 | --- | --- |
 | Example product | [`examples/hello-minikube/`](examples/hello-minikube/) |
-| One-shot script | [`scripts/dogfood-minikube.sh`](scripts/dogfood-minikube.sh) |
+| One-shot script | [`scripts/dogfood-minikube.sh`](scripts/dogfood-minikube.sh) (`local` or `signed-multi-env`) |
 | Ops notes (trust, rollback, multi-env) | [`docs/local-dogfood-minikube.md`](docs/local-dogfood-minikube.md) |
 | Native/Helm apply contract | [`docs/software-executor.md`](docs/software-executor.md) |
 
-**Trust reminders proven in dogfood:** `--allow-unsigned-development` publishes
-only apply to the built-in `local` environment. A second env (e.g. `stage`)
-needs signed releases and signed plan approvals; see the ops note and
-[`examples/dev_sign_release.rs`](examples/dev_sign_release.rs) /
-[`examples/dev_sign_plan_approval.rs`](examples/dev_sign_plan_approval.rs).
+**Trust reminders proven in dogfood:** `--allow-unsigned-development` applies only
+to the built-in `local` environment. A second env (e.g. `stage`) needs **signed
+releases** and **signed plan approvals** via `tenkaictl dev init-keys` /
+`dev sign-release` / `dev sign-approval` (or
+`TENKAI_DOGFOOD_MODE=signed-multi-env`). See the [ops note](docs/local-dogfood-minikube.md).
 
 ## The manifest (`tenkai.toml`)
 
@@ -464,7 +467,9 @@ it ([ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md),
 | Multi-host reconcile tick fencing | [Tick fencing](docs/reconcile-tick-fencing.md); #129 |
 | Multi-replica hub ops runbook | [Multi-replica hub runbook](docs/multi-replica-hub-runbook.md); #130 |
 | Durable Postgres tick fence + inventory heartbeat + OpenMetrics + outcome priors | #135–#138; [tick fencing](docs/reconcile-tick-fencing.md), [plan priors](docs/plan-priors.md) |
-| Local minikube dogfood (embedded, no remote server) | [Local dogfood](#local-dogfood-minikube-no-remote-server); [ops note](docs/local-dogfood-minikube.md); #145–#146 |
+| Local minikube dogfood (embedded, no remote server) | [Local dogfood](#local-dogfood-minikube-no-remote-server); [ops note](docs/local-dogfood-minikube.md); #145–#146, #152 |
+| Dogfood `tenkaictl dev` release/plan signing (not production KMS) | [ops note](docs/local-dogfood-minikube.md#first-class-dogfood-signing-149); #149 |
+| K8s software phase diagnostics (apply/health/restore/remove) | [software executor](docs/software-executor.md); [ops note](docs/local-dogfood-minikube.md#apply--health--restore-diagnostics-150); #150 |
 | Backup/restore drill and server reconcile diagnostics | [operational storage](docs/operational-storage.md); [server diagnostics](docs/server-diagnostics.md); #59, #60 |
 | Release readiness checklist | [release readiness](docs/release-readiness.md); #72 |
 
@@ -487,7 +492,7 @@ Postgres hub + multi-replica fencing) are landed on main. Remaining work is
 | Intelligence loop depth | Fail-closed prior policy; live remote OutcomeProvider history |
 | Executor / model depth | Peer/regional weight caches; additional engines; in-process kube client only if dependency weight is accepted |
 | Enterprise host | JWKS rotation, live IdP drills, tenant-isolated prior stores |
-| Local dogfood | [minikube path](docs/local-dogfood-minikube.md) is the laptop default; extend with canary/inventory as desired |
+| Local dogfood | [minikube path](docs/local-dogfood-minikube.md): unsigned + **scripted signed multi-env** landed (#152); canary/inventory drills still optional |
 
 Explicit non-priorities until measured need: Catalog service extraction
 (ADR 0001), multi-primary SQLite HA (ADR 0009), identity-plane DB co-location.
