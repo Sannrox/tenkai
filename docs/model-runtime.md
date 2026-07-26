@@ -109,7 +109,11 @@ tenkaictl env facts probe local
 tenkaictl env facts probe local --apply
 ```
 
-See `src/inventory.rs`. Probes never leave the host or invent unknown keys.
+Environment runtimes can also refresh admitted facts on each poll via
+`POST /v1/runtime/environments/{env}/inventory` (provenance `runtime-probe`).
+Disable with `tenkai-runtime --no-inventory-report` or
+`TENKAI_RUNTIME_INVENTORY=0`. See `src/inventory.rs` and #136. Probes never
+leave the host or invent unknown keys.
 
 ## Reference engine plugin (llama.cpp)
 

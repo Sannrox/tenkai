@@ -52,6 +52,12 @@ pub trait ReconcilePort: Send + Sync {
     fn inspect_environment(&self, environment: String) -> InspectEnvFuture<'_>;
     fn environment_status(&self, environment: String) -> StatusEnvFuture<'_>;
     fn fleet_status(&self) -> FleetStatusFuture<'_>;
+    /// Apply admitted inventory facts from a scoped environment runtime (#136).
+    fn apply_inventory_facts(
+        &self,
+        environment: String,
+        facts: std::collections::BTreeMap<String, String>,
+    ) -> InventoryFuture<'_>;
 }
 
 pub type WorkFuture<'a> =
@@ -68,6 +74,8 @@ pub type StatusEnvFuture<'a> =
     Pin<Box<dyn Future<Output = anyhow::Result<Vec<crate::plan::StatusRow>>> + Send + 'a>>;
 pub type FleetStatusFuture<'a> =
     Pin<Box<dyn Future<Output = anyhow::Result<crate::plan::FleetStatusReport>> + Send + 'a>>;
+pub type InventoryFuture<'a> =
+    Pin<Box<dyn Future<Output = anyhow::Result<Vec<String>>> + Send + 'a>>;
 
 impl ReconcilePort for Reconciler {
     fn reconcile(&self) -> ReconcileFuture<'_> {
@@ -119,6 +127,17 @@ impl ReconcilePort for Reconciler {
         Box::pin(async move {
             let mut ctx = self.ctx_clone();
             crate::plan::status(&mut ctx, &environment).await
+        })
+    }
+
+    fn apply_inventory_facts(
+        &self,
+        environment: String,
+        facts: std::collections::BTreeMap<String, String>,
+    ) -> InventoryFuture<'_> {
+        Box::pin(async move {
+            let mut ctx = self.ctx_clone();
+            crate::plan::apply_runtime_inventory_facts(&mut ctx, &environment, &facts).await
         })
     }
 
@@ -274,6 +293,27 @@ pub struct RuntimeHeartbeat {
     pub generation: u64,
 }
 
+/// Inventory fact report from a scoped environment runtime (#136).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeInventoryReport {
+    /// Admitted fact keys only (`architecture`, `memory_gib`, …).
+    pub facts: std::collections::BTreeMap<String, String>,
+    /// Provenance token (e.g. `runtime-probe`); not stored as a fact key.
+    #[serde(default = "default_inventory_source")]
+    pub source: String,
+}
+
+fn default_inventory_source() -> String {
+    crate::inventory::RUNTIME_INVENTORY_SOURCE.into()
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RuntimeInventoryResponse {
+    pub environment: String,
+    pub source: String,
+    pub applied: Vec<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct ErrorBody {
     error: String,
@@ -308,6 +348,10 @@ pub fn router(
         .route(
             "/v1/runtime/environments/{environment}/heartbeat",
             post(runtime_heartbeat),
+        )
+        .route(
+            "/v1/runtime/environments/{environment}/inventory",
+            post(runtime_inventory),
         )
         .with_state(Arc::new(AppState {
             tenant_store: config.tenant_store.clone(),
@@ -788,6 +832,59 @@ async fn runtime_heartbeat(
     }
 }
 
+/// Runtime inventory report: write admitted capability facts for the assigned env (#136).
+async fn runtime_inventory(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+    Json(report): Json<RuntimeInventoryReport>,
+) -> Response {
+    let Some(token) = bearer(&headers) else {
+        return error_response(StatusCode::UNAUTHORIZED, "missing bearer token");
+    };
+    let Some(assigned) = runtime_assignment(&state.config, token) else {
+        return error_response(StatusCode::FORBIDDEN, "invalid runtime credential");
+    };
+    let Some(_instance) = runtime_instance(&headers) else {
+        return error_response(StatusCode::BAD_REQUEST, "missing runtime instance identity");
+    };
+    if assigned != environment {
+        return error_response(
+            StatusCode::FORBIDDEN,
+            "runtime credential is not assigned to this environment",
+        );
+    }
+    if report.source.trim().is_empty() || report.source.len() > 64 {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "inventory source must be 1..=64 characters",
+        );
+    }
+    // Reject secret-like source labels without treating source as a fact key.
+    let source_lower = report.source.to_ascii_lowercase();
+    for needle in ["bearer ", "password=", "secret=", "token="] {
+        if source_lower.contains(needle) {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "inventory source must not contain credential material",
+            );
+        }
+    }
+    match state
+        .reconciler
+        .apply_inventory_facts(environment.clone(), report.facts)
+        .await
+    {
+        Ok(applied) => Json(RuntimeInventoryResponse {
+            environment,
+            source: report.source,
+            applied,
+        })
+        .into_response(),
+        Err(error) => error_response(StatusCode::BAD_REQUEST, format!("{error:#}")),
+    }
+}
+
 fn runtime_owner(token: &str, instance: &str) -> String {
     let mut digest = Sha256::new();
     digest.update(token.as_bytes());
@@ -1071,6 +1168,24 @@ mod tests {
                 })
             })
         }
+
+        fn apply_inventory_facts(
+            &self,
+            _environment: String,
+            facts: std::collections::BTreeMap<String, String>,
+        ) -> InventoryFuture<'_> {
+            Box::pin(async move {
+                // Fixture: accept admitted keys only (mirror plan validation lightly).
+                for key in facts.keys() {
+                    if !crate::plan::ENVIRONMENT_FACT_KEYS.contains(&key.as_str()) {
+                        anyhow::bail!("unknown environment fact {key:?}");
+                    }
+                }
+                let mut applied: Vec<String> = facts.into_keys().collect();
+                applied.sort();
+                Ok(applied)
+            })
+        }
     }
 
     fn app() -> (Router, Arc<crate::storage::SqliteStore>) {
@@ -1092,6 +1207,69 @@ mod tests {
         )
         .unwrap();
         (app, store)
+    }
+
+    #[tokio::test]
+    async fn runtime_inventory_accepts_admitted_facts_and_rejects_foreign_env() {
+        let (app, _store) = app();
+        let body = serde_json::json!({
+            "facts": { "architecture": "arm64", "memory_gib": "32" },
+            "source": "runtime-probe"
+        });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/runtime/environments/prod/inventory")
+                    .header("authorization", "Bearer runtime-secret")
+                    .header("x-tenkai-runtime-instance", "rt-1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let report: RuntimeInventoryResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(report.environment, "prod");
+        assert_eq!(report.source, "runtime-probe");
+        assert_eq!(
+            report.applied,
+            vec!["architecture".to_string(), "memory_gib".to_string()]
+        );
+
+        let forbidden = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/runtime/environments/other/inventory")
+                    .header("authorization", "Bearer runtime-secret")
+                    .header("x-tenkai-runtime-instance", "rt-1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+        let bad_key = serde_json::json!({
+            "facts": { "token": "x" },
+            "source": "runtime-probe"
+        });
+        let rejected = app
+            .oneshot(
+                Request::post("/v1/runtime/environments/prod/inventory")
+                    .header("authorization", "Bearer runtime-secret")
+                    .header("x-tenkai-runtime-instance", "rt-1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(bad_key.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
