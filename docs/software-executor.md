@@ -125,6 +125,7 @@ Laptop path (embedded `tenkaictl`, minikube, no remote server):
 ## Failure diagnostics (#150)
 
 Kubernetes apply/remove capture kubectl stderr (sanitized). Operator errors
-include **phase** (`apply` / `health` / `restore`), product@version, and
-environment/namespace. Auto-rollback does not rewrite channel head — status may
-show `behind` until re-promote.
+include **phase** (`apply` / `health` / `restore` / `remove`), product@version,
+and environment/namespace. Auto-rollback does not rewrite channel head — status
+may show `behind` until re-promote. Laptop dogfood script modes:
+`TENKAI_DOGFOOD_MODE=local|signed-multi-env` (see local dogfood note).
