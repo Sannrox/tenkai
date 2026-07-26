@@ -4,9 +4,7 @@ Use this checklist before tagging a Tenkai release. It does **not** invent a
 version number; the maintainer chooses the target version. Pair with the
 project-local `prepare-release` skill for notes and evidence assembly.
 
-Draft notes for the next candidate milestone:
-[docs/releases/0.2.0-draft.md](releases/0.2.0-draft.md) (not tagged until
-maintainer go/no-go).
+Latest milestone notes: [docs/releases/0.2.0.md](releases/0.2.0.md).
 
 ## 1. Scope
 
