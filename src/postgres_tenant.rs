@@ -205,6 +205,16 @@ impl PostgresTenantOperationalStore {
         })
     }
 
+    /// Durable multi-host reconcile tick fence backed by hub Postgres (#135).
+    #[cfg(feature = "postgres")]
+    pub fn reconcile_tick_fence(
+        &self,
+    ) -> std::sync::Arc<dyn crate::reconcile_fence::ReconcileTickFence> {
+        std::sync::Arc::new(PostgresReconcileFence {
+            inner: self.inner.clone(),
+        })
+    }
+
     pub fn partition_for(
         &self,
         context: &AuthenticatedRequestContext,
@@ -277,6 +287,87 @@ impl PostgresTenantOperationalStore {
         partition
             .list_environment_ids()
             .map_err(|error| IsolationError::Contract(error.to_string()))
+    }
+}
+
+/// Durable [`crate::reconcile_fence::ReconcileTickFence`] on hub Postgres (#135).
+///
+/// Claims live in `public.tenkai_reconcile_tick_claims` (hub-wide, not
+/// schema-per-tenant). Does not advertise product `high_availability`.
+#[cfg(feature = "postgres")]
+pub struct PostgresReconcileFence {
+    inner: std::sync::Arc<postgres_imp::Inner>,
+}
+
+#[cfg(feature = "postgres")]
+impl crate::reconcile_fence::ReconcileTickFence for PostgresReconcileFence {
+    fn try_begin(
+        &self,
+        environment: &str,
+        owner: &str,
+        now: i64,
+        ttl_ms: i64,
+    ) -> std::result::Result<
+        crate::reconcile_fence::FenceAdmission,
+        crate::reconcile_fence::FenceError,
+    > {
+        self.inner
+            .try_begin_reconcile_claim(environment, owner, now, ttl_ms)
+    }
+
+    fn release(
+        &self,
+        environment: &str,
+        owner: &str,
+        generation: u64,
+        now: i64,
+    ) -> std::result::Result<(), crate::reconcile_fence::FenceError> {
+        self.inner
+            .release_reconcile_claim(environment, owner, generation, now)
+    }
+}
+
+/// Open a durable Postgres reconcile fence from `TENKAI_POSTGRES_URL` (#135).
+///
+/// Requires `--features postgres`. Used by multi-replica `tenkai-server` hosts
+/// that share the hub database.
+pub fn open_postgres_reconcile_fence()
+-> Result<std::sync::Arc<dyn crate::reconcile_fence::ReconcileTickFence>> {
+    if !postgres_feature_enabled() {
+        return Err(StoreError::AdapterUnavailable(
+            "durable reconcile fence requires --features postgres and TENKAI_POSTGRES_URL".into(),
+        ));
+    }
+    #[cfg(feature = "postgres")]
+    {
+        let config = PostgresTenantConfig::from_env()?;
+        let store = config.open()?;
+        Ok(store.reconcile_tick_fence())
+    }
+    #[cfg(not(feature = "postgres"))]
+    {
+        Err(StoreError::AdapterUnavailable(
+            "rebuild tenkai with --features postgres for durable reconcile fence".into(),
+        ))
+    }
+}
+
+/// Prefer durable Postgres fence when available; otherwise process-shared (#129).
+///
+/// Multi-process multi-replica hubs must set `TENKAI_POSTGRES_URL` and build with
+/// `--features postgres` so claims survive process restart.
+pub fn resolve_reconcile_fence_for_replicas(
+    replica_count: u32,
+) -> Result<Option<std::sync::Arc<dyn crate::reconcile_fence::ReconcileTickFence>>> {
+    if replica_count <= 1 {
+        return Ok(None);
+    }
+    match open_postgres_reconcile_fence() {
+        Ok(fence) => Ok(Some(fence)),
+        Err(_) => Ok(Some(
+            crate::reconcile_fence::SharedReconcileFence::new().into_arc()
+                as std::sync::Arc<dyn crate::reconcile_fence::ReconcileTickFence>,
+        )),
     }
 }
 
@@ -652,9 +743,154 @@ mod postgres_imp {
                         .map_err(pg)?;
                 }
             }
+            // Hub-wide durable tick fence claims (#135). Not per-tenant: reconcile
+            // environments are coordinated across the control plane.
+            client
+                .batch_execute(
+                    "CREATE TABLE IF NOT EXISTS tenkai_reconcile_tick_claims (
+                        environment TEXT PRIMARY KEY,
+                        owner TEXT NOT NULL,
+                        generation BIGINT NOT NULL,
+                        expires_at BIGINT NOT NULL
+                     );",
+                )
+                .map_err(pg)?;
             Ok(Self {
                 client: Mutex::new(client),
             })
+        }
+
+        /// Acquire or renew a durable reconcile tick claim for `environment`.
+        pub fn try_begin_reconcile_claim(
+            &self,
+            environment: &str,
+            owner: &str,
+            now: i64,
+            ttl_ms: i64,
+        ) -> std::result::Result<
+            crate::reconcile_fence::FenceAdmission,
+            crate::reconcile_fence::FenceError,
+        > {
+            use crate::reconcile_fence::{FenceAdmission, FenceError};
+            if environment.trim().is_empty() || owner.trim().is_empty() {
+                return Err(FenceError::InvalidIdentity);
+            }
+            if ttl_ms <= 0 {
+                return Err(FenceError::InvalidExpiry);
+            }
+            let expires_at = now.saturating_add(ttl_ms);
+            let mut client = self
+                .client
+                .lock()
+                .map_err(|_| FenceError::Store("postgres client mutex poisoned".into()))?;
+            let mut tx = client
+                .transaction()
+                .map_err(|e| FenceError::Store(e.to_string()))?;
+            let row = tx
+                .query_opt(
+                    "SELECT owner, generation, expires_at
+                     FROM tenkai_reconcile_tick_claims
+                     WHERE environment = $1
+                     FOR UPDATE",
+                    &[&environment],
+                )
+                .map_err(|e| FenceError::Store(e.to_string()))?;
+            let admission = match row {
+                Some(row) => {
+                    let claim_owner: String = row.get(0);
+                    let generation: i64 = row.get(1);
+                    let claim_expires: i64 = row.get(2);
+                    if claim_expires > now && claim_owner != owner {
+                        FenceAdmission::Busy { owner: claim_owner }
+                    } else if claim_expires > now && claim_owner == owner {
+                        tx.execute(
+                            "UPDATE tenkai_reconcile_tick_claims
+                             SET expires_at = $1
+                             WHERE environment = $2",
+                            &[&expires_at, &environment],
+                        )
+                        .map_err(|e| FenceError::Store(e.to_string()))?;
+                        FenceAdmission::Started {
+                            generation: generation as u64,
+                        }
+                    } else {
+                        let next_gen = (generation as u64).saturating_add(1);
+                        tx.execute(
+                            "UPDATE tenkai_reconcile_tick_claims
+                             SET owner = $1, generation = $2, expires_at = $3
+                             WHERE environment = $4",
+                            &[&owner, &(next_gen as i64), &expires_at, &environment],
+                        )
+                        .map_err(|e| FenceError::Store(e.to_string()))?;
+                        FenceAdmission::Started {
+                            generation: next_gen,
+                        }
+                    }
+                }
+                None => {
+                    tx.execute(
+                        "INSERT INTO tenkai_reconcile_tick_claims
+                         (environment, owner, generation, expires_at)
+                         VALUES ($1, $2, 1, $3)",
+                        &[&environment, &owner, &expires_at],
+                    )
+                    .map_err(|e| FenceError::Store(e.to_string()))?;
+                    FenceAdmission::Started { generation: 1 }
+                }
+            };
+            if matches!(admission, FenceAdmission::Busy { .. }) {
+                // No write; still commit to end the FOR UPDATE transaction cleanly.
+                tx.commit().map_err(|e| FenceError::Store(e.to_string()))?;
+                return Ok(admission);
+            }
+            tx.commit().map_err(|e| FenceError::Store(e.to_string()))?;
+            Ok(admission)
+        }
+
+        pub fn release_reconcile_claim(
+            &self,
+            environment: &str,
+            owner: &str,
+            generation: u64,
+            now: i64,
+        ) -> std::result::Result<(), crate::reconcile_fence::FenceError> {
+            use crate::reconcile_fence::FenceError;
+            let mut client = self
+                .client
+                .lock()
+                .map_err(|_| FenceError::Store("postgres client mutex poisoned".into()))?;
+            let mut tx = client
+                .transaction()
+                .map_err(|e| FenceError::Store(e.to_string()))?;
+            let row = tx
+                .query_opt(
+                    "SELECT owner, generation, expires_at
+                     FROM tenkai_reconcile_tick_claims
+                     WHERE environment = $1
+                     FOR UPDATE",
+                    &[&environment],
+                )
+                .map_err(|e| FenceError::Store(e.to_string()))?;
+            match row {
+                Some(row) => {
+                    let claim_owner: String = row.get(0);
+                    let claim_gen: i64 = row.get(1);
+                    let claim_expires: i64 = row.get(2);
+                    if (claim_owner == owner && claim_gen as u64 == generation)
+                        || claim_expires <= now
+                    {
+                        tx.execute(
+                            "DELETE FROM tenkai_reconcile_tick_claims WHERE environment = $1",
+                            &[&environment],
+                        )
+                        .map_err(|e| FenceError::Store(e.to_string()))?;
+                    }
+                    // Stale release must not steal another host's claim.
+                }
+                None => {}
+            }
+            tx.commit().map_err(|e| FenceError::Store(e.to_string()))?;
+            Ok(())
         }
 
         fn with_schema<T>(
@@ -2129,6 +2365,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn open_postgres_reconcile_fence_fails_closed_without_feature_or_url() {
+        let err = match open_postgres_reconcile_fence() {
+            Ok(_) => {
+                // Live URL may be set in developer env; only assert when feature off
+                // or when open failed path was expected.
+                if !postgres_feature_enabled() {
+                    panic!("open should fail without postgres feature");
+                }
+                return;
+            }
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            err.contains("features postgres")
+                || err.contains("TENKAI_POSTGRES_URL")
+                || err.contains("postgres"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn resolve_reconcile_fence_none_for_single_replica() {
+        assert!(resolve_reconcile_fence_for_replicas(1).unwrap().is_none());
+    }
+
+    #[test]
+    fn resolve_reconcile_fence_some_for_multi_replica() {
+        // Always returns a fence (durable or process-shared fallback).
+        assert!(resolve_reconcile_fence_for_replicas(2).unwrap().is_some());
+    }
+
     /// Live isolation drill. Requires feature `postgres` and `TENKAI_POSTGRES_URL`.
     #[cfg(feature = "postgres")]
     #[test]
@@ -2181,5 +2449,34 @@ mod tests {
         })
         .unwrap();
         assert!(part.get_release("rel-1").unwrap().is_some());
+    }
+
+    /// Live durable fence drill. Requires feature `postgres` and `TENKAI_POSTGRES_URL`.
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires Postgres; set TENKAI_POSTGRES_URL and cargo test --features postgres -- --ignored"]
+    fn live_postgres_reconcile_fence_claim_and_busy() {
+        use crate::reconcile_fence::{FenceAdmission, ReconcileTickFence};
+
+        let config = PostgresTenantConfig::from_env().expect("TENKAI_POSTGRES_URL");
+        let store = config.open().expect("connect");
+        let fence = store.reconcile_tick_fence();
+        let env = format!("fence-test-{}", uuid::Uuid::new_v4());
+        let a = fence.try_begin(&env, "host-a", 1_000_000, 60_000).unwrap();
+        assert!(matches!(a, FenceAdmission::Started { generation: 1 }));
+        let b = fence.try_begin(&env, "host-b", 1_000_100, 60_000).unwrap();
+        assert!(matches!(b, FenceAdmission::Busy { .. }));
+        fence.release(&env, "host-a", 1, 1_000_200).unwrap();
+        let c = fence.try_begin(&env, "host-b", 1_000_300, 60_000).unwrap();
+        assert!(matches!(c, FenceAdmission::Started { generation: 1 }));
+        // Expired takeover bumps generation.
+        fence.release(&env, "host-b", 1, 1_000_400).unwrap();
+        assert!(matches!(
+            fence.try_begin(&env, "host-a", 2_000_000, 100).unwrap(),
+            FenceAdmission::Started { generation: 1 }
+        ));
+        let takeover = fence.try_begin(&env, "host-b", 2_000_200, 60_000).unwrap();
+        assert_eq!(takeover, FenceAdmission::Started { generation: 2 });
+        fence.release(&env, "host-b", 2, 2_000_300).unwrap();
     }
 }

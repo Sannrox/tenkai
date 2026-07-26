@@ -150,6 +150,16 @@ pg_restore -d "$TENKAI_POSTGRES_URL" --clean --if-exists tenkai-hub-YYYYMMDD.dum
 SQLite `tenkaictl backup` / `restore` remains the community embedded path; it is
 **not** a substitute for hub Postgres backup.
 
+## Durable tick fence (#135)
+
+With `--features postgres` and `TENKAI_POSTGRES_URL`, multi-replica hosts use
+hub table `tenkai_reconcile_tick_claims` for environment tick ownership. Claims
+survive process restart; another host only takes over after TTL expiry or an
+explicit release. Without Postgres, fencing is process-memory only and is not
+safe across machines.
+
+See [reconcile-tick-fencing.md](reconcile-tick-fencing.md).
+
 ## Explicit non-guarantees
 
 - Community SQLite is not multi-replica safe; `--replica-count > 1` fails closed
