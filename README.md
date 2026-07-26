@@ -454,7 +454,7 @@ Postgres hub + multi-replica fencing) are landed on main. Remaining work is
 
 | Track | Intent |
 | --- | --- |
-| Release packaging | First tagged milestone after the architecture program (see [0.2 draft notes](docs/releases/0.2.0-draft.md)) |
+| Release packaging | [v0.2.0 notes](docs/releases/0.2.0.md) |
 | Hub HA depth | Durable store-backed tick fencing (#135); criteria before claiming `high_availability` |
 | Environment inventory continuity | Runtime-agent fact heartbeat (#136; CLI probe already shipped #97) |
 | Control-plane metrics | Optional OpenMetrics on the hub (#137); not a TSDB product |
