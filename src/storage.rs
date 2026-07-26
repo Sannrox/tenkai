@@ -80,6 +80,12 @@ pub enum StoreError {
     },
     #[error("operational store mutex was poisoned")]
     Poisoned,
+    /// Optional Postgres adapter failures (feature `postgres`). Never used by SQLite path.
+    #[error("postgres operational store failure: {0}")]
+    Postgres(String),
+    /// Feature or configuration required for an optional store adapter is missing.
+    #[error("optional store adapter unavailable: {0}")]
+    AdapterUnavailable(String),
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
@@ -120,7 +126,7 @@ pub enum PlanStatus {
 }
 
 impl PlanStatus {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Computed => "computed",
             Self::Running => "running",
@@ -130,7 +136,7 @@ impl PlanStatus {
         }
     }
 
-    fn parse(value: &str) -> Result<Self> {
+    pub(crate) fn parse(value: &str) -> Result<Self> {
         match value {
             "computed" => Ok(Self::Computed),
             "running" => Ok(Self::Running),
@@ -144,7 +150,7 @@ impl PlanStatus {
         }
     }
 
-    fn allows(self, next: Self) -> bool {
+    pub(crate) fn allows(self, next: Self) -> bool {
         self == next
             || matches!(
                 (self, next),
@@ -216,7 +222,7 @@ pub enum RollbackStatus {
 }
 
 impl RollbackStatus {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
             Self::Running => "running",
@@ -225,7 +231,7 @@ impl RollbackStatus {
         }
     }
 
-    fn parse(value: &str) -> Result<Self> {
+    pub(crate) fn parse(value: &str) -> Result<Self> {
         match value {
             "pending" => Ok(Self::Pending),
             "running" => Ok(Self::Running),
@@ -238,7 +244,7 @@ impl RollbackStatus {
         }
     }
 
-    fn allows(self, next: Self) -> bool {
+    pub(crate) fn allows(self, next: Self) -> bool {
         self == next
             || matches!(
                 (self, next),

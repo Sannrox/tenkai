@@ -22,6 +22,7 @@ pub mod pb;
 pub mod plan;
 pub mod plan_approval;
 pub mod plan_priors;
+pub mod postgres_tenant;
 pub mod providers;
 pub mod reconciler;
 pub mod release_signing;
