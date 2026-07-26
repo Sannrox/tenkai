@@ -50,7 +50,36 @@ Prior files are host-local operator input. They must not embed foreign tenant
 identifiers or credentials. Hard multi-tenant isolation of prior stores is a
 follow-on; this delivery uses local files only.
 
+## OutcomeProvider projection (#138)
+
+When priors are enabled **and** `TENKAI_PLAN_PRIORS_OUTCOME=1`, Tenkai also
+loads advisory priors from OutcomeProvider-compatible history:
+
+| Source | Config |
+| --- | --- |
+| JSON event file | `TENKAI_PLAN_PRIORS_OUTCOME_FILE` (array of `ProviderEvent` or `{ "events": [...] }`) |
+| In-process port | `OutcomePriorSource` (e.g. `LocalEventSinkPriorSource`) |
+
+Payload schema inside `ProviderEvent.payload_json`:
+
+```json
+{
+  "schema": "tenkai.outcome_prior.v1",
+  "product": "api",
+  "fact_key": "architecture",
+  "fact_value": "x86_64",
+  "note": "historical install failures on this architecture",
+  "failure_count": 3
+}
+```
+
+Events with other schemas are skipped. Secret-like notes fail closed.
+`TENKAI_PLAN_PRIORS_OUTCOME_REQUIRED=1` makes outcome load failures fail plan
+annotation; default is degrade to file-only priors with a stderr notice.
+
+Still **advisory only** — does not replace gates, canary, or approval.
+
 ## Follow-on (not this issue)
 
 - Hard fail-closed priors as optional policy.
-- Projection from OutcomeProvider / remote eval history.
+- Live remote OutcomeProvider HTTP history adapter (file + port are the first cut).
