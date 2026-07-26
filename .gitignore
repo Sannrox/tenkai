@@ -2,6 +2,7 @@
 .state/
 .tenkai-state/
 .tenkai-demo-multi-env/
+.tenkai-dogfood-minikube/
 /artifacts/replay/
 
 .agents/*
