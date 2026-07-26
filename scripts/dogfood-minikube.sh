@@ -59,3 +59,4 @@ echo "==> status"
 kubectl -n "$ENV_NAME" get deploy,svc,pods
 
 echo "dogfood ok: hello-minikube@0.1.0 in namespace $ENV_NAME (db=$DB)"
+echo "Next (optional): signed multi-env + rollback walkthrough in examples/hello-minikube/README.md"
