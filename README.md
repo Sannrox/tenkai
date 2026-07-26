@@ -447,16 +447,23 @@ is explicitly configured; ungated solo deploys never open a network connection.
 
 ### Deferred (next-era product work)
 
-Tracked in open GitHub Issues. The architecture program (ADRs 0001–0009) is
-landed; remaining work is product depth (DESIGN Phase 5+), for example:
+Tracked in open GitHub Issues. The architecture program (ADRs 0001–0009) and
+the Phase 5 first cut (fleet status/watch/waves, software executors, optional
+Postgres hub + multi-replica fencing) are landed on main. Remaining work is
+**depth**, not re-litigating operational ownership:
 
-- Multi-environment rollout waves (#94)
-- Kubernetes (or Argo-backed) software apply path (#95)
-- llama.cpp operator golden path beyond CI fake (#96)
-- Hardware inventory fact reporter (#97)
-- Production tenant-capable store criteria / adapter (#98 and follow-ons)
-- Peer/regional weight caches; additional inference engines
-- Remote chisei eval gates and outcome→planner learning loop
+| Track | Intent |
+| --- | --- |
+| Release packaging | First tagged milestone after the architecture program (see [0.2 draft notes](docs/releases/0.2.0-draft.md)) |
+| Hub HA depth | Durable store-backed tick fencing (#135); criteria before claiming `high_availability` |
+| Environment inventory continuity | Runtime-agent fact heartbeat (#136; CLI probe already shipped #97) |
+| Control-plane metrics | Optional OpenMetrics on the hub (#137); not a TSDB product |
+| Intelligence loop | OutcomeProvider → plan priors (#138); optional fail-closed prior policy |
+| Executor / model depth | Peer/regional weight caches; additional engines; in-process kube client only if dependency weight is accepted |
+| Enterprise host | JWKS rotation, live IdP drills, tenant-isolated prior stores |
+
+Explicit non-priorities until measured need: Catalog service extraction
+(ADR 0001), multi-primary SQLite HA (ADR 0009), identity-plane DB co-location.
 
 Founding product intent and long-range roadmap remain in [DESIGN.md](DESIGN.md);
 accepted architecture decisions are the decision log under
