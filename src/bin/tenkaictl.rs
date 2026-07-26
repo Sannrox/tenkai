@@ -914,11 +914,11 @@ async fn main() -> Result<()> {
                 emergency_reason.as_deref(),
                 approval.as_deref(),
                 approval_trust_roots.as_deref(),
-                allow_unapproved_development.then_some(
+                allow_unapproved_development.then(|| {
                     development_reason
                         .as_deref()
-                        .expect("clap requires a development reason"),
-                ),
+                        .expect("clap requires a development reason")
+                }),
             )
             .await?;
         }
@@ -1027,11 +1027,11 @@ async fn main() -> Result<()> {
                     max_backoff: Duration::from_secs(max_backoff),
                     max_concurrency,
                     skip_gates,
-                    unapproved_development_reason: allow_unapproved_development.then_some(
+                    unapproved_development_reason: allow_unapproved_development.then(|| {
                         development_reason
                             .clone()
-                            .expect("clap requires a development reason"),
-                    ),
+                            .expect("clap requires a development reason")
+                    }),
                     approval_directory: std::env::var_os("TENKAI_PLAN_APPROVAL_DIR")
                         .map(PathBuf::from),
                     approval_trust_roots: std::env::var_os("TENKAI_PLAN_APPROVAL_TRUST_ROOTS")
