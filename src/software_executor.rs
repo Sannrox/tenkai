@@ -422,6 +422,9 @@ fn ensure_namespace(executor: &KubernetesSoftwareExecutor, namespace: &str) -> R
         .arg("get")
         .arg("namespace")
         .arg(namespace)
+        // Missing namespaces are expected on first apply; do not spam NotFound.
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .with_context(|| {
             format!(
