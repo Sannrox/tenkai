@@ -9,9 +9,10 @@ use anyhow::{Context as _, Result, bail};
 use reqwest::StatusCode;
 use tokio::process::Command;
 
+use crate::inventory::{self, RUNTIME_INVENTORY_SOURCE};
 use crate::plan::{Plan, Step};
 use crate::reconciler::{RuntimeCompletion, RuntimeStepReceipt};
-use crate::server::{RuntimeHeartbeat, RuntimeWork};
+use crate::server::{RuntimeHeartbeat, RuntimeInventoryReport, RuntimeWork};
 
 #[derive(Clone)]
 pub struct RuntimeClient {
@@ -21,6 +22,8 @@ pub struct RuntimeClient {
     token: String,
     executor: PathBuf,
     http: reqwest::Client,
+    /// When true, probe local inventory and POST to the hub each poll (#136).
+    inventory_report: bool,
 }
 
 impl RuntimeClient {
@@ -29,6 +32,16 @@ impl RuntimeClient {
         environment: impl Into<String>,
         token: impl Into<String>,
         executor: PathBuf,
+    ) -> Result<Self> {
+        Self::new_with_options(base_url, environment, token, executor, true)
+    }
+
+    pub fn new_with_options(
+        base_url: impl Into<String>,
+        environment: impl Into<String>,
+        token: impl Into<String>,
+        executor: PathBuf,
+        inventory_report: bool,
     ) -> Result<Self> {
         let base_url = base_url.into().trim_end_matches('/').to_owned();
         let parsed = url::Url::parse(&base_url)?;
@@ -60,10 +73,16 @@ impl RuntimeClient {
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(10))
                 .build()?,
+            inventory_report,
         })
     }
 
     pub async fn run_once(&self) -> Result<bool> {
+        // Refresh admitted inventory facts before work pull (#136). Failures are
+        // visible but non-fatal so temporary probe issues do not stop delivery.
+        if let Err(error) = self.report_inventory().await {
+            eprintln!("runtime inventory report failed (continuing): {error:#}");
+        }
         let work = self.pull().await?;
         let (Some(plan), Some(claim)) = (work.plan, work.claim) else {
             return Ok(false);
@@ -150,6 +169,40 @@ impl RuntimeClient {
             .send()
             .await?;
         decode_response(response, "pulling runtime work").await
+    }
+
+    /// Probe local admitted inventory and POST to the hub (#136).
+    ///
+    /// No-op when `inventory_report` is disabled. Never invents unknown keys.
+    pub async fn report_inventory(&self) -> Result<()> {
+        if !self.inventory_report {
+            return Ok(());
+        }
+        let facts = inventory::probe_local_inventory()?;
+        if facts.is_empty() {
+            return Ok(());
+        }
+        let report = RuntimeInventoryReport {
+            facts: inventory::facts_map(&facts),
+            source: RUNTIME_INVENTORY_SOURCE.into(),
+        };
+        let response = self
+            .http
+            .post(format!(
+                "{}/v1/runtime/environments/{}/inventory",
+                self.base_url, self.environment
+            ))
+            .bearer_auth(&self.token)
+            .header("x-tenkai-runtime-instance", &self.instance_id)
+            .json(&report)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let detail = response.text().await.unwrap_or_default();
+            bail!("reporting runtime inventory returned {status}: {detail}");
+        }
+        Ok(())
     }
 
     async fn heartbeat(&self, plan_id: &str, generation: u64) -> Result<bool> {
