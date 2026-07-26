@@ -104,11 +104,9 @@ impl ReconcileTickFence for SharedReconcileFence {
         let expires_at = now.saturating_add(ttl_ms);
         let mut claims = self.claims.lock().map_err(|_| FenceError::Poisoned)?;
         let admission = match claims.get(environment) {
-            Some(claim) if claim.expires_at > now && claim.owner != owner => {
-                FenceAdmission::Busy {
-                    owner: claim.owner.clone(),
-                }
-            }
+            Some(claim) if claim.expires_at > now && claim.owner != owner => FenceAdmission::Busy {
+                owner: claim.owner.clone(),
+            },
             Some(claim) if claim.expires_at > now && claim.owner == owner => {
                 // Renew for same owner.
                 let generation = claim.generation;
