@@ -109,6 +109,8 @@ dependencies in the normal suite; isolate and document service-dependent tests.
 Verification should be proportional to the change. At minimum, format and run
 the narrowest relevant tests. Before delivery, prefer the project-local
 `verify-change` Skill to select and report the appropriate broader checks.
+Before commit or PR, run `autoreview` and fix actionable findings (see
+`deliver-ready-issue`).
 
 ## Commit & Pull Request Guidelines
 
