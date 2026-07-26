@@ -12,6 +12,7 @@ use crate::apply;
 use crate::client::Ctx;
 use crate::ontology::{KIND_ENVIRONMENT, KIND_PLAN};
 use crate::plan::{self, PlanState};
+use crate::reconcile_fence::{FenceAdmission, FenceGuard, ReconcileTickFence};
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -22,6 +23,10 @@ pub struct Config {
     pub unapproved_development_reason: Option<String>,
     pub approval_directory: Option<PathBuf>,
     pub approval_trust_roots: Option<PathBuf>,
+    /// TTL for multi-host reconcile tick claims (milliseconds).
+    pub fence_ttl_ms: i64,
+    /// Stable host/instance identity used for tick fencing.
+    pub instance_id: String,
 }
 
 impl Default for Config {
@@ -35,6 +40,8 @@ impl Default for Config {
             approval_directory: std::env::var_os("TENKAI_PLAN_APPROVAL_DIR").map(PathBuf::from),
             approval_trust_roots: std::env::var_os("TENKAI_PLAN_APPROVAL_TRUST_ROOTS")
                 .map(PathBuf::from),
+            fence_ttl_ms: 30_000,
+            instance_id: format!("reconciler-{}", uuid::Uuid::new_v4()),
         }
     }
 }
@@ -278,6 +285,8 @@ pub struct Reconciler {
     tick_lock: Arc<tokio::sync::Mutex<()>>,
     runtime_environments: Arc<HashSet<String>>,
     diagnostics: Arc<Mutex<ReconcileDiagnostics>>,
+    /// Optional multi-host tick fence (shared across reconcilers / processes).
+    shared_fence: Option<Arc<dyn ReconcileTickFence>>,
 }
 
 impl Reconciler {
@@ -291,6 +300,12 @@ impl Reconciler {
         if config.max_concurrency == 0 {
             bail!("reconciler maximum concurrency must be greater than zero");
         }
+        if config.fence_ttl_ms <= 0 {
+            bail!("reconciler fence TTL must be greater than zero");
+        }
+        if config.instance_id.trim().is_empty() {
+            bail!("reconciler instance_id must not be empty");
+        }
         Ok(Self {
             ctx,
             config,
@@ -298,11 +313,19 @@ impl Reconciler {
             tick_lock: Arc::new(tokio::sync::Mutex::new(())),
             runtime_environments: Arc::new(HashSet::new()),
             diagnostics: Arc::new(Mutex::new(ReconcileDiagnostics::default())),
+            shared_fence: None,
         })
     }
 
     pub fn with_runtime_environments(mut self, environments: HashSet<String>) -> Self {
         self.runtime_environments = Arc::new(environments);
+        self
+    }
+
+    /// Attach a multi-host tick fence (ADR 0009 / #129). Required for multi-process
+    /// reconcile against shared operational state.
+    pub fn with_shared_fence(mut self, fence: Arc<dyn ReconcileTickFence>) -> Self {
+        self.shared_fence = Some(fence);
         self
     }
 
@@ -346,6 +369,54 @@ impl Reconciler {
                     status: EnvironmentStatus::Deferred { retry_at },
                 }),
                 Admission::Started => {
+                    // Multi-host fence (optional): at most one live claim per environment.
+                    let fence_guard = if let Some(fence) = &self.shared_fence {
+                        let now = crate::now_millis();
+                        match fence.try_begin(
+                            &name,
+                            &self.config.instance_id,
+                            now,
+                            self.config.fence_ttl_ms,
+                        ) {
+                            Ok(FenceAdmission::Started { generation }) => Some(FenceGuard::new(
+                                Arc::clone(fence),
+                                name.clone(),
+                                self.config.instance_id.clone(),
+                                generation,
+                            )),
+                            Ok(FenceAdmission::Busy { .. }) | Ok(FenceAdmission::Stale) => {
+                                self.state.lock().expect("reconciler state lock").finish(
+                                    &name,
+                                    true, // not a local failure; clear in_flight
+                                    crate::now_millis(),
+                                    &self.config,
+                                );
+                                report.environments.push(EnvironmentResult {
+                                    environment: name,
+                                    status: EnvironmentStatus::Busy,
+                                });
+                                continue;
+                            }
+                            Err(error) => {
+                                self.state.lock().expect("reconciler state lock").finish(
+                                    &name,
+                                    false,
+                                    crate::now_millis(),
+                                    &self.config,
+                                );
+                                report.environments.push(EnvironmentResult {
+                                    environment: name,
+                                    status: EnvironmentStatus::Failed {
+                                        error: format!("reconcile fence: {error}"),
+                                    },
+                                });
+                                continue;
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
                     let mut ctx = self.ctx.clone();
                     let config = self.config.clone();
                     let runtime_managed = self.runtime_environments.contains(&name);
@@ -361,6 +432,7 @@ impl Reconciler {
                             .acquire_owned()
                             .await
                             .expect("semaphore remains open");
+                        let _fence = fence_guard;
                         let result = reconcile_environment(
                             &mut ctx,
                             &name,
@@ -729,7 +801,32 @@ mod tests {
             unapproved_development_reason: Some("reconciler test".into()),
             approval_directory: None,
             approval_trust_roots: None,
+            fence_ttl_ms: 30_000,
+            instance_id: "reconciler-test".into(),
         }
+    }
+
+    #[test]
+    fn shared_fence_serializes_two_hosts_on_same_environment() {
+        use crate::reconcile_fence::SharedReconcileFence;
+
+        let fence = SharedReconcileFence::new().into_arc();
+        let host_a = fence.try_begin("prod", "host-a", 1_000, 10_000).unwrap();
+        let host_b = fence.try_begin("prod", "host-b", 1_100, 10_000).unwrap();
+        assert!(matches!(
+            host_a,
+            crate::reconcile_fence::FenceAdmission::Started { generation: 1 }
+        ));
+        assert!(matches!(
+            host_b,
+            crate::reconcile_fence::FenceAdmission::Busy { .. }
+        ));
+        fence.release("prod", "host-a", 1, 1_200).unwrap();
+        let host_b_again = fence.try_begin("prod", "host-b", 1_300, 10_000).unwrap();
+        assert!(matches!(
+            host_b_again,
+            crate::reconcile_fence::FenceAdmission::Started { generation: 1 }
+        ));
     }
 
     #[test]

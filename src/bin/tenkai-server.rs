@@ -144,16 +144,27 @@ async fn main() -> Result<()> {
         .values()
         .cloned()
         .collect::<HashSet<_>>();
-    let reconciler = Arc::new(
-        Reconciler::new(
-            ctx,
-            ReconcilerConfig {
-                max_concurrency: cli.max_concurrency,
-                ..ReconcilerConfig::default()
-            },
-        )?
-        .with_runtime_environments(runtime_environments),
-    );
+    let mut reconciler = Reconciler::new(
+        ctx,
+        ReconcilerConfig {
+            max_concurrency: cli.max_concurrency,
+            instance_id: format!(
+                "tenkai-server-{}",
+                std::env::var("TENKAI_INSTANCE_ID")
+                    .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string())
+            ),
+            ..ReconcilerConfig::default()
+        },
+    )?
+    .with_runtime_environments(runtime_environments);
+    // Multi-host tick fencing (#129): shared fence when replica_count > 1.
+    // Same-process hosts share one fence; multi-process should use the same
+    // SharedReconcileFence port (durable store backend can plug in later).
+    if cli.replica_count > 1 {
+        let fence = tenkai::reconcile_fence::SharedReconcileFence::new().into_arc();
+        reconciler = reconciler.with_shared_fence(fence);
+    }
+    let reconciler = Arc::new(reconciler);
     let app = router(
         ServerConfig {
             management_token,
