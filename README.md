@@ -64,6 +64,32 @@ before replacement work starts. Legacy object-only leases are never taken over
 automatically: stop the old controller and its children, then use
 `tenkaictl env unlock <environment>` as the explicit compatibility fallback.
 
+## Local dogfood (minikube, no remote server)
+
+The file-based quickstart above uses shell install commands. To exercise the
+**Kubernetes software executor** entirely on a laptop (embedded SQLite, no
+`tenkai-server`, no cloud):
+
+```bash
+# once: brew install minikube && minikube start --driver=docker
+export TENKAI_SOFTWARE_EXECUTOR=kubernetes
+./scripts/dogfood-minikube.sh
+kubectl -n local get deploy,pods
+```
+
+| Path | Notes |
+| --- | --- |
+| Example product | [`examples/hello-minikube/`](examples/hello-minikube/) |
+| One-shot script | [`scripts/dogfood-minikube.sh`](scripts/dogfood-minikube.sh) |
+| Ops notes (trust, rollback, multi-env) | [`docs/local-dogfood-minikube.md`](docs/local-dogfood-minikube.md) |
+| Native/Helm apply contract | [`docs/software-executor.md`](docs/software-executor.md) |
+
+**Trust reminders proven in dogfood:** `--allow-unsigned-development` publishes
+only apply to the built-in `local` environment. A second env (e.g. `stage`)
+needs signed releases and signed plan approvals; see the ops note and
+[`examples/dev_sign_release.rs`](examples/dev_sign_release.rs) /
+[`examples/dev_sign_plan_approval.rs`](examples/dev_sign_plan_approval.rs).
+
 ## The manifest (`tenkai.toml`)
 
 ```toml
@@ -437,6 +463,8 @@ it ([ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md),
 | Postgres hub `shared_replica_state` (single-active writer) | [Shared replica state](docs/postgres-tenant-store.md#shared-replica-state-128); #128 |
 | Multi-host reconcile tick fencing | [Tick fencing](docs/reconcile-tick-fencing.md); #129 |
 | Multi-replica hub ops runbook | [Multi-replica hub runbook](docs/multi-replica-hub-runbook.md); #130 |
+| Durable Postgres tick fence + inventory heartbeat + OpenMetrics + outcome priors | #135–#138; [tick fencing](docs/reconcile-tick-fencing.md), [plan priors](docs/plan-priors.md) |
+| Local minikube dogfood (embedded, no remote server) | [Local dogfood](#local-dogfood-minikube-no-remote-server); [ops note](docs/local-dogfood-minikube.md); #145–#146 |
 | Backup/restore drill and server reconcile diagnostics | [operational storage](docs/operational-storage.md); [server diagnostics](docs/server-diagnostics.md); #59, #60 |
 | Release readiness checklist | [release readiness](docs/release-readiness.md); #72 |
 
@@ -454,13 +482,12 @@ Postgres hub + multi-replica fencing) are landed on main. Remaining work is
 
 | Track | Intent |
 | --- | --- |
-| Release packaging | [v0.2.0 notes](docs/releases/0.2.0.md) |
-| Hub HA depth | Durable store-backed tick fencing (#135); criteria before claiming `high_availability` |
-| Environment inventory continuity | Runtime-agent fact heartbeat (#136; CLI probe already shipped #97) |
-| Control-plane metrics | Optional OpenMetrics on the hub (#137); not a TSDB product |
-| Intelligence loop | OutcomeProvider → plan priors (#138); optional fail-closed prior policy |
+| Release packaging | [v0.2.0 notes](docs/releases/0.2.0.md) (tagged); next notes when needed |
+| Hub HA product claim | Criteria + automated drills before advertising `high_availability` (fence already shipped #135) |
+| Intelligence loop depth | Fail-closed prior policy; live remote OutcomeProvider history |
 | Executor / model depth | Peer/regional weight caches; additional engines; in-process kube client only if dependency weight is accepted |
 | Enterprise host | JWKS rotation, live IdP drills, tenant-isolated prior stores |
+| Local dogfood | [minikube path](docs/local-dogfood-minikube.md) is the laptop default; extend with canary/inventory as desired |
 
 Explicit non-priorities until measured need: Catalog service extraction
 (ADR 0001), multi-primary SQLite HA (ADR 0009), identity-plane DB co-location.
