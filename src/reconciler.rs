@@ -159,7 +159,7 @@ pub struct TickDiagnostics {
     pub outcome: &'static str,
 }
 
-/// Cumulative counters retained across ticks for `/v1/diagnostics`.
+/// Cumulative counters retained across ticks for diagnostics and OpenMetrics (#137).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReconcileDiagnostics {
     pub ticks_total: u64,
@@ -167,6 +167,8 @@ pub struct ReconcileDiagnostics {
     pub last_outcome: String,
     pub last_environments_total: usize,
     pub last_environments_failed: usize,
+    /// Cumulative `EnvironmentStatus::Busy` admissions (local in-flight or fence).
+    pub environments_busy_total: u64,
 }
 
 impl ReconcileDiagnostics {
@@ -179,6 +181,9 @@ impl ReconcileDiagnostics {
         self.last_outcome = diag.outcome.into();
         self.last_environments_total = diag.environments_total;
         self.last_environments_failed = diag.environments_failed;
+        self.environments_busy_total = self
+            .environments_busy_total
+            .saturating_add(diag.environments_busy as u64);
     }
 
     pub fn record_tick_error(&mut self) {
