@@ -107,4 +107,6 @@ Rules:
 In-memory adapter remains for unit tests (`ServerConfig.tenant_store = Some(Arc::new(InMemory…))`).
 
 `--replica-count > 1` passes capability negotiation when the Postgres hub store
-is composed (#128). Multi-active reconcile still requires tick fencing (#129).
+is composed (#128). Multi-active reconcile uses tick fencing (#129). Full
+operator steps: [multi-replica-hub-runbook.md](multi-replica-hub-runbook.md)
+(#130).
