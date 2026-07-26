@@ -1,0 +1,23 @@
+# Local dogfood product for minikube (embedded tenkaictl, no tenkai-server).
+#
+# Requires:
+#   minikube start --driver=docker
+#   export TENKAI_SOFTWARE_EXECUTOR=kubernetes
+#
+# See examples/hello-minikube/README.md
+
+[product]
+name = "hello-minikube"
+version = "0.1.0"
+description = "Minimal Deployment+Service for local minikube dogfood"
+kind = "software"
+
+[deploy]
+workdir = "."
+# Native k8s executor applies manifests/; install is unused when TENKAI_SOFTWARE_EXECUTOR=kubernetes.
+# Kept as a fail-closed reminder if the executor env is forgotten.
+install = "echo 'set TENKAI_SOFTWARE_EXECUTOR=kubernetes for this product' >&2; exit 1"
+uninstall = "true"
+# Ready when the Deployment has available replicas in the env namespace.
+health = "kubectl -n \"$TENKAI_ENVIRONMENT\" rollout status deployment/hello-minikube --timeout=90s"
+inputs = ["manifests"]
