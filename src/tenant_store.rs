@@ -27,6 +27,31 @@ use crate::tenant_isolation::{
     IsolationError, TenantIsolationHarness, TenantResources, TwoTenantFixture,
 };
 
+/// Application port for multi-tenant operational access used by the server host.
+///
+/// Community hosts leave this unset. Enterprise tenant mode requires an
+/// implementation (in-memory for tests, Postgres for durable hub recovery).
+pub trait TenantOperationalStore: Send + Sync {
+    fn runtime_capabilities(&self) -> ComponentCapabilities;
+
+    fn get_environment_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        environment_id: &str,
+    ) -> std::result::Result<EnvironmentRecord, IsolationError>;
+
+    fn put_environment_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        environment: &EnvironmentRecord,
+    ) -> std::result::Result<EnvironmentRecord, IsolationError>;
+
+    fn list_environment_ids_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+    ) -> std::result::Result<Vec<String>, IsolationError>;
+}
+
 /// Capability advertisement for the in-memory tenant-isolating store adapter.
 pub fn tenant_memory_store_capabilities() -> ComponentCapabilities {
     ComponentCapabilities::new(
@@ -184,6 +209,35 @@ impl InMemoryTenantOperationalStore {
             )),
             Err(other) => Err(other),
         }
+    }
+}
+
+impl TenantOperationalStore for InMemoryTenantOperationalStore {
+    fn runtime_capabilities(&self) -> ComponentCapabilities {
+        tenant_memory_store_capabilities()
+    }
+
+    fn get_environment_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        environment_id: &str,
+    ) -> std::result::Result<EnvironmentRecord, IsolationError> {
+        InMemoryTenantOperationalStore::get_environment_for(self, context, environment_id)
+    }
+
+    fn put_environment_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        environment: &EnvironmentRecord,
+    ) -> std::result::Result<EnvironmentRecord, IsolationError> {
+        InMemoryTenantOperationalStore::put_environment_for(self, context, environment)
+    }
+
+    fn list_environment_ids_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+    ) -> std::result::Result<Vec<String>, IsolationError> {
+        InMemoryTenantOperationalStore::list_environment_ids_for(self, context)
     }
 }
 

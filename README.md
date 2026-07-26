@@ -433,6 +433,7 @@ it ([ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md),
 | Tenant-isolation harness + in-memory tenant store | [Tenant isolation](docs/tenant-isolation-conformance.md); #37, #69, #70 |
 | Tenant isolation on all HTTP management surfaces | [Tenant isolation HTTP exposure](docs/tenant-isolation-conformance.md#http-exposure-vs-registry-112); #112 |
 | Optional Postgres multi-tenant hub store (feature `postgres`) | [Postgres tenant store](docs/postgres-tenant-store.md); #111 |
+| tenkai-server tenant mode → Postgres hub store | [Postgres server wiring](docs/postgres-tenant-store.md#tenkai-server-wiring-127); #127 |
 | Backup/restore drill and server reconcile diagnostics | [operational storage](docs/operational-storage.md); [server diagnostics](docs/server-diagnostics.md); #59, #60 |
 | Release readiness checklist | [release readiness](docs/release-readiness.md); #72 |
 

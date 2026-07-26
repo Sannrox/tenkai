@@ -28,7 +28,7 @@ use crate::runtime_capabilities::{
 };
 use crate::storage::{AuditRecord, OperationalStore};
 use crate::tenant_isolation::NON_DISCLOSING_DENY;
-use crate::tenant_store::InMemoryTenantOperationalStore;
+use crate::tenant_store::TenantOperationalStore;
 
 pub type ReconcileFuture<'a> =
     Pin<Box<dyn Future<Output = anyhow::Result<TickReport>> + Send + 'a>>;
@@ -150,7 +150,8 @@ pub struct ServerConfig {
     /// Local correlation + replay directory (never shared with an identity plane DB).
     pub identity_directory: Arc<IdentityDirectory>,
     /// Optional tenant-isolating operational store. Required when `tenant_mode` is on.
-    pub tenant_store: Option<Arc<InMemoryTenantOperationalStore>>,
+    /// In-memory for tests; Postgres hub adapter for durable multi-tenant recovery.
+    pub tenant_store: Option<Arc<dyn TenantOperationalStore>>,
 }
 
 impl ServerConfig {
@@ -250,7 +251,7 @@ struct AppState {
     auth: AuthStack,
     reconciler: Arc<dyn ReconcilePort>,
     store: Arc<dyn OperationalStore>,
-    tenant_store: Option<Arc<InMemoryTenantOperationalStore>>,
+    tenant_store: Option<Arc<dyn TenantOperationalStore>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1306,7 +1307,7 @@ mod tests {
         use crate::storage::EnvironmentRecord;
         use crate::tenant_store::tenant_memory_store_capabilities;
 
-        let tenant_store = Arc::new(InMemoryTenantOperationalStore::new());
+        let tenant_store = Arc::new(crate::tenant_store::InMemoryTenantOperationalStore::new());
         let mut config = ServerConfig::community(
             "management-secret",
             HashMap::from([("runtime-secret".into(), "prod".into())]),
