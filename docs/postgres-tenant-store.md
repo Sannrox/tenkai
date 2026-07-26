@@ -10,9 +10,31 @@ Postgres is an **optional** durable multi-tenant store for the **Tenkai hub**
 | Conformance without Postgres | In-memory tenant partitions (`InMemoryTenantOperationalStore`) |
 
 Source: `src/postgres_tenant.rs`. Decision: [ADR 0008](decisions/0008-production-tenant-operational-store.md).
-HA multi-replica: [ADR 0009](decisions/0009-multi-replica-reconcile-and-ha-profile.md) —
-this adapter advertises **`tenant_isolation` only**, not `shared_replica_state`
-or `high_availability`.
+HA multi-replica: [ADR 0009](decisions/0009-multi-replica-reconcile-and-ha-profile.md).
+
+## Shared replica state (#128)
+
+This adapter advertises:
+
+```text
+store.tenant_postgres:
+  - tenant_isolation:v1
+  - shared_replica_state:v1
+  - operational_store_migration:v1:levelN
+```
+
+**Writer model (locked first slice):** `SingleActiveWriter` — one active
+control-plane writer against a shared Postgres database (failover / cold
+standby). It does **not** mean multi-active concurrent reconcile without tick
+fencing (#129). It does **not** advertise `high_availability` (product HA flag
+remains separate per ADR 0009).
+
+| Claim | Meaning |
+| --- | --- |
+| `shared_replica_state` | Shared durable ops state; safe for single-active writer + standby failover |
+| Not claimed yet | Multi-active reconcile, automatic multi-AZ product HA |
+
+Community SQLite never advertises `shared_replica_state`.
 
 ## Isolation model
 
@@ -61,14 +83,6 @@ Default CI does **not** require a Postgres service. Live tests are `#[ignore]`.
   `/readyz` — same operational discipline as SQLite cutover, different tools.
 - Do not confuse with environment runtime state or identity-plane backups.
 
-## Capability advertisement
-
-```text
-store.tenant_postgres:
-  - tenant_isolation:v1
-  - operational_store_migration:v1:levelN
-```
-
 ## `tenkai-server` wiring (#127)
 
 ```bash
@@ -91,5 +105,6 @@ Rules:
 | `--tenant-mode` + feature + URL | Wires `PostgresTenantOperationalStore`; profile `enterprise-tenant-postgres` |
 
 In-memory adapter remains for unit tests (`ServerConfig.tenant_store = Some(Arc::new(InMemory…))`).
-Multi-replica reconcile remains blocked until a store claims `shared_replica_state`
-with fencing (ADR 0009 / #128–#129).
+
+`--replica-count > 1` passes capability negotiation when the Postgres hub store
+is composed (#128). Multi-active reconcile still requires tick fencing (#129).
