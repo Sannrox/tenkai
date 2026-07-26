@@ -436,6 +436,7 @@ it ([ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md),
 | tenkai-server tenant mode → Postgres hub store | [Postgres server wiring](docs/postgres-tenant-store.md#tenkai-server-wiring-127); #127 |
 | Postgres hub `shared_replica_state` (single-active writer) | [Shared replica state](docs/postgres-tenant-store.md#shared-replica-state-128); #128 |
 | Multi-host reconcile tick fencing | [Tick fencing](docs/reconcile-tick-fencing.md); #129 |
+| Multi-replica hub ops runbook | [Multi-replica hub runbook](docs/multi-replica-hub-runbook.md); #130 |
 | Backup/restore drill and server reconcile diagnostics | [operational storage](docs/operational-storage.md); [server diagnostics](docs/server-diagnostics.md); #59, #60 |
 | Release readiness checklist | [release readiness](docs/release-readiness.md); #72 |
 

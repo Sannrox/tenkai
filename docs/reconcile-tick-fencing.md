@@ -51,6 +51,11 @@ writer model). Tick fencing is the reconcile-side coordination once multiple
 processes are allowed past capability negotiation. Durable store-backed claims
 (table / advisory locks) can implement the same `ReconcileTickFence` port later.
 
+## Ops
+
+Operator failover and lab steps:
+[multi-replica-hub-runbook.md](multi-replica-hub-runbook.md) (#130).
+
 ## Non-goals
 
 - Multi-primary SQLite
