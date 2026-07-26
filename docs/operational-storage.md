@@ -58,7 +58,8 @@ plane tables with Tenkai operational partitions.
 Optional production multi-tenant Postgres for the **control-plane hub** is
 available behind Cargo feature `postgres` (`src/postgres_tenant.rs`). See
 [postgres-tenant-store.md](postgres-tenant-store.md). Community default remains
-SQLite; the adapter does not claim multi-replica HA without ADR 0009 fencing.
+SQLite. Multi-replica hub operations:
+[multi-replica-hub-runbook.md](multi-replica-hub-runbook.md).
 
 ## Embedded-to-server migration
 

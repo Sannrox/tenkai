@@ -53,8 +53,9 @@ a store honestly advertises the matching capabilities. Decision:
 
 Optional Postgres hub store (`--features postgres`) advertises
 `shared_replica_state` under a **single-active-writer** model (failover on
-shared DB). Multi-active reconcile still needs tick fencing; see
-[postgres-tenant-store.md](postgres-tenant-store.md#shared-replica-state-128).
+shared DB). Multi-active reconcile uses tick fencing; see
+[postgres-tenant-store.md](postgres-tenant-store.md#shared-replica-state-128)
+and [multi-replica-hub-runbook.md](multi-replica-hub-runbook.md).
 
 ## Host requirements
 
