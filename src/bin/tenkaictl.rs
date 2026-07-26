@@ -7,7 +7,8 @@ use anyhow::{Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 
 use tenkai::{
-    apply, canary, catalog, client, inventory, maintenance, ontology, plan, reconciler, wave,
+    apply, canary, catalog, client, dev_sign, inventory, maintenance, ontology, plan, reconciler,
+    wave,
 };
 
 #[derive(Parser)]
@@ -188,6 +189,51 @@ enum Command {
         /// Audited justification for automatic local-development execution.
         #[arg(long, requires = "allow_unapproved_development")]
         development_reason: Option<String>,
+    },
+    /// Development-only signing helpers for laptop dogfood (not production KMS).
+    Dev {
+        #[command(subcommand)]
+        command: DevCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum DevCommand {
+    /// Create a local directory of development Ed25519 keys (mode 0600).
+    InitKeys {
+        /// Directory for private key material (default `.tenkai-dev-keys`).
+        #[arg(long, default_value = dev_sign::DEFAULT_DEV_KEYS_DIR)]
+        dir: PathBuf,
+    },
+    /// Sign a release for publish --signature / --trust-roots (dogfood only).
+    SignRelease {
+        /// Path to tenkai.toml
+        manifest: PathBuf,
+        /// Keys directory from `dev init-keys`
+        #[arg(long, default_value = dev_sign::DEFAULT_DEV_KEYS_DIR)]
+        keys: PathBuf,
+        /// Output path for detached release signature JSON
+        #[arg(long)]
+        signature: PathBuf,
+        /// Output path for release trust-roots TOML
+        #[arg(long)]
+        trust_roots: PathBuf,
+    },
+    /// Sign a plan approval for apply --approval (dogfood only; non-local envs).
+    SignApproval {
+        plan_id: String,
+        /// Keys directory from `dev init-keys`
+        #[arg(long, default_value = dev_sign::DEFAULT_DEV_KEYS_DIR)]
+        keys: PathBuf,
+        /// Output path for plan-approval JSON envelope
+        #[arg(long)]
+        approval: PathBuf,
+        /// Output path for approval trust-roots TOML
+        #[arg(long)]
+        trust_roots: PathBuf,
+        /// Approval lifetime in seconds
+        #[arg(long, default_value_t = 3600)]
+        ttl_secs: i64,
     },
 }
 
@@ -557,6 +603,62 @@ async fn main() -> Result<()> {
             cli.database.display()
         );
         return Ok(());
+    }
+    if let Command::Dev { command } = &cli.command {
+        match command {
+            DevCommand::InitKeys { dir } => {
+                let path = dev_sign::init_dev_keys(dir)?;
+                println!("{}", dev_sign::warning_line());
+                println!("initialized development keys in {}", path.display());
+                return Ok(());
+            }
+            DevCommand::SignRelease {
+                manifest,
+                keys,
+                signature,
+                trust_roots,
+            } => {
+                let written = dev_sign::sign_release(keys, manifest, signature, trust_roots)?;
+                println!("{}", dev_sign::warning_line());
+                println!("wrote signature  {}", written.envelope.display());
+                println!("wrote trust roots {}", written.trust_roots.display());
+                println!(
+                    "publish with: tenkaictl publish {} --signature {} --trust-roots {}",
+                    manifest.display(),
+                    written.envelope.display(),
+                    written.trust_roots.display()
+                );
+                return Ok(());
+            }
+            DevCommand::SignApproval {
+                plan_id,
+                keys,
+                approval,
+                trust_roots,
+                ttl_secs,
+            } => {
+                let written = dev_sign::sign_plan_approval(
+                    keys,
+                    &cli.database,
+                    plan_id,
+                    approval,
+                    trust_roots,
+                    *ttl_secs,
+                )
+                .await?;
+                println!("{}", dev_sign::warning_line());
+                println!("wrote approval   {}", written.envelope.display());
+                println!("wrote trust roots {}", written.trust_roots.display());
+                println!(
+                    "apply with: tenkaictl --database {} apply {} --approval {} --approval-trust-roots {}",
+                    cli.database.display(),
+                    plan_id,
+                    written.envelope.display(),
+                    written.trust_roots.display()
+                );
+                return Ok(());
+            }
+        }
     }
     let mut ctx = client::Ctx::embedded(&cli.database)?;
 
@@ -968,6 +1070,7 @@ async fn main() -> Result<()> {
             println!("backed up embedded state to {}", destination.display());
         }
         Command::Restore { .. } => unreachable!("restore is handled before opening the database"),
+        Command::Dev { .. } => unreachable!("dev signing is handled before opening the database"),
         Command::ExecutorGuard { .. } => {
             unreachable!("executor guard is handled before opening the database")
         }

@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 
+// Path is used by run_kubectl.
+
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 
@@ -235,53 +237,46 @@ impl SoftwareExecutor for KubernetesSoftwareExecutor {
         }
         ensure_namespace(self, &request.environment)?;
         for path in &files {
-            let status = Command::new(&self.kubectl_binary)
-                .arg("apply")
-                .arg("-f")
-                .arg(path)
-                .arg("--namespace")
-                .arg(&request.environment)
-                .status()
-                .with_context(|| {
-                    format!(
-                        "starting kubectl apply via {} (set TENKAI_KUBECTL_BIN or install kubectl)",
-                        self.kubectl_binary.display()
-                    )
-                })?;
-            if !status.success() {
-                bail!(
-                    "kubectl apply failed for {} in namespace {} (file {}, status {status})",
-                    request.product,
-                    request.environment,
-                    path.display()
-                );
-            }
+            let path_s = path.to_string_lossy();
+            run_kubectl(
+                &self.kubectl_binary,
+                &[
+                    "apply",
+                    "-f",
+                    path_s.as_ref(),
+                    "--namespace",
+                    &request.environment,
+                ],
+                SoftwareDeployPhase::Apply,
+                &format!("apply -f {}", path.display()),
+                &request.product,
+                &request.environment,
+            )?;
         }
         // Ownership labels for Tenkai correlation (values sanitized for k8s).
         let label_args = ownership_label_args(request);
-        let status = Command::new(&self.kubectl_binary)
-            .arg("label")
-            .arg("--overwrite")
-            .arg("-f")
-            .arg(&manifests)
-            .arg("--recursive")
-            .arg("--namespace")
-            .arg(&request.environment)
-            .args(&label_args)
-            .status()
-            .with_context(|| {
-                format!(
-                    "starting kubectl label via {}",
-                    self.kubectl_binary.display()
-                )
-            })?;
-        if !status.success() {
-            bail!(
-                "kubectl label failed for {} in namespace {} after apply (status {status})",
-                request.product,
-                request.environment
-            );
+        let manifests_s = manifests.to_string_lossy();
+        let mut args: Vec<&str> = vec![
+            "label",
+            "--overwrite",
+            "-f",
+            manifests_s.as_ref(),
+            "--recursive",
+            "--namespace",
+            &request.environment,
+        ];
+        let owned: Vec<String> = label_args;
+        for label in &owned {
+            args.push(label.as_str());
         }
+        run_kubectl(
+            &self.kubectl_binary,
+            &args,
+            SoftwareDeployPhase::Apply,
+            "label --overwrite",
+            &request.product,
+            &request.environment,
+        )?;
         Ok(())
     }
 
@@ -297,29 +292,23 @@ impl SoftwareExecutor for KubernetesSoftwareExecutor {
         }
         // Delete in reverse order for safer teardown of dependent resources.
         for path in files.iter().rev() {
-            let status = Command::new(&self.kubectl_binary)
-                .arg("delete")
-                .arg("-f")
-                .arg(path)
-                .arg("--namespace")
-                .arg(&request.environment)
-                .arg("--ignore-not-found=true")
-                .arg("--wait=true")
-                .status()
-                .with_context(|| {
-                    format!(
-                        "starting kubectl delete via {}",
-                        self.kubectl_binary.display()
-                    )
-                })?;
-            if !status.success() {
-                bail!(
-                    "kubectl delete failed for {} in namespace {} (file {}, status {status})",
-                    request.product,
-                    request.environment,
-                    path.display()
-                );
-            }
+            let path_s = path.to_string_lossy();
+            run_kubectl(
+                &self.kubectl_binary,
+                &[
+                    "delete",
+                    "-f",
+                    path_s.as_ref(),
+                    "--namespace",
+                    &request.environment,
+                    "--ignore-not-found=true",
+                    "--wait=true",
+                ],
+                SoftwareDeployPhase::Remove,
+                &format!("delete -f {}", path.display()),
+                &request.product,
+                &request.environment,
+            )?;
         }
         Ok(())
     }
@@ -418,13 +407,14 @@ fn collect_manifest_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Re
 }
 
 fn ensure_namespace(executor: &KubernetesSoftwareExecutor, namespace: &str) -> Result<()> {
+    use std::process::Stdio;
     let get = Command::new(&executor.kubectl_binary)
         .arg("get")
         .arg("namespace")
         .arg(namespace)
         // Missing namespaces are expected on first apply; do not spam NotFound.
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .with_context(|| {
             format!(
@@ -435,23 +425,14 @@ fn ensure_namespace(executor: &KubernetesSoftwareExecutor, namespace: &str) -> R
     if get.success() {
         return Ok(());
     }
-    let create = Command::new(&executor.kubectl_binary)
-        .arg("create")
-        .arg("namespace")
-        .arg(namespace)
-        .status()
-        .with_context(|| {
-            format!(
-                "creating namespace via {}",
-                executor.kubectl_binary.display()
-            )
-        })?;
-    if !create.success() {
-        bail!(
-            "kubectl create namespace {namespace} failed (status {create}); create it or fix kubeconfig"
-        );
-    }
-    Ok(())
+    run_kubectl(
+        &executor.kubectl_binary,
+        &["create", "namespace", namespace],
+        SoftwareDeployPhase::Apply,
+        "create namespace",
+        "namespace",
+        namespace,
+    )
 }
 
 fn ownership_label_args(request: &SoftwareApplyRequest) -> Vec<String> {
@@ -481,6 +462,350 @@ pub fn k8s_label_value(raw: &str) -> String {
         // Label values max 63 chars.
         trimmed.chars().take(63).collect()
     }
+}
+
+/// Operator-facing software deploy phase for diagnostics (#150).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SoftwareDeployPhase {
+    Apply,
+    Health,
+    Restore,
+    /// Uninstall / kubectl delete path (not the same as restore).
+    Remove,
+}
+
+impl SoftwareDeployPhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Apply => "apply",
+            Self::Health => "health",
+            Self::Restore => "restore",
+            Self::Remove => "remove",
+        }
+    }
+}
+
+/// Format a credential-free, phase-aware software deploy error (#150).
+pub fn format_software_phase_error(
+    phase: SoftwareDeployPhase,
+    product: &str,
+    version: &str,
+    environment: &str,
+    detail: &str,
+) -> String {
+    let sanitized = sanitize_diagnostic_text(detail);
+    format!(
+        "software deploy phase={} product={}@{} environment/namespace={}: {sanitized}",
+        phase.as_str(),
+        product,
+        version,
+        environment
+    )
+}
+
+/// Auto-rollback note: channel head is not rewritten by restore (#150).
+pub fn rollback_channel_note(product: &str, restored_version: &str) -> String {
+    format!(
+        "restored {product} to {restored_version}; channel head is unchanged (status may show behind until re-promote)"
+    )
+}
+
+fn char_slice_eq_ignore_ascii(hay: &[char], start: usize, needle: &str) -> bool {
+    let n: Vec<char> = needle.chars().collect();
+    if start + n.len() > hay.len() {
+        return false;
+    }
+    hay[start..start + n.len()]
+        .iter()
+        .zip(n.iter())
+        .all(|(a, b)| a.eq_ignore_ascii_case(b))
+}
+
+/// True when a field/env name looks like a credential carrier (substring heuristics).
+fn looks_like_credential_key(name: &str) -> bool {
+    if name.is_empty() || name.len() > 128 {
+        return false;
+    }
+    // Collapse camelCase / snake_case / kebab-case for fragment matching.
+    let compact: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    const FRAGMENTS: &[&str] = &[
+        "authorization",
+        "clientsecret",
+        "accesstoken",
+        "refreshtoken",
+        "sessiontoken",
+        "idtoken",
+        "privatekey",
+        "privatekeydata",
+        "secretaccesskey",
+        "accesskeyid",
+        "accesskey",
+        "apikey",
+        "authkey",
+        "password",
+        "passwd",
+        "credential",
+        "credentials",
+        "kubeconfig",
+        "dockerconfigjson",
+        "serviceaccount",
+        "bearer",
+        "secret",
+        "token",
+    ];
+    FRAGMENTS.iter().any(|frag| compact.contains(frag))
+}
+
+/// Read a bare or JSON-quoted identifier starting at `i`.
+/// Returns `(key_without_quotes, index_after_key)`.
+fn read_identifier_key(chars: &[char], i: usize) -> Option<(String, usize)> {
+    if i >= chars.len() {
+        return None;
+    }
+    if chars[i] == '"' {
+        let mut j = i + 1;
+        let mut key = String::new();
+        while j < chars.len() && chars[j] != '"' && chars[j] != '\n' {
+            key.push(chars[j]);
+            j += 1;
+        }
+        if j < chars.len() && chars[j] == '"' && !key.is_empty() {
+            return Some((key, j + 1));
+        }
+        return None;
+    }
+    if !chars[i].is_ascii_alphabetic() && chars[i] != '_' {
+        return None;
+    }
+    // Bare key: left boundary must not continue an identifier.
+    if i > 0 {
+        let prev = chars[i - 1];
+        if prev.is_ascii_alphanumeric() || prev == '_' || prev == '-' {
+            return None;
+        }
+    }
+    let mut j = i;
+    let mut key = String::new();
+    while j < chars.len() {
+        let c = chars[j];
+        if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+            key.push(c);
+            j += 1;
+        } else {
+            break;
+        }
+    }
+    if key.is_empty() { None } else { Some((key, j)) }
+}
+
+#[derive(Clone, Copy)]
+enum CredentialValueStyle {
+    /// JSON / query: quoted string, or unquoted until delimiter.
+    Structured,
+    /// YAML / HTTP header bare `key: value` — consume the rest of the line.
+    RestOfLine,
+}
+
+/// After a key match, skip optional whitespace + `:`/`=` and redact the value.
+fn skip_credential_value(
+    chars: &[char],
+    after_key: usize,
+    style: CredentialValueStyle,
+) -> Option<usize> {
+    let mut j = after_key;
+    while j < chars.len() && chars[j].is_whitespace() {
+        j += 1;
+    }
+    if j >= chars.len() {
+        return None;
+    }
+    let sep = chars[j];
+    if sep != ':' && sep != '=' {
+        return None;
+    }
+    j += 1;
+    while j < chars.len() && chars[j].is_whitespace() {
+        j += 1;
+    }
+    if j >= chars.len() {
+        return Some(j);
+    }
+    if chars[j] == '"' || chars[j] == '\'' {
+        let quote = chars[j];
+        j += 1;
+        let mut closed = false;
+        while j < chars.len() && chars[j] != '\n' {
+            // Honor common escapes so `\"` does not end the value early.
+            if chars[j] == '\\' && j + 1 < chars.len() && chars[j + 1] != '\n' {
+                j += 2;
+                continue;
+            }
+            if chars[j] == quote {
+                j += 1;
+                closed = true;
+                break;
+            }
+            j += 1;
+        }
+        // Unclosed quoted value: conservatively redact through end of line.
+        if !closed {
+            while j < chars.len() && chars[j] != '\n' {
+                j += 1;
+            }
+        }
+        return Some(j);
+    }
+    if matches!(style, CredentialValueStyle::RestOfLine) && sep == ':' {
+        while j < chars.len() && chars[j] != '\n' {
+            j += 1;
+        }
+        return Some(j);
+    }
+    // Unquoted query / form values: stop at whitespace or structural delimiters.
+    while j < chars.len() {
+        let c = chars[j];
+        if c.is_whitespace() || matches!(c, ',' | '}' | ']' | '&' | ';' | '\n') {
+            break;
+        }
+        j += 1;
+    }
+    Some(j)
+}
+
+/// Strip credential-like substrings from diagnostic text.
+pub fn sanitize_diagnostic_text(raw: &str) -> String {
+    // Bound work before scanning (kubectl can emit large payloads).
+    const MAX_IN: usize = 2_000;
+    let bounded: String = raw.chars().take(MAX_IN).collect();
+    let cleaned: String = bounded
+        .chars()
+        .map(|c| {
+            if c.is_control() && c != '\n' && c != '\t' {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    let lower = cleaned.to_ascii_lowercase();
+    // Collapse whitespace so formatted JSON/YAML still matches.
+    let compact: String = lower.chars().filter(|c| !c.is_whitespace()).collect();
+    for structure in [
+        "kind:secret",
+        "\"kind\":\"secret\"",
+        "begincertificate",
+        "beginrsaprivate",
+        "beginopensshprivate",
+        "beginprivatekey",
+        "\"stringdata\"",
+        "stringdata:",
+        // Structured Secret data maps (not bare "data:" which matches "metadata:")
+        "\"data\":{",
+        "\ndata:",
+        ".dockerconfigjson",
+    ] {
+        if compact.contains(&structure.replace('\n', "")) || lower.contains(structure) {
+            return "kubectl output omitted (looked like secret or certificate material); inspect the cluster with kubectl describe and avoid pasting secrets into Tenkai"
+                .into();
+        }
+    }
+    // YAML map start for secret data field at line begin.
+    if lower.lines().any(|line| {
+        let t = line.trim_start();
+        t.starts_with("data:") || t.starts_with("stringdata:")
+    }) {
+        return "kubectl output omitted (looked like secret or certificate material); inspect the cluster with kubectl describe and avoid pasting secrets into Tenkai"
+            .into();
+    }
+    let mut out = String::with_capacity(cleaned.len().min(512));
+    let chars: Vec<char> = cleaned.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        // Bearer <token> (Authorization header form).
+        if char_slice_eq_ignore_ascii(&chars, i, "bearer ") {
+            out.push_str("[redacted]");
+            i += "bearer ".len();
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+
+        if let Some((key, after_key)) = read_identifier_key(&chars, i)
+            && looks_like_credential_key(&key)
+        {
+            // Quoted JSON keys use structured value parsing; bare keys use rest-of-line for `:`.
+            let style = if chars[i] == '"' {
+                CredentialValueStyle::Structured
+            } else {
+                CredentialValueStyle::RestOfLine
+            };
+            if let Some(end) = skip_credential_value(&chars, after_key, style) {
+                out.push_str("[redacted]");
+                i = end;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    const MAX_CHARS: usize = 400;
+    let mut capped: String = out.chars().take(MAX_CHARS).collect();
+    if out.chars().count() > MAX_CHARS {
+        capped.push('…');
+    }
+    capped.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn run_kubectl(
+    binary: &Path,
+    args: &[&str],
+    phase: SoftwareDeployPhase,
+    phase_hint: &str,
+    product: &str,
+    environment: &str,
+) -> Result<()> {
+    use std::process::Stdio;
+    let mut child = Command::new(binary)
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| {
+            format!(
+                "starting kubectl ({phase_hint}) via {} (set TENKAI_KUBECTL_BIN or install kubectl)",
+                binary.display()
+            )
+        })?;
+    let mut stderr_buf = Vec::new();
+    if let Some(mut pipe) = child.stderr.take() {
+        const MAX_STDERR: u64 = 4_096;
+        let mut limited = pipe.by_ref().take(MAX_STDERR);
+        use std::io::Read as _;
+        let _ = limited.read_to_end(&mut stderr_buf);
+        // Drain any remaining bytes so the child can exit.
+        let mut sink = [0_u8; 1024];
+        while pipe.read(&mut sink).unwrap_or(0) > 0 {}
+    }
+    let status = child.wait().with_context(|| {
+        format!(
+            "waiting for kubectl ({phase_hint}) via {}",
+            binary.display()
+        )
+    })?;
+    if status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&stderr_buf);
+    let detail = sanitize_diagnostic_text(stderr.trim());
+    bail!(
+        "software deploy phase={} product={product} environment/namespace={environment}: kubectl {phase_hint} failed (status {status}): {detail}",
+        phase.as_str()
+    );
 }
 
 /// Select software executor from `TENKAI_SOFTWARE_EXECUTOR`, else None
@@ -647,6 +972,84 @@ mod tests {
         let err = executor.apply(&request).unwrap_err().to_string();
         assert!(err.contains("manifests"), "{err}");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn phase_error_names_health_and_product_without_secrets() {
+        let err = format_software_phase_error(
+            SoftwareDeployPhase::Health,
+            "hello-minikube",
+            "0.2.0",
+            "local",
+            "error: rollout timed out; Bearer super-secret-token-value",
+        );
+        assert!(err.contains("phase=health"), "{err}");
+        assert!(err.contains("hello-minikube@0.2.0"), "{err}");
+        assert!(err.contains("environment/namespace=local"), "{err}");
+        assert!(!err.contains("super-secret-token-value"), "{err}");
+        assert!(err.contains("[redacted]"), "{err}");
+        let long = format_software_phase_error(
+            SoftwareDeployPhase::Apply,
+            "api",
+            "1.0.0",
+            "stage",
+            "token=abcdefghijklmnopqrstuvwxyz0123456789extra",
+        );
+        assert!(!long.contains("abcdefghij"), "{long}");
+        assert!(long.contains("[redacted]"), "{long}");
+        let json_secret = sanitize_diagnostic_text(
+            r#"Error from server: {"kind": "Secret", "data": {"api-key": "supersecret"}}"#,
+        );
+        assert!(
+            json_secret.contains("omitted") || json_secret.contains("secret"),
+            "{json_secret}"
+        );
+        assert!(!json_secret.contains("supersecret"), "{json_secret}");
+        let auth = sanitize_diagnostic_text("Authorization: Bearer super-secret-token\nnext");
+        assert!(!auth.contains("super-secret-token"), "{auth}");
+        assert!(auth.contains("[redacted]"), "{auth}");
+        // JSON, query-string, env-style, and camelCase credential carriers (#150 / autoreview).
+        for sample in [
+            r#"error: {"token":"json-secret-value"}"#,
+            r#"error: {"token": "json-secret-value"}"#,
+            "client_secret=query-secret-value",
+            "access_token=query-secret-value",
+            "api_key=query-secret-value",
+            "api-key: query-secret-value",
+            r#"{"access_token":"json-secret-value","ok":true}"#,
+            "AWS_SECRET_ACCESS_KEY=query-secret-value",
+            "clientSecret=query-secret-value",
+            "private-key-data=query-secret-value",
+            "credentials=query-secret-value",
+            r#"{"clientSecret":"json-secret-value"}"#,
+        ] {
+            let cleaned = sanitize_diagnostic_text(sample);
+            assert!(
+                !cleaned.contains("json-secret-value") && !cleaned.contains("query-secret-value"),
+                "leaked secret in {sample:?} -> {cleaned}"
+            );
+            assert!(cleaned.contains("[redacted]"), "{sample:?} -> {cleaned}");
+        }
+        // Non-credential assignment must survive (operator-useful kubectl text).
+        let safe = sanitize_diagnostic_text(
+            "error: deployment.apps \"hello\" not found in namespace=local",
+        );
+        assert!(safe.contains("not found"), "{safe}");
+        assert!(
+            safe.contains("namespace=local") || safe.contains("namespace"),
+            "{safe}"
+        );
+        // Escaped quotes inside a credential value must not leak the tail.
+        let escaped = sanitize_diagnostic_text(r#"{"token":"prefix\"remaining-secret"}"#);
+        assert!(!escaped.contains("remaining-secret"), "{escaped}");
+        assert!(escaped.contains("[redacted]"), "{escaped}");
+    }
+
+    #[test]
+    fn rollback_note_mentions_channel_unchanged() {
+        let note = rollback_channel_note("api", "1.0.0");
+        assert!(note.contains("restored api to 1.0.0"), "{note}");
+        assert!(note.contains("channel head is unchanged"), "{note}");
     }
 
     /// Optional live-cluster path. Not run in default CI.

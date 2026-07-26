@@ -38,6 +38,37 @@ matches the environment name (`local`).
 
 Details and command templates: [hello-minikube README](../examples/hello-minikube/README.md).
 
+### Apply / health / restore diagnostics (#150)
+
+Software k8s failures name the **phase** (`apply`, `health`, or `restore`),
+product@version, and environment/namespace, with credential-like snippets
+redacted. Auto-rollback restores the previous **deployed** release; **channel
+head is not rewritten** (status may show `behind` until you re-promote).
+
+### First-class dogfood signing (#149)
+
+```bash
+tenkaictl dev init-keys --dir .tenkai-dev-keys
+tenkaictl dev sign-release path/to/tenkai.toml \
+  --keys .tenkai-dev-keys \
+  --signature /tmp/rel.sig.json \
+  --trust-roots /tmp/rel-trust.toml
+tenkaictl publish path/to/tenkai.toml \
+  --signature /tmp/rel.sig.json --trust-roots /tmp/rel-trust.toml
+
+# after plan --env stage:
+tenkaictl dev sign-approval "$PLAN_ID" \
+  --keys .tenkai-dev-keys \
+  --approval /tmp/approval.json \
+  --trust-roots /tmp/approval-trust.toml
+tenkaictl apply "$PLAN_ID" \
+  --approval /tmp/approval.json \
+  --approval-trust-roots /tmp/approval-trust.toml
+```
+
+Development keys only — not production KMS. Default keys dir: `.tenkai-dev-keys/`
+(gitignored).
+
 ## Findings from Mac dogfood (v0.2)
 
 These are intentional product rules, not minikube quirks:
@@ -61,9 +92,9 @@ These are intentional product rules, not minikube quirks:
    `wave run` reports per-env posture. Channel promotion and canary evidence
    remain separate gates.
 
-5. **Dev signing helpers are not production KMS.**  
-   `examples/dev_sign_release.rs` and `examples/dev_sign_plan_approval.rs`
-   generate ephemeral keys (or seed env vars) for laptop dogfood only.
+5. **Dev signing is not production KMS.**  
+   Use `tenkaictl dev init-keys` / `sign-release` / `sign-approval` for laptop
+   multi-env drills only; never treat `.tenkai-dev-keys` as production trust.
 
 ## Out of scope for this dogfood path
 

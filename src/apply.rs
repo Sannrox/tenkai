@@ -504,11 +504,28 @@ async fn activate_fenced(
                 content.product, content.manifest.product.version
             ),
         );
-        let install = executor.apply(&request).map_err(|error| error.to_string());
+        let install = executor.apply(&request).map_err(|error| {
+            crate::software_executor::format_software_phase_error(
+                crate::software_executor::SoftwareDeployPhase::Apply,
+                &content.product,
+                &content.manifest.product.version,
+                &content.environment,
+                &error.to_string(),
+            )
+        });
         let result = match install {
             Ok(()) => match &content.manifest.deploy.health {
                 Some(command) if !command.is_empty() => {
-                    run_mutation_command(ctx, lease, content, command).await?
+                    match run_mutation_command(ctx, lease, content, command).await? {
+                        Ok(()) => Ok(()),
+                        Err(error) => Err(crate::software_executor::format_software_phase_error(
+                            crate::software_executor::SoftwareDeployPhase::Health,
+                            &content.product,
+                            &content.manifest.product.version,
+                            &content.environment,
+                            &error,
+                        )),
+                    }
                 }
                 _ => Ok(()),
             },
@@ -609,15 +626,42 @@ async fn restore_previous_fenced(
     version: &str,
     failure: String,
 ) -> Result<(bool, String)> {
-    Ok(match activate_fenced(ctx, lease, content).await {
-        Ok(Ok(())) => (true, format!("{failure}; restored {version}")),
+    let channel_note = crate::software_executor::rollback_channel_note(&content.product, version);
+    // Tag activation failures during rollback as restore phase (#150).
+    let restore_result = match activate_fenced(ctx, lease, content).await {
+        Ok(Ok(())) => Ok(Ok(())),
+        Ok(Err(detail)) => Ok(Err(crate::software_executor::format_software_phase_error(
+            crate::software_executor::SoftwareDeployPhase::Restore,
+            &content.product,
+            version,
+            &content.environment,
+            &detail,
+        ))),
+        Err(error) => Err(error),
+    };
+    Ok(match restore_result {
+        Ok(Ok(())) => (
+            true,
+            format!("{failure}; restored {version}; {channel_note}"),
+        ),
         Ok(Err(restore)) => (
             false,
-            format!("{failure}; restore or health check of {version} also failed: {restore}"),
+            format!(
+                "{failure}; restore or health check of {version} also failed: {restore}; {channel_note}"
+            ),
         ),
         Err(error) => (
             false,
-            format!("{failure}; restore executor failed for {version}: {error}"),
+            format!(
+                "{failure}; restore executor failed for {version}: {}; {channel_note}",
+                crate::software_executor::format_software_phase_error(
+                    crate::software_executor::SoftwareDeployPhase::Restore,
+                    &content.product,
+                    version,
+                    &content.environment,
+                    &error.to_string(),
+                )
+            ),
         ),
     })
 }
