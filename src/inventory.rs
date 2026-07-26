@@ -15,6 +15,9 @@ use crate::plan::ENVIRONMENT_FACT_KEYS;
 /// Provenance token recorded in dry-run output (not a fact key).
 pub const INVENTORY_SOURCE: &str = "local-probe";
 
+/// Provenance when the environment runtime reports inventory to the hub (#136).
+pub const RUNTIME_INVENTORY_SOURCE: &str = "runtime-probe";
+
 /// One probed fact candidate for an environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InventoryFact {

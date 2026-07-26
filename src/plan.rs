@@ -1816,6 +1816,29 @@ pub async fn set_environment_fact(
     Ok(format!("set {env} fact {key}={value}"))
 }
 
+/// Apply admitted inventory facts from a runtime heartbeat report (#136).
+///
+/// Only [`ENVIRONMENT_FACT_KEYS`] are accepted (via [`set_environment_fact`]).
+/// Unknown keys and credential-like values fail closed before any write.
+pub async fn apply_runtime_inventory_facts(
+    ctx: &mut Ctx,
+    env: &str,
+    facts: &std::collections::BTreeMap<String, String>,
+) -> Result<Vec<String>> {
+    // Validate all first so a bad key never partially mutates.
+    for (key, value) in facts {
+        validate_fact_key(key)?;
+        validate_fact_value(key, value)?;
+    }
+    let mut applied = Vec::with_capacity(facts.len());
+    for (key, value) in facts {
+        set_environment_fact(ctx, env, key, value).await?;
+        applied.push(key.clone());
+    }
+    applied.sort();
+    Ok(applied)
+}
+
 /// Clear one capability/inventory fact from an environment.
 pub async fn clear_environment_fact(ctx: &mut Ctx, env: &str, key: &str) -> Result<String> {
     validate_fact_key(key)?;
@@ -2257,6 +2280,29 @@ mod tests {
         set_environment_fact(&mut ctx, "alpha", "memory_gib", "32")
             .await
             .unwrap();
+        let mut runtime_facts = std::collections::BTreeMap::new();
+        runtime_facts.insert("architecture".into(), "x86_64".into());
+        runtime_facts.insert("memory_gib".into(), "64".into());
+        let applied = apply_runtime_inventory_facts(&mut ctx, "alpha", &runtime_facts)
+            .await
+            .unwrap();
+        assert_eq!(
+            applied,
+            vec!["architecture".to_string(), "memory_gib".to_string()]
+        );
+        let listed = list_environment_facts(&mut ctx, "alpha").await.unwrap();
+        assert_eq!(
+            listed.get("architecture").map(String::as_str),
+            Some("x86_64")
+        );
+        assert_eq!(listed.get("memory_gib").map(String::as_str), Some("64"));
+        let mut bad = std::collections::BTreeMap::new();
+        bad.insert("not_a_key".into(), "x".into());
+        assert!(
+            apply_runtime_inventory_facts(&mut ctx, "alpha", &bad)
+                .await
+                .is_err()
+        );
         assert!(
             set_environment_fact(&mut ctx, "alpha", "memory_gib", "0")
                 .await
@@ -2273,12 +2319,15 @@ mod tests {
                 .is_err()
         );
         let facts = list_environment_facts(&mut ctx, "alpha").await.unwrap();
-        assert_eq!(facts.get("architecture").map(String::as_str), Some("arm64"));
+        assert_eq!(
+            facts.get("architecture").map(String::as_str),
+            Some("x86_64")
+        );
         assert_eq!(
             require_environment_fact(&mut ctx, "alpha", "architecture")
                 .await
                 .unwrap(),
-            "arm64"
+            "x86_64"
         );
         assert!(
             require_environment_fact(&mut ctx, "alpha", "accelerator")
