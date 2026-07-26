@@ -2,9 +2,11 @@
 //!
 //! Community hosts keep using [`crate::storage::SqliteStore`] (tenant-free).
 //! Enterprise hosts that enable tenant mode use a store that advertises
-//! `tenant_isolation` and enforces tenant-scoped reads/writes. Production
-//! PostgreSQL is out of scope; this module provides the port and a
-//! deterministic in-memory adapter for conformance and host wiring tests.
+//! `tenant_isolation` and enforces tenant-scoped reads/writes.
+//!
+//! - In-memory partitions: this module (`InMemoryTenantOperationalStore`).
+//! - Production hub Postgres: optional [`crate::postgres_tenant`] (feature
+//!   `postgres`, schema-per-tenant, never identity-plane co-location).
 //!
 //! The adapter never shares a database with an identity plane (ADR 0005).
 

@@ -53,9 +53,12 @@ adapter for conformance and host wiring:
 - Production criteria: [ADR 0008](decisions/0008-production-tenant-operational-store.md)
 
 Do not enable tenant mode against community SQLite. Do not co-locate identity
-plane tables with Tenkai operational partitions. Production PostgreSQL (or
-equivalent) is deferred per ADR 0008 unless an optional/out-of-tree adapter is
-explicitly adopted.
+plane tables with Tenkai operational partitions.
+
+Optional production multi-tenant Postgres for the **control-plane hub** is
+available behind Cargo feature `postgres` (`src/postgres_tenant.rs`). See
+[postgres-tenant-store.md](postgres-tenant-store.md). Community default remains
+SQLite; the adapter does not claim multi-replica HA without ADR 0009 fencing.
 
 ## Embedded-to-server migration
 
