@@ -3,6 +3,7 @@
 .tenkai-state/
 .tenkai-demo-multi-env/
 .tenkai-dogfood-minikube/
+.tenkai-dev-keys/
 /artifacts/replay/
 
 .agents/*
