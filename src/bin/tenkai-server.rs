@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
+use tenkai::postgres_tenant::{resolve_server_tenant_store, tenant_postgres_store_capabilities};
 use tenkai::reconciler::{Config as ReconcilerConfig, Reconciler};
 use tenkai::runtime_capabilities::{
     RuntimeRequirements, community_auth_capabilities, community_sqlite_profile,
@@ -107,6 +108,19 @@ async fn main() -> Result<()> {
     } else {
         capabilities.components.push(store.runtime_capabilities());
     }
+
+    // Tenant mode requires durable Postgres hub store (#127): feature + URL.
+    let tenant_store = resolve_server_tenant_store(cli.tenant_mode)
+        .context("resolving tenant operational store for tenant mode")?;
+    if let Some(ref tenant) = tenant_store {
+        capabilities.components.push(tenant.runtime_capabilities());
+        // Keep sqlite component for community ops tables; tenant adapter is additive.
+        let _ = tenant_postgres_store_capabilities();
+        if cli.tenant_mode {
+            capabilities.profile = "enterprise-tenant-postgres".into();
+        }
+    }
+
     let requirements = RuntimeRequirements {
         tenant_mode: cli.tenant_mode,
         replica_count: cli.replica_count,
@@ -152,7 +166,7 @@ async fn main() -> Result<()> {
             identity_directory: std::sync::Arc::new(
                 tenkai::federated_identity::IdentityDirectory::new(),
             ),
-            tenant_store: None,
+            tenant_store,
         },
         reconciler.clone(),
         store,

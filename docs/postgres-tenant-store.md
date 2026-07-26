@@ -69,7 +69,27 @@ store.tenant_postgres:
   - operational_store_migration:v1:levelN
 ```
 
-Enabling tenant mode still requires host wiring of the store into
-`ServerConfig.tenant_store` (or successor) the same way as the in-memory
-adapter. Multi-replica reconcile remains blocked until a store claims
-`shared_replica_state` with fencing (ADR 0009).
+## `tenkai-server` wiring (#127)
+
+```bash
+cargo build --features postgres --bin tenkai-server
+
+export TENKAI_MANAGEMENT_TOKEN=…
+export TENKAI_POSTGRES_URL='postgres://tenkai:tenkai@127.0.0.1:5432/tenkai'
+
+# Tenant mode selects Postgres hub store (fails closed without URL/feature)
+tenkai-server --tenant-mode --listen 127.0.0.1:8080
+```
+
+Rules:
+
+| Condition | Result |
+| --- | --- |
+| No `--tenant-mode` | Community path; `tenant_store` unset |
+| `--tenant-mode` without feature | Startup fails: rebuild with `--features postgres` |
+| `--tenant-mode` without `TENKAI_POSTGRES_URL` | Startup fails closed |
+| `--tenant-mode` + feature + URL | Wires `PostgresTenantOperationalStore`; profile `enterprise-tenant-postgres` |
+
+In-memory adapter remains for unit tests (`ServerConfig.tenant_store = Some(Arc::new(InMemory…))`).
+Multi-replica reconcile remains blocked until a store claims `shared_replica_state`
+with fencing (ADR 0009 / #128–#129).

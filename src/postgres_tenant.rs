@@ -27,6 +27,7 @@ use crate::storage::{
 };
 use crate::storage::{EnvironmentRecord, Result, SCHEMA_VERSION, StoreError};
 use crate::tenant_isolation::IsolationError;
+use crate::tenant_store::TenantOperationalStore;
 
 /// Capability advertisement for the optional Postgres tenant store.
 ///
@@ -96,6 +97,28 @@ impl PostgresTenantConfig {
             ))
         }
     }
+}
+
+/// Resolve the durable hub tenant store for `tenkai-server` startup (#127).
+///
+/// - `tenant_mode == false` → `Ok(None)` (community path).
+/// - `tenant_mode == true` → requires `TENKAI_POSTGRES_URL` and feature `postgres`,
+///   then returns a wired [`PostgresTenantOperationalStore`].
+pub fn resolve_server_tenant_store(
+    tenant_mode: bool,
+) -> Result<Option<std::sync::Arc<dyn TenantOperationalStore>>> {
+    if !tenant_mode {
+        return Ok(None);
+    }
+    if !postgres_feature_enabled() {
+        return Err(StoreError::AdapterUnavailable(
+            "tenant mode requires a binary built with --features postgres and TENKAI_POSTGRES_URL"
+                .into(),
+        ));
+    }
+    let config = PostgresTenantConfig::from_env()?;
+    let store = config.open()?;
+    Ok(Some(std::sync::Arc::new(store)))
 }
 
 /// Sanitize tenant id into a safe Postgres schema name (`tenkai_t_*`).
@@ -225,7 +248,38 @@ impl PostgresTenantOperationalStore {
             .list_environment_ids()
             .map_err(|error| IsolationError::Contract(error.to_string()))
     }
+}
 
+impl TenantOperationalStore for PostgresTenantOperationalStore {
+    fn runtime_capabilities(&self) -> ComponentCapabilities {
+        tenant_postgres_store_capabilities()
+    }
+
+    fn get_environment_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        environment_id: &str,
+    ) -> std::result::Result<EnvironmentRecord, IsolationError> {
+        PostgresTenantOperationalStore::get_environment_for(self, context, environment_id)
+    }
+
+    fn put_environment_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        environment: &EnvironmentRecord,
+    ) -> std::result::Result<EnvironmentRecord, IsolationError> {
+        PostgresTenantOperationalStore::put_environment_for(self, context, environment)
+    }
+
+    fn list_environment_ids_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+    ) -> std::result::Result<Vec<String>, IsolationError> {
+        PostgresTenantOperationalStore::list_environment_ids_for(self, context)
+    }
+}
+
+impl PostgresTenantOperationalStore {
     /// Isolation checks when a live Postgres is available; no-op structure when feature off.
     pub fn run_partition_isolation_check(
         &self,
@@ -1973,6 +2027,26 @@ mod tests {
         assert!(names.contains("operational_store_migration"));
         assert!(!names.contains("high_availability"));
         assert!(!names.contains("shared_replica_state"));
+    }
+
+    #[test]
+    fn resolve_server_tenant_store_community_is_none() {
+        let resolved = resolve_server_tenant_store(false).unwrap();
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn resolve_server_tenant_store_fails_closed_without_feature_or_url() {
+        let err = match resolve_server_tenant_store(true) {
+            Ok(_) => panic!("tenant mode without config must fail closed"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            err.contains("features postgres")
+                || err.contains("TENKAI_POSTGRES_URL")
+                || err.contains("postgres"),
+            "{err}"
+        );
     }
 
     /// Live isolation drill. Requires feature `postgres` and `TENKAI_POSTGRES_URL`.
