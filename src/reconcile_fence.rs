@@ -1,13 +1,14 @@
-//! Multi-host reconcile tick fencing (ADR 0009 / #129).
+//! Multi-host reconcile tick fencing (ADR 0009 / #129 / #135).
 //!
 //! Local `SchedulerState` only serializes environments inside one process.
 //! When multiple control-plane hosts share operational state, each environment
 //! tick must also acquire a generation-fenced claim so at most one host mutates
 //! that environment at a time.
 //!
-//! First delivery: process-shared [`SharedReconcileFence`] (deterministic tests
-//! and single-host multi-reconciler). Durable store-backed claims can plug the
-//! same [`ReconcileTickFence`] port later.
+//! Implementations:
+//! - [`SharedReconcileFence`] — process-shared (tests / single host)
+//! - Postgres-backed fence — durable hub claims when feature `postgres` is on
+//!   (`crate::postgres_tenant::PostgresReconcileFence`, #135)
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -42,6 +43,9 @@ pub enum FenceError {
     InvalidIdentity,
     #[error("reconcile fence expiry must be in the future")]
     InvalidExpiry,
+    /// Durable store or transport failure (Postgres, etc.).
+    #[error("reconcile fence store: {0}")]
+    Store(String),
 }
 
 /// Port for inter-host (or multi-reconciler) tick fencing.

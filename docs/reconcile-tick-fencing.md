@@ -44,12 +44,34 @@ let reconciler = Reconciler::new(ctx, Config {
 
 Without `with_shared_fence`, behavior matches the historical single-process model.
 
+## Durable Postgres fence (#135)
+
+Hub multi-process deployments should use durable claims in Postgres:
+
+```text
+public.tenkai_reconcile_tick_claims
+  environment TEXT PRIMARY KEY
+  owner TEXT
+  generation BIGINT
+  expires_at BIGINT   -- unix millis
+```
+
+`tenkai-server` with `--replica-count > 1` calls
+`resolve_reconcile_fence_for_replicas`: when `TENKAI_POSTGRES_URL` is set and the
+binary is built with `--features postgres`, it opens
+[`PostgresReconcileFence`](../src/postgres_tenant.rs) (same URL as the hub
+store). Otherwise it falls back to process-shared memory (single machine only).
+
+Claims are hub-wide (not schema-per-tenant). TTL expiry allows takeover with a
+bumped generation; stale `release` cannot steal another owner’s live claim.
+
+This does **not** advertise product `high_availability` by itself.
+
 ## Relation to store capabilities
 
 `--replica-count > 1` requires `shared_replica_state` (Postgres hub, single-active
 writer model). Tick fencing is the reconcile-side coordination once multiple
-processes are allowed past capability negotiation. Durable store-backed claims
-(table / advisory locks) can implement the same `ReconcileTickFence` port later.
+processes are allowed past capability negotiation.
 
 ## Ops
 
