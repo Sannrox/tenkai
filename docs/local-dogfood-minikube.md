@@ -28,11 +28,16 @@ export TENKAI_SOFTWARE_EXECUTOR=kubernetes
 # Prefer a fresh DB if you already ran the unsigned path for 0.1.0:
 #   rm -rf .tenkai-dogfood-minikube
 TENKAI_DOGFOOD_MODE=signed-multi-env ./scripts/dogfood-minikube.sh
+
+# Software canary cohort drill (designate → canary channel → policy → blocked
+# promote → apply → stable promote). Prefer a fresh DB:
+#   rm -rf .tenkai-dogfood-minikube
+TENKAI_DOGFOOD_MODE=canary ./scripts/dogfood-minikube.sh
 ```
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `TENKAI_DOGFOOD_MODE` | `local` | `local` or `signed-multi-env` |
+| `TENKAI_DOGFOOD_MODE` | `local` | `local`, `signed-multi-env`, or `canary` |
 | `TENKAI_DATABASE` | `.tenkai-dogfood-minikube/tenkai.db` | Embedded SQLite |
 | `TENKAI_DEV_KEYS` | `.tenkai-dev-keys` | Dev-only Ed25519 seeds (gitignored) |
 | `TENKAI_SOFTWARE_EXECUTOR` | forced to `kubernetes` by the script | Native kubectl apply |
@@ -50,11 +55,38 @@ cluster is unreachable.
 | --- | --- | --- |
 | Happy install (`local`) | `./scripts/dogfood-minikube.sh` | publish → promote → plan → apply → `status` current |
 | **Signed multi-env** | `TENKAI_DOGFOOD_MODE=signed-multi-env ./scripts/dogfood-minikube.sh` | signed publish; `stage` apply with plan approval only |
+| **Software canary** | `TENKAI_DOGFOOD_MODE=canary ./scripts/dogfood-minikube.sh` | designate → canary channel → policy on stable → **blocked** promote without evidence → apply (no `--skip-gates`) → promote stable |
 | Bad upgrade | manual (broken image) | auto-rollback; **phase=health/restore** diagnostics (#150) |
 | Good upgrade | manual newer healthy version | cluster + Tenkai both current |
-| Fleet / wave | included in signed mode; or `fleet status` / `wave run local,stage` | observe posture (waves do not apply) |
+| Fleet / wave | included in signed mode; or `fleet status` / `wave run local,stage` | observe posture (waves do not apply; canary evidence still gates promotion) |
 
 Manual command templates: [hello-minikube README](../examples/hello-minikube/README.md).
+
+### Software canary cohort drill (#154)
+
+Canary designation, promotion policy, and evidence gates are product features
+(#7). The `model_runtime` path is documented in
+[model-runtime canary](model-runtime.md#canary-promotion-evidence-model_runtime)
+(#108). This dogfood mode exercises the **same gate for software** on
+`hello-minikube` using the built-in `local` environment (unsigned development).
+
+What the script proves:
+
+1. `canary designate local` marks the cohort host.
+2. Promote the release to the free **canary** channel first (policy does not
+   block that channel).
+3. `canary policy hello-minikube@0.1.0 stable --env local` requires complete
+   evidence before wider promotion.
+4. Promote to `stable` **without** a canary apply fails closed
+   (`canary promotion blocked`).
+5. Subscribe to `hello-minikube=canary`, plan, and apply **without**
+   `--skip-gates` so outcomes record as gate-satisfied.
+6. Promote to `stable` succeeds after a clean canary-cohort apply.
+7. `wave run` only observes posture; it does not authorize channel promotion.
+
+Prefer a fresh DB (`rm -rf .tenkai-dogfood-minikube`) if 0.1.0 was already
+published on another path. Non-local canary cohort members still need signed
+releases and plan approval (same trust rules as signed multi-env).
 
 ### Apply / health / restore diagnostics (#150)
 
@@ -115,7 +147,8 @@ These are intentional product rules, not minikube quirks:
 
 4. **Waves observe; they do not apply.**  
    `wave run` reports per-env posture. Channel promotion and canary evidence
-   remain separate gates.
+   remain separate gates. Run `TENKAI_DOGFOOD_MODE=canary` to exercise the
+   software promote gate on this path.
 
 5. **Dev signing is not production KMS.**  
    Use `tenkaictl dev init-keys` / `sign-release` / `sign-approval` for laptop
@@ -123,12 +156,14 @@ These are intentional product rules, not minikube quirks:
 
 ## Out of scope for this dogfood path
 
-- Canary cohort policy drills (software or `model_runtime`)
 - Inventory fact probe → `env facts` automation
 - Multi-replica `tenkai-server` + Postgres hub HA ([runbook](multi-replica-hub-runbook.md))
 - OpenMetrics scrape on a hub process
 - Remote GateProvider / outcome→priors intelligence loop
 - In-process Kubernetes client (still kubectl argv)
 
-Those remain optional later work; none are required to learn Tenkai’s delivery
-core on a laptop.
+Software canary cohort drill is in scope via `TENKAI_DOGFOOD_MODE=canary` (#154).
+`model_runtime` canary remains documented under
+[model-runtime](model-runtime.md#canary-promotion-evidence-model_runtime) (#108).
+The items above remain optional later work; none are required to learn Tenkai’s
+delivery core on a laptop.
