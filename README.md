@@ -78,20 +78,26 @@ kubectl -n local get deploy,pods
 
 # Signed multi-env (local + stage) with tenkaictl dev signing:
 # TENKAI_DOGFOOD_MODE=signed-multi-env ./scripts/dogfood-minikube.sh
+#
+# Software canary cohort (designate → blocked promote → apply → stable):
+# TENKAI_DOGFOOD_MODE=canary ./scripts/dogfood-minikube.sh
 ```
 
 | Path | Notes |
 | --- | --- |
 | Example product | [`examples/hello-minikube/`](examples/hello-minikube/) |
-| One-shot script | [`scripts/dogfood-minikube.sh`](scripts/dogfood-minikube.sh) (`local` or `signed-multi-env`) |
-| Ops notes (trust, rollback, multi-env) | [`docs/local-dogfood-minikube.md`](docs/local-dogfood-minikube.md) |
+| One-shot script | [`scripts/dogfood-minikube.sh`](scripts/dogfood-minikube.sh) (`local`, `signed-multi-env`, or `canary`) |
+| Ops notes (trust, rollback, multi-env, canary) | [`docs/local-dogfood-minikube.md`](docs/local-dogfood-minikube.md) |
 | Native/Helm apply contract | [`docs/software-executor.md`](docs/software-executor.md) |
 
 **Trust reminders proven in dogfood:** `--allow-unsigned-development` applies only
 to the built-in `local` environment. A second env (e.g. `stage`) needs **signed
 releases** and **signed plan approvals** via `tenkaictl dev init-keys` /
 `dev sign-release` / `dev sign-approval` (or
-`TENKAI_DOGFOOD_MODE=signed-multi-env`). See the [ops note](docs/local-dogfood-minikube.md).
+`TENKAI_DOGFOOD_MODE=signed-multi-env`). Software canary evidence gates
+(`TENKAI_DOGFOOD_MODE=canary`) use the same canary product rules as
+`model_runtime` (#7 / #108): waves observe; promote fails closed without
+complete cohort outcomes. See the [ops note](docs/local-dogfood-minikube.md).
 
 ## The manifest (`tenkai.toml`)
 
@@ -470,6 +476,7 @@ it ([ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md),
 | Local minikube dogfood (embedded, no remote server) | [Local dogfood](#local-dogfood-minikube-no-remote-server); [ops note](docs/local-dogfood-minikube.md); #145–#146, #152 |
 | Dogfood `tenkaictl dev` release/plan signing (not production KMS) | [ops note](docs/local-dogfood-minikube.md#first-class-dogfood-signing-149); #149 |
 | K8s software phase diagnostics (apply/health/restore/remove) | [software executor](docs/software-executor.md); [ops note](docs/local-dogfood-minikube.md#apply--health--restore-diagnostics-150); #150 |
+| Software canary cohort drill on minikube dogfood | [ops note](docs/local-dogfood-minikube.md#software-canary-cohort-drill-154); #154 |
 | Backup/restore drill and server reconcile diagnostics | [operational storage](docs/operational-storage.md); [server diagnostics](docs/server-diagnostics.md); #59, #60 |
 | Release readiness checklist | [release readiness](docs/release-readiness.md); #72 |
 
@@ -492,7 +499,7 @@ Postgres hub + multi-replica fencing) are landed on main. Remaining work is
 | Intelligence loop depth | Fail-closed prior policy; live remote OutcomeProvider history |
 | Executor / model depth | Peer/regional weight caches; additional engines; in-process kube client only if dependency weight is accepted |
 | Enterprise host | JWKS rotation, live IdP drills, tenant-isolated prior stores |
-| Local dogfood | [minikube path](docs/local-dogfood-minikube.md): unsigned + **scripted signed multi-env** landed (#152); canary/inventory drills still optional |
+| Local dogfood | [minikube path](docs/local-dogfood-minikube.md): unsigned + signed multi-env (#152) + **software canary drill** (#154) landed; inventory → `env facts` drill still optional |
 
 Explicit non-priorities until measured need: Catalog service extraction
 (ADR 0001), multi-primary SQLite HA (ADR 0009), identity-plane DB co-location.

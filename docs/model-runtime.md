@@ -244,6 +244,10 @@ Deterministic suite: `model_runtime_canary_evidence_gates_stable_promotion` in
 incomplete multi-env cohort blocks). Related: [rollout waves](rollout-waves.md),
 [fleet status](server-diagnostics.md#fleet-status-operator-table).
 
+Software products use the same canary gate. The minikube dogfood path exercises
+it for `hello-minikube` via `TENKAI_DOGFOOD_MODE=canary` — see
+[software canary cohort drill](local-dogfood-minikube.md#software-canary-cohort-drill-154).
+
 ## Ordered rollout with routing_config
 
 When an environment runs both `model_runtime` and `routing_config`, plan
