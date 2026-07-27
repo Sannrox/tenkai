@@ -128,6 +128,33 @@ accepted architectural or project outcomes with the project-local
 `capture-project-decision` Skill. Use `assess-change-impact` for changes that
 cross product, trust, protocol, ontology, execution, or operational boundaries.
 
+### Verified commits on GitHub
+
+Prefer publishing PR branch tips with GitHub-signed commits so GitHub shows
+**Verified**:
+
+1. Implement and commit locally as usual (`commit.gpgsign` may still apply).
+2. Publish the branch tip with `scripts/gh-verified-push.sh` instead of a plain
+   `git push` when you want the hosted commit Verified (OpenClaw-style GraphQL
+   `createCommitOnBranch`). That path creates one server-side commit with the
+   local `HEAD` tree; committer is typically **GitHub**.
+3. New branch:
+   `scripts/gh-verified-push.sh --create-branch-from origin/main --branch <topic> --sync-local`
+4. Existing PR branch:
+   `scripts/gh-verified-push.sh --branch <topic> --sync-local`
+   (uses the current remote tip as `expectedHeadOid`).
+5. Never pass `--no-gpg-sign` for local commits; if GPG fails, stop and fix it.
+6. After publish, confirm `verification.verified=true` (the script prints this).
+
+When merging PRs, prefer **squash** (`gh pr merge --squash --delete-branch`) so
+the land commit on `main` is also GitHub-signed/Verified and history stays
+linear. Use `gh pr merge --merge` only when multi-commit history must be kept
+(original SHAs preserved). Avoid GitHub **rebase** merges when Verified history
+matters: rebase-merge rewrites commits and drops signatures. Do not rewrite
+protected `main` after merging unless the user explicitly approves; if
+protection is temporarily relaxed, restore force-push and status-check settings
+immediately after the correction.
+
 ## Security & Configuration
 
 Never commit secrets, bearer tokens, signing keys, provider credentials, local
