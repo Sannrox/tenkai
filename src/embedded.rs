@@ -11,7 +11,7 @@ use crate::pb::sekai::{
     ActionResult, ActionTypeDef, Decision, Lease, Link, Object, ObjectChange, ObjectType,
 };
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 pub struct EmbeddedStore {
     connection: Mutex<Connection>,
@@ -122,10 +122,13 @@ impl EmbeddedStore {
     }
 
     pub fn create(&self, object: Object) -> std::result::Result<Object, tonic::Status> {
-        let connection = self
+        let mut connection = self
             .connection()
             .map_err(|error| tonic::Status::internal(error.to_string()))?;
-        let changed = connection
+        let tx = connection
+            .transaction()
+            .map_err(|error| tonic::Status::internal(error.to_string()))?;
+        let changed = tx
             .execute(
                 "INSERT OR IGNORE INTO embedded_objects(id,kind,payload) VALUES(?1,?2,?3)",
                 params![object.id, object.kind, object.encode_to_vec()],
@@ -137,6 +140,10 @@ impl EmbeddedStore {
                 object.id
             )));
         }
+        replace_object_properties(&tx, &object)
+            .map_err(|error| tonic::Status::internal(error.to_string()))?;
+        tx.commit()
+            .map_err(|error| tonic::Status::internal(error.to_string()))?;
         Ok(object)
     }
 
@@ -149,6 +156,7 @@ impl EmbeddedStore {
              ON CONFLICT(id) DO UPDATE SET kind=excluded.kind,payload=excluded.payload",
             params![object.id, object.kind, object.encode_to_vec()],
         )?;
+        replace_object_properties(&tx, &object)?;
         if let Some(previous) = previous {
             record_changes(&tx, &previous, &object, &self.principal)?;
         }
@@ -176,6 +184,10 @@ impl EmbeddedStore {
         let tx = connection.transaction()?;
         tx.execute(
             "DELETE FROM embedded_links WHERE from_id=?1 OR to_id=?1",
+            [id],
+        )?;
+        tx.execute(
+            "DELETE FROM embedded_object_properties WHERE object_id=?1",
             [id],
         )?;
         tx.execute("DELETE FROM embedded_objects WHERE id=?1", [id])?;
@@ -257,17 +269,25 @@ impl EmbeddedStore {
             .collect()
     }
 
+    /// Load objects of `kind` with property `key=value` via the property index.
+    /// Does not scan the full kind set. Fails closed when kind or key is empty.
     pub fn find_by_property(&self, kind: &str, key: &str, value: &str) -> Result<Vec<Object>> {
-        Ok(self
-            .list_kind(kind)?
-            .into_iter()
-            .filter(|object| {
-                object
-                    .properties
-                    .get(key)
-                    .is_some_and(|stored| stored == value)
-            })
-            .collect())
+        anyhow::ensure!(
+            !kind.trim().is_empty() && !key.trim().is_empty(),
+            "find_by_property requires non-empty kind and key"
+        );
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT o.payload
+             FROM embedded_objects o
+             INNER JOIN embedded_object_properties p ON p.object_id = o.id
+             WHERE p.kind = ?1 AND p.key = ?2 AND p.value = ?3
+             ORDER BY o.id",
+        )?;
+        let payloads = statement
+            .query_map(params![kind, key, value], |row| row.get::<_, Vec<u8>>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        decode_many(payloads, "object")
     }
 
     pub fn list_kind(&self, kind: &str) -> Result<Vec<Object>> {
@@ -603,7 +623,7 @@ fn migrate(connection: &mut Connection) -> Result<()> {
              key TEXT PRIMARY KEY, value TEXT NOT NULL
          );",
     )?;
-    let found = connection
+    let mut found = connection
         .query_row(
             "SELECT value FROM embedded_metadata WHERE key='schema_version'",
             [],
@@ -625,6 +645,16 @@ fn migrate(connection: &mut Connection) -> Result<()> {
                  id TEXT PRIMARY KEY, kind TEXT NOT NULL, payload BLOB NOT NULL
              );
              CREATE INDEX embedded_objects_kind ON embedded_objects(kind,id);
+             CREATE TABLE embedded_object_properties (
+                 object_id TEXT NOT NULL,
+                 kind TEXT NOT NULL,
+                 key TEXT NOT NULL,
+                 value TEXT NOT NULL,
+                 PRIMARY KEY (object_id, key),
+                 FOREIGN KEY (object_id) REFERENCES embedded_objects(id) ON DELETE CASCADE
+             );
+             CREATE INDEX embedded_object_properties_lookup
+                 ON embedded_object_properties(kind, key, value, object_id);
              CREATE TABLE embedded_links (
                  id TEXT PRIMARY KEY, from_id TEXT NOT NULL, to_id TEXT NOT NULL,
                  relation TEXT NOT NULL, payload BLOB NOT NULL
@@ -650,9 +680,77 @@ fn migrate(connection: &mut Connection) -> Result<()> {
                  payload BLOB NOT NULL
              );
              CREATE INDEX embedded_changes_object ON embedded_changes(object_id,timestamp,id);
-             INSERT INTO embedded_metadata(key,value) VALUES('schema_version','1');
+             INSERT INTO embedded_metadata(key,value) VALUES('schema_version','2');
              COMMIT;",
         )?;
+        found = 2;
+    }
+    if found == 1 {
+        // Property index for environment-scoped (and general) property queries.
+        // Create the table, backfill, then advance the version in one transaction
+        // so a partial upgrade cannot leave schema_version=2 without an index.
+        let tx = connection.transaction()?;
+        tx.execute_batch(
+            "CREATE TABLE embedded_object_properties (
+                 object_id TEXT NOT NULL,
+                 kind TEXT NOT NULL,
+                 key TEXT NOT NULL,
+                 value TEXT NOT NULL,
+                 PRIMARY KEY (object_id, key),
+                 FOREIGN KEY (object_id) REFERENCES embedded_objects(id) ON DELETE CASCADE
+             );
+             CREATE INDEX embedded_object_properties_lookup
+                 ON embedded_object_properties(kind, key, value, object_id);",
+        )?;
+        backfill_object_properties(&tx)?;
+        tx.execute(
+            "UPDATE embedded_metadata SET value=?1 WHERE key='schema_version'",
+            [SCHEMA_VERSION.to_string()],
+        )?;
+        tx.commit()?;
+        found = 2;
+    }
+    debug_assert_eq!(found, SCHEMA_VERSION);
+    let _ = found;
+    Ok(())
+}
+
+fn replace_object_properties(connection: &Connection, object: &Object) -> Result<()> {
+    connection.execute(
+        "DELETE FROM embedded_object_properties WHERE object_id=?1",
+        [&object.id],
+    )?;
+    for (key, value) in &object.properties {
+        connection.execute(
+            "INSERT INTO embedded_object_properties(object_id, kind, key, value)
+             VALUES(?1, ?2, ?3, ?4)",
+            params![object.id, object.kind, key, value],
+        )?;
+    }
+    Ok(())
+}
+
+fn backfill_object_properties(connection: &Connection) -> Result<()> {
+    let mut statement =
+        connection.prepare("SELECT id, kind, payload FROM embedded_objects ORDER BY id")?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (id, kind, payload) in rows {
+        let object = Object::decode(payload.as_slice()).with_context(|| {
+            format!("decoding embedded object {id} for property index backfill")
+        })?;
+        anyhow::ensure!(
+            object.id == id && object.kind == kind,
+            "embedded object {id} payload identity does not match row identity"
+        );
+        replace_object_properties(connection, &object)?;
     }
     Ok(())
 }
@@ -812,6 +910,167 @@ mod tests {
                 .fencing_token,
             lease.fencing_token
         );
+    }
+
+    #[test]
+    fn find_by_property_is_environment_scoped_and_fail_closed() {
+        let store = EmbeddedStore::open_in_memory().unwrap();
+        for (id, env, status) in [
+            ("plan-a1", "env_a", "computed"),
+            ("plan-a2", "env_a", "running"),
+            ("plan-b1", "env_b", "computed"),
+            ("plan-c1", "env_c", "succeeded"),
+        ] {
+            store
+                .create(Object {
+                    id: id.into(),
+                    kind: "tenkai.plan".into(),
+                    name: id.into(),
+                    properties: [
+                        ("environment".into(), env.into()),
+                        ("status".into(), status.into()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        let env_a = store
+            .find_by_property("tenkai.plan", "environment", "env_a")
+            .unwrap();
+        assert_eq!(env_a.len(), 2);
+        assert!(env_a.iter().all(
+            |object| object.properties.get("environment").map(String::as_str) == Some("env_a")
+        ));
+        assert!(!env_a.iter().any(
+            |object| object.properties.get("environment").map(String::as_str) == Some("env_b")
+        ));
+        let empty = store
+            .find_by_property("tenkai.plan", "environment", "missing")
+            .unwrap();
+        assert!(empty.is_empty());
+        assert!(
+            store
+                .find_by_property("", "environment", "env_a")
+                .unwrap_err()
+                .to_string()
+                .contains("non-empty")
+        );
+        assert!(
+            store
+                .find_by_property("tenkai.plan", "", "env_a")
+                .unwrap_err()
+                .to_string()
+                .contains("non-empty")
+        );
+
+        // Property updates keep the index coherent.
+        let mut updated = store.get("plan-a1").unwrap().unwrap();
+        updated
+            .properties
+            .insert("environment".into(), "env_b".into());
+        store.put(updated).unwrap();
+        assert_eq!(
+            store
+                .find_by_property("tenkai.plan", "environment", "env_a")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .find_by_property("tenkai.plan", "environment", "env_b")
+                .unwrap()
+                .len(),
+            2
+        );
+        store.delete("plan-b1").unwrap();
+        assert_eq!(
+            store
+                .find_by_property("tenkai.plan", "environment", "env_b")
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn migrates_v1_databases_and_backfills_property_index() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", "ON")
+            .unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE embedded_metadata (
+                     key TEXT PRIMARY KEY, value TEXT NOT NULL
+                 );
+                 CREATE TABLE embedded_objects (
+                     id TEXT PRIMARY KEY, kind TEXT NOT NULL, payload BLOB NOT NULL
+                 );
+                 CREATE INDEX embedded_objects_kind ON embedded_objects(kind,id);
+                 CREATE TABLE embedded_links (
+                     id TEXT PRIMARY KEY, from_id TEXT NOT NULL, to_id TEXT NOT NULL,
+                     relation TEXT NOT NULL, payload BLOB NOT NULL
+                 );
+                 CREATE TABLE embedded_schema_types (
+                     name TEXT PRIMARY KEY, payload BLOB NOT NULL
+                 );
+                 CREATE TABLE embedded_action_types (
+                     name TEXT PRIMARY KEY, payload BLOB NOT NULL
+                 );
+                 CREATE TABLE embedded_leases (
+                     namespace TEXT NOT NULL, lease_key TEXT NOT NULL, payload BLOB NOT NULL,
+                     PRIMARY KEY(namespace,lease_key)
+                 );
+                 CREATE TABLE embedded_decisions (
+                     id TEXT PRIMARY KEY, timestamp INTEGER NOT NULL, actor TEXT NOT NULL,
+                     action TEXT NOT NULL, payload BLOB NOT NULL
+                 );
+                 CREATE TABLE embedded_changes (
+                     id TEXT PRIMARY KEY, object_id TEXT NOT NULL, timestamp INTEGER NOT NULL,
+                     payload BLOB NOT NULL
+                 );
+                 INSERT INTO embedded_metadata(key,value) VALUES('schema_version','1');",
+            )
+            .unwrap();
+        let object = Object {
+            id: "tenkai:plan:legacy".into(),
+            kind: "tenkai.plan".into(),
+            name: "legacy".into(),
+            properties: [
+                ("environment".into(), "prod".into()),
+                ("status".into(), "computed".into()),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        connection
+            .execute(
+                "INSERT INTO embedded_objects(id,kind,payload) VALUES(?1,?2,?3)",
+                params![object.id, object.kind, object.encode_to_vec()],
+            )
+            .unwrap();
+        migrate(&mut connection).unwrap();
+        let version: String = connection
+            .query_row(
+                "SELECT value FROM embedded_metadata WHERE key='schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "2");
+        let store = EmbeddedStore {
+            connection: Mutex::new(connection),
+            principal: "test".into(),
+        };
+        let found = store
+            .find_by_property("tenkai.plan", "environment", "prod")
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, "tenkai:plan:legacy");
     }
 
     #[test]

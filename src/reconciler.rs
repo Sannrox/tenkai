@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::apply;
 use crate::client::Ctx;
-use crate::ontology::{KIND_ENVIRONMENT, KIND_PLAN};
+use crate::ontology::KIND_ENVIRONMENT;
 use crate::plan::{self, PlanState};
 use crate::reconcile_fence::{FenceAdmission, FenceGuard, ReconcileTickFence};
 
@@ -489,24 +489,17 @@ impl Reconciler {
     /// Return the oldest executable plan visible to this environment in the
     /// current operational authority. The server enforces environment scope
     /// before calling this application operation.
+    ///
+    /// Plan work selection is **environment-scoped** (property-indexed query),
+    /// not a full plan catalog scan.
     pub async fn pending_work(&self, environment: &str) -> Result<Option<plan::Plan>> {
         let mut ctx = self.ctx.clone();
-        let mut candidates = Vec::new();
-        for object in ctx.list_kind(KIND_PLAN).await? {
-            if object
-                .properties
-                .get("environment")
-                .is_some_and(|value| value == environment)
-                && object
-                    .properties
-                    .get("status")
-                    .is_some_and(|value| value == "computed" || value == "running")
-            {
-                candidates.push(plan::load(&mut ctx, &object.id).await?);
-            }
-        }
-        candidates.sort_by_key(|candidate| candidate.created_at);
-        Ok(candidates.into_iter().next())
+        plan::oldest_for_environment(
+            &mut ctx,
+            environment,
+            &[PlanState::Computed, PlanState::Running],
+        )
+        .await
     }
 
     pub async fn check_provider_health(&self) -> Result<()> {
@@ -630,22 +623,14 @@ async fn reconcile_environment(
     approval_trust_roots: Option<&std::path::Path>,
 ) -> Result<EnvironmentStatus> {
     if runtime_managed {
-        let mut computed = Vec::new();
-        for object in ctx.list_kind(KIND_PLAN).await? {
-            if object
-                .properties
-                .get("environment")
-                .is_some_and(|value| value == environment)
-                && object
-                    .properties
-                    .get("status")
-                    .is_some_and(|value| value == "computed" || value == "running")
-            {
-                computed.push(plan::load(ctx, &object.id).await?);
-            }
-        }
-        computed.sort_by_key(|candidate| candidate.created_at);
-        if let Some(plan) = computed.into_iter().next() {
+        // Environment-scoped plan query (not a full-kind scan).
+        if let Some(plan) = plan::oldest_for_environment(
+            ctx,
+            environment,
+            &[PlanState::Computed, PlanState::Running],
+        )
+        .await?
+        {
             return Ok(EnvironmentStatus::AwaitingRuntime {
                 plan_id: plan.id,
                 steps: plan.steps.len(),
@@ -666,26 +651,18 @@ async fn reconcile_environment(
     let approval_required =
         unapproved_development_reason.is_none() || environment != "local" || !ctx.is_embedded();
     let stored = if approval_required {
+        // Environment-scoped plan query (not a full-kind scan).
         let mut computed = Vec::new();
-        for object in ctx.list_kind(KIND_PLAN).await? {
-            if object
-                .properties
-                .get("environment")
-                .is_some_and(|value| value == environment)
-                && object
-                    .properties
-                    .get("status")
-                    .is_some_and(|value| value == "computed")
+        for candidate in
+            plan::list_for_environment(ctx, environment, Some(&[PlanState::Computed])).await?
+        {
+            if !candidate.steps.is_empty()
+                && apply::validate_preconditions(ctx, &candidate).await.is_ok()
             {
-                let candidate = plan::load(ctx, &object.id).await?;
-                if !candidate.steps.is_empty()
-                    && apply::validate_preconditions(ctx, &candidate).await.is_ok()
-                {
-                    computed.push(candidate);
-                }
+                computed.push(candidate);
             }
         }
-        computed.sort_by_key(|candidate| candidate.created_at);
+        // list_for_environment already orders by created_at ascending.
         match computed.into_iter().next() {
             Some(stored) => stored,
             None => plan::create(ctx, environment).await?,
@@ -760,21 +737,8 @@ async fn reconcile_environment(
 /// Deterministically terminate plans orphaned by a stopped controller. An active
 /// generation-fenced lease proves another process still owns the environment.
 async fn recover_or_detect_active_plan(ctx: &mut Ctx, environment: &str) -> Result<bool> {
-    let plans = ctx.list_kind(KIND_PLAN).await?;
-    let mut running = Vec::new();
-    for object in plans {
-        if object
-            .properties
-            .get("environment")
-            .is_some_and(|value| value == environment)
-            && object
-                .properties
-                .get("status")
-                .is_some_and(|value| value == "running")
-        {
-            running.push(plan::load(ctx, &object.id).await?);
-        }
-    }
+    // Environment-scoped plan query (not a full-kind scan).
+    let running = plan::list_for_environment(ctx, environment, Some(&[PlanState::Running])).await?;
     if running.is_empty() {
         return Ok(false);
     }
@@ -796,6 +760,8 @@ async fn recover_or_detect_active_plan(ctx: &mut Ctx, environment: &str) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::Ctx;
+    use crate::plan::{self, Plan, PlanState};
 
     fn config() -> Config {
         Config {
@@ -809,6 +775,115 @@ mod tests {
             fence_ttl_ms: 30_000,
             instance_id: "reconciler-test".into(),
         }
+    }
+
+    fn test_plan(env: &str, created_at: i64, state: PlanState) -> Plan {
+        use crate::ontology::plan_id;
+        use crate::plan::{Action, DesiredStateInput, PLAN_FORMAT_VERSION, ReleasePin, Step};
+        use sha2::{Digest as _, Sha256};
+
+        let inputs = vec![DesiredStateInput {
+            product: "api".into(),
+            channel: "stable".into(),
+            channel_id: "tenkai:channel:api/stable".into(),
+            desired_version: "2.0.0".into(),
+            release_id: "tenkai:release:api@2.0.0".into(),
+            release_digest: "target-digest".into(),
+            artifact_digest: "target-artifact-digest".into(),
+            deployed_version: Some("1.0.0".into()),
+        }];
+        let mut steps = vec![Step {
+            id: String::new(),
+            order: 0,
+            product: "api".into(),
+            action: Action::Upgrade,
+            from: Some("1.0.0".into()),
+            to: "2.0.0".into(),
+            release_id: "tenkai:release:api@2.0.0".into(),
+            release_digest: "target-digest".into(),
+            artifact_digest: "target-artifact-digest".into(),
+            workdir: "/srv/api".into(),
+            restore: Some(ReleasePin {
+                release_id: "tenkai:release:api@1.0.0".into(),
+                digest: "restore-digest".into(),
+                artifact_digest: "restore-artifact-digest".into(),
+                workdir: "/srv/api".into(),
+            }),
+        }];
+        let mut normalized = steps.clone();
+        for step in &mut normalized {
+            step.id.clear();
+        }
+        let content_id = format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&(PLAN_FORMAT_VERSION, env, created_at, &inputs, &normalized))
+                    .unwrap()
+            )
+        );
+        let id = plan_id(env, created_at, &content_id);
+        steps[0].id = format!("{id}:step:0");
+        Plan {
+            format_version: PLAN_FORMAT_VERSION,
+            id,
+            content_id,
+            environment: env.into(),
+            created_at,
+            inputs,
+            steps,
+            state,
+            gates_skipped: None,
+            status_detail: String::new(),
+            maintenance_blocked: false,
+            prior_warnings: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_work_selects_oldest_env_plan_only() {
+        let database = std::env::temp_dir().join(format!(
+            "tenkai-pending-work-{}-{}.db",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let _ = std::fs::remove_file(&database);
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        let env_a_old = test_plan("env_a", 100, PlanState::Computed);
+        let env_a_new = test_plan("env_a", 300, PlanState::Running);
+        let env_b = test_plan("env_b", 50, PlanState::Computed);
+        for plan in [&env_a_old, &env_a_new, &env_b] {
+            plan::store(&mut ctx, plan).await.unwrap();
+        }
+        for i in 0..30 {
+            let noise = test_plan(&format!("other-{i}"), 1_000 + i, PlanState::Computed);
+            plan::store(&mut ctx, &noise).await.unwrap();
+        }
+
+        let reconciler = Reconciler::new(ctx.clone(), config()).unwrap();
+        let selected = reconciler.pending_work("env_a").await.unwrap().unwrap();
+        assert_eq!(selected.id, env_a_old.id);
+        assert_eq!(selected.environment, "env_a");
+
+        let other = reconciler.pending_work("env_b").await.unwrap().unwrap();
+        assert_eq!(other.id, env_b.id);
+        assert_ne!(other.id, env_a_old.id);
+
+        assert!(
+            reconciler
+                .pending_work("env_missing")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            reconciler
+                .pending_work("")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("required")
+        );
+        let _ = std::fs::remove_file(&database);
     }
 
     #[test]
