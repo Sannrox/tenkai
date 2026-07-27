@@ -643,6 +643,10 @@ impl Ctx {
         key: &str,
         value: &str,
     ) -> Result<Vec<Object>> {
+        anyhow::ensure!(
+            !kind.trim().is_empty() && !key.trim().is_empty(),
+            "find_by_property requires non-empty kind and key"
+        );
         if let Some(store) = self.embedded_store() {
             return store.find_by_property(kind, key, value);
         }

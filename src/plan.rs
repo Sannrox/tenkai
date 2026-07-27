@@ -310,6 +310,56 @@ pub async fn load(ctx: &mut Ctx, id: &str) -> Result<Plan> {
     Plan::from_object(&object)
 }
 
+/// Load plans for one environment without scanning the full plan kind set.
+///
+/// Uses the store property index (`find_by_property` on `environment`). Empty
+/// environment ids fail closed rather than falling back to an unscoped list.
+/// When `statuses` is `Some`, only matching lifecycle states are returned.
+/// Results are ordered by `created_at` ascending (oldest first), matching
+/// reconcile work selection.
+pub async fn list_for_environment(
+    ctx: &mut Ctx,
+    environment: &str,
+    statuses: Option<&[PlanState]>,
+) -> Result<Vec<Plan>> {
+    anyhow::ensure!(
+        !environment.trim().is_empty(),
+        "environment is required for plan work selection"
+    );
+    let objects = ctx
+        .find_by_property(KIND_PLAN, "environment", environment)
+        .await?;
+    let mut plans = Vec::with_capacity(objects.len());
+    for object in objects {
+        let plan = Plan::from_object(&object)?;
+        if plan.environment != environment {
+            bail!(
+                "plan {} property index returned environment {}, expected {environment}",
+                plan.id,
+                plan.environment
+            );
+        }
+        if let Some(allowed) = statuses
+            && !allowed.contains(&plan.state)
+        {
+            continue;
+        }
+        plans.push(plan);
+    }
+    plans.sort_by_key(|plan| plan.created_at);
+    Ok(plans)
+}
+
+/// Oldest plan for `environment` whose status is in `statuses`, or `None`.
+pub async fn oldest_for_environment(
+    ctx: &mut Ctx,
+    environment: &str,
+    statuses: &[PlanState],
+) -> Result<Option<Plan>> {
+    let plans = list_for_environment(ctx, environment, Some(statuses)).await?;
+    Ok(plans.into_iter().next())
+}
+
 fn environment_record(
     existing: Option<Object>,
     name: &str,
@@ -1874,27 +1924,17 @@ async fn latest_plan_for_environment(
     ctx: &mut Ctx,
     env: &str,
 ) -> Result<Option<EnvironmentPlanSummary>> {
-    let plans = ctx.list_kind(KIND_PLAN).await?;
-    let mut best: Option<EnvironmentPlanSummary> = None;
-    for object in plans {
-        let Ok(plan) = Plan::from_object(&object) else {
-            continue;
-        };
-        if plan.environment != env {
-            continue;
-        }
-        let summary = EnvironmentPlanSummary {
+    // Environment-scoped property query — not a full plan catalog scan.
+    let plans = list_for_environment(ctx, env, None).await?;
+    Ok(plans
+        .into_iter()
+        .next_back()
+        .map(|plan| EnvironmentPlanSummary {
             id: plan.id,
             state: plan.state.to_string(),
             created_at: plan.created_at,
             step_count: plan.steps.len(),
-        };
-        match &best {
-            Some(current) if current.created_at >= summary.created_at => {}
-            _ => best = Some(summary),
-        }
-    }
-    Ok(best)
+        }))
 }
 
 #[cfg(test)]
@@ -1959,6 +1999,100 @@ mod tests {
         let plan = example_plan();
         let object = plan.to_object().unwrap();
         assert_eq!(Plan::from_object(&object).unwrap(), plan);
+    }
+
+    fn plan_for(env: &str, created_at: i64, state: PlanState) -> Plan {
+        let mut plan = example_plan();
+        plan.environment = env.into();
+        plan.created_at = created_at;
+        plan.state = state;
+        plan.content_id = content_address(
+            &plan.environment,
+            plan.created_at,
+            &plan.inputs,
+            &plan.steps,
+        )
+        .unwrap();
+        plan.id = plan_id(&plan.environment, plan.created_at, &plan.content_id);
+        plan.steps[0].id = format!("{}:step:0", plan.id);
+        plan
+    }
+
+    #[tokio::test]
+    async fn list_for_environment_scopes_status_and_order() {
+        let database = std::env::temp_dir().join(format!(
+            "tenkai-plan-scope-{}-{}.db",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let _ = std::fs::remove_file(&database);
+        let mut ctx = Ctx::embedded(&database).unwrap();
+
+        let env_a_old = plan_for("env_a", 100, PlanState::Computed);
+        let env_a_new = plan_for("env_a", 200, PlanState::Running);
+        let env_a_done = plan_for("env_a", 50, PlanState::Succeeded);
+        let env_b = plan_for("env_b", 10, PlanState::Computed);
+        for plan in [&env_a_old, &env_a_new, &env_a_done, &env_b] {
+            store(&mut ctx, plan).await.unwrap();
+        }
+
+        // Noise: many other environments must not affect env_a selection.
+        for i in 0..40 {
+            let noise = plan_for(&format!("noise-{i}"), 1_000 + i, PlanState::Computed);
+            store(&mut ctx, &noise).await.unwrap();
+        }
+
+        let executable = list_for_environment(
+            &mut ctx,
+            "env_a",
+            Some(&[PlanState::Computed, PlanState::Running]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            executable
+                .iter()
+                .map(|plan| plan.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![env_a_old.id.as_str(), env_a_new.id.as_str()]
+        );
+        assert!(executable.iter().all(|plan| plan.environment == "env_a"
+            && matches!(plan.state, PlanState::Computed | PlanState::Running)));
+
+        let oldest = oldest_for_environment(
+            &mut ctx,
+            "env_a",
+            &[PlanState::Computed, PlanState::Running],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(oldest.id, env_a_old.id);
+
+        let env_b_only = list_for_environment(
+            &mut ctx,
+            "env_b",
+            Some(&[PlanState::Computed, PlanState::Running]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(env_b_only.len(), 1);
+        assert_eq!(env_b_only[0].id, env_b.id);
+        assert!(!env_b_only.iter().any(|plan| plan.environment == "env_a"));
+
+        let empty = list_for_environment(&mut ctx, "env_missing", Some(&[PlanState::Computed]))
+            .await
+            .unwrap();
+        assert!(empty.is_empty());
+        assert!(
+            list_for_environment(&mut ctx, "", None)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("required")
+        );
+
+        let _ = std::fs::remove_file(&database);
     }
 
     #[test]
