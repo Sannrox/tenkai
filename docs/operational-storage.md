@@ -40,6 +40,16 @@ open a database whose schema is newer than the binary supports. Use
 database and its WAL files sequentially. Stop every writer before
 `tenkaictl restore <source>`. Restore and integrity checks require no provider.
 
+### Embedded object property index
+
+The embedded catalog store (`EmbeddedStore`, schema version **2**) maintains an
+`embedded_object_properties` index for kind+key+value lookups. Plan work
+selection (`pending_work`, reconcile admission, orphan recovery, environment
+plan summary) queries plans **by environment** through that index rather than
+loading every `tenkai.plan` row and filtering in process. Opening a v1 embedded
+database backfills the index and advances the schema version; empty kind/key or
+environment arguments fail closed (no unscoped fallback).
+
 ## Tenant isolation adapter
 
 Community SQLite (`SqliteStore`) is tenant-free. Enterprise hosts that require
