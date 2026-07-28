@@ -31,6 +31,12 @@ pub struct ReleaseDescriptor {
     pub content_path: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishResult {
+    pub release: String,
+    pub message: String,
+}
+
 #[derive(Debug)]
 pub enum CatalogLookupError {
     NotFound { release_id: String },
@@ -651,9 +657,33 @@ pub async fn publish(
     manifest_path: &Path,
     options: &PublishOptions,
 ) -> Result<String> {
+    Ok(publish_impl(ctx, manifest_path, options, false)
+        .await?
+        .message)
+}
+
+pub async fn publish_with_result(
+    ctx: &mut Ctx,
+    manifest_path: &Path,
+    options: &PublishOptions,
+) -> Result<PublishResult> {
+    publish_impl(ctx, manifest_path, options, true).await
+}
+
+async fn publish_impl(
+    ctx: &mut Ctx,
+    manifest_path: &Path,
+    options: &PublishOptions,
+    bounded_result: bool,
+) -> Result<PublishResult> {
     let loaded = manifest::load(manifest_path)?;
     let name = loaded.manifest.product.name.clone();
     let version = loaded.manifest.product.version.clone();
+    let published_spec = format!("{name}@{version}");
+    if bounded_result {
+        crate::command_result::validate_resource_reference("release", &published_spec)
+            .map_err(|message| anyhow::anyhow!(message))?;
+    }
     let digest = manifest::digest(&loaded.raw);
     let artifact_digest =
         manifest::artifact_digest(&loaded.workdir, &loaded.manifest.immutable_inputs())?;
@@ -766,15 +796,16 @@ pub async fn publish(
     ctx.link(&rid, &pid, REL_RELEASE_OF).await?;
 
     if existing_release {
-        Ok(format!(
-            "{name}@{version} already published (digest unchanged)"
-        ))
+        Ok(PublishResult {
+            release: published_spec,
+            message: format!("{name}@{version} already published (digest unchanged)"),
+        })
     } else {
         let trust = verification.description();
-        Ok(format!(
-            "published {name}@{version} ({}, {trust})",
-            &digest[..12]
-        ))
+        Ok(PublishResult {
+            release: published_spec,
+            message: format!("published {name}@{version} ({}, {trust})", &digest[..12]),
+        })
     }
 }
 
