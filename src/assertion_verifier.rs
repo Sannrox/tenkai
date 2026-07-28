@@ -84,8 +84,12 @@ impl JwtVerifierConfig {
             ))
         })?;
         let config: Self = toml::from_str(&raw).map_err(|error| {
+            let location = error
+                .span()
+                .map(|span| format!(" near byte {}", span.start))
+                .unwrap_or_default();
             AuthError::InvalidCredential(format!(
-                "failed to parse JWT trust config {}: {error}",
+                "failed to parse JWT trust config {}{location}",
                 path.display()
             ))
         })?;
@@ -267,6 +271,13 @@ fn validate_claims(
             )));
         }
     };
+    if let (Some(tenant_id), Some(tenkai_tenant)) = (&claims.tenant_id, &claims.tenkai_tenant)
+        && tenant_id != tenkai_tenant
+    {
+        return Err(AuthError::Unauthorized(
+            "JWT contains conflicting tenant claims".into(),
+        ));
+    }
     let tenant_id = claims
         .tenant_id
         .clone()
@@ -542,6 +553,32 @@ mod tests {
     }
 
     #[test]
+    fn wrong_issuer_fails_closed() {
+        let (signing, public_b64) = keypair();
+        let v = verifier(&public_b64);
+        let now = 1_700_000_000_i64;
+        let mut claims = base_claims(now);
+        claims.insert(
+            "iss".into(),
+            serde_json::Value::String("https://forged-issuer.example.test/".into()),
+        );
+        let token = mint_jwt(&signing, &claims, Some("k1"));
+        let err = v.verify(token.as_bytes(), now).unwrap_err().to_string();
+        assert!(err.contains("issuer"), "{err}");
+    }
+
+    #[test]
+    fn malformed_jwt_fails_closed() {
+        let (_, public_b64) = keypair();
+        let v = verifier(&public_b64);
+        let err = v
+            .verify(b"not-a-compact-jwt", 1_700_000_000_i64)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("compact JWT"), "{err}");
+    }
+
+    #[test]
     fn expired_jwt_fails_closed() {
         let (signing, public_b64) = keypair();
         let v = verifier(&public_b64);
@@ -551,6 +588,21 @@ mod tests {
         let token = mint_jwt(&signing, &claims, Some("k1"));
         let err = v.verify(token.as_bytes(), now).unwrap_err().to_string();
         assert!(err.contains("expired"), "{err}");
+    }
+
+    #[test]
+    fn conflicting_tenant_claims_fail_closed() {
+        let (signing, public_b64) = keypair();
+        let v = verifier(&public_b64);
+        let now = 1_700_000_000_i64;
+        let mut claims = base_claims(now);
+        claims.insert(
+            "tenkai_tenant".into(),
+            serde_json::Value::String("tenant-b".into()),
+        );
+        let token = mint_jwt(&signing, &claims, Some("k1"));
+        let err = v.verify(token.as_bytes(), now).unwrap_err().to_string();
+        assert!(err.contains("conflicting tenant"), "{err}");
     }
 
     #[test]

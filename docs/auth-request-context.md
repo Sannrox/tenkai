@@ -160,6 +160,39 @@ Ed25519 keys; live network JWKS/IdP is optional and not default CI.
 
 Community bearer-token mode is unchanged when no extension is loaded.
 
+### `tenkai-server` enterprise JWT configuration
+
+The shipped server enables the reference extension only when
+`TENKAI_JWT_VERIFIER_CONFIG` names a readable, valid trust file in the format
+above:
+
+```sh
+export TENKAI_JWT_VERIFIER_CONFIG=/etc/tenkai/aldunis-jwt-trust.toml
+tenkai-server --with-enterprise-auth --require-enterprise-auth
+```
+
+The file contains public Ed25519 verification keys only. Do not put assertion
+tokens or private signing keys in it. The server loads and validates the file
+before binding its listener, attaches `JwtEnterpriseAuthExtension`, and
+advertises `enterprise_authentication` only after that succeeds.
+`--with-enterprise-auth` and `--require-enterprise-auth` both fail startup with
+an actionable configuration error when the env path is absent or unusable;
+neither flag creates a capability-only claim.
+
+Aldunis assertions must use the exact `audience` configured in the trust file.
+Issuer, audience, signature, expiry, principal, and optional tenant claims are
+verified for every request. Tenant-mode compositions require a verified tenant
+claim and reject caller-selected tenant metadata.
+
+Trust roots are a startup snapshot. For key rotation, publish a trust file that
+temporarily contains both the old and new public keys, restart every server
+replica, switch Aldunis signing to the new key, then remove the old key and
+restart again after all assertions signed by it have expired. An invalid
+rotation fails before listen; rollback restores the previous trust file and
+restarts the server. Configuration errors identify the file and validation
+problem but do not print file contents, assertions, tokens, private keys, or
+customer data.
+
 ## Lifecycle and version compatibility
 
 | Stage | Behavior |
