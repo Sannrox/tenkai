@@ -87,8 +87,14 @@ tenkai-server \
 - Requesting tenant mode against community SQLite **fails startup**.
 - Requesting `--replica-count 2` without a shared-replica-capable store **fails
   startup**.
-- `--with-enterprise-auth` only **advertises** the enterprise authentication
-  capability (host claims an extension is wired). It does not implement OIDC.
+- Enterprise JWT authentication requires
+  `TENKAI_JWT_VERIFIER_CONFIG=/path/to/public-trust.toml`. The server advertises
+  `enterprise_authentication` only after loading a usable
+  `JwtEnterpriseAuthExtension`; `--with-enterprise-auth` cannot make an
+  unsupported capability claim.
+- `--require-enterprise-auth` fails before listen unless the verifier is
+  configured and usable. This static Ed25519 verifier is an Aldunis integration
+  contract, not an OIDC or browser-session implementation.
 
 ## Health and diagnostics
 

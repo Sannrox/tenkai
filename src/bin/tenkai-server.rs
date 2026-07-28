@@ -8,6 +8,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
+use tenkai::assertion_verifier::{JwtAssertionVerifier, JwtEnterpriseAuthExtension};
+use tenkai::auth_context::{
+    AUTH_CONTEXT_CONTRACT_VERSION, AuthHostConfig, EnterpriseAuthExtension,
+};
 use tenkai::postgres_tenant::{
     resolve_reconcile_fence_for_replicas, resolve_server_tenant_store,
     tenant_postgres_store_capabilities,
@@ -19,6 +23,9 @@ use tenkai::runtime_capabilities::{
 };
 use tenkai::server::{ServerConfig, router};
 use tenkai::storage::{OperationalStore, SqliteStore};
+
+const JWT_AUTH_EXTENSION_ID: &str = "auth.jwt.aldunis";
+const JWT_VERIFIER_CONFIG_ENV: &str = "TENKAI_JWT_VERIFIER_CONFIG";
 
 #[derive(Parser)]
 #[command(
@@ -57,7 +64,7 @@ struct Cli {
     /// Minimum operational store migration level required at startup.
     #[arg(long, default_value_t = 1)]
     min_migration_level: u32,
-    /// Advertise enterprise authentication capability (host-wired extension present).
+    /// Require an enterprise JWT verifier configured by TENKAI_JWT_VERIFIER_CONFIG.
     #[arg(long, default_value_t = false)]
     with_enterprise_auth: bool,
     /// Expose unauthenticated `GET /metrics` OpenMetrics on the loopback listener (#137).
@@ -69,6 +76,50 @@ struct Cli {
 enum ProviderMode {
     Embedded,
     Remote,
+}
+
+struct EnterpriseAuthComposition {
+    auth_host: AuthHostConfig,
+    extension: Option<Arc<dyn EnterpriseAuthExtension>>,
+}
+
+fn compose_enterprise_auth(
+    trust_path: Option<&std::path::Path>,
+    requested: bool,
+    require_tenant: bool,
+) -> Result<EnterpriseAuthComposition> {
+    let Some(trust_path) = trust_path else {
+        anyhow::ensure!(
+            !requested,
+            "enterprise authentication requires {JWT_VERIFIER_CONFIG_ENV} to name a JWT trust file containing public verification keys"
+        );
+        return Ok(EnterpriseAuthComposition {
+            auth_host: AuthHostConfig::community(),
+            extension: None,
+        });
+    };
+
+    let verifier = JwtAssertionVerifier::from_path(trust_path).with_context(|| {
+        format!(
+            "loading enterprise JWT trust configuration from {}",
+            trust_path.display()
+        )
+    })?;
+    let audience = verifier.config().audience.clone();
+    let extension: Arc<dyn EnterpriseAuthExtension> =
+        Arc::new(JwtEnterpriseAuthExtension::from_jwt_verifier(
+            JWT_AUTH_EXTENSION_ID,
+            verifier,
+            require_tenant,
+        ));
+    Ok(EnterpriseAuthComposition {
+        auth_host: AuthHostConfig {
+            required_extension_id: Some(JWT_AUTH_EXTENSION_ID.into()),
+            expected_contract_version: AUTH_CONTEXT_CONTRACT_VERSION,
+            expected_audience: Some(audience),
+        },
+        extension: Some(extension),
+    })
 }
 
 #[tokio::main]
@@ -98,7 +149,13 @@ async fn main() -> Result<()> {
         SqliteStore::open(&cli.database)
             .with_context(|| format!("opening {}", cli.database.display()))?,
     );
-    let auth_capabilities = if cli.with_enterprise_auth {
+    let jwt_trust_path = std::env::var_os(JWT_VERIFIER_CONFIG_ENV).map(PathBuf::from);
+    let enterprise_auth = compose_enterprise_auth(
+        jwt_trust_path.as_deref(),
+        cli.with_enterprise_auth || cli.require_enterprise_auth || cli.tenant_mode,
+        cli.tenant_mode,
+    )?;
+    let auth_capabilities = if enterprise_auth.extension.is_some() {
         enterprise_auth_capabilities()
     } else {
         community_auth_capabilities()
@@ -177,8 +234,8 @@ async fn main() -> Result<()> {
             runtime_assignments,
             requirements,
             capabilities: capabilities.clone(),
-            auth_host: tenkai::auth_context::AuthHostConfig::community(),
-            enterprise_auth: None,
+            auth_host: enterprise_auth.auth_host,
+            enterprise_auth: enterprise_auth.extension,
             federation: tenkai::federated_identity::FederationConfig::community(),
             identity_directory: std::sync::Arc::new(
                 tenkai::federated_identity::IdentityDirectory::new(),
@@ -253,4 +310,91 @@ async fn main() -> Result<()> {
         .await
         .context("joining reconciliation task during shutdown")?;
     result.context("serving Tenkai API")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine as _;
+    use ed25519_dalek::SigningKey;
+
+    fn trust_file() -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "tenkai-jwt-trust-{}-{}.toml",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let public_key = base64::engine::general_purpose::STANDARD.encode(
+            SigningKey::from_bytes(&[7_u8; 32])
+                .verifying_key()
+                .as_bytes(),
+        );
+        std::fs::write(
+            &path,
+            format!(
+                "issuer = \"https://aldunis.example.test/\"\naudience = \"tenkai-control-plane\"\nclock_skew_secs = 60\n\n[[keys]]\nkey_id = \"active\"\npublic_key = \"{public_key}\"\n"
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn community_composition_stays_tenant_free_without_trust_config() {
+        let composition = compose_enterprise_auth(None, false, false).unwrap();
+        assert!(composition.extension.is_none());
+        assert_eq!(composition.auth_host, AuthHostConfig::community());
+    }
+
+    #[test]
+    fn requested_enterprise_auth_fails_without_trust_config() {
+        let error = compose_enterprise_auth(None, true, true)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains(JWT_VERIFIER_CONFIG_ENV), "{error}");
+        assert!(!error.contains("token"));
+        assert!(!error.contains("private"));
+    }
+
+    #[test]
+    fn usable_trust_config_wires_required_extension_and_audience() {
+        let path = trust_file();
+        let composition = compose_enterprise_auth(Some(&path), true, true).unwrap();
+        std::fs::remove_file(path).unwrap();
+
+        let extension = composition.extension.unwrap();
+        assert_eq!(extension.extension_id(), JWT_AUTH_EXTENSION_ID);
+        assert_eq!(extension.expected_audience(), "tenkai-control-plane");
+        assert_eq!(
+            composition.auth_host.required_extension_id.as_deref(),
+            Some(JWT_AUTH_EXTENSION_ID)
+        );
+        assert_eq!(
+            composition.auth_host.expected_audience.as_deref(),
+            Some("tenkai-control-plane")
+        );
+    }
+
+    #[test]
+    fn malformed_trust_config_fails_without_echoing_contents() {
+        let path = std::env::temp_dir().join(format!(
+            "tenkai-jwt-malformed-{}-{}.toml",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let marker = "customer-secret-marker";
+        std::fs::write(&path, format!("private_key = \"{marker}\"")).unwrap();
+        let error = compose_enterprise_auth(Some(&path), true, true)
+            .err()
+            .unwrap();
+        std::fs::remove_file(path).unwrap();
+        let diagnostic = format!("{error:#}");
+
+        assert!(
+            diagnostic.contains("loading enterprise JWT trust configuration"),
+            "{diagnostic}"
+        );
+        assert!(!diagnostic.contains(marker));
+    }
 }
