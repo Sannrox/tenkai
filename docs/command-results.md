@@ -43,7 +43,9 @@ The fixed fields are:
   inspection or status reconciliation. A resource kind is at most 64 bytes
   and a complete resource identifier at most 512 bytes. An envelope contains
   at most eight resources. These bounds apply only to this opt-in output
-  contract; existing human-mode identifiers remain compatible.
+  contract; existing human-mode identifiers remain compatible. Publish may
+  return the release followed by `release_provenance` resources whose ids are
+  canonical envelope digests.
 - `counts`: optional bounded step or item counts.
 - `error`: optional fixed `code` and sanitized `message`.
 

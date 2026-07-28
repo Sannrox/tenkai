@@ -30,6 +30,7 @@ pub mod postgres_tenant;
 pub mod providers;
 pub mod reconcile_fence;
 pub mod reconciler;
+pub mod release_provenance;
 pub mod release_signing;
 pub mod routing;
 pub mod runtime_agent;

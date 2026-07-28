@@ -29,6 +29,9 @@ replay-safe receipts documented in
 Typed local adapters can request the bounded
 [machine-readable command result contract](docs/command-results.md) with
 `--output json-v1`.
+Publication can also retain [registered immutable provenance
+envelopes](docs/release-provenance.md) without accepting subject payloads or
+granting external evidence delivery authority.
 
 ## Quickstart
 

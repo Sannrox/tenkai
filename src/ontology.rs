@@ -167,6 +167,21 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
                 ),
                 prop("manifest", true, "Raw manifest as published"),
                 prop("workdir", false, "Absolute workdir for deploy commands"),
+                prop(
+                    "provenance_envelopes",
+                    false,
+                    "Canonical registered immutable provenance envelopes",
+                ),
+                prop(
+                    "provenance_digests",
+                    false,
+                    "Sorted canonical provenance-envelope digests",
+                ),
+                prop(
+                    "provenance_projections",
+                    false,
+                    "Bounded payload-free inspection projections",
+                ),
             ],
         ),
         object_type(

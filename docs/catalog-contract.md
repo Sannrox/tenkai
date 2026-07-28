@@ -27,6 +27,10 @@ promotion. The current sekai-backed compatibility adapter keeps its existing
 governed operations; the Tenkai-owned persistence migration must not split
 their authorization, audit, and state writes.
 
+Registered release provenance is an optional immutable Catalog fact. See
+[registered release provenance](release-provenance.md) for its compiled profile
+registry, canonical digest, replay, inspection, and authority boundaries.
+
 ## Transport conformance
 
 Embedded and remote adapters must run the same behavior cases:
