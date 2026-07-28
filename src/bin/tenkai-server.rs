@@ -86,6 +86,16 @@ struct EnterpriseAuthComposition {
     extension: Option<Arc<dyn EnterpriseAuthExtension>>,
 }
 
+async fn run_blocking_startup<T, F>(operation: &'static str, work: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(work)
+        .await
+        .with_context(|| format!("joining blocking startup operation: {operation}"))?
+}
+
 fn compose_enterprise_auth(
     trust_path: Option<&std::path::Path>,
     requested: bool,
@@ -188,8 +198,11 @@ async fn main() -> Result<()> {
     }
 
     // Tenant mode requires durable Postgres hub store (#127): feature + URL.
-    let tenant_store = resolve_server_tenant_store(cli.tenant_mode)
-        .context("resolving tenant operational store for tenant mode")?;
+    let tenant_store = run_blocking_startup("tenant operational store", move || {
+        resolve_server_tenant_store(cli.tenant_mode).map_err(Into::into)
+    })
+    .await
+    .context("resolving tenant operational store for tenant mode")?;
     if let Some(ref tenant) = tenant_store {
         capabilities.components.push(tenant.runtime_capabilities());
         // Keep sqlite component for community ops tables; tenant adapter is additive.
@@ -237,8 +250,11 @@ async fn main() -> Result<()> {
     .with_runtime_environments(runtime_environments);
     // Multi-host tick fencing (#129 / #135): durable Postgres fence when
     // TENKAI_POSTGRES_URL + features postgres; otherwise process-shared only.
-    if let Some(fence) = resolve_reconcile_fence_for_replicas(cli.replica_count)
-        .context("resolving multi-replica reconcile tick fence")?
+    if let Some(fence) = run_blocking_startup("multi-replica reconcile tick fence", move || {
+        resolve_reconcile_fence_for_replicas(cli.replica_count).map_err(Into::into)
+    })
+    .await
+    .context("resolving multi-replica reconcile tick fence")?
     {
         reconciler = reconciler.with_shared_fence(fence);
     }
@@ -416,5 +432,23 @@ mod tests {
             "{diagnostic}"
         );
         assert!(!diagnostic.contains(marker));
+    }
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn postgres_adapter_initialization_runs_outside_the_async_runtime() {
+        let result = run_blocking_startup("postgres startup regression", || {
+            let config = tenkai::postgres_tenant::PostgresTenantConfig::new(
+                "postgres://127.0.0.1:1/tenkai",
+            )?;
+            Ok(config.open())
+        })
+        .await
+        .expect("blocking startup task must join without a nested-runtime panic");
+
+        assert!(
+            result.is_err(),
+            "the deterministic closed port must not connect"
+        );
     }
 }
