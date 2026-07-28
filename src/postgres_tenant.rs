@@ -310,6 +310,19 @@ impl PostgresTenantOperationalStore {
             .reset_development_fixture(fixture_id, context.principal_id(), &context.request_id)
             .map_err(|error| IsolationError::Contract(error.to_string()))
     }
+
+    pub fn development_fixture_environment_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        environment_id: &str,
+    ) -> std::result::Result<
+        Option<crate::development_fixtures::FixtureEnvironmentProjection>,
+        IsolationError,
+    > {
+        self.partition_for(context)?
+            .development_fixture_environment(environment_id)
+            .map_err(|error| IsolationError::Contract(error.to_string()))
+    }
 }
 
 /// Durable [`crate::reconcile_fence::ReconcileTickFence`] on hub Postgres (#135).
@@ -435,6 +448,21 @@ impl TenantOperationalStore for PostgresTenantOperationalStore {
         fixture_id: &str,
     ) -> std::result::Result<crate::development_fixtures::FixtureResetResult, IsolationError> {
         PostgresTenantOperationalStore::reset_development_fixture_for(self, context, fixture_id)
+    }
+
+    fn development_fixture_environment_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        environment_id: &str,
+    ) -> std::result::Result<
+        Option<crate::development_fixtures::FixtureEnvironmentProjection>,
+        IsolationError,
+    > {
+        PostgresTenantOperationalStore::development_fixture_environment_for(
+            self,
+            context,
+            environment_id,
+        )
     }
 }
 
@@ -577,6 +605,24 @@ impl PostgresTenantPartition {
         #[cfg(not(feature = "postgres"))]
         {
             let _ = (fixture_id, actor, request_id);
+            Err(StoreError::AdapterUnavailable(
+                "postgres feature disabled".into(),
+            ))
+        }
+    }
+
+    pub fn development_fixture_environment(
+        &self,
+        environment_id: &str,
+    ) -> Result<Option<crate::development_fixtures::FixtureEnvironmentProjection>> {
+        #[cfg(feature = "postgres")]
+        {
+            self.inner
+                .development_fixture_environment(&self.schema, environment_id)
+        }
+        #[cfg(not(feature = "postgres"))]
+        {
+            let _ = environment_id;
             Err(StoreError::AdapterUnavailable(
                 "postgres feature disabled".into(),
             ))
@@ -740,6 +786,13 @@ impl OperationalStore for PostgresTenantPartition {
     ) -> Result<crate::development_fixtures::FixtureResetResult> {
         self.inner
             .reset_development_fixture(&self.schema, fixture_id, actor, request_id)
+    }
+    fn development_fixture_environment(
+        &self,
+        environment_id: &str,
+    ) -> Result<Option<crate::development_fixtures::FixtureEnvironmentProjection>> {
+        self.inner
+            .development_fixture_environment(&self.schema, environment_id)
     }
     fn runtime_capabilities(&self) -> ComponentCapabilities {
         tenant_postgres_store_capabilities()
@@ -1219,15 +1272,17 @@ mod postgres_imp {
                     ("environment", &fixture.map.environments),
                     ("plan", &fixture.map.plans),
                 ] {
-                    for id in ids {
+                    for (object_order, id) in ids.iter().enumerate() {
+                        let object_order = object_order as i64;
                         tx.execute(
-                            "INSERT INTO development_fixture_objects(fixture_id,fixture_digest,object_kind,object_id)
-                             VALUES($1,$2,$3,$4)",
+                            "INSERT INTO development_fixture_objects(fixture_id,fixture_digest,object_kind,object_id,object_order)
+                             VALUES($1,$2,$3,$4,$5)",
                             &[
                                 &fixture.map.fixture_id,
                                 &fixture.map.fixture_digest,
                                 &kind,
                                 &id,
+                                &object_order,
                             ],
                         )
                         .map_err(pg)?;
@@ -1328,6 +1383,85 @@ mod postgres_imp {
                     fixture_id: fixture_id.into(),
                     removed,
                 })
+            })
+        }
+
+        pub fn development_fixture_environment(
+            &self,
+            schema: &str,
+            environment_id: &str,
+        ) -> Result<Option<crate::development_fixtures::FixtureEnvironmentProjection>> {
+            self.with_schema(schema, |tx| {
+                let fixture = tx
+                    .query_opt(
+                        "SELECT fixture_id FROM development_fixture_objects
+                         WHERE object_kind='environment' AND object_id=$1",
+                        &[&environment_id],
+                    )
+                    .map_err(pg)?;
+                let Some(fixture) = fixture else {
+                    return Ok(None);
+                };
+                let fixture_id: String = fixture.get(0);
+                let row = tx
+                    .query_one(
+                        "SELECT id,revision,configuration_json FROM environments WHERE id=$1",
+                        &[&environment_id],
+                    )
+                    .map_err(pg)?;
+                let environment = EnvironmentRecord {
+                    id: row.get(0),
+                    revision: row.get::<_, i64>(1) as u64,
+                    configuration_json: row.get(2),
+                };
+                let channels = tx
+                    .query(
+                        "SELECT c.product,c.name,r.version
+                         FROM development_fixture_objects owned
+                         JOIN channels c ON c.id=owned.object_id
+                         JOIN releases r ON r.id=c.release_id
+                         WHERE owned.fixture_id=$1 AND owned.object_kind='channel'
+                         ORDER BY owned.object_order DESC, c.id",
+                        &[&fixture_id],
+                    )
+                    .map_err(pg)?
+                    .into_iter()
+                    .map(|row| crate::development_fixtures::FixtureChannelProjection {
+                        product: row.get(0),
+                        channel: row.get(1),
+                        head: row.get(2),
+                    })
+                    .collect();
+                let latest_plan = tx
+                    .query_opt(
+                        "SELECT p.id,p.environment_id,p.format_version,p.content_digest,p.plan_json,p.status,p.status_detail
+                         FROM development_fixture_objects owned
+                         JOIN plans p ON p.id=owned.object_id
+                         WHERE owned.fixture_id=$1 AND owned.object_kind='plan' AND p.environment_id=$2
+                         ORDER BY owned.object_order DESC, p.id DESC
+                         LIMIT 1",
+                        &[&fixture_id, &environment_id],
+                    )
+                    .map_err(pg)?
+                    .map(|row| {
+                        let status: String = row.get(5);
+                        Ok::<PlanRecord, StoreError>(PlanRecord {
+                            id: row.get(0),
+                            environment_id: row.get(1),
+                            format_version: row.get::<_, i32>(2) as u32,
+                            content_digest: row.get(3),
+                            plan_json: row.get(4),
+                            status: PlanStatus::parse(&status)?,
+                            status_detail: row.get(6),
+                        })
+                    })
+                    .transpose()?;
+                crate::development_fixtures::parse_environment_projection(
+                    environment,
+                    channels,
+                    latest_plan,
+                )
+                .map(Some)
             })
         }
 
@@ -2650,8 +2784,31 @@ mod postgres_imp {
             CREATE TABLE IF NOT EXISTS development_fixture_objects (
                 fixture_id TEXT NOT NULL, fixture_digest TEXT NOT NULL,
                 object_kind TEXT NOT NULL, object_id TEXT NOT NULL,
+                object_order BIGINT NOT NULL DEFAULT 0,
                 PRIMARY KEY(object_kind, object_id)
             );
+            DO $fixture_migration$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = current_schema()
+                      AND table_name = 'development_fixture_objects'
+                      AND column_name = 'object_order'
+                ) THEN
+                    DELETE FROM plans WHERE id IN
+                        (SELECT object_id FROM development_fixture_objects WHERE object_kind='plan');
+                    DELETE FROM channels WHERE id IN
+                        (SELECT object_id FROM development_fixture_objects WHERE object_kind='channel');
+                    DELETE FROM environments WHERE id IN
+                        (SELECT object_id FROM development_fixture_objects WHERE object_kind='environment');
+                    DELETE FROM releases WHERE id IN
+                        (SELECT object_id FROM development_fixture_objects WHERE object_kind='release');
+                    DELETE FROM development_fixture_objects;
+                    ALTER TABLE development_fixture_objects
+                        ADD COLUMN object_order BIGINT NOT NULL DEFAULT 0;
+                END IF;
+            END
+            $fixture_migration$;
             CREATE INDEX IF NOT EXISTS development_fixture_objects_fixture
                 ON development_fixture_objects(fixture_id, object_kind);
             ",

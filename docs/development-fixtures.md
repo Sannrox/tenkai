@@ -75,7 +75,7 @@ X-Tenkai-Assertion: <short-lived assertion>
 
 The authenticated context supplies the tenant. The document has no tenant
 field, and caller tenant headers remain forbidden. Names are placed in a
-reserved `fx-<fixture-id>-...` namespace. Repeating byte-equivalent semantic
+reserved `fx-<hex-encoded-fixture-id>-...` namespace. Repeating byte-equivalent semantic
 input is idempotent; reusing an identity with different content returns a
 conflict without partial writes.
 
@@ -89,6 +89,24 @@ Only sanitized projections are admitted:
 The importer cannot approve, apply, reconcile, create leases or receipts,
 trigger rollback, or bypass release signing and plan-approval rules.
 
+## Read projections
+
+Existing tenant read routes expose imported fixtures without registering them
+with the reconciler:
+
+- `GET /v1/environments` returns fixture descriptions and stable identifiers;
+- environment detail and status synthesize sanitized channel/release posture
+  from the immutable fixture projection (the last declared channel is shown
+  when a v1 fixture declares multiple channels for one product); and
+- `GET /v1/fleet/status` maps `drifted` and `awaiting_approval` to the existing
+  `behind` aggregate posture while retaining a blocked latest-plan state.
+
+Fixture environments always report no lease and cannot enter runtime work.
+Foreign tenant identifiers retain the normal non-disclosing `404` behavior.
+The schema-8 upgrade invalidates schema-7 development fixtures, which did not
+persist declaration order; run the same idempotent seed command after upgrade
+to recreate them. Ordinary operational records are not affected.
+
 ## Reset and recovery
 
 ```http
@@ -97,7 +115,8 @@ X-Tenkai-Assertion: <short-lived assertion>
 ```
 
 Reset requires the same tenant and an allowlisted service/management principal.
-It deletes only the reserved fixture namespace in reverse dependency order.
+It deletes only objects in the durable fixture-ownership registry, in reverse
+dependency order.
 Reset refuses when leases, receipts, runtime claims, offline imports, or
 rollback state depend on a fixture object.
 

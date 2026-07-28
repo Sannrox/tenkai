@@ -88,6 +88,200 @@ pub struct FixtureResetResult {
     pub removed: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct FixtureEnvironmentProjection {
+    pub environment: EnvironmentRecord,
+    pub posture: String,
+    pub description: String,
+    pub channels: Vec<FixtureChannelProjection>,
+    pub latest_plan: Option<PlanRecord>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FixtureChannelProjection {
+    pub product: String,
+    pub channel: String,
+    pub head: String,
+}
+
+impl FixtureEnvironmentProjection {
+    pub fn list_entry(&self) -> crate::plan::EnvironmentListEntry {
+        let product_count = self
+            .channels
+            .iter()
+            .map(|channel| channel.product.as_str())
+            .collect::<BTreeSet<_>>()
+            .len();
+        crate::plan::EnvironmentListEntry {
+            name: self.environment.id.clone(),
+            id: format!("tenkai:env:{}", self.environment.id),
+            description: self.description.clone(),
+            subscription_count: self.channels.len(),
+            deployed_product_count: if self.posture == "awaiting_approval" {
+                0
+            } else {
+                product_count
+            },
+            lease_held: false,
+        }
+    }
+
+    pub fn status_rows(&self) -> Vec<crate::plan::StatusRow> {
+        self.channels
+            .iter()
+            .map(|projection| {
+                let (deployed, health, error) = match self.posture.as_str() {
+                    "current" => (Some(projection.head.clone()), Some("ok".into()), None),
+                    "unhealthy" => (
+                        Some(projection.head.clone()),
+                        Some("unknown".into()),
+                        Some("sanitized fixture health failure".into()),
+                    ),
+                    "behind" | "drifted" => {
+                        (Some("fixture-previous".into()), Some("ok".into()), None)
+                    }
+                    "awaiting_approval" => (None, None, None),
+                    _ => (None, None, None),
+                };
+                crate::plan::StatusRow {
+                    product: projection.product.clone(),
+                    channel: projection.channel.clone(),
+                    deployed,
+                    health,
+                    error,
+                    head: projection.head.clone(),
+                }
+            })
+            .collect()
+    }
+
+    pub fn inspect_report(&self) -> crate::plan::EnvironmentInspectReport {
+        let subscriptions = self
+            .status_rows()
+            .into_iter()
+            .map(|row| crate::plan::EnvironmentSubscriptionView {
+                state: match self.posture.as_str() {
+                    "current" => "current",
+                    "unhealthy" => "unknown",
+                    "behind" | "drifted" => "behind",
+                    "awaiting_approval" => "missing",
+                    _ => "unknown",
+                }
+                .into(),
+                product: row.product,
+                channel: row.channel,
+                head: row.head,
+                deployed: row.deployed,
+                health: row.health,
+                error: row.error,
+            })
+            .collect();
+        crate::plan::EnvironmentInspectReport {
+            name: self.environment.id.clone(),
+            id: format!("tenkai:env:{}", self.environment.id),
+            description: self.description.clone(),
+            subscriptions,
+            facts: BTreeMap::new(),
+            lease: crate::apply::EnvironmentLeaseInspect {
+                held: false,
+                owner: None,
+                generation: None,
+                expires_at_ms: None,
+                status: "fixture_non_executable".into(),
+            },
+            latest_plan: self.latest_plan.as_ref().map(|plan| {
+                crate::plan::EnvironmentPlanSummary {
+                    id: plan.id.clone(),
+                    state: plan.status.as_str().into(),
+                    created_at: 0,
+                    step_count: 0,
+                }
+            }),
+            execution_note: "Development fixture projection; execution is disabled.".into(),
+        }
+    }
+
+    pub fn fleet_row(&self) -> crate::plan::FleetEnvironmentRow {
+        let product_count = self
+            .channels
+            .iter()
+            .map(|channel| channel.product.as_str())
+            .collect::<BTreeSet<_>>()
+            .len();
+        let (current, behind, missing, unhealthy, health, posture) = match self.posture.as_str() {
+            "current" => (product_count, 0, 0, false, "ok", "current"),
+            "unhealthy" => (product_count, 0, 0, true, "error", "unhealthy"),
+            "behind" | "drifted" => (0, product_count, 0, false, "ok", "behind"),
+            "awaiting_approval" => (0, 0, product_count, false, "ok", "behind"),
+            _ => (0, 0, product_count, false, "n/a", "empty"),
+        };
+        crate::plan::FleetEnvironmentRow {
+            name: self.environment.id.clone(),
+            id: format!("tenkai:env:{}", self.environment.id),
+            description: self.description.clone(),
+            subscription_count: self.channels.len(),
+            products_current: current,
+            products_behind: behind,
+            products_missing: missing,
+            unhealthy,
+            health_summary: health.into(),
+            lease_held: false,
+            latest_plan_state: self
+                .latest_plan
+                .as_ref()
+                .map(|plan| plan.status.as_str().into()),
+            posture: posture.into(),
+        }
+    }
+}
+
+pub fn parse_environment_projection(
+    environment: EnvironmentRecord,
+    channels: Vec<FixtureChannelProjection>,
+    latest_plan: Option<PlanRecord>,
+) -> Result<FixtureEnvironmentProjection, StoreError> {
+    let configuration: serde_json::Value = serde_json::from_str(&environment.configuration_json)
+        .map_err(|error| StoreError::InvalidData {
+            kind: "development_fixture",
+            detail: format!("invalid fixture environment projection: {error}"),
+        })?;
+    if configuration
+        .get("fixture_only")
+        .and_then(|value| value.as_bool())
+        != Some(true)
+    {
+        return invalid("fixture environment projection lacks ownership marker".into());
+    }
+    let posture = configuration
+        .get("posture")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| StoreError::InvalidData {
+            kind: "development_fixture",
+            detail: "fixture environment projection lacks posture".into(),
+        })?
+        .to_string();
+    let description = configuration
+        .get("description")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
+    // A normal environment has at most one active channel subscription per
+    // product. Fixture ownership rows arrive newest-first; retain that same
+    // invariant without narrowing the v1 import contract.
+    let mut projected_products = BTreeSet::new();
+    let channels = channels
+        .into_iter()
+        .filter(|channel| projected_products.insert(channel.product.clone()))
+        .collect();
+    Ok(FixtureEnvironmentProjection {
+        environment,
+        posture,
+        description,
+        channels,
+        latest_plan,
+    })
+}
+
 impl DevelopmentFixture {
     pub fn prepare(&self) -> Result<PreparedDevelopmentFixture, StoreError> {
         if self.contract_version != DEVELOPMENT_FIXTURE_CONTRACT_VERSION {
@@ -361,12 +555,12 @@ mod tests {
 
     #[test]
     fn rejects_unknown_reference_and_executable_posture() {
-        let mut fixture = fixture();
-        fixture.plans[0].environment = "foreign".into();
-        assert!(fixture.prepare().is_err());
-        fixture.plans.clear();
-        fixture.environments[0].posture = "running".into();
-        assert!(fixture.prepare().is_err());
+        let mut invalid_fixture = fixture();
+        invalid_fixture.plans[0].environment = "foreign".into();
+        assert!(invalid_fixture.prepare().is_err());
+        invalid_fixture.plans.clear();
+        invalid_fixture.environments[0].posture = "running".into();
+        assert!(invalid_fixture.prepare().is_err());
     }
 
     #[test]
@@ -458,6 +652,28 @@ mod tests {
             revision: 1,
         };
         assert!(store.promote_channel(&ordinary_channel).is_err());
+    }
+
+    #[test]
+    fn sqlite_projection_selects_last_channel_per_product() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let mut fixture = fixture();
+        fixture.channels.push(FixtureChannel {
+            name: "canary".into(),
+            product: "app".into(),
+            release: "app".into(),
+        });
+        let prepared = fixture.prepare().unwrap();
+        let map = store
+            .import_development_fixture(&prepared, "seed-service", "request-1")
+            .unwrap();
+        let projection = store
+            .development_fixture_environment(&map.environments[0])
+            .unwrap()
+            .unwrap();
+        let rows = projection.status_rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].channel, "fixture-buyer-demo-canary");
     }
 
     #[test]

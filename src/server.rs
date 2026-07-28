@@ -634,11 +634,26 @@ async fn fleet_status(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                 return error_response(StatusCode::FORBIDDEN, error.public_message());
             }
         };
+        let mut fixture_rows = Vec::new();
+        let mut reconciler_ids = Vec::new();
+        for id in &allowed {
+            match tenant_store.development_fixture_environment_for(&context, id) {
+                Ok(Some(projection)) => fixture_rows.push(projection.fleet_row()),
+                Ok(None) => reconciler_ids.push(id.clone()),
+                Err(error) => {
+                    return error_response(StatusCode::FORBIDDEN, error.public_message());
+                }
+            }
+        }
         return match state.reconciler.fleet_status().await {
             Ok(mut report) => {
                 report
                     .environments
-                    .retain(|row| allowed.iter().any(|id| id == &row.name));
+                    .retain(|row| reconciler_ids.iter().any(|id| id == &row.name));
+                report.environments.extend(fixture_rows);
+                report
+                    .environments
+                    .sort_by(|left, right| left.name.cmp(&right.name));
                 let rebuilt = crate::plan::fleet_status_from_rows(report.environments);
                 Json(rebuilt).into_response()
             }
@@ -668,17 +683,23 @@ async fn list_environments(State(state): State<Arc<AppState>>, headers: HeaderMa
         };
         return match tenant_store.list_environment_ids_for(&context) {
             Ok(ids) => {
-                let entries: Vec<crate::plan::EnvironmentListEntry> = ids
-                    .into_iter()
-                    .map(|name| crate::plan::EnvironmentListEntry {
-                        name: name.clone(),
-                        id: format!("tenkai:env:{name}"),
-                        description: String::new(),
-                        subscription_count: 0,
-                        deployed_product_count: 0,
-                        lease_held: false,
-                    })
-                    .collect();
+                let mut entries = Vec::with_capacity(ids.len());
+                for name in ids {
+                    match tenant_store.development_fixture_environment_for(&context, &name) {
+                        Ok(Some(projection)) => entries.push(projection.list_entry()),
+                        Ok(None) => entries.push(crate::plan::EnvironmentListEntry {
+                            name: name.clone(),
+                            id: format!("tenkai:env:{name}"),
+                            description: String::new(),
+                            subscription_count: 0,
+                            deployed_product_count: 0,
+                            lease_held: false,
+                        }),
+                        Err(error) => {
+                            return error_response(StatusCode::FORBIDDEN, error.public_message());
+                        }
+                    }
+                }
                 // Non-leakage: foreign tenant markers never appear.
                 Json(entries).into_response()
             }
@@ -702,6 +723,21 @@ async fn inspect_environment(
     };
     if let Err(response) = require_tenant_scope(&state, &context, Some(&environment)) {
         return *response;
+    }
+    if state.config.requirements.tenant_mode {
+        let Some(tenant_store) = state.tenant_store.as_ref() else {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "tenant mode is enabled but no tenant store is configured",
+            );
+        };
+        match tenant_store.development_fixture_environment_for(&context, &environment) {
+            Ok(Some(projection)) => return Json(projection.inspect_report()).into_response(),
+            Ok(None) => {}
+            Err(error) => {
+                return error_response(StatusCode::FORBIDDEN, error.public_message());
+            }
+        }
     }
     match state.reconciler.inspect_environment(environment).await {
         Ok(report) => Json(report).into_response(),
@@ -732,6 +768,21 @@ async fn environment_status(
     };
     if let Err(response) = require_tenant_scope(&state, &context, Some(&environment)) {
         return *response;
+    }
+    if state.config.requirements.tenant_mode {
+        let Some(tenant_store) = state.tenant_store.as_ref() else {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "tenant mode is enabled but no tenant store is configured",
+            );
+        };
+        match tenant_store.development_fixture_environment_for(&context, &environment) {
+            Ok(Some(projection)) => return Json(projection.status_rows()).into_response(),
+            Ok(None) => {}
+            Err(error) => {
+                return error_response(StatusCode::FORBIDDEN, error.public_message());
+            }
+        }
     }
     match state.reconciler.environment_status(environment).await {
         Ok(rows) => Json(rows).into_response(),
@@ -1931,11 +1982,20 @@ mod tests {
                 "product": "app",
                 "version": "1.0.0",
                 "content_digest": "a".repeat(64)
+            }, {
+                "name": "worker",
+                "product": "worker",
+                "version": "2.0.0",
+                "content_digest": "b".repeat(64)
             }],
             "channels": [{
                 "name": "stable",
                 "product": "app",
                 "release": "app"
+            }, {
+                "name": "canary",
+                "product": "worker",
+                "release": "worker"
             }],
             "environments": [{
                 "name": "prod-eu",
@@ -1990,6 +2050,46 @@ mod tests {
             .unwrap();
         assert_eq!(repeated.status(), StatusCode::OK);
 
+        for (path, expected) in [
+            (
+                "/v1/environments",
+                "fx-62757965722d64656d6f-environment-prod-eu",
+            ),
+            (
+                "/v1/environments/fx-62757965722d64656d6f-environment-prod-eu",
+                "\"state\":\"missing\"",
+            ),
+            (
+                "/v1/environments/fx-62757965722d64656d6f-environment-prod-eu/status",
+                "\"channel\":\"fixture-buyer-demo-canary\"",
+            ),
+            ("/v1/fleet/status", "\"posture\":\"behind\""),
+        ] {
+            let response = fixture_app
+                .clone()
+                .oneshot(
+                    Request::get(path)
+                        .header(
+                            "x-tenkai-assertion",
+                            r#"{"tenant":"tenant-a","principal":"seed-service","kind":"service"}"#,
+                        )
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            let response_body = String::from_utf8(
+                axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap()
+                    .to_vec(),
+            )
+            .unwrap();
+            assert!(response_body.contains(expected), "{path}: {response_body}");
+            assert!(!response_body.contains("management-secret"));
+        }
+
         for assertion in [
             r#"{"tenant":"tenant-a","principal":"human-user"}"#,
             r#"{"tenant":"tenant-a","principal":"other-service","kind":"service"}"#,
@@ -2030,6 +2130,20 @@ mod tests {
         .unwrap();
         assert!(!tenant_b_body.contains("prod-eu"));
         assert!(!tenant_b_body.contains("buyer-demo"));
+        let tenant_b_deep_link = fixture_app
+            .clone()
+            .oneshot(
+                Request::get("/v1/environments/fx-62757965722d64656d6f-environment-prod-eu/status")
+                    .header(
+                        "x-tenkai-assertion",
+                        r#"{"tenant":"tenant-b","principal":"seed-service","kind":"service"}"#,
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(tenant_b_deep_link.status(), StatusCode::NOT_FOUND);
 
         let reset = fixture_app
             .oneshot(
