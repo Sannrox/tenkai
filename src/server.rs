@@ -2087,6 +2087,13 @@ mod tests {
             )
             .unwrap();
             assert!(response_body.contains(expected), "{path}: {response_body}");
+            if path == "/v1/environments/fx-62757965722d64656d6f-environment-prod-eu" {
+                assert!(response_body.contains("\"state\":\"blocked\""));
+                assert!(response_body.contains(
+                    "\"status_detail\":\"blocked development fixture; execution is disabled\""
+                ));
+                assert!(response_body.contains("\"steps\":[]"));
+            }
             assert!(!response_body.contains("management-secret"));
         }
 
@@ -2133,7 +2140,7 @@ mod tests {
         let tenant_b_deep_link = fixture_app
             .clone()
             .oneshot(
-                Request::get("/v1/environments/fx-62757965722d64656d6f-environment-prod-eu/status")
+                Request::get("/v1/environments/fx-62757965722d64656d6f-environment-prod-eu")
                     .header(
                         "x-tenkai-assertion",
                         r#"{"tenant":"tenant-b","principal":"seed-service","kind":"service"}"#,
@@ -2144,6 +2151,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(tenant_b_deep_link.status(), StatusCode::NOT_FOUND);
+        let tenant_b_deep_link_body = String::from_utf8(
+            axum::body::to_bytes(tenant_b_deep_link.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(!tenant_b_deep_link_body.contains("blocked development fixture"));
+        assert!(!tenant_b_deep_link_body.contains("buyer-demo"));
 
         let reset = fixture_app
             .oneshot(

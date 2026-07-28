@@ -211,7 +211,9 @@ tenkaictl env maintenance list prod
 
 `env list` shows every registered environment with subscription and lease
 summary. `env inspect <name>` prints JSON for subscriptions, deployed versions,
-lease/fencing state, and the latest plan—never bearer tokens.
+lease/fencing state, and the latest plan. Latest-plan inspection includes
+sanitized lifecycle detail and at most 256 ordered step summaries; executable
+digests, work directories, payloads, and bearer tokens are not returned.
 
 For a scripted two-environment walkthrough (list/inspect/status), run:
 
