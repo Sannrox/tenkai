@@ -1,11 +1,15 @@
 //! tenkaictl — embedded and remote delivery control-plane CLI.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
+use clap::error::ErrorKind;
 use clap::{Parser, Subcommand, ValueEnum};
 
+use tenkai::command_result::{CommandName, CommandOutcome, CommandResultV1, RetryGuidance};
 use tenkai::{
     apply, canary, catalog, client, dev_sign, inventory, maintenance, ontology, plan, reconciler,
     wave,
@@ -28,6 +32,9 @@ struct Cli {
         global = true
     )]
     database: PathBuf,
+    /// Stable output contract for typed adapters. Human output remains the default.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human, global = true)]
+    output: OutputFormat,
     #[command(subcommand)]
     command: Command,
 }
@@ -36,6 +43,12 @@ struct Cli {
 enum Target {
     Embedded,
     Remote,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum OutputFormat {
+    Human,
+    JsonV1,
 }
 
 #[derive(Subcommand)]
@@ -439,9 +452,137 @@ fn print_steps(steps: &[plan::Step]) {
     }
 }
 
+#[derive(Debug)]
+struct ReportedMachineFailure(CommandResultV1);
+
+impl std::fmt::Display for ReportedMachineFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("machine-readable command failure")
+    }
+}
+
+impl std::error::Error for ReportedMachineFailure {}
+
+fn machine_output_requested(args: &[OsString]) -> bool {
+    args.windows(2).any(|pair| {
+        pair[0] == std::ffi::OsStr::new("--output") && pair[1] == std::ffi::OsStr::new("json-v1")
+    }) || args
+        .iter()
+        .any(|arg| arg == std::ffi::OsStr::new("--output=json-v1"))
+}
+
+fn command_name(command: &Command) -> Option<CommandName> {
+    match command {
+        Command::Publish { .. } => Some(CommandName::Publish),
+        Command::Promote { .. } => Some(CommandName::Promote),
+        Command::Plan { .. } => Some(CommandName::Plan),
+        Command::Apply { .. } => Some(CommandName::Apply),
+        Command::Status { .. } => Some(CommandName::Status),
+        Command::Env {
+            command: EnvCommand::Inspect { .. },
+        } => Some(CommandName::InspectEnvironment),
+        Command::Rollback { .. } => Some(CommandName::Rollback),
+        _ => None,
+    }
+}
+
+fn mutation_retry(command: CommandName) -> RetryGuidance {
+    match command {
+        CommandName::Publish
+        | CommandName::Promote
+        | CommandName::Plan
+        | CommandName::Apply
+        | CommandName::Rollback => RetryGuidance::ReconcileBeforeRetry,
+        _ => RetryGuidance::CorrectRequest,
+    }
+}
+
+fn print_machine_result(result: &CommandResultV1) -> Result<()> {
+    result
+        .validate()
+        .map_err(|message| anyhow::anyhow!(message))?;
+    println!("{}", serde_json::to_string(result)?);
+    Ok(())
+}
+
+fn reported_machine_failure(result: CommandResultV1) -> anyhow::Error {
+    ReportedMachineFailure(result).into()
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
-    let cli = Cli::parse();
+async fn main() -> ExitCode {
+    let args = std::env::args_os().collect::<Vec<_>>();
+    let requested_machine_output = machine_output_requested(&args);
+    let cli = match Cli::try_parse_from(args) {
+        Ok(cli) => cli,
+        Err(error) => {
+            if matches!(
+                error.kind(),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+            ) {
+                let _ = error.print();
+                return ExitCode::SUCCESS;
+            }
+            if requested_machine_output {
+                let result = CommandResultV1::failed(
+                    CommandName::Invocation,
+                    "invocation_rejected",
+                    "The command line is invalid",
+                    RetryGuidance::CorrectRequest,
+                );
+                if let Ok(encoded) = serde_json::to_string(&result) {
+                    println!("{encoded}");
+                }
+            } else {
+                let _ = error.print();
+            }
+            return ExitCode::from(error.exit_code().clamp(1, 255) as u8);
+        }
+    };
+    let output = cli.output;
+    let machine_command = command_name(&cli.command).unwrap_or(CommandName::Invocation);
+    match run(cli).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            if output == OutputFormat::JsonV1 {
+                let result = error
+                    .downcast_ref::<ReportedMachineFailure>()
+                    .map(|reported| reported.0.clone())
+                    .unwrap_or_else(|| {
+                        CommandResultV1::failed(
+                            machine_command,
+                            "operation_failed",
+                            "Tenkai rejected the operation",
+                            mutation_retry(machine_command),
+                        )
+                    });
+                let _ = print_machine_result(&result);
+            } else {
+                eprintln!("error: {error:#}");
+            }
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run(cli: Cli) -> Result<()> {
+    if cli.output == OutputFormat::JsonV1 && command_name(&cli.command).is_none() {
+        return Err(reported_machine_failure(CommandResultV1::failed(
+            CommandName::Invocation,
+            "unsupported_command",
+            "This command does not support tenkai.command-result/v1",
+            RetryGuidance::CorrectRequest,
+        )));
+    }
+    if cli.output == OutputFormat::JsonV1 && cli.target == Target::Remote {
+        return Err(reported_machine_failure(CommandResultV1::failed(
+            command_name(&cli.command).unwrap_or(CommandName::Invocation),
+            "unsupported_target",
+            "Machine-readable results currently require --target embedded",
+            RetryGuidance::CorrectRequest,
+        )));
+    }
+    let output = cli.output;
     if let Command::ExecutorGuard {
         lock,
         workdir,
@@ -688,7 +829,15 @@ async fn main() -> Result<()> {
                 trust_roots,
                 allow_unsigned_development,
             };
-            println!("{}", catalog::publish(&mut ctx, &manifest, &options).await?);
+            if output == OutputFormat::JsonV1 {
+                let published = catalog::publish_with_result(&mut ctx, &manifest, &options).await?;
+                print_machine_result(
+                    &CommandResultV1::succeeded(CommandName::Publish)
+                        .resource("release", published.release),
+                )?;
+            } else {
+                println!("{}", catalog::publish(&mut ctx, &manifest, &options).await?);
+            }
         }
         Command::Release { command } => match command {
             ReleaseCommand::Inspect { spec } => {
@@ -722,7 +871,24 @@ async fn main() -> Result<()> {
             }
         },
         Command::Promote { spec, channel } => {
-            println!("{}", catalog::promote(&mut ctx, &spec, &channel).await?);
+            if output == OutputFormat::JsonV1 {
+                let product = spec.split_once('@').map_or(spec.as_str(), |value| value.0);
+                tenkai::command_result::validate_resource_reference(
+                    "channel",
+                    &format!("{product}/{channel}"),
+                )
+                .map_err(|message| anyhow::anyhow!(message))?;
+            }
+            let message = catalog::promote(&mut ctx, &spec, &channel).await?;
+            if output == OutputFormat::JsonV1 {
+                let product = spec.split_once('@').map_or(spec.as_str(), |value| value.0);
+                print_machine_result(
+                    &CommandResultV1::succeeded(CommandName::Promote)
+                        .resource("channel", format!("{product}/{channel}")),
+                )?;
+            } else {
+                println!("{message}");
+            }
         }
         Command::Canary { command } => match command {
             CanaryCommand::Designate { env, remove } => {
@@ -844,8 +1010,16 @@ async fn main() -> Result<()> {
             }
             EnvCommand::Inspect { env } => {
                 let report = plan::inspect_environment(&mut ctx, &env).await?;
-                // JSON keeps multi-env inspect machine-readable without secrets.
-                println!("{}", serde_json::to_string_pretty(&report)?);
+                if output == OutputFormat::JsonV1 {
+                    print_machine_result(
+                        &CommandResultV1::succeeded(CommandName::InspectEnvironment)
+                            .resource("environment", report.id)
+                            .counts(None, Some(report.subscriptions.len())),
+                    )?;
+                } else {
+                    // JSON keeps multi-env inspect machine-readable without secrets.
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                }
             }
             EnvCommand::Subscribe { env, spec } => {
                 let Some((product, channel)) = spec.split_once('=') else {
@@ -988,13 +1162,29 @@ async fn main() -> Result<()> {
             },
         },
         Command::Plan { env } => {
+            if output == OutputFormat::JsonV1 {
+                tenkai::command_result::validate_resource_reference(
+                    "plan",
+                    &format!("tenkai:plan:{env}:18446744073709551615:{}", "0".repeat(64)),
+                )
+                .map_err(|message| anyhow::anyhow!(message))?;
+            }
             let stored = plan::create(&mut ctx, &env).await?;
-            println!("plan id: {}", stored.id);
-            if stored.steps.is_empty() {
-                println!("{env} is up to date");
+            if output == OutputFormat::JsonV1 {
+                print_machine_result(
+                    &CommandResultV1::succeeded(CommandName::Plan)
+                        .resource("plan", stored.id)
+                        .resource("environment", stored.environment)
+                        .counts(Some(stored.steps.len()), None),
+                )?;
             } else {
-                println!("plan for {env}:");
-                print_steps(&stored.steps);
+                println!("plan id: {}", stored.id);
+                if stored.steps.is_empty() {
+                    println!("{env} is up to date");
+                } else {
+                    println!("plan for {env}:");
+                    print_steps(&stored.steps);
+                }
             }
         }
         Command::Apply {
@@ -1007,25 +1197,51 @@ async fn main() -> Result<()> {
             emergency_reason,
         } => {
             let stored = plan::load(&mut ctx, &plan_id).await?;
-            println!("applying {} to {}:", stored.id, stored.environment);
-            print_steps(&stored.steps);
+            if output == OutputFormat::JsonV1 {
+                CommandResultV1::succeeded(CommandName::Apply)
+                    .resource("plan", &stored.id)
+                    .resource("environment", &stored.environment)
+                    .counts(Some(stored.steps.len()), None)
+                    .validate()
+                    .map_err(|message| anyhow::anyhow!(message))?;
+            }
+            if output == OutputFormat::Human {
+                println!("applying {} to {}:", stored.id, stored.environment);
+                print_steps(&stored.steps);
+            }
             run_plan(
                 &mut ctx,
                 &plan_id,
-                skip_gates,
-                emergency_reason.as_deref(),
-                approval.as_deref(),
-                approval_trust_roots.as_deref(),
-                allow_unapproved_development.then(|| {
-                    development_reason
-                        .as_deref()
-                        .expect("clap requires a development reason")
-                }),
+                apply::ExecutionOptions {
+                    skip_gates,
+                    emergency_reason: emergency_reason.as_deref(),
+                    approval: approval.as_deref(),
+                    approval_trust_roots: approval_trust_roots.as_deref(),
+                    unapproved_development_reason: allow_unapproved_development.then(|| {
+                        development_reason
+                            .as_deref()
+                            .expect("clap requires a development reason")
+                    }),
+                },
+                PlanResultContext {
+                    command: CommandName::Apply,
+                    environment: &stored.environment,
+                    step_count: stored.steps.len(),
+                    output,
+                },
             )
             .await?;
         }
         Command::Status { env } => {
             let rows = plan::status(&mut ctx, &env).await?;
+            if output == OutputFormat::JsonV1 {
+                print_machine_result(
+                    &CommandResultV1::succeeded(CommandName::Status)
+                        .resource("environment", env)
+                        .counts(None, Some(rows.len())),
+                )?;
+                return Ok(());
+            }
             if rows.is_empty() {
                 println!("{env} has no channel subscriptions");
                 return Ok(());
@@ -1081,25 +1297,54 @@ async fn main() -> Result<()> {
             development_reason,
             emergency_reason,
         } => {
+            if output == OutputFormat::JsonV1 {
+                tenkai::command_result::validate_resource_reference(
+                    "plan",
+                    &format!("tenkai:plan:{env}:18446744073709551615:{}", "0".repeat(64)),
+                )
+                .map_err(|message| anyhow::anyhow!(message))?;
+            }
             let step = plan::rollback_step(&mut ctx, &env, &product).await?;
             let stored = plan::create_from_steps(&mut ctx, &env, vec![step]).await?;
-            println!("rolling back in {env}:");
-            print_steps(&stored.steps);
+            if output == OutputFormat::Human {
+                println!("rolling back in {env}:");
+                print_steps(&stored.steps);
+            }
             if allow_unapproved_development {
                 run_plan(
                     &mut ctx,
                     &stored.id,
-                    true,
-                    emergency_reason.as_deref(),
-                    None,
-                    None,
-                    Some(
-                        development_reason
-                            .as_deref()
-                            .expect("clap requires a development reason"),
-                    ),
+                    apply::ExecutionOptions {
+                        skip_gates: true,
+                        emergency_reason: emergency_reason.as_deref(),
+                        approval: None,
+                        approval_trust_roots: None,
+                        unapproved_development_reason: Some(
+                            development_reason
+                                .as_deref()
+                                .expect("clap requires a development reason"),
+                        ),
+                    },
+                    PlanResultContext {
+                        command: CommandName::Rollback,
+                        environment: &stored.environment,
+                        step_count: stored.steps.len(),
+                        output,
+                    },
                 )
                 .await?;
+            } else if output == OutputFormat::JsonV1 {
+                let mut result = CommandResultV1::failed(
+                    CommandName::Rollback,
+                    "approval_required",
+                    "The rollback plan requires signed approval",
+                    RetryGuidance::NotSafe,
+                )
+                .resource("plan", stored.id)
+                .resource("environment", stored.environment)
+                .counts(Some(stored.steps.len()), None);
+                result.outcome = CommandOutcome::AwaitingApproval;
+                return Err(reported_machine_failure(result));
             } else {
                 bail!(
                     "rollback was not executed; plan {} requires signed approval. Run `tenkaictl apply {}` with --approval and --approval-trust-roots{}",
@@ -1336,29 +1581,26 @@ fn print_reconcile_report(report: reconciler::TickReport) {
     }
 }
 
+struct PlanResultContext<'a> {
+    command: CommandName,
+    environment: &'a str,
+    step_count: usize,
+    output: OutputFormat,
+}
+
 async fn run_plan(
     ctx: &mut client::Ctx,
     plan_id: &str,
-    skip_gates: bool,
-    emergency_reason: Option<&str>,
-    approval: Option<&std::path::Path>,
-    approval_trust_roots: Option<&std::path::Path>,
-    unapproved_development_reason: Option<&str>,
+    execution: apply::ExecutionOptions<'_>,
+    result_context: PlanResultContext<'_>,
 ) -> Result<()> {
-    let outcomes = apply::execute_with_options(
-        ctx,
-        plan_id,
-        apply::ExecutionOptions {
-            skip_gates,
-            emergency_reason,
-            approval,
-            approval_trust_roots,
-            unapproved_development_reason,
-        },
-    )
-    .await?;
+    let outcomes = apply::execute_with_options(ctx, plan_id, execution).await?;
     let mut failed = false;
     for o in &outcomes {
+        if result_context.output == OutputFormat::JsonV1 {
+            failed |= o.status != "succeeded";
+            continue;
+        }
         match o.status.as_str() {
             "succeeded" => println!("  ok        {:<24} {}", o.step.product, o.step.to),
             "blocked" => {
@@ -1376,7 +1618,28 @@ async fn run_plan(
         }
     }
     if failed {
-        std::process::exit(1);
+        if result_context.output == OutputFormat::JsonV1 {
+            return Err(reported_machine_failure(
+                CommandResultV1::failed(
+                    result_context.command,
+                    "execution_failed",
+                    "One or more delivery steps did not succeed",
+                    RetryGuidance::ReconcileBeforeRetry,
+                )
+                .resource("plan", plan_id)
+                .resource("environment", result_context.environment)
+                .counts(Some(result_context.step_count), None),
+            ));
+        }
+        bail!("one or more delivery steps did not succeed");
+    }
+    if result_context.output == OutputFormat::JsonV1 {
+        print_machine_result(
+            &CommandResultV1::succeeded(result_context.command)
+                .resource("plan", plan_id)
+                .resource("environment", result_context.environment)
+                .counts(Some(result_context.step_count), None),
+        )?;
     }
     Ok(())
 }
@@ -1384,6 +1647,55 @@ async fn run_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn machine_output_flag_is_explicit_and_bounded_to_supported_commands() {
+        let args = ["tenkaictl", "plan", "--output", "json-v1"]
+            .into_iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>();
+        assert!(machine_output_requested(&args));
+
+        let cli = Cli::try_parse_from(["tenkaictl", "plan", "--output=json-v1"]).unwrap();
+        assert_eq!(cli.output, OutputFormat::JsonV1);
+        assert_eq!(command_name(&cli.command), Some(CommandName::Plan));
+
+        let unsupported = Cli::try_parse_from(["tenkaictl", "init", "--output=json-v1"]).unwrap();
+        assert_eq!(command_name(&unsupported.command), None);
+
+        let help = Cli::try_parse_from(["tenkaictl", "plan", "--output=json-v1", "--help"])
+            .err()
+            .expect("help exits through Clap's display path");
+        assert_eq!(help.kind(), ErrorKind::DisplayHelp);
+        assert_eq!(help.exit_code(), 0);
+    }
+
+    #[test]
+    fn every_machine_command_has_a_deterministic_bounded_envelope() {
+        let cases = [
+            (CommandName::Publish, "release"),
+            (CommandName::Promote, "channel"),
+            (CommandName::Plan, "plan"),
+            (CommandName::Apply, "plan"),
+            (CommandName::Status, "environment"),
+            (CommandName::InspectEnvironment, "environment"),
+            (CommandName::Rollback, "plan"),
+        ];
+        for (command, resource_kind) in cases {
+            let result = CommandResultV1::succeeded(command)
+                .resource(resource_kind, "opaque")
+                .counts(Some(1), Some(1));
+            let first = serde_json::to_string(&result).unwrap();
+            let second = serde_json::to_string(&result).unwrap();
+            assert_eq!(first, second);
+            assert_eq!(
+                serde_json::from_str::<CommandResultV1>(&first).unwrap(),
+                result
+            );
+            assert!(!first.contains('\n'));
+            assert!(first.len() < 1024);
+        }
+    }
 
     #[test]
     fn parses_canary_policy_cohort_and_reactivation() {

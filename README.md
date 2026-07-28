@@ -26,6 +26,9 @@ tenant-scoped, non-executable projections and is not a production mutation API.
 Disconnected environments use bounded self-verifying archives and signed,
 replay-safe receipts documented in
 [the offline bundle contract](docs/offline-bundles.md).
+Typed local adapters can request the bounded
+[machine-readable command result contract](docs/command-results.md) with
+`--output json-v1`.
 
 ## Quickstart
 
