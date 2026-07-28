@@ -11,7 +11,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -366,6 +366,26 @@ pub trait OperationalStore: Send + Sync {
     fn append_audit(&self, event: &AuditRecord) -> Result<()>;
     fn audit_events(&self) -> Result<Vec<AuditRecord>>;
     fn check_health(&self) -> Result<()>;
+    fn import_development_fixture(
+        &self,
+        _fixture: &crate::development_fixtures::PreparedDevelopmentFixture,
+        _actor: &str,
+        _request_id: &str,
+    ) -> Result<crate::development_fixtures::FixtureMap> {
+        Err(StoreError::AdapterUnavailable(
+            "development fixture import is not implemented by this store".into(),
+        ))
+    }
+    fn reset_development_fixture(
+        &self,
+        _fixture_id: &str,
+        _actor: &str,
+        _request_id: &str,
+    ) -> Result<crate::development_fixtures::FixtureResetResult> {
+        Err(StoreError::AdapterUnavailable(
+            "development fixture reset is not implemented by this store".into(),
+        ))
+    }
     /// Versioned runtime capabilities this store implementation provides.
     fn runtime_capabilities(&self) -> crate::runtime_capabilities::ComponentCapabilities;
     fn claim_runtime_plan(
@@ -536,7 +556,14 @@ fn migrate(connection: &mut Connection) -> Result<()> {
                 attempt INTEGER NOT NULL, result_digest TEXT NOT NULL,
                 succeeded INTEGER NOT NULL
              );
-             PRAGMA user_version = 6;",
+             CREATE TABLE development_fixture_objects (
+                fixture_id TEXT NOT NULL, fixture_digest TEXT NOT NULL,
+                object_kind TEXT NOT NULL, object_id TEXT NOT NULL,
+                PRIMARY KEY(object_kind, object_id)
+             );
+             CREATE INDEX development_fixture_objects_fixture
+                ON development_fixture_objects(fixture_id, object_kind);
+             PRAGMA user_version = 7;",
         )?;
         tx.commit()?;
     }
@@ -669,6 +696,20 @@ fn migrate(connection: &mut Connection) -> Result<()> {
         )?;
         tx.commit()?;
     }
+    if found <= 6 && found != 0 {
+        let tx = connection.transaction()?;
+        tx.execute_batch(
+            "CREATE TABLE development_fixture_objects (
+                fixture_id TEXT NOT NULL, fixture_digest TEXT NOT NULL,
+                object_kind TEXT NOT NULL, object_id TEXT NOT NULL,
+                PRIMARY KEY(object_kind, object_id)
+             );
+             CREATE INDEX development_fixture_objects_fixture
+                ON development_fixture_objects(fixture_id, object_kind);
+             PRAGMA user_version = 7;",
+        )?;
+        tx.commit()?;
+    }
     Ok(())
 }
 
@@ -772,6 +813,108 @@ fn rollback_intent_digest(rollback: &RollbackRecord) -> String {
     format!("{:x}", digest.finalize())
 }
 
+fn sqlite_fixture_matches(
+    tx: &Transaction<'_>,
+    fixture: &crate::development_fixtures::PreparedDevelopmentFixture,
+) -> Result<bool> {
+    for release in &fixture.releases {
+        let row = tx
+            .query_row(
+                "SELECT product,version,content_digest,descriptor_json FROM releases WHERE id=?1",
+                [&release.id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if row
+            != Some((
+                release.product.clone(),
+                release.version.clone(),
+                release.content_digest.clone(),
+                release.descriptor_json.clone(),
+            ))
+        {
+            return Ok(false);
+        }
+    }
+    for channel in &fixture.channels {
+        let row = tx
+            .query_row(
+                "SELECT product,name,release_id,revision FROM channels WHERE id=?1",
+                [&channel.id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, u64>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if row
+            != Some((
+                channel.product.clone(),
+                channel.name.clone(),
+                channel.release_id.clone(),
+                channel.revision,
+            ))
+        {
+            return Ok(false);
+        }
+    }
+    for environment in &fixture.environments {
+        let row = tx
+            .query_row(
+                "SELECT revision,configuration_json FROM environments WHERE id=?1",
+                [&environment.id],
+                |row| Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        if row != Some((environment.revision, environment.configuration_json.clone())) {
+            return Ok(false);
+        }
+    }
+    for plan in &fixture.plans {
+        let row = tx
+            .query_row(
+                "SELECT environment_id,format_version,content_digest,plan_json,status,status_detail
+                 FROM plans WHERE id=?1",
+                [&plan.id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, u32>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if row
+            != Some((
+                plan.environment_id.clone(),
+                plan.format_version,
+                plan.content_digest.clone(),
+                plan.plan_json.clone(),
+                "blocked".into(),
+                plan.status_detail.clone(),
+            ))
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 impl OperationalStore for SqliteStore {
     fn publish_release(&self, release: &ReleaseRecord) -> Result<()> {
         let mut connection = self.connection()?;
@@ -815,9 +958,205 @@ impl OperationalStore for SqliteStore {
         ).optional()?)
     }
 
+    fn import_development_fixture(
+        &self,
+        fixture: &crate::development_fixtures::PreparedDevelopmentFixture,
+        actor: &str,
+        request_id: &str,
+    ) -> Result<crate::development_fixtures::FixtureMap> {
+        let mut connection = self.connection()?;
+        let tx = connection.transaction()?;
+        let (existing, persisted_digest): (i64, Option<String>) = tx.query_row(
+            "SELECT COUNT(*), MIN(fixture_digest)
+             FROM development_fixture_objects WHERE fixture_id=?1",
+            [&fixture.map.fixture_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let expected = fixture.releases.len()
+            + fixture.channels.len()
+            + fixture.environments.len()
+            + fixture.plans.len();
+        if existing != 0 {
+            if existing as usize != expected
+                || persisted_digest.as_deref() != Some(&fixture.map.fixture_digest)
+                || !sqlite_fixture_matches(&tx, fixture)?
+            {
+                return Err(StoreError::ImmutableConflict {
+                    kind: "development_fixture",
+                    id: fixture.map.fixture_id.clone(),
+                });
+            }
+            return Ok(fixture.map.clone());
+        }
+        for release in &fixture.releases {
+            tx.execute(
+                "INSERT INTO releases(id,product,version,content_digest,descriptor_json)
+                 VALUES(?1,?2,?3,?4,?5)",
+                params![
+                    release.id,
+                    release.product,
+                    release.version,
+                    release.content_digest,
+                    release.descriptor_json
+                ],
+            )?;
+        }
+        for channel in &fixture.channels {
+            tx.execute(
+                "INSERT INTO channels(id,product,name,release_id,revision)
+                 VALUES(?1,?2,?3,?4,?5)",
+                params![
+                    channel.id,
+                    channel.product,
+                    channel.name,
+                    channel.release_id,
+                    channel.revision
+                ],
+            )?;
+        }
+        for environment in &fixture.environments {
+            tx.execute(
+                "INSERT INTO environments(id,revision,configuration_json) VALUES(?1,?2,?3)",
+                params![
+                    environment.id,
+                    environment.revision,
+                    environment.configuration_json
+                ],
+            )?;
+        }
+        for plan in &fixture.plans {
+            tx.execute(
+                "INSERT INTO plans(id,environment_id,format_version,content_digest,plan_json,status,status_detail)
+                 VALUES(?1,?2,?3,?4,?5,'blocked',?6)",
+                params![
+                    plan.id,
+                    plan.environment_id,
+                    plan.format_version,
+                    plan.content_digest,
+                    plan.plan_json,
+                    plan.status_detail
+                ],
+            )?;
+        }
+        for (kind, ids) in [
+            ("release", &fixture.map.releases),
+            ("channel", &fixture.map.channels),
+            ("environment", &fixture.map.environments),
+            ("plan", &fixture.map.plans),
+        ] {
+            for id in ids {
+                tx.execute(
+                    "INSERT INTO development_fixture_objects(fixture_id,fixture_digest,object_kind,object_id)
+                     VALUES(?1,?2,?3,?4)",
+                    params![
+                        fixture.map.fixture_id,
+                        fixture.map.fixture_digest,
+                        kind,
+                        id
+                    ],
+                )?;
+            }
+        }
+        tx.execute(
+            "INSERT INTO audit_events(id,occurred_at,principal,operation,resource,outcome)
+             VALUES(?1,?2,?3,'development_fixture.imported',?4,'imported')",
+            params![
+                request_id,
+                crate::now_millis(),
+                actor,
+                fixture.map.fixture_digest
+            ],
+        )?;
+        tx.commit()?;
+        Ok(fixture.map.clone())
+    }
+
+    fn reset_development_fixture(
+        &self,
+        fixture_id: &str,
+        actor: &str,
+        request_id: &str,
+    ) -> Result<crate::development_fixtures::FixtureResetResult> {
+        let mut connection = self.connection()?;
+        let tx = connection.transaction()?;
+        let dependent: i64 = tx.query_row(
+            "SELECT
+               (SELECT COUNT(*) FROM leases WHERE environment_id IN
+                  (SELECT object_id FROM development_fixture_objects WHERE fixture_id=?1 AND object_kind='environment')) +
+               (SELECT COUNT(*) FROM receipts WHERE environment_id IN
+                  (SELECT object_id FROM development_fixture_objects WHERE fixture_id=?1 AND object_kind='environment')
+                  OR plan_id IN (SELECT object_id FROM development_fixture_objects WHERE fixture_id=?1 AND object_kind='plan')) +
+               (SELECT COUNT(*) FROM rollbacks WHERE environment_id IN
+                  (SELECT object_id FROM development_fixture_objects WHERE fixture_id=?1 AND object_kind='environment')
+                  OR plan_id IN (SELECT object_id FROM development_fixture_objects WHERE fixture_id=?1 AND object_kind='plan')) +
+               (SELECT COUNT(*) FROM offline_imports WHERE environment_id IN
+                  (SELECT object_id FROM development_fixture_objects WHERE fixture_id=?1 AND object_kind='environment')
+                  OR plan_id IN (SELECT object_id FROM development_fixture_objects WHERE fixture_id=?1 AND object_kind='plan')) +
+               (SELECT COUNT(*) FROM offline_step_receipts WHERE environment_id IN
+                  (SELECT object_id FROM development_fixture_objects WHERE fixture_id=?1 AND object_kind='environment')
+                  OR plan_id IN (SELECT object_id FROM development_fixture_objects WHERE fixture_id=?1 AND object_kind='plan')) +
+               (SELECT COUNT(*) FROM runtime_claims WHERE environment_id IN
+                  (SELECT object_id FROM development_fixture_objects WHERE fixture_id=?1 AND object_kind='environment')
+                  OR plan_id IN (SELECT object_id FROM development_fixture_objects WHERE fixture_id=?1 AND object_kind='plan'))",
+            [fixture_id],
+            |row| row.get(0),
+        )?;
+        if dependent != 0 {
+            return Err(StoreError::InvalidData {
+                kind: "development_fixture",
+                detail: "fixture reset refused because operational state depends on it".into(),
+            });
+        }
+        let mut removed = 0_usize;
+        for (table, kind) in [
+            ("plans", "plan"),
+            ("channels", "channel"),
+            ("environments", "environment"),
+            ("releases", "release"),
+        ] {
+            removed += tx.execute(
+                &format!(
+                    "DELETE FROM {table} WHERE id IN
+                     (SELECT object_id FROM development_fixture_objects
+                      WHERE fixture_id=?1 AND object_kind=?2)"
+                ),
+                params![fixture_id, kind],
+            )?;
+        }
+        tx.execute(
+            "DELETE FROM development_fixture_objects WHERE fixture_id=?1",
+            [fixture_id],
+        )?;
+        tx.execute(
+            "INSERT INTO audit_events(id,occurred_at,principal,operation,resource,outcome)
+             VALUES(?1,?2,?3,'development_fixture.reset',?4,'reset')",
+            params![request_id, crate::now_millis(), actor, fixture_id],
+        )?;
+        tx.commit()?;
+        Ok(crate::development_fixtures::FixtureResetResult {
+            contract_version: crate::development_fixtures::DEVELOPMENT_FIXTURE_CONTRACT_VERSION,
+            fixture_id: fixture_id.into(),
+            removed,
+        })
+    }
+
     fn promote_channel(&self, channel: &ChannelRecord) -> Result<ChannelRecord> {
         let mut connection = self.connection()?;
         let tx = connection.transaction()?;
+        if tx.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM development_fixture_objects
+                WHERE (object_kind='release' AND object_id=?1)
+                   OR (object_kind='channel' AND object_id=?2)
+             )",
+            params![channel.release_id, channel.id],
+            |row| row.get::<_, bool>(0),
+        )? {
+            return Err(StoreError::InvalidData {
+                kind: "development_fixture",
+                detail: "fixture releases and channels cannot be promoted".into(),
+            });
+        }
         let release_product: String = tx
             .query_row(
                 "SELECT product FROM releases WHERE id=?1",
@@ -888,6 +1227,19 @@ impl OperationalStore for SqliteStore {
     fn put_environment(&self, environment: &EnvironmentRecord) -> Result<EnvironmentRecord> {
         let mut connection = self.connection()?;
         let tx = connection.transaction()?;
+        if tx.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM development_fixture_objects
+                WHERE object_kind='environment' AND object_id=?1
+             )",
+            [&environment.id],
+            |row| row.get::<_, bool>(0),
+        )? {
+            return Err(StoreError::InvalidData {
+                kind: "development_fixture",
+                detail: "fixture environments are immutable".into(),
+            });
+        }
         let revision: Option<u64> = tx
             .query_row(
                 "SELECT revision FROM environments WHERE id=?1",
@@ -930,6 +1282,19 @@ impl OperationalStore for SqliteStore {
     fn create_plan(&self, plan: &PlanRecord) -> Result<()> {
         let mut connection = self.connection()?;
         let tx = connection.transaction()?;
+        if tx.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM development_fixture_objects
+                WHERE object_kind='environment' AND object_id=?1
+             )",
+            [&plan.environment_id],
+            |row| row.get::<_, bool>(0),
+        )? {
+            return Err(StoreError::InvalidData {
+                kind: "development_fixture",
+                detail: "fixture environments cannot accept executable plans".into(),
+            });
+        }
         let existing: Option<(String, u32, String, String)> = tx.query_row(
             "SELECT environment_id,format_version,content_digest,plan_json FROM plans WHERE id=?1", [&plan.id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
@@ -988,6 +1353,19 @@ impl OperationalStore for SqliteStore {
     ) -> Result<PlanRecord> {
         let mut connection = self.connection()?;
         let tx = connection.transaction()?;
+        if tx.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM development_fixture_objects
+                WHERE object_kind='plan' AND object_id=?1
+             )",
+            [id],
+            |row| row.get::<_, bool>(0),
+        )? {
+            return Err(StoreError::InvalidData {
+                kind: "development_fixture",
+                detail: "fixture plans are non-executable".into(),
+            });
+        }
         let current: String = tx
             .query_row("SELECT status FROM plans WHERE id=?1", [id], |row| {
                 row.get(0)
@@ -1034,6 +1412,19 @@ impl OperationalStore for SqliteStore {
         }
         let mut connection = self.connection()?;
         let tx = connection.transaction()?;
+        if tx.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM development_fixture_objects
+                WHERE object_kind='environment' AND object_id=?1
+             )",
+            [environment],
+            |row| row.get::<_, bool>(0),
+        )? {
+            return Err(StoreError::InvalidData {
+                kind: "development_fixture",
+                detail: "fixture environments are non-executable".into(),
+            });
+        }
         let current = lease_in(&tx, environment)?;
         let generation = match current {
             Some(current) if current.expires_at > now && current.owner != owner => {
@@ -1561,6 +1952,19 @@ impl OperationalStore for SqliteStore {
         }
         let mut connection = self.connection()?;
         let tx = connection.transaction()?;
+        if tx.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM development_fixture_objects
+                WHERE object_kind='plan' AND object_id=?1
+             )",
+            [plan_id],
+            |row| row.get::<_, bool>(0),
+        )? {
+            return Err(StoreError::InvalidData {
+                kind: "development_fixture",
+                detail: "fixture plans are non-executable".into(),
+            });
+        }
         let current: Option<(String, String, u64, i64, Option<String>)> = tx
             .query_row(
                 "SELECT environment_id,owner,generation,expires_at,completion_json FROM runtime_claims WHERE plan_id=?1",

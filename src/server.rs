@@ -18,6 +18,7 @@ use crate::auth_context::{
     CredentialMaterial, EnterpriseAuthExtension, PrincipalIdentity, PrincipalKind,
     build_auth_stack,
 };
+use crate::development_fixtures::DevelopmentFixture;
 use crate::federated_identity::{
     FederatingAuthExtension, FederationConfig, IdentityDirectory, reject_caller_selected_tenant,
 };
@@ -180,6 +181,13 @@ pub struct ServerConfig {
     /// When true, expose unauthenticated `GET /metrics` OpenMetrics (#137).
     /// Intended for loopback scrapes only (server already binds loopback).
     pub metrics_enabled: bool,
+    /// Explicitly enabled, development-only authenticated fixture surface.
+    pub development_fixtures: Option<DevelopmentFixtureConfig>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DevelopmentFixtureConfig {
+    pub allowed_principals: std::collections::BTreeSet<String>,
 }
 
 impl ServerConfig {
@@ -199,6 +207,7 @@ impl ServerConfig {
             identity_directory: Arc::new(IdentityDirectory::new()),
             tenant_store: None,
             metrics_enabled: false,
+            development_fixtures: None,
         }
     }
 
@@ -224,6 +233,22 @@ impl ServerConfig {
         if self.requirements.tenant_mode && self.tenant_store.is_none() {
             anyhow::bail!(
                 "tenant mode requires a tenant-isolating operational store adapter (tenant_store)"
+            );
+        }
+        if let Some(fixtures) = &self.development_fixtures {
+            anyhow::ensure!(
+                self.requirements.tenant_mode
+                    && self.requirements.require_enterprise_authentication
+                    && self.enterprise_auth.is_some(),
+                "development fixtures require tenant mode and enterprise authentication"
+            );
+            anyhow::ensure!(
+                !fixtures.allowed_principals.is_empty()
+                    && fixtures
+                        .allowed_principals
+                        .iter()
+                        .all(|principal| !principal.trim().is_empty()),
+                "development fixtures require at least one non-empty allowed principal"
             );
         }
         // Compose AuthStack at validation time so missing required enterprise
@@ -337,6 +362,7 @@ pub fn router(
     config.validate()?;
     let auth = config.build_auth_stack()?;
     let metrics_enabled = config.metrics_enabled;
+    let development_fixtures_enabled = config.development_fixtures.is_some();
     let mut router = Router::new()
         .route("/healthz", get(health))
         .route("/readyz", get(ready))
@@ -367,6 +393,17 @@ pub fn router(
     if metrics_enabled {
         router = router.route("/metrics", get(openmetrics));
     }
+    if development_fixtures_enabled {
+        router = router
+            .route(
+                "/v1/development/fixtures/import",
+                post(import_development_fixture),
+            )
+            .route(
+                "/v1/development/fixtures/{fixture_id}",
+                axum::routing::delete(reset_development_fixture),
+            );
+    }
     Ok(router.with_state(Arc::new(AppState {
         tenant_store: config.tenant_store.clone(),
         config,
@@ -374,6 +411,90 @@ pub fn router(
         reconciler,
         store,
     })))
+}
+
+fn authorize_development_fixture(
+    state: &AppState,
+    context: &AuthenticatedRequestContext,
+) -> Result<(), Box<Response>> {
+    let Some(config) = &state.config.development_fixtures else {
+        return Err(Box::new(error_response(StatusCode::NOT_FOUND, "not found")));
+    };
+    if context.tenant().is_none()
+        || !matches!(
+            context.principal.kind,
+            PrincipalKind::Service | PrincipalKind::Management
+        )
+        || !config.allowed_principals.contains(context.principal_id())
+    {
+        return Err(Box::new(error_response(
+            StatusCode::FORBIDDEN,
+            NON_DISCLOSING_DENY,
+        )));
+    }
+    Ok(())
+}
+
+async fn import_development_fixture(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(fixture): Json<DevelopmentFixture>,
+) -> Response {
+    let context = match authenticate_management(&state, &headers) {
+        Ok(context) => context,
+        Err(response) => return *response,
+    };
+    if let Err(response) = require_tenant_scope(&state, &context, None) {
+        return *response;
+    }
+    if let Err(response) = authorize_development_fixture(&state, &context) {
+        return *response;
+    }
+    let prepared = match fixture.prepare() {
+        Ok(prepared) => prepared,
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "invalid fixture document"),
+    };
+    let Some(store) = &state.tenant_store else {
+        return error_response(StatusCode::SERVICE_UNAVAILABLE, "fixture store unavailable");
+    };
+    match store.import_development_fixture_for(&context, &prepared) {
+        Ok(map) => (StatusCode::OK, Json(map)).into_response(),
+        Err(crate::tenant_isolation::IsolationError::NotFound)
+        | Err(crate::tenant_isolation::IsolationError::Unauthenticated) => {
+            error_response(StatusCode::NOT_FOUND, NON_DISCLOSING_DENY)
+        }
+        Err(error) => {
+            eprintln!("development fixture import failed: {error}");
+            error_response(StatusCode::CONFLICT, "fixture import conflict")
+        }
+    }
+}
+
+async fn reset_development_fixture(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(fixture_id): Path<String>,
+) -> Response {
+    let context = match authenticate_management(&state, &headers) {
+        Ok(context) => context,
+        Err(response) => return *response,
+    };
+    if let Err(response) = require_tenant_scope(&state, &context, None) {
+        return *response;
+    }
+    if let Err(response) = authorize_development_fixture(&state, &context) {
+        return *response;
+    }
+    let Some(store) = &state.tenant_store else {
+        return error_response(StatusCode::SERVICE_UNAVAILABLE, "fixture store unavailable");
+    };
+    match store.reset_development_fixture_for(&context, &fixture_id) {
+        Ok(result) => (StatusCode::OK, Json(result)).into_response(),
+        Err(error) => {
+            eprintln!("development fixture reset failed: {error}");
+            error_response(StatusCode::CONFLICT, "fixture reset conflict")
+        }
+    }
 }
 
 /// When tenant mode is enabled, require authenticated tenant membership and
@@ -1547,11 +1668,16 @@ mod tests {
                 .get("principal")
                 .and_then(|v| v.as_str())
                 .unwrap_or("enterprise-user");
+            let kind = match value.get("kind").and_then(|value| value.as_str()) {
+                Some("service") => PrincipalKind::Service,
+                Some("management") => PrincipalKind::Management,
+                _ => PrincipalKind::Human,
+            };
             crate::auth_context::AuthenticatedRequestContextBuilder::new(
                 credential.request_id.clone(),
                 PrincipalIdentity {
                     id: principal.into(),
-                    kind: PrincipalKind::Human,
+                    kind,
                 },
                 self.extension_id(),
             )
@@ -1767,6 +1893,169 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(health.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn development_fixture_surface_is_explicit_authorized_and_tenant_scoped() {
+        use crate::runtime_capabilities::enterprise_auth_capabilities;
+        use crate::tenant_store::tenant_memory_store_capabilities;
+
+        let tenant_store = Arc::new(crate::tenant_store::InMemoryTenantOperationalStore::new());
+        let mut config = ServerConfig::community("management-secret", HashMap::new());
+        config.requirements.tenant_mode = true;
+        config.requirements.require_enterprise_authentication = true;
+        config.capabilities = crate::runtime_capabilities::ProvidedCapabilities::assemble(
+            "enterprise-tenant-memory",
+            [
+                tenant_memory_store_capabilities(),
+                enterprise_auth_capabilities(),
+            ],
+        );
+        config.auth_host = AuthHostConfig {
+            required_extension_id: Some("auth.enterprise".into()),
+            expected_contract_version: crate::auth_context::AUTH_CONTEXT_CONTRACT_VERSION,
+            expected_audience: Some("tenkai-server".into()),
+        };
+        config.enterprise_auth = Some(Arc::new(TenantAssertionExtension));
+        config.tenant_store = Some(tenant_store);
+        config.development_fixtures = Some(DevelopmentFixtureConfig {
+            allowed_principals: std::collections::BTreeSet::from(["seed-service".into()]),
+        });
+        let store = Arc::new(crate::storage::SqliteStore::open_in_memory().unwrap());
+        let fixture_app = router(config, Arc::new(FixedReconciler), store).unwrap();
+        let fixture = serde_json::json!({
+            "contract_version": 1,
+            "fixture_id": "buyer-demo",
+            "releases": [{
+                "name": "app",
+                "product": "app",
+                "version": "1.0.0",
+                "content_digest": "a".repeat(64)
+            }],
+            "channels": [{
+                "name": "stable",
+                "product": "app",
+                "release": "app"
+            }],
+            "environments": [{
+                "name": "prod-eu",
+                "posture": "awaiting_approval",
+                "description": "sanitized"
+            }],
+            "plans": [{
+                "name": "approval",
+                "environment": "prod-eu",
+                "blocked_reason": "awaiting approval"
+            }]
+        });
+
+        let import = fixture_app
+            .clone()
+            .oneshot(
+                Request::post("/v1/development/fixtures/import")
+                    .header(
+                        "x-tenkai-assertion",
+                        r#"{"tenant":"tenant-a","principal":"seed-service","kind":"service"}"#,
+                    )
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&fixture).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(import.status(), StatusCode::OK);
+        let body = String::from_utf8(
+            axum::body::to_bytes(import.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(body.contains("fx-62757965722d64656d6f-environment-prod-eu"));
+        assert!(!body.contains("management-secret"));
+
+        let repeated = fixture_app
+            .clone()
+            .oneshot(
+                Request::post("/v1/development/fixtures/import")
+                    .header(
+                        "x-tenkai-assertion",
+                        r#"{"tenant":"tenant-a","principal":"seed-service","kind":"service"}"#,
+                    )
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&fixture).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repeated.status(), StatusCode::OK);
+
+        for assertion in [
+            r#"{"tenant":"tenant-a","principal":"human-user"}"#,
+            r#"{"tenant":"tenant-a","principal":"other-service","kind":"service"}"#,
+        ] {
+            let denied = fixture_app
+                .clone()
+                .oneshot(
+                    Request::post("/v1/development/fixtures/import")
+                        .header("x-tenkai-assertion", assertion)
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&fixture).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        }
+
+        let tenant_b = fixture_app
+            .clone()
+            .oneshot(
+                Request::get("/v1/environments")
+                    .header(
+                        "x-tenkai-assertion",
+                        r#"{"tenant":"tenant-b","principal":"seed-service","kind":"service"}"#,
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let tenant_b_body = String::from_utf8(
+            axum::body::to_bytes(tenant_b.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(!tenant_b_body.contains("prod-eu"));
+        assert!(!tenant_b_body.contains("buyer-demo"));
+
+        let reset = fixture_app
+            .oneshot(
+                Request::delete("/v1/development/fixtures/buyer-demo")
+                    .header(
+                        "x-tenkai-assertion",
+                        r#"{"tenant":"tenant-a","principal":"seed-service","kind":"service"}"#,
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reset.status(), StatusCode::OK);
+
+        let (community_app, _) = app();
+        let absent = community_app
+            .oneshot(
+                Request::post("/v1/development/fixtures/import")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(absent.status(), StatusCode::NOT_FOUND);
     }
 
     #[test]

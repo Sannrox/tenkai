@@ -70,6 +70,9 @@ struct Cli {
     /// Expose unauthenticated `GET /metrics` OpenMetrics on the loopback listener (#137).
     #[arg(long, env = "TENKAI_ENABLE_METRICS", default_value_t = false)]
     enable_metrics: bool,
+    /// Enable the authenticated, non-executable local demo fixture surface.
+    #[arg(long, default_value_t = false)]
+    with_development_fixtures: bool,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -137,6 +140,18 @@ async fn main() -> Result<()> {
         .transpose()
         .context("TENKAI_RUNTIME_TOKENS must be a JSON object mapping tokens to environments")?
         .unwrap_or_default();
+    let development_fixture_principals = std::env::var("TENKAI_DEVELOPMENT_FIXTURE_PRINCIPALS")
+        .ok()
+        .map(|value| serde_json::from_str::<Vec<String>>(&value))
+        .transpose()
+        .context("TENKAI_DEVELOPMENT_FIXTURE_PRINCIPALS must be a JSON array of principal ids")?
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    anyhow::ensure!(
+        cli.with_development_fixtures || development_fixture_principals.is_empty(),
+        "TENKAI_DEVELOPMENT_FIXTURE_PRINCIPALS requires --with-development-fixtures"
+    );
 
     if let Some(parent) = cli.database.parent()
         && !parent.as_os_str().is_empty()
@@ -242,6 +257,11 @@ async fn main() -> Result<()> {
             ),
             tenant_store,
             metrics_enabled: cli.enable_metrics,
+            development_fixtures: cli.with_development_fixtures.then_some(
+                tenkai::server::DevelopmentFixtureConfig {
+                    allowed_principals: development_fixture_principals,
+                },
+            ),
         },
         reconciler.clone(),
         store,

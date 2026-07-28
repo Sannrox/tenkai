@@ -11,6 +11,7 @@ pub mod canary;
 pub mod catalog;
 pub mod client;
 pub mod dev_sign;
+pub mod development_fixtures;
 pub mod embedded;
 pub mod federated_identity;
 pub mod inventory;
