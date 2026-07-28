@@ -195,6 +195,9 @@ impl FixtureEnvironmentProjection {
                     state: plan.status.as_str().into(),
                     created_at: 0,
                     step_count: 0,
+                    status_detail: "blocked development fixture; execution is disabled".into(),
+                    steps: Vec::new(),
+                    steps_truncated: false,
                 }
             }),
             execution_note: "Development fixture projection; execution is disabled.".into(),
@@ -674,6 +677,15 @@ mod tests {
         let rows = projection.status_rows();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].channel, "fixture-buyer-demo-canary");
+        let report = projection.inspect_report();
+        let latest_plan = report.latest_plan.unwrap();
+        assert_eq!(latest_plan.state, "blocked");
+        assert_eq!(
+            latest_plan.status_detail,
+            "blocked development fixture; execution is disabled"
+        );
+        assert!(latest_plan.steps.is_empty());
+        assert!(!latest_plan.steps_truncated);
     }
 
     #[test]

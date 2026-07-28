@@ -1281,6 +1281,26 @@ pub struct EnvironmentPlanSummary {
     pub state: String,
     pub created_at: i64,
     pub step_count: usize,
+    /// Bounded operator-facing lifecycle detail; never contains executable payloads.
+    #[serde(default)]
+    pub status_detail: String,
+    /// Ordered, bounded summaries of executable steps.
+    #[serde(default)]
+    pub steps: Vec<EnvironmentPlanStepSummary>,
+    /// True when `step_count` exceeds the number of returned summaries.
+    #[serde(default)]
+    pub steps_truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvironmentPlanStepSummary {
+    pub id: String,
+    pub order: u32,
+    pub product: String,
+    pub action: String,
+    pub from: Option<String>,
+    pub to: String,
+    pub release_id: String,
 }
 
 pub async fn status(ctx: &mut Ctx, env: &str) -> Result<Vec<StatusRow>> {
@@ -1926,15 +1946,49 @@ async fn latest_plan_for_environment(
 ) -> Result<Option<EnvironmentPlanSummary>> {
     // Environment-scoped property query — not a full plan catalog scan.
     let plans = list_for_environment(ctx, env, None).await?;
-    Ok(plans
+    Ok(plans.into_iter().next_back().map(environment_plan_summary))
+}
+
+fn environment_plan_summary(plan: Plan) -> EnvironmentPlanSummary {
+    const MAX_PLAN_STEP_SUMMARIES: usize = 256;
+    let step_count = plan.steps.len();
+    let status_detail = operator_safe_status_detail(&plan);
+    let steps = plan
+        .steps
         .into_iter()
-        .next_back()
-        .map(|plan| EnvironmentPlanSummary {
-            id: plan.id,
-            state: plan.state.to_string(),
-            created_at: plan.created_at,
-            step_count: plan.steps.len(),
-        }))
+        .take(MAX_PLAN_STEP_SUMMARIES)
+        .map(|step| EnvironmentPlanStepSummary {
+            id: step.id,
+            order: step.order,
+            product: step.product,
+            action: step.action.to_string(),
+            from: step.from,
+            to: step.to,
+            release_id: step.release_id,
+        })
+        .collect::<Vec<_>>();
+    EnvironmentPlanSummary {
+        id: plan.id,
+        state: plan.state.to_string(),
+        created_at: plan.created_at,
+        step_count,
+        status_detail,
+        steps_truncated: steps.len() < step_count,
+        steps,
+    }
+}
+
+fn operator_safe_status_detail(plan: &Plan) -> String {
+    match plan.state {
+        PlanState::Blocked if plan.maintenance_blocked => {
+            "blocked outside the configured maintenance window".into()
+        }
+        PlanState::Blocked => "blocked by Tenkai approval or policy requirements".into(),
+        PlanState::Failed => {
+            "plan execution failed; inspect authorized Tenkai audit evidence".into()
+        }
+        PlanState::Computed | PlanState::Running | PlanState::Succeeded => String::new(),
+    }
 }
 
 #[cfg(test)]
@@ -2126,6 +2180,32 @@ mod tests {
     }
 
     #[test]
+    fn environment_plan_summary_is_bounded_and_omits_executable_payloads() {
+        let mut plan = example_plan();
+        plan.state = PlanState::Blocked;
+        plan.status_detail = format!("token=do-not-return {}", "x".repeat(600));
+        let release_digest = plan.steps[0].release_digest.clone();
+        let artifact_digest = plan.steps[0].artifact_digest.clone();
+        let workdir = plan.steps[0].workdir.clone();
+
+        let summary = environment_plan_summary(plan);
+
+        assert_eq!(summary.state, "blocked");
+        assert_eq!(
+            summary.status_detail,
+            "blocked by Tenkai approval or policy requirements"
+        );
+        assert!(!summary.status_detail.contains("do-not-return"));
+        assert_eq!(summary.steps.len(), 1);
+        assert_eq!(summary.steps[0].action, "upgrade");
+        assert!(!summary.steps_truncated);
+        let encoded = serde_json::to_string(&summary).unwrap();
+        assert!(!encoded.contains(&release_digest));
+        assert!(!encoded.contains(&artifact_digest));
+        assert!(!encoded.contains(&workdir));
+    }
+
+    #[test]
     fn semantic_version_direction_is_recorded() {
         assert_eq!(classify_change("2.0.0", "1.9.0"), Action::Downgrade);
         assert_eq!(classify_change("1.9.0", "2.0.0"), Action::Upgrade);
@@ -2177,6 +2257,9 @@ mod tests {
                 state: "succeeded".into(),
                 created_at: 1,
                 step_count: 1,
+                status_detail: String::new(),
+                steps: Vec::new(),
+                steps_truncated: false,
             }),
             execution_note: "fixture".into(),
         };

@@ -98,6 +98,9 @@ with the reconciler:
 - environment detail and status synthesize sanitized channel/release posture
   from the immutable fixture projection (the last declared channel is shown
   when a v1 fixture declares multiple channels for one product); and
+- environment detail includes a generic operator-safe explanation that the
+  latest fixture plan is blocked and non-executable, plus an empty step-summary
+  list; arbitrary imported reason text is never projected; and
 - `GET /v1/fleet/status` maps `drifted` and `awaiting_approval` to the existing
   `behind` aggregate posture while retaining a blocked latest-plan state.
 
