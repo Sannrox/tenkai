@@ -288,6 +288,28 @@ impl PostgresTenantOperationalStore {
             .list_environment_ids()
             .map_err(|error| IsolationError::Contract(error.to_string()))
     }
+
+    pub fn import_development_fixture_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        fixture: &crate::development_fixtures::PreparedDevelopmentFixture,
+    ) -> std::result::Result<crate::development_fixtures::FixtureMap, IsolationError> {
+        let partition = self.partition_for(context)?;
+        partition
+            .import_development_fixture(fixture, context.principal_id(), &context.request_id)
+            .map_err(|error| IsolationError::Contract(error.to_string()))
+    }
+
+    pub fn reset_development_fixture_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        fixture_id: &str,
+    ) -> std::result::Result<crate::development_fixtures::FixtureResetResult, IsolationError> {
+        let partition = self.partition_for(context)?;
+        partition
+            .reset_development_fixture(fixture_id, context.principal_id(), &context.request_id)
+            .map_err(|error| IsolationError::Contract(error.to_string()))
+    }
 }
 
 /// Durable [`crate::reconcile_fence::ReconcileTickFence`] on hub Postgres (#135).
@@ -398,6 +420,22 @@ impl TenantOperationalStore for PostgresTenantOperationalStore {
     ) -> std::result::Result<Vec<String>, IsolationError> {
         PostgresTenantOperationalStore::list_environment_ids_for(self, context)
     }
+
+    fn import_development_fixture_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        fixture: &crate::development_fixtures::PreparedDevelopmentFixture,
+    ) -> std::result::Result<crate::development_fixtures::FixtureMap, IsolationError> {
+        PostgresTenantOperationalStore::import_development_fixture_for(self, context, fixture)
+    }
+
+    fn reset_development_fixture_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        fixture_id: &str,
+    ) -> std::result::Result<crate::development_fixtures::FixtureResetResult, IsolationError> {
+        PostgresTenantOperationalStore::reset_development_fixture_for(self, context, fixture_id)
+    }
 }
 
 impl PostgresTenantOperationalStore {
@@ -499,6 +537,46 @@ impl PostgresTenantPartition {
         }
         #[cfg(not(feature = "postgres"))]
         {
+            Err(StoreError::AdapterUnavailable(
+                "postgres feature disabled".into(),
+            ))
+        }
+    }
+
+    pub fn import_development_fixture(
+        &self,
+        fixture: &crate::development_fixtures::PreparedDevelopmentFixture,
+        actor: &str,
+        request_id: &str,
+    ) -> Result<crate::development_fixtures::FixtureMap> {
+        #[cfg(feature = "postgres")]
+        {
+            self.inner
+                .import_development_fixture(&self.schema, fixture, actor, request_id)
+        }
+        #[cfg(not(feature = "postgres"))]
+        {
+            let _ = (fixture, actor, request_id);
+            Err(StoreError::AdapterUnavailable(
+                "postgres feature disabled".into(),
+            ))
+        }
+    }
+
+    pub fn reset_development_fixture(
+        &self,
+        fixture_id: &str,
+        actor: &str,
+        request_id: &str,
+    ) -> Result<crate::development_fixtures::FixtureResetResult> {
+        #[cfg(feature = "postgres")]
+        {
+            self.inner
+                .reset_development_fixture(&self.schema, fixture_id, actor, request_id)
+        }
+        #[cfg(not(feature = "postgres"))]
+        {
+            let _ = (fixture_id, actor, request_id);
             Err(StoreError::AdapterUnavailable(
                 "postgres feature disabled".into(),
             ))
@@ -645,6 +723,24 @@ impl OperationalStore for PostgresTenantPartition {
     fn check_health(&self) -> Result<()> {
         self.inner.check_health()
     }
+    fn import_development_fixture(
+        &self,
+        fixture: &crate::development_fixtures::PreparedDevelopmentFixture,
+        actor: &str,
+        request_id: &str,
+    ) -> Result<crate::development_fixtures::FixtureMap> {
+        self.inner
+            .import_development_fixture(&self.schema, fixture, actor, request_id)
+    }
+    fn reset_development_fixture(
+        &self,
+        fixture_id: &str,
+        actor: &str,
+        request_id: &str,
+    ) -> Result<crate::development_fixtures::FixtureResetResult> {
+        self.inner
+            .reset_development_fixture(&self.schema, fixture_id, actor, request_id)
+    }
     fn runtime_capabilities(&self) -> ComponentCapabilities {
         tenant_postgres_store_capabilities()
     }
@@ -692,6 +788,106 @@ mod postgres_imp {
 
     fn pg(err: postgres::Error) -> StoreError {
         StoreError::Postgres(err.to_string())
+    }
+
+    fn postgres_fixture_matches(
+        tx: &mut Transaction<'_>,
+        fixture: &crate::development_fixtures::PreparedDevelopmentFixture,
+    ) -> Result<bool> {
+        for release in &fixture.releases {
+            let row = tx
+                .query_opt(
+                    "SELECT product,version,content_digest,descriptor_json FROM releases WHERE id=$1",
+                    &[&release.id],
+                )
+                .map_err(pg)?;
+            let Some(row) = row else {
+                return Ok(false);
+            };
+            if (
+                row.get::<_, String>(0),
+                row.get::<_, String>(1),
+                row.get::<_, String>(2),
+                row.get::<_, String>(3),
+            ) != (
+                release.product.clone(),
+                release.version.clone(),
+                release.content_digest.clone(),
+                release.descriptor_json.clone(),
+            ) {
+                return Ok(false);
+            }
+        }
+        for channel in &fixture.channels {
+            let row = tx
+                .query_opt(
+                    "SELECT product,name,release_id,revision FROM channels WHERE id=$1",
+                    &[&channel.id],
+                )
+                .map_err(pg)?;
+            let Some(row) = row else {
+                return Ok(false);
+            };
+            if (
+                row.get::<_, String>(0),
+                row.get::<_, String>(1),
+                row.get::<_, String>(2),
+                row.get::<_, i64>(3) as u64,
+            ) != (
+                channel.product.clone(),
+                channel.name.clone(),
+                channel.release_id.clone(),
+                channel.revision,
+            ) {
+                return Ok(false);
+            }
+        }
+        for environment in &fixture.environments {
+            let row = tx
+                .query_opt(
+                    "SELECT revision,configuration_json FROM environments WHERE id=$1",
+                    &[&environment.id],
+                )
+                .map_err(pg)?;
+            let Some(row) = row else {
+                return Ok(false);
+            };
+            if (row.get::<_, i64>(0) as u64, row.get::<_, String>(1))
+                != (environment.revision, environment.configuration_json.clone())
+            {
+                return Ok(false);
+            }
+        }
+        for plan in &fixture.plans {
+            let row = tx
+                .query_opt(
+                    "SELECT environment_id,format_version,content_digest,plan_json,status,status_detail
+                     FROM plans WHERE id=$1",
+                    &[&plan.id],
+                )
+                .map_err(pg)?;
+            let Some(row) = row else {
+                return Ok(false);
+            };
+            if (
+                row.get::<_, String>(0),
+                row.get::<_, i32>(1) as u32,
+                row.get::<_, String>(2),
+                row.get::<_, String>(3),
+                row.get::<_, String>(4),
+                row.get::<_, String>(5),
+            ) != (
+                plan.environment_id.clone(),
+                plan.format_version,
+                plan.content_digest.clone(),
+                plan.plan_json.clone(),
+                "blocked".into(),
+                plan.status_detail.clone(),
+            ) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     impl Inner {
@@ -871,23 +1067,19 @@ mod postgres_imp {
                     &[&environment],
                 )
                 .map_err(|e| FenceError::Store(e.to_string()))?;
-            match row {
-                Some(row) => {
-                    let claim_owner: String = row.get(0);
-                    let claim_gen: i64 = row.get(1);
-                    let claim_expires: i64 = row.get(2);
-                    if (claim_owner == owner && claim_gen as u64 == generation)
-                        || claim_expires <= now
-                    {
-                        tx.execute(
-                            "DELETE FROM tenkai_reconcile_tick_claims WHERE environment = $1",
-                            &[&environment],
-                        )
-                        .map_err(|e| FenceError::Store(e.to_string()))?;
-                    }
-                    // Stale release must not steal another host's claim.
+            if let Some(row) = row {
+                let claim_owner: String = row.get(0);
+                let claim_gen: i64 = row.get(1);
+                let claim_expires: i64 = row.get(2);
+                if (claim_owner == owner && claim_gen as u64 == generation) || claim_expires <= now
+                {
+                    tx.execute(
+                        "DELETE FROM tenkai_reconcile_tick_claims WHERE environment = $1",
+                        &[&environment],
+                    )
+                    .map_err(|e| FenceError::Store(e.to_string()))?;
                 }
-                None => {}
+                // Stale release must not steal another host's claim.
             }
             tx.commit().map_err(|e| FenceError::Store(e.to_string()))?;
             Ok(())
@@ -927,6 +1119,218 @@ mod postgres_imp {
             Ok(())
         }
 
+        pub fn import_development_fixture(
+            &self,
+            schema: &str,
+            fixture: &crate::development_fixtures::PreparedDevelopmentFixture,
+            actor: &str,
+            request_id: &str,
+        ) -> Result<crate::development_fixtures::FixtureMap> {
+            self.with_schema(schema, |tx| {
+                let lock_key = format!("{schema}:{}", fixture.map.fixture_id);
+                tx.query_one(
+                    "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                    &[&lock_key],
+                )
+                .map_err(pg)?;
+                let row = tx
+                    .query_one(
+                        "SELECT COUNT(*), MIN(fixture_digest)
+                         FROM development_fixture_objects WHERE fixture_id=$1",
+                        &[&fixture.map.fixture_id],
+                    )
+                    .map_err(pg)?;
+                let existing: i64 = row.get(0);
+                let persisted_digest: Option<String> = row.get(1);
+                let expected = fixture.releases.len()
+                    + fixture.channels.len()
+                    + fixture.environments.len()
+                    + fixture.plans.len();
+                if existing != 0 {
+                    if existing as usize != expected
+                        || persisted_digest.as_deref() != Some(&fixture.map.fixture_digest)
+                        || !postgres_fixture_matches(tx, fixture)?
+                    {
+                        return Err(StoreError::ImmutableConflict {
+                            kind: "development_fixture",
+                            id: fixture.map.fixture_id.clone(),
+                        });
+                    }
+                    return Ok(fixture.map.clone());
+                }
+                for release in &fixture.releases {
+                    tx.execute(
+                        "INSERT INTO releases(id,product,version,content_digest,descriptor_json)
+                         VALUES($1,$2,$3,$4,$5)",
+                        &[
+                            &release.id,
+                            &release.product,
+                            &release.version,
+                            &release.content_digest,
+                            &release.descriptor_json,
+                        ],
+                    )
+                    .map_err(pg)?;
+                }
+                for channel in &fixture.channels {
+                    tx.execute(
+                        "INSERT INTO channels(id,product,name,release_id,revision)
+                         VALUES($1,$2,$3,$4,$5)",
+                        &[
+                            &channel.id,
+                            &channel.product,
+                            &channel.name,
+                            &channel.release_id,
+                            &(channel.revision as i64),
+                        ],
+                    )
+                    .map_err(pg)?;
+                }
+                for environment in &fixture.environments {
+                    tx.execute(
+                        "INSERT INTO environments(id,revision,configuration_json)
+                         VALUES($1,$2,$3)",
+                        &[
+                            &environment.id,
+                            &(environment.revision as i64),
+                            &environment.configuration_json,
+                        ],
+                    )
+                    .map_err(pg)?;
+                }
+                for plan in &fixture.plans {
+                    tx.execute(
+                        "INSERT INTO plans(id,environment_id,format_version,content_digest,plan_json,status,status_detail)
+                         VALUES($1,$2,$3,$4,$5,'blocked',$6)",
+                        &[
+                            &plan.id,
+                            &plan.environment_id,
+                            &(plan.format_version as i32),
+                            &plan.content_digest,
+                            &plan.plan_json,
+                            &plan.status_detail,
+                        ],
+                    )
+                    .map_err(pg)?;
+                }
+                for (kind, ids) in [
+                    ("release", &fixture.map.releases),
+                    ("channel", &fixture.map.channels),
+                    ("environment", &fixture.map.environments),
+                    ("plan", &fixture.map.plans),
+                ] {
+                    for id in ids {
+                        tx.execute(
+                            "INSERT INTO development_fixture_objects(fixture_id,fixture_digest,object_kind,object_id)
+                             VALUES($1,$2,$3,$4)",
+                            &[
+                                &fixture.map.fixture_id,
+                                &fixture.map.fixture_digest,
+                                &kind,
+                                &id,
+                            ],
+                        )
+                        .map_err(pg)?;
+                    }
+                }
+                tx.execute(
+                    "INSERT INTO audit_events(id,occurred_at,principal,operation,resource,outcome)
+                     VALUES($1,$2,$3,'development_fixture.imported',$4,'imported')",
+                    &[
+                        &request_id,
+                        &crate::now_millis(),
+                        &actor,
+                        &fixture.map.fixture_digest,
+                    ],
+                )
+                .map_err(pg)?;
+                Ok(fixture.map.clone())
+            })
+        }
+
+        pub fn reset_development_fixture(
+            &self,
+            schema: &str,
+            fixture_id: &str,
+            actor: &str,
+            request_id: &str,
+        ) -> Result<crate::development_fixtures::FixtureResetResult> {
+            self.with_schema(schema, |tx| {
+                let lock_key = format!("{schema}:{fixture_id}");
+                tx.query_one(
+                    "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                    &[&lock_key],
+                )
+                .map_err(pg)?;
+                let row = tx
+                    .query_one(
+                        "SELECT
+                           (SELECT COUNT(*) FROM leases WHERE environment_id IN
+                              (SELECT object_id FROM development_fixture_objects WHERE fixture_id=$1 AND object_kind='environment')) +
+                           (SELECT COUNT(*) FROM receipts WHERE environment_id IN
+                              (SELECT object_id FROM development_fixture_objects WHERE fixture_id=$1 AND object_kind='environment')
+                              OR plan_id IN (SELECT object_id FROM development_fixture_objects WHERE fixture_id=$1 AND object_kind='plan')) +
+                           (SELECT COUNT(*) FROM rollbacks WHERE environment_id IN
+                              (SELECT object_id FROM development_fixture_objects WHERE fixture_id=$1 AND object_kind='environment')
+                              OR plan_id IN (SELECT object_id FROM development_fixture_objects WHERE fixture_id=$1 AND object_kind='plan')) +
+                           (SELECT COUNT(*) FROM offline_imports WHERE environment_id IN
+                              (SELECT object_id FROM development_fixture_objects WHERE fixture_id=$1 AND object_kind='environment')
+                              OR plan_id IN (SELECT object_id FROM development_fixture_objects WHERE fixture_id=$1 AND object_kind='plan')) +
+                           (SELECT COUNT(*) FROM offline_step_receipts WHERE environment_id IN
+                              (SELECT object_id FROM development_fixture_objects WHERE fixture_id=$1 AND object_kind='environment')
+                              OR plan_id IN (SELECT object_id FROM development_fixture_objects WHERE fixture_id=$1 AND object_kind='plan')) +
+                           (SELECT COUNT(*) FROM runtime_claims WHERE environment_id IN
+                              (SELECT object_id FROM development_fixture_objects WHERE fixture_id=$1 AND object_kind='environment')
+                              OR plan_id IN (SELECT object_id FROM development_fixture_objects WHERE fixture_id=$1 AND object_kind='plan'))",
+                        &[&fixture_id],
+                    )
+                    .map_err(pg)?;
+                let dependent: i64 = row.get(0);
+                if dependent != 0 {
+                    return Err(StoreError::InvalidData {
+                        kind: "development_fixture",
+                        detail:
+                            "fixture reset refused because operational state depends on it".into(),
+                    });
+                }
+                let mut removed = 0_usize;
+                for (table, kind) in [
+                    ("plans", "plan"),
+                    ("channels", "channel"),
+                    ("environments", "environment"),
+                    ("releases", "release"),
+                ] {
+                    removed += tx
+                        .execute(
+                            &format!(
+                                "DELETE FROM {table} WHERE id IN
+                                 (SELECT object_id FROM development_fixture_objects
+                                  WHERE fixture_id=$1 AND object_kind=$2)"
+                            ),
+                            &[&fixture_id, &kind],
+                        )
+                        .map_err(pg)? as usize;
+                }
+                tx.execute(
+                    "DELETE FROM development_fixture_objects WHERE fixture_id=$1",
+                    &[&fixture_id],
+                )
+                .map_err(pg)?;
+                tx.execute(
+                    "INSERT INTO audit_events(id,occurred_at,principal,operation,resource,outcome)
+                     VALUES($1,$2,$3,'development_fixture.reset',$4,'reset')",
+                    &[&request_id, &crate::now_millis(), &actor, &fixture_id],
+                )
+                .map_err(pg)?;
+                Ok(crate::development_fixtures::FixtureResetResult {
+                    contract_version:
+                        crate::development_fixtures::DEVELOPMENT_FIXTURE_CONTRACT_VERSION,
+                    fixture_id: fixture_id.into(),
+                    removed,
+                })
+            })
+        }
+
         pub fn get_environment(&self, schema: &str, id: &str) -> Result<Option<EnvironmentRecord>> {
             self.with_schema(schema, |tx| {
                 let row = tx
@@ -958,6 +1362,22 @@ mod postgres_imp {
             environment: &EnvironmentRecord,
         ) -> Result<EnvironmentRecord> {
             self.with_schema(schema, |tx| {
+                if tx
+                    .query_one(
+                        "SELECT EXISTS(
+                            SELECT 1 FROM development_fixture_objects
+                            WHERE object_kind='environment' AND object_id=$1
+                         )",
+                        &[&environment.id],
+                    )
+                    .map_err(pg)?
+                    .get::<_, bool>(0)
+                {
+                    return Err(StoreError::InvalidData {
+                        kind: "development_fixture",
+                        detail: "fixture environments are immutable".into(),
+                    });
+                }
                 let revision: Option<i64> = tx
                     .query_opt(
                         "SELECT revision FROM environments WHERE id = $1",
@@ -1068,6 +1488,23 @@ mod postgres_imp {
             channel: &ChannelRecord,
         ) -> Result<ChannelRecord> {
             self.with_schema(schema, |tx| {
+                if tx
+                    .query_one(
+                        "SELECT EXISTS(
+                            SELECT 1 FROM development_fixture_objects
+                            WHERE (object_kind='release' AND object_id=$1)
+                               OR (object_kind='channel' AND object_id=$2)
+                         )",
+                        &[&channel.release_id, &channel.id],
+                    )
+                    .map_err(pg)?
+                    .get::<_, bool>(0)
+                {
+                    return Err(StoreError::InvalidData {
+                        kind: "development_fixture",
+                        detail: "fixture releases and channels cannot be promoted".into(),
+                    });
+                }
                 let release_product: String = tx
                     .query_opt(
                         "SELECT product FROM releases WHERE id = $1",
@@ -1149,6 +1586,22 @@ mod postgres_imp {
 
         pub fn create_plan(&self, schema: &str, plan: &PlanRecord) -> Result<()> {
             self.with_schema(schema, |tx| {
+                if tx
+                    .query_one(
+                        "SELECT EXISTS(
+                            SELECT 1 FROM development_fixture_objects
+                            WHERE object_kind='environment' AND object_id=$1
+                         )",
+                        &[&plan.environment_id],
+                    )
+                    .map_err(pg)?
+                    .get::<_, bool>(0)
+                {
+                    return Err(StoreError::InvalidData {
+                        kind: "development_fixture",
+                        detail: "fixture environments cannot accept executable plans".into(),
+                    });
+                }
                 let existing = tx
                     .query_opt(
                         "SELECT environment_id,format_version,content_digest,plan_json
@@ -1234,6 +1687,22 @@ mod postgres_imp {
             detail: &str,
         ) -> Result<PlanRecord> {
             self.with_schema(schema, |tx| {
+                if tx
+                    .query_one(
+                        "SELECT EXISTS(
+                            SELECT 1 FROM development_fixture_objects
+                            WHERE object_kind='plan' AND object_id=$1
+                         )",
+                        &[&id],
+                    )
+                    .map_err(pg)?
+                    .get::<_, bool>(0)
+                {
+                    return Err(StoreError::InvalidData {
+                        kind: "development_fixture",
+                        detail: "fixture plans are non-executable".into(),
+                    });
+                }
                 let current: String = tx
                     .query_opt("SELECT status FROM plans WHERE id = $1", &[&id])
                     .map_err(pg)?
@@ -1295,6 +1764,22 @@ mod postgres_imp {
                 });
             }
             self.with_schema(schema, |tx| {
+                if tx
+                    .query_one(
+                        "SELECT EXISTS(
+                            SELECT 1 FROM development_fixture_objects
+                            WHERE object_kind='environment' AND object_id=$1
+                         )",
+                        &[&environment],
+                    )
+                    .map_err(pg)?
+                    .get::<_, bool>(0)
+                {
+                    return Err(StoreError::InvalidData {
+                        kind: "development_fixture",
+                        detail: "fixture environments are non-executable".into(),
+                    });
+                }
                 let current = lease_in(tx, environment)?;
                 let generation = match current {
                     Some(current) if current.expires_at > now && current.owner != owner => {
@@ -1885,6 +2370,22 @@ mod postgres_imp {
                 });
             }
             self.with_schema(schema, |tx| {
+                if tx
+                    .query_one(
+                        "SELECT EXISTS(
+                            SELECT 1 FROM development_fixture_objects
+                            WHERE object_kind='plan' AND object_id=$1
+                         )",
+                        &[&plan_id],
+                    )
+                    .map_err(pg)?
+                    .get::<_, bool>(0)
+                {
+                    return Err(StoreError::InvalidData {
+                        kind: "development_fixture",
+                        detail: "fixture plans are non-executable".into(),
+                    });
+                }
                 let current = tx
                     .query_opt(
                         "SELECT environment_id,owner,generation,expires_at,completion_json
@@ -2146,6 +2647,13 @@ mod postgres_imp {
                 attempt INTEGER NOT NULL, result_digest TEXT NOT NULL,
                 succeeded BOOLEAN NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS development_fixture_objects (
+                fixture_id TEXT NOT NULL, fixture_digest TEXT NOT NULL,
+                object_kind TEXT NOT NULL, object_id TEXT NOT NULL,
+                PRIMARY KEY(object_kind, object_id)
+            );
+            CREATE INDEX IF NOT EXISTS development_fixture_objects_fixture
+                ON development_fixture_objects(fixture_id, object_kind);
             ",
         )
         .map_err(pg)?;
@@ -2451,12 +2959,82 @@ mod tests {
         assert!(part.get_release("rel-1").unwrap().is_some());
     }
 
+    /// Live atomic fixture drill. Requires feature `postgres` and `TENKAI_POSTGRES_URL`.
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires Postgres; set TENKAI_POSTGRES_URL and cargo test --features postgres -- --ignored"]
+    fn live_postgres_development_fixture_is_atomic_and_tenant_scoped() {
+        use crate::auth_context::{
+            AuthenticatedRequestContextBuilder, PrincipalIdentity, PrincipalKind,
+            TenantDerivationAuthority,
+        };
+        use crate::development_fixtures::{DevelopmentFixture, FixtureEnvironment, FixturePlan};
+
+        let config = PostgresTenantConfig::from_env().expect("TENKAI_POSTGRES_URL");
+        let store = config.open().expect("connect");
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let authority = TenantDerivationAuthority::new("test");
+        let context = |tenant: &str, request: &str| {
+            AuthenticatedRequestContextBuilder::new(
+                request,
+                PrincipalIdentity {
+                    id: "seed-service".into(),
+                    kind: PrincipalKind::Service,
+                },
+                "test",
+            )
+            .with_tenant(tenant, &authority)
+            .unwrap()
+            .build()
+            .unwrap()
+        };
+        let ctx_a = context(&format!("fixture-a-{suffix}"), "fixture-request-a");
+        let ctx_b = context(&format!("fixture-b-{suffix}"), "fixture-request-b");
+        let fixture = DevelopmentFixture {
+            contract_version: 1,
+            fixture_id: format!("demo-{suffix}"),
+            releases: Vec::new(),
+            channels: Vec::new(),
+            environments: vec![FixtureEnvironment {
+                name: "prod".into(),
+                posture: "awaiting_approval".into(),
+                description: "sanitized".into(),
+            }],
+            plans: vec![FixturePlan {
+                name: "approval".into(),
+                environment: "prod".into(),
+                blocked_reason: "awaiting approval".into(),
+            }],
+        }
+        .prepare()
+        .unwrap();
+        let first = store
+            .import_development_fixture_for(&ctx_a, &fixture)
+            .unwrap();
+        assert_eq!(
+            store
+                .import_development_fixture_for(&ctx_a, &fixture)
+                .unwrap(),
+            first
+        );
+        assert!(
+            !store
+                .list_environment_ids_for(&ctx_b)
+                .unwrap()
+                .contains(&first.environments[0])
+        );
+        let reset = store
+            .reset_development_fixture_for(&ctx_a, &fixture.map.fixture_id)
+            .unwrap();
+        assert_eq!(reset.removed, 2);
+    }
+
     /// Live durable fence drill. Requires feature `postgres` and `TENKAI_POSTGRES_URL`.
     #[cfg(feature = "postgres")]
     #[test]
     #[ignore = "requires Postgres; set TENKAI_POSTGRES_URL and cargo test --features postgres -- --ignored"]
     fn live_postgres_reconcile_fence_claim_and_busy() {
-        use crate::reconcile_fence::{FenceAdmission, ReconcileTickFence};
+        use crate::reconcile_fence::FenceAdmission;
 
         let config = PostgresTenantConfig::from_env().expect("TENKAI_POSTGRES_URL");
         let store = config.open().expect("connect");

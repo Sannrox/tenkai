@@ -50,6 +50,18 @@ pub trait TenantOperationalStore: Send + Sync {
         &self,
         context: &AuthenticatedRequestContext,
     ) -> std::result::Result<Vec<String>, IsolationError>;
+
+    fn import_development_fixture_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        fixture: &crate::development_fixtures::PreparedDevelopmentFixture,
+    ) -> std::result::Result<crate::development_fixtures::FixtureMap, IsolationError>;
+
+    fn reset_development_fixture_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        fixture_id: &str,
+    ) -> std::result::Result<crate::development_fixtures::FixtureResetResult, IsolationError>;
 }
 
 /// Capability advertisement for the in-memory tenant-isolating store adapter.
@@ -164,6 +176,28 @@ impl InMemoryTenantOperationalStore {
             .map_err(|error| IsolationError::Contract(error.to_string()))
     }
 
+    pub fn import_development_fixture_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        fixture: &crate::development_fixtures::PreparedDevelopmentFixture,
+    ) -> std::result::Result<crate::development_fixtures::FixtureMap, IsolationError> {
+        let partition = self.partition_for(context)?;
+        partition
+            .import_development_fixture(fixture, context.principal_id(), &context.request_id)
+            .map_err(|error| IsolationError::Contract(error.to_string()))
+    }
+
+    pub fn reset_development_fixture_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        fixture_id: &str,
+    ) -> std::result::Result<crate::development_fixtures::FixtureResetResult, IsolationError> {
+        let partition = self.partition_for(context)?;
+        partition
+            .reset_development_fixture(fixture_id, context.principal_id(), &context.request_id)
+            .map_err(|error| IsolationError::Contract(error.to_string()))
+    }
+
     /// Run the isolation harness plus store-partition isolation checks.
     pub fn run_conformance(&self) -> std::result::Result<(), IsolationError> {
         let harness = TenantIsolationHarness::new()
@@ -238,6 +272,22 @@ impl TenantOperationalStore for InMemoryTenantOperationalStore {
         context: &AuthenticatedRequestContext,
     ) -> std::result::Result<Vec<String>, IsolationError> {
         InMemoryTenantOperationalStore::list_environment_ids_for(self, context)
+    }
+
+    fn import_development_fixture_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        fixture: &crate::development_fixtures::PreparedDevelopmentFixture,
+    ) -> std::result::Result<crate::development_fixtures::FixtureMap, IsolationError> {
+        InMemoryTenantOperationalStore::import_development_fixture_for(self, context, fixture)
+    }
+
+    fn reset_development_fixture_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        fixture_id: &str,
+    ) -> std::result::Result<crate::development_fixtures::FixtureResetResult, IsolationError> {
+        InMemoryTenantOperationalStore::reset_development_fixture_for(self, context, fixture_id)
     }
 }
 
@@ -380,6 +430,24 @@ impl OperationalStore for TenantPartition {
     }
     fn check_health(&self) -> Result<()> {
         self.store.check_health()
+    }
+    fn import_development_fixture(
+        &self,
+        fixture: &crate::development_fixtures::PreparedDevelopmentFixture,
+        actor: &str,
+        request_id: &str,
+    ) -> Result<crate::development_fixtures::FixtureMap> {
+        self.store
+            .import_development_fixture(fixture, actor, request_id)
+    }
+    fn reset_development_fixture(
+        &self,
+        fixture_id: &str,
+        actor: &str,
+        request_id: &str,
+    ) -> Result<crate::development_fixtures::FixtureResetResult> {
+        self.store
+            .reset_development_fixture(fixture_id, actor, request_id)
     }
     fn runtime_capabilities(&self) -> ComponentCapabilities {
         // Partition claims the multi-tenant adapter identity so hosts never

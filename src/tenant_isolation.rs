@@ -120,6 +120,16 @@ pub fn tenant_visible_rpcs() -> &'static [TenantVisibleRpc] {
             surface: TenantVisibleSurface::Management,
         },
         TenantVisibleRpc {
+            id: "development.fixture_import",
+            path_template: "POST /v1/development/fixtures/import",
+            surface: TenantVisibleSurface::Management,
+        },
+        TenantVisibleRpc {
+            id: "development.fixture_reset",
+            path_template: "DELETE /v1/development/fixtures/{fixture_id}",
+            surface: TenantVisibleSurface::Management,
+        },
+        TenantVisibleRpc {
             id: "runtime.work",
             path_template: "GET /v1/runtime/environments/{environment}/work",
             surface: TenantVisibleSurface::RuntimeAgent,
@@ -222,6 +232,8 @@ pub fn http_exposed_tenant_rpc_ids() -> &'static [&'static str] {
     &[
         "management.reconcile",
         "management.fleet_status",
+        "development.fixture_import",
+        "development.fixture_reset",
         "runtime.work",
         "runtime.complete",
         "runtime.heartbeat",

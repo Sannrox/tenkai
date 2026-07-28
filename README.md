@@ -20,6 +20,9 @@ durable boundary and service-evolution rules are recorded in
 The versioned Catalog application port, transport conformance requirements,
 cache rules, and failure semantics are documented in
 [the Catalog contract](docs/catalog-contract.md).
+Authenticated local integration demos may opt into the disabled-by-default
+[development fixture contract](docs/development-fixtures.md); it creates only
+tenant-scoped, non-executable projections and is not a production mutation API.
 Disconnected environments use bounded self-verifying archives and signed,
 replay-safe receipts documented in
 [the offline bundle contract](docs/offline-bundles.md).
