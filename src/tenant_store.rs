@@ -62,6 +62,15 @@ pub trait TenantOperationalStore: Send + Sync {
         context: &AuthenticatedRequestContext,
         fixture_id: &str,
     ) -> std::result::Result<crate::development_fixtures::FixtureResetResult, IsolationError>;
+
+    fn development_fixture_environment_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        environment_id: &str,
+    ) -> std::result::Result<
+        Option<crate::development_fixtures::FixtureEnvironmentProjection>,
+        IsolationError,
+    >;
 }
 
 /// Capability advertisement for the in-memory tenant-isolating store adapter.
@@ -198,6 +207,19 @@ impl InMemoryTenantOperationalStore {
             .map_err(|error| IsolationError::Contract(error.to_string()))
     }
 
+    pub fn development_fixture_environment_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        environment_id: &str,
+    ) -> std::result::Result<
+        Option<crate::development_fixtures::FixtureEnvironmentProjection>,
+        IsolationError,
+    > {
+        self.partition_for(context)?
+            .development_fixture_environment(environment_id)
+            .map_err(|error| IsolationError::Contract(error.to_string()))
+    }
+
     /// Run the isolation harness plus store-partition isolation checks.
     pub fn run_conformance(&self) -> std::result::Result<(), IsolationError> {
         let harness = TenantIsolationHarness::new()
@@ -288,6 +310,21 @@ impl TenantOperationalStore for InMemoryTenantOperationalStore {
         fixture_id: &str,
     ) -> std::result::Result<crate::development_fixtures::FixtureResetResult, IsolationError> {
         InMemoryTenantOperationalStore::reset_development_fixture_for(self, context, fixture_id)
+    }
+
+    fn development_fixture_environment_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        environment_id: &str,
+    ) -> std::result::Result<
+        Option<crate::development_fixtures::FixtureEnvironmentProjection>,
+        IsolationError,
+    > {
+        InMemoryTenantOperationalStore::development_fixture_environment_for(
+            self,
+            context,
+            environment_id,
+        )
     }
 }
 
@@ -448,6 +485,12 @@ impl OperationalStore for TenantPartition {
     ) -> Result<crate::development_fixtures::FixtureResetResult> {
         self.store
             .reset_development_fixture(fixture_id, actor, request_id)
+    }
+    fn development_fixture_environment(
+        &self,
+        environment_id: &str,
+    ) -> Result<Option<crate::development_fixtures::FixtureEnvironmentProjection>> {
+        self.store.development_fixture_environment(environment_id)
     }
     fn runtime_capabilities(&self) -> ComponentCapabilities {
         // Partition claims the multi-tenant adapter identity so hosts never

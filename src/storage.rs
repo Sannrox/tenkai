@@ -11,7 +11,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -386,6 +386,12 @@ pub trait OperationalStore: Send + Sync {
             "development fixture reset is not implemented by this store".into(),
         ))
     }
+    fn development_fixture_environment(
+        &self,
+        _environment_id: &str,
+    ) -> Result<Option<crate::development_fixtures::FixtureEnvironmentProjection>> {
+        Ok(None)
+    }
     /// Versioned runtime capabilities this store implementation provides.
     fn runtime_capabilities(&self) -> crate::runtime_capabilities::ComponentCapabilities;
     fn claim_runtime_plan(
@@ -426,7 +432,6 @@ impl SqliteStore {
             connection: Mutex::new(connection),
         })
     }
-
     pub fn open_in_memory() -> Result<Self> {
         let mut connection = Connection::open_in_memory()?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
@@ -559,11 +564,12 @@ fn migrate(connection: &mut Connection) -> Result<()> {
              CREATE TABLE development_fixture_objects (
                 fixture_id TEXT NOT NULL, fixture_digest TEXT NOT NULL,
                 object_kind TEXT NOT NULL, object_id TEXT NOT NULL,
+                object_order INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(object_kind, object_id)
              );
              CREATE INDEX development_fixture_objects_fixture
                 ON development_fixture_objects(fixture_id, object_kind);
-             PRAGMA user_version = 7;",
+             PRAGMA user_version = 8;",
         )?;
         tx.commit()?;
     }
@@ -702,11 +708,30 @@ fn migrate(connection: &mut Connection) -> Result<()> {
             "CREATE TABLE development_fixture_objects (
                 fixture_id TEXT NOT NULL, fixture_digest TEXT NOT NULL,
                 object_kind TEXT NOT NULL, object_id TEXT NOT NULL,
+                object_order INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(object_kind, object_id)
              );
              CREATE INDEX development_fixture_objects_fixture
                 ON development_fixture_objects(fixture_id, object_kind);
-             PRAGMA user_version = 7;",
+             PRAGMA user_version = 8;",
+        )?;
+        tx.commit()?;
+    }
+    if found == 7 {
+        let tx = connection.transaction()?;
+        tx.execute_batch(
+            "DELETE FROM plans WHERE id IN
+                (SELECT object_id FROM development_fixture_objects WHERE object_kind='plan');
+             DELETE FROM channels WHERE id IN
+                (SELECT object_id FROM development_fixture_objects WHERE object_kind='channel');
+             DELETE FROM environments WHERE id IN
+                (SELECT object_id FROM development_fixture_objects WHERE object_kind='environment');
+             DELETE FROM releases WHERE id IN
+                (SELECT object_id FROM development_fixture_objects WHERE object_kind='release');
+             DELETE FROM development_fixture_objects;
+             ALTER TABLE development_fixture_objects
+                ADD COLUMN object_order INTEGER NOT NULL DEFAULT 0;
+             PRAGMA user_version = 8;",
         )?;
         tx.commit()?;
     }
@@ -1044,15 +1069,17 @@ impl OperationalStore for SqliteStore {
             ("environment", &fixture.map.environments),
             ("plan", &fixture.map.plans),
         ] {
-            for id in ids {
+            for (object_order, id) in ids.iter().enumerate() {
+                let object_order = object_order as i64;
                 tx.execute(
-                    "INSERT INTO development_fixture_objects(fixture_id,fixture_digest,object_kind,object_id)
-                     VALUES(?1,?2,?3,?4)",
+                    "INSERT INTO development_fixture_objects(fixture_id,fixture_digest,object_kind,object_id,object_order)
+                     VALUES(?1,?2,?3,?4,?5)",
                     params![
                         fixture.map.fixture_id,
                         fixture.map.fixture_digest,
                         kind,
-                        id
+                        id,
+                        object_order
                     ],
                 )?;
             }
@@ -1138,6 +1165,94 @@ impl OperationalStore for SqliteStore {
             fixture_id: fixture_id.into(),
             removed,
         })
+    }
+
+    fn development_fixture_environment(
+        &self,
+        environment_id: &str,
+    ) -> Result<Option<crate::development_fixtures::FixtureEnvironmentProjection>> {
+        let connection = self.connection()?;
+        let fixture_id: Option<String> = connection
+            .query_row(
+                "SELECT fixture_id FROM development_fixture_objects
+                 WHERE object_kind='environment' AND object_id=?1",
+                [environment_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(fixture_id) = fixture_id else {
+            return Ok(None);
+        };
+        let environment = connection.query_row(
+            "SELECT id,revision,configuration_json FROM environments WHERE id=?1",
+            [environment_id],
+            |row| {
+                Ok(EnvironmentRecord {
+                    id: row.get(0)?,
+                    revision: row.get(1)?,
+                    configuration_json: row.get(2)?,
+                })
+            },
+        )?;
+        let mut channel_statement = connection.prepare(
+            "SELECT c.product,c.name,r.version
+                 FROM development_fixture_objects owned
+                 JOIN channels c ON c.id=owned.object_id
+                 JOIN releases r ON r.id=c.release_id
+                 WHERE owned.fixture_id=?1 AND owned.object_kind='channel'
+                 ORDER BY owned.object_order DESC, c.id",
+        )?;
+        let channels = channel_statement
+            .query_map([&fixture_id], |row| {
+                Ok(crate::development_fixtures::FixtureChannelProjection {
+                    product: row.get(0)?,
+                    channel: row.get(1)?,
+                    head: row.get(2)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let latest_plan = connection
+            .query_row(
+                "SELECT p.id,p.environment_id,p.format_version,p.content_digest,p.plan_json,p.status,p.status_detail
+                 FROM development_fixture_objects owned
+                 JOIN plans p ON p.id=owned.object_id
+                 WHERE owned.fixture_id=?1 AND owned.object_kind='plan' AND p.environment_id=?2
+                 ORDER BY owned.object_order DESC, p.id DESC
+                 LIMIT 1",
+                params![fixture_id, environment_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, u32>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                },
+            )
+            .optional()?
+            .map(
+                |(id, environment_id, format_version, content_digest, plan_json, status, detail)| {
+                    Ok::<PlanRecord, StoreError>(PlanRecord {
+                        id,
+                        environment_id,
+                        format_version,
+                        content_digest,
+                        plan_json,
+                        status: PlanStatus::parse(&status)?,
+                        status_detail: detail,
+                    })
+                },
+            )
+            .transpose()?;
+        crate::development_fixtures::parse_environment_projection(
+            environment,
+            channels,
+            latest_plan,
+        )
+        .map(Some)
     }
 
     fn promote_channel(&self, channel: &ChannelRecord) -> Result<ChannelRecord> {
