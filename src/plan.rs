@@ -2702,6 +2702,8 @@ max_startup_seconds = 60
             signature: None,
             trust_roots: None,
             allow_unsigned_development: true,
+            provenance: Vec::new(),
+            provenance_trust_roots: None,
         };
         crate::catalog::publish(&mut ctx, &q4_dir.join("tenkai.toml"), &options)
             .await

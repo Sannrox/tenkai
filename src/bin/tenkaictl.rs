@@ -82,6 +82,12 @@ enum Command {
         /// Permit an unsigned release for local development only.
         #[arg(long)]
         allow_unsigned_development: bool,
+        /// Registered, versioned release-provenance envelope (repeatable).
+        #[arg(long = "provenance")]
+        provenance: Vec<PathBuf>,
+        /// Trust roots authenticating release-provenance issuers.
+        #[arg(long, requires = "provenance")]
+        provenance_trust_roots: Option<PathBuf>,
     },
     /// Inspect or reverify published release trust evidence.
     Release {
@@ -823,18 +829,24 @@ async fn run(cli: Cli) -> Result<()> {
             signature,
             trust_roots,
             allow_unsigned_development,
+            provenance,
+            provenance_trust_roots,
         } => {
             let options = catalog::PublishOptions {
                 signature,
                 trust_roots,
                 allow_unsigned_development,
+                provenance,
+                provenance_trust_roots,
             };
             if output == OutputFormat::JsonV1 {
                 let published = catalog::publish_with_result(&mut ctx, &manifest, &options).await?;
-                print_machine_result(
-                    &CommandResultV1::succeeded(CommandName::Publish)
-                        .resource("release", published.release),
-                )?;
+                let mut result = CommandResultV1::succeeded(CommandName::Publish)
+                    .resource("release", published.release);
+                for digest in published.provenance_digests {
+                    result = result.resource("release_provenance", digest);
+                }
+                print_machine_result(&result)?;
             } else {
                 println!("{}", catalog::publish(&mut ctx, &manifest, &options).await?);
             }
@@ -1936,6 +1948,7 @@ mod tests {
             signature,
             trust_roots,
             allow_unsigned_development,
+            provenance,
             ..
         } = signed.command
         else {
@@ -1944,20 +1957,28 @@ mod tests {
         assert_eq!(signature, Some(PathBuf::from("tenkai.sig.json")));
         assert_eq!(trust_roots, Some(PathBuf::from("release-trust.toml")));
         assert!(!allow_unsigned_development);
+        assert!(provenance.is_empty());
 
         let unsigned = Cli::try_parse_from([
             "tenkaictl",
             "publish",
             "tenkai.toml",
             "--allow-unsigned-development",
+            "--provenance",
+            "subject.json",
+            "--provenance",
+            "build.json",
+            "--provenance-trust-roots",
+            "provenance-trust.toml",
         ])
         .unwrap();
         assert!(matches!(
             unsigned.command,
             Command::Publish {
                 allow_unsigned_development: true,
+                provenance,
                 ..
-            }
+            } if provenance == [PathBuf::from("subject.json"), PathBuf::from("build.json")]
         ));
     }
 

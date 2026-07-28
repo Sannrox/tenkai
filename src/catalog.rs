@@ -10,6 +10,7 @@ use crate::client::Ctx;
 use crate::manifest;
 use crate::ontology::*;
 use crate::pb::sekai::Object;
+use crate::release_provenance::{self, ProvenanceEnvelope, ProvenanceProjection};
 use crate::release_signing::{self, VerificationEvidence};
 
 /// Version of the transport-independent Catalog application contract.
@@ -29,11 +30,14 @@ pub struct ReleaseDescriptor {
     pub manifest_digest: String,
     pub artifact_digest: String,
     pub content_path: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provenance: Vec<ProvenanceProjection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishResult {
     pub release: String,
+    pub provenance_digests: Vec<String>,
     pub message: String,
 }
 
@@ -165,6 +169,10 @@ async fn descriptor_from_object(
         manifest_digest: required("digest")?.into(),
         artifact_digest: required("artifact_digest")?.into(),
         content_path: required("workdir")?.into(),
+        provenance: stored_provenance(release).map_err(|error| CatalogLookupError::Malformed {
+            release_id: release.id.clone(),
+            reason: error.to_string(),
+        })?,
     })
 }
 
@@ -236,6 +244,8 @@ pub struct PublishOptions {
     pub signature: Option<PathBuf>,
     pub trust_roots: Option<PathBuf>,
     pub allow_unsigned_development: bool,
+    pub provenance: Vec<PathBuf>,
+    pub provenance_trust_roots: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -255,6 +265,44 @@ pub struct ReleaseVerificationView {
     pub statement_digest: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provenance: Option<release_signing::Provenance>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub governance_provenance: Vec<ProvenanceProjection>,
+}
+
+fn stored_provenance(release: &Object) -> Result<Vec<ProvenanceProjection>> {
+    let Some(raw_envelopes) = release.properties.get("provenance_envelopes") else {
+        if release.properties.contains_key("provenance_digests")
+            || release.properties.contains_key("provenance_projections")
+        {
+            bail!("stored release provenance properties are incomplete");
+        }
+        return Ok(Vec::new());
+    };
+    let envelopes: Vec<ProvenanceEnvelope> = serde_json::from_str(raw_envelopes)?;
+    let stored_digests: Vec<String> = serde_json::from_str(
+        release
+            .properties
+            .get("provenance_digests")
+            .ok_or_else(|| anyhow::anyhow!("stored release provenance has no digest list"))?,
+    )?;
+    let stored_projections: Vec<ProvenanceProjection> = serde_json::from_str(
+        release
+            .properties
+            .get("provenance_projections")
+            .ok_or_else(|| anyhow::anyhow!("stored release provenance has no projections"))?,
+    )?;
+    let expected_digests = envelopes
+        .iter()
+        .map(ProvenanceEnvelope::stored_digest)
+        .collect::<Result<Vec<_>>>()?;
+    let expected_projections = envelopes
+        .iter()
+        .map(ProvenanceEnvelope::stored_projection)
+        .collect::<Result<Vec<_>>>()?;
+    if stored_digests != expected_digests || stored_projections != expected_projections {
+        bail!("stored release provenance projections do not match their canonical envelopes");
+    }
+    Ok(expected_projections)
 }
 
 fn parse_release_spec(spec: &str) -> Result<(&str, &str)> {
@@ -429,6 +477,7 @@ fn verification_view(
                 artifact_digest: artifact_digest.into(),
                 statement_digest: Some(evidence.statement_digest),
                 provenance: Some(evidence.provenance),
+                governance_provenance: stored_provenance(release)?,
             })
         }
         "unsigned-development" => {
@@ -447,6 +496,7 @@ fn verification_view(
                 artifact_digest: artifact_digest.into(),
                 statement_digest: None,
                 provenance: None,
+                governance_provenance: stored_provenance(release)?,
             })
         }
         other => bail!("release has unknown verification status {other:?}"),
@@ -503,6 +553,74 @@ pub async fn reverify_release(
         bail!("release {spec} reverification result differs from its stored evidence");
     }
     Ok(stored)
+}
+
+fn provenance_properties(
+    envelopes: &[ProvenanceEnvelope],
+) -> Result<(HashMap<String, String>, Vec<String>)> {
+    if envelopes.is_empty() {
+        return Ok((HashMap::new(), Vec::new()));
+    }
+    let digests = envelopes
+        .iter()
+        .map(ProvenanceEnvelope::digest)
+        .collect::<Result<Vec<_>>>()?;
+    let projections = envelopes
+        .iter()
+        .map(ProvenanceEnvelope::projection)
+        .collect::<Result<Vec<_>>>()?;
+    Ok((
+        HashMap::from([
+            (
+                "provenance_envelopes".into(),
+                serde_json::to_string(envelopes)?,
+            ),
+            (
+                "provenance_digests".into(),
+                serde_json::to_string(&digests)?,
+            ),
+            (
+                "provenance_projections".into(),
+                serde_json::to_string(&projections)?,
+            ),
+        ]),
+        digests,
+    ))
+}
+
+fn validate_stored_provenance(release: &Object, expected: &HashMap<String, String>) -> Result<()> {
+    for key in [
+        "provenance_envelopes",
+        "provenance_digests",
+        "provenance_projections",
+    ] {
+        let stored = release
+            .properties
+            .get(key)
+            .map(String::as_str)
+            .unwrap_or("");
+        let wanted = expected.get(key).map(String::as_str).unwrap_or("");
+        if stored != wanted {
+            bail!(
+                "release {} already exists with different immutable provenance",
+                release.id
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_provenance_admission(
+    envelopes: &[ProvenanceEnvelope],
+    existing_release: bool,
+    now_unix_ms: i64,
+) -> Result<()> {
+    if !existing_release {
+        for envelope in envelopes {
+            envelope.validate(now_unix_ms)?;
+        }
+    }
+    Ok(())
 }
 
 fn verify_publication(
@@ -687,6 +805,19 @@ async fn publish_impl(
     let digest = manifest::digest(&loaded.raw);
     let artifact_digest =
         manifest::artifact_digest(&loaded.workdir, &loaded.manifest.immutable_inputs())?;
+    let provenance = release_provenance::load_all(
+        &options.provenance,
+        options.provenance_trust_roots.as_deref(),
+    )?;
+    release_provenance::validate_release_binding(&provenance, &digest, &artifact_digest)?;
+    let (provenance_properties, provenance_digests) = provenance_properties(&provenance)?;
+    let rid = release_id(&name, &version);
+    let preexisting_release = ctx.get(&rid).await?;
+    validate_provenance_admission(
+        &provenance,
+        preexisting_release.is_some(),
+        crate::now_millis(),
+    )?;
     let verification = verify_publication(options, &digest, &artifact_digest)?;
     let verification_properties = verification.properties()?;
     let versioned_workdir = manifest::snapshot_workdir(
@@ -696,8 +827,7 @@ async fn publish_impl(
         &artifact_digest,
     )?;
 
-    let rid = release_id(&name, &version);
-    let existing_release = if let Some(mut existing) = ctx.get(&rid).await? {
+    let existing_release = if let Some(mut existing) = preexisting_release {
         let existing_digest = existing
             .properties
             .get("digest")
@@ -712,6 +842,7 @@ async fn publish_impl(
             && (existing_artifact_digest.is_empty() || existing_artifact_digest == artifact_digest)
         {
             validate_stored_release_content(&existing, &digest, &artifact_digest)?;
+            validate_stored_provenance(&existing, &provenance_properties)?;
             existing
                 .properties
                 .insert("artifact_digest".into(), artifact_digest.clone());
@@ -727,7 +858,7 @@ async fn publish_impl(
             );
         }
     } else {
-        let properties = HashMap::from([
+        let mut properties = HashMap::from([
             ("product".into(), name.clone()),
             ("version".into(), version.clone()),
             ("digest".into(), digest.clone()),
@@ -735,6 +866,7 @@ async fn publish_impl(
             ("manifest".into(), loaded.raw.clone()),
             ("workdir".into(), versioned_workdir.display().to_string()),
         ]);
+        properties.extend(provenance_properties.clone());
         let release = object(
             rid.clone(),
             KIND_RELEASE,
@@ -765,6 +897,7 @@ async fn publish_impl(
                     );
                 }
                 validate_stored_release_content(&existing, &digest, &artifact_digest)?;
+                validate_stored_provenance(&existing, &provenance_properties)?;
                 let mut pinned = existing;
                 pinned
                     .properties
@@ -798,12 +931,14 @@ async fn publish_impl(
     if existing_release {
         Ok(PublishResult {
             release: published_spec,
+            provenance_digests,
             message: format!("{name}@{version} already published (digest unchanged)"),
         })
     } else {
         let trust = verification.description();
         Ok(PublishResult {
             release: published_spec,
+            provenance_digests,
             message: format!("published {name}@{version} ({}, {trust})", &digest[..12]),
         })
     }
@@ -986,5 +1121,143 @@ mod tests {
             .properties
             .insert("product".into(), "other".into());
         assert!(validate_release_identity(&substituted, "api", "1.0.0").is_err());
+    }
+
+    fn test_provenance(now: i64) -> release_provenance::ProvenanceEnvelope {
+        release_provenance::ProvenanceEnvelope {
+            profile: release_provenance::GOVERNED_SUBJECT_PROFILE.into(),
+            issuer: "sekai-chisei".into(),
+            issuer_key_id: String::new(),
+            subject: "candidate-1".into(),
+            content_digest: format!("sha256:{}", "1".repeat(64)),
+            decision: "allow".into(),
+            receipt_schema: "chisei.governed-subject-receipt/v1".into(),
+            receipt_digest: format!("sha256:{}", "2".repeat(64)),
+            governed_references: vec![release_provenance::GovernedReference {
+                kind: "operation".into(),
+                id: "operation-1".into(),
+                digest: format!("sha256:{}", "3".repeat(64)),
+            }],
+            observed_at_unix_ms: now,
+            expires_at_unix_ms: now + 60_000,
+            signature: base64::engine::general_purpose::STANDARD.encode([0_u8; 64]),
+        }
+    }
+
+    #[tokio::test]
+    async fn publication_persists_replays_and_conflicts_on_provenance() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-provenance-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let manifest_path = root.join("tenkai.toml");
+        std::fs::write(
+            &manifest_path,
+            "[product]\nname = \"api\"\nversion = \"1.0.0\"\n\n[deploy]\ninstall = \"true\"\n",
+        )
+        .unwrap();
+        let provenance_path = root.join("provenance.json");
+        let provenance = test_provenance(crate::now_millis());
+        let mut provenance = provenance;
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[7_u8; 32]);
+        provenance.issuer_key_id = release_signing::key_id(&signing_key.verifying_key().to_bytes());
+        provenance.content_digest = release_provenance::release_content_digest(
+            &manifest::digest(&std::fs::read_to_string(&manifest_path).unwrap()),
+            &manifest::artifact_digest(
+                &root,
+                &manifest::load(&manifest_path)
+                    .unwrap()
+                    .manifest
+                    .immutable_inputs(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        provenance.signature = base64::engine::general_purpose::STANDARD.encode(
+            signing_key
+                .sign(&provenance.signed_bytes().unwrap())
+                .to_bytes(),
+        );
+        std::fs::write(
+            &provenance_path,
+            serde_json::to_vec_pretty(&provenance).unwrap(),
+        )
+        .unwrap();
+        let roots_path = root.join("provenance-trust.toml");
+        let roots = release_signing::TrustRoots {
+            version: release_signing::TRUST_ROOT_VERSION,
+            signers: vec![release_signing::TrustedSigner {
+                key_id: provenance.issuer_key_id.clone(),
+                identity: provenance.issuer.clone(),
+                public_key: base64::engine::general_purpose::STANDARD
+                    .encode(signing_key.verifying_key().to_bytes()),
+            }],
+        };
+        std::fs::write(&roots_path, toml::to_string(&roots).unwrap()).unwrap();
+
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let options = PublishOptions {
+            allow_unsigned_development: true,
+            provenance: vec![provenance_path.clone()],
+            provenance_trust_roots: Some(roots_path),
+            ..Default::default()
+        };
+        let first = publish_with_result(&mut ctx, &manifest_path, &options)
+            .await
+            .unwrap();
+        assert_eq!(first.provenance_digests, vec![provenance.digest().unwrap()]);
+        let replay = publish_with_result(&mut ctx, &manifest_path, &options)
+            .await
+            .unwrap();
+        assert!(replay.message.contains("already published"));
+
+        let inspected = inspect_release(&mut ctx, "api@1.0.0").await.unwrap();
+        assert_eq!(inspected.governance_provenance.len(), 1);
+        assert_eq!(
+            inspected.governance_provenance[0].envelope_digest,
+            provenance.digest().unwrap()
+        );
+
+        let mut changed = provenance;
+        changed.subject = "candidate-2".into();
+        changed.signature = base64::engine::general_purpose::STANDARD.encode(
+            signing_key
+                .sign(&changed.signed_bytes().unwrap())
+                .to_bytes(),
+        );
+        std::fs::write(
+            &provenance_path,
+            serde_json::to_vec_pretty(&changed).unwrap(),
+        )
+        .unwrap();
+        let error = publish_with_result(&mut ctx, &manifest_path, &options)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("different immutable provenance"));
+
+        let absent = PublishOptions {
+            allow_unsigned_development: true,
+            ..Default::default()
+        };
+        assert!(
+            publish_with_result(&mut ctx, &manifest_path, &absent)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("different immutable provenance")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn expired_provenance_is_allowed_only_for_existing_release_replay() {
+        let envelope = test_provenance(1_000);
+        assert!(
+            validate_provenance_admission(std::slice::from_ref(&envelope), false, 100_000).is_err()
+        );
+        assert!(validate_provenance_admission(&[envelope], true, 100_000).is_ok());
     }
 }
