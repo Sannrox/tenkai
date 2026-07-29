@@ -953,7 +953,7 @@ mod tests {
         let host_b_again = fence.try_begin("prod", "host-b", 1_300, 10_000).unwrap();
         assert!(matches!(
             host_b_again,
-            crate::reconcile_fence::FenceAdmission::Started { generation: 1 }
+            crate::reconcile_fence::FenceAdmission::Started { generation: 2 }
         ));
     }
 

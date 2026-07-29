@@ -23,7 +23,7 @@ use crate::runtime_capabilities::{
 use crate::storage::{
     AuditRecord, ChannelRecord, LeaseRecord, OfflineImportRecord, OfflineStepImportRecord,
     OperationalStore, PlanRecord, PlanStatus, ProviderEventRecord, ReceiptRecord, ReleaseRecord,
-    RollbackRecord, RollbackStatus, RuntimeClaim,
+    RollbackRecord, RollbackStatus, RuntimeClaim, rollback_intent_digest,
 };
 use crate::storage::{EnvironmentRecord, Result, SCHEMA_VERSION, StoreError};
 use crate::tenant_isolation::IsolationError;
@@ -840,7 +840,52 @@ mod postgres_imp {
     }
 
     fn pg(err: postgres::Error) -> StoreError {
-        StoreError::Postgres(err.to_string())
+        let message = err
+            .as_db_error()
+            .map(|database| format!("{} ({})", database.message(), database.code().code()))
+            .unwrap_or_else(|| err.to_string());
+        StoreError::Postgres(message)
+    }
+
+    fn legacy_rollback_intent(rollback: &RollbackRecord) -> String {
+        format!(
+            "{}:{}:{}",
+            rollback.environment_id, rollback.plan_id, rollback.lease_generation
+        )
+    }
+
+    fn rollback_intent_matches(
+        tx: &mut Transaction<'_>,
+        rollback: &RollbackRecord,
+    ) -> Result<bool> {
+        let row = tx
+            .query_one(
+                "SELECT intent_digest,environment_id,plan_id,intent_lease_generation,
+                        creation_checkpoint_json,creation_status_detail
+                 FROM rollbacks WHERE id=$1",
+                &[&rollback.id],
+            )
+            .map_err(pg)?;
+        let stored: String = row.get(0);
+        let expected = rollback_intent_digest(rollback);
+        let intent_generation = row.get::<_, Option<i64>>(3);
+        let creation_checkpoint = row.get::<_, Option<String>>(4);
+        let creation_detail = row.get::<_, Option<String>>(5);
+        if intent_generation.is_none() && creation_checkpoint.is_none() && creation_detail.is_none()
+        {
+            // Progressed rows from the legacy schema no longer contain their
+            // original mutable fields. Preserve their historical idempotency
+            // contract without rewriting or claiming stronger validation.
+            return Ok(stored == legacy_rollback_intent(rollback));
+        }
+        Ok(
+            (stored == expected || stored == legacy_rollback_intent(rollback))
+                && row.get::<_, String>(1) == rollback.environment_id
+                && row.get::<_, String>(2) == rollback.plan_id
+                && intent_generation == Some(rollback.lease_generation as i64)
+                && creation_checkpoint.as_deref() == Some(&rollback.checkpoint_json)
+                && creation_detail.as_deref() == Some(&rollback.status_detail),
+        )
     }
 
     fn postgres_fixture_matches(
@@ -946,6 +991,16 @@ mod postgres_imp {
     impl Inner {
         pub fn connect(url: &str) -> Result<Self> {
             let mut client = Client::connect(url, NoTls).map_err(pg)?;
+            // PostgreSQL's IF NOT EXISTS DDL can still race in the system
+            // catalogs when several replicas initialize a fresh database at
+            // once. Serialize only the global adapter migration; the
+            // session-scoped lock is released automatically if setup fails.
+            client
+                .query_one(
+                    "SELECT pg_advisory_lock(hashtextextended('tenkai_global_schema_migration', 0))",
+                    &[],
+                )
+                .map_err(pg)?;
             client
                 .batch_execute(
                     "CREATE TABLE IF NOT EXISTS tenkai_meta (
@@ -1002,6 +1057,12 @@ mod postgres_imp {
                         generation BIGINT NOT NULL,
                         expires_at BIGINT NOT NULL
                      );",
+                )
+                .map_err(pg)?;
+            client
+                .query_one(
+                    "SELECT pg_advisory_unlock(hashtextextended('tenkai_global_schema_migration', 0))",
+                    &[],
                 )
                 .map_err(pg)?;
             Ok(Self {
@@ -1123,12 +1184,12 @@ mod postgres_imp {
             if let Some(row) = row {
                 let claim_owner: String = row.get(0);
                 let claim_gen: i64 = row.get(1);
-                let claim_expires: i64 = row.get(2);
-                if (claim_owner == owner && claim_gen as u64 == generation) || claim_expires <= now
-                {
+                if claim_owner == owner && claim_gen as u64 == generation {
                     tx.execute(
-                        "DELETE FROM tenkai_reconcile_tick_claims WHERE environment = $1",
-                        &[&environment],
+                        "UPDATE tenkai_reconcile_tick_claims
+                         SET expires_at = LEAST(expires_at, $1)
+                         WHERE environment = $2",
+                        &[&now, &environment],
                     )
                     .map_err(|e| FenceError::Store(e.to_string()))?;
                 }
@@ -1155,10 +1216,16 @@ mod postgres_imp {
 
         pub fn ensure_tenant_schema(&self, schema: &str) -> Result<()> {
             let mut client = self.client.lock().map_err(|_| StoreError::Poisoned)?;
-            client
-                .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {schema}"))
-                .map_err(pg)?;
             let mut tx = client.transaction().map_err(pg)?;
+            tx.query_one(
+                "SELECT pg_advisory_xact_lock(
+                    hashtextextended('tenkai_tenant_schema:' || $1, 0)
+                 )",
+                &[&schema],
+            )
+            .map_err(pg)?;
+            tx.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {schema}"))
+                .map_err(pg)?;
             tx.batch_execute(&format!("SET LOCAL search_path TO {schema}, public"))
                 .map_err(pg)?;
             migrate_tenant_schema(&mut tx)?;
@@ -1292,7 +1359,7 @@ mod postgres_imp {
                     "INSERT INTO audit_events(id,occurred_at,principal,operation,resource,outcome)
                      VALUES($1,$2,$3,'development_fixture.imported',$4,'imported')",
                     &[
-                        &request_id,
+                        &format!("development_fixture.imported:{request_id}"),
                         &crate::now_millis(),
                         &actor,
                         &fixture.map.fixture_digest,
@@ -1374,7 +1441,12 @@ mod postgres_imp {
                 tx.execute(
                     "INSERT INTO audit_events(id,occurred_at,principal,operation,resource,outcome)
                      VALUES($1,$2,$3,'development_fixture.reset',$4,'reset')",
-                    &[&request_id, &crate::now_millis(), &actor, &fixture_id],
+                    &[
+                        &format!("development_fixture.reset:{request_id}"),
+                        &crate::now_millis(),
+                        &actor,
+                        &fixture_id,
+                    ],
                 )
                 .map_err(pg)?;
                 Ok(crate::development_fixtures::FixtureResetResult {
@@ -1558,33 +1630,10 @@ mod postgres_imp {
 
         pub fn publish_release(&self, schema: &str, release: &ReleaseRecord) -> Result<()> {
             self.with_schema(schema, |tx| {
-                let existing = tx
-                    .query_opt(
-                        "SELECT product, version, content_digest, descriptor_json
-                         FROM releases WHERE id = $1",
-                        &[&release.id],
-                    )
-                    .map_err(pg)?;
-                if let Some(row) = existing {
-                    let product: String = row.get(0);
-                    let version: String = row.get(1);
-                    let digest: String = row.get(2);
-                    let descriptor: String = row.get(3);
-                    if product != release.product
-                        || version != release.version
-                        || digest != release.content_digest
-                        || descriptor != release.descriptor_json
-                    {
-                        return Err(StoreError::ImmutableConflict {
-                            kind: "release",
-                            id: release.id.clone(),
-                        });
-                    }
-                    return Ok(());
-                }
                 tx.execute(
                     "INSERT INTO releases(id,product,version,content_digest,descriptor_json)
-                     VALUES($1,$2,$3,$4,$5)",
+                     VALUES($1,$2,$3,$4,$5)
+                     ON CONFLICT DO NOTHING",
                     &[
                         &release.id,
                         &release.product,
@@ -1594,6 +1643,27 @@ mod postgres_imp {
                     ],
                 )
                 .map_err(pg)?;
+                let existing = tx
+                    .query_one(
+                        "SELECT product, version, content_digest, descriptor_json
+                         FROM releases WHERE id = $1",
+                        &[&release.id],
+                    )
+                    .map_err(pg)?;
+                let product: String = existing.get(0);
+                let version: String = existing.get(1);
+                let digest: String = existing.get(2);
+                let descriptor: String = existing.get(3);
+                if product != release.product
+                    || version != release.version
+                    || digest != release.content_digest
+                    || descriptor != release.descriptor_json
+                {
+                    return Err(StoreError::ImmutableConflict {
+                        kind: "release",
+                        id: release.id.clone(),
+                    });
+                }
                 Ok(())
             })
         }
@@ -1661,15 +1731,17 @@ mod postgres_imp {
                 }
                 let existing = tx
                     .query_opt(
-                        "SELECT product,name,revision FROM channels WHERE id = $1",
+                        "SELECT product,name,release_id,revision FROM channels WHERE id = $1",
                         &[&channel.id],
                     )
                     .map_err(pg)?;
+                let inserting = existing.is_none();
                 let next = match existing {
                     Some(row) => {
                         let product: String = row.get(0);
                         let name: String = row.get(1);
-                        let revision: i64 = row.get(2);
+                        let release_id: String = row.get(2);
+                        let revision: i64 = row.get(3);
                         if product != channel.product || name != channel.name {
                             return Err(StoreError::ImmutableConflict {
                                 kind: "channel",
@@ -1677,6 +1749,14 @@ mod postgres_imp {
                             });
                         }
                         if revision as u64 != channel.revision {
+                            if release_id == channel.release_id
+                                && revision as u64 == channel.revision.saturating_add(1)
+                            {
+                                return Ok(ChannelRecord {
+                                    revision: revision as u64,
+                                    ..channel.clone()
+                                });
+                            }
                             return Err(StoreError::RevisionConflict {
                                 kind: "channel",
                                 id: channel.id.clone(),
@@ -1697,20 +1777,57 @@ mod postgres_imp {
                     }
                 };
                 let next_i = next as i64;
-                tx.execute(
-                    "INSERT INTO channels(id,product,name,release_id,revision)
-                     VALUES($1,$2,$3,$4,$5)
-                     ON CONFLICT(id) DO UPDATE SET release_id=EXCLUDED.release_id,
-                       revision=EXCLUDED.revision",
-                    &[
-                        &channel.id,
-                        &channel.product,
-                        &channel.name,
-                        &channel.release_id,
-                        &next_i,
-                    ],
-                )
-                .map_err(pg)?;
+                let changed = if inserting {
+                    tx.execute(
+                        "INSERT INTO channels(id,product,name,release_id,revision)
+                         VALUES($1,$2,$3,$4,$5)
+                         ON CONFLICT DO NOTHING",
+                        &[
+                            &channel.id,
+                            &channel.product,
+                            &channel.name,
+                            &channel.release_id,
+                            &next_i,
+                        ],
+                    )
+                    .map_err(pg)?
+                } else {
+                    tx.execute(
+                        "UPDATE channels SET release_id=$1,revision=$2
+                         WHERE id=$3 AND product=$4 AND name=$5 AND revision=$6",
+                        &[
+                            &channel.release_id,
+                            &next_i,
+                            &channel.id,
+                            &channel.product,
+                            &channel.name,
+                            &(channel.revision as i64),
+                        ],
+                    )
+                    .map_err(pg)?
+                };
+                if changed == 0 {
+                    let observed = tx
+                        .query_one(
+                            "SELECT release_id,revision FROM channels WHERE id=$1",
+                            &[&channel.id],
+                        )
+                        .map_err(pg)?;
+                    let release_id: String = observed.get(0);
+                    let revision = observed.get::<_, i64>(1) as u64;
+                    if release_id == channel.release_id && revision == next {
+                        return Ok(ChannelRecord {
+                            revision,
+                            ..channel.clone()
+                        });
+                    }
+                    return Err(StoreError::RevisionConflict {
+                        kind: "channel",
+                        id: channel.id.clone(),
+                        expected: channel.revision,
+                        actual: revision,
+                    });
+                }
                 Ok(ChannelRecord {
                     revision: next,
                     ..channel.clone()
@@ -1736,30 +1853,6 @@ mod postgres_imp {
                         detail: "fixture environments cannot accept executable plans".into(),
                     });
                 }
-                let existing = tx
-                    .query_opt(
-                        "SELECT environment_id,format_version,content_digest,plan_json
-                         FROM plans WHERE id = $1",
-                        &[&plan.id],
-                    )
-                    .map_err(pg)?;
-                if let Some(row) = existing {
-                    let env: String = row.get(0);
-                    let format: i32 = row.get(1);
-                    let digest: String = row.get(2);
-                    let json: String = row.get(3);
-                    if env != plan.environment_id
-                        || format as u32 != plan.format_version
-                        || digest != plan.content_digest
-                        || json != plan.plan_json
-                    {
-                        return Err(StoreError::ImmutableConflict {
-                            kind: "plan",
-                            id: plan.id.clone(),
-                        });
-                    }
-                    return Ok(());
-                }
                 if plan.status != PlanStatus::Computed {
                     return Err(StoreError::InvalidPlanTransition {
                         id: plan.id.clone(),
@@ -1770,7 +1863,8 @@ mod postgres_imp {
                 let format = plan.format_version as i32;
                 tx.execute(
                     "INSERT INTO plans(id,environment_id,format_version,content_digest,plan_json,status,status_detail)
-                     VALUES($1,$2,$3,$4,$5,$6,$7)",
+                     VALUES($1,$2,$3,$4,$5,$6,$7)
+                     ON CONFLICT(id) DO NOTHING",
                     &[
                         &plan.id,
                         &plan.environment_id,
@@ -1782,6 +1876,27 @@ mod postgres_imp {
                     ],
                 )
                 .map_err(pg)?;
+                let existing = tx
+                    .query_one(
+                        "SELECT environment_id,format_version,content_digest,plan_json
+                         FROM plans WHERE id = $1",
+                        &[&plan.id],
+                    )
+                    .map_err(pg)?;
+                let env: String = existing.get(0);
+                let stored_format: i32 = existing.get(1);
+                let digest: String = existing.get(2);
+                let json: String = existing.get(3);
+                if env != plan.environment_id
+                    || stored_format as u32 != plan.format_version
+                    || digest != plan.content_digest
+                    || json != plan.plan_json
+                {
+                    return Err(StoreError::ImmutableConflict {
+                        kind: "plan",
+                        id: plan.id.clone(),
+                    });
+                }
                 Ok(())
             })
         }
@@ -1837,19 +1952,20 @@ mod postgres_imp {
                         detail: "fixture plans are non-executable".into(),
                     });
                 }
-                let current: String = tx
-                    .query_opt("SELECT status FROM plans WHERE id = $1", &[&id])
+                let environment: String = tx
+                    .query_opt("SELECT environment_id FROM plans WHERE id = $1", &[&id])
                     .map_err(pg)?
                     .map(|row| row.get(0))
                     .ok_or_else(|| StoreError::NotFound {
                         kind: "plan",
                         id: id.into(),
                     })?;
-                let current = PlanStatus::parse(&current)?;
-                let environment: String = tx
-                    .query_one("SELECT environment_id FROM plans WHERE id = $1", &[&id])
+                lock_lease(tx, &environment)?;
+                let current: String = tx
+                    .query_one("SELECT status FROM plans WHERE id = $1", &[&id])
                     .map_err(pg)?
                     .get(0);
+                let current = PlanStatus::parse(&current)?;
                 require_lease(tx, &environment, owner, generation, crate::now_millis())?;
                 if !current.allows(status) {
                     return Err(StoreError::InvalidPlanTransition {
@@ -1898,6 +2014,7 @@ mod postgres_imp {
                 });
             }
             self.with_schema(schema, |tx| {
+                lock_lease(tx, environment)?;
                 if tx
                     .query_one(
                         "SELECT EXISTS(
@@ -1953,6 +2070,38 @@ mod postgres_imp {
             self.with_schema(schema, |tx| lease_in(tx, environment))
         }
 
+        #[cfg(test)]
+        pub(super) fn expire_lease_for_test(&self, schema: &str, environment: &str) -> Result<()> {
+            self.with_schema(schema, |tx| {
+                tx.execute(
+                    "UPDATE leases SET expires_at = 0 WHERE environment_id = $1",
+                    &[&environment],
+                )
+                .map_err(pg)?;
+                Ok(())
+            })
+        }
+
+        #[cfg(test)]
+        pub(super) fn delivery_effect_counts_for_test(
+            &self,
+            schema: &str,
+        ) -> Result<(i64, i64, i64, i64)> {
+            self.with_schema(schema, |tx| {
+                let row = tx
+                    .query_one(
+                        "SELECT
+                           (SELECT count(*) FROM channels),
+                           (SELECT count(*) FROM plans),
+                           (SELECT count(*) FROM receipts),
+                           (SELECT count(*) FROM rollbacks)",
+                        &[],
+                    )
+                    .map_err(pg)?;
+                Ok((row.get(0), row.get(1), row.get(2), row.get(3)))
+            })
+        }
+
         pub fn record_receipt(
             &self,
             schema: &str,
@@ -1997,7 +2146,8 @@ mod postgres_imp {
                 let lease_gen = receipt.lease_generation as i64;
                 tx.execute(
                     "INSERT INTO receipts(id,environment_id,plan_id,step_id,lease_generation,payload_json)
-                     VALUES($1,$2,$3,$4,$5,$6)",
+                     VALUES($1,$2,$3,$4,$5,$6)
+                     ON CONFLICT(id) DO NOTHING",
                     &[
                         &receipt.id,
                         &receipt.environment_id,
@@ -2008,6 +2158,24 @@ mod postgres_imp {
                     ],
                 )
                 .map_err(pg)?;
+                let stored = tx
+                    .query_one(
+                        "SELECT environment_id,plan_id,step_id,lease_generation,payload_json
+                         FROM receipts WHERE id = $1",
+                        &[&receipt.id],
+                    )
+                    .map_err(pg)?;
+                if stored.get::<_, String>(0) != receipt.environment_id
+                    || stored.get::<_, String>(1) != receipt.plan_id
+                    || stored.get::<_, String>(2) != receipt.step_id
+                    || stored.get::<_, i64>(3) as u64 != receipt.lease_generation
+                    || stored.get::<_, String>(4) != receipt.payload_json
+                {
+                    return Err(StoreError::ImmutableConflict {
+                        kind: "receipt",
+                        id: receipt.id.clone(),
+                    });
+                }
                 Ok(())
             })
         }
@@ -2131,11 +2299,8 @@ mod postgres_imp {
                 });
             }
             self.with_schema(schema, |tx| {
-                if let Some(existing) = rollback_in(tx, &rollback.id)? {
-                    if existing.environment_id != rollback.environment_id
-                        || existing.plan_id != rollback.plan_id
-                        || existing.lease_generation != rollback.lease_generation
-                    {
+                if rollback_in(tx, &rollback.id)?.is_some() {
+                    if !rollback_intent_matches(tx, rollback)? {
                         return Err(StoreError::ImmutableConflict {
                             kind: "rollback",
                             id: rollback.id.clone(),
@@ -2152,13 +2317,14 @@ mod postgres_imp {
                     crate::now_millis(),
                 )?;
                 let lease_gen = rollback.lease_generation as i64;
-                let intent = format!(
-                    "{}:{}:{}",
-                    rollback.environment_id, rollback.plan_id, rollback.lease_generation
-                );
+                let intent = rollback_intent_digest(rollback);
                 tx.execute(
-                    "INSERT INTO rollbacks(id,environment_id,plan_id,lease_generation,intent_digest,checkpoint_json,status,status_detail)
-                     VALUES($1,$2,$3,$4,$5,$6,$7,$8)",
+                    "INSERT INTO rollbacks(
+                        id,environment_id,plan_id,lease_generation,intent_digest,
+                        checkpoint_json,status,status_detail,intent_lease_generation,
+                        creation_checkpoint_json,creation_status_detail
+                     ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$4,$6,$8)
+                     ON CONFLICT(id) DO NOTHING",
                     &[
                         &rollback.id,
                         &rollback.environment_id,
@@ -2171,6 +2337,12 @@ mod postgres_imp {
                     ],
                 )
                 .map_err(pg)?;
+                if !rollback_intent_matches(tx, rollback)? {
+                    return Err(StoreError::ImmutableConflict {
+                        kind: "rollback",
+                        id: rollback.id.clone(),
+                    });
+                }
                 Ok(())
             })
         }
@@ -2187,6 +2359,18 @@ mod postgres_imp {
             detail: &str,
         ) -> Result<RollbackRecord> {
             self.with_schema(schema, |tx| {
+                let environment: String = tx
+                    .query_opt(
+                        "SELECT environment_id FROM rollbacks WHERE id=$1",
+                        &[&id],
+                    )
+                    .map_err(pg)?
+                    .map(|row| row.get(0))
+                    .ok_or_else(|| StoreError::NotFound {
+                        kind: "rollback",
+                        id: id.into(),
+                    })?;
+                lock_lease(tx, &environment)?;
                 let current = rollback_in(tx, id)?.ok_or_else(|| StoreError::NotFound {
                     kind: "rollback",
                     id: id.into(),
@@ -2747,6 +2931,20 @@ mod postgres_imp {
                 intent_digest TEXT NOT NULL,
                 checkpoint_json TEXT NOT NULL, status TEXT NOT NULL, status_detail TEXT NOT NULL
             );
+            ALTER TABLE rollbacks
+                ADD COLUMN IF NOT EXISTS intent_lease_generation BIGINT;
+            ALTER TABLE rollbacks
+                ADD COLUMN IF NOT EXISTS creation_checkpoint_json TEXT;
+            ALTER TABLE rollbacks
+                ADD COLUMN IF NOT EXISTS creation_status_detail TEXT;
+            UPDATE rollbacks
+               SET intent_lease_generation = lease_generation,
+                   creation_checkpoint_json = checkpoint_json,
+                   creation_status_detail = status_detail
+             WHERE intent_lease_generation IS NULL
+               AND status = 'pending'
+               AND intent_digest =
+                   environment_id || ':' || plan_id || ':' || lease_generation::text;
             CREATE INDEX IF NOT EXISTS rollbacks_recovery ON rollbacks(status, environment_id);
             CREATE TABLE IF NOT EXISTS provider_events (
                 id TEXT NOT NULL, provider_kind TEXT NOT NULL,
@@ -2839,14 +3037,16 @@ mod postgres_imp {
         generation: u64,
         now: i64,
     ) -> Result<()> {
+        lock_lease(tx, environment)?;
         let lease = lease_in(tx, environment)?.ok_or_else(|| StoreError::LeaseExpired {
             environment: environment.into(),
             generation,
         })?;
-        if lease.expires_at <= now {
-            return Err(StoreError::LeaseExpired {
+        if lease.generation != generation {
+            return Err(StoreError::StaleLease {
                 environment: environment.into(),
-                generation: lease.generation,
+                expected: lease.generation,
+                actual: generation,
             });
         }
         if lease.owner != owner {
@@ -2856,13 +3056,23 @@ mod postgres_imp {
                 actual: owner.into(),
             });
         }
-        if lease.generation != generation {
-            return Err(StoreError::StaleLease {
+        if lease.expires_at <= now {
+            return Err(StoreError::LeaseExpired {
                 environment: environment.into(),
-                expected: generation,
-                actual: lease.generation,
+                generation,
             });
         }
+        Ok(())
+    }
+
+    fn lock_lease(tx: &mut Transaction<'_>, environment: &str) -> Result<()> {
+        tx.query_one(
+            "SELECT pg_advisory_xact_lock(
+                hashtextextended(current_schema() || ':lease:' || $1, 0)
+             )",
+            &[&environment],
+        )
+        .map_err(pg)?;
         Ok(())
     }
 
@@ -3186,6 +3396,270 @@ mod tests {
         assert_eq!(reset.removed, 2);
     }
 
+    /// Two-replica delivery-effect conformance. Every mutation uses a stable
+    /// identity, and execution/rollback commits are rejected after lease handoff.
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires Postgres; set TENKAI_POSTGRES_URL and cargo test --features postgres -- --ignored"]
+    fn live_postgres_delivery_effects_are_idempotent_and_fenced() {
+        use crate::auth_context::{
+            AuthenticatedRequestContextBuilder, PrincipalIdentity, PrincipalKind,
+            TenantDerivationAuthority,
+        };
+        use crate::storage::{
+            ChannelRecord, EnvironmentRecord, OperationalStore as _, PlanRecord, PlanStatus,
+            ReceiptRecord, ReleaseRecord, RollbackRecord, RollbackStatus, StoreError,
+        };
+        use std::sync::{Arc, Barrier};
+
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let config = PostgresTenantConfig::from_env().expect("TENKAI_POSTGRES_URL");
+        let replica_a = config.open().expect("connect replica a");
+        let replica_b = config.open().expect("connect replica b");
+        let authority = TenantDerivationAuthority::new("test");
+        let context = AuthenticatedRequestContextBuilder::new(
+            format!("delivery-effects-{suffix}"),
+            PrincipalIdentity {
+                id: "ha-conformance".into(),
+                kind: PrincipalKind::Service,
+            },
+            "test",
+        )
+        .with_tenant(format!("ha-{suffix}"), &authority)
+        .unwrap()
+        .build()
+        .unwrap();
+        let a = replica_a.partition_for(&context).unwrap();
+        let b = replica_b.partition_for(&context).unwrap();
+
+        let release = ReleaseRecord {
+            id: format!("release-{suffix}"),
+            product: "api".into(),
+            version: "1.0.0".into(),
+            content_digest: format!("sha256:{suffix}"),
+            descriptor_json: "{}".into(),
+        };
+        let barrier = Arc::new(Barrier::new(2));
+        let (publish_a, publish_b) = std::thread::scope(|scope| {
+            let left = {
+                let a = a.clone();
+                let release = release.clone();
+                let barrier = Arc::clone(&barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    a.publish_release(&release)
+                })
+            };
+            let right = {
+                let b = b.clone();
+                let release = release.clone();
+                let barrier = Arc::clone(&barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    b.publish_release(&release)
+                })
+            };
+            (left.join().unwrap(), right.join().unwrap())
+        });
+        publish_a.unwrap();
+        publish_b.unwrap();
+
+        let channel = ChannelRecord {
+            id: format!("channel-{suffix}"),
+            product: "api".into(),
+            name: "stable".into(),
+            release_id: release.id.clone(),
+            revision: 0,
+        };
+        let barrier = Arc::new(Barrier::new(2));
+        let (promotion_a, promotion_b) = std::thread::scope(|scope| {
+            let left = {
+                let a = a.clone();
+                let channel = channel.clone();
+                let barrier = Arc::clone(&barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    a.promote_channel(&channel)
+                })
+            };
+            let right = {
+                let b = b.clone();
+                let channel = channel.clone();
+                let barrier = Arc::clone(&barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    b.promote_channel(&channel)
+                })
+            };
+            (left.join().unwrap(), right.join().unwrap())
+        });
+        assert_eq!(promotion_a.unwrap().revision, 1);
+        assert_eq!(promotion_b.unwrap().revision, 1);
+
+        let environment = EnvironmentRecord {
+            id: format!("environment-{suffix}"),
+            revision: 0,
+            configuration_json: "{}".into(),
+        };
+        a.put_environment(&environment).unwrap();
+        let plan = PlanRecord {
+            id: format!("plan-{suffix}"),
+            environment_id: environment.id.clone(),
+            format_version: 1,
+            content_digest: format!("sha256:plan-{suffix}"),
+            plan_json: "{}".into(),
+            status: PlanStatus::Computed,
+            status_detail: String::new(),
+        };
+        a.create_plan(&plan).unwrap();
+        b.create_plan(&plan).unwrap();
+
+        let lease_a = a
+            .acquire_lease(
+                &environment.id,
+                "replica-a",
+                crate::now_millis().saturating_add(60_000),
+            )
+            .unwrap();
+        a.transition_plan(
+            &plan.id,
+            "replica-a",
+            lease_a.generation,
+            PlanStatus::Running,
+            "started",
+        )
+        .unwrap();
+        let receipt = ReceiptRecord {
+            id: format!("receipt-{suffix}"),
+            environment_id: environment.id.clone(),
+            plan_id: plan.id.clone(),
+            step_id: "apply-api".into(),
+            lease_generation: lease_a.generation,
+            payload_json: r#"{"outcome":"succeeded"}"#.into(),
+        };
+        a.record_receipt("replica-a", &receipt).unwrap();
+
+        // Simulate process loss after the authoritative receipt commit. A fresh
+        // replica reuses the recorded outcome instead of repeating the effect.
+        let restarted = config.open().expect("connect restarted replica");
+        let restarted = restarted.partition_for(&context).unwrap();
+        restarted
+            .record_receipt("replacement-owner", &receipt)
+            .unwrap();
+        assert_eq!(restarted.get_receipt(&receipt.id).unwrap(), Some(receipt));
+
+        let rollback = RollbackRecord {
+            id: format!("rollback-{suffix}"),
+            environment_id: environment.id.clone(),
+            plan_id: plan.id.clone(),
+            lease_generation: lease_a.generation,
+            checkpoint_json: r#"{"step":0}"#.into(),
+            status: RollbackStatus::Pending,
+            status_detail: "prepared".into(),
+        };
+        a.create_rollback("replica-a", &rollback).unwrap();
+        restarted
+            .create_rollback("replacement-owner", &rollback)
+            .unwrap();
+        let mut conflicting_rollback = rollback.clone();
+        conflicting_rollback.checkpoint_json = r#"{"step":1}"#.into();
+        assert!(matches!(
+            restarted.create_rollback("replacement-owner", &conflicting_rollback),
+            Err(StoreError::ImmutableConflict {
+                kind: "rollback",
+                ..
+            })
+        ));
+
+        a.inner
+            .expire_lease_for_test(a.schema(), &environment.id)
+            .unwrap();
+        let lease_b = b
+            .acquire_lease(
+                &environment.id,
+                "replica-b",
+                crate::now_millis().saturating_add(60_000),
+            )
+            .unwrap();
+        assert_eq!(lease_b.generation, lease_a.generation + 1);
+
+        let mut stale_rejections = 0;
+        for result in [
+            a.transition_plan(
+                &plan.id,
+                "replica-a",
+                lease_a.generation,
+                PlanStatus::Succeeded,
+                "stale",
+            )
+            .map(|_| ()),
+            a.record_receipt(
+                "replica-a",
+                &ReceiptRecord {
+                    id: format!("stale-receipt-{suffix}"),
+                    ..restarted
+                        .get_receipt(&format!("receipt-{suffix}"))
+                        .unwrap()
+                        .unwrap()
+                },
+            ),
+            a.transition_rollback(
+                &rollback.id,
+                "replica-a",
+                lease_a.generation,
+                RollbackStatus::Running,
+                r#"{"step":1}"#,
+                "stale",
+            )
+            .map(|_| ()),
+        ] {
+            assert!(matches!(result, Err(StoreError::StaleLease { .. })));
+            stale_rejections += 1;
+        }
+        assert_eq!(stale_rejections, 3);
+
+        b.transition_rollback(
+            &rollback.id,
+            "replica-b",
+            lease_b.generation,
+            RollbackStatus::Running,
+            r#"{"step":1}"#,
+            "resumed",
+        )
+        .unwrap();
+        b.transition_rollback(
+            &rollback.id,
+            "replica-b",
+            lease_b.generation,
+            RollbackStatus::Succeeded,
+            r#"{"step":2}"#,
+            "completed",
+        )
+        .unwrap();
+        // A delayed retry of the original creation intent remains idempotent
+        // after lease handoff and mutable rollback progress.
+        b.create_rollback("replica-b", &rollback).unwrap();
+        b.transition_plan(
+            &plan.id,
+            "replica-b",
+            lease_b.generation,
+            PlanStatus::Succeeded,
+            "completed",
+        )
+        .unwrap();
+
+        assert_eq!(
+            a.inner.delivery_effect_counts_for_test(a.schema()).unwrap(),
+            (1, 1, 1, 1)
+        );
+        assert!(
+            !tenant_postgres_store_capabilities()
+                .capabilities
+                .iter()
+                .any(|capability| capability.name == CapabilityName::HighAvailability)
+        );
+    }
+
     /// Live durable fence drill. Requires feature `postgres` and `TENKAI_POSTGRES_URL`.
     #[cfg(feature = "postgres")]
     #[test]
@@ -3203,15 +3677,20 @@ mod tests {
         assert!(matches!(b, FenceAdmission::Busy { .. }));
         fence.release(&env, "host-a", 1, 1_000_200).unwrap();
         let c = fence.try_begin(&env, "host-b", 1_000_300, 60_000).unwrap();
-        assert!(matches!(c, FenceAdmission::Started { generation: 1 }));
+        assert!(matches!(c, FenceAdmission::Started { generation: 2 }));
+        fence.release(&env, "host-a", 1, 1_000_400).unwrap();
+        assert!(matches!(
+            fence.try_begin(&env, "host-c", 1_000_500, 60_000).unwrap(),
+            FenceAdmission::Busy { .. }
+        ));
         // Expired takeover bumps generation.
-        fence.release(&env, "host-b", 1, 1_000_400).unwrap();
+        fence.release(&env, "host-b", 2, 1_000_600).unwrap();
         assert!(matches!(
             fence.try_begin(&env, "host-a", 2_000_000, 100).unwrap(),
-            FenceAdmission::Started { generation: 1 }
+            FenceAdmission::Started { generation: 3 }
         ));
         let takeover = fence.try_begin(&env, "host-b", 2_000_200, 60_000).unwrap();
-        assert_eq!(takeover, FenceAdmission::Started { generation: 2 });
-        fence.release(&env, "host-b", 2, 2_000_300).unwrap();
+        assert_eq!(takeover, FenceAdmission::Started { generation: 4 });
+        fence.release(&env, "host-b", 4, 2_000_300).unwrap();
     }
 }
