@@ -29,6 +29,43 @@ cargo test --features postgres \
   -- --ignored --nocapture
 ```
 
+## Callable adapter
+
+Composed local test harnesses can invoke the same production PostgreSQL
+partition operations through the versioned `tenkai.delivery-conformance/v1`
+adapter:
+
+```bash
+export TENKAI_CONFORMANCE_POSTGRES_URL='postgresql://127.0.0.1:5432/tenkai_test'
+cargo run --locked --features postgres --bin tenkai-delivery-conformance
+```
+
+The dedicated environment variable is accepted only when the host is
+loopback/localhost, the database name contains `test`, and the URL has no query
+or fragment overrides; connection material is never accepted on the command
+line or included in output. The adapter uses
+synthetic tenant and resource identities, uses two independent logical
+runtime/store instances while restarting one across injected loss boundaries,
+and emits at most ten checks with four closed tested scenarios each.
+It covers publication, promotion, plan and receipt replay, process loss before
+and after an authoritative commit, rollback immutability, lease handoff, stale
+generation fencing, and recovery completion.
+
+Consumers must pin both `version` and `evidence_ref`. The evidence digest binds
+the result schema and length-delimited callable binary, adapter, PostgreSQL
+store, storage contract, and runtime capability implementation sources.
+Unknown versions or changed
+digests fail closed. The capability evidence must report
+`shared_replica_state: true` and `high_availability: false`.
+
+For the focused live test:
+
+```bash
+TENKAI_CONFORMANCE_POSTGRES_URL='postgresql://127.0.0.1:5432/tenkai_test' \
+  cargo test --locked --features postgres --test delivery_conformance_adapter \
+  live_postgres_adapter_exercises_real_delivery_authority -- --ignored --nocapture
+```
+
 ## Bounded operational evidence
 
 - `env inspect` exposes the active execution lease and current generation

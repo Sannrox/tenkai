@@ -1,0 +1,9 @@
+{
+  "version": "tenkai.delivery-conformance/v1",
+  "max_checks": 10,
+  "max_scenarios_per_check": 4,
+  "outcomes": ["current", "replayed", "reconciled", "rejected", "unavailable", "unknown"],
+  "fields": ["version", "evidence_ref", "passed", "runtime_instances", "capabilities", "checks"],
+  "check_fields": ["id", "operation_ref", "passed", "scenarios"],
+  "prohibited_output": ["database_url", "credential", "payload", "tenant_id", "raw_error"]
+}
