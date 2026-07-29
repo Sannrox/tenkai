@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tenkai Operator"
+  short_description: "Operate Tenkai delivery control planes safely"
+  default_prompt: "Use $tenkai to inspect this Tenkai environment and perform the requested delivery operation safely."
