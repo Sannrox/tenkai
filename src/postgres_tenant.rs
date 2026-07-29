@@ -411,6 +411,10 @@ impl TenantOperationalStore for PostgresTenantOperationalStore {
         tenant_postgres_store_capabilities()
     }
 
+    fn check_health(&self) -> crate::storage::Result<()> {
+        self.inner.check_health()
+    }
+
     fn get_environment_for(
         &self,
         context: &AuthenticatedRequestContext,

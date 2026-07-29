@@ -916,6 +916,12 @@ async fn ready(State(state): State<Arc<AppState>>) -> Response {
         eprintln!("operational store readiness check failed: {error}");
         return error_response(StatusCode::SERVICE_UNAVAILABLE, "service is not ready");
     }
+    if let Some(tenant_store) = &state.tenant_store
+        && let Err(error) = tenant_store.check_health()
+    {
+        eprintln!("tenant store readiness check failed: {error}");
+        return error_response(StatusCode::SERVICE_UNAVAILABLE, "service is not ready");
+    }
     match state.reconciler.check_health().await {
         Ok(()) => Json(service_status("ready", &state.config)).into_response(),
         Err(error) => error_response(StatusCode::SERVICE_UNAVAILABLE, {
@@ -2064,6 +2070,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(health.status(), StatusCode::OK);
+
+        tenant_store.set_healthy(false);
+        let unavailable = tenant_app
+            .oneshot(Request::get("/readyz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]

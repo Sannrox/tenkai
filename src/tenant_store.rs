@@ -34,6 +34,10 @@ use crate::tenant_isolation::{
 pub trait TenantOperationalStore: Send + Sync {
     fn runtime_capabilities(&self) -> ComponentCapabilities;
 
+    fn check_health(&self) -> Result<()> {
+        Ok(())
+    }
+
     fn get_environment_for(
         &self,
         context: &AuthenticatedRequestContext,
@@ -92,9 +96,21 @@ pub fn tenant_memory_store_capabilities() -> ComponentCapabilities {
 /// Each authenticated tenant receives an isolated [`SqliteStore`] partition.
 /// Cross-tenant access is denied with a non-disclosing error. This is a
 /// conformance and wiring adapter, not a commercial multi-tenant database.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct InMemoryTenantOperationalStore {
     partitions: Arc<Mutex<BTreeMap<String, Arc<SqliteStore>>>>,
+    #[cfg(test)]
+    healthy: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Default for InMemoryTenantOperationalStore {
+    fn default() -> Self {
+        Self {
+            partitions: Arc::new(Mutex::new(BTreeMap::new())),
+            #[cfg(test)]
+            healthy: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        }
+    }
 }
 
 impl InMemoryTenantOperationalStore {
@@ -104,6 +120,12 @@ impl InMemoryTenantOperationalStore {
 
     pub fn runtime_capabilities(&self) -> ComponentCapabilities {
         tenant_memory_store_capabilities()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_healthy(&self, healthy: bool) {
+        self.healthy
+            .store(healthy, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Open (or return) the operational partition for the authenticated tenant.
@@ -271,6 +293,16 @@ impl InMemoryTenantOperationalStore {
 impl TenantOperationalStore for InMemoryTenantOperationalStore {
     fn runtime_capabilities(&self) -> ComponentCapabilities {
         tenant_memory_store_capabilities()
+    }
+
+    fn check_health(&self) -> Result<()> {
+        #[cfg(test)]
+        if !self.healthy.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(crate::storage::StoreError::AdapterUnavailable(
+                "synthetic tenant store outage".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn get_environment_for(
