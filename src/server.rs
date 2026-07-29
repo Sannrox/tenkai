@@ -912,9 +912,30 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<ServiceStatus> {
 }
 
 async fn ready(State(state): State<Arc<AppState>>) -> Response {
-    if let Err(error) = state.store.check_health() {
-        eprintln!("operational store readiness check failed: {error}");
-        return error_response(StatusCode::SERVICE_UNAVAILABLE, "service is not ready");
+    let operational_store = state.store.clone();
+    match tokio::task::spawn_blocking(move || operational_store.check_health()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            eprintln!("operational store readiness check failed: {error}");
+            return error_response(StatusCode::SERVICE_UNAVAILABLE, "service is not ready");
+        }
+        Err(error) => {
+            eprintln!("operational store readiness task failed: {error}");
+            return error_response(StatusCode::SERVICE_UNAVAILABLE, "service is not ready");
+        }
+    }
+    if let Some(tenant_store) = state.tenant_store.clone() {
+        match tokio::task::spawn_blocking(move || tenant_store.check_health()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                eprintln!("tenant store readiness check failed: {error}");
+                return error_response(StatusCode::SERVICE_UNAVAILABLE, "service is not ready");
+            }
+            Err(error) => {
+                eprintln!("tenant store readiness task failed: {error}");
+                return error_response(StatusCode::SERVICE_UNAVAILABLE, "service is not ready");
+            }
+        }
     }
     match state.reconciler.check_health().await {
         Ok(()) => Json(service_status("ready", &state.config)).into_response(),
@@ -2064,6 +2085,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(health.status(), StatusCode::OK);
+
+        tenant_store.set_healthy(false);
+        let unavailable = tenant_app
+            .oneshot(Request::get("/readyz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
