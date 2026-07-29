@@ -12,6 +12,10 @@ install scripts as the primary path.
 
 Source: `src/staged_artifact.rs`, `src/manifest.rs`. Issues: #115, #116, #117.
 
+The public kinds share one staging lifecycle but intentionally retain distinct
+schema identities. The evidence and compatibility analysis are recorded in
+[the consolidation research](research/staged-document-product-kinds.md).
+
 ## Non-goals
 
 | Kind | Does **not** do |
