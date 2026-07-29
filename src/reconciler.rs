@@ -347,11 +347,30 @@ impl Reconciler {
 
     /// Reconcile every registered environment once. Environments run concurrently.
     pub async fn run_once(&self) -> Result<TickReport> {
+        self.run_once_bounded(None).await
+    }
+
+    /// Reconcile only the registered environments admitted by the caller's
+    /// already-verified authority boundary.
+    pub async fn run_once_for(&self, allowed_environments: &[String]) -> Result<TickReport> {
+        self.run_once_bounded(Some(allowed_environments.iter().cloned().collect()))
+            .await
+    }
+
+    async fn run_once_bounded(
+        &self,
+        allowed_environments: Option<HashSet<String>>,
+    ) -> Result<TickReport> {
         // Periodic and requested ticks share this lock so a successful request
         // always represents a complete tick rather than a transient Busy report.
         let _tick = self.tick_lock.lock().await;
         let mut listing = self.ctx.clone();
         let mut environments = listing.list_kind(KIND_ENVIRONMENT).await?;
+        if let Some(allowed) = &allowed_environments {
+            // Scope work selection before admission, fencing, planning, leasing,
+            // or execution. Unknown identities are silently excluded.
+            environments.retain(|environment| allowed.contains(&environment.name));
+        }
         environments.sort_by(|left, right| left.name.cmp(&right.name));
         let permits = Arc::new(tokio::sync::Semaphore::new(self.config.max_concurrency));
         let mut jobs = tokio::task::JoinSet::new();
@@ -882,6 +901,35 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("required")
+        );
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
+    async fn bounded_tick_excludes_foreign_work_before_reconcile() {
+        let database = std::env::temp_dir().join(format!(
+            "tenkai-bounded-reconcile-{}-{}.db",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let _ = std::fs::remove_file(&database);
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        plan::env_add(&mut ctx, "env-a", "tenant a").await.unwrap();
+        plan::env_add(&mut ctx, "env-b", "tenant b").await.unwrap();
+
+        let reconciler = Reconciler::new(ctx, config()).unwrap();
+        let report = reconciler
+            .run_once_for(&["env-a".into(), "unknown".into()])
+            .await
+            .unwrap();
+
+        assert_eq!(report.environments.len(), 1);
+        assert_eq!(report.environments[0].environment, "env-a");
+        assert_eq!(report.environments[0].status, EnvironmentStatus::Current);
+        assert!(
+            !serde_json::to_string(&report).unwrap().contains("env-b"),
+            "foreign environment must be excluded before reconcile admission"
         );
         let _ = std::fs::remove_file(&database);
     }

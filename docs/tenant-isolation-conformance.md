@@ -79,7 +79,7 @@ and are not registered.
 
 | RPC id | Route | Tenant-mode enforcement |
 | --- | --- | --- |
-| `management.reconcile` | `POST /v1/reconcile` | Require tenant context; filter tick report to tenant envs |
+| `management.reconcile` | `POST /v1/reconcile` | Require tenant context; resolve tenant envs before bounded work selection |
 | `management.fleet_status` | `GET /v1/fleet/status` | Filter rows to tenant envs |
 | `environment.list` | `GET /v1/environments` | List only tenant partition ids |
 | `environment.get` | `GET /v1/environments/{env}` | Non-disclosing deny on cross-tenant |

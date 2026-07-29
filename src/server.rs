@@ -37,6 +37,16 @@ pub type ReconcileFuture<'a> =
 /// Transport-independent application operation used by embedded and remote hosts.
 pub trait ReconcilePort: Send + Sync {
     fn reconcile(&self) -> ReconcileFuture<'_>;
+    /// Reconcile only environments selected by a verified host authority.
+    ///
+    /// The fail-closed default preserves compatibility for community-only
+    /// implementers without ever substituting global reconciliation in tenant
+    /// mode.
+    fn reconcile_environments(&self, _environments: Vec<String>) -> ReconcileFuture<'_> {
+        Box::pin(async {
+            anyhow::bail!("tenant-bounded reconciliation is not supported by this host")
+        })
+    }
     fn pending_work(&self, environment: String) -> WorkFuture<'_>;
     fn check_health(&self) -> HealthFuture<'_>;
     fn complete_work(
@@ -83,6 +93,10 @@ pub type InventoryFuture<'a> =
 impl ReconcilePort for Reconciler {
     fn reconcile(&self) -> ReconcileFuture<'_> {
         Box::pin(self.run_once())
+    }
+
+    fn reconcile_environments(&self, environments: Vec<String>) -> ReconcileFuture<'_> {
+        Box::pin(async move { self.run_once_for(&environments).await })
     }
 
     fn pending_work(&self, environment: String) -> WorkFuture<'_> {
@@ -923,33 +937,34 @@ async fn reconcile(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Re
     if let Err(error) = audit(&*state.store, &actor, "reconcile.requested", "*") {
         return error_response(StatusCode::SERVICE_UNAVAILABLE, error.to_string());
     }
-    match state.reconciler.reconcile().await {
-        Ok(mut report) => {
-            if state.config.requirements.tenant_mode {
-                let Some(tenant_store) = state.tenant_store.clone() else {
-                    return error_response(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "tenant mode is enabled but no tenant store is configured",
-                    );
-                };
-                let allowed = match run_blocking_tenant_store(move || {
-                    tenant_store.list_environment_ids_for(&context)
-                })
-                .await
-                {
-                    Ok(result) => match result {
-                        Ok(ids) => ids,
-                        Err(error) => {
-                            return error_response(StatusCode::FORBIDDEN, error.public_message());
-                        }
-                    },
-                    Err(response) => return response,
-                };
-                // Non-leakage: foreign environment names never appear in the tick report.
-                report
-                    .environments
-                    .retain(|row| allowed.iter().any(|id| id == &row.environment));
+    let allowed_environments = if state.config.requirements.tenant_mode {
+        let Some(tenant_store) = state.tenant_store.clone() else {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "tenant mode is enabled but no tenant store is configured",
+            );
+        };
+        let tenant_context = context.clone();
+        match run_blocking_tenant_store(move || {
+            tenant_store.list_environment_ids_for(&tenant_context)
+        })
+        .await
+        {
+            Ok(Ok(ids)) => Some(ids),
+            Ok(Err(error)) => {
+                return error_response(StatusCode::FORBIDDEN, error.public_message());
             }
+            Err(response) => return response,
+        }
+    } else {
+        None
+    };
+    let result = match allowed_environments {
+        Some(environments) => state.reconciler.reconcile_environments(environments).await,
+        None => state.reconciler.reconcile().await,
+    };
+    match result {
+        Ok(report) => {
             let outcome = if report.failures() == 0 {
                 "reconcile.completed"
             } else {
@@ -1352,6 +1367,20 @@ mod tests {
                         environment: "prod".into(),
                         status: crate::reconciler::EnvironmentStatus::Current,
                     }],
+                })
+            })
+        }
+
+        fn reconcile_environments(&self, environments: Vec<String>) -> ReconcileFuture<'_> {
+            Box::pin(async move {
+                Ok(TickReport {
+                    environments: environments
+                        .into_iter()
+                        .map(|environment| crate::reconciler::EnvironmentResult {
+                            environment,
+                            status: crate::reconciler::EnvironmentStatus::Current,
+                        })
+                        .collect(),
                 })
             })
         }
@@ -2018,6 +2047,12 @@ mod tests {
                 .to_vec(),
         )
         .unwrap();
+        // The fake global reconcile path returns `prod`; seeing only the
+        // tenant-store identity proves selection used the bounded application
+        // operation before any reconciler work, rather than filtering a global
+        // report afterward.
+        assert!(reconcile_body.contains("env-a"));
+        assert!(!reconcile_body.contains("prod"));
         assert!(!reconcile_body.contains("env-b"));
         assert!(!reconcile_body.contains("tenant-b"));
         assert!(!reconcile_body.contains("management-secret"));
