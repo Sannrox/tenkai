@@ -412,7 +412,16 @@ impl TenantOperationalStore for PostgresTenantOperationalStore {
     }
 
     fn check_health(&self) -> crate::storage::Result<()> {
-        self.inner.check_health()
+        #[cfg(feature = "postgres")]
+        {
+            self.inner.check_health()
+        }
+        #[cfg(not(feature = "postgres"))]
+        {
+            Err(crate::storage::StoreError::AdapterUnavailable(
+                "postgres feature is disabled".into(),
+            ))
+        }
     }
 
     fn get_environment_for(
