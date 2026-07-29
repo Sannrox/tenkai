@@ -537,3 +537,7 @@ deliberately unhealthy upgrade, records Tenkai's automatic rollback, and asks
 By default it expects `../sekai-chisei`, uses an isolated temporary database,
 and writes `artifacts/replay/rollback-incident.json`. Override the repository
 with `SEKAI_CHISEI_DIR` or the destination with `REPLAY_OUTPUT_DIR`.
+
+Independent fresh-checkout evidence for the provider-free embedded workflow,
+including automatic rollback and backup/restore, is recorded in the
+[embedded golden-path usability exercise](docs/research/embedded-golden-path-usability.md).
