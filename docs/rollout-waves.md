@@ -37,6 +37,10 @@ Waves never authorize a wider channel promotion. Use canary configure /
 promotion after canary envs are healthy. For `model_runtime` products, the same
 canary evidence rules apply; see [model runtime canary path](model-runtime.md#canary-promotion-evidence-model_runtime).
 
+The responsibility map across channels, canary, waves, maintenance, facts,
+constraints, emergency start, and rollback is recorded in
+[the rollout-control simplification research](research/rollout-control-simplification.md).
+
 ## Non-goals (this surface)
 
 - Automatic multi-wave fleet scheduling
