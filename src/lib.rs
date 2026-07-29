@@ -11,6 +11,7 @@ pub mod canary;
 pub mod catalog;
 pub mod client;
 pub mod command_result;
+pub mod delivery_conformance;
 pub mod dev_sign;
 pub mod development_fixtures;
 pub mod embedded;

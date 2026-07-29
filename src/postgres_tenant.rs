@@ -527,6 +527,17 @@ impl PostgresTenantPartition {
         &self.schema
     }
 
+    #[cfg(feature = "postgres")]
+    pub(crate) fn expire_lease_for_conformance(&self, environment: &str) -> Result<()> {
+        self.inner
+            .expire_lease_for_conformance(&self.schema, environment)
+    }
+
+    #[cfg(feature = "postgres")]
+    pub(crate) fn cleanup_conformance_schema(&self) -> Result<()> {
+        self.inner.cleanup_conformance_schema(&self.schema)
+    }
+
     pub fn get_environment(&self, id: &str) -> Result<Option<EnvironmentRecord>> {
         #[cfg(feature = "postgres")]
         {
@@ -2070,8 +2081,11 @@ mod postgres_imp {
             self.with_schema(schema, |tx| lease_in(tx, environment))
         }
 
-        #[cfg(test)]
-        pub(super) fn expire_lease_for_test(&self, schema: &str, environment: &str) -> Result<()> {
+        pub(super) fn expire_lease_for_conformance(
+            &self,
+            schema: &str,
+            environment: &str,
+        ) -> Result<()> {
             self.with_schema(schema, |tx| {
                 tx.execute(
                     "UPDATE leases SET expires_at = 0 WHERE environment_id = $1",
@@ -2080,6 +2094,29 @@ mod postgres_imp {
                 .map_err(pg)?;
                 Ok(())
             })
+        }
+
+        pub(super) fn cleanup_conformance_schema(&self, schema: &str) -> Result<()> {
+            if !schema.starts_with("tenkai_t_delivery_test_")
+                || !schema
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '_')
+            {
+                return Err(StoreError::InvalidData {
+                    kind: "delivery conformance",
+                    detail: "refusing to clean a non-conformance tenant schema".into(),
+                });
+            }
+            self.client
+                .lock()
+                .map_err(|_| StoreError::AdapterUnavailable("postgres lock poisoned".into()))?
+                .batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+                .map_err(pg)
+        }
+
+        #[cfg(test)]
+        pub(super) fn expire_lease_for_test(&self, schema: &str, environment: &str) -> Result<()> {
+            self.expire_lease_for_conformance(schema, environment)
         }
 
         #[cfg(test)]
