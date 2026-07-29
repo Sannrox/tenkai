@@ -159,13 +159,15 @@ impl ReconcileTickFence for SharedReconcileFence {
         now: i64,
     ) -> Result<(), FenceError> {
         let mut claims = self.claims.lock().map_err(|_| FenceError::Poisoned)?;
-        match claims.get(environment) {
+        match claims.get(environment).cloned() {
             Some(claim) if claim.owner == owner && claim.generation == generation => {
-                claims.remove(environment);
-                Ok(())
-            }
-            Some(claim) if claim.expires_at <= now => {
-                claims.remove(environment);
+                claims.insert(
+                    environment.into(),
+                    LiveClaim {
+                        expires_at: claim.expires_at.min(now),
+                        ..claim
+                    },
+                );
                 Ok(())
             }
             // Stale release must not steal another host's claim.
@@ -237,8 +239,13 @@ mod tests {
         assert!(matches!(b, FenceAdmission::Busy { .. }));
         fence.release("prod", "host-a", 1, 1_200).unwrap();
         let c = fence.try_begin("prod", "host-b", 1_300, 5_000).unwrap();
-        // After release the claim is gone; next owner starts at generation 1.
-        assert!(matches!(c, FenceAdmission::Started { generation: 1 }));
+        assert!(matches!(c, FenceAdmission::Started { generation: 2 }));
+        // A delayed generation-1 release cannot expire generation 2.
+        fence.release("prod", "host-a", 1, 1_400).unwrap();
+        assert!(matches!(
+            fence.try_begin("prod", "host-c", 1_500, 5_000).unwrap(),
+            FenceAdmission::Busy { .. }
+        ));
     }
 
     #[test]

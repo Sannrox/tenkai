@@ -93,10 +93,9 @@ Notes:
 
 - Local SQLite paths may still be used for non-tenant application paths; tenant
   isolation uses Postgres schemas `tenkai_t_*`.
-- Tick fencing is process-shared per process today (`SharedReconcileFence` per
-  server). For multi-process production, use distinct `TENKAI_INSTANCE_ID` values
-  and prefer a durable fence backend implementing `ReconcileTickFence` when
-  available; until then treat one hub as active writer.
+- With `--features postgres`, `TENKAI_POSTGRES_URL`, and `replica_count > 1`,
+  both hosts use the durable Postgres `ReconcileTickFence`. Distinct
+  `TENKAI_INSTANCE_ID` values are required.
 
 ### 4. Verify management plane
 
@@ -159,6 +158,8 @@ explicit release. Without Postgres, fencing is process-memory only and is not
 safe across machines.
 
 See [reconcile-tick-fencing.md](reconcile-tick-fencing.md).
+Mutation-level replay and stale-generation evidence:
+[fenced delivery-effect conformance](delivery-effect-conformance.md).
 
 ## Explicit non-guarantees
 

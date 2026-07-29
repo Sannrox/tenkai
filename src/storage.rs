@@ -821,7 +821,7 @@ fn require_plan_environment(
     Ok(())
 }
 
-fn rollback_intent_digest(rollback: &RollbackRecord) -> String {
+pub(crate) fn rollback_intent_digest(rollback: &RollbackRecord) -> String {
     use sha2::{Digest as _, Sha256};
 
     let mut digest = Sha256::new();

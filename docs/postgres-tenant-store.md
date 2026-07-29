@@ -36,6 +36,8 @@ remains separate per ADR 0009).
 | Not claimed yet | Product `high_availability`, automatic multi-AZ failover |
 
 Community SQLite never advertises `shared_replica_state`.
+The two-connection mutation and lease-handoff proof is documented in
+[fenced delivery-effect conformance](delivery-effect-conformance.md).
 
 ## Isolation model
 

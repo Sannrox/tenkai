@@ -63,7 +63,9 @@ binary is built with `--features postgres`, it opens
 store). Otherwise it falls back to process-shared memory (single machine only).
 
 Claims are hub-wide (not schema-per-tenant). TTL expiry allows takeover with a
-bumped generation; stale `release` cannot steal another owner’s live claim.
+bumped generation. Release expires the claim but retains its generation
+tombstone, so generations never reset and a delayed stale `release` cannot
+match or steal a later owner's live claim.
 
 This does **not** advertise product `high_availability` by itself.
 
@@ -83,3 +85,6 @@ Operator failover and lab steps:
 - Multi-primary SQLite
 - Product `high_availability` flag (still separate)
 - Identity-plane co-location
+
+Delivery-effect evidence and the paths that remain outside the HA claim:
+[fenced delivery-effect conformance](delivery-effect-conformance.md).
