@@ -1,7 +1,20 @@
-# Multi-replica control-plane hub runbook (#130)
+# Multi-replica PostgreSQL integration lab (#130)
 
-This runbook is for the **Tenkai hub** (`tenkai-server`), not environment
-runtimes. It assumes:
+This runbook exercises component-level PostgreSQL tenant isolation, shared
+replica state, and reconcile fencing for the **Tenkai hub** (`tenkai-server`),
+not environment runtimes. It is a conformance lab, not a supported operating
+profile, product HA claim, failover procedure, or complete backup and recovery
+contract.
+
+The commands compose PostgreSQL tenant state with SQLite-backed non-tenant
+application state. That mixed-store diagnostic composition cannot activate the
+gated `enterprise-experimental` profile until PostgreSQL is the sole
+authoritative store and all readiness evidence in
+[ADR 0010](decisions/0010-supported-operating-profiles.md) exists. The supported
+profile contract remains `local` by default and experimental single-server
+`fleet` for remote runtime operation.
+
+The lab assumes:
 
 | Prerequisite | Reference |
 | --- | --- |
@@ -9,22 +22,25 @@ runtimes. It assumes:
 | Server wires tenant mode → Postgres | #127 |
 | `shared_replica_state` (single-active writer) | #128 |
 | Reconcile tick fencing | [reconcile-tick-fencing.md](reconcile-tick-fencing.md), #129 |
-| HA capability profile | [ADR 0009](decisions/0009-multi-replica-reconcile-and-ha-profile.md) |
+| Replica and HA capability semantics | [ADR 0009](decisions/0009-multi-replica-reconcile-and-ha-profile.md) |
+| Supported operating-profile contract | [ADR 0010](decisions/0010-supported-operating-profiles.md) |
 
-## What HA means here
+## Component guarantees and limits
 
-| Guaranteed (with this stack) | **Not** guaranteed |
+| Component evidence exercised by this lab | **Not** guaranteed |
 | --- | --- |
-| Shared durable ops state in Postgres | Workload HA inside canary/stage/prod |
+| Shared durable tenant state in Postgres | One complete authoritative operational store |
 | Capability gate for `--replica-count > 1` | Multi-active concurrent writers without fencing |
 | Tick fence so two hosts do not double-reconcile the same env | Automatic multi-AZ product packaging |
-| Failover by promoting a standby hub | Community SQLite multi-writer |
-| Restart + `pg_dump` recovery of hub DB | Identity-plane / IdP co-located DB |
+| Manual role-switch and PostgreSQL dump/restore exercises | Supported failover, backup, or recovery profile |
+| Tenant isolation conformance | Product HA inside canary/stage/prod |
 
-**Single-active writer model:** at most one control-plane process should actively
-reconcile and mutate hub state. Standbys share `TENKAI_POSTGRES_URL` for cold
-failover. Tick fencing (`SharedReconcileFence` / `ReconcileTickFence`) reduces
-double-reconcile races when more than one process is live.
+**Single-active writer component model:** at most one control-plane process
+should actively reconcile and mutate the tested tenant state. Lab peers share
+`TENKAI_POSTGRES_URL`. Tick fencing (`SharedReconcileFence` /
+`ReconcileTickFence`) reduces double-reconcile races when more than one process
+is live. SQLite still owns other authoritative state, so this composition has
+no single transaction, backup, restore, or cutover boundary.
 
 ## Prerequisites
 
@@ -73,10 +89,12 @@ cargo run --features postgres --bin tenkai-server -- \
   --database .tenkai-state/hub-1.db
 ```
 
-Expect startup profile `enterprise-tenant-postgres` and capabilities including
-`tenant_isolation` and `shared_replica_state`.
+Expect diagnostic composition identifier `enterprise-tenant-postgres` and
+capabilities including `tenant_isolation` and `shared_replica_state`. That
+identifier reports the current low-level composition; it is not the
+`enterprise-experimental` operating profile defined by ADR 0010.
 
-### 3. Start secondary hub (standby / peer)
+### 3. Start secondary lab peer
 
 ```bash
 export TENKAI_INSTANCE_ID=hub-2
@@ -108,11 +126,15 @@ curl -sS -H "Authorization: Bearer lab-management-token" \
 
 Do not print tokens in logs or commit them.
 
-## Failover drill
+## Manual role-switch conformance drill
+
+This drill tests shared tenant state and fencing only. It is not evidence for a
+supported failover or recovery profile because each host still has independent
+SQLite-backed application state.
 
 1. Confirm primary (`hub-1`) is healthy (`/readyz`, reconcile log lines).
 2. Stop primary (`Ctrl+C` or kill the process).
-3. Ensure secondary (`hub-2`) is running with the **same** `TENKAI_POSTGRES_URL`.
+3. Ensure the second peer (`hub-2`) is running with the **same** `TENKAI_POSTGRES_URL`.
 4. Point the reverse proxy / operator `TENKAI_SERVER_URL` at the secondary listen
    address.
 5. Re-check `/readyz`, `fleet status`, and one `reconcile` tick.
@@ -122,7 +144,11 @@ If both hubs were left running, tick fencing reduces double-reconcile risk for
 the same environment when both share a fence; with per-process fences only,
 **stop the old writer** before treating the standby as sole active.
 
-## Backup and restore (Postgres hub)
+## PostgreSQL component dump and restore exercise
+
+This exercise covers the PostgreSQL tenant schemas used by the lab. It does not
+capture the SQLite-backed application state and therefore is not a complete
+Tenkai backup, restore, or enterprise recovery procedure.
 
 ### Backup
 
@@ -144,10 +170,12 @@ pg_restore -d "$TENKAI_POSTGRES_URL" --clean --if-exists tenkai-hub-YYYYMMDD.dum
 
 3. Start a single hub first; verify `/readyz` and inspect.
 4. Re-inject management/runtime tokens from the secret store (never stored in DB).
-5. Only then start additional replicas.
+5. Only then start additional lab peers.
 
 SQLite `tenkaictl backup` / `restore` remains the community embedded path; it is
-**not** a substitute for hub Postgres backup.
+**not** a substitute for a complete enterprise PostgreSQL backend. Conversely,
+the PostgreSQL dump above is not a substitute for backing up the mixed
+composition's SQLite state.
 
 ## Durable tick fence (#135)
 
@@ -170,6 +198,9 @@ Mutation-level replay and stale-generation evidence:
   (ADR 0005 / 0008).
 - `high_availability` product flag is separate from `shared_replica_state` and
   is not claimed by the Postgres adapter by default.
+- No complete operating profile currently admits multiple server replicas;
+  `enterprise-experimental` remains gated by ADR 0010's single-store parity and
+  readiness evidence.
 
 ## Related docs
 
@@ -178,3 +209,4 @@ Mutation-level replay and stale-generation evidence:
 - [runtime-capabilities.md](runtime-capabilities.md)
 - [backup-restore.md](backup-restore.md) (SQLite embedded)
 - [ADR 0009](decisions/0009-multi-replica-reconcile-and-ha-profile.md)
+- [ADR 0010](decisions/0010-supported-operating-profiles.md)

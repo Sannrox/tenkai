@@ -1,16 +1,26 @@
-# Optional PostgreSQL tenant OperationalStore (control-plane hub)
+# Optional PostgreSQL tenant OperationalStore integration
 
-Postgres is an **optional** durable multi-tenant store for the **Tenkai hub**
-(`tenkai-server` / control plane), not for remote environment agents.
+Postgres is an **optional**, component-level multi-tenant store adapter for the
+**Tenkai hub** (`tenkai-server` / control plane), not for remote environment
+agents. The current server composition keeps non-tenant application state in
+SQLite, so this adapter is test-only integration evidence rather than a
+supported operating profile or complete recovery backend.
+
+[ADR 0010](decisions/0010-supported-operating-profiles.md) defines the supported
+profiles. The default `local` profile and experimental single-server `fleet`
+profile use SQLite. The gated `enterprise-experimental` profile cannot activate
+until PostgreSQL is the sole authoritative store and every ADR 0010 readiness
+requirement passes.
 
 | Role | Store |
 | --- | --- |
 | Community / solo | SQLite (`SqliteStore`) — default |
-| Enterprise multi-tenant recovery | Optional Postgres (`PostgresTenantOperationalStore`) |
+| Tenant-store integration and conformance | Optional Postgres (`PostgresTenantOperationalStore`) |
 | Conformance without Postgres | In-memory tenant partitions (`InMemoryTenantOperationalStore`) |
 
 Source: `src/postgres_tenant.rs`. Decision: [ADR 0008](decisions/0008-production-tenant-operational-store.md).
 HA multi-replica: [ADR 0009](decisions/0009-multi-replica-reconcile-and-ha-profile.md).
+Operating profiles: [ADR 0010](decisions/0010-supported-operating-profiles.md).
 
 ## Shared replica state (#128)
 
@@ -24,16 +34,17 @@ store.tenant_postgres:
 ```
 
 **Writer model (locked first slice):** `SingleActiveWriter` — one active
-control-plane writer against a shared Postgres database (failover / cold
-standby). It does **not** mean multi-active concurrent reconcile without tick
-fencing (#129). It does **not** advertise `high_availability` (product HA flag
-remains separate per ADR 0009).
+control-plane writer against the shared PostgreSQL tenant-state component, with
+a cold lab peer available for conformance drills. It does **not** mean
+multi-active concurrent reconcile without tick fencing (#129), a complete
+shared application store, or supported failover. It does **not** advertise
+`high_availability` (product HA remains separate per ADR 0009).
 
 | Claim | Meaning |
 | --- | --- |
-| `shared_replica_state` | Shared durable ops state; safe for single-active writer + standby failover |
+| `shared_replica_state` | Shared durable state for this adapter; sufficient for single-active-writer component tests |
 | Tick fence table | `tenkai_reconcile_tick_claims` for multi-host reconcile (#135); not a HA product claim |
-| Not claimed yet | Product `high_availability`, automatic multi-AZ failover |
+| Not claimed yet | Complete PostgreSQL authority, product `high_availability`, supported failover or recovery |
 
 Community SQLite never advertises `shared_replica_state`.
 The two-connection mutation and lease-handoff proof is documented in
@@ -78,12 +89,16 @@ cargo test --features postgres live_postgres_tenant_isolation -- --ignored --noc
 
 Default CI does **not** require a Postgres service. Live tests are `#[ignore]`.
 
-## Backup notes
+## Component backup notes
 
-- Use Postgres-native backup (`pg_dump` / continuous archiving) for the hub DB.
+- Use Postgres-native backup (`pg_dump` / continuous archiving) to exercise
+  backup of the adapter's tenant schemas.
 - Document tenant schema names (`tenkai_t_*`) in ops runbooks.
-- Restore is a hub cutover: stop writers, restore DB, start server, verify
-  `/readyz` — same operational discipline as SQLite cutover, different tools.
+- A lab restore stops writers, restores the PostgreSQL component, starts one
+  server, and verifies `/readyz`.
+- This does not restore SQLite-backed releases, channels, environments, plans,
+  execution, receipts, rollback, or other non-tenant application state. It is
+  therefore not an enterprise backup, cutover, or recovery contract.
 - Do not confuse with environment runtime state or identity-plane backups.
 
 ## `tenkai-server` wiring (#127)
@@ -105,11 +120,13 @@ Rules:
 | No `--tenant-mode` | Community path; `tenant_store` unset |
 | `--tenant-mode` without feature | Startup fails: rebuild with `--features postgres` |
 | `--tenant-mode` without `TENKAI_POSTGRES_URL` | Startup fails closed |
-| `--tenant-mode` + feature + URL | Wires `PostgresTenantOperationalStore`; profile `enterprise-tenant-postgres` |
+| `--tenant-mode` + feature + URL | Wires `PostgresTenantOperationalStore`; diagnostic composition `enterprise-tenant-postgres` |
 
 In-memory adapter remains for unit tests (`ServerConfig.tenant_store = Some(Arc::new(InMemory…))`).
 
 `--replica-count > 1` passes capability negotiation when the Postgres hub store
-is composed (#128). Multi-active reconcile uses tick fencing (#129). Full
-operator steps: [multi-replica-hub-runbook.md](multi-replica-hub-runbook.md)
-(#130).
+is composed (#128). Multi-active reconcile uses tick fencing (#129). These
+component claims do not activate `enterprise-experimental`; the mixed-store
+path must remain a diagnostic/conformance composition until PostgreSQL owns
+every authoritative surface and ADR 0010 readiness evidence exists. Lab steps:
+[multi-replica-hub-runbook.md](multi-replica-hub-runbook.md) (#130).
