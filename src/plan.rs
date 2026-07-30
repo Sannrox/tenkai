@@ -254,6 +254,32 @@ impl Plan {
 }
 
 pub async fn store(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
+    store_with_provider_events(ctx, plan, &[]).await
+}
+
+pub(crate) async fn store_with_provider_events(
+    ctx: &mut Ctx,
+    plan: &Plan,
+    provider_events: &[crate::storage::ProviderEventRecord],
+) -> Result<()> {
+    let object = validated_plan_object(ctx, plan).await?;
+    ctx.put_with_provider_events(object, provider_events)
+        .await?;
+    Ok(())
+}
+
+pub(crate) async fn store_with_environment_and_provider_events(
+    ctx: &mut Ctx,
+    plan: &Plan,
+    environment: Object,
+    provider_events: &[crate::storage::ProviderEventRecord],
+) -> Result<()> {
+    let plan_object = validated_plan_object(ctx, plan).await?;
+    ctx.put_objects_with_provider_events(&[plan_object, environment], provider_events)
+        .await
+}
+
+async fn validated_plan_object(ctx: &mut Ctx, plan: &Plan) -> Result<Object> {
     let existing = ctx.get(&plan.id).await?;
     if let Some(existing) = existing.as_ref() {
         let stored = Plan::from_object(existing)?;
@@ -298,8 +324,7 @@ pub async fn store(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
             }
         }
     }
-    ctx.put(object).await?;
-    Ok(())
+    Ok(object)
 }
 
 pub async fn load(ctx: &mut Ctx, id: &str) -> Result<Plan> {
@@ -430,6 +455,72 @@ pub async fn reconcile_deployment(
         bail!("environment {env} has an apply in progress");
     }
     let mut object = environment(ctx, env).await?;
+    let was_unknown = object
+        .properties
+        .get(&format!("deployment_health.{product}"))
+        .is_some_and(|health| health == "unknown");
+    let unknown_origin = (
+        object
+            .properties
+            .get(&format!("deployment_unknown_plan.{product}"))
+            .cloned(),
+        object
+            .properties
+            .get(&format!("deployment_unknown_step.{product}"))
+            .cloned(),
+        object
+            .properties
+            .get(&format!("deployment_unknown_attempt.{product}"))
+            .cloned(),
+    );
+    let observed_at = crate::now_millis();
+    let provider_events = if ctx.outcome_export_enabled() && was_unknown {
+        match unknown_origin {
+            (Some(plan_id), Some(step_id), Some(deployment_id)) => {
+                let plan = load(ctx, &plan_id).await?;
+                anyhow::ensure!(
+                    plan.environment == env,
+                    "unknown deployment origin belongs to a different environment"
+                );
+                let step = plan
+                    .steps
+                    .iter()
+                    .find(|step| step.id == step_id && step.product == product)
+                    .with_context(|| {
+                        format!(
+                            "unknown deployment origin step {step_id} is absent from plan {plan_id}"
+                        )
+                    })?;
+                vec![crate::providers::terminal_outcome_record(
+                    &plan,
+                    step,
+                    &deployment_id,
+                    crate::providers::TerminalOutcomeState::UnknownReconciled,
+                    &object,
+                    observed_at,
+                )?]
+            }
+            _ => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+    update_reconciled_deployment_object(ctx, &mut object, product, deployed, observed_at).await?;
+    ctx.put_with_provider_events(object, &provider_events)
+        .await?;
+    Ok(match deployed {
+        Some(version) => format!("recorded {product}@{version} as deployed in {env}"),
+        None => format!("cleared unknown deployment state for {product} in {env}"),
+    })
+}
+
+async fn update_reconciled_deployment_object(
+    ctx: &mut Ctx,
+    object: &mut Object,
+    product: &str,
+    deployed: Option<&str>,
+    observed_at: i64,
+) -> Result<()> {
     match deployed {
         Some(version) => {
             validate_identifier("version", version)?;
@@ -460,12 +551,35 @@ pub async fn reconcile_deployment(
     object
         .properties
         .remove(&format!("deployed_prev.{product}"));
-    object.updated = crate::now_millis();
-    ctx.put(object).await?;
-    Ok(match deployed {
-        Some(version) => format!("recorded {product}@{version} as deployed in {env}"),
-        None => format!("cleared unknown deployment state for {product} in {env}"),
-    })
+    for prefix in [
+        "deployment_unknown_plan.",
+        "deployment_unknown_step.",
+        "deployment_unknown_attempt.",
+    ] {
+        object.properties.remove(&format!("{prefix}{product}"));
+    }
+    object.updated = observed_at;
+    Ok(())
+}
+
+pub(crate) async fn update_runtime_deployments_object(
+    ctx: &mut Ctx,
+    object: &mut Object,
+    steps: &[Step],
+    observed_at: i64,
+) -> Result<()> {
+    for step in steps {
+        validate_identifier("product", &step.product)?;
+        update_reconciled_deployment_object(
+            ctx,
+            object,
+            &step.product,
+            Some(&step.to),
+            observed_at,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// Subscribe an environment to a product channel. The channel must exist.

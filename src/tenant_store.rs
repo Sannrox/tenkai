@@ -470,6 +470,22 @@ impl OperationalStore for TenantPartition {
         self.store
             .claim_provider_events(now, limit, claim_token, claim_until)
     }
+    fn claim_provider_events_for_kind(
+        &self,
+        provider_kind: &str,
+        now: i64,
+        limit: usize,
+        claim_token: &str,
+        claim_until: i64,
+    ) -> Result<Vec<ProviderEventRecord>> {
+        self.store.claim_provider_events_for_kind(
+            provider_kind,
+            now,
+            limit,
+            claim_token,
+            claim_until,
+        )
+    }
     fn record_provider_failure(
         &self,
         provider_kind: &str,

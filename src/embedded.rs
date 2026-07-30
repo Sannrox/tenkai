@@ -10,6 +10,7 @@ use rusqlite::{Connection, DatabaseName, OptionalExtension, params};
 use crate::pb::sekai::{
     ActionResult, ActionTypeDef, Decision, Lease, Link, Object, ObjectChange, ObjectType,
 };
+use crate::storage::{ProviderEventRecord, enqueue_provider_event_in};
 
 const SCHEMA_VERSION: u32 = 2;
 
@@ -162,6 +163,108 @@ impl EmbeddedStore {
         }
         tx.commit()?;
         Ok(object)
+    }
+
+    fn put_objects_with_provider_events_inner(
+        &self,
+        objects: &[Object],
+        events: &[ProviderEventRecord],
+        lease: Option<(&str, &str, &str)>,
+    ) -> Result<()> {
+        anyhow::ensure!(!objects.is_empty(), "embedded object update is empty");
+        let unique_ids = objects
+            .iter()
+            .map(|object| object.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        anyhow::ensure!(
+            unique_ids.len() == objects.len(),
+            "embedded object update contains duplicate identities"
+        );
+        let mut connection = self.connection()?;
+        let tx = connection.transaction()?;
+        if let Some((namespace, key, fencing_token)) = lease {
+            require_active_lease_in(&tx, namespace, key, fencing_token)?;
+        }
+        for object in objects {
+            let previous: Option<Object> = decode_optional(
+                tx.query_row(
+                    "SELECT payload FROM embedded_objects WHERE id=?1",
+                    [&object.id],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .optional()?,
+                "object",
+            )?;
+            anyhow::ensure!(
+                previous.is_some(),
+                "embedded object {} does not exist",
+                object.id
+            );
+            tx.execute(
+                "UPDATE embedded_objects SET kind=?2,payload=?3 WHERE id=?1",
+                params![object.id, object.kind, object.encode_to_vec()],
+            )?;
+            replace_object_properties(&tx, object)?;
+            record_changes(
+                &tx,
+                previous.as_ref().expect("existing object checked"),
+                object,
+                &self.principal,
+            )?;
+        }
+        for event in events {
+            enqueue_provider_event_in(&tx, event).map_err(anyhow::Error::from)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn put_with_provider_events(
+        &self,
+        object: Object,
+        events: &[ProviderEventRecord],
+    ) -> Result<Object> {
+        self.put_objects_with_provider_events_inner(std::slice::from_ref(&object), events, None)?;
+        Ok(object)
+    }
+
+    pub fn put_objects_with_provider_events(
+        &self,
+        objects: &[Object],
+        events: &[ProviderEventRecord],
+    ) -> Result<()> {
+        self.put_objects_with_provider_events_inner(objects, events, None)
+    }
+
+    pub fn guarded_put_with_provider_events(
+        &self,
+        object: Object,
+        namespace: &str,
+        key: &str,
+        fencing_token: &str,
+        events: &[ProviderEventRecord],
+    ) -> Result<Object> {
+        self.put_objects_with_provider_events_inner(
+            std::slice::from_ref(&object),
+            events,
+            Some((namespace, key, fencing_token)),
+        )?;
+        Ok(object)
+    }
+
+    pub fn guarded_put_objects_with_provider_events(
+        &self,
+        objects: &[Object],
+        namespace: &str,
+        key: &str,
+        fencing_token: &str,
+        events: &[ProviderEventRecord],
+    ) -> Result<()> {
+        self.put_objects_with_provider_events_inner(
+            objects,
+            events,
+            Some((namespace, key, fencing_token)),
+        )
     }
 
     pub fn guarded_put(
@@ -885,6 +988,7 @@ fn record_changes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::SqliteStore;
 
     #[test]
     fn persists_objects_links_actions_and_leases() {
@@ -910,6 +1014,97 @@ mod tests {
                 .fencing_token,
             lease.fencing_token
         );
+    }
+
+    #[tokio::test]
+    async fn terminal_transition_reaches_adapter_and_atomic_conflicts_roll_back() {
+        let database = std::env::temp_dir().join(format!(
+            "tenkai-terminal-outcome-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let operational = SqliteStore::open(&database).unwrap();
+        let embedded = EmbeddedStore::open(&database, "tenkai".into()).unwrap();
+        let mut object = Object {
+            id: "tenkai:plan:prod:1".into(),
+            kind: "tenkai.plan".into(),
+            name: "running".into(),
+            ..Default::default()
+        };
+        let mut environment = Object {
+            id: "tenkai:environment:prod".into(),
+            kind: "tenkai.environment".into(),
+            name: "before".into(),
+            ..Default::default()
+        };
+        embedded.create(object.clone()).unwrap();
+        embedded.create(environment.clone()).unwrap();
+        let provider_event = crate::providers::terminal_outcome_event(
+            "tenkai:deployment:prod:api:1",
+            &object.id,
+            "sha256:plan",
+            "tenkai:release:api@2.0.0",
+            "sha256:release",
+            "api",
+            "prod",
+            "tenkai:environment:prod",
+            "sha256:config",
+            crate::providers::TerminalOutcomeState::DeploymentSucceeded,
+            100,
+        )
+        .unwrap();
+        let event =
+            crate::providers::provider_event_record("outcome", &provider_event, 100).unwrap();
+
+        object.name = "terminal".into();
+        environment.name = "after".into();
+        embedded
+            .put_objects_with_provider_events_inner(
+                &[object.clone(), environment.clone()],
+                std::slice::from_ref(&event),
+                None,
+            )
+            .unwrap();
+        assert_eq!(embedded.get(&object.id).unwrap(), Some(object.clone()));
+        assert_eq!(
+            embedded.get(&environment.id).unwrap(),
+            Some(environment.clone())
+        );
+        let sink = crate::providers::LocalEventSink::default();
+        assert_eq!(
+            crate::providers::deliver_outcome_batch(
+                &operational,
+                &sink,
+                std::time::Duration::from_secs(1),
+                100,
+                10,
+            )
+            .await
+            .unwrap(),
+            (1, 0)
+        );
+        assert_eq!(sink.received(), vec![provider_event]);
+
+        let mut conflicting = event;
+        conflicting.payload_json = "{\"different\":true}".into();
+        object.name = "must-roll-back".into();
+        environment.name = "must-also-roll-back".into();
+        assert!(
+            embedded
+                .put_objects_with_provider_events_inner(
+                    &[object.clone(), environment.clone()],
+                    &[conflicting],
+                    None,
+                )
+                .is_err()
+        );
+        assert_eq!(embedded.get(&object.id).unwrap().unwrap().name, "terminal");
+        assert_eq!(
+            embedded.get(&environment.id).unwrap().unwrap().name,
+            "after"
+        );
+        drop(operational);
+        drop(embedded);
+        std::fs::remove_file(database).unwrap();
     }
 
     #[test]

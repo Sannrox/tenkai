@@ -39,8 +39,11 @@ valid bound evidence is returned.
 
 Audit and outcome delivery uses a Tenkai-owned durable outbox. Host wiring must
 commit the outbox event in the same operational-store transaction as the state
-change that produced it; the current provider module supplies the delivery
-contract and retry queue but does not wire planning or execution mutations.
+change that produced it. Configured terminal-outcome export uses that contract:
+embedded/server plan, deployment, cancellation, and unknown-state
+reconciliation transitions write the versioned outcome event in the same
+SQLite transaction as the terminal object update. Audit mutations are not yet
+wired to this queue.
 The event is always durable before an adapter is called. Its destination kind
 and stable event ID form the adapter idempotency key; enqueueing the same pair
 and payload is safe, while reusing the pair with different content is rejected.
@@ -54,6 +57,39 @@ Restarting Tenkai does not lose pending events. Adapters may receive an event
 more than once and must deduplicate by event ID. Optional lag degrades the
 integration but never changes or rolls back committed operational truth.
 
+Outcome workers claim only the `outcome` destination. A separate adapter cannot
+consume or acknowledge audit events accidentally. Delivery failure and timeout
+leave the attempt count, bounded retry time, and sanitized failure reason in
+the durable row and emit a bounded degraded diagnostic; they do not make the
+server unready.
+
+### Terminal outcome event v1
+
+`ProviderEvent.payload_json` contains `tenkai.terminal_outcome.v1` with:
+
+- stable deployment, plan, release, product, environment, and configuration
+  identities;
+- one of `deployment_succeeded`, `deployment_failed`,
+  `automatic_rollback_succeeded`, `rollback_succeeded`, `rollback_failed`,
+  `execution_cancelled`, or `unknown_reconciled`; and
+- the Tenkai observation timestamp.
+
+The event's `EvidenceBinding` carries the exact release digest, immutable plan
+digest, environment-configuration digest, and environment identity. Event
+identity is a deterministic digest over the deployment, plan, release, terminal
+state, observation time, and evidence binding. Replaying the same transition is
+idempotent, while a later transition with the same operational inputs remains a
+distinct fact. Payloads are bounded to 16 KiB and contain no status detail,
+command output, environment facts, artifact/source content, approvals,
+credentials, or signing material.
+
+When a failed restore makes deployment state unknown, Tenkai records the
+originating deployment, plan, and step identities on the environment in the
+same terminal transaction. A later explicit reconciliation exports
+`unknown_reconciled` only from that durable origin; legacy or manually created
+unknown state without an attributable origin is cleared without inventing
+learning evidence.
+
 ## Standalone operation and external adapters
 
 The built-in local gate consumes explicitly configured evidence, and the local
@@ -66,6 +102,41 @@ External sekai/chisei or other adapters translate their protocol into these
 ports. They must enforce transport authentication, bounded payloads and
 deadlines, redact credentials, validate returned evidence, and pass the same
 binding, denial, timeout, idempotency, and retry tests as the local adapters.
+
+## Chisei terminal-outcome adapter (#197)
+
+Reference adapter: `ChiseiOutcomeProvider` in `src/providers.rs`.
+
+The adapter maps each terminal event to the already-vendored
+`ChiseiService.RecordSampleObservation` RPC:
+
+- Tenkai event ID → `request_id` (downstream idempotency key);
+- configured namespace → `namespace`;
+- `tenkai.terminal_outcome.v1` → `spec`;
+- the bounded payload → `output_content`; and
+- terminal state → `sample_reason`.
+
+Chisei authenticates the telemetry-writer principal and enforces namespace
+membership. A `recorded=false` response, transport error, timeout, or gRPC
+failure defers the event. The adapter never calls a Tenkai mutation or recovery
+API.
+
+Configure the server explicitly:
+
+```sh
+export TENKAI_OUTCOME_PROVIDER_URL=https://sekai.example.internal
+export TENKAI_OUTCOME_NAMESPACE=delivery-learning
+export TENKAI_OUTCOME_PROVIDER_PRINCIPAL=tenkai.outcome
+export TENKAI_OUTCOME_PROVIDER_TOKEN='inject-from-secret-store'
+tenkai-server --outcome-provider chisei
+```
+
+The token is environment-only, and remote plaintext endpoints are rejected
+even when no token is configured. Outcome export requires embedded Tenkai
+application state so the authoritative transition and outbox write share one
+local transaction; the legacy `--provider-mode remote` composition is rejected.
+With no `--outcome-provider`, Tenkai creates no adapter, queues no outcome
+events, and opens no outcome-provider connection.
 
 ## Remote gate HTTP JSON contract (#113)
 

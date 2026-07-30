@@ -16,6 +16,7 @@ use tenkai::postgres_tenant::{
     resolve_reconcile_fence_for_replicas, resolve_server_tenant_store,
     tenant_postgres_store_capabilities,
 };
+use tenkai::providers::{ChiseiOutcomeProvider, deliver_outcome_batch};
 use tenkai::reconciler::{Config as ReconcilerConfig, Reconciler};
 use tenkai::runtime_capabilities::{
     RuntimeRequirements, community_auth_capabilities, community_sqlite_profile,
@@ -73,12 +74,29 @@ struct Cli {
     /// Enable the authenticated, non-executable local demo fixture surface.
     #[arg(long, default_value_t = false)]
     with_development_fixtures: bool,
+    /// Optional terminal-outcome adapter. Disabled keeps standalone operation network-free.
+    #[arg(
+        long,
+        env = "TENKAI_OUTCOME_PROVIDER",
+        value_enum,
+        default_value_t = OutcomeProviderMode::Disabled
+    )]
+    outcome_provider: OutcomeProviderMode,
+    /// Namespace admitted by the configured Chisei telemetry-writer policy.
+    #[arg(long, env = "TENKAI_OUTCOME_NAMESPACE")]
+    outcome_namespace: Option<String>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
 enum ProviderMode {
     Embedded,
     Remote,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum OutcomeProviderMode {
+    Disabled,
+    Chisei,
 }
 
 struct EnterpriseAuthComposition {
@@ -174,6 +192,36 @@ async fn main() -> Result<()> {
         SqliteStore::open(&cli.database)
             .with_context(|| format!("opening {}", cli.database.display()))?,
     );
+    let outcome_provider = match cli.outcome_provider {
+        OutcomeProviderMode::Disabled => {
+            anyhow::ensure!(
+                cli.outcome_namespace.is_none()
+                    && std::env::var_os("TENKAI_OUTCOME_PROVIDER_URL").is_none()
+                    && std::env::var_os("TENKAI_OUTCOME_PROVIDER_TOKEN").is_none(),
+                "outcome provider configuration requires --outcome-provider chisei"
+            );
+            None
+        }
+        OutcomeProviderMode::Chisei => {
+            anyhow::ensure!(
+                matches!(cli.provider_mode, ProviderMode::Embedded),
+                "outcome export requires embedded Tenkai application state so terminal state and outbox enqueue share one transaction"
+            );
+            let endpoint = std::env::var("TENKAI_OUTCOME_PROVIDER_URL")
+                .context("TENKAI_OUTCOME_PROVIDER_URL is required for Chisei outcome export")?;
+            let namespace = cli
+                .outcome_namespace
+                .as_deref()
+                .context("TENKAI_OUTCOME_NAMESPACE is required for Chisei outcome export")?;
+            let principal = std::env::var("TENKAI_OUTCOME_PROVIDER_PRINCIPAL")
+                .unwrap_or_else(|_| "tenkai.outcome".into());
+            let token = std::env::var("TENKAI_OUTCOME_PROVIDER_TOKEN").ok();
+            Some(
+                ChiseiOutcomeProvider::new(endpoint, namespace, principal, token)
+                    .context("validating Chisei outcome adapter configuration")?,
+            )
+        }
+    };
     let jwt_trust_path = std::env::var_os(JWT_VERIFIER_CONFIG_ENV).map(PathBuf::from);
     let enterprise_auth = compose_enterprise_auth(
         jwt_trust_path.as_deref(),
@@ -225,8 +273,11 @@ async fn main() -> Result<()> {
         .with_context(|| "runtime capability negotiation failed at startup")?;
 
     let ctx = match cli.provider_mode {
-        ProviderMode::Embedded => tenkai::client::Ctx::embedded(&cli.database)
-            .context("opening embedded application state")?,
+        ProviderMode::Embedded => tenkai::client::Ctx::embedded_with_outcome_export(
+            &cli.database,
+            outcome_provider.is_some(),
+        )
+        .context("opening embedded application state")?,
         ProviderMode::Remote => tenkai::client::connect()
             .await
             .context("connecting explicitly configured remote provider")?,
@@ -280,7 +331,7 @@ async fn main() -> Result<()> {
             ),
         },
         reconciler.clone(),
-        store,
+        store.clone(),
     )?;
     let listener = tokio::net::TcpListener::bind(cli.listen).await?;
     println!(
@@ -296,6 +347,46 @@ async fn main() -> Result<()> {
         "reconcile interval must be greater than zero"
     );
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+    let outcome_task = outcome_provider.map(|provider| {
+        let outcome_store = store.clone();
+        let mut outcome_shutdown_rx = shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            let mut timer = tokio::time::interval(Duration::from_secs(5));
+            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    changed = outcome_shutdown_rx.changed() => {
+                        if changed.is_err() || *outcome_shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                    _ = timer.tick() => {
+                        match deliver_outcome_batch(
+                            &*outcome_store,
+                            &provider,
+                            Duration::from_secs(5),
+                            tenkai::now_millis(),
+                            10,
+                        ).await {
+                            Ok((delivered, deferred)) if delivered > 0 || deferred > 0 => {
+                                eprintln!(
+                                    "tenkai.outcome_export delivered={} deferred={}",
+                                    delivered, deferred
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                eprintln!(
+                                    "tenkai.outcome_export outcome=degraded detail={}",
+                                    error
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        })
+    });
     let reconcile_task = tokio::spawn(async move {
         let mut timer = tokio::time::interval(interval);
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -345,6 +436,11 @@ async fn main() -> Result<()> {
     reconcile_task
         .await
         .context("joining reconciliation task during shutdown")?;
+    if let Some(outcome_task) = outcome_task {
+        outcome_task
+            .await
+            .context("joining outcome delivery task during shutdown")?;
+    }
     result.context("serving Tenkai API")
 }
 

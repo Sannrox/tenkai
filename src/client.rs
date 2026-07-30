@@ -68,6 +68,7 @@ pub type Chisei = ChiseiServiceClient<InterceptedService<Channel, Meta>>;
 pub struct Ctx {
     backend: Backend,
     canary_schema_preflight: Arc<OnceCell<()>>,
+    outcome_export_enabled: bool,
 }
 
 #[derive(Clone)]
@@ -133,23 +134,38 @@ pub async fn connect() -> Result<Ctx> {
             chisei: Box::new(ChiseiServiceClient::with_interceptor(channel, meta)),
         },
         canary_schema_preflight: Arc::new(OnceCell::new()),
+        outcome_export_enabled: false,
     })
 }
 
 impl Ctx {
     /// Open the complete in-process backend used by the solo CLI.
     pub fn embedded(path: impl AsRef<Path>) -> Result<Self> {
+        Self::embedded_with_outcome_export(path, false)
+    }
+
+    /// Open embedded application state and optionally enable atomic terminal
+    /// outcome enqueueing into the Tenkai-owned provider outbox.
+    pub fn embedded_with_outcome_export(
+        path: impl AsRef<Path>,
+        outcome_export_enabled: bool,
+    ) -> Result<Self> {
         let principal = std::env::var("TENKAI_PRINCIPAL").unwrap_or_else(|_| "tenkai".into());
         Ok(Self {
             backend: Backend::Embedded(Arc::new(crate::embedded::EmbeddedStore::open(
                 path, principal,
             )?)),
             canary_schema_preflight: Arc::new(OnceCell::new()),
+            outcome_export_enabled,
         })
     }
 
     pub fn is_embedded(&self) -> bool {
         matches!(self.backend, Backend::Embedded(_))
+    }
+
+    pub(crate) fn outcome_export_enabled(&self) -> bool {
+        self.outcome_export_enabled
     }
 
     pub fn backup_embedded(&self, destination: impl AsRef<Path>) -> Result<()> {
@@ -473,6 +489,35 @@ impl Ctx {
         Ok(resp.unwrap_or_default())
     }
 
+    pub(crate) async fn put_with_provider_events(
+        &mut self,
+        object: Object,
+        events: &[crate::storage::ProviderEventRecord],
+    ) -> Result<Object> {
+        if events.is_empty() {
+            return self.put(object).await;
+        }
+        let Some(store) = self.embedded_store() else {
+            anyhow::bail!(
+                "remote application state cannot atomically enqueue Tenkai provider events"
+            );
+        };
+        store.put_with_provider_events(object, events)
+    }
+
+    pub(crate) async fn put_objects_with_provider_events(
+        &mut self,
+        objects: &[Object],
+        events: &[crate::storage::ProviderEventRecord],
+    ) -> Result<()> {
+        let Some(store) = self.embedded_store() else {
+            anyhow::bail!(
+                "remote application state cannot atomically update objects and enqueue Tenkai provider events"
+            );
+        };
+        store.put_objects_with_provider_events(objects, events)
+    }
+
     pub(crate) async fn guarded_create(
         &mut self,
         object: Object,
@@ -547,6 +592,28 @@ impl Ctx {
             .into_inner()
             .object
             .context("Sekai returned an empty guarded update result")
+    }
+
+    pub(crate) async fn guarded_update_objects_with_provider_events(
+        &mut self,
+        objects: &[Object],
+        lease_namespace: &str,
+        lease_key: &str,
+        fencing_token: &str,
+        events: &[crate::storage::ProviderEventRecord],
+    ) -> Result<()> {
+        let Some(store) = self.embedded_store() else {
+            anyhow::bail!(
+                "remote application state cannot atomically update objects and enqueue Tenkai provider events"
+            );
+        };
+        store.guarded_put_objects_with_provider_events(
+            objects,
+            lease_namespace,
+            lease_key,
+            fencing_token,
+            events,
+        )
     }
 
     /// Create a link with a deterministic id; already-exists is treated as success.

@@ -69,7 +69,7 @@ continues to fail the affected operation closed.
 | Authentication | Management bearer plus distinct environment-scoped runtime bearers, injected from secret storage. Enterprise identity assertions are not part of this profile. |
 | Execution ownership | Server application core owns plans, leases, receipts, rollback, and recovery; runtimes execute only immutable scoped work under fencing. |
 | Recovery | Stop the server writer, use SQLite backup/restore, re-inject runtime and management credentials, restart one server, and verify readiness/fleet posture. |
-| Provider behavior | Local providers by default. Explicit remote provider adapters may enrich or gate operations; required evidence fails closed. Optional audit/outcome export is unavailable until host mutations transactionally enqueue the existing outbox contract. |
+| Provider behavior | Local providers by default. Explicit remote provider adapters may enrich or gate operations; required evidence fails closed. Configured terminal outcomes enqueue transactionally to the SQLite outbox and deliver through the optional Chisei adapter; audit export remains unwired. |
 | Upgrade path | Back up SQLite before store migration. Server and runtimes must remain on the same advertised protocol minor until the implementation supports and tests a current/previous-minor window. |
 | Guarantees | Environment-scoped pull transport, protocol negotiation, receipt idempotency, lease fencing, authenticated management, single-server recovery. |
 | Non-guarantees | Tenant isolation, shared server writers, automatic server failover, product HA, enterprise authentication, or arbitrary plaintext remote binding. |
@@ -133,7 +133,7 @@ until the PostgreSQL implementation and evidence exist.
 | Offline bundle/receipt contract |  |  |  | Unexposed library contract; unsupported until a shipped workflow exists |
 | Local gate/policy provider | ✓ | ✓ | gated | Fails closed when required inputs are absent |
 | Explicit remote provider adapters |  | ✓ | gated | Experimental; never on recovery path |
-| Durable optional-provider outbox |  |  | gated | Queue contract exists, but host mutations are not wired transactionally |
+| Durable optional-provider outbox |  | outcome | gated | Fleet can transactionally export terminal outcomes from SQLite; audit and complete enterprise PostgreSQL wiring remain gated |
 | OpenMetrics endpoint |  | ✓ | gated | Optional, disabled by default, protected at network boundary |
 | Development fixture surface |  |  |  | Lab-only, disabled by default |
 | Fleet status/watch/waves | ✓ embedded view | ✓ | gated | Waves observe; they do not execute or authorize |
