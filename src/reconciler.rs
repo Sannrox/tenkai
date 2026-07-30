@@ -549,15 +549,93 @@ impl Reconciler {
             stored.status_detail = "claimed by assigned environment runtime".into();
             plan::store(&mut ctx, &stored).await?;
         }
-        if completion.succeeded {
+        let observed_at = crate::now_millis();
+        let mut environment_object = None;
+        if completion.succeeded && ctx.outcome_export_enabled() {
+            if apply::environment_lease_status(&mut ctx, environment)
+                .await?
+                .is_some()
+            {
+                bail!("environment {environment} has an apply in progress");
+            }
+            let mut object = ctx
+                .get(&crate::ontology::env_id(environment))
+                .await?
+                .with_context(|| {
+                    format!("environment {environment} disappeared during outcome enqueue")
+                })?;
+            plan::update_runtime_deployments_object(
+                &mut ctx,
+                &mut object,
+                &stored.steps,
+                observed_at,
+            )
+            .await?;
+            environment_object = Some(object);
+        } else if completion.succeeded {
             for step in &stored.steps {
                 plan::reconcile_deployment(&mut ctx, environment, &step.product, Some(&step.to))
                     .await?;
             }
         }
+        let provider_events = if ctx.outcome_export_enabled() {
+            if environment_object.is_none() {
+                environment_object = Some(
+                    ctx.get(&crate::ontology::env_id(environment))
+                        .await?
+                        .with_context(|| {
+                            format!("environment {environment} disappeared during outcome enqueue")
+                        })?,
+                );
+            }
+            let environment_object = environment_object
+                .as_ref()
+                .expect("outcome export always loads the environment");
+            stored
+                .steps
+                .iter()
+                .filter_map(|step| {
+                    completion
+                        .receipts
+                        .iter()
+                        .find(|receipt| receipt.step_id == step.id)
+                        .map(|receipt| (step, receipt))
+                })
+                .filter_map(|(step, receipt)| {
+                    runtime_terminal_outcome(step, receipt)
+                        .map(|terminal_state| (step, terminal_state))
+                })
+                .map(|(step, terminal_state)| {
+                    crate::providers::terminal_outcome_record(
+                        &stored,
+                        step,
+                        &format!(
+                            "tenkai:runtime-deployment:{}:{}:{}",
+                            stored.id, completion.generation, step.id
+                        ),
+                        terminal_state,
+                        environment_object,
+                        observed_at,
+                    )
+                    .map_err(anyhow::Error::from)
+                })
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            Vec::new()
+        };
         stored.state = terminal;
         stored.status_detail = completion.detail.clone();
-        plan::store(&mut ctx, &stored).await?;
+        if completion.succeeded && ctx.outcome_export_enabled() {
+            plan::store_with_environment_and_provider_events(
+                &mut ctx,
+                &stored,
+                environment_object.expect("successful outcome export updates its environment"),
+                &provider_events,
+            )
+            .await?;
+        } else {
+            plan::store_with_provider_events(&mut ctx, &stored, &provider_events).await?;
+        }
         Ok(())
     }
 
@@ -776,6 +854,24 @@ async fn recover_or_detect_active_plan(ctx: &mut Ctx, environment: &str) -> Resu
     Ok(false)
 }
 
+fn runtime_terminal_outcome(
+    step: &crate::plan::Step,
+    receipt: &RuntimeStepReceipt,
+) -> Option<crate::providers::TerminalOutcomeState> {
+    use crate::plan::Action;
+    use crate::providers::TerminalOutcomeState;
+
+    if receipt.detail == "not executed after an earlier step failed" {
+        return None;
+    }
+    Some(match (step.action, receipt.succeeded) {
+        (Action::Rollback, true) => TerminalOutcomeState::RollbackSucceeded,
+        (_, true) => TerminalOutcomeState::DeploymentSucceeded,
+        (Action::Rollback, false) => TerminalOutcomeState::RollbackFailed,
+        (_, false) => TerminalOutcomeState::DeploymentFailed,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -856,6 +952,41 @@ mod tests {
             maintenance_blocked: false,
             prior_warnings: Vec::new(),
         }
+    }
+
+    #[test]
+    fn runtime_receipts_export_only_outcomes_the_runtime_proves() {
+        use crate::plan::Action;
+        use crate::providers::TerminalOutcomeState;
+
+        let mut step = test_plan("prod", 100, PlanState::Running).steps.remove(0);
+        let failed = RuntimeStepReceipt {
+            step_id: step.id.clone(),
+            succeeded: false,
+            detail: "executor failed".into(),
+        };
+        assert_eq!(
+            runtime_terminal_outcome(&step, &failed),
+            Some(TerminalOutcomeState::DeploymentFailed)
+        );
+
+        step.action = Action::Rollback;
+        assert_eq!(
+            runtime_terminal_outcome(&step, &failed),
+            Some(TerminalOutcomeState::RollbackFailed)
+        );
+        let mut skipped = failed;
+        skipped.detail = "not executed after an earlier step failed".into();
+        assert_eq!(runtime_terminal_outcome(&step, &skipped), None);
+        let succeeded = RuntimeStepReceipt {
+            step_id: step.id.clone(),
+            succeeded: true,
+            detail: "executor completed successfully".into(),
+        };
+        assert_eq!(
+            runtime_terminal_outcome(&step, &succeeded),
+            Some(TerminalOutcomeState::RollbackSucceeded)
+        );
     }
 
     #[tokio::test]

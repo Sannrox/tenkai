@@ -12,6 +12,16 @@ authoritative state change. Provider adapters can acknowledge delivery, but
 cannot change or reconstruct operational truth. See
 [provider contracts](provider-contracts.md) for delivery semantics.
 
+When terminal-outcome export is configured, `EmbeddedStore` updates the
+authoritative plan, deployment, or reconciled environment object and inserts
+the `provider_events` row through the same SQLite transaction. A failed insert
+rolls back the object update; a committed object update therefore cannot lose
+its outcome row. The separately opened `SqliteStore` worker claims and
+acknowledges that row through the shared database. PostgreSQL retains the same
+kind-filtered outbox contract, but the current mixed enterprise composition
+cannot claim atomic terminal wiring until PostgreSQL owns the corresponding
+authoritative state under ADR 0010.
+
 Server management requests and their terminal outcomes are appended to the
 `audit_events` table. Audit identifiers are immutable and survive server
 restart. The table contains principals, operation/resource identifiers, and

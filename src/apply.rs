@@ -32,6 +32,16 @@ pub struct Outcome {
     pub detail: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EnvironmentTransition {
+    Unchanged,
+    Deployed {
+        version: String,
+        previous: Option<String>,
+    },
+    Unknown,
+}
+
 async fn maintenance_decision(
     ctx: &mut Ctx,
     environment: &str,
@@ -940,6 +950,13 @@ async fn set_env_unknown(
     environment
         .properties
         .insert(format!("deployment_error.{product}"), detail.to_string());
+    for prefix in [
+        "deployment_unknown_plan.",
+        "deployment_unknown_step.",
+        "deployment_unknown_attempt.",
+    ] {
+        environment.properties.remove(&format!("{prefix}{product}"));
+    }
     environment.updated = crate::now_millis();
     ctx.guarded_update(
         environment,
@@ -949,6 +966,60 @@ async fn set_env_unknown(
     )
     .await?;
     Ok(())
+}
+
+fn transition_environment(
+    environment: &mut Object,
+    product: &str,
+    transition: &EnvironmentTransition,
+    detail: &str,
+    observed_at: i64,
+) {
+    match transition {
+        EnvironmentTransition::Unchanged => return,
+        EnvironmentTransition::Deployed { version, previous } => {
+            environment
+                .properties
+                .insert(format!("deployed.{product}"), version.clone());
+            environment.properties.insert(
+                format!("deployed_release.{product}"),
+                release_id(product, version),
+            );
+            if let Some(previous) = previous {
+                environment
+                    .properties
+                    .insert(format!("deployed_prev.{product}"), previous.clone());
+            }
+            environment
+                .properties
+                .remove(&format!("deployment_health.{product}"));
+            environment
+                .properties
+                .remove(&format!("deployment_error.{product}"));
+            for prefix in [
+                "deployment_unknown_plan.",
+                "deployment_unknown_step.",
+                "deployment_unknown_attempt.",
+            ] {
+                environment.properties.remove(&format!("{prefix}{product}"));
+            }
+        }
+        EnvironmentTransition::Unknown => {
+            environment
+                .properties
+                .remove(&format!("deployed.{product}"));
+            environment
+                .properties
+                .remove(&format!("deployed_release.{product}"));
+            environment
+                .properties
+                .insert(format!("deployment_health.{product}"), "unknown".into());
+            environment
+                .properties
+                .insert(format!("deployment_error.{product}"), detail.into());
+        }
+    }
+    environment.updated = observed_at;
 }
 
 async fn set_plan_state(
@@ -2082,13 +2153,20 @@ async fn execute_step(
         };
         if let Some(detail) = cleanup_failure {
             let detail = format!("rollback blocked: outgoing release cleanup failed: {detail}");
-            set_env_unknown(ctx, lease, env, &step.product, &detail).await?;
             let outcome = Outcome {
                 step: step.clone(),
                 status: "failed".into(),
                 detail,
             };
-            record_deployment(ctx, lease, env, plan_oid, &outcome).await?;
+            record_deployment(
+                ctx,
+                lease,
+                env,
+                plan_oid,
+                &outcome,
+                EnvironmentTransition::Unknown,
+            )
+            .await?;
             return Ok(outcome);
         }
     }
@@ -2104,20 +2182,19 @@ async fn execute_step(
                 status: "succeeded".into(),
                 detail: String::new(),
             };
-            if let Err(error) = set_env_deployed(
+            if let Err(error) = record_deployment(
                 ctx,
                 lease,
                 env,
-                &step.product,
-                &step.to,
-                step.from.as_deref(),
+                plan_oid,
+                &outcome,
+                EnvironmentTransition::Deployed {
+                    version: step.to.clone(),
+                    previous: step.from.clone(),
+                },
             )
             .await
             {
-                compensate_activation(ctx, lease, env, step, &content, &error).await;
-                return Err(error);
-            }
-            if let Err(error) = record_deployment(ctx, lease, env, plan_oid, &outcome).await {
                 compensate_activation(ctx, lease, env, step, &content, &error).await;
                 return Err(error);
             }
@@ -2132,44 +2209,60 @@ async fn execute_step(
                     let Some(prev_content) = restore_content.as_ref() else {
                         let detail =
                             format!("{detail}; step {} has no pinned restore release", step.id);
-                        set_env_unknown(ctx, lease, env, &step.product, &detail).await?;
                         let outcome = Outcome {
                             step: step.clone(),
                             status: "failed".into(),
                             detail,
                         };
-                        record_deployment(ctx, lease, env, plan_oid, &outcome).await?;
+                        record_deployment(
+                            ctx,
+                            lease,
+                            env,
+                            plan_oid,
+                            &outcome,
+                            EnvironmentTransition::Unknown,
+                        )
+                        .await?;
                         return Ok(outcome);
                     };
                     let (restored, detail) =
                         restore_previous_fenced(ctx, lease, prev_content, prev, detail).await?;
                     let recovered = cleaned && restored;
-                    if !recovered {
-                        set_env_unknown(ctx, lease, env, &step.product, &detail).await?;
-                    }
-                    Outcome {
-                        step: step.clone(),
-                        status: if recovered { "rolled_back" } else { "failed" }.into(),
-                        detail,
-                    }
+                    (
+                        Outcome {
+                            step: step.clone(),
+                            status: if recovered { "rolled_back" } else { "failed" }.into(),
+                            detail,
+                        },
+                        if recovered {
+                            EnvironmentTransition::Unchanged
+                        } else {
+                            EnvironmentTransition::Unknown
+                        },
+                    )
                 }
                 None => {
                     let (cleaned, detail) =
                         cleanup_failed_install_fenced(ctx, lease, &content, detail).await?;
-                    if !cleaned {
-                        set_env_unknown(ctx, lease, env, &step.product, &detail).await?;
-                    }
-                    Outcome {
-                        step: step.clone(),
-                        status: "failed".into(),
-                        detail,
-                    }
+                    (
+                        Outcome {
+                            step: step.clone(),
+                            status: "failed".into(),
+                            detail,
+                        },
+                        if cleaned {
+                            EnvironmentTransition::Unchanged
+                        } else {
+                            EnvironmentTransition::Unknown
+                        },
+                    )
                 }
             }
         }
     };
 
-    record_deployment(ctx, lease, env, plan_oid, &outcome).await?;
+    let (outcome, environment_transition) = outcome;
+    record_deployment(ctx, lease, env, plan_oid, &outcome, environment_transition).await?;
     Ok(outcome)
 }
 
@@ -2179,6 +2272,7 @@ async fn record_deployment(
     env: &str,
     plan_oid: &str,
     outcome: &Outcome,
+    environment_transition: EnvironmentTransition,
 ) -> Result<()> {
     let now = crate::now_millis();
     let did = deployment_id(env, &outcome.step.product, now);
@@ -2228,16 +2322,100 @@ async fn record_deployment(
     deployment
         .properties
         .insert("detail".into(), outcome.detail.clone());
-    deployment.updated = crate::now_millis();
-    match ctx
-        .guarded_update(
+    let observed_at = crate::now_millis();
+    deployment.updated = observed_at;
+    let mut environment = if ctx.outcome_export_enabled()
+        || environment_transition != EnvironmentTransition::Unchanged
+    {
+        Some(
+            ctx.get(&env_id(env))
+                .await?
+                .with_context(|| format!("environment {env} disappeared during outcome enqueue"))?,
+        )
+    } else {
+        None
+    };
+    if let Some(environment) = environment.as_mut()
+        && environment_transition != EnvironmentTransition::Unchanged
+    {
+        transition_environment(
+            environment,
+            &outcome.step.product,
+            &environment_transition,
+            &outcome.detail,
+            observed_at,
+        );
+        if environment_transition == EnvironmentTransition::Unknown {
+            environment.properties.insert(
+                format!("deployment_unknown_plan.{}", outcome.step.product),
+                plan_oid.into(),
+            );
+            environment.properties.insert(
+                format!("deployment_unknown_step.{}", outcome.step.product),
+                outcome.step.id.clone(),
+            );
+            environment.properties.insert(
+                format!("deployment_unknown_attempt.{}", outcome.step.product),
+                did.clone(),
+            );
+        }
+    }
+    let provider_events = if ctx.outcome_export_enabled() {
+        let plan = plan::load(ctx, plan_oid).await?;
+        let environment = environment
+            .as_ref()
+            .expect("outcome export always loads the environment");
+        terminal_outcome_state(outcome)
+            .map(|terminal_state| {
+                crate::providers::terminal_outcome_record(
+                    &plan,
+                    &outcome.step,
+                    &did,
+                    terminal_state,
+                    environment,
+                    observed_at,
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .transpose()?
+            .into_iter()
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let update_result = if ctx.outcome_export_enabled() {
+        let mut objects = vec![deployment];
+        if environment_transition != EnvironmentTransition::Unchanged {
+            objects.push(environment.expect("an environment transition always loads its object"));
+        }
+        ctx.guarded_update_objects_with_provider_events(
+            &objects,
+            ENVIRONMENT_LEASE_NAMESPACE,
+            &lease.environment,
+            &lease.fencing_token,
+            &provider_events,
+        )
+        .await
+    } else {
+        if environment_transition != EnvironmentTransition::Unchanged {
+            ctx.guarded_update(
+                environment.expect("an environment transition always loads its object"),
+                ENVIRONMENT_LEASE_NAMESPACE,
+                &lease.environment,
+                &lease.fencing_token,
+            )
+            .await?;
+        }
+        ctx.guarded_update(
             deployment,
             ENVIRONMENT_LEASE_NAMESPACE,
             &lease.environment,
             &lease.fencing_token,
         )
         .await
-    {
+        .map(|_| ())
+    };
+    match update_result {
         Ok(_) => Ok(()),
         Err(error) => {
             let persisted = ctx.get(&did).await;
@@ -2255,11 +2433,89 @@ async fn record_deployment(
     }
 }
 
+fn terminal_outcome_state(outcome: &Outcome) -> Option<crate::providers::TerminalOutcomeState> {
+    use crate::providers::TerminalOutcomeState;
+
+    if outcome.status == "failed"
+        && [
+            "deployment command interrupted",
+            "deployment command terminated",
+        ]
+        .iter()
+        .any(|marker| outcome.detail.starts_with(marker))
+    {
+        return Some(TerminalOutcomeState::ExecutionCancelled);
+    }
+    match (outcome.step.action, outcome.status.as_str()) {
+        (Action::Rollback, "succeeded") => Some(TerminalOutcomeState::RollbackSucceeded),
+        (_, "succeeded") => Some(TerminalOutcomeState::DeploymentSucceeded),
+        (_, "rolled_back") => Some(TerminalOutcomeState::AutomaticRollbackSucceeded),
+        (Action::Rollback, "failed") => Some(TerminalOutcomeState::RollbackFailed),
+        (_, "failed") if outcome.step.from.is_some() => Some(TerminalOutcomeState::RollbackFailed),
+        (_, "failed") => Some(TerminalOutcomeState::DeploymentFailed),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::manifest::{DeploySection, GateSection, ProductSection};
     use crate::pb::chisei::CaseResult;
+
+    fn classified_outcome(action: Action, status: &str, detail: &str) -> Outcome {
+        Outcome {
+            step: Step {
+                id: "plan:step:0".into(),
+                order: 0,
+                product: "api".into(),
+                action,
+                from: Some("1.0.0".into()),
+                to: "2.0.0".into(),
+                release_id: "tenkai:release:api@2.0.0".into(),
+                release_digest: "sha256:release".into(),
+                artifact_digest: "sha256:artifact".into(),
+                workdir: "/tmp/api".into(),
+                restore: None,
+            },
+            status: status.into(),
+            detail: detail.into(),
+        }
+    }
+
+    #[test]
+    fn terminal_deployment_states_are_distinct_and_bounded() {
+        use crate::providers::TerminalOutcomeState;
+
+        assert_eq!(
+            terminal_outcome_state(&classified_outcome(Action::Upgrade, "succeeded", "")),
+            Some(TerminalOutcomeState::DeploymentSucceeded)
+        );
+        let mut failed_install = classified_outcome(Action::Install, "failed", "");
+        failed_install.step.from = None;
+        assert_eq!(
+            terminal_outcome_state(&failed_install),
+            Some(TerminalOutcomeState::DeploymentFailed)
+        );
+        assert_eq!(
+            terminal_outcome_state(&classified_outcome(Action::Upgrade, "rolled_back", "")),
+            Some(TerminalOutcomeState::AutomaticRollbackSucceeded)
+        );
+        assert_eq!(
+            terminal_outcome_state(&classified_outcome(Action::Rollback, "succeeded", "")),
+            Some(TerminalOutcomeState::RollbackSucceeded)
+        );
+        assert_eq!(
+            terminal_outcome_state(&classified_outcome(Action::Rollback, "failed", "")),
+            Some(TerminalOutcomeState::RollbackFailed)
+        );
+        let cancelled =
+            classified_outcome(Action::Upgrade, "failed", "deployment command interrupted");
+        assert_eq!(
+            terminal_outcome_state(&cancelled),
+            Some(TerminalOutcomeState::ExecutionCancelled)
+        );
+    }
 
     #[test]
     fn emergency_override_requires_a_reason() {

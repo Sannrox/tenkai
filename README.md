@@ -421,6 +421,11 @@ control plane can't safely restart its own backend mid-apply.
 | `TENKAI_RUNTIME_ENVIRONMENT` | unset | The one environment assigned to an environment-runtime process |
 | `TENKAI_RUNTIME_TOKEN` | unset | Runtime-only bearer secret; kept out of command-line arguments and executor state |
 | `TENKAI_RUNTIME_EXECUTOR` | unset | Absolute path to the environment executor implementing the idempotency contract |
+| `TENKAI_OUTCOME_PROVIDER` | `disabled` | Set to `chisei` to enable durable terminal-outcome export |
+| `TENKAI_OUTCOME_PROVIDER_URL` | unset | Explicit Chisei endpoint used only with `tenkai-server --outcome-provider chisei` |
+| `TENKAI_OUTCOME_NAMESPACE` | unset | Namespace authorized for terminal-outcome admission |
+| `TENKAI_OUTCOME_PROVIDER_PRINCIPAL` | `tenkai.outcome` | Authenticated telemetry-writer principal for outcome admission |
+| `TENKAI_OUTCOME_PROVIDER_TOKEN` | unset | Optional outcome-adapter bearer secret; environment-only and never persisted |
 | `TENKAI_DATABASE` | `.tenkai-state/tenkai.db` | Embedded or server-owned operational SQLite database |
 | `TENKAI_LISTEN` | `127.0.0.1:8080` | Server listen address; must remain loopback behind a TLS proxy |
 
@@ -469,6 +474,7 @@ it ([ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md),
 | Reference llama.cpp engine plugin (fake for CI) | [Model runtime](docs/model-runtime.md); #64 |
 | Self-verifying offline bundles | [Offline bundles](docs/offline-bundles.md); [ADR 0003](docs/decisions/0003-canonical-offline-delivery-archives.md) |
 | Optional governance/intelligence provider ports | [Provider contracts](docs/provider-contracts.md) |
+| Durable terminal outcome export to Chisei | [Provider contracts](docs/provider-contracts.md#chisei-terminal-outcome-adapter-197); #197 |
 | Remote HTTP GateProvider (chisei-compatible JSON) | [Provider contracts](docs/provider-contracts.md#remote-gate-http-json-contract-113); #113 |
 | Optional advisory plan priors (default off) | [Plan priors](docs/plan-priors.md); #114 |
 | Staged products: policy_bundle, eval_suite, agent_definition | [Staged products](docs/staged-products.md); #115, #116, #117 |
