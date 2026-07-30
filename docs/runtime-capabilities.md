@@ -11,6 +11,7 @@ Source of truth: `src/runtime_capabilities.rs`. Related contracts:
 - [Tenant isolation conformance](tenant-isolation-conformance.md)
 - [Enterprise integration boundary](enterprise-integration-boundary.md)
 - [Operational storage](operational-storage.md)
+- [ADR 0010: supported operating profiles](decisions/0010-supported-operating-profiles.md)
 
 ## Why this exists
 
@@ -32,7 +33,27 @@ runtime currently provides.
 Each capability is versioned. Migration also carries a numeric `level` (the
 store schema version).
 
-## Community SQLite profile
+## Diagnostic identifiers versus operating profiles
+
+The current `profile` field in runtime diagnostics describes a low-level
+composition, not an operator support contract:
+
+- `community-sqlite` is the current diagnostic identifier for SQLite-backed
+  hosts. It underlies the stable default `local` profile and the experimental
+  single-server `fleet` profile.
+- `enterprise-tenant-postgres` identifies the current mixed composition:
+  PostgreSQL owns tenant-store state while SQLite still owns non-tenant
+  application state. It is a test-only integration surface, not the gated
+  `enterprise-experimental` operating profile.
+
+ADR 0010 defines complete operating profiles. The mixed-store composition
+cannot activate `enterprise-experimental` until PostgreSQL is the sole
+authoritative operational store and the ADR's startup, conformance, migration,
+backup, restore, and usability evidence exists. Capability negotiation remains
+useful component evidence, but a set of component claims is not by itself a
+support, failover, or recovery promise.
+
+## Community SQLite diagnostic composition
 
 Embedded SQLite and the default `tenkai-server` profile advertise:
 
@@ -43,17 +64,21 @@ capabilities:
 ```
 
 They do **not** advertise tenant isolation, shared replica state, high
-availability, or enterprise authentication. Community operation is intentionally
-tenant-free.
+availability, or enterprise authentication. Community operation is
+intentionally tenant-free. `local` remains the stable default operating
+profile. `fleet` remains experimental, single-server, and tenant-free; it does
+not gain shared-server or HA guarantees from the diagnostic identifier.
 
 **HA profile:** single-replica operation means process restart + backup/restore
 only — not multi-writer reconcile. Multi-replica and HA flags fail closed until
 a store honestly advertises the matching capabilities. Decision:
 [ADR 0009](decisions/0009-multi-replica-reconcile-and-ha-profile.md).
 
-Optional Postgres hub store (`--features postgres`) advertises
+The optional Postgres tenant-store component (`--features postgres`) advertises
 `shared_replica_state` under a **single-active-writer** model (failover on
-shared DB). Multi-active reconcile uses tick fencing; see
+the shared tenant-state database). Multi-host conformance uses tick fencing;
+neither claim covers SQLite-backed application state or establishes product
+failover, HA, backup, or recovery. See
 [postgres-tenant-store.md](postgres-tenant-store.md#shared-replica-state-128)
 and [multi-replica-hub-runbook.md](multi-replica-hub-runbook.md).
 
@@ -109,6 +134,8 @@ tenkai-server \
 ```
 
 Capability diagnostics never include tokens, secrets, or tenant identifiers.
+Until profile selection is implemented, operators must not interpret the
+diagnostic `profile` value as activation of an ADR 0010 operating profile.
 
 ## Compatibility matrix
 
@@ -123,6 +150,8 @@ Automated coverage lives in `community_sqlite_compatibility_matrix()` and the
 
 ## Non-goals
 
-This contract does **not** implement PostgreSQL, tenant lifecycle, or high
-availability. Future adapters add capabilities by implementing
-`OperationalStore::runtime_capabilities` and composing auth extension claims.
+This contract does **not** implement complete PostgreSQL authority, tenant
+lifecycle, high availability, or operating-profile activation. Future adapters
+add component capabilities by implementing
+`OperationalStore::runtime_capabilities` and composing auth extension claims;
+ADR 0010 separately governs when a complete profile may be selected.
