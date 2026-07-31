@@ -54,8 +54,10 @@ policy or approved plan makes that evidence part of the operation's contract.
 ## Non-goals
 
 - Not a CI system: tenkai consumes built, signed artifacts; it never builds.
-- Not an orchestrator/scheduler of agent work (that stays out, same as
-  sekai-chisei Plan 10).
+- Not an orchestrator/scheduler of agent work: Tenkai may manage the
+  deployment and lifecycle of a Shikigami worker pool, but admission, work
+  selection, claims, leases, fencing, retry/park decisions, and receipts stay
+  with Sekai Chisei (ADR 0011).
 - Not a git replacement: desired state lives in the Tenkai Catalog and
   environment constraints, with optional audit projection to sekai; git can
   feed the Catalog.
@@ -123,6 +125,14 @@ gRPC is a transport rather than a domain boundary:
   health. For disconnected environments the same runtime consumes **signed
   bundles** (plan + artifacts) imported out-of-band, and exports signed state
   receipts back.
+- **Shikigami worker-pool lifecycle** — when configured as a delivery product,
+  Tenkai can bind an immutable release to an environment-scoped pool and
+  reconcile its capacity, rollout, drain, health, and recovery through the
+  environment executor. The Shikigami serve host pulls admitted work, claims it
+  through its plane intake, and executes it; Tenkai never selects or
+  acknowledges individual work. The first lifecycle implementation uses fixed
+  replicas. Autoscaling requires the versioned worker-host and read-only
+  claim-pressure contracts described in ADR 0011.
 - **tenkaictl** — CLI: `publish`, `promote`, `env register`, `env constrain`,
   `plan show`, `rollback`, `fleet status`.
 
