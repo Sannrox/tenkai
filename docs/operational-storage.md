@@ -7,9 +7,9 @@ database adapters must pass the same immutability, lifecycle, idempotency, and
 generation-fencing contract.
 
 The store also owns the provider-event retry queue used for audit and outcome
-projection. Host implementations must add each event atomically with its
-authoritative state change. Provider adapters can acknowledge delivery, but
-cannot change or reconstruct operational truth. See
+projection. The shipped SQLite host path uses this queue for terminal outcomes;
+audit and planning-event mutations remain unwired. Provider adapters can
+acknowledge delivery, but cannot change or reconstruct operational truth. See
 [provider contracts](provider-contracts.md) for delivery semantics.
 
 When terminal-outcome export is configured, `EmbeddedStore` updates the

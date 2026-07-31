@@ -39,11 +39,13 @@ valid bound evidence is returned.
 
 Audit and outcome delivery uses a Tenkai-owned durable outbox. Host wiring must
 commit the outbox event in the same operational-store transaction as the state
-change that produced it. Configured terminal-outcome export uses that contract:
-embedded/server plan, deployment, cancellation, and unknown-state
-reconciliation transitions write the versioned outcome event in the same
-SQLite transaction as the terminal object update. Audit mutations are not yet
-wired to this queue.
+change that produced it. The shipped SQLite host wiring uses that contract for
+configured terminal-outcome export: embedded/server plan, deployment,
+cancellation, and unknown-state reconciliation transitions write the versioned
+outcome event in the same SQLite transaction as the terminal object update.
+This is not a general planning or execution-event bus: audit mutations,
+planning events, and non-terminal lifecycle changes are not wired to this
+outcome queue.
 The event is always durable before an adapter is called. Its destination kind
 and stable event ID form the adapter idempotency key; enqueueing the same pair
 and payload is safe, while reusing the pair with different content is rejected.
@@ -137,6 +139,13 @@ application state so the authoritative transition and outbox write share one
 local transaction; the legacy `--provider-mode remote` composition is rejected.
 With no `--outcome-provider`, Tenkai creates no adapter, queues no outcome
 events, and opens no outcome-provider connection.
+
+The PostgreSQL adapter exposes the same kind-filtered queue contract, but the
+current mixed SQLite/PostgreSQL composition does not provide atomic terminal
+wiring for the gated `enterprise-experimental` profile. That profile therefore
+does not advertise terminal-outcome, audit, or planning-event export until
+PostgreSQL owns the complete authoritative state and its wiring and recovery
+evidence are complete.
 
 ## Remote gate HTTP JSON contract (#113)
 
