@@ -85,7 +85,7 @@ continues to fail the affected operation closed.
 | Authentication | Verified enterprise JWT assertions establish management and tenant context; distinct environment runtime credentials scope execution. Caller metadata never establishes tenant authority. |
 | Execution ownership | Tenkai remains sole operational owner. Enterprise identity and optional provider systems cannot mint plans, mutate receipts, or enter recovery. |
 | Recovery | PostgreSQL-native consistent backup and restore covers the complete authoritative state. Restore one compatible database point, start a compatible Tenkai version, re-inject credentials, and verify migrations, tenant isolation, fencing, readiness, and fleet posture before admitting writes. |
-| Provider behavior | Required evidence fails the affected operation closed. Optional audit/outcome delivery remains unavailable until host mutations transactionally enqueue a PostgreSQL-backed outbox; providers never own recovery. |
+| Provider behavior | Required evidence fails the affected operation closed. The PostgreSQL adapter retains the durable outbox contract, but this gated profile does not advertise terminal-outcome, audit, or planning-event export until PostgreSQL owns all authoritative state and the corresponding atomic wiring and recovery evidence exist; providers never own recovery. |
 | Upgrade path | Take and verify a PostgreSQL recovery point, migrate under the documented compatibility window, keep server/runtime protocol minors compatible, and restore the prior binary plus database recovery point if migration fails. |
 | Guarantees | Tenant isolation, federated assertion verification, PostgreSQL durability, leases/fencing, and single-store recovery once every required PostgreSQL capability passes startup validation and conformance. |
 | Non-guarantees | Multiple server replicas, automatic failover, multi-AZ packaging, multi-active writers, zero-downtime migration, browser OIDC sessions, or product `high_availability`. |
@@ -133,7 +133,7 @@ until the PostgreSQL implementation and evidence exist.
 | Offline bundle/receipt contract |  |  |  | Unexposed library contract; unsupported until a shipped workflow exists |
 | Local gate/policy provider | ✓ | ✓ | gated | Fails closed when required inputs are absent |
 | Explicit remote provider adapters |  | ✓ | gated | Experimental; never on recovery path |
-| Durable optional-provider outbox |  | outcome | gated | Fleet can transactionally export terminal outcomes from SQLite; audit and complete enterprise PostgreSQL wiring remain gated |
+| Durable optional-provider outbox |  | terminal outcomes | gated | Fleet can transactionally export terminal outcomes from SQLite; audit/planning-event export and complete enterprise PostgreSQL wiring remain gated |
 | OpenMetrics endpoint |  | ✓ | gated | Optional, disabled by default, protected at network boundary |
 | Development fixture surface |  |  |  | Lab-only, disabled by default |
 | Fleet status/watch/waves | ✓ embedded view | ✓ | gated | Waves observe; they do not execute or authorize |
@@ -231,7 +231,7 @@ in favor of the single-backend model already used by Sekai-Chisei.
 | Operational persistence | Enterprise moves all authoritative state behind PostgreSQL application ports | Shared SQLite/PostgreSQL conformance, migration, backup, restore, and cutover drills |
 | Authentication/trust | Each profile has one documented authority posture | Enterprise verifier and tenant-scope negative tests |
 | Runtime protocol/execution | Remote profiles retain scoped pull execution and fencing | Same-minor compatibility until a wider window is proven |
-| Providers | Provider requirements do not change by profile | Transactional host wiring plus SQLite/PostgreSQL outbox conformance; recovery remains provider-independent |
+| Providers | Provider requirements do not change by profile | SQLite terminal-outcome wiring is shipped; audit/planning-event export and complete PostgreSQL host wiring remain pre-activation evidence; recovery remains provider-independent |
 | HA/replicas | Shared state remains distinct from product HA | Preserve explicit non-guarantee and fail-closed HA requirement |
 | Ontology | The current portable ontology has no operating-profile or backend definitions | Add portable definitions only when the repository adopts a tracked ontology artifact |
 | Security | Dual-store fallback and caller-selected tenant authority are prohibited | Fail-closed startup and authorization tests |

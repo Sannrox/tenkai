@@ -499,9 +499,13 @@ it ([ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md),
 | Release readiness checklist | [release readiness](docs/release-readiness.md); #72 |
 
 Governance integrations remain optional. Required policy or gate decisions fail
-closed; optional audit/outcome exports use a durable retry outbox. An embedded
-apply with `[gate].eval_suite` fails closed locally unless a remote provider host
-is explicitly configured; ungated solo deploys never open a network connection.
+closed; configured terminal-outcome export uses a durable retry outbox, while
+audit and planning-event export remain unwired and the enterprise profile stays
+gated as documented in the [provider contracts](docs/provider-contracts.md) and
+[supported operating profiles](docs/decisions/0010-supported-operating-profiles.md).
+An embedded apply with `[gate].eval_suite` fails closed locally unless a remote
+provider host is explicitly configured; ungated solo deploys never open a
+network connection.
 
 ### Deferred (next-era product work)
 
