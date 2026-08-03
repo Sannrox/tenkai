@@ -138,7 +138,27 @@ even when no token is configured. Outcome export requires embedded Tenkai
 application state so the authoritative transition and outbox write share one
 local transaction; the legacy `--provider-mode remote` composition is rejected.
 With no `--outcome-provider`, Tenkai creates no adapter, queues no outcome
-events, and opens no outcome-provider connection.
+events, and opens no outcome-provider connection; embedded inspection may still
+show already durable Tenkai-owned outcome rows.
+
+### Authenticated outcome inspection
+
+The authenticated management projection returned by
+`GET /v1/environments/{environment}` and `tenkaictl env inspect` includes a
+bounded `terminal_outcomes` list. Each entry contains the stable event,
+deployment, plan, release, product, environment, and configuration identities;
+the evidence binding digests; the terminal state; the Tenkai observation time;
+and one of `pending`, `in_flight`, `retrying`, or `delivered` with attempts,
+bounded retry timing, acknowledgement time, and delivery lag. Claim tokens,
+retry error text, event payloads, credentials, source content, and executor logs
+are never returned. An unconfigured outcome provider produces no new rows;
+embedded inspection may show already durable rows. The absence of a row is not
+inferred to mean that an outcome was delivered.
+Tenant-mode hosts suppress the community embedded projection until the
+authenticated tenant partition exposes the same bounded read, so one tenant
+cannot observe another tenant's outcome identities.
+Pre-v2 outcome rows remain durable for delivery but are omitted from this
+projection because their historical identity did not bind every returned field.
 
 The PostgreSQL adapter exposes the same kind-filtered queue contract, but the
 current mixed SQLite/PostgreSQL composition does not provide atomic terminal

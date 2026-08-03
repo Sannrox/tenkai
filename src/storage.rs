@@ -11,7 +11,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: u32 = 8;
+pub const SCHEMA_VERSION: u32 = 10;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -341,6 +341,14 @@ pub trait OperationalStore: Send + Sync {
     ) -> Result<RollbackRecord>;
     fn pending_rollbacks(&self) -> Result<Vec<RollbackRecord>>;
     fn enqueue_provider_event(&self, event: &ProviderEventRecord) -> Result<()>;
+    /// Read-only, bounded inspection of durable provider events. The caller
+    /// must project and redact payloads before returning them to an operator.
+    fn list_provider_events(
+        &self,
+        provider_kind: &str,
+        environment_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ProviderEventRecord>>;
     fn claim_provider_events(
         &self,
         now: i64,
@@ -536,15 +544,17 @@ fn migrate(connection: &mut Connection) -> Result<()> {
                 checkpoint_json TEXT NOT NULL, status TEXT NOT NULL, status_detail TEXT NOT NULL
              );
              CREATE INDEX rollbacks_recovery ON rollbacks(status, environment_id);
-             CREATE TABLE provider_events (
+             CREATE TABLE IF NOT EXISTS provider_events (
                 id TEXT NOT NULL, provider_kind TEXT NOT NULL,
                 binding_digest TEXT NOT NULL, payload_json TEXT NOT NULL,
                 attempts INTEGER NOT NULL, next_attempt_at INTEGER NOT NULL,
                 delivered_at INTEGER, last_error TEXT NOT NULL,
                 claim_token TEXT, claim_until INTEGER,
+                environment_id TEXT NOT NULL DEFAULT '',
+                observed_at INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(provider_kind,id)
              );
-             CREATE INDEX provider_events_delivery
+             CREATE INDEX IF NOT EXISTS provider_events_delivery
                 ON provider_events(delivered_at, next_attempt_at, id);
              CREATE TABLE audit_events (
                 id TEXT PRIMARY KEY, occurred_at INTEGER NOT NULL,
@@ -577,22 +587,24 @@ fn migrate(connection: &mut Connection) -> Result<()> {
              );
              CREATE INDEX development_fixture_objects_fixture
                 ON development_fixture_objects(fixture_id, object_kind);
-             PRAGMA user_version = 8;",
+             PRAGMA user_version = 10;",
         )?;
         tx.commit()?;
     }
     if found == 1 {
         let tx = connection.transaction()?;
         tx.execute_batch(
-            "CREATE TABLE provider_events (
+            "CREATE TABLE IF NOT EXISTS provider_events (
                 id TEXT NOT NULL, provider_kind TEXT NOT NULL,
                 binding_digest TEXT NOT NULL, payload_json TEXT NOT NULL,
                 attempts INTEGER NOT NULL, next_attempt_at INTEGER NOT NULL,
                 delivered_at INTEGER, last_error TEXT NOT NULL,
                 claim_token TEXT, claim_until INTEGER,
+                environment_id TEXT NOT NULL DEFAULT '',
+                observed_at INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(provider_kind,id)
              );
-             CREATE INDEX provider_events_delivery
+             CREATE INDEX IF NOT EXISTS provider_events_delivery
                 ON provider_events(delivered_at, next_attempt_at, id);
              CREATE TABLE audit_events (
                 id TEXT PRIMARY KEY, occurred_at INTEGER NOT NULL,
@@ -721,7 +733,7 @@ fn migrate(connection: &mut Connection) -> Result<()> {
              );
              CREATE INDEX development_fixture_objects_fixture
                 ON development_fixture_objects(fixture_id, object_kind);
-             PRAGMA user_version = 8;",
+             PRAGMA user_version = 9;",
         )?;
         tx.commit()?;
     }
@@ -739,10 +751,118 @@ fn migrate(connection: &mut Connection) -> Result<()> {
              DELETE FROM development_fixture_objects;
              ALTER TABLE development_fixture_objects
                 ADD COLUMN object_order INTEGER NOT NULL DEFAULT 0;
-             PRAGMA user_version = 8;",
+             PRAGMA user_version = 9;",
         )?;
         tx.commit()?;
     }
+    if found == 8 {
+        let tx = connection.transaction()?;
+        tx.execute_batch("PRAGMA user_version = 9;")?;
+        tx.commit()?;
+    }
+    ensure_provider_event_environment_column(connection)?;
+    let current: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if current < SCHEMA_VERSION {
+        let tx = connection.transaction()?;
+        tx.execute_batch("PRAGMA user_version = 10;")?;
+        tx.commit()?;
+    }
+    Ok(())
+}
+
+pub(crate) fn provider_event_environment_id(payload_json: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(payload_json).ok()?;
+    value
+        .get("binding")?
+        .get("environment_id")?
+        .as_str()
+        .filter(|environment| !environment.trim().is_empty())
+        .map(str::to_owned)
+}
+
+pub(crate) fn provider_event_observed_at(payload_json: &str, fallback: i64) -> i64 {
+    let observed_at = serde_json::from_str::<serde_json::Value>(payload_json)
+        .ok()
+        .and_then(|value| {
+            let payload = value.get("payload_json")?.as_str()?;
+            let payload = serde_json::from_str::<serde_json::Value>(payload).ok()?;
+            payload.get("observed_at")?.as_i64()
+        })
+        .filter(|observed_at| *observed_at > 0);
+    observed_at.unwrap_or(fallback)
+}
+
+pub(crate) fn ensure_provider_event_environment_column(connection: &mut Connection) -> Result<()> {
+    let columns = {
+        let mut statement = connection.prepare("PRAGMA table_info(provider_events)")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    if !columns.iter().any(|name| name == "environment_id") {
+        connection.execute(
+            "ALTER TABLE provider_events ADD COLUMN environment_id TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
+    if !columns.iter().any(|name| name == "observed_at") {
+        connection.execute(
+            "ALTER TABLE provider_events ADD COLUMN observed_at INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS provider_events_environment
+         ON provider_events(provider_kind, environment_id, next_attempt_at, id)",
+        [],
+    )?;
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS provider_events_environment_observed
+         ON provider_events(provider_kind, environment_id, observed_at, id)",
+        [],
+    )?;
+
+    let tx = connection.transaction()?;
+    let rows = {
+        let mut statement = tx.prepare(
+            "SELECT provider_kind,id,payload_json,next_attempt_at,environment_id,observed_at
+             FROM provider_events WHERE environment_id='' OR observed_at=0",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (provider_kind, id, payload_json, next_attempt_at, environment_id, observed_at) in rows {
+        if environment_id.is_empty()
+            && let Some(environment_id) = provider_event_environment_id(&payload_json)
+        {
+            tx.execute(
+                "UPDATE provider_events SET environment_id=?1
+                 WHERE provider_kind=?2 AND id=?3 AND environment_id=''",
+                params![environment_id, provider_kind, id],
+            )?;
+        }
+        if observed_at == 0 {
+            tx.execute(
+                "UPDATE provider_events SET observed_at=?1
+                 WHERE provider_kind=?2 AND id=?3 AND observed_at=0",
+                params![
+                    provider_event_observed_at(&payload_json, next_attempt_at),
+                    provider_kind,
+                    id
+                ],
+            )?;
+        }
+    }
+    tx.commit()?;
     Ok(())
 }
 
@@ -994,12 +1114,14 @@ pub(crate) fn enqueue_provider_event_in(
         }
         return Ok(());
     }
+    let environment_id = provider_event_environment_id(&event.payload_json).unwrap_or_default();
+    let observed_at = provider_event_observed_at(&event.payload_json, event.next_attempt_at);
     connection.execute(
-        "INSERT INTO provider_events(id,provider_kind,binding_digest,payload_json,attempts,next_attempt_at,delivered_at,last_error,claim_token,claim_until)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+        "INSERT INTO provider_events(id,provider_kind,binding_digest,payload_json,attempts,next_attempt_at,delivered_at,last_error,claim_token,claim_until,environment_id,observed_at)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
         params![event.id, event.provider_kind, event.binding_digest, event.payload_json,
             event.attempts, event.next_attempt_at, event.delivered_at, event.last_error,
-            event.claim_token, event.claim_until],
+            event.claim_token, event.claim_until, environment_id, observed_at],
     )?;
     Ok(())
 }
@@ -1906,6 +2028,46 @@ impl OperationalStore for SqliteStore {
         enqueue_provider_event_in(&connection, event)
     }
 
+    fn list_provider_events(
+        &self,
+        provider_kind: &str,
+        environment_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ProviderEventRecord>> {
+        if provider_kind.trim().is_empty() || environment_id.trim().is_empty() || limit == 0 {
+            return Err(StoreError::InvalidData {
+                kind: "provider event inspection",
+                detail: "provider kind, environment, and a positive result limit are required"
+                    .into(),
+            });
+        }
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT id,provider_kind,binding_digest,payload_json,attempts,
+                    next_attempt_at,delivered_at,last_error,claim_token,claim_until
+             FROM provider_events WHERE provider_kind=?1 AND environment_id=?2
+             ORDER BY observed_at DESC,id DESC LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            params![provider_kind, environment_id, limit.min(128) as u64],
+            |row| {
+                Ok(ProviderEventRecord {
+                    id: row.get(0)?,
+                    provider_kind: row.get(1)?,
+                    binding_digest: row.get(2)?,
+                    payload_json: row.get(3)?,
+                    attempts: row.get(4)?,
+                    next_attempt_at: row.get(5)?,
+                    delivered_at: row.get(6)?,
+                    last_error: row.get(7)?,
+                    claim_token: row.get(8)?,
+                    claim_until: row.get(9)?,
+                })
+            },
+        )?;
+        rows.map(|row| row.map_err(StoreError::from)).collect()
+    }
+
     fn claim_provider_events(
         &self,
         now: i64,
@@ -2784,6 +2946,96 @@ mod tests {
                 [],
             )
             .unwrap();
+    }
+
+    #[test]
+    fn provider_event_inspection_uses_immutable_observation_time() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let old_event = crate::providers::terminal_outcome_event(
+            "deployment-old",
+            "plan-prod",
+            "sha256:plan",
+            "release-api",
+            "sha256:release",
+            "api",
+            "prod",
+            "environment-prod",
+            "sha256:config",
+            crate::providers::TerminalOutcomeState::DeploymentSucceeded,
+            100,
+        )
+        .unwrap();
+        let mut old_record = crate::providers::provider_event_record(
+            crate::providers::OUTCOME_PROVIDER_KIND,
+            &old_event,
+            100,
+        )
+        .unwrap();
+        old_record.next_attempt_at = 10_000;
+        store.enqueue_provider_event(&old_record).unwrap();
+
+        let new_event = crate::providers::terminal_outcome_event(
+            "deployment-new",
+            "plan-prod",
+            "sha256:plan",
+            "release-api",
+            "sha256:release",
+            "api",
+            "prod",
+            "environment-prod",
+            "sha256:config",
+            crate::providers::TerminalOutcomeState::DeploymentSucceeded,
+            200,
+        )
+        .unwrap();
+        let new_record = crate::providers::provider_event_record(
+            crate::providers::OUTCOME_PROVIDER_KIND,
+            &new_event,
+            200,
+        )
+        .unwrap();
+        store.enqueue_provider_event(&new_record).unwrap();
+
+        let selected = store
+            .list_provider_events(crate::providers::OUTCOME_PROVIDER_KIND, "prod", 1)
+            .unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].id, new_event.id);
+    }
+
+    #[test]
+    fn migrates_shared_legacy_provider_events_from_version_zero() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE provider_events (
+                     id TEXT NOT NULL, provider_kind TEXT NOT NULL,
+                     binding_digest TEXT NOT NULL, payload_json TEXT NOT NULL,
+                     attempts INTEGER NOT NULL, next_attempt_at INTEGER NOT NULL,
+                     delivered_at INTEGER, last_error TEXT NOT NULL,
+                     claim_token TEXT, claim_until INTEGER,
+                     PRIMARY KEY(provider_kind,id)
+                 );",
+            )
+            .unwrap();
+
+        migrate(&mut connection).unwrap();
+
+        let columns: Vec<String> = connection
+            .prepare("PRAGMA table_info(provider_events)")
+            .unwrap()
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(columns.iter().any(|column| column == "environment_id"));
+        assert!(columns.iter().any(|column| column == "observed_at"));
+        assert_eq!(
+            connection
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+                .unwrap(),
+            SCHEMA_VERSION
+        );
     }
 
     #[test]

@@ -1374,6 +1374,10 @@ pub struct EnvironmentInspectReport {
     pub lease: crate::apply::EnvironmentLeaseInspect,
     /// Most recent plan for this environment by `created_at`, if any.
     pub latest_plan: Option<EnvironmentPlanSummary>,
+    /// Bounded terminal-outcome identities and outbox delivery state. Event
+    /// payloads and retry errors are intentionally excluded.
+    #[serde(default)]
+    pub terminal_outcomes: Vec<crate::providers::TerminalOutcomeProjection>,
     /// Execution ownership note: Tenkai never prints runtime bearer tokens.
     pub execution_note: String,
 }
@@ -1891,6 +1895,21 @@ fn aggregate_fleet_report(environments: Vec<FleetEnvironmentRow>) -> FleetStatus
 
 /// Inspect one environment's subscriptions, lease/fence, and latest plan.
 pub async fn inspect_environment(ctx: &mut Ctx, env: &str) -> Result<EnvironmentInspectReport> {
+    inspect_environment_base(ctx, env).await
+}
+
+/// Inspect one environment and, when the context permits it, include the
+/// bounded Tenkai-owned terminal-outcome projection for management readback.
+pub async fn inspect_environment_with_outcomes(
+    ctx: &mut Ctx,
+    env: &str,
+) -> Result<EnvironmentInspectReport> {
+    let mut report = inspect_environment_base(ctx, env).await?;
+    report.terminal_outcomes = ctx.terminal_outcomes(env, crate::now_millis())?;
+    Ok(report)
+}
+
+async fn inspect_environment_base(ctx: &mut Ctx, env: &str) -> Result<EnvironmentInspectReport> {
     let env_obj = environment(ctx, env).await?;
     let rows = status(ctx, env).await?;
     let subscriptions = rows
@@ -1929,6 +1948,7 @@ pub async fn inspect_environment(ctx: &mut Ctx, env: &str) -> Result<Environment
         facts,
         lease,
         latest_plan,
+        terminal_outcomes: Vec::new(),
         execution_note: "Apply leases and runtime credentials are distinct; inspect never prints bearer tokens. Server-side runtime-token environments are not executed by the embedded server executor."
             .into(),
     })
@@ -2375,6 +2395,7 @@ mod tests {
                 steps: Vec::new(),
                 steps_truncated: false,
             }),
+            terminal_outcomes: Vec::new(),
             execution_note: "fixture".into(),
         };
         let behind = EnvironmentInspectReport {
@@ -2399,6 +2420,7 @@ mod tests {
                 status: "active".into(),
             },
             latest_plan: None,
+            terminal_outcomes: Vec::new(),
             execution_note: "fixture".into(),
         };
         let unhealthy = EnvironmentInspectReport {
@@ -2423,6 +2445,7 @@ mod tests {
                 status: "absent".into(),
             },
             latest_plan: None,
+            terminal_outcomes: Vec::new(),
             execution_note: "fixture".into(),
         };
         let empty = EnvironmentInspectReport {
@@ -2439,6 +2462,7 @@ mod tests {
                 status: "absent".into(),
             },
             latest_plan: None,
+            terminal_outcomes: Vec::new(),
             execution_note: "fixture".into(),
         };
         let report = fleet_status_from_inspects(vec![behind, empty, unhealthy, current]);

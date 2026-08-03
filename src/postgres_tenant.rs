@@ -742,6 +742,15 @@ impl OperationalStore for PostgresTenantPartition {
     fn enqueue_provider_event(&self, event: &ProviderEventRecord) -> Result<()> {
         self.inner.enqueue_provider_event(&self.schema, event)
     }
+    fn list_provider_events(
+        &self,
+        provider_kind: &str,
+        environment_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ProviderEventRecord>> {
+        self.inner
+            .list_provider_events(&self.schema, provider_kind, environment_id, limit)
+    }
     fn claim_provider_events(
         &self,
         now: i64,
@@ -2537,9 +2546,17 @@ mod postgres_imp {
                     return Ok(());
                 }
                 let attempts = event.attempts as i32;
+                let environment_id = crate::storage::provider_event_environment_id(
+                    &event.payload_json,
+                )
+                .unwrap_or_default();
+                let observed_at = crate::storage::provider_event_observed_at(
+                    &event.payload_json,
+                    event.next_attempt_at,
+                );
                 tx.execute(
-                    "INSERT INTO provider_events(id,provider_kind,binding_digest,payload_json,attempts,next_attempt_at,delivered_at,last_error,claim_token,claim_until)
-                     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+                    "INSERT INTO provider_events(id,provider_kind,binding_digest,payload_json,attempts,next_attempt_at,delivered_at,last_error,claim_token,claim_until,environment_id,observed_at)
+                     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
                     &[
                         &event.id,
                         &event.provider_kind,
@@ -2551,10 +2568,56 @@ mod postgres_imp {
                         &event.last_error,
                         &event.claim_token,
                         &event.claim_until,
+                        &environment_id,
+                        &observed_at,
                     ],
                 )
                 .map_err(pg)?;
                 Ok(())
+            })
+        }
+
+        pub fn list_provider_events(
+            &self,
+            schema: &str,
+            provider_kind: &str,
+            environment_id: &str,
+            limit: usize,
+        ) -> Result<Vec<ProviderEventRecord>> {
+            if provider_kind.trim().is_empty() || environment_id.trim().is_empty() || limit == 0 {
+                return Err(StoreError::InvalidData {
+                    kind: "provider event inspection",
+                    detail: "provider kind, environment, and a positive result limit are required"
+                        .into(),
+                });
+            }
+            self.with_schema(schema, |tx| {
+                let limit_i = limit.min(128) as i64;
+                let rows = tx
+                    .query(
+                        "SELECT id,provider_kind,binding_digest,payload_json,attempts,
+                                next_attempt_at,delivered_at,last_error,claim_token,claim_until
+                        FROM provider_events
+                        WHERE provider_kind=$1 AND environment_id=$2
+                         ORDER BY observed_at DESC,id DESC LIMIT $3",
+                        &[&provider_kind, &environment_id, &limit_i],
+                    )
+                    .map_err(pg)?;
+                Ok(rows
+                    .into_iter()
+                    .map(|row| ProviderEventRecord {
+                        id: row.get(0),
+                        provider_kind: row.get(1),
+                        binding_digest: row.get(2),
+                        payload_json: row.get(3),
+                        attempts: row.get::<_, i32>(4) as u32,
+                        next_attempt_at: row.get(5),
+                        delivered_at: row.get(6),
+                        last_error: row.get(7),
+                        claim_token: row.get(8),
+                        claim_until: row.get(9),
+                    })
+                    .collect())
             })
         }
 
@@ -3097,10 +3160,20 @@ mod postgres_imp {
                 attempts INTEGER NOT NULL, next_attempt_at BIGINT NOT NULL,
                 delivered_at BIGINT, last_error TEXT NOT NULL,
                 claim_token TEXT, claim_until BIGINT,
+                environment_id TEXT NOT NULL DEFAULT '',
+                observed_at BIGINT NOT NULL DEFAULT 0,
                 PRIMARY KEY(provider_kind,id)
             );
+            ALTER TABLE provider_events
+                ADD COLUMN IF NOT EXISTS environment_id TEXT NOT NULL DEFAULT '';
+            ALTER TABLE provider_events
+                ADD COLUMN IF NOT EXISTS observed_at BIGINT NOT NULL DEFAULT 0;
             CREATE INDEX IF NOT EXISTS provider_events_delivery
                 ON provider_events(delivered_at, next_attempt_at, id);
+            CREATE INDEX IF NOT EXISTS provider_events_environment
+                ON provider_events(provider_kind, environment_id, next_attempt_at, id);
+            CREATE INDEX IF NOT EXISTS provider_events_environment_observed
+                ON provider_events(provider_kind, environment_id, observed_at, id);
             CREATE TABLE IF NOT EXISTS audit_events (
                 id TEXT PRIMARY KEY, occurred_at BIGINT NOT NULL,
                 principal TEXT NOT NULL, operation TEXT NOT NULL,
@@ -3157,6 +3230,51 @@ mod postgres_imp {
             ",
         )
         .map_err(pg)?;
+        let legacy_events = tx
+            .query(
+                "SELECT provider_kind,id,payload_json FROM provider_events
+                 WHERE environment_id = ''",
+                &[],
+            )
+            .map_err(pg)?;
+        for row in legacy_events {
+            let provider_kind: String = row.get(0);
+            let id: String = row.get(1);
+            let payload_json: String = row.get(2);
+            if let Some(environment_id) =
+                crate::storage::provider_event_environment_id(&payload_json)
+            {
+                tx.execute(
+                    "UPDATE provider_events SET environment_id = $1
+                     WHERE provider_kind = $2 AND id = $3 AND environment_id = ''",
+                    &[&environment_id, &provider_kind, &id],
+                )
+                .map_err(pg)?;
+            }
+        }
+        let legacy_observations = tx
+            .query(
+                "SELECT provider_kind,id,payload_json,next_attempt_at FROM provider_events
+                 WHERE observed_at = 0",
+                &[],
+            )
+            .map_err(pg)?;
+        for row in legacy_observations {
+            let provider_kind: String = row.get(0);
+            let id: String = row.get(1);
+            let payload_json: String = row.get(2);
+            let next_attempt_at: i64 = row.get(3);
+            tx.execute(
+                "UPDATE provider_events SET observed_at = $1
+                 WHERE provider_kind = $2 AND id = $3 AND observed_at = 0",
+                &[
+                    &crate::storage::provider_event_observed_at(&payload_json, next_attempt_at),
+                    &provider_kind,
+                    &id,
+                ],
+            )
+            .map_err(pg)?;
+        }
         Ok(())
     }
 

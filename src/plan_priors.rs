@@ -395,6 +395,7 @@ mod tests {
                 status: "absent".into(),
             },
             latest_plan: None,
+            terminal_outcomes: Vec::new(),
             execution_note: String::new(),
         };
         annotate_plan_with_priors(
@@ -528,6 +529,7 @@ mod tests {
                 status: "absent".into(),
             },
             latest_plan: None,
+            terminal_outcomes: Vec::new(),
             execution_note: String::new(),
         };
         let config = PriorConfig {
