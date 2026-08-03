@@ -69,6 +69,7 @@ pub struct Ctx {
     backend: Backend,
     canary_schema_preflight: Arc<OnceCell<()>>,
     outcome_export_enabled: bool,
+    outcome_inspection_enabled: bool,
 }
 
 #[derive(Clone)]
@@ -135,6 +136,7 @@ pub async fn connect() -> Result<Ctx> {
         },
         canary_schema_preflight: Arc::new(OnceCell::new()),
         outcome_export_enabled: false,
+        outcome_inspection_enabled: false,
     })
 }
 
@@ -157,6 +159,7 @@ impl Ctx {
             )?)),
             canary_schema_preflight: Arc::new(OnceCell::new()),
             outcome_export_enabled,
+            outcome_inspection_enabled: true,
         })
     }
 
@@ -166,6 +169,52 @@ impl Ctx {
 
     pub(crate) fn outcome_export_enabled(&self) -> bool {
         self.outcome_export_enabled
+    }
+
+    pub(crate) fn without_outcome_export(&self) -> Self {
+        let mut context = self.clone();
+        context.outcome_export_enabled = false;
+        context.outcome_inspection_enabled = false;
+        context
+    }
+
+    /// Read the bounded Tenkai-owned terminal-outcome projection for one
+    /// environment. Remote provider mode has no local outbox to inspect; its
+    /// authenticated server host supplies the same projection from its local
+    /// operational store.
+    pub(crate) fn terminal_outcomes(
+        &self,
+        environment: &str,
+        as_of: i64,
+    ) -> Result<Vec<crate::providers::TerminalOutcomeProjection>> {
+        if !self.outcome_inspection_enabled {
+            return Ok(Vec::new());
+        }
+        let Some(store) = self.embedded_store() else {
+            return Ok(Vec::new());
+        };
+        let records = store.list_provider_events(
+            crate::providers::OUTCOME_PROVIDER_KIND,
+            environment,
+            128,
+        )?;
+        let mut projections = Vec::new();
+        for record in &records {
+            let Some(projection) = crate::providers::project_terminal_outcome(record, as_of)
+                .map_err(anyhow::Error::from)?
+            else {
+                continue;
+            };
+            if projection.environment_id == environment {
+                projections.push(projection);
+            }
+        }
+        projections.sort_by(|left, right| {
+            left.observed_at
+                .cmp(&right.observed_at)
+                .then_with(|| left.event_id.cmp(&right.event_id))
+        });
+        Ok(projections)
     }
 
     pub fn backup_embedded(&self, destination: impl AsRef<Path>) -> Result<()> {

@@ -61,8 +61,24 @@ pub trait ReconcilePort: Send + Sync {
     ) -> CompletionFuture<'_>;
     fn list_environments(&self) -> ListEnvFuture<'_>;
     fn inspect_environment(&self, environment: String) -> InspectEnvFuture<'_>;
+    fn inspect_environment_without_outcome_export(
+        &self,
+        environment: String,
+    ) -> InspectEnvFuture<'_> {
+        let inspection = self.inspect_environment(environment);
+        Box::pin(async move {
+            let mut report = inspection.await?;
+            report.terminal_outcomes.clear();
+            Ok(report)
+        })
+    }
     fn environment_status(&self, environment: String) -> StatusEnvFuture<'_>;
     fn fleet_status(&self) -> FleetStatusFuture<'_>;
+    fn fleet_status_without_outcome_export(&self) -> FleetStatusFuture<'_> {
+        Box::pin(async {
+            anyhow::bail!("tenant-bounded fleet inspection is not supported by this host")
+        })
+    }
     /// Apply admitted inventory facts from a scoped environment runtime (#136).
     fn apply_inventory_facts(
         &self,
@@ -136,8 +152,15 @@ impl ReconcilePort for Reconciler {
     fn inspect_environment(&self, environment: String) -> InspectEnvFuture<'_> {
         Box::pin(async move {
             let mut ctx = self.ctx_clone();
-            crate::plan::inspect_environment(&mut ctx, &environment).await
+            crate::plan::inspect_environment_with_outcomes(&mut ctx, &environment).await
         })
+    }
+
+    fn inspect_environment_without_outcome_export(
+        &self,
+        environment: String,
+    ) -> InspectEnvFuture<'_> {
+        Box::pin(self.inspect_environment_without_outcome_export(environment))
     }
 
     fn environment_status(&self, environment: String) -> StatusEnvFuture<'_> {
@@ -167,6 +190,10 @@ impl ReconcilePort for Reconciler {
             let mut ctx = self.ctx_clone();
             crate::plan::fleet_status(&mut ctx).await
         })
+    }
+
+    fn fleet_status_without_outcome_export(&self) -> FleetStatusFuture<'_> {
+        Box::pin(self.fleet_status_without_outcome_export())
     }
 }
 
@@ -700,7 +727,7 @@ async fn fleet_status(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
             Err(response) => return response,
         };
         let (fixture_rows, reconciler_ids) = projections;
-        return match state.reconciler.fleet_status().await {
+        return match state.reconciler.fleet_status_without_outcome_export().await {
             Ok(mut report) => {
                 report
                     .environments
@@ -809,8 +836,33 @@ async fn inspect_environment(
             }
         }
     }
-    match state.reconciler.inspect_environment(environment).await {
-        Ok(report) => Json(report).into_response(),
+    let store_environment = environment.clone();
+    let inspection = if state.config.requirements.tenant_mode {
+        // The reconciler's embedded context is tenant-free. Until the tenant
+        // partition exposes the same projection, skip the shared outbox read
+        // entirely rather than validating or returning community rows.
+        state
+            .reconciler
+            .inspect_environment_without_outcome_export(environment)
+            .await
+    } else {
+        state.reconciler.inspect_environment(environment).await
+    };
+    match inspection {
+        Ok(mut report) => {
+            if !state.config.requirements.tenant_mode && report.terminal_outcomes.is_empty() {
+                match terminal_outcomes_from_store(state.store.as_ref(), &store_environment) {
+                    Ok(outcomes) => report.terminal_outcomes = outcomes,
+                    Err(error) => {
+                        return error_response(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("{error:#}"),
+                        );
+                    }
+                }
+            }
+            Json(report).into_response()
+        }
         Err(error) => {
             let message = format!("{error:#}");
             if message.contains("not registered") {
@@ -825,6 +877,31 @@ async fn inspect_environment(
             }
         }
     }
+}
+
+fn terminal_outcomes_from_store(
+    store: &dyn OperationalStore,
+    environment: &str,
+) -> anyhow::Result<Vec<crate::providers::TerminalOutcomeProjection>> {
+    let records =
+        store.list_provider_events(crate::providers::OUTCOME_PROVIDER_KIND, environment, 128)?;
+    let mut outcomes = Vec::new();
+    for record in &records {
+        let Some(outcome) = crate::providers::project_terminal_outcome(record, crate::now_millis())
+            .map_err(anyhow::Error::from)?
+        else {
+            continue;
+        };
+        if outcome.environment_id == environment {
+            outcomes.push(outcome);
+        }
+    }
+    outcomes.sort_by(|left, right| {
+        left.observed_at
+            .cmp(&right.observed_at)
+            .then_with(|| left.event_id.cmp(&right.event_id))
+    });
+    Ok(outcomes)
 }
 
 async fn environment_status(
@@ -1474,6 +1551,7 @@ mod tests {
                         status: "absent".into(),
                     },
                     latest_plan: None,
+                    terminal_outcomes: Vec::new(),
                     execution_note: "fixture".into(),
                 })
             })
@@ -1507,6 +1585,10 @@ mod tests {
                     environments_empty: 1,
                 })
             })
+        }
+
+        fn fleet_status_without_outcome_export(&self) -> FleetStatusFuture<'_> {
+            self.fleet_status()
         }
 
         fn apply_inventory_facts(

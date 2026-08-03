@@ -52,12 +52,15 @@ database and its WAL files sequentially. Stop every writer before
 
 ### Embedded object property index
 
-The embedded catalog store (`EmbeddedStore`, schema version **2**) maintains an
-`embedded_object_properties` index for kind+key+value lookups. Plan work
-selection (`pending_work`, reconcile admission, orphan recovery, environment
-plan summary) queries plans **by environment** through that index rather than
-loading every `tenkai.plan` row and filtering in process. Opening a v1 embedded
-database backfills the index and advances the schema version; empty kind/key or
+The embedded catalog store (`EmbeddedStore`, schema version **4**) maintains an
+`embedded_object_properties` index for kind+key+value lookups and the
+Tenkai-owned `provider_events` outbox. Provider outbox rows retain an immutable
+observation timestamp for bounded inspection; retry scheduling remains
+separate delivery state. Plan work selection (`pending_work`,
+reconcile admission, orphan recovery, environment plan summary) queries plans
+**by environment** through that index rather than loading every `tenkai.plan`
+row and filtering in process. Opening a v1 or v2 embedded database backfills
+the required structures and advances the schema version; empty kind/key or
 environment arguments fail closed (no unscoped fallback).
 
 ## Tenant isolation adapter

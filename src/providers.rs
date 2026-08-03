@@ -186,6 +186,150 @@ impl TerminalOutcomePayload {
     }
 }
 
+/// Bounded, authenticated read projection of one Tenkai-owned terminal
+/// outcome and its optional-provider delivery state. The projection contains
+/// identities and digests only; the original event payload and retry error are
+/// never returned to an operator or integration client.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalOutcomeProjection {
+    pub event_id: String,
+    pub schema: String,
+    pub deployment_id: String,
+    pub plan_id: String,
+    pub release_id: String,
+    pub product: String,
+    pub environment_id: String,
+    pub configuration_id: String,
+    pub terminal_state: String,
+    pub observed_at: i64,
+    pub binding_digest: String,
+    pub release_digest: String,
+    pub plan_digest: String,
+    pub configuration_digest: String,
+    pub delivery_state: String,
+    pub attempts: u32,
+    pub next_attempt_at: i64,
+    pub delivered_at: Option<i64>,
+    pub claim_until: Option<i64>,
+    pub delivery_lag_ms: i64,
+}
+
+/// Project a durable outcome row without exposing its bounded event payload.
+/// Invalid rows fail closed so a corrupt or forged outbox record cannot be
+/// presented as authoritative evidence.
+pub fn project_terminal_outcome(
+    record: &ProviderEventRecord,
+    as_of: i64,
+) -> Result<Option<TerminalOutcomeProjection>, ProviderError> {
+    if record.provider_kind != OUTCOME_PROVIDER_KIND {
+        return Ok(None);
+    }
+    let event: ProviderEvent = serde_json::from_str(&record.payload_json)?;
+    event.validate()?;
+    if event.id != record.id || event.binding.digest() != record.binding_digest {
+        return Err(ProviderError::InvalidEvidence(
+            "terminal outcome row does not match its event envelope".into(),
+        ));
+    }
+    let payload_value: serde_json::Value = serde_json::from_str(&event.payload_json)?;
+    if payload_value
+        .get("schema")
+        .and_then(serde_json::Value::as_str)
+        != Some(TERMINAL_OUTCOME_SCHEMA)
+    {
+        return Ok(None);
+    }
+    let payload: TerminalOutcomePayload = serde_json::from_value(payload_value)?;
+    payload.validate_for_event(&event)?;
+    let expected_event_id = terminal_outcome_event_id(&event.binding, &payload)?;
+    let legacy_event_id = legacy_terminal_outcome_event_id(&event.binding, &payload);
+    if event.id != expected_event_id && event.id != legacy_event_id {
+        return Err(ProviderError::InvalidEvidence(
+            "terminal outcome event identity does not bind its payload".into(),
+        ));
+    }
+    // The pre-v2 identity did not include every projected field. Keep those
+    // durable rows for delivery and historical storage, but do not present
+    // them as authoritative readback evidence.
+    if event.id == legacy_event_id {
+        return Ok(None);
+    }
+    let delivery_state = if record.delivered_at.is_some() {
+        "delivered"
+    } else if record.claim_token.is_some()
+        && record
+            .claim_until
+            .is_some_and(|claim_until| claim_until > as_of)
+    {
+        "in_flight"
+    } else if record.attempts > 0 {
+        "retrying"
+    } else {
+        "pending"
+    };
+    let delivery_end = record
+        .delivered_at
+        .unwrap_or(as_of)
+        .max(payload.observed_at);
+    Ok(Some(TerminalOutcomeProjection {
+        event_id: event.id,
+        schema: payload.schema,
+        deployment_id: payload.deployment_id,
+        plan_id: payload.plan_id,
+        release_id: payload.release_id,
+        product: payload.product,
+        environment_id: payload.environment_id,
+        configuration_id: payload.configuration_id,
+        terminal_state: payload.terminal_state.as_str().into(),
+        observed_at: payload.observed_at,
+        binding_digest: event.binding.digest(),
+        release_digest: event.binding.release_digest,
+        plan_digest: event.binding.plan_digest,
+        configuration_digest: event.binding.configuration_digest,
+        delivery_state: delivery_state.into(),
+        attempts: record.attempts,
+        next_attempt_at: record.next_attempt_at,
+        delivered_at: record.delivered_at,
+        claim_until: record.claim_until,
+        delivery_lag_ms: delivery_end.saturating_sub(payload.observed_at),
+    }))
+}
+
+fn legacy_terminal_outcome_event_id(
+    binding: &EvidenceBinding,
+    payload: &TerminalOutcomePayload,
+) -> String {
+    let observed_at = payload.observed_at.to_string();
+    let binding_digest = binding.digest();
+    let mut identity = Sha256::new();
+    for value in [
+        payload.deployment_id.as_str(),
+        payload.plan_id.as_str(),
+        payload.release_id.as_str(),
+        payload.terminal_state.as_str(),
+        binding_digest.as_str(),
+        observed_at.as_str(),
+    ] {
+        identity.update((value.len() as u64).to_le_bytes());
+        identity.update(value.as_bytes());
+    }
+    format!("tenkai:outcome:v1:{:x}", identity.finalize())
+}
+
+fn terminal_outcome_event_id(
+    binding: &EvidenceBinding,
+    payload: &TerminalOutcomePayload,
+) -> Result<String, ProviderError> {
+    let payload_json = serde_json::to_string(payload)?;
+    let binding_digest = binding.digest();
+    let mut identity = Sha256::new();
+    for value in [&binding_digest, &payload_json] {
+        identity.update((value.len() as u64).to_le_bytes());
+        identity.update(value.as_bytes());
+    }
+    Ok(format!("tenkai:outcome:v2:{:x}", identity.finalize()))
+}
+
 pub fn environment_configuration_digest(environment: &Object) -> String {
     let mut digest = Sha256::new();
     for value in [&environment.id, &environment.namespace] {
@@ -251,20 +395,8 @@ pub fn terminal_outcome_event(
         terminal_state,
         observed_at,
     };
-    let mut identity = Sha256::new();
-    for value in [
-        deployment_id,
-        plan_id,
-        release_id,
-        terminal_state.as_str(),
-        &binding.digest(),
-        &observed_at.to_string(),
-    ] {
-        identity.update((value.len() as u64).to_le_bytes());
-        identity.update(value.as_bytes());
-    }
     let event = ProviderEvent {
-        id: format!("tenkai:outcome:v1:{:x}", identity.finalize()),
+        id: terminal_outcome_event_id(&binding, &payload)?,
         binding,
         payload_json: serde_json::to_string(&payload)?,
     };
@@ -939,6 +1071,72 @@ mod tests {
             1_000,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn terminal_outcome_projection_is_bounded_and_reports_delivery_lag() {
+        let event = terminal_event();
+        let mut record = provider_event_record(OUTCOME_PROVIDER_KIND, &event, 1_000).unwrap();
+        let pending = project_terminal_outcome(&record, 4_000).unwrap().unwrap();
+        assert_eq!(pending.delivery_state, "pending");
+        assert_eq!(pending.delivery_lag_ms, 3_000);
+        assert_eq!(pending.binding_digest, event.binding.digest());
+        let encoded = serde_json::to_string(&pending).unwrap();
+        assert!(!encoded.contains("payload_json"));
+        assert!(!encoded.contains("private-claim"));
+
+        let mut tampered_record = record.clone();
+        let mut tampered_event: ProviderEvent =
+            serde_json::from_str(&tampered_record.payload_json).unwrap();
+        let mut tampered_payload: TerminalOutcomePayload =
+            serde_json::from_str(&tampered_event.payload_json).unwrap();
+        tampered_payload.product = "tampered".into();
+        tampered_event.payload_json = serde_json::to_string(&tampered_payload).unwrap();
+        tampered_record.payload_json = serde_json::to_string(&tampered_event).unwrap();
+        assert!(project_terminal_outcome(&tampered_record, 4_000).is_err());
+
+        let generic_event = ProviderEvent {
+            id: "generic-outcome-destination-event".into(),
+            binding: event.binding.clone(),
+            payload_json: "{}".into(),
+        };
+        let generic_record =
+            provider_event_record(OUTCOME_PROVIDER_KIND, &generic_event, 1_000).unwrap();
+        assert!(
+            project_terminal_outcome(&generic_record, 4_000)
+                .unwrap()
+                .is_none()
+        );
+
+        let payload: TerminalOutcomePayload = serde_json::from_str(&event.payload_json).unwrap();
+        let mut legacy_event = event.clone();
+        legacy_event.id = legacy_terminal_outcome_event_id(&event.binding, &payload);
+        let mut legacy_record = record.clone();
+        legacy_record.id = legacy_event.id.clone();
+        legacy_record.payload_json = serde_json::to_string(&legacy_event).unwrap();
+        assert!(
+            project_terminal_outcome(&legacy_record, 4_000)
+                .unwrap()
+                .is_none()
+        );
+
+        record.attempts = 1;
+        record.claim_token = Some("private-claim".into());
+        record.claim_until = Some(5_000);
+        let in_flight = project_terminal_outcome(&record, 4_000).unwrap().unwrap();
+        assert_eq!(in_flight.delivery_state, "in_flight");
+        assert_eq!(in_flight.claim_until, Some(5_000));
+
+        let expired_claim = project_terminal_outcome(&record, 5_000).unwrap().unwrap();
+        assert_eq!(expired_claim.delivery_state, "retrying");
+
+        record.claim_token = None;
+        record.claim_until = None;
+        record.delivered_at = Some(4_500);
+        let delivered = project_terminal_outcome(&record, 5_000).unwrap().unwrap();
+        assert_eq!(delivered.delivery_state, "delivered");
+        assert_eq!(delivered.delivery_lag_ms, 3_500);
+        assert_eq!(delivered.delivered_at, Some(4_500));
     }
 
     #[tokio::test]

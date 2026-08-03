@@ -460,6 +460,15 @@ impl OperationalStore for TenantPartition {
     fn enqueue_provider_event(&self, event: &ProviderEventRecord) -> Result<()> {
         self.store.enqueue_provider_event(event)
     }
+    fn list_provider_events(
+        &self,
+        provider_kind: &str,
+        environment_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ProviderEventRecord>> {
+        self.store
+            .list_provider_events(provider_kind, environment_id, limit)
+    }
     fn claim_provider_events(
         &self,
         now: i64,

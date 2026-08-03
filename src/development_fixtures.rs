@@ -200,6 +200,7 @@ impl FixtureEnvironmentProjection {
                     steps_truncated: false,
                 }
             }),
+            terminal_outcomes: Vec::new(),
             execution_note: "Development fixture projection; execution is disabled.".into(),
         }
     }

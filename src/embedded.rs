@@ -12,7 +12,7 @@ use crate::pb::sekai::{
 };
 use crate::storage::{ProviderEventRecord, enqueue_provider_event_in};
 
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 4;
 
 pub struct EmbeddedStore {
     connection: Mutex<Connection>,
@@ -234,6 +234,46 @@ impl EmbeddedStore {
         events: &[ProviderEventRecord],
     ) -> Result<()> {
         self.put_objects_with_provider_events_inner(objects, events, None)
+    }
+
+    /// Read a bounded set of durable provider events for operator-safe
+    /// projection. The event payload remains internal to the adapter.
+    pub fn list_provider_events(
+        &self,
+        provider_kind: &str,
+        environment_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ProviderEventRecord>> {
+        anyhow::ensure!(
+            !provider_kind.trim().is_empty() && !environment_id.trim().is_empty() && limit > 0,
+            "provider kind, environment, and a positive result limit are required"
+        );
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT id,provider_kind,binding_digest,payload_json,attempts,
+                    next_attempt_at,delivered_at,last_error,claim_token,claim_until
+             FROM provider_events WHERE provider_kind=?1 AND environment_id=?2
+             ORDER BY observed_at DESC,id DESC LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            params![provider_kind, environment_id, limit.min(128) as u64],
+            |row| {
+                Ok(ProviderEventRecord {
+                    id: row.get(0)?,
+                    provider_kind: row.get(1)?,
+                    binding_digest: row.get(2)?,
+                    payload_json: row.get(3)?,
+                    attempts: row.get(4)?,
+                    next_attempt_at: row.get(5)?,
+                    delivered_at: row.get(6)?,
+                    last_error: row.get(7)?,
+                    claim_token: row.get(8)?,
+                    claim_until: row.get(9)?,
+                })
+            },
+        )?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     pub fn guarded_put_with_provider_events(
@@ -783,10 +823,22 @@ fn migrate(connection: &mut Connection) -> Result<()> {
                  payload BLOB NOT NULL
              );
              CREATE INDEX embedded_changes_object ON embedded_changes(object_id,timestamp,id);
-             INSERT INTO embedded_metadata(key,value) VALUES('schema_version','2');
+             CREATE TABLE IF NOT EXISTS provider_events (
+                 id TEXT NOT NULL, provider_kind TEXT NOT NULL,
+                 binding_digest TEXT NOT NULL, payload_json TEXT NOT NULL,
+                 attempts INTEGER NOT NULL, next_attempt_at INTEGER NOT NULL,
+                 delivered_at INTEGER, last_error TEXT NOT NULL,
+                 claim_token TEXT, claim_until INTEGER,
+                 environment_id TEXT NOT NULL DEFAULT '',
+                 observed_at INTEGER NOT NULL DEFAULT 0,
+                 PRIMARY KEY(provider_kind,id)
+             );
+             CREATE INDEX IF NOT EXISTS provider_events_delivery
+                 ON provider_events(delivered_at, next_attempt_at, id);
+             INSERT INTO embedded_metadata(key,value) VALUES('schema_version','4');
              COMMIT;",
         )?;
-        found = 2;
+        found = 4;
     }
     if found == 1 {
         // Property index for environment-scoped (and general) property queries.
@@ -808,11 +860,56 @@ fn migrate(connection: &mut Connection) -> Result<()> {
         backfill_object_properties(&tx)?;
         tx.execute(
             "UPDATE embedded_metadata SET value=?1 WHERE key='schema_version'",
-            [SCHEMA_VERSION.to_string()],
+            ["2"],
         )?;
         tx.commit()?;
         found = 2;
     }
+    if found == 2 {
+        let tx = connection.transaction()?;
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS provider_events (
+                 id TEXT NOT NULL, provider_kind TEXT NOT NULL,
+                 binding_digest TEXT NOT NULL, payload_json TEXT NOT NULL,
+                 attempts INTEGER NOT NULL, next_attempt_at INTEGER NOT NULL,
+                 delivered_at INTEGER, last_error TEXT NOT NULL,
+                 claim_token TEXT, claim_until INTEGER,
+                 environment_id TEXT NOT NULL DEFAULT '',
+                 observed_at INTEGER NOT NULL DEFAULT 0,
+                 PRIMARY KEY(provider_kind,id)
+             );
+             CREATE INDEX IF NOT EXISTS provider_events_delivery
+                 ON provider_events(delivered_at, next_attempt_at, id);
+             UPDATE embedded_metadata SET value='4' WHERE key='schema_version';",
+        )?;
+        tx.commit()?;
+        found = 4;
+    }
+    if found == 3 {
+        let tx = connection.transaction()?;
+        let has_observed_at = {
+            let mut statement = tx.prepare("PRAGMA table_info(provider_events)")?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+                .iter()
+                .any(|name| name == "observed_at")
+        };
+        if !has_observed_at {
+            tx.execute(
+                "ALTER TABLE provider_events
+                 ADD COLUMN observed_at INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+        tx.execute(
+            "UPDATE embedded_metadata SET value='4' WHERE key='schema_version'",
+            [],
+        )?;
+        tx.commit()?;
+        found = 4;
+    }
+    crate::storage::ensure_provider_event_environment_column(connection)
+        .map_err(anyhow::Error::from)?;
     debug_assert_eq!(found, SCHEMA_VERSION);
     let _ = found;
     Ok(())
@@ -988,7 +1085,7 @@ fn record_changes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::SqliteStore;
+    use crate::storage::{OperationalStore, SqliteStore};
 
     #[test]
     fn persists_objects_links_actions_and_leases() {
@@ -1064,6 +1161,26 @@ mod tests {
                 None,
             )
             .unwrap();
+        assert_eq!(
+            embedded
+                .list_provider_events("outcome", "prod", 1)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            embedded
+                .list_provider_events("outcome", "other", 1)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            operational
+                .list_provider_events("outcome", "prod", 1)
+                .unwrap()
+                .len(),
+            1
+        );
         assert_eq!(embedded.get(&object.id).unwrap(), Some(object.clone()));
         assert_eq!(
             embedded.get(&environment.id).unwrap(),
@@ -1256,7 +1373,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "2");
+        assert_eq!(version, "4");
         let store = EmbeddedStore {
             connection: Mutex::new(connection),
             principal: "test".into(),
@@ -1266,6 +1383,93 @@ mod tests {
             .unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].id, "tenkai:plan:legacy");
+    }
+
+    #[test]
+    fn migrates_shared_legacy_provider_events_before_indexing() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE embedded_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO embedded_metadata(key,value) VALUES('schema_version','2');
+                 CREATE TABLE provider_events (
+                     id TEXT NOT NULL, provider_kind TEXT NOT NULL,
+                     binding_digest TEXT NOT NULL, payload_json TEXT NOT NULL,
+                     attempts INTEGER NOT NULL, next_attempt_at INTEGER NOT NULL,
+                     delivered_at INTEGER, last_error TEXT NOT NULL,
+                     claim_token TEXT, claim_until INTEGER,
+                     PRIMARY KEY(provider_kind,id)
+                 );",
+            )
+            .unwrap();
+
+        migrate(&mut connection).unwrap();
+
+        let columns: Vec<String> = connection
+            .prepare("PRAGMA table_info(provider_events)")
+            .unwrap()
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(columns.iter().any(|column| column == "environment_id"));
+        assert!(columns.iter().any(|column| column == "observed_at"));
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT value FROM embedded_metadata WHERE key='schema_version'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "4"
+        );
+    }
+
+    #[test]
+    fn migrates_v3_after_shared_store_preflight() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE embedded_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO embedded_metadata(key,value) VALUES('schema_version','3');
+                 CREATE TABLE provider_events (
+                     id TEXT NOT NULL, provider_kind TEXT NOT NULL,
+                     binding_digest TEXT NOT NULL, payload_json TEXT NOT NULL,
+                     attempts INTEGER NOT NULL, next_attempt_at INTEGER NOT NULL,
+                     delivered_at INTEGER, last_error TEXT NOT NULL,
+                     claim_token TEXT, claim_until INTEGER,
+                     environment_id TEXT NOT NULL DEFAULT '',
+                     PRIMARY KEY(provider_kind,id)
+                 );",
+            )
+            .unwrap();
+
+        // Server startup migrates the shared operational schema before the
+        // embedded metadata migration. That preflight is allowed to add the
+        // column that schema 3 would otherwise add itself.
+        crate::storage::ensure_provider_event_environment_column(&mut connection).unwrap();
+        migrate(&mut connection).unwrap();
+
+        let observed_at: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('provider_events')
+                 WHERE name='observed_at'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(observed_at, 1);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT value FROM embedded_metadata WHERE key='schema_version'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "4"
+        );
     }
 
     #[test]

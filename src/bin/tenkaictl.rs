@@ -1021,7 +1021,7 @@ async fn run(cli: Cli) -> Result<()> {
                 }
             }
             EnvCommand::Inspect { env } => {
-                let report = plan::inspect_environment(&mut ctx, &env).await?;
+                let report = plan::inspect_environment_with_outcomes(&mut ctx, &env).await?;
                 if output == OutputFormat::JsonV1 {
                     print_machine_result(
                         &CommandResultV1::succeeded(CommandName::InspectEnvironment)

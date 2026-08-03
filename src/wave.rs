@@ -307,6 +307,7 @@ mod tests {
                 status: "absent".into(),
             },
             latest_plan: None,
+            terminal_outcomes: Vec::new(),
             execution_note: "fixture".into(),
         }
     }
