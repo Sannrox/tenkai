@@ -3,6 +3,7 @@
 //! Providers return or consume evidence; they never own releases, plans,
 //! execution state, leases, receipts, or rollback recovery.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::time::Duration;
 
@@ -12,16 +13,40 @@ use thiserror::Error;
 use tonic::metadata::MetadataValue;
 use tonic::transport::{Channel, Endpoint};
 
-use crate::pb::chisei::chisei_service_client::ChiseiServiceClient;
-use crate::pb::chisei::{RecordSampleObservationRequest, SampleObservation};
-use crate::pb::sekai::Object;
+use crate::pb::sekai::sekai_service_client::SekaiServiceClient;
+use crate::pb::sekai::{EvidenceEnvelope, Object, SubmitEvidenceRequest};
 use crate::storage::{OperationalStore, ProviderEventRecord, StoreError};
 
 pub const PROVIDER_CONTRACT_VERSION: u32 = 1;
 pub const TERMINAL_OUTCOME_SCHEMA: &str = "tenkai.terminal_outcome.v1";
+const TERMINAL_OUTCOME_SCHEMA_VERSION: &str = "1.0.0";
 pub const OUTCOME_PROVIDER_KIND: &str = "outcome";
+pub const OUTCOME_PROVIDER_REGISTRATION_ENV: &str = "TENKAI_OUTCOME_PROVIDER_REGISTRATION";
 const MAX_PROVIDER_EVENT_ID_BYTES: usize = 512;
 const MAX_PROVIDER_EVENT_PAYLOAD_BYTES: usize = 16 * 1024;
+
+fn evidence_submission_succeeded(result: &crate::pb::sekai::EvidenceSubmissionResult) -> bool {
+    let Some(submission) = result.submission.as_ref() else {
+        return false;
+    };
+    let lifecycle = submission.lifecycle_state.trim();
+    if lifecycle.is_empty()
+        || matches!(
+            lifecycle,
+            "received" | "validated" | "deduplicated" | "rejected"
+        )
+    {
+        return false;
+    }
+    // A rejection code contradicts admission unless Sekai explicitly retained
+    // an admitted submission in quarantine because projection failed.
+    let rejection_is_projection_quarantine =
+        lifecycle == "quarantined" && submission.rejection_code.starts_with("projection_");
+    if !submission.rejection_code.is_empty() && !rejection_is_projection_quarantine {
+        return false;
+    }
+    result.admitted || result.deduplicated
+}
 
 /// Exact operational inputs to which a decision or exported event applies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,6 +119,13 @@ pub struct ProviderEvent {
     pub id: String,
     pub binding: EvidenceBinding,
     pub payload_json: String,
+    /// Set atomically on the first delivery attempt and retained across
+    /// retries. `None` is valid only before the event enters delivery.
+    #[serde(default)]
+    pub collected_at_ms: Option<i64>,
+    /// Source-instance ordering allocated durably on first delivery.
+    #[serde(default)]
+    pub source_sequence: Option<i64>,
 }
 
 impl ProviderEvent {
@@ -110,6 +142,16 @@ impl ProviderEvent {
         {
             return Err(ProviderError::InvalidEvidence(
                 "provider event payload is empty, oversized, or not valid JSON".into(),
+            ));
+        }
+        if self.collected_at_ms.is_some_and(|timestamp| timestamp <= 0) {
+            return Err(ProviderError::InvalidEvidence(
+                "provider event collection timestamp must be positive".into(),
+            ));
+        }
+        if self.source_sequence.is_some_and(|sequence| sequence <= 0) {
+            return Err(ProviderError::InvalidEvidence(
+                "provider event source sequence must be positive".into(),
             ));
         }
         Ok(())
@@ -424,6 +466,8 @@ pub fn terminal_outcome_event(
         id: terminal_outcome_event_id(&binding, &payload)?,
         binding,
         payload_json: serde_json::to_string(&payload)?,
+        collected_at_ms: None,
+        source_sequence: None,
     };
     event.validate()?;
     payload.validate_for_event(&event)?;
@@ -620,14 +664,15 @@ impl GateProvider for HttpRemoteGateProvider {
     }
 }
 
-/// Reference adapter for Chisei's authenticated, namespace-scoped
-/// `RecordSampleObservation` admission path.
+/// Reference adapter for Sekai's authenticated, namespace-scoped
+/// `SubmitEvidence` admission path.
 #[derive(Clone)]
 pub struct ChiseiOutcomeProvider {
     namespace: String,
     principal: String,
     bearer_token: Option<String>,
-    client: ChiseiServiceClient<Channel>,
+    registration_attested: bool,
+    client: SekaiServiceClient<Channel>,
 }
 
 impl std::fmt::Debug for ChiseiOutcomeProvider {
@@ -640,6 +685,7 @@ impl std::fmt::Debug for ChiseiOutcomeProvider {
                 "bearer_token",
                 &self.bearer_token.as_ref().map(|_| "[redacted]"),
             )
+            .field("registration_attested", &self.registration_attested)
             .finish_non_exhaustive()
     }
 }
@@ -665,7 +711,22 @@ fn outcome_transport_is_safe(endpoint: &str) -> bool {
     }
 }
 
+/// Return the exact, non-secret registration contract expected by the
+/// terminal-outcome adapter. Sekai administrators register the corresponding
+/// producer capability and schema out of band; Tenkai compares this value at
+/// startup before enabling delivery.
+pub fn outcome_provider_registration_attestation(principal: &str, namespace: &str) -> String {
+    format!(
+        "producer={principal};source_type={OUTCOME_PROVIDER_KIND};source_instance={namespace}:{OUTCOME_PROVIDER_KIND};namespace={namespace};evidence_type=operations.terminal_outcome;schema={TERMINAL_OUTCOME_SCHEMA}@{TERMINAL_OUTCOME_SCHEMA_VERSION};target_kind=tenkai.deployment;classification=internal;intent=upsert"
+    )
+}
+
 impl ChiseiOutcomeProvider {
+    /// Build an adapter for evidence mapping and local inspection.
+    ///
+    /// This constructor deliberately leaves delivery disabled. The server
+    /// host must use [`Self::new_for_export`] so the operator has explicitly
+    /// confirmed the producer and schema registrations required by Sekai.
     pub fn new(
         endpoint: impl Into<String>,
         namespace: impl Into<String>,
@@ -705,34 +766,113 @@ impl ChiseiOutcomeProvider {
             namespace,
             principal,
             bearer_token,
-            client: ChiseiServiceClient::new(channel),
+            registration_attested: false,
+            client: SekaiServiceClient::new(channel),
         })
     }
 
-    fn observation(&self, event: &ProviderEvent) -> Result<SampleObservation, ProviderError> {
+    /// Build an adapter that is allowed to submit terminal outcome evidence.
+    ///
+    /// Sekai 1.0 does not expose producer-capability provisioning through the
+    /// client RPC surface. The registration attestation therefore binds the
+    /// configured principal, namespace, source identity, evidence type, and
+    /// schema to the administrator-side registration that must already exist.
+    pub fn new_for_export(
+        endpoint: impl Into<String>,
+        namespace: impl Into<String>,
+        principal: impl Into<String>,
+        bearer_token: Option<String>,
+        registration_attestation: impl AsRef<str>,
+    ) -> Result<Self, ProviderError> {
+        let provider = Self::new(endpoint, namespace, principal, bearer_token)?;
+        let expected =
+            outcome_provider_registration_attestation(&provider.principal, &provider.namespace);
+        if registration_attestation.as_ref() != expected {
+            return Err(ProviderError::InvalidEvidence(format!(
+                "{OUTCOME_PROVIDER_REGISTRATION_ENV} must exactly confirm the configured Sekai producer and schema registration"
+            )));
+        }
+        Ok(Self {
+            registration_attested: true,
+            ..provider
+        })
+    }
+
+    fn evidence(&self, event: &ProviderEvent) -> Result<EvidenceEnvelope, ProviderError> {
         event.validate()?;
         let payload: TerminalOutcomePayload = serde_json::from_str(&event.payload_json)?;
         payload.validate_for_event(event)?;
-        Ok(SampleObservation {
-            request_id: event.id.clone(),
+        let content_value: serde_json::Value = serde_json::from_str(&event.payload_json)?;
+        let content_json = serde_json::to_vec(&content_value)?;
+        let content_digest = format!("{:x}", Sha256::digest(&content_json));
+        Ok(EvidenceEnvelope {
+            contract_version: "sekai.evidence/v1".into(),
+            source_type: OUTCOME_PROVIDER_KIND.into(),
+            source_instance: format!("{}:{OUTCOME_PROVIDER_KIND}", self.namespace),
+            source_record_id: event.id.clone(),
+            source_version: PROVIDER_CONTRACT_VERSION.to_string(),
+            source_sequence: event.source_sequence.ok_or_else(|| {
+                ProviderError::InvalidEvidence(
+                    "terminal outcome delivery is missing its durable source sequence".into(),
+                )
+            })?,
             namespace: self.namespace.clone(),
-            spec: TERMINAL_OUTCOME_SCHEMA.into(),
-            resolved_model: String::new(),
-            output_content: event.payload_json.clone(),
-            sample_reason: payload.terminal_state.as_str().into(),
-            input_tokens: 0,
-            output_tokens: 0,
-            stop_reason: "terminal".into(),
-            timestamp: payload.observed_at,
+            target_external_id: payload.deployment_id,
+            target_kind: "tenkai.deployment".into(),
+            evidence_type: "operations.terminal_outcome".into(),
+            signal: "other".into(),
+            schema_id: TERMINAL_OUTCOME_SCHEMA.into(),
+            schema_version: TERMINAL_OUTCOME_SCHEMA_VERSION.into(),
+            schema_compatibility: "exact".into(),
+            observed_at_ms: payload.observed_at,
+            collected_at_ms: event.collected_at_ms.ok_or_else(|| {
+                ProviderError::InvalidEvidence(
+                    "terminal outcome delivery is missing its durable collection timestamp".into(),
+                )
+            })?,
+            expires_at_ms: None,
+            content_json,
+            relationships: Vec::new(),
+            producer_identity: self.principal.clone(),
+            confidence_bps: 10_000,
+            classification: "internal".into(),
+            provenance: HashMap::from([
+                (
+                    "environment_id".into(),
+                    event.binding.environment_id.clone(),
+                ),
+                (
+                    "release_digest".into(),
+                    event.binding.release_digest.clone(),
+                ),
+                ("plan_digest".into(), event.binding.plan_digest.clone()),
+                (
+                    "configuration_digest".into(),
+                    event.binding.configuration_digest.clone(),
+                ),
+                (
+                    "provider_contract_version".into(),
+                    PROVIDER_CONTRACT_VERSION.to_string(),
+                ),
+            ]),
+            idempotency_key: event.id.clone(),
+            content_digest,
+            intent: "upsert".into(),
+            causality: None,
         })
     }
 }
 
 impl OutcomeProvider for ChiseiOutcomeProvider {
     async fn record(&self, event: &ProviderEvent) -> Result<(), ProviderError> {
-        let observation = self.observation(event)?;
-        let mut request = tonic::Request::new(RecordSampleObservationRequest {
-            observation: Some(observation),
+        if !self.registration_attested {
+            return Err(ProviderError::InvalidEvidence(
+                "Sekai outcome export requires administrator-confirmed producer and schema registration".into(),
+            ));
+        }
+        let evidence = self.evidence(event)?;
+        let mut request = tonic::Request::new(SubmitEvidenceRequest {
+            envelope: Some(evidence),
         });
         let principal = MetadataValue::try_from(self.principal.as_str()).map_err(|_| {
             ProviderError::InvalidEvidence("outcome principal is not valid metadata".into())
@@ -750,20 +890,25 @@ impl OutcomeProvider for ChiseiOutcomeProvider {
                 .insert("authorization", authorization);
         }
         let mut client = self.client.clone();
-        let recorded = client
-            .record_sample_observation(request)
+        let result = client
+            .submit_evidence(request)
             .await
             .map_err(|status| {
                 ProviderError::Unavailable(format!(
-                    "Chisei outcome admission returned gRPC {}",
+                    "Sekai outcome evidence admission returned gRPC {}",
                     status.code()
                 ))
             })?
             .into_inner()
-            .recorded;
-        if !recorded {
+            .result
+            .ok_or_else(|| {
+                ProviderError::Unavailable(
+                    "Sekai outcome evidence admission returned no result".into(),
+                )
+            })?;
+        if !evidence_submission_succeeded(&result) {
             return Err(ProviderError::Unavailable(
-                "Chisei outcome admission is not enabled".into(),
+                "Sekai rejected terminal outcome evidence".into(),
             ));
         }
         Ok(())
@@ -909,6 +1054,11 @@ pub fn provider_event_record(
     now: i64,
 ) -> Result<ProviderEventRecord, ProviderError> {
     event.validate()?;
+    if event.collected_at_ms.is_some() || event.source_sequence.is_some() {
+        return Err(ProviderError::InvalidEvidence(
+            "new provider events must not carry delivery metadata".into(),
+        ));
+    }
     if kind.trim().is_empty() || kind.len() > 64 {
         return Err(ProviderError::InvalidEvidence(
             "provider event kind is empty or oversized".into(),
@@ -963,7 +1113,7 @@ where
             }
             Ok(event)
         });
-    let event = match parsed {
+    let mut event = match parsed {
         Ok(event) => event,
         Err(error) => {
             store.record_provider_failure(
@@ -976,6 +1126,30 @@ where
             return Ok(DeliveryStatus::Deferred);
         }
     };
+    if event.collected_at_ms.is_none() || event.source_sequence.is_none() {
+        if event.collected_at_ms.is_none() && now <= 0 {
+            return Err(ProviderError::InvalidEvidence(
+                "provider delivery timestamp must be positive".into(),
+            ));
+        }
+        if event.source_sequence.is_none() {
+            event.source_sequence = Some(store.reserve_provider_event_sequence(
+                &record.provider_kind,
+                &record.id,
+                claim_token,
+            )?);
+        }
+        if event.collected_at_ms.is_none() {
+            event.collected_at_ms = Some(now);
+        }
+        let payload_json = serde_json::to_string(&event)?;
+        store.bind_provider_event_collection_time(
+            &record.provider_kind,
+            &record.id,
+            claim_token,
+            &payload_json,
+        )?;
+    }
     let result = tokio::time::timeout(timeout, delivery(event, record.provider_kind.clone())).await;
     let delivered = matches!(&result, Ok(Ok(())));
     match result {
@@ -1160,6 +1334,77 @@ mod tests {
     }
 
     #[test]
+    fn deduplicated_evidence_must_reference_an_admitted_submission() {
+        let rejected = crate::pb::sekai::EvidenceSubmissionResult {
+            deduplicated: true,
+            submission: Some(crate::pb::sekai::EvidenceSubmissionRecord {
+                lifecycle_state: "rejected".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(!evidence_submission_succeeded(&rejected));
+
+        let admitted = crate::pb::sekai::EvidenceSubmissionResult {
+            deduplicated: true,
+            submission: Some(crate::pb::sekai::EvidenceSubmissionRecord {
+                lifecycle_state: "available".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(evidence_submission_succeeded(&admitted));
+        assert!(evidence_submission_succeeded(
+            &crate::pb::sekai::EvidenceSubmissionResult {
+                deduplicated: true,
+                submission: Some(crate::pb::sekai::EvidenceSubmissionRecord {
+                    lifecycle_state: "future_admitted_state".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+        ));
+        assert!(!evidence_submission_succeeded(
+            &crate::pb::sekai::EvidenceSubmissionResult {
+                admitted: true,
+                ..Default::default()
+            }
+        ));
+        assert!(!evidence_submission_succeeded(
+            &crate::pb::sekai::EvidenceSubmissionResult {
+                admitted: true,
+                submission: Some(crate::pb::sekai::EvidenceSubmissionRecord {
+                    lifecycle_state: "rejected".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+        ));
+        assert!(evidence_submission_succeeded(
+            &crate::pb::sekai::EvidenceSubmissionResult {
+                deduplicated: true,
+                submission: Some(crate::pb::sekai::EvidenceSubmissionRecord {
+                    lifecycle_state: "quarantined".into(),
+                    rejection_code: "projection_unavailable".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+        ));
+        assert!(!evidence_submission_succeeded(
+            &crate::pb::sekai::EvidenceSubmissionResult {
+                deduplicated: true,
+                submission: Some(crate::pb::sekai::EvidenceSubmissionRecord {
+                    lifecycle_state: "quarantined".into(),
+                    rejection_code: "producer_unregistered".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+        ));
+    }
+
+    #[test]
     fn terminal_outcome_projection_is_bounded_and_reports_delivery_lag() {
         let event = terminal_event();
         let mut record = provider_event_record(OUTCOME_PROVIDER_KIND, &event, 1_000).unwrap();
@@ -1185,6 +1430,8 @@ mod tests {
             id: "generic-outcome-destination-event".into(),
             binding: event.binding.clone(),
             payload_json: "{}".into(),
+            collected_at_ms: None,
+            source_sequence: None,
         };
         let generic_record =
             provider_event_record(OUTCOME_PROVIDER_KIND, &generic_event, 1_000).unwrap();
@@ -1226,7 +1473,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_outcome_is_bounded_content_bound_and_chisei_mapped() {
+    async fn terminal_outcome_is_bounded_content_bound_and_sekai_evidence_mapped() {
         let event = terminal_event();
         let repeated_transition = terminal_event();
         let later_transition = terminal_outcome_event(
@@ -1259,12 +1506,49 @@ mod tests {
             Some("secret-token".into()),
         )
         .unwrap();
-        let observation = provider.observation(&event).unwrap();
-        assert_eq!(observation.request_id, event.id);
-        assert_eq!(observation.namespace, "tenkai-prod");
-        assert_eq!(observation.output_content, event.payload_json);
-        assert_eq!(observation.sample_reason, "automatic_rollback_succeeded");
+        let mut collected_event = event.clone();
+        collected_event.collected_at_ms = Some(1_000);
+        collected_event.source_sequence = Some(1);
+        let evidence = provider.evidence(&collected_event).unwrap();
+        assert_eq!(evidence, provider.evidence(&collected_event).unwrap());
+        assert_eq!(evidence.source_record_id, event.id);
+        assert_eq!(evidence.namespace, "tenkai-prod");
+        assert_eq!(evidence.target_external_id, "tenkai:deployment:prod:api:1");
+        assert_eq!(evidence.schema_id, TERMINAL_OUTCOME_SCHEMA);
+        assert_eq!(evidence.collected_at_ms, 1_000);
+        assert_eq!(evidence.source_sequence, 1);
+        let canonical_content = serde_json::to_vec(
+            &serde_json::from_str::<serde_json::Value>(&event.payload_json).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(evidence.content_json, canonical_content);
+        assert_eq!(evidence.idempotency_key, event.id);
+        assert_eq!(evidence.confidence_bps, 10_000);
+        assert_eq!(evidence.intent, "upsert");
         assert!(!format!("{provider:?}").contains("secret-token"));
+        assert!(provider.record(&event).await.is_err());
+
+        let registration =
+            outcome_provider_registration_attestation("tenkai.outcome", "tenkai-prod");
+        let export_provider = ChiseiOutcomeProvider::new_for_export(
+            "http://127.0.0.1:50051",
+            "tenkai-prod",
+            "tenkai.outcome",
+            Some("secret-token".into()),
+            registration,
+        )
+        .unwrap();
+        assert!(export_provider.registration_attested);
+        assert!(
+            ChiseiOutcomeProvider::new_for_export(
+                "http://127.0.0.1:50051",
+                "tenkai-prod",
+                "tenkai.outcome",
+                None,
+                "producer=tenkai.outcome;schema=wrong",
+            )
+            .is_err()
+        );
 
         assert!(
             ChiseiOutcomeProvider::new(
@@ -1299,7 +1583,10 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!((delivered, deferred), (1, 0));
-        assert_eq!(sink.received(), vec![event.clone()]);
+        let mut collected_event = event.clone();
+        collected_event.collected_at_ms = Some(100);
+        collected_event.source_sequence = Some(1);
+        assert_eq!(sink.received(), vec![collected_event]);
         assert!(
             store
                 .claim_provider_events_for_kind(
@@ -1317,6 +1604,71 @@ mod tests {
             .unwrap();
         assert_eq!(audit.len(), 1);
         assert_eq!(audit[0].id, event.id);
+    }
+
+    #[tokio::test]
+    async fn outcome_sequences_are_durable_and_monotonic_across_events() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let first = terminal_event();
+        let second = terminal_outcome_event(
+            "tenkai:deployment:prod:web:2",
+            "tenkai:plan:prod:2",
+            "sha256:plan-2",
+            "tenkai:release:web@2.0.0",
+            "sha256:release-2",
+            "web",
+            "prod",
+            "tenkai:environment:prod",
+            "sha256:config-2",
+            TerminalOutcomeState::DeploymentSucceeded,
+            1_001,
+        )
+        .unwrap();
+        enqueue_optional_event(&store, OUTCOME_PROVIDER_KIND, &first, 100).unwrap();
+        enqueue_optional_event(&store, OUTCOME_PROVIDER_KIND, &second, 100).unwrap();
+        let claimed = store
+            .claim_provider_events_for_kind(
+                OUTCOME_PROVIDER_KIND,
+                100,
+                10,
+                "sequence-worker",
+                1_100,
+            )
+            .unwrap();
+        assert_eq!(claimed.len(), 2);
+        let sink = std::sync::Arc::new(LocalEventSink::default());
+        for record in &claimed {
+            let delivery_sink = std::sync::Arc::clone(&sink);
+            deliver_optional_event(
+                &store,
+                record,
+                Duration::from_secs(1),
+                100,
+                move |event, kind| async move {
+                    assert_eq!(kind, OUTCOME_PROVIDER_KIND);
+                    delivery_sink.export(&event).await
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let mut sequences = sink
+            .received()
+            .into_iter()
+            .map(|event| event.source_sequence.unwrap())
+            .collect::<Vec<_>>();
+        sequences.sort_unstable();
+        assert_eq!(sequences, vec![1, 2]);
+
+        let durable = store
+            .list_provider_events(OUTCOME_PROVIDER_KIND, "prod", 128)
+            .unwrap();
+        assert_eq!(durable.len(), 2);
+        for record in durable {
+            let event: ProviderEvent = serde_json::from_str(&record.payload_json).unwrap();
+            assert!(event.collected_at_ms.is_some());
+            assert!(event.source_sequence.is_some());
+        }
     }
 
     #[tokio::test]
@@ -1531,6 +1883,8 @@ mod tests {
             id: "audit-1".into(),
             binding: binding(),
             payload_json: "{\"result\":\"ok\"}".into(),
+            collected_at_ms: None,
+            source_sequence: None,
         };
         enqueue_optional_event(&store, "audit", &event, 100).unwrap();
         enqueue_optional_event(&store, "audit", &event, 100).unwrap();
@@ -1578,7 +1932,10 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        assert_eq!(sink.received(), vec![event]);
+        let mut collected_event = event;
+        collected_event.collected_at_ms = Some(100);
+        collected_event.source_sequence = Some(1);
+        assert_eq!(sink.received(), vec![collected_event]);
     }
 
     #[tokio::test]
@@ -1588,6 +1945,8 @@ mod tests {
             id: "shared-1".into(),
             binding: binding(),
             payload_json: "{}".into(),
+            collected_at_ms: None,
+            source_sequence: None,
         };
         enqueue_optional_event(&store, "audit", &event, 10).unwrap();
         enqueue_optional_event(&store, "outcome", &event, 10).unwrap();

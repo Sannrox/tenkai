@@ -58,6 +58,9 @@ schedules bounded exponential backoff (one second through roughly 17 minutes).
 Restarting Tenkai does not lose pending events. Adapters may receive an event
 more than once and must deduplicate by event ID. Optional lag degrades the
 integration but never changes or rolls back committed operational truth.
+The first delivery attempt binds a durable collection timestamp into the
+outbox envelope; retries reuse that timestamp so Sekai replay-window checks do
+not see a new evidence body on every attempt.
 
 Outcome workers claim only the `outcome` destination. A separate adapter cannot
 consume or acknowledge audit events accidentally. Delivery failure and timeout
@@ -109,19 +112,40 @@ binding, denial, timeout, idempotency, and retry tests as the local adapters.
 
 Reference adapter: `ChiseiOutcomeProvider` in `src/providers.rs`.
 
-The adapter maps each terminal event to the already-vendored
-`ChiseiService.RecordSampleObservation` RPC:
+The adapter maps each terminal event to Sekai's canonical
+`SekaiService.SubmitEvidence` RPC:
 
-- Tenkai event ID → `request_id` (downstream idempotency key);
+- Tenkai event ID → `source_record_id` and `idempotency_key`;
 - configured namespace → `namespace`;
-- `tenkai.terminal_outcome.v1` → `spec`;
-- the bounded payload → `output_content`; and
-- terminal state → `sample_reason`.
+- the Tenkai-owned outbox → a durable monotonic `source_sequence` per
+  outcome producer;
+- deployment ID → `target_external_id` with target kind `tenkai.deployment`;
+- `tenkai.terminal_outcome.v1` → `schema_id`;
+- the bounded payload → `content_json`, with a SHA-256 `content_digest`; and
+- the exact release, plan, configuration, and environment binding → bounded
+  evidence provenance fields.
 
-Chisei authenticates the telemetry-writer principal and enforces namespace
-membership. A `recorded=false` response, transport error, timeout, or gRPC
-failure defers the event. The adapter never calls a Tenkai mutation or recovery
-API.
+Sekai authenticates the telemetry-writer principal and enforces namespace
+membership. A result that is neither admitted nor deduplicated, transport
+error, timeout, or gRPC failure defers the event. The adapter never calls a
+Tenkai mutation or recovery API.
+
+Before enabling export, a Sekai administrator must register both of the
+following for the configured principal and namespace:
+
+- a producer capability for `source_type=outcome`, source instance
+  `<namespace>:outcome`, the configured namespace,
+  `operations.terminal_outcome`, target kind `tenkai.deployment`, internal
+  classification, and the `upsert` intent; and
+- the immutable schema `tenkai.terminal_outcome.v1@1.0.0` for evidence type
+  `operations.terminal_outcome`.
+
+The Sekai 1.0 client contract does not expose producer-capability provisioning,
+so Tenkai cannot safely bootstrap this state with the telemetry-writer
+credential. Tenkai therefore fails startup unless
+`TENKAI_OUTCOME_PROVIDER_REGISTRATION` exactly attests to the configured
+registration. This is an operator confirmation, not a remote health probe; a
+rejected submission remains a visible, retryable failure.
 
 Configure the server explicitly:
 
@@ -130,6 +154,7 @@ export TENKAI_OUTCOME_PROVIDER_URL=https://sekai.example.internal
 export TENKAI_OUTCOME_NAMESPACE=delivery-learning
 export TENKAI_OUTCOME_PROVIDER_PRINCIPAL=tenkai.outcome
 export TENKAI_OUTCOME_PROVIDER_TOKEN='inject-from-secret-store'
+export TENKAI_OUTCOME_PROVIDER_REGISTRATION='producer=tenkai.outcome;source_type=outcome;source_instance=delivery-learning:outcome;namespace=delivery-learning;evidence_type=operations.terminal_outcome;schema=tenkai.terminal_outcome.v1@1.0.0;target_kind=tenkai.deployment;classification=internal;intent=upsert'
 tenkai-server --outcome-provider chisei
 ```
 

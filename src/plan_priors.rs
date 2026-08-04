@@ -489,6 +489,8 @@ mod tests {
             id: "ev-1".into(),
             binding,
             payload_json: serde_json::to_string(&payload).unwrap(),
+            collected_at_ms: None,
+            source_sequence: None,
         };
         let priors = project_priors_from_outcome_events(&[event]).unwrap();
         assert_eq!(priors.len(), 1);
@@ -584,6 +586,8 @@ mod tests {
                 failure_count: 1,
             })
             .unwrap(),
+            collected_at_ms: None,
+            source_sequence: None,
         };
         assert!(project_priors_from_outcome_events(&[event]).is_err());
     }

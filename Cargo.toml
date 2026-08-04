@@ -63,3 +63,4 @@ protoc-bin-vendored = "3"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+tokio-stream = "0.1"

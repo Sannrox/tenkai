@@ -616,6 +616,7 @@ impl EmbeddedStore {
             refreshed_at_ms: now,
             expires_at_ms: now.saturating_add(ttl_ms),
             released_at_ms: 0,
+            site_id: String::new(),
         };
         tx.execute(
             "INSERT INTO embedded_leases(namespace,lease_key,payload) VALUES(?1,?2,?3)
@@ -709,6 +710,7 @@ impl EmbeddedStore {
             refreshed_at_ms: now,
             expires_at_ms: now.saturating_add(ttl_ms),
             released_at_ms: 0,
+            site_id: String::new(),
         };
         save_lease_in(&tx, &lease)?;
         tx.commit()?;
@@ -1199,7 +1201,10 @@ mod tests {
             .unwrap(),
             (1, 0)
         );
-        assert_eq!(sink.received(), vec![provider_event]);
+        let mut delivered_event = provider_event.clone();
+        delivered_event.collected_at_ms = Some(100);
+        delivered_event.source_sequence = Some(1);
+        assert_eq!(sink.received(), vec![delivered_event]);
 
         let mut conflicting = event;
         conflicting.payload_json = "{\"different\":true}".into();
