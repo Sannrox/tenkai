@@ -13,3 +13,4 @@
 - [0011 — Shikigami worker-pool lifecycle ownership](0011-shikigami-worker-pool-lifecycle.md)
 - [0012 — Legacy graph-action compatibility boundary](0012-legacy-graph-action-compatibility-boundary.md)
 - [0013 — Evaluation gate evidence projection](0013-evaluation-gate-evidence-projection.md)
+- [0014 — Versioned Rust client facade](0014-versioned-rust-client-facade.md)
