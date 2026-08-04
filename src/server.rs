@@ -885,23 +885,8 @@ fn terminal_outcomes_from_store(
 ) -> anyhow::Result<Vec<crate::providers::TerminalOutcomeProjection>> {
     let records =
         store.list_provider_events(crate::providers::OUTCOME_PROVIDER_KIND, environment, 128)?;
-    let mut outcomes = Vec::new();
-    for record in &records {
-        let Some(outcome) = crate::providers::project_terminal_outcome(record, crate::now_millis())
-            .map_err(anyhow::Error::from)?
-        else {
-            continue;
-        };
-        if outcome.environment_id == environment {
-            outcomes.push(outcome);
-        }
-    }
-    outcomes.sort_by(|left, right| {
-        left.observed_at
-            .cmp(&right.observed_at)
-            .then_with(|| left.event_id.cmp(&right.event_id))
-    });
-    Ok(outcomes)
+    crate::providers::project_terminal_outcomes(&records, environment, crate::now_millis())
+        .map_err(anyhow::Error::from)
 }
 
 async fn environment_status(
