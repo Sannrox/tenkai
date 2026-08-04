@@ -198,23 +198,8 @@ impl Ctx {
             environment,
             128,
         )?;
-        let mut projections = Vec::new();
-        for record in &records {
-            let Some(projection) = crate::providers::project_terminal_outcome(record, as_of)
-                .map_err(anyhow::Error::from)?
-            else {
-                continue;
-            };
-            if projection.environment_id == environment {
-                projections.push(projection);
-            }
-        }
-        projections.sort_by(|left, right| {
-            left.observed_at
-                .cmp(&right.observed_at)
-                .then_with(|| left.event_id.cmp(&right.event_id))
-        });
-        Ok(projections)
+        crate::providers::project_terminal_outcomes(&records, environment, as_of)
+            .map_err(anyhow::Error::from)
     }
 
     pub fn backup_embedded(&self, destination: impl AsRef<Path>) -> Result<()> {

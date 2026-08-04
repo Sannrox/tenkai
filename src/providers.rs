@@ -295,6 +295,31 @@ pub fn project_terminal_outcome(
     }))
 }
 
+/// Project a bounded, authenticated set of terminal outcomes for one
+/// environment. Callers own storage lookup and authorization; this helper
+/// owns provider-record validation, environment filtering, and ordering.
+pub(crate) fn project_terminal_outcomes(
+    records: &[ProviderEventRecord],
+    environment: &str,
+    as_of: i64,
+) -> Result<Vec<TerminalOutcomeProjection>, ProviderError> {
+    let mut outcomes = Vec::new();
+    for record in records {
+        let Some(outcome) = project_terminal_outcome(record, as_of)? else {
+            continue;
+        };
+        if outcome.environment_id == environment {
+            outcomes.push(outcome);
+        }
+    }
+    outcomes.sort_by(|left, right| {
+        left.observed_at
+            .cmp(&right.observed_at)
+            .then_with(|| left.event_id.cmp(&right.event_id))
+    });
+    Ok(outcomes)
+}
+
 fn legacy_terminal_outcome_event_id(
     binding: &EvidenceBinding,
     payload: &TerminalOutcomePayload,
@@ -1071,6 +1096,67 @@ mod tests {
             1_000,
         )
         .unwrap()
+    }
+
+    fn terminal_event_for(
+        environment: &str,
+        deployment_id: &str,
+        observed_at: i64,
+    ) -> ProviderEvent {
+        terminal_outcome_event(
+            deployment_id,
+            "tenkai:plan:shared",
+            "sha256:plan",
+            "tenkai:release:api@2.0.0",
+            "sha256:release",
+            "api",
+            environment,
+            &format!("tenkai:environment:{environment}"),
+            "sha256:config",
+            TerminalOutcomeState::DeploymentSucceeded,
+            observed_at,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn terminal_outcome_projections_filter_and_order_records() {
+        let first = terminal_event_for("prod", "tenkai:deployment:prod:first", 1_000);
+        let second = terminal_event_for("prod", "tenkai:deployment:prod:second", 1_000);
+        let wrong_environment = terminal_event_for("stage", "tenkai:deployment:stage:wrong", 500);
+        let generic = provider_event_record("audit", &first, 2_000).unwrap();
+        let records = [
+            provider_event_record(OUTCOME_PROVIDER_KIND, &first, 2_000).unwrap(),
+            generic,
+            provider_event_record(OUTCOME_PROVIDER_KIND, &wrong_environment, 500).unwrap(),
+            provider_event_record(OUTCOME_PROVIDER_KIND, &second, 1_000).unwrap(),
+        ];
+
+        let projections = project_terminal_outcomes(&records, "prod", 3_000).unwrap();
+        let mut expected_ids = vec![first.id.as_str(), second.id.as_str()];
+        expected_ids.sort_unstable();
+
+        assert_eq!(
+            projections
+                .iter()
+                .map(|projection| projection.event_id.as_str())
+                .collect::<Vec<_>>(),
+            expected_ids
+        );
+        assert!(
+            projections
+                .iter()
+                .all(|projection| projection.environment_id == "prod")
+        );
+    }
+
+    #[test]
+    fn terminal_outcome_projections_reject_invalid_evidence() {
+        let event = terminal_event();
+        let mut invalid = provider_event_record(OUTCOME_PROVIDER_KIND, &event, 1_000).unwrap();
+        invalid.binding_digest = "sha256:tampered".into();
+
+        assert!(project_terminal_outcomes(&[invalid], "prod", 4_000).is_err());
     }
 
     #[test]
