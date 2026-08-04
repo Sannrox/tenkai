@@ -12,7 +12,6 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use anyhow::{Context as _, Result, bail};
-use prost::Message as _;
 use sha2::{Digest as _, Sha256};
 
 use crate::client::Ctx;
@@ -20,7 +19,7 @@ use crate::maintenance::{self, Eligibility};
 use crate::manifest::{self, Manifest, ProductKind};
 use crate::model_runtime::ModelRuntimeExecutor as _;
 use crate::ontology::*;
-use crate::pb::chisei::{EvalRun, EvalSuite};
+use crate::pb::chisei::{EvaluationGateCaseResult, GetEvaluationGateEvidenceRequest};
 use crate::pb::sekai::{Lease, Link, Object};
 use crate::plan::{self, Action, Plan, PlanState, ReleasePin, Step};
 use crate::routing::RoutingConfigExecutor as _;
@@ -216,30 +215,25 @@ enum GateDecision {
     Unavailable(String),
 }
 
-fn evaluate_gate(runs: &[EvalRun], suite_id: &str, expected_cases: &[String]) -> GateDecision {
-    let Some(latest) = runs.iter().max_by_key(|run| run.timestamp) else {
-        return GateDecision::Denied(format!(
-            "gate blocked: eval suite {suite_id} has no runs — run the suite in chisei first, or use --skip-gates"
-        ));
-    };
-    if latest.results.is_empty() {
+fn evaluate_gate(
+    results: &[EvaluationGateCaseResult],
+    suite_id: &str,
+    expected_cases: &[String],
+) -> GateDecision {
+    if results.is_empty() {
         return GateDecision::Denied(format!(
             "gate blocked: latest run of eval suite {suite_id} has no case results"
         ));
     }
     let expected: std::collections::HashSet<_> = expected_cases.iter().collect();
-    let actual: std::collections::HashSet<_> = latest
-        .results
-        .iter()
-        .map(|result| &result.case_id)
-        .collect();
-    if expected.is_empty() || actual.len() != latest.results.len() || actual != expected {
+    let actual: std::collections::HashSet<_> =
+        results.iter().map(|result| &result.case_id).collect();
+    if expected.is_empty() || actual.len() != results.len() || actual != expected {
         return GateDecision::Denied(format!(
             "gate blocked: latest run of eval suite {suite_id} does not contain exactly one result for every current case"
         ));
     }
-    let failed: Vec<_> = latest
-        .results
+    let failed: Vec<_> = results
         .iter()
         .filter(|result| !result.passed)
         .map(|result| result.case_id.clone())
@@ -253,82 +247,66 @@ fn evaluate_gate(runs: &[EvalRun], suite_id: &str, expected_cases: &[String]) ->
     GateDecision::Allowed
 }
 
-/// Gate: the suite's latest eval run must exist and be fully passing.
+/// Gate: Chisei must return a server-owned, digest-bound, fully passing evidence projection.
 async fn check_eval_gate(
     ctx: &mut Ctx,
     suite_id: &str,
     release_digest: &str,
     artifact_digest: &str,
 ) -> GateDecision {
-    let suite = match ctx.eval_suite(suite_id).await {
-        Ok(Some(suite)) => suite,
-        Ok(None) => {
-            return GateDecision::Denied(format!(
-                "gate blocked: eval suite {suite_id} does not exist"
-            ));
-        }
-        Err(error) => {
-            return GateDecision::Unavailable(format!(
-                "gate unavailable: could not read eval suite {suite_id}: {error}"
-            ));
-        }
-    };
-    let expected_cases = suite
-        .cases
-        .iter()
-        .map(|case| case.id.clone())
-        .collect::<Vec<_>>();
-    let expected_ref = gate_config_ref(release_digest, artifact_digest, &suite);
-    let summaries = match ctx.eval_runs(suite_id).await {
-        Ok(runs) => runs,
-        Err(error) => {
-            return GateDecision::Unavailable(format!(
-                "gate unavailable: could not read eval suite {suite_id}: {error}"
-            ));
-        }
-    };
-    let Some(latest) = summaries
-        .iter()
-        .filter(|run| run.config_ref == expected_ref)
-        .filter(|run| run.timestamp > 0 && run.timestamp <= crate::now_millis() + 60_000)
-        .max_by(|left, right| {
-            left.timestamp
-                .cmp(&right.timestamp)
-                .then_with(|| left.id.cmp(&right.id))
+    let max_timestamp_ms = crate::now_millis().saturating_add(60_000);
+    let response = match ctx
+        .evaluation_gate_evidence(GetEvaluationGateEvidenceRequest {
+            suite_id: suite_id.into(),
+            release_digest: release_digest.into(),
+            artifact_digest: artifact_digest.into(),
+            max_timestamp_ms,
         })
-    else {
-        return GateDecision::Denied(format!(
-            "gate blocked: eval suite {suite_id} has no current run with config_ref {expected_ref}"
-        ));
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            return GateDecision::Unavailable(format!(
+                "gate unavailable: could not read evaluation gate evidence for suite {suite_id}: {error}"
+            ));
+        }
     };
-    match ctx.eval_run(&latest.id).await {
-        Ok(run) => match run {
-            Some(run)
-                if run.config_ref == expected_ref
-                    && run.timestamp == latest.timestamp
-                    && run.timestamp > 0
-                    && run.timestamp <= crate::now_millis() + 60_000 =>
+    match response.status.as_str() {
+        "suite_not_found" => GateDecision::Denied(format!(
+            "gate blocked: eval suite {suite_id} does not exist"
+        )),
+        "no_matching_run" => GateDecision::Denied(format!(
+            "gate blocked: eval suite {suite_id} has no current run bound to this release and artifact"
+        )),
+        "found" => {
+            let Some(evidence) = response.evidence else {
+                return GateDecision::Unavailable(format!(
+                    "gate unavailable: evaluation gate evidence for suite {suite_id} omitted its projection"
+                ));
+            };
+            if evidence.suite_id != suite_id
+                || evidence.release_digest != release_digest
+                || evidence.artifact_digest != artifact_digest
+                || evidence.suite_digest.is_empty()
+                || evidence.config_ref
+                    != gate_config_ref(release_digest, artifact_digest, &evidence.suite_digest)
+                || evidence.run_id.is_empty()
+                || evidence.run_timestamp <= 0
+                || evidence.run_timestamp > max_timestamp_ms
             {
-                evaluate_gate(&[run], suite_id, &expected_cases)
+                return GateDecision::Unavailable(format!(
+                    "gate unavailable: evaluation gate evidence for suite {suite_id} had an invalid binding"
+                ));
             }
-            Some(_) => GateDecision::Unavailable(format!(
-                "gate unavailable: eval run {} no longer references the current release and suite",
-                latest.id
-            )),
-            None => GateDecision::Unavailable(format!(
-                "gate unavailable: latest eval run {} disappeared",
-                latest.id
-            )),
-        },
-        Err(error) => GateDecision::Unavailable(format!(
-            "gate unavailable: could not read latest eval run {}: {error}",
-            latest.id
+            evaluate_gate(&evidence.results, suite_id, &evidence.expected_case_ids)
+        }
+        status => GateDecision::Unavailable(format!(
+            "gate unavailable: evaluation gate evidence for suite {suite_id} returned unknown status {status:?}"
         )),
     }
 }
 
-fn gate_config_ref(release_digest: &str, artifact_digest: &str, suite: &EvalSuite) -> String {
-    let suite_digest = format!("{:x}", Sha256::digest(suite.encode_to_vec()));
+fn gate_config_ref(release_digest: &str, artifact_digest: &str, suite_digest: &str) -> String {
     let mut hasher = Sha256::new();
     for value in [
         b"tenkai-gate-v1".as_slice(),
@@ -2461,7 +2439,7 @@ fn terminal_outcome_state(outcome: &Outcome) -> Option<crate::providers::Termina
 mod tests {
     use super::*;
     use crate::manifest::{DeploySection, GateSection, ProductSection};
-    use crate::pb::chisei::CaseResult;
+    use crate::pb::chisei::EvaluationGateCaseResult;
 
     fn classified_outcome(action: Action, status: &str, detail: &str) -> Outcome {
         Outcome {
@@ -2597,66 +2575,45 @@ mod tests {
 
     #[test]
     fn gate_uses_latest_run_and_reports_failed_cases() {
-        let runs = vec![
-            EvalRun {
-                timestamp: 1,
-                results: vec![CaseResult {
-                    case_id: "old".into(),
-                    passed: true,
-                    ..Default::default()
-                }],
-                ..Default::default()
+        let results = vec![
+            EvaluationGateCaseResult {
+                case_id: "old".into(),
+                passed: true,
             },
-            EvalRun {
-                timestamp: 2,
-                results: vec![CaseResult {
-                    case_id: "smoke".into(),
-                    passed: false,
-                    ..Default::default()
-                }],
-                ..Default::default()
+            EvaluationGateCaseResult {
+                case_id: "smoke".into(),
+                passed: false,
             },
         ];
-        match evaluate_gate(&runs, "suite", &["smoke".into()]) {
+        match evaluate_gate(&results, "suite", &["smoke".into(), "old".into()]) {
             GateDecision::Denied(detail) => assert!(detail.contains("smoke")),
-            _ => panic!("latest failing run must deny the gate"),
+            _ => panic!("a failing case must deny the gate"),
         }
     }
 
     #[test]
     fn gate_rejects_incomplete_or_duplicate_case_results() {
-        let run = EvalRun {
-            results: vec![
-                CaseResult {
-                    case_id: "first".into(),
-                    passed: true,
-                    ..Default::default()
-                },
-                CaseResult {
-                    case_id: "first".into(),
-                    passed: true,
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        };
+        let results = vec![
+            EvaluationGateCaseResult {
+                case_id: "first".into(),
+                passed: true,
+            },
+            EvaluationGateCaseResult {
+                case_id: "first".into(),
+                passed: true,
+            },
+        ];
         assert!(matches!(
-            evaluate_gate(&[run], "suite", &["first".into(), "second".into()]),
+            evaluate_gate(&results, "suite", &["first".into(), "second".into()]),
             GateDecision::Denied(detail) if detail.contains("exactly one result")
         ));
     }
 
     #[test]
     fn gate_reference_changes_with_artifact_or_suite_content() {
-        let mut suite = EvalSuite {
-            id: "suite".into(),
-            name: "quality".into(),
-            ..Default::default()
-        };
-        let original = gate_config_ref("manifest", "artifact-one", &suite);
-        let changed_artifact = gate_config_ref("manifest", "artifact-two", &suite);
-        suite.description = "tightened checks".into();
-        let changed_suite = gate_config_ref("manifest", "artifact-one", &suite);
+        let original = gate_config_ref("manifest", "artifact-one", "suite-digest-one");
+        let changed_artifact = gate_config_ref("manifest", "artifact-two", "suite-digest-one");
+        let changed_suite = gate_config_ref("manifest", "artifact-one", "suite-digest-two");
 
         assert_ne!(original, changed_artifact);
         assert_ne!(original, changed_suite);

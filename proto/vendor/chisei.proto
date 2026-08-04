@@ -221,49 +221,35 @@ message PlannedChatResponse {
   int32 cache_creation_input_tokens = 8;
 }
 
-message EvalAssertion {
-  string type = 1;
-  string value = 2;
+// Server-owned, bounded evidence projection for release gates. The server
+// computes the suite/config binding and selects the latest matching run; the
+// caller cannot submit evaluation truth through this query.
+message GetEvaluationGateEvidenceRequest {
+  string suite_id = 1;
+  string release_digest = 2;
+  string artifact_digest = 3;
+  int64 max_timestamp_ms = 4;
 }
-
-message EvalCase {
-  string id = 1;
-  string name = 2;
-  string namespace = 3;
-  string spec = 4;
-  repeated EvalAssertion assertions = 5;
-}
-
-message EvalSuite {
-  string id = 1;
-  string name = 2;
-  string description = 3;
-  repeated EvalCase cases = 4;
-}
-
-message CaseResult {
+message EvaluationGateCaseResult {
   string case_id = 1;
   bool passed = 2;
-  string status = 3;
-  string result = 4;
-  int32 score = 5;
-  string reason = 6;
-  int64 elapsed = 7;
 }
-
-message EvalRun {
-  string id = 1;
-  string suite_id = 2;
-  string config_ref = 3;
-  repeated CaseResult results = 4;
-  int64 timestamp = 5;
+message EvaluationGateEvidence {
+  string suite_id = 1;
+  string release_digest = 2;
+  string artifact_digest = 3;
+  string suite_digest = 4;
+  string config_ref = 5;
+  string run_id = 6;
+  int64 run_timestamp = 7;
+  repeated string expected_case_ids = 8;
+  repeated EvaluationGateCaseResult results = 9;
 }
-message GetEvalSuiteRequest { string id = 1; }
-message GetEvalSuiteResponse { EvalSuite suite = 1; }
-message GetEvalRunRequest { string id = 1; }
-message GetEvalRunResponse { EvalRun run = 1; }
-message ListEvalRunsRequest { string suite_id = 1; }
-message ListEvalRunsResponse { repeated EvalRun runs = 1; }
+message GetEvaluationGateEvidenceResponse {
+  // found | suite_not_found | no_matching_run
+  string status = 1;
+  EvaluationGateEvidence evidence = 2;
+}
 
 // Immutable, operator-controlled deterministic evaluator metadata. This
 // registers deployed implementation identity; it never uploads executable code.
@@ -1309,9 +1295,7 @@ service ChiseiService {
   rpc PutEvaluatorDefinition(PutEvaluatorDefinitionRequest) returns (PutEvaluatorDefinitionResponse);
   rpc PutEvaluationPlan(PutEvaluationPlanRequest) returns (PutEvaluationPlanResponse);
   rpc ResolveEvaluationPlan(ResolveEvaluationPlanRequest) returns (ResolveEvaluationPlanResponse);
-  rpc GetEvalSuite(GetEvalSuiteRequest) returns (GetEvalSuiteResponse);
-  rpc GetEvalRun(GetEvalRunRequest) returns (GetEvalRunResponse);
-  rpc ListEvalRuns(ListEvalRunsRequest) returns (ListEvalRunsResponse);
+  rpc GetEvaluationGateEvidence(GetEvaluationGateEvidenceRequest) returns (GetEvaluationGateEvidenceResponse);
   rpc GetSampleObservation(GetSampleObservationRequest) returns (GetSampleObservationResponse);
 
 }

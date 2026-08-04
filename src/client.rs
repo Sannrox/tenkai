@@ -11,9 +11,7 @@ use tonic::transport::{Channel, Endpoint};
 use tonic::{Request, Status};
 
 use crate::pb::chisei::chisei_service_client::ChiseiServiceClient;
-use crate::pb::chisei::{
-    EvalRun, EvalSuite, GetEvalRunRequest, GetEvalSuiteRequest, ListEvalRunsRequest,
-};
+use crate::pb::chisei::{GetEvaluationGateEvidenceRequest, GetEvaluationGateEvidenceResponse};
 use crate::pb::sekai::sekai_service_client::SekaiServiceClient;
 use crate::pb::sekai::{
     ActionRequest, ActionResult, ActionTypeDef, CreateActionTypeRequest, CreateLinkRequest,
@@ -310,52 +308,20 @@ impl Ctx {
         Ok(())
     }
 
-    pub(crate) async fn eval_suite(&mut self, id: &str) -> Result<Option<EvalSuite>> {
+    pub(crate) async fn evaluation_gate_evidence(
+        &mut self,
+        request: GetEvaluationGateEvidenceRequest,
+    ) -> Result<GetEvaluationGateEvidenceResponse> {
         if self.is_embedded() {
             anyhow::bail!(
-                "embedded mode has no governance provider; configure remote provider mode for eval suite {id}"
-            );
-        }
-        let (_, chisei) = self.remote()?;
-        match chisei
-            .get_eval_suite(GetEvalSuiteRequest { id: id.into() })
-            .await
-        {
-            Ok(response) => Ok(response.into_inner().suite),
-            Err(status) if status.code() == tonic::Code::NotFound => Ok(None),
-            Err(status) => Err(status.into()),
-        }
-    }
-
-    pub(crate) async fn eval_runs(&mut self, suite_id: &str) -> Result<Vec<EvalRun>> {
-        if self.is_embedded() {
-            anyhow::bail!(
-                "embedded mode has no governance provider; configure remote provider mode for eval suite {suite_id}"
+                "embedded mode has no governance provider; configure remote provider mode for evaluation gate evidence"
             );
         }
         let (_, chisei) = self.remote()?;
         Ok(chisei
-            .list_eval_runs(ListEvalRunsRequest {
-                suite_id: suite_id.into(),
-            })
+            .get_evaluation_gate_evidence(request)
             .await?
-            .into_inner()
-            .runs)
-    }
-
-    pub(crate) async fn eval_run(&mut self, id: &str) -> Result<Option<EvalRun>> {
-        if self.is_embedded() {
-            anyhow::bail!("embedded mode has no governance provider; cannot load eval run {id}");
-        }
-        let (_, chisei) = self.remote()?;
-        match chisei
-            .get_eval_run(GetEvalRunRequest { id: id.into() })
-            .await
-        {
-            Ok(response) => Ok(response.into_inner().run),
-            Err(status) if status.code() == tonic::Code::NotFound => Ok(None),
-            Err(status) => Err(status.into()),
-        }
+            .into_inner())
     }
 
     pub(crate) async fn acquire_lease(
@@ -1299,11 +1265,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn embedded_gate_lookup_fails_locally_without_networking() {
+    async fn embedded_gate_evidence_lookup_fails_locally_without_networking() {
         let path =
             std::env::temp_dir().join(format!("tenkai-embedded-gate-{}.db", uuid::Uuid::new_v4()));
         let mut ctx = Ctx::embedded(&path).unwrap();
-        let error = ctx.eval_suite("required-suite").await.unwrap_err();
+        let error = ctx
+            .evaluation_gate_evidence(crate::pb::chisei::GetEvaluationGateEvidenceRequest {
+                suite_id: "required-suite".into(),
+                release_digest: "release".into(),
+                artifact_digest: "artifact".into(),
+                max_timestamp_ms: 1,
+            })
+            .await
+            .unwrap_err();
         assert!(
             error
                 .to_string()
