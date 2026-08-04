@@ -20,6 +20,8 @@ use crate::runtime_capabilities::{
     Capability, CapabilityName, ComponentCapabilities, RUNTIME_CAPABILITY_CONTRACT_VERSION,
 };
 #[cfg(feature = "postgres")]
+use crate::storage::provider_event_payloads_match;
+#[cfg(feature = "postgres")]
 use crate::storage::{
     AuditRecord, ChannelRecord, LeaseRecord, OfflineImportRecord, OfflineStepImportRecord,
     OperationalStore, PlanRecord, PlanStatus, ProviderEventRecord, ReceiptRecord, ReleaseRecord,
@@ -776,6 +778,30 @@ impl OperationalStore for PostgresTenantPartition {
             limit,
             claim_token,
             claim_until,
+        )
+    }
+    fn reserve_provider_event_sequence(
+        &self,
+        provider_kind: &str,
+        id: &str,
+        claim_token: &str,
+    ) -> Result<i64> {
+        self.inner
+            .reserve_provider_event_sequence(&self.schema, provider_kind, id, claim_token)
+    }
+    fn bind_provider_event_collection_time(
+        &self,
+        provider_kind: &str,
+        id: &str,
+        claim_token: &str,
+        payload_json: &str,
+    ) -> Result<()> {
+        self.inner.bind_provider_event_collection_time(
+            &self.schema,
+            provider_kind,
+            id,
+            claim_token,
+            payload_json,
         )
     }
     fn record_provider_failure(
@@ -2536,7 +2562,7 @@ mod postgres_imp {
                     let payload: String = row.get(2);
                     if kind != event.provider_kind
                         || digest != event.binding_digest
-                        || payload != event.payload_json
+                        || !provider_event_payloads_match(&payload, &event.payload_json)
                     {
                         return Err(StoreError::ImmutableConflict {
                             kind: "provider event",
@@ -2770,6 +2796,81 @@ mod postgres_imp {
                         claim_until: row.get(9),
                     })
                     .collect())
+            })
+        }
+
+        pub fn reserve_provider_event_sequence(
+            &self,
+            schema: &str,
+            provider_kind: &str,
+            id: &str,
+            claim_token: &str,
+        ) -> Result<i64> {
+            self.with_schema(schema, |tx| {
+                let claimed: bool = tx
+                    .query_one(
+                        "SELECT EXISTS(
+                             SELECT 1 FROM provider_events
+                             WHERE provider_kind=$1 AND id=$2
+                               AND claim_token=$3 AND delivered_at IS NULL
+                         )",
+                        &[&provider_kind, &id, &claim_token],
+                    )
+                    .map_err(pg)?
+                    .get(0);
+                if !claimed {
+                    return Err(StoreError::NotFound {
+                        kind: "claimed provider event",
+                        id: id.into(),
+                    });
+                }
+                tx.execute(
+                    "INSERT INTO provider_event_sequences(provider_kind,next_sequence)
+                     VALUES($1,1) ON CONFLICT(provider_kind) DO NOTHING",
+                    &[&provider_kind],
+                )
+                .map_err(pg)?;
+                tx.execute(
+                    "UPDATE provider_event_sequences SET next_sequence=next_sequence+1
+                     WHERE provider_kind=$1",
+                    &[&provider_kind],
+                )
+                .map_err(pg)?;
+                let sequence: i64 = tx
+                    .query_one(
+                        "SELECT next_sequence-1 FROM provider_event_sequences
+                         WHERE provider_kind=$1",
+                        &[&provider_kind],
+                    )
+                    .map_err(pg)?
+                    .get(0);
+                Ok(sequence)
+            })
+        }
+
+        pub fn bind_provider_event_collection_time(
+            &self,
+            schema: &str,
+            provider_kind: &str,
+            id: &str,
+            claim_token: &str,
+            payload_json: &str,
+        ) -> Result<()> {
+            self.with_schema(schema, |tx| {
+                let changed = tx
+                    .execute(
+                        "UPDATE provider_events SET payload_json=$4
+                         WHERE provider_kind=$1 AND id=$2 AND claim_token=$3 AND delivered_at IS NULL",
+                        &[&provider_kind, &id, &claim_token, &payload_json],
+                    )
+                    .map_err(pg)?;
+                if changed == 0 {
+                    return Err(StoreError::NotFound {
+                        kind: "claimed provider event",
+                        id: id.into(),
+                    });
+                }
+                Ok(())
             })
         }
 
@@ -3174,6 +3275,10 @@ mod postgres_imp {
                 ON provider_events(provider_kind, environment_id, next_attempt_at, id);
             CREATE INDEX IF NOT EXISTS provider_events_environment_observed
                 ON provider_events(provider_kind, environment_id, observed_at, id);
+            CREATE TABLE IF NOT EXISTS provider_event_sequences (
+                provider_kind TEXT PRIMARY KEY,
+                next_sequence BIGINT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS audit_events (
                 id TEXT PRIMARY KEY, occurred_at BIGINT NOT NULL,
                 principal TEXT NOT NULL, operation TEXT NOT NULL,

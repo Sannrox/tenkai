@@ -16,7 +16,9 @@ use tenkai::postgres_tenant::{
     resolve_reconcile_fence_for_replicas, resolve_server_tenant_store,
     tenant_postgres_store_capabilities,
 };
-use tenkai::providers::{ChiseiOutcomeProvider, deliver_outcome_batch};
+use tenkai::providers::{
+    ChiseiOutcomeProvider, OUTCOME_PROVIDER_REGISTRATION_ENV, deliver_outcome_batch,
+};
 use tenkai::reconciler::{Config as ReconcilerConfig, Reconciler};
 use tenkai::runtime_capabilities::{
     RuntimeRequirements, community_auth_capabilities, community_sqlite_profile,
@@ -197,7 +199,8 @@ async fn main() -> Result<()> {
             anyhow::ensure!(
                 cli.outcome_namespace.is_none()
                     && std::env::var_os("TENKAI_OUTCOME_PROVIDER_URL").is_none()
-                    && std::env::var_os("TENKAI_OUTCOME_PROVIDER_TOKEN").is_none(),
+                    && std::env::var_os("TENKAI_OUTCOME_PROVIDER_TOKEN").is_none()
+                    && std::env::var_os(OUTCOME_PROVIDER_REGISTRATION_ENV).is_none(),
                 "outcome provider configuration requires --outcome-provider chisei"
             );
             None
@@ -216,9 +219,20 @@ async fn main() -> Result<()> {
             let principal = std::env::var("TENKAI_OUTCOME_PROVIDER_PRINCIPAL")
                 .unwrap_or_else(|_| "tenkai.outcome".into());
             let token = std::env::var("TENKAI_OUTCOME_PROVIDER_TOKEN").ok();
+            let registration = std::env::var(OUTCOME_PROVIDER_REGISTRATION_ENV).with_context(|| {
+                format!(
+                    "{OUTCOME_PROVIDER_REGISTRATION_ENV} is required after the Sekai producer capability and terminal-outcome schema are registered"
+                )
+            })?;
             Some(
-                ChiseiOutcomeProvider::new(endpoint, namespace, principal, token)
-                    .context("validating Chisei outcome adapter configuration")?,
+                ChiseiOutcomeProvider::new_for_export(
+                    endpoint,
+                    namespace,
+                    principal,
+                    token,
+                    registration,
+                )
+                .context("validating Chisei outcome adapter configuration")?,
             )
         }
     };

@@ -495,6 +495,25 @@ impl OperationalStore for TenantPartition {
             claim_until,
         )
     }
+    fn reserve_provider_event_sequence(
+        &self,
+        provider_kind: &str,
+        id: &str,
+        claim_token: &str,
+    ) -> Result<i64> {
+        self.store
+            .reserve_provider_event_sequence(provider_kind, id, claim_token)
+    }
+    fn bind_provider_event_collection_time(
+        &self,
+        provider_kind: &str,
+        id: &str,
+        claim_token: &str,
+        payload_json: &str,
+    ) -> Result<()> {
+        self.store
+            .bind_provider_event_collection_time(provider_kind, id, claim_token, payload_json)
+    }
     fn record_provider_failure(
         &self,
         provider_kind: &str,

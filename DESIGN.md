@@ -156,7 +156,7 @@ depends on these integrations:
 | Eval-gated promotion | `CreateEvalRun` / `GetEvalRun` / `CompareRuns` — a gate is "run suite S against candidate, compare to baseline, block on regression" |
 | Governed execution of destructive steps | `PlanExecution` / `ExecutePlan(Stream)` — tenkai plan steps map onto governed actions (PR #57) |
 | Cost-aware rollout (esp. model rollouts) | `CheckBudget` / `RecordUsage` |
-| Learning from deployment outcomes | `RecordSampleObservation`, evolve/pattern APIs — mine failure patterns across the fleet |
+| Learning from deployment outcomes | Sekai `SubmitEvidence` terminal-outcome envelopes and evolve/pattern APIs — mine failure patterns across the fleet |
 | AI-assisted ops (plan explanation, incident triage, release notes) | `LlmService.Chat` through the governed gateway |
 
 ### Trust model

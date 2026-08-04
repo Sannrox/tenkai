@@ -364,6 +364,22 @@ pub trait OperationalStore: Send + Sync {
         claim_token: &str,
         claim_until: i64,
     ) -> Result<Vec<ProviderEventRecord>>;
+    /// Reserve a producer sequence under the event's claim fence.
+    fn reserve_provider_event_sequence(
+        &self,
+        provider_kind: &str,
+        id: &str,
+        claim_token: &str,
+    ) -> Result<i64>;
+    /// Bind the first delivery timestamp into the durable event envelope.
+    /// The claim token fences this write so retries retain the same timestamp.
+    fn bind_provider_event_collection_time(
+        &self,
+        provider_kind: &str,
+        id: &str,
+        claim_token: &str,
+        payload_json: &str,
+    ) -> Result<()>;
     fn record_provider_failure(
         &self,
         provider_kind: &str,
@@ -761,12 +777,23 @@ fn migrate(connection: &mut Connection) -> Result<()> {
         tx.commit()?;
     }
     ensure_provider_event_environment_column(connection)?;
+    ensure_provider_event_sequence_table(connection)?;
     let current: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if current < SCHEMA_VERSION {
         let tx = connection.transaction()?;
         tx.execute_batch("PRAGMA user_version = 10;")?;
         tx.commit()?;
     }
+    Ok(())
+}
+
+fn ensure_provider_event_sequence_table(connection: &Connection) -> Result<()> {
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS provider_event_sequences (
+             provider_kind TEXT PRIMARY KEY,
+             next_sequence INTEGER NOT NULL
+         );",
+    )?;
     Ok(())
 }
 
@@ -1100,12 +1127,9 @@ pub(crate) fn enqueue_provider_event_in(
         )
         .optional()?;
     if let Some(existing) = existing {
-        if existing
-            != (
-                event.provider_kind.clone(),
-                event.binding_digest.clone(),
-                event.payload_json.clone(),
-            )
+        if existing.0 != event.provider_kind
+            || existing.1 != event.binding_digest
+            || !provider_event_payloads_match(&existing.2, &event.payload_json)
         {
             return Err(StoreError::ImmutableConflict {
                 kind: "provider event",
@@ -1124,6 +1148,43 @@ pub(crate) fn enqueue_provider_event_in(
             event.claim_token, event.claim_until, environment_id, observed_at],
     )?;
     Ok(())
+}
+
+/// A first-delivery collection timestamp is the only field allowed to be
+/// added to a durable provider envelope after enqueue. Preserve enqueue
+/// idempotency when the same event is submitted again after that binding.
+pub(crate) fn provider_event_payloads_match(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    let Ok(mut left) = serde_json::from_str::<serde_json::Value>(left) else {
+        return false;
+    };
+    let Ok(mut right) = serde_json::from_str::<serde_json::Value>(right) else {
+        return false;
+    };
+    let (Some(left), Some(right)) = (left.as_object_mut(), right.as_object_mut()) else {
+        return false;
+    };
+    let metadata = |object: &serde_json::Map<String, serde_json::Value>| {
+        ["collected_at_ms", "source_sequence"]
+            .map(|key| object.get(key).filter(|value| !value.is_null()).cloned())
+    };
+    let left_metadata = metadata(left);
+    let right_metadata = metadata(right);
+    if left_metadata == right_metadata
+        || !((left_metadata.iter().all(Option::is_none)
+            && right_metadata.iter().all(Option::is_some))
+            || (right_metadata.iter().all(Option::is_none)
+                && left_metadata.iter().all(Option::is_some)))
+    {
+        return false;
+    }
+    left.remove("collected_at_ms");
+    left.remove("source_sequence");
+    right.remove("collected_at_ms");
+    right.remove("source_sequence");
+    left == right
 }
 
 impl OperationalStore for SqliteStore {
@@ -2204,6 +2265,69 @@ impl OperationalStore for SqliteStore {
         drop(statement);
         tx.commit()?;
         claimed
+    }
+
+    fn reserve_provider_event_sequence(
+        &self,
+        provider_kind: &str,
+        id: &str,
+        claim_token: &str,
+    ) -> Result<i64> {
+        let mut connection = self.connection()?;
+        let tx = connection.transaction()?;
+        let claimed: bool = tx.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM provider_events
+                 WHERE provider_kind=?1 AND id=?2 AND claim_token=?3 AND delivered_at IS NULL
+             )",
+            params![provider_kind, id, claim_token],
+            |row| row.get(0),
+        )?;
+        if !claimed {
+            return Err(StoreError::NotFound {
+                kind: "claimed provider event",
+                id: id.into(),
+            });
+        }
+        tx.execute(
+            "INSERT INTO provider_event_sequences(provider_kind,next_sequence)
+             VALUES(?1,1) ON CONFLICT(provider_kind) DO NOTHING",
+            [provider_kind],
+        )?;
+        tx.execute(
+            "UPDATE provider_event_sequences SET next_sequence=next_sequence+1
+             WHERE provider_kind=?1",
+            [provider_kind],
+        )?;
+        let sequence: i64 = tx.query_row(
+            "SELECT next_sequence-1 FROM provider_event_sequences WHERE provider_kind=?1",
+            [provider_kind],
+            |row| row.get(0),
+        )?;
+        tx.commit()?;
+        Ok(sequence)
+    }
+
+    fn bind_provider_event_collection_time(
+        &self,
+        provider_kind: &str,
+        id: &str,
+        claim_token: &str,
+        payload_json: &str,
+    ) -> Result<()> {
+        let connection = self.connection()?;
+        let changed = connection.execute(
+            "UPDATE provider_events SET payload_json=?4
+             WHERE provider_kind=?1 AND id=?2 AND claim_token=?3 AND delivered_at IS NULL",
+            params![provider_kind, id, claim_token, payload_json],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound {
+                kind: "claimed provider event",
+                id: id.into(),
+            });
+        }
+        Ok(())
     }
 
     fn record_provider_failure(

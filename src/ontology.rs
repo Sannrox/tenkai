@@ -142,6 +142,7 @@ fn configure_maintenance_action() -> ActionTypeDef {
         ],
         target_kind: KIND_MAINTENANCE_CONFIG.into(),
         created: crate::now_millis(),
+        required_purpose: String::new(),
     }
 }
 
@@ -475,6 +476,7 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
             }],
             target_kind: KIND_ENVIRONMENT.into(),
             created: crate::now_millis(),
+            required_purpose: String::new(),
         },
         configure_maintenance_action(),
         ActionTypeDef {
@@ -497,6 +499,7 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
             ],
             target_kind: KIND_PLAN.into(),
             created: crate::now_millis(),
+            required_purpose: String::new(),
         },
         ActionTypeDef {
             name: ACTION_REPLACE_SUBSCRIPTION.into(),
@@ -519,6 +522,7 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
             ],
             target_kind: KIND_ENVIRONMENT.into(),
             created: crate::now_millis(),
+            required_purpose: String::new(),
         },
     ];
     for action in actions {
