@@ -31,6 +31,16 @@ for shaping, delivering, verifying, assessing, documenting, and releasing work.
 - `cargo build --all-targets` verifies all binaries and test targets compile.
 - `cargo clippy --all-targets --all-features -- -D warnings` runs strict
   linting when Clippy is available.
+- `make test` runs the default test suite.
+- `make validate` runs formatting, lint, shell, and diff checks.
+- `make test-integration` runs all checked-in integration-test targets.
+- `make update` formats Rust and refreshes build-generated protobuf bindings
+  without changing the locked dependency graph.
+
+The Makefile is a thin façade over `scripts/make-targets/`. Validation and
+update fan out over sorted `scripts/validate-*.sh` and `scripts/update-*.sh`
+files. `WHAT=<one test filter> make test` and the equivalent integration target
+run one explicit Cargo test filter without shell evaluation.
 - `cargo run --bin tenkaictl -- init` initializes embedded local state.
 - `cargo run --bin tenkaictl -- inspect` inspects embedded state without
   starting the server.
@@ -43,6 +53,10 @@ Use the quickstart in `README.md` for an end-to-end local deployment. Never
 weaken signing, approval, authentication, or provider requirements merely to
 make a development command pass; use the documented development-only flags and
 recorded reasons.
+
+The repository does not install or require Codex hooks. Run the four Make
+targets explicitly; external-provider tests remain opt-in and must be invoked
+with their documented prerequisites.
 
 ## Architecture and Integration Policy
 
