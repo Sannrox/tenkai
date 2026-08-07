@@ -2,6 +2,7 @@
 name = "tenkai"
 version = "0.2.0"
 edition = "2024"
+rust-version = "1.96.1"
 license = "Apache-2.0"
 readme = "README.md"
 description = "Local-first, constraint-based delivery control plane backed by sekai-chisei."

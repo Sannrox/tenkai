@@ -56,6 +56,24 @@ cargo build --bin tenkaictl
 ./target/debug/tenkaictl inspect
 ```
 
+## Repository verification
+
+The repository exposes the same deterministic checks to humans and agents:
+
+```bash
+make test
+make validate
+make test-integration
+make update
+```
+
+The four targets are explicit local commands. `make update` formats Rust and
+refreshes build-generated protobuf bindings without changing the locked
+dependency graph. The Makefile is a thin façade over `scripts/make-targets/`;
+validation and update fan out over sorted `validate-*.sh` and `update-*.sh`
+scripts. Live Kubernetes, Llama, and PostgreSQL checks remain explicit and
+documented.
+
 Publish a new version and `apply` again to upgrade. If the health probe of a
 new release fails, the previous release is restored automatically. Use
 `tenkaictl rollback <product>` to return to the previously deployed version.
