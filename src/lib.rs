@@ -10,6 +10,8 @@
 //!
 //! - [`catalog`] owns immutable release publication, promotion, and lookup.
 //! - [`plan`], [`apply`], and [`reconciler`] own convergence decisions and execution.
+//! - [`fleet`] owns pure fleet posture aggregation, drift comparison, and
+//!   baseline I/O so callers do not re-encode inspect→posture classification.
 //! - [`storage`] and [`tenant_store`] provide operational persistence adapters.
 //! - [`software_executor`], [`model_runtime`], [`routing`], and [`staged_artifact`]
 //!   adapt typed delivery products to their target runtimes.
@@ -36,6 +38,7 @@ pub mod dev_sign;
 pub mod development_fixtures;
 pub mod embedded;
 pub mod federated_identity;
+pub mod fleet;
 pub mod inventory;
 pub mod maintenance;
 pub mod manifest;

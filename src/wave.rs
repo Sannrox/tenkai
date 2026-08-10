@@ -8,7 +8,8 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::client::Ctx;
-use crate::plan::{self, FleetEnvironmentRow};
+use crate::fleet::{self, FleetEnvironmentRow};
+use crate::plan;
 
 /// How the wave behaves after an environment fails observation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,7 +132,7 @@ pub async fn run_wave_observe(ctx: &mut Ctx, spec: &WaveSpec) -> Result<WaveRepo
 
         let outcome = match plan::inspect_environment(ctx, name).await {
             Ok(report) => {
-                let row = plan::fleet_status_from_inspects(vec![report]).environments;
+                let row = fleet::fleet_status_from_inspects(vec![report]).environments;
                 let row = row
                     .into_iter()
                     .next()
@@ -265,9 +266,8 @@ pub fn format_report(report: &WaveReport) -> String {
 mod tests {
     use super::*;
     use crate::client::Ctx;
-    use crate::plan::{
-        EnvironmentInspectReport, EnvironmentSubscriptionView, fleet_status_from_inspects,
-    };
+    use crate::fleet::fleet_status_from_inspects;
+    use crate::plan::{EnvironmentInspectReport, EnvironmentSubscriptionView};
 
     fn report(
         name: &str,

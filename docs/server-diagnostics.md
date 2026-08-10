@@ -64,7 +64,7 @@ tenkaictl --target remote --server-url http://127.0.0.1:8080 fleet status
 ```
 
 HTTP: `GET /v1/fleet/status` (management bearer). Domain type:
-`plan::FleetStatusReport`. Complements `env list` / `env inspect` / per-env
+`fleet::FleetStatusReport` (also re-exported as `plan::FleetStatusReport`). Complements `env list` / `env inspect` / per-env
 `status`. Does not include reconcile tick counters (this page).
 
 ## Fleet drift watch
