@@ -136,13 +136,7 @@ impl ModelRuntimeDescriptor {
 }
 
 fn validate_artifact_digest(value: &str) -> Result<()> {
-    let Some(hex) = value.strip_prefix("sha256:") else {
-        bail!("model.artifact_digest must use sha256:<hex> form");
-    };
-    if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
-        bail!("model.artifact_digest must be sha256: followed by 64 hex characters");
-    }
-    Ok(())
+    crate::signature_verification::validate_prefixed_digest("model.artifact_digest", value)
 }
 
 fn artifact_digest_hex(value: &str) -> Result<&str> {

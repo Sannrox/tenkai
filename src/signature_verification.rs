@@ -1,9 +1,58 @@
-//! Shared Ed25519 verification mechanics for Tenkai's signed formats.
+//! Shared signed-format primitives for Tenkai's content-bound evidence.
+//!
+//! This module is the deep seam for encoding and Ed25519 mechanics used by
+//! release signatures, plan approvals, offline bundles, and provenance
+//! envelopes. Domain modules keep statement shapes, domain tags, and policy
+//! rules; they must not re-encode length-prefixing, digest grammar, key-id
+//! derivation, or strict signature verification.
 
 use anyhow::{Context as _, Result, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ed25519_dalek::{Signature, VerifyingKey};
 use sha2::{Digest as _, Sha256};
+
+/// Append a big-endian u64 length prefix and the raw bytes that follow.
+///
+/// Every content-bound Tenkai signature domain uses this framing so signed
+/// bytes stay independent of JSON/TOML serializers.
+pub(crate) fn push_len_prefixed(output: &mut Vec<u8>, value: &[u8]) {
+    output.extend_from_slice(&(value.len() as u64).to_be_bytes());
+    output.extend_from_slice(value);
+}
+
+/// Accept exactly 64 lowercase hexadecimal characters (bare sha256 hex).
+pub(crate) fn validate_hex_digest(label: &str, value: &str) -> Result<()> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("{label} must be a 64-character hexadecimal sha256 digest");
+    }
+    if value.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        bail!("{label} must use lowercase hexadecimal");
+    }
+    Ok(())
+}
+
+/// Accept `sha256:` followed by 64 lowercase hexadecimal characters.
+pub(crate) fn validate_prefixed_digest(label: &str, value: &str) -> Result<()> {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        bail!("{label} must use sha256:<hex>");
+    };
+    if hex.len() != 64
+        || !hex
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        bail!("{label} must contain 64 lowercase hexadecimal characters");
+    }
+    Ok(())
+}
+
+/// Accept a content-bound key id in `sha256:<hex>` form.
+pub(crate) fn validate_key_id(label: &str, value: &str) -> Result<()> {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        bail!("{label} must use the sha256:<hex> format");
+    };
+    validate_hex_digest(label, hex)
+}
 
 pub(crate) fn key_id(public_key: &[u8; 32]) -> String {
     format!("sha256:{:x}", Sha256::digest(public_key))
@@ -88,5 +137,32 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn length_prefix_framing_is_stable() {
+        let mut out = Vec::new();
+        push_len_prefixed(&mut out, b"ab");
+        assert_eq!(out[..8], 2u64.to_be_bytes());
+        assert_eq!(&out[8..], b"ab");
+        push_len_prefixed(&mut out, b"");
+        assert_eq!(&out[10..], &0u64.to_be_bytes());
+    }
+
+    #[test]
+    fn digest_forms_reject_case_and_prefix_drift() {
+        let hex = "a".repeat(64);
+        validate_hex_digest("bare", &hex).unwrap();
+        assert!(validate_hex_digest("bare", &hex.to_uppercase()).is_err());
+        assert!(validate_hex_digest("bare", &format!("sha256:{hex}")).is_err());
+
+        validate_prefixed_digest("pref", &format!("sha256:{hex}")).unwrap();
+        assert!(validate_prefixed_digest("pref", &hex).is_err());
+        assert!(
+            validate_prefixed_digest("pref", &format!("sha256:{}", hex.to_uppercase())).is_err()
+        );
+
+        validate_key_id("key", &format!("sha256:{hex}")).unwrap();
+        assert!(validate_key_id("key", &hex).is_err());
     }
 }

@@ -121,16 +121,6 @@ fn validate_schema_id(label: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_digest(label: &str, value: &str) -> Result<()> {
-    let Some(hex) = value.strip_prefix("sha256:") else {
-        bail!("{label} must be a sha256 digest");
-    };
-    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        bail!("{label} must contain exactly 64 hexadecimal digits");
-    }
-    Ok(())
-}
-
 impl ProvenanceEnvelope {
     pub fn load(path: &Path) -> Result<Self> {
         let file = std::fs::File::open(path)?;
@@ -190,14 +180,23 @@ impl ProvenanceEnvelope {
     fn validate_stored_structure(&self) -> Result<()> {
         validate_schema_id("release provenance profile", &self.profile)?;
         validate_text("release provenance issuer", &self.issuer)?;
-        validate_digest("release provenance issuer_key_id", &self.issuer_key_id)?;
+        crate::signature_verification::validate_key_id(
+            "release provenance issuer_key_id",
+            &self.issuer_key_id,
+        )?;
         validate_text("release provenance subject", &self.subject)?;
-        validate_digest("release provenance content_digest", &self.content_digest)?;
+        crate::signature_verification::validate_prefixed_digest(
+            "release provenance content_digest",
+            &self.content_digest,
+        )?;
         if self.decision != "allow" {
             bail!("release provenance decision must be allow");
         }
         validate_schema_id("release provenance receipt_schema", &self.receipt_schema)?;
-        validate_digest("release provenance receipt_digest", &self.receipt_digest)?;
+        crate::signature_verification::validate_prefixed_digest(
+            "release provenance receipt_digest",
+            &self.receipt_digest,
+        )?;
         if self.governed_references.len() > MAX_REFERENCES {
             bail!("release provenance has too many governed references");
         }
@@ -205,7 +204,10 @@ impl ProvenanceEnvelope {
         for reference in &self.governed_references {
             validate_schema_id("release provenance reference kind", &reference.kind)?;
             validate_text("release provenance reference id", &reference.id)?;
-            validate_digest("release provenance reference digest", &reference.digest)?;
+            crate::signature_verification::validate_prefixed_digest(
+                "release provenance reference digest",
+                &reference.digest,
+            )?;
             let current = (reference.kind.as_str(), reference.id.as_str());
             if previous.is_some_and(|value| value >= current) {
                 bail!("release provenance references must be unique and canonically sorted");
@@ -242,13 +244,19 @@ impl ProvenanceEnvelope {
             &self.receipt_schema,
             &self.receipt_digest,
         ] {
-            push_bytes(&mut output, value.as_bytes());
+            crate::signature_verification::push_len_prefixed(&mut output, value.as_bytes());
         }
         output.extend_from_slice(&(self.governed_references.len() as u64).to_be_bytes());
         for reference in &self.governed_references {
-            push_bytes(&mut output, reference.kind.as_bytes());
-            push_bytes(&mut output, reference.id.as_bytes());
-            push_bytes(&mut output, reference.digest.as_bytes());
+            crate::signature_verification::push_len_prefixed(
+                &mut output,
+                reference.kind.as_bytes(),
+            );
+            crate::signature_verification::push_len_prefixed(&mut output, reference.id.as_bytes());
+            crate::signature_verification::push_len_prefixed(
+                &mut output,
+                reference.digest.as_bytes(),
+            );
         }
         output.extend_from_slice(&self.observed_at_unix_ms.to_be_bytes());
         output.extend_from_slice(&self.expires_at_unix_ms.to_be_bytes());
@@ -257,32 +265,23 @@ impl ProvenanceEnvelope {
 
     pub fn digest(&self) -> Result<String> {
         let mut canonical = self.signed_bytes()?;
-        push_bytes(&mut canonical, self.signature.as_bytes());
+        crate::signature_verification::push_len_prefixed(&mut canonical, self.signature.as_bytes());
         Ok(format!("sha256:{:x}", Sha256::digest(canonical)))
     }
 
     pub fn verify_issuer(&self, roots: &TrustRoots) -> Result<()> {
         roots.validate()?;
-        let signer = roots
-            .signers
-            .iter()
-            .find(|signer| signer.key_id == self.issuer_key_id)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "release provenance issuer key {} is not trusted",
-                    self.issuer_key_id
-                )
-            })?;
+        let signer = roots.resolve(&self.issuer_key_id).map_err(|_| {
+            anyhow::anyhow!(
+                "release provenance issuer key {} is not trusted",
+                self.issuer_key_id
+            )
+        })?;
         if signer.identity != self.issuer {
             bail!("release provenance issuer does not match its trusted key identity");
         }
-        let verifying_key = crate::signature_verification::trusted_key(
-            "trusted provenance public key",
-            &signer.public_key,
-            &signer.key_id,
-        )?;
         crate::signature_verification::verify_strict(
-            &verifying_key,
+            &signer.verifying_key,
             "release provenance issuer signature",
             &self.signature,
             &self.signed_bytes()?,
@@ -308,7 +307,7 @@ impl ProvenanceEnvelope {
     pub fn stored_digest(&self) -> Result<String> {
         self.validate_stored_structure()?;
         let mut canonical = self.canonical_signed_bytes();
-        push_bytes(&mut canonical, self.signature.as_bytes());
+        crate::signature_verification::push_len_prefixed(&mut canonical, self.signature.as_bytes());
         Ok(format!("sha256:{:x}", Sha256::digest(canonical)))
     }
 
@@ -328,11 +327,6 @@ impl ProvenanceEnvelope {
             expires_at_unix_ms: self.expires_at_unix_ms,
         })
     }
-}
-
-fn push_bytes(output: &mut Vec<u8>, value: &[u8]) {
-    output.extend_from_slice(&(value.len() as u64).to_be_bytes());
-    output.extend_from_slice(value);
 }
 
 pub fn load_all(
@@ -372,17 +366,11 @@ pub fn load_all(
 }
 
 pub fn release_content_digest(manifest_digest: &str, artifact_digest: &str) -> Result<String> {
-    for (label, digest) in [
-        ("manifest digest", manifest_digest),
-        ("artifact digest", artifact_digest),
-    ] {
-        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            bail!("{label} must contain exactly 64 hexadecimal digits");
-        }
-    }
+    crate::signature_verification::validate_hex_digest("manifest digest", manifest_digest)?;
+    crate::signature_verification::validate_hex_digest("artifact digest", artifact_digest)?;
     let mut canonical = b"TENKAI-RELEASE-PROVENANCE-CONTENT-V1\0".to_vec();
-    push_bytes(&mut canonical, manifest_digest.as_bytes());
-    push_bytes(&mut canonical, artifact_digest.as_bytes());
+    crate::signature_verification::push_len_prefixed(&mut canonical, manifest_digest.as_bytes());
+    crate::signature_verification::push_len_prefixed(&mut canonical, artifact_digest.as_bytes());
     Ok(format!("sha256:{:x}", Sha256::digest(canonical)))
 }
 
