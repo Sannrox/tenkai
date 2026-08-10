@@ -123,11 +123,6 @@ pub struct ReceiptTrustScope {
     pub key_id: String,
 }
 
-fn push_bytes(output: &mut Vec<u8>, value: &[u8]) {
-    output.extend_from_slice(&(value.len() as u64).to_be_bytes());
-    output.extend_from_slice(value);
-}
-
 fn validate_text(name: &str, value: &str, max: usize) -> Result<()> {
     if value.is_empty()
         || value != value.trim()
@@ -136,20 +131,6 @@ fn validate_text(name: &str, value: &str, max: usize) -> Result<()> {
         || value.chars().any(char::is_control)
     {
         bail!("{name} is empty, non-canonical, contains control characters, or is too long");
-    }
-    Ok(())
-}
-
-fn validate_digest(name: &str, value: &str) -> Result<()> {
-    let Some(hex) = value.strip_prefix("sha256:") else {
-        bail!("{name} must use sha256:<hex>");
-    };
-    if hex.len() != 64
-        || !hex
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-    {
-        bail!("{name} must contain 64 lowercase hexadecimal characters");
     }
     Ok(())
 }
@@ -172,24 +153,6 @@ fn signing_key_id(key: &SigningKey) -> String {
     crate::signature_verification::key_id(&key.verifying_key().to_bytes())
 }
 
-fn verifying_key(
-    roots: &TrustRoots,
-    key_id: &str,
-) -> Result<(String, ed25519_dalek::VerifyingKey)> {
-    roots.validate()?;
-    let signer = roots
-        .signers
-        .iter()
-        .find(|signer| signer.key_id == key_id)
-        .with_context(|| format!("offline signer {key_id} is not currently trusted"))?;
-    let key = crate::signature_verification::trusted_key(
-        "offline signer public key",
-        &signer.public_key,
-        &signer.key_id,
-    )?;
-    Ok((signer.identity.clone(), key))
-}
-
 impl BundleStatement {
     pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
         self.validate()?;
@@ -202,13 +165,13 @@ impl BundleStatement {
             self.approval_digest.as_bytes(),
             self.exporter_identity.as_bytes(),
         ] {
-            push_bytes(&mut output, value);
+            crate::signature_verification::push_len_prefixed(&mut output, value);
         }
         output.extend_from_slice(&self.issued_at_unix_ms.to_be_bytes());
         output.extend_from_slice(&self.expires_at_unix_ms.to_be_bytes());
         output.extend_from_slice(&(self.release_ids.len() as u64).to_be_bytes());
         for release in &self.release_ids {
-            push_bytes(&mut output, release.as_bytes());
+            crate::signature_verification::push_len_prefixed(&mut output, release.as_bytes());
         }
         output.extend_from_slice(&(self.entries.len() as u64).to_be_bytes());
         for entry in &self.entries {
@@ -217,7 +180,7 @@ impl BundleStatement {
                 entry.media_type.as_bytes(),
                 entry.digest.as_bytes(),
             ] {
-                push_bytes(&mut output, value);
+                crate::signature_verification::push_len_prefixed(&mut output, value);
             }
             output.extend_from_slice(&entry.size.to_be_bytes());
         }
@@ -233,8 +196,11 @@ impl BundleStatement {
         ] {
             validate_text(name, value, 256)?;
         }
-        validate_digest("plan digest", &self.plan_digest)?;
-        validate_digest("approval digest", &self.approval_digest)?;
+        crate::signature_verification::validate_prefixed_digest("plan digest", &self.plan_digest)?;
+        crate::signature_verification::validate_prefixed_digest(
+            "approval digest",
+            &self.approval_digest,
+        )?;
         if self.issued_at_unix_ms <= 0 || self.expires_at_unix_ms <= self.issued_at_unix_ms {
             bail!("bundle validity interval is invalid");
         }
@@ -260,7 +226,7 @@ impl BundleStatement {
         for entry in &self.entries {
             validate_path(&entry.path)?;
             validate_text("entry media type", &entry.media_type, 128)?;
-            validate_digest("entry digest", &entry.digest)?;
+            crate::signature_verification::validate_prefixed_digest("entry digest", &entry.digest)?;
             if entry.size > MAX_ENTRY_BYTES {
                 bail!("bundle entry {} exceeds the byte limit", entry.path);
             }
@@ -385,12 +351,13 @@ impl BundleEnvelope {
         {
             bail!("offline bundle is outside its validity interval");
         }
-        let (identity, key) = verifying_key(roots, &self.key_id)?;
-        if self.statement.exporter_identity != identity {
+        roots.validate()?;
+        let signer = roots.resolve(&self.key_id)?;
+        if self.statement.exporter_identity != signer.identity {
             bail!("bundle exporter identity does not match its trusted signing identity");
         }
         crate::signature_verification::verify_strict(
-            &key,
+            &signer.verifying_key,
             "offline bundle signature",
             &self.signature,
             &self.statement.canonical_bytes()?,
@@ -448,7 +415,7 @@ impl BundleEnvelope {
         }
         Ok(VerifiedBundle {
             digest: self.statement.digest()?,
-            signer_identity: identity,
+            signer_identity: signer.identity,
             statement: self.statement.clone(),
             entries,
         })
@@ -485,11 +452,11 @@ impl ReceiptStatement {
             self.plan_id.as_bytes(),
             self.plan_digest.as_bytes(),
         ] {
-            push_bytes(&mut output, value);
+            crate::signature_verification::push_len_prefixed(&mut output, value);
         }
         output.extend_from_slice(&self.generation.to_be_bytes());
         output.push(u8::from(self.succeeded));
-        push_bytes(&mut output, self.detail.as_bytes());
+        crate::signature_verification::push_len_prefixed(&mut output, self.detail.as_bytes());
         output.extend_from_slice(&self.completed_at_unix_ms.to_be_bytes());
         output.extend_from_slice(&(self.receipts.len() as u64).to_be_bytes());
         for receipt in &self.receipts {
@@ -498,7 +465,7 @@ impl ReceiptStatement {
                 receipt.step_id.as_bytes(),
                 receipt.result_digest.as_bytes(),
             ] {
-                push_bytes(&mut output, value);
+                crate::signature_verification::push_len_prefixed(&mut output, value);
             }
             output.extend_from_slice(&receipt.attempt.to_be_bytes());
             output.push(u8::from(receipt.succeeded));
@@ -507,8 +474,11 @@ impl ReceiptStatement {
     }
 
     fn validate(&self) -> Result<()> {
-        validate_digest("bundle digest", &self.bundle_digest)?;
-        validate_digest("plan digest", &self.plan_digest)?;
+        crate::signature_verification::validate_prefixed_digest(
+            "bundle digest",
+            &self.bundle_digest,
+        )?;
+        crate::signature_verification::validate_prefixed_digest("plan digest", &self.plan_digest)?;
         for (name, value) in [
             ("tenant identity", self.tenant_id.as_str()),
             ("environment identity", self.environment_id.as_str()),
@@ -526,7 +496,10 @@ impl ReceiptStatement {
         for receipt in &self.receipts {
             validate_text("receipt identity", &receipt.receipt_id, 256)?;
             validate_text("receipt step identity", &receipt.step_id, 256)?;
-            validate_digest("receipt result digest", &receipt.result_digest)?;
+            crate::signature_verification::validate_prefixed_digest(
+                "receipt result digest",
+                &receipt.result_digest,
+            )?;
             if receipt.attempt == 0
                 || receipt.receipt_id
                     != offline_receipt_id(
@@ -591,15 +564,16 @@ impl ReceiptEnvelope {
         {
             bail!("offline receipt completion time is invalid");
         }
-        let (identity, key) = verifying_key(roots, &self.key_id)?;
+        roots.validate()?;
+        let signer = roots.resolve(&self.key_id)?;
         crate::signature_verification::verify_strict(
-            &key,
+            &signer.verifying_key,
             "offline receipt signature",
             &self.signature,
             &self.statement.canonical_bytes()?,
         )?;
         Ok(VerifiedReceipt {
-            signer_identity: identity,
+            signer_identity: signer.identity,
             statement: self.statement.clone(),
         })
     }

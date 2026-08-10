@@ -92,9 +92,15 @@ impl SignatureEnvelope {
                 self.schema
             );
         }
-        validate_key_id(&self.key_id)?;
-        validate_digest("manifest_digest", &self.statement.manifest_digest)?;
-        validate_digest("artifact_digest", &self.statement.artifact_digest)?;
+        crate::signature_verification::validate_key_id("release signer key id", &self.key_id)?;
+        crate::signature_verification::validate_hex_digest(
+            "manifest_digest",
+            &self.statement.manifest_digest,
+        )?;
+        crate::signature_verification::validate_hex_digest(
+            "artifact_digest",
+            &self.statement.artifact_digest,
+        )?;
         self.statement.provenance.validate()?;
         crate::signature_verification::decode_exact::<64>("signature", &self.signature)?;
         Ok(())
@@ -103,23 +109,33 @@ impl SignatureEnvelope {
     /// Canonical signed bytes use a versioned, length-prefixed binary encoding
     /// independent of the JSON serializer used for the detached envelope.
     pub fn signed_bytes(&self) -> Result<Vec<u8>> {
-        fn push_bytes(output: &mut Vec<u8>, bytes: &[u8]) {
-            output.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
-            output.extend_from_slice(bytes);
-        }
-
         let statement = &self.statement;
         let mut output = b"TENKAI-RELEASE-SIGNATURE-V1\0".to_vec();
-        push_bytes(&mut output, statement.manifest_digest.as_bytes());
-        push_bytes(&mut output, statement.artifact_digest.as_bytes());
-        push_bytes(&mut output, statement.provenance.source_uri.as_bytes());
-        push_bytes(&mut output, statement.provenance.revision.as_bytes());
-        push_bytes(&mut output, statement.provenance.builder.as_bytes());
+        crate::signature_verification::push_len_prefixed(
+            &mut output,
+            statement.manifest_digest.as_bytes(),
+        );
+        crate::signature_verification::push_len_prefixed(
+            &mut output,
+            statement.artifact_digest.as_bytes(),
+        );
+        crate::signature_verification::push_len_prefixed(
+            &mut output,
+            statement.provenance.source_uri.as_bytes(),
+        );
+        crate::signature_verification::push_len_prefixed(
+            &mut output,
+            statement.provenance.revision.as_bytes(),
+        );
+        crate::signature_verification::push_len_prefixed(
+            &mut output,
+            statement.provenance.builder.as_bytes(),
+        );
         output.extend_from_slice(&statement.provenance.built_at_unix_ms.to_be_bytes());
         output.extend_from_slice(&(statement.provenance.materials.len() as u64).to_be_bytes());
         for (uri, digest) in &statement.provenance.materials {
-            push_bytes(&mut output, uri.as_bytes());
-            push_bytes(&mut output, digest.as_bytes());
+            crate::signature_verification::push_len_prefixed(&mut output, uri.as_bytes());
+            crate::signature_verification::push_len_prefixed(&mut output, digest.as_bytes());
         }
         Ok(output)
     }
@@ -185,7 +201,10 @@ impl Provenance {
         }
         for (uri, digest) in &self.materials {
             validate_canonical_url("provenance material URL", uri)?;
-            validate_digest("provenance material digest", digest)?;
+            crate::signature_verification::validate_hex_digest(
+                "provenance material digest",
+                digest,
+            )?;
         }
         Ok(())
     }
@@ -214,7 +233,10 @@ impl TrustRoots {
         let mut key_ids = std::collections::BTreeSet::new();
         let mut identities = std::collections::BTreeSet::new();
         for signer in &self.signers {
-            validate_key_id(&signer.key_id)?;
+            crate::signature_verification::validate_key_id(
+                "release signer key id",
+                &signer.key_id,
+            )?;
             validate_text("trusted signer identity", &signer.identity, 256)?;
             if !key_ids.insert(&signer.key_id) {
                 bail!(
@@ -245,7 +267,7 @@ impl TrustRoots {
             .collect();
         let signer = signers
             .get(key_id)
-            .with_context(|| format!("release signer {key_id} is not trusted"))?;
+            .with_context(|| format!("signer {key_id} is not trusted"))?;
         Ok(ResolvedSigner {
             identity: signer.identity.clone(),
             key_id: signer.key_id.clone(),
@@ -260,23 +282,6 @@ impl TrustRoots {
 
 pub fn key_id(public_key: &[u8; 32]) -> String {
     crate::signature_verification::key_id(public_key)
-}
-
-fn validate_key_id(value: &str) -> Result<()> {
-    let Some(digest) = value.strip_prefix("sha256:") else {
-        bail!("release signer key id must use the sha256:<hex> format");
-    };
-    validate_digest("release signer key id", digest)
-}
-
-fn validate_digest(label: &str, value: &str) -> Result<()> {
-    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        bail!("{label} must be a 64-character hexadecimal sha256 digest");
-    }
-    if value.bytes().any(|byte| byte.is_ascii_uppercase()) {
-        bail!("{label} must use lowercase hexadecimal");
-    }
-    Ok(())
 }
 
 fn validate_text(label: &str, value: &str, max_len: usize) -> Result<()> {

@@ -71,11 +71,6 @@ pub struct VerificationEvidence {
     pub bypass_reason: Option<String>,
 }
 
-fn push_bytes(output: &mut Vec<u8>, value: &[u8]) {
-    output.extend_from_slice(&(value.len() as u64).to_be_bytes());
-    output.extend_from_slice(value);
-}
-
 pub fn canonical_bytes(statement: &ApprovalStatement) -> Result<Vec<u8>> {
     validate_statement(statement)?;
     let mut bytes = APPROVAL_DOMAIN.to_vec();
@@ -84,7 +79,7 @@ pub fn canonical_bytes(statement: &ApprovalStatement) -> Result<Vec<u8>> {
         statement.environment.as_bytes(),
         statement.purpose.as_bytes(),
     ] {
-        push_bytes(&mut bytes, value);
+        crate::signature_verification::push_len_prefixed(&mut bytes, value);
     }
     bytes.extend_from_slice(&statement.issued_at.to_be_bytes());
     bytes.extend_from_slice(&statement.expires_at.to_be_bytes());
@@ -94,7 +89,7 @@ pub fn canonical_bytes(statement: &ApprovalStatement) -> Result<Vec<u8>> {
         statement.policy_evidence_id.as_bytes(),
         statement.policy_digest.as_bytes(),
     ] {
-        push_bytes(&mut bytes, value);
+        crate::signature_verification::push_len_prefixed(&mut bytes, value);
     }
     Ok(bytes)
 }
@@ -107,22 +102,8 @@ fn validate_text(name: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_digest(name: &str, value: &str) -> Result<()> {
-    let Some(hex) = value.strip_prefix("sha256:") else {
-        bail!("{name} must use sha256:<hex>");
-    };
-    if hex.len() != 64
-        || !hex
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-    {
-        bail!("{name} must contain 64 lowercase hexadecimal characters");
-    }
-    Ok(())
-}
-
 fn validate_statement(statement: &ApprovalStatement) -> Result<()> {
-    validate_digest("plan digest", &statement.plan_digest)?;
+    crate::signature_verification::validate_prefixed_digest("plan digest", &statement.plan_digest)?;
     validate_text("environment", &statement.environment)?;
     if statement.purpose != PURPOSE {
         bail!("approval purpose must be {PURPOSE}");
@@ -132,7 +113,10 @@ fn validate_statement(statement: &ApprovalStatement) -> Result<()> {
     }
     validate_text("policy provider", &statement.policy_provider)?;
     validate_text("policy evidence id", &statement.policy_evidence_id)?;
-    validate_digest("policy digest", &statement.policy_digest)?;
+    crate::signature_verification::validate_prefixed_digest(
+        "policy digest",
+        &statement.policy_digest,
+    )?;
     Ok(())
 }
 
