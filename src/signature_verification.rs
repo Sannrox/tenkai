@@ -90,15 +90,30 @@ pub(crate) fn trusted_key(
     verifying_key(label, public_key)
 }
 
+/// Strict Ed25519 verification over raw signature bytes.
+///
+/// Used by JWT assertions (base64url payload + raw 64-byte signature) and by
+/// the base64 signature path below so every domain shares one fail-closed rule.
+pub(crate) fn verify_strict_bytes(
+    key: &VerifyingKey,
+    signature_label: &str,
+    signature: &[u8; 64],
+    message: &[u8],
+) -> Result<()> {
+    let signature = Signature::from_bytes(signature);
+    key.verify_strict(message, &signature)
+        .with_context(|| format!("{signature_label} verification failed"))
+}
+
+/// Strict Ed25519 verification over a standard-base64 signature string.
 pub(crate) fn verify_strict(
     key: &VerifyingKey,
     signature_label: &str,
     signature: &str,
     message: &[u8],
 ) -> Result<()> {
-    let signature = Signature::from_bytes(&decode_exact::<64>(signature_label, signature)?);
-    key.verify_strict(message, &signature)
-        .with_context(|| format!("{signature_label} verification failed"))
+    let signature = decode_exact::<64>(signature_label, signature)?;
+    verify_strict_bytes(key, signature_label, &signature, message)
 }
 
 #[cfg(test)]
@@ -119,7 +134,10 @@ mod tests {
         assert!(trusted_key("test key", &encoded_key, "sha256:wrong").is_err());
 
         let message = b"content-bound message";
-        let signature = STANDARD.encode(signing_key.sign(message).to_bytes());
+        let signature_bytes = signing_key.sign(message).to_bytes();
+        verify_strict_bytes(&key, "test signature", &signature_bytes, message).unwrap();
+        assert!(verify_strict_bytes(&key, "test signature", &signature_bytes, b"changed").is_err());
+        let signature = STANDARD.encode(signature_bytes);
         verify_strict(&key, "test signature", &signature, message).unwrap();
         assert!(verify_strict(&key, "test signature", &signature, b"changed").is_err());
     }

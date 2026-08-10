@@ -14,9 +14,8 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
-use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
+use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 
 use crate::auth_context::{
     AUTH_CONTEXT_CONTRACT_VERSION, AuthError, AuthenticatedRequestContext,
@@ -189,16 +188,19 @@ impl AssertionVerifier for JwtAssertionVerifier {
             )));
         }
         let signing_input = format!("{header_b64}.{payload_b64}");
-        let signature = Signature::from_bytes(
-            signature_raw
-                .as_slice()
-                .try_into()
-                .map_err(|_| AuthError::Unauthorized("invalid JWT signature length".into()))?,
-        );
+        let signature: [u8; 64] = signature_raw
+            .as_slice()
+            .try_into()
+            .map_err(|_| AuthError::Unauthorized("invalid JWT signature length".into()))?;
 
         let key = select_key(&self.keys, header.kid.as_deref())?;
-        key.verify(signing_input.as_bytes(), &signature)
-            .map_err(|_| AuthError::Unauthorized("JWT signature verification failed".into()))?;
+        crate::signature_verification::verify_strict_bytes(
+            key,
+            "JWT signature",
+            &signature,
+            signing_input.as_bytes(),
+        )
+        .map_err(|error| AuthError::Unauthorized(error.to_string()))?;
 
         let claims: JwtClaims = serde_json::from_slice(&payload_raw)
             .map_err(|_| AuthError::Unauthorized("JWT payload is not valid JSON claims".into()))?;
@@ -315,15 +317,9 @@ fn select_key<'a>(
 }
 
 fn decode_public_key(encoded: &str) -> Result<VerifyingKey, AuthError> {
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(encoded.trim())
-        .map_err(|_| AuthError::InvalidCredential("JWT public key is not valid base64".into()))?;
-    let array: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
-        AuthError::InvalidCredential("JWT public key must be 32 bytes (Ed25519)".into())
-    })?;
-    VerifyingKey::from_bytes(&array).map_err(|_| {
-        AuthError::InvalidCredential("JWT public key is not a valid Ed25519 key".into())
-    })
+    // Shared trust seam: length, base64, weak-key rejection, and key parsing.
+    crate::signature_verification::verifying_key("JWT public key", encoded.trim())
+        .map_err(|error| AuthError::InvalidCredential(error.to_string()))
 }
 
 fn b64url_decode(input: &str) -> Result<Vec<u8>, AuthError> {
@@ -434,7 +430,7 @@ pub fn now_unix_secs() -> i64 {
 /// Diagnostic key fingerprint (sha256 of raw public key bytes). Never logs secrets.
 pub fn public_key_fingerprint(public_key_b64: &str) -> Result<String, AuthError> {
     let key = decode_public_key(public_key_b64)?;
-    Ok(format!("sha256:{:x}", Sha256::digest(key.as_bytes())))
+    Ok(crate::signature_verification::key_id(key.as_bytes()))
 }
 
 #[cfg(test)]
@@ -709,5 +705,25 @@ public_key = "{public_b64}"
         let fp = public_key_fingerprint(&public_b64).unwrap();
         assert!(fp.starts_with("sha256:"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn weak_public_keys_are_rejected_at_trust_load() {
+        let weak = base64::engine::general_purpose::STANDARD.encode([0_u8; 32]);
+        let err = JwtAssertionVerifier::new(JwtVerifierConfig {
+            issuer: "https://idp.example.test/".into(),
+            audience: "tenkai-control-plane".into(),
+            keys: vec![JwtTrustedKey {
+                key_id: Some("weak".into()),
+                public_key: weak,
+            }],
+            clock_skew_secs: 60,
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("weak") || err.contains("JWT public key"),
+            "{err}"
+        );
     }
 }

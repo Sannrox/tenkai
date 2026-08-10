@@ -2,6 +2,20 @@
 
 use super::*;
 
+/// Refresh the environment fence and re-check release content integrity.
+///
+/// Outer errors from this helper are fence/control-plane failures; they must
+/// not be collapsed into ordinary product-target failures.
+async fn prepare_fenced_mutation(
+    ctx: &mut Ctx,
+    lease: &EnvironmentLease,
+    content: &ReleaseContent,
+) -> Result<()> {
+    refresh_environment_lease(ctx, lease).await?;
+    verify_content_integrity(content)?;
+    Ok(())
+}
+
 /// Activate one immutable release under the current environment fence.
 ///
 /// Product target failures are returned in the inner result. Fence, integrity,
@@ -13,8 +27,7 @@ pub(super) async fn activate(
     content: &ReleaseContent,
 ) -> Result<Result<(), String>> {
     if content.manifest.product.kind == ProductKind::RoutingConfig {
-        refresh_environment_lease(ctx, lease).await?;
-        verify_content_integrity(content)?;
+        prepare_fenced_mutation(ctx, lease, content).await?;
         let routing = content
             .manifest
             .routing
@@ -32,8 +45,7 @@ pub(super) async fn activate(
             .map_err(|error| error.to_string()));
     }
     if content.manifest.product.kind == ProductKind::ModelRuntime {
-        refresh_environment_lease(ctx, lease).await?;
-        verify_content_integrity(content)?;
+        prepare_fenced_mutation(ctx, lease, content).await?;
         let descriptor =
             crate::model_runtime::ModelRuntimeDescriptor::from_manifest(&content.manifest)?;
         // Reference llama.cpp plugin: fake by default; real binary when
@@ -47,8 +59,7 @@ pub(super) async fn activate(
             .map_err(|error| error.to_string()));
     }
     if crate::staged_artifact::is_staged_kind(content.manifest.product.kind) {
-        refresh_environment_lease(ctx, lease).await?;
-        verify_content_integrity(content)?;
+        prepare_fenced_mutation(ctx, lease, content).await?;
         let state_root = content
             .routing_state
             .parent()
@@ -62,8 +73,7 @@ pub(super) async fn activate(
         .map_err(|error| error.to_string()));
     }
     if let Some(executor) = crate::software_executor::selected_software_executor() {
-        refresh_environment_lease(ctx, lease).await?;
-        verify_content_integrity(content)?;
+        prepare_fenced_mutation(ctx, lease, content).await?;
         let request = software_request(content);
         let install = executor.apply(&request).map_err(|error| {
             crate::software_executor::format_software_phase_error(

@@ -25,7 +25,9 @@
 //! - [`providers`] and [`client`] contain optional Sekai-Chisei integration.
 //! - `signature_verification` hides shared signed-format framing, digest
 //!   grammar, key-id derivation, and Ed25519 verification while each domain
-//!   module retains its own statement shape and policy rules.
+//!   module retains its own statement shape and policy rules. Enterprise JWT
+//!   assertion verification also uses this seam for public-key decode and
+//!   strict signature checks.
 //! - `terminal_outcome` classifies embedded and runtime execution evidence in
 //!   one pure module before optional provider projection.
 //! - [`embedded`] and [`server`] host the same application core; transport is not
