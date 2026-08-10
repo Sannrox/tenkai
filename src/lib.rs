@@ -23,6 +23,8 @@
 //! - [`atomic_state`] hides verified atomic local state-file mutation shared by
 //!   those local executor adapters.
 //! - [`providers`] and [`client`] contain optional Sekai-Chisei integration.
+//! - `signature_verification` hides shared Ed25519 key and signature mechanics
+//!   while each signed-format module retains its own domain validation.
 //! - `terminal_outcome` classifies embedded and runtime execution evidence in
 //!   one pure module before optional provider projection.
 //! - [`embedded`] and [`server`] host the same application core; transport is not
@@ -66,6 +68,7 @@ pub mod runtime_agent;
 pub mod runtime_capabilities;
 pub mod runtime_protocol;
 pub mod server;
+mod signature_verification;
 pub mod software_executor;
 pub mod staged_artifact;
 pub mod storage;

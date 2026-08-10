@@ -4,8 +4,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use anyhow::{Context as _, Result, bail};
-use base64::{Engine as _, engine::general_purpose::STANDARD};
-use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
@@ -151,19 +149,11 @@ impl TrustRoots {
         let mut identities = std::collections::BTreeSet::new();
         for signer in &roots.signers {
             validate_text("trusted signer identity", &signer.identity)?;
-            let public_key = decode_exact::<32>("trusted signer public key", &signer.public_key)?;
-            let verifying_key =
-                VerifyingKey::from_bytes(&public_key).context("invalid Ed25519 public key")?;
-            if verifying_key.is_weak() {
-                bail!("plan approval public key is weak and cannot be trusted");
-            }
-            let derived = format!("sha256:{:x}", Sha256::digest(public_key));
-            if signer.key_id != derived {
-                bail!(
-                    "trusted signer key id {} does not match its public key",
-                    signer.key_id
-                );
-            }
+            crate::signature_verification::trusted_key(
+                "plan approval public key",
+                &signer.public_key,
+                &signer.key_id,
+            )?;
             if keys.insert(&signer.key_id, ()).is_some() || !identities.insert(&signer.identity) {
                 bail!("plan approval trust roots contain duplicate keys or identities");
             }
@@ -177,15 +167,6 @@ impl TrustRoots {
             .find(|signer| signer.key_id == key_id)
             .with_context(|| format!("plan approval signer {key_id} is not currently trusted"))
     }
-}
-
-fn decode_exact<const N: usize>(name: &str, value: &str) -> Result<[u8; N]> {
-    let decoded = STANDARD
-        .decode(value)
-        .with_context(|| format!("decoding {name}"))?;
-    decoded
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("{name} must decode to exactly {N} bytes"))
 }
 
 pub fn verify(
@@ -219,18 +200,17 @@ pub fn verify(
     }
     let roots = TrustRoots::load(trust_roots_path)?;
     let signer = roots.signer(&envelope.key_id)?;
-    let public_key = VerifyingKey::from_bytes(&decode_exact(
+    let public_key = crate::signature_verification::trusted_key(
         "trusted signer public key",
         &signer.public_key,
-    )?)
-    .context("trusted plan approval public key is invalid")?;
-    let signature = Signature::from_bytes(&decode_exact(
+        &signer.key_id,
+    )?;
+    crate::signature_verification::verify_strict(
+        &public_key,
         "plan approval signature",
         &envelope.signature,
-    )?);
-    public_key
-        .verify_strict(&canonical_bytes(&envelope.statement)?, &signature)
-        .context("plan approval signature verification failed")?;
+        &canonical_bytes(&envelope.statement)?,
+    )?;
     Ok(VerificationEvidence {
         schema: APPROVAL_SCHEMA.into(),
         plan_id: plan.id.clone(),

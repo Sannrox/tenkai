@@ -5,7 +5,7 @@ use std::path::Path;
 
 use anyhow::{Context as _, Result, bail};
 use base64::Engine as _;
-use ed25519_dalek::{Signature, VerifyingKey};
+use ed25519_dalek::VerifyingKey;
 use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -96,7 +96,7 @@ impl SignatureEnvelope {
         validate_digest("manifest_digest", &self.statement.manifest_digest)?;
         validate_digest("artifact_digest", &self.statement.artifact_digest)?;
         self.statement.provenance.validate()?;
-        decode_exact::<64>("signature", &self.signature)?;
+        crate::signature_verification::decode_exact::<64>("signature", &self.signature)?;
         Ok(())
     }
 
@@ -134,12 +134,12 @@ impl SignatureEnvelope {
         self.validate()?;
         roots.validate()?;
         let signer = roots.resolve(&self.key_id)?;
-        let signature_bytes = decode_exact::<64>("signature", &self.signature)?;
-        let signature = Signature::from_bytes(&signature_bytes);
-        signer
-            .verifying_key
-            .verify_strict(&self.signed_bytes()?, &signature)
-            .context("release signature verification failed")?;
+        crate::signature_verification::verify_strict(
+            &signer.verifying_key,
+            "release signature",
+            &self.signature,
+            &self.signed_bytes()?,
+        )?;
         Ok(signer)
     }
 }
@@ -228,15 +228,11 @@ impl TrustRoots {
                     signer.identity
                 );
             }
-            let public_key = decode_exact::<32>("trusted signer public_key", &signer.public_key)?;
-            let derived_key_id = key_id(&public_key);
-            if signer.key_id != derived_key_id {
-                bail!(
-                    "trusted signer key id {} does not match its public key ({derived_key_id})",
-                    signer.key_id
-                );
-            }
-            parse_verifying_key(&public_key)?;
+            crate::signature_verification::trusted_key(
+                "trusted signer public_key",
+                &signer.public_key,
+                &signer.key_id,
+            )?;
         }
         Ok(())
     }
@@ -250,17 +246,20 @@ impl TrustRoots {
         let signer = signers
             .get(key_id)
             .with_context(|| format!("release signer {key_id} is not trusted"))?;
-        let public_key = decode_exact::<32>("trusted signer public_key", &signer.public_key)?;
         Ok(ResolvedSigner {
             identity: signer.identity.clone(),
             key_id: signer.key_id.clone(),
-            verifying_key: parse_verifying_key(&public_key)?,
+            verifying_key: crate::signature_verification::trusted_key(
+                "trusted signer public_key",
+                &signer.public_key,
+                &signer.key_id,
+            )?,
         })
     }
 }
 
 pub fn key_id(public_key: &[u8; 32]) -> String {
-    format!("sha256:{:x}", Sha256::digest(public_key))
+    crate::signature_verification::key_id(public_key)
 }
 
 fn validate_key_id(value: &str) -> Result<()> {
@@ -337,23 +336,6 @@ where
     }
 
     deserializer.deserialize_map(UniqueMaterialsVisitor)
-}
-
-fn decode_exact<const N: usize>(label: &str, value: &str) -> Result<[u8; N]> {
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(value)
-        .with_context(|| format!("{label} is not valid base64"))?;
-    bytes.try_into().map_err(|bytes: Vec<u8>| {
-        anyhow::anyhow!("{label} must decode to {N} bytes, got {}", bytes.len())
-    })
-}
-
-fn parse_verifying_key(bytes: &[u8; 32]) -> Result<VerifyingKey> {
-    let key = VerifyingKey::from_bytes(bytes).context("invalid Ed25519 public key")?;
-    if key.is_weak() {
-        bail!("Ed25519 public key is weak and cannot be trusted");
-    }
-    Ok(key)
 }
 
 #[cfg(test)]
