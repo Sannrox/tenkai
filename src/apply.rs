@@ -24,6 +24,8 @@ use crate::pb::sekai::{Lease, Link, Object};
 use crate::plan::{self, Action, Plan, PlanState, ReleasePin, Step};
 use crate::routing::RoutingConfigExecutor as _;
 
+mod product_execution;
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Outcome {
     pub step: Step,
@@ -389,181 +391,6 @@ async fn deactivate(content: &ReleaseContent) -> Result<Result<(), String>> {
     }
 }
 
-async fn activate_fenced(
-    ctx: &mut Ctx,
-    lease: &EnvironmentLease,
-    content: &ReleaseContent,
-) -> Result<Result<(), String>> {
-    if content.manifest.product.kind == ProductKind::RoutingConfig {
-        refresh_environment_lease(ctx, lease).await?;
-        verify_content_integrity(content)?;
-        let routing = content
-            .manifest
-            .routing
-            .as_ref()
-            .context("routing release has no routing contract")?;
-        let config = crate::routing::load_and_validate(
-            &content.workdir.join(&routing.config),
-            &routing.allowed_providers,
-        )?;
-        let executor =
-            crate::routing::LocalRoutingConfigExecutor::new(content.routing_state.clone());
-        return Ok(executor
-            .apply(&config)
-            .map(|_| ())
-            .map_err(|error| error.to_string()));
-    }
-    if content.manifest.product.kind == ProductKind::ModelRuntime {
-        refresh_environment_lease(ctx, lease).await?;
-        verify_content_integrity(content)?;
-        let descriptor =
-            crate::model_runtime::ModelRuntimeDescriptor::from_manifest(&content.manifest)?;
-        // Reference llama.cpp plugin: fake by default; real binary when
-        // TENKAI_LLAMA_SERVER / TENKAI_USE_REAL_LLAMA is set (see model-runtime.md).
-        let executor = crate::model_runtime::ReferenceLlamaCppExecutor::for_operator_host(
-            content.model_runtime_state.clone(),
-        );
-        return Ok(executor
-            .apply(&descriptor)
-            .map(|_| ())
-            .map_err(|error| error.to_string()));
-    }
-    if crate::staged_artifact::is_staged_kind(content.manifest.product.kind) {
-        refresh_environment_lease(ctx, lease).await?;
-        verify_content_integrity(content)?;
-        let state_root = content
-            .routing_state
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."));
-        return Ok(crate::staged_artifact::activate(
-            &content.manifest,
-            &content.workdir,
-            state_root,
-            &content.product,
-        )
-        .map_err(|error| error.to_string()));
-    }
-    if let Some(executor) = crate::software_executor::selected_software_executor() {
-        refresh_environment_lease(ctx, lease).await?;
-        verify_content_integrity(content)?;
-        let request = crate::software_executor::request_from_parts(
-            content.product.clone(),
-            content.manifest.product.version.clone(),
-            content.environment.clone(),
-            &content.workdir,
-            format!(
-                "tenkai:release:{}@{}",
-                content.product, content.manifest.product.version
-            ),
-        );
-        let install = executor.apply(&request).map_err(|error| {
-            crate::software_executor::format_software_phase_error(
-                crate::software_executor::SoftwareDeployPhase::Apply,
-                &content.product,
-                &content.manifest.product.version,
-                &content.environment,
-                &error.to_string(),
-            )
-        });
-        let result = match install {
-            Ok(()) => match &content.manifest.deploy.health {
-                Some(command) if !command.is_empty() => {
-                    match run_mutation_command(ctx, lease, content, command).await? {
-                        Ok(()) => Ok(()),
-                        Err(error) => Err(crate::software_executor::format_software_phase_error(
-                            crate::software_executor::SoftwareDeployPhase::Health,
-                            &content.product,
-                            &content.manifest.product.version,
-                            &content.environment,
-                            &error,
-                        )),
-                    }
-                }
-                _ => Ok(()),
-            },
-            Err(error) => Err(error),
-        };
-        return Ok(result);
-    }
-    let install =
-        run_mutation_command(ctx, lease, content, &content.manifest.deploy.install).await?;
-    let result = match install {
-        Ok(()) => match &content.manifest.deploy.health {
-            Some(command) if !command.is_empty() => {
-                run_mutation_command(ctx, lease, content, command).await
-            }
-            _ => Ok(Ok(())),
-        },
-        error => Ok(error),
-    }?;
-    match verify_content_integrity(content) {
-        Ok(()) => Ok(result),
-        Err(error) => Ok(Err(error.to_string())),
-    }
-}
-
-async fn deactivate_fenced(
-    ctx: &mut Ctx,
-    lease: &EnvironmentLease,
-    content: &ReleaseContent,
-) -> Result<Result<(), String>> {
-    if content.manifest.product.kind == ProductKind::RoutingConfig {
-        refresh_environment_lease(ctx, lease).await?;
-        return Ok(
-            crate::routing::LocalRoutingConfigExecutor::new(content.routing_state.clone())
-                .remove()
-                .map_err(|error| error.to_string()),
-        );
-    }
-    if content.manifest.product.kind == ProductKind::ModelRuntime {
-        refresh_environment_lease(ctx, lease).await?;
-        return Ok(
-            crate::model_runtime::ReferenceLlamaCppExecutor::for_operator_host(
-                content.model_runtime_state.clone(),
-            )
-            .remove()
-            .map_err(|error| error.to_string()),
-        );
-    }
-    if crate::staged_artifact::is_staged_kind(content.manifest.product.kind) {
-        refresh_environment_lease(ctx, lease).await?;
-        let state_root = content
-            .routing_state
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."));
-        return Ok(crate::staged_artifact::deactivate(
-            content.manifest.product.kind,
-            state_root,
-            &content.product,
-        )
-        .map_err(|error| error.to_string()));
-    }
-    if let Some(executor) = crate::software_executor::selected_software_executor() {
-        refresh_environment_lease(ctx, lease).await?;
-        let request = crate::software_executor::request_from_parts(
-            content.product.clone(),
-            content.manifest.product.version.clone(),
-            content.environment.clone(),
-            &content.workdir,
-            format!(
-                "tenkai:release:{}@{}",
-                content.product, content.manifest.product.version
-            ),
-        );
-        return Ok(executor.remove(&request).map_err(|error| error.to_string()));
-    }
-    match content.manifest.deploy.uninstall.as_deref() {
-        Some(command) if !command.is_empty() => {
-            let result = run_mutation_command(ctx, lease, content, command).await?;
-            match verify_content_integrity(content) {
-                Ok(()) => Ok(result),
-                Err(error) => Ok(Err(error.to_string())),
-            }
-        }
-        _ => Ok(Err("release has no uninstall command".into())),
-    }
-}
-
 async fn restore_previous_fenced(
     ctx: &mut Ctx,
     lease: &EnvironmentLease,
@@ -573,7 +400,7 @@ async fn restore_previous_fenced(
 ) -> Result<(bool, String)> {
     let channel_note = crate::software_executor::rollback_channel_note(&content.product, version);
     // Tag activation failures during rollback as restore phase (#150).
-    let restore_result = match activate_fenced(ctx, lease, content).await {
+    let restore_result = match product_execution::activate(ctx, lease, content).await {
         Ok(Ok(())) => Ok(Ok(())),
         Ok(Err(detail)) => Ok(Err(crate::software_executor::format_software_phase_error(
             crate::software_executor::SoftwareDeployPhase::Restore,
@@ -608,34 +435,6 @@ async fn restore_previous_fenced(
                 )
             ),
         ),
-    })
-}
-
-async fn cleanup_failed_install_fenced(
-    ctx: &mut Ctx,
-    lease: &EnvironmentLease,
-    content: &ReleaseContent,
-    failure: String,
-) -> Result<(bool, String)> {
-    if matches!(
-        content.manifest.product.kind,
-        ProductKind::RoutingConfig | ProductKind::ModelRuntime
-    ) || crate::staged_artifact::is_staged_kind(content.manifest.product.kind)
-    {
-        // Descriptor validation is pre-mutation and local adapters publish
-        // atomically, so a failed target does not require shell uninstall cleanup.
-        return Ok((true, failure));
-    }
-    Ok(match content.manifest.deploy.uninstall.as_deref() {
-        Some(_) => match deactivate_fenced(ctx, lease, content).await {
-            Ok(Ok(())) => (true, format!("{failure}; cleaned up failed install")),
-            Ok(Err(cleanup)) => (false, format!("{failure}; cleanup also failed: {cleanup}")),
-            Err(error) => (
-                false,
-                format!("{failure}; cleanup executor also failed: {error}"),
-            ),
-        },
-        None => (false, failure),
     })
 }
 
@@ -685,13 +484,16 @@ async fn compensate_activation(
     failure: &anyhow::Error,
 ) {
     let failure = format!("deployment bookkeeping failed after activation: {failure}");
-    let cleaned = matches!(deactivate_fenced(ctx, lease, content).await, Ok(Ok(())));
+    let cleaned = matches!(
+        product_execution::deactivate(ctx, lease, content).await,
+        Ok(Ok(()))
+    );
     let mut restored = step.from.is_none();
 
     if let (Some(previous), Some(pin)) = (step.from.as_deref(), step.restore.as_ref())
         && let Ok(previous_content) = release_content(ctx, pin, env, &step.product).await
         && matches!(
-            activate_fenced(ctx, lease, &previous_content).await,
+            product_execution::activate(ctx, lease, &previous_content).await,
             Ok(Ok(()))
         )
     {
@@ -2078,7 +1880,7 @@ async fn execute_step(
             .as_deref()
             .is_some_and(|command| !command.is_empty())
     {
-        let cleanup_failure = match deactivate_fenced(ctx, lease, outgoing).await {
+        let cleanup_failure = match product_execution::deactivate(ctx, lease, outgoing).await {
             Ok(Ok(())) => None,
             Ok(Err(detail)) => Some(detail),
             Err(error) => Some(format!("cleanup executor failed: {error}")),
@@ -2103,7 +1905,7 @@ async fn execute_step(
         }
     }
 
-    let activation = match activate_fenced(ctx, lease, &content).await {
+    let activation = match product_execution::activate(ctx, lease, &content).await {
         Ok(result) => result,
         Err(error) => Err(format!("deployment executor failed: {error}")),
     };
@@ -2137,7 +1939,8 @@ async fn execute_step(
             match &step.from {
                 Some(prev) => {
                     let (cleaned, detail) =
-                        cleanup_failed_install_fenced(ctx, lease, &content, detail).await?;
+                        product_execution::cleanup_failed_activation(ctx, lease, &content, detail)
+                            .await?;
                     let Some(prev_content) = restore_content.as_ref() else {
                         let detail =
                             format!("{detail}; step {} has no pinned restore release", step.id);
@@ -2175,7 +1978,8 @@ async fn execute_step(
                 }
                 None => {
                     let (cleaned, detail) =
-                        cleanup_failed_install_fenced(ctx, lease, &content, detail).await?;
+                        product_execution::cleanup_failed_activation(ctx, lease, &content, detail)
+                            .await?;
                     (
                         Outcome {
                             step: step.clone(),
