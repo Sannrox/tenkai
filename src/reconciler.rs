@@ -617,8 +617,14 @@ impl Reconciler {
                         .map(|receipt| (step, receipt))
                 })
                 .filter_map(|(step, receipt)| {
-                    runtime_terminal_outcome(step, receipt)
-                        .map(|terminal_state| (step, terminal_state))
+                    crate::terminal_outcome::classify(
+                        step.action,
+                        crate::terminal_outcome::Observation::Runtime {
+                            succeeded: receipt.succeeded,
+                            detail: &receipt.detail,
+                        },
+                    )
+                    .map(|terminal_state| (step, terminal_state))
                 })
                 .map(|(step, terminal_state)| {
                     crate::providers::terminal_outcome_record(
@@ -869,24 +875,6 @@ async fn recover_or_detect_active_plan(ctx: &mut Ctx, environment: &str) -> Resu
     Ok(false)
 }
 
-fn runtime_terminal_outcome(
-    step: &crate::plan::Step,
-    receipt: &RuntimeStepReceipt,
-) -> Option<crate::providers::TerminalOutcomeState> {
-    use crate::plan::Action;
-    use crate::providers::TerminalOutcomeState;
-
-    if receipt.detail == "not executed after an earlier step failed" {
-        return None;
-    }
-    Some(match (step.action, receipt.succeeded) {
-        (Action::Rollback, true) => TerminalOutcomeState::RollbackSucceeded,
-        (_, true) => TerminalOutcomeState::DeploymentSucceeded,
-        (Action::Rollback, false) => TerminalOutcomeState::RollbackFailed,
-        (_, false) => TerminalOutcomeState::DeploymentFailed,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -967,41 +955,6 @@ mod tests {
             maintenance_blocked: false,
             prior_warnings: Vec::new(),
         }
-    }
-
-    #[test]
-    fn runtime_receipts_export_only_outcomes_the_runtime_proves() {
-        use crate::plan::Action;
-        use crate::providers::TerminalOutcomeState;
-
-        let mut step = test_plan("prod", 100, PlanState::Running).steps.remove(0);
-        let failed = RuntimeStepReceipt {
-            step_id: step.id.clone(),
-            succeeded: false,
-            detail: "executor failed".into(),
-        };
-        assert_eq!(
-            runtime_terminal_outcome(&step, &failed),
-            Some(TerminalOutcomeState::DeploymentFailed)
-        );
-
-        step.action = Action::Rollback;
-        assert_eq!(
-            runtime_terminal_outcome(&step, &failed),
-            Some(TerminalOutcomeState::RollbackFailed)
-        );
-        let mut skipped = failed;
-        skipped.detail = "not executed after an earlier step failed".into();
-        assert_eq!(runtime_terminal_outcome(&step, &skipped), None);
-        let succeeded = RuntimeStepReceipt {
-            step_id: step.id.clone(),
-            succeeded: true,
-            detail: "executor completed successfully".into(),
-        };
-        assert_eq!(
-            runtime_terminal_outcome(&step, &succeeded),
-            Some(TerminalOutcomeState::RollbackSucceeded)
-        );
     }
 
     #[tokio::test]

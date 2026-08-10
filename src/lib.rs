@@ -20,6 +20,8 @@
 //! - [`atomic_state`] hides verified atomic local state-file mutation shared by
 //!   those local executor adapters.
 //! - [`providers`] and [`client`] contain optional Sekai-Chisei integration.
+//! - `terminal_outcome` classifies embedded and runtime execution evidence in
+//!   one pure module before optional provider projection.
 //! - [`embedded`] and [`server`] host the same application core; transport is not
 //!   a domain seam.
 //!
@@ -66,6 +68,7 @@ pub mod staged_artifact;
 pub mod storage;
 pub mod tenant_isolation;
 pub mod tenant_store;
+mod terminal_outcome;
 pub mod wave;
 
 pub fn now_millis() -> i64 {
