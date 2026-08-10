@@ -1,8 +1,6 @@
 //! Authenticated network host for the shared Tenkai application core.
 
 use std::collections::HashMap;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
@@ -10,8 +8,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use serde::Serialize;
 
 use crate::auth_context::{
     AuthHostConfig, AuthMode, AuthStack, AuthenticatedRequestContext, CommunityTokenAuthenticator,
@@ -22,183 +19,23 @@ use crate::development_fixtures::DevelopmentFixture;
 use crate::federated_identity::{
     FederatingAuthExtension, FederationConfig, IdentityDirectory, reject_caller_selected_tenant,
 };
-use crate::reconciler::{Reconciler, TickReport};
+use crate::reconciler::TickReport;
 use crate::runtime_capabilities::{
     ProvidedCapabilities, RuntimeRequirements, community_auth_capabilities,
     community_sqlite_profile, validate_runtime_capabilities,
 };
+pub use crate::runtime_delivery::{
+    CompletionFuture, FleetStatusFuture, HealthFuture, InspectEnvFuture, InventoryFuture,
+    ListEnvFuture, ReconcileFuture, ReconcilePort, RuntimeHeartbeat, RuntimeInventoryReport,
+    RuntimeInventoryResponse, RuntimeWork, StatusEnvFuture, WorkFuture,
+};
+use crate::runtime_delivery::{RuntimeDeliveryError, RuntimeDeliveryOperations};
 use crate::storage::{AuditRecord, OperationalStore};
 use crate::tenant_environment::{
     TenantEnvironmentError, TenantEnvironmentOperations, TenantEnvironmentView,
 };
 use crate::tenant_isolation::NON_DISCLOSING_DENY;
 use crate::tenant_store::TenantOperationalStore;
-
-pub type ReconcileFuture<'a> =
-    Pin<Box<dyn Future<Output = anyhow::Result<TickReport>> + Send + 'a>>;
-
-/// Transport-independent application operation used by embedded and remote hosts.
-pub trait ReconcilePort: Send + Sync {
-    fn reconcile(&self) -> ReconcileFuture<'_>;
-    /// Reconcile only environments selected by a verified host authority.
-    ///
-    /// The fail-closed default preserves compatibility for community-only
-    /// implementers without ever substituting global reconciliation in tenant
-    /// mode.
-    fn reconcile_environments(&self, _environments: Vec<String>) -> ReconcileFuture<'_> {
-        Box::pin(async {
-            anyhow::bail!("tenant-bounded reconciliation is not supported by this host")
-        })
-    }
-    fn pending_work(&self, environment: String) -> WorkFuture<'_>;
-    fn check_health(&self) -> HealthFuture<'_>;
-    fn complete_work(
-        &self,
-        environment: String,
-        completion: crate::reconciler::RuntimeCompletion,
-    ) -> CompletionFuture<'_>;
-    fn validate_completion(
-        &self,
-        environment: String,
-        completion: crate::reconciler::RuntimeCompletion,
-    ) -> CompletionFuture<'_>;
-    fn list_environments(&self) -> ListEnvFuture<'_>;
-    fn inspect_environment(&self, environment: String) -> InspectEnvFuture<'_>;
-    fn inspect_environment_without_outcome_export(
-        &self,
-        environment: String,
-    ) -> InspectEnvFuture<'_> {
-        let inspection = self.inspect_environment(environment);
-        Box::pin(async move {
-            let mut report = inspection.await?;
-            report.terminal_outcomes.clear();
-            Ok(report)
-        })
-    }
-    fn environment_status(&self, environment: String) -> StatusEnvFuture<'_>;
-    fn fleet_status(&self) -> FleetStatusFuture<'_>;
-    fn fleet_status_without_outcome_export(&self) -> FleetStatusFuture<'_> {
-        Box::pin(async {
-            anyhow::bail!("tenant-bounded fleet inspection is not supported by this host")
-        })
-    }
-    /// Apply admitted inventory facts from a scoped environment runtime (#136).
-    fn apply_inventory_facts(
-        &self,
-        environment: String,
-        facts: std::collections::BTreeMap<String, String>,
-    ) -> InventoryFuture<'_>;
-    /// Cumulative reconcile diagnostics for OpenMetrics (#137).
-    fn diagnostics_snapshot(&self) -> crate::reconciler::ReconcileDiagnostics;
-}
-
-pub type WorkFuture<'a> =
-    Pin<Box<dyn Future<Output = anyhow::Result<Option<crate::plan::Plan>>> + Send + 'a>>;
-pub type HealthFuture<'a> = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>;
-pub type CompletionFuture<'a> = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>;
-pub type ListEnvFuture<'a> = Pin<
-    Box<dyn Future<Output = anyhow::Result<Vec<crate::plan::EnvironmentListEntry>>> + Send + 'a>,
->;
-pub type InspectEnvFuture<'a> = Pin<
-    Box<dyn Future<Output = anyhow::Result<crate::plan::EnvironmentInspectReport>> + Send + 'a>,
->;
-pub type StatusEnvFuture<'a> =
-    Pin<Box<dyn Future<Output = anyhow::Result<Vec<crate::plan::StatusRow>>> + Send + 'a>>;
-pub type FleetStatusFuture<'a> =
-    Pin<Box<dyn Future<Output = anyhow::Result<crate::plan::FleetStatusReport>> + Send + 'a>>;
-pub type InventoryFuture<'a> =
-    Pin<Box<dyn Future<Output = anyhow::Result<Vec<String>>> + Send + 'a>>;
-
-impl ReconcilePort for Reconciler {
-    fn reconcile(&self) -> ReconcileFuture<'_> {
-        Box::pin(self.run_once())
-    }
-
-    fn reconcile_environments(&self, environments: Vec<String>) -> ReconcileFuture<'_> {
-        Box::pin(async move { self.run_once_for(&environments).await })
-    }
-
-    fn pending_work(&self, environment: String) -> WorkFuture<'_> {
-        Box::pin(async move { self.pending_work(&environment).await })
-    }
-
-    fn check_health(&self) -> HealthFuture<'_> {
-        Box::pin(self.check_provider_health())
-    }
-
-    fn complete_work(
-        &self,
-        environment: String,
-        completion: crate::reconciler::RuntimeCompletion,
-    ) -> CompletionFuture<'_> {
-        Box::pin(async move { self.complete_runtime_work(&environment, &completion).await })
-    }
-
-    fn validate_completion(
-        &self,
-        environment: String,
-        completion: crate::reconciler::RuntimeCompletion,
-    ) -> CompletionFuture<'_> {
-        Box::pin(async move {
-            self.validate_runtime_completion(&environment, &completion)
-                .await
-        })
-    }
-
-    fn list_environments(&self) -> ListEnvFuture<'_> {
-        Box::pin(async move {
-            let mut ctx = self.ctx_clone();
-            crate::plan::list_environments(&mut ctx).await
-        })
-    }
-
-    fn inspect_environment(&self, environment: String) -> InspectEnvFuture<'_> {
-        Box::pin(async move {
-            let mut ctx = self.ctx_clone();
-            crate::plan::inspect_environment_with_outcomes(&mut ctx, &environment).await
-        })
-    }
-
-    fn inspect_environment_without_outcome_export(
-        &self,
-        environment: String,
-    ) -> InspectEnvFuture<'_> {
-        Box::pin(self.inspect_environment_without_outcome_export(environment))
-    }
-
-    fn environment_status(&self, environment: String) -> StatusEnvFuture<'_> {
-        Box::pin(async move {
-            let mut ctx = self.ctx_clone();
-            crate::plan::status(&mut ctx, &environment).await
-        })
-    }
-
-    fn apply_inventory_facts(
-        &self,
-        environment: String,
-        facts: std::collections::BTreeMap<String, String>,
-    ) -> InventoryFuture<'_> {
-        Box::pin(async move {
-            let mut ctx = self.ctx_clone();
-            crate::plan::apply_runtime_inventory_facts(&mut ctx, &environment, &facts).await
-        })
-    }
-
-    fn diagnostics_snapshot(&self) -> crate::reconciler::ReconcileDiagnostics {
-        Reconciler::diagnostics_snapshot(self)
-    }
-
-    fn fleet_status(&self) -> FleetStatusFuture<'_> {
-        Box::pin(async move {
-            let mut ctx = self.ctx_clone();
-            crate::plan::fleet_status(&mut ctx).await
-        })
-    }
-
-    fn fleet_status_without_outcome_export(&self) -> FleetStatusFuture<'_> {
-        Box::pin(self.fleet_status_without_outcome_export())
-    }
-}
 
 struct ReconcileTenantEnvironmentView {
     reconciler: Arc<dyn ReconcilePort>,
@@ -387,6 +224,7 @@ struct AppState {
     store: Arc<dyn OperationalStore>,
     tenant_store: Option<Arc<dyn TenantOperationalStore>>,
     tenant_environments: Option<Arc<TenantEnvironmentOperations>>,
+    runtime_delivery: Arc<RuntimeDeliveryOperations>,
 }
 
 #[derive(Debug, Serialize)]
@@ -394,40 +232,6 @@ struct ServiceStatus {
     status: &'static str,
     profile: String,
     capabilities: Vec<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct RuntimeWork {
-    pub environment: String,
-    pub plan: Option<crate::plan::Plan>,
-    pub claim: Option<crate::storage::RuntimeClaim>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct RuntimeHeartbeat {
-    pub plan_id: String,
-    pub generation: u64,
-}
-
-/// Inventory fact report from a scoped environment runtime (#136).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RuntimeInventoryReport {
-    /// Admitted fact keys only (`architecture`, `memory_gib`, …).
-    pub facts: std::collections::BTreeMap<String, String>,
-    /// Provenance token (e.g. `runtime-probe`); not stored as a fact key.
-    #[serde(default = "default_inventory_source")]
-    pub source: String,
-}
-
-fn default_inventory_source() -> String {
-    crate::inventory::RUNTIME_INVENTORY_SOURCE.into()
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct RuntimeInventoryResponse {
-    pub environment: String,
-    pub source: String,
-    pub applied: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -444,6 +248,11 @@ pub fn router(
     let auth = config.build_auth_stack()?;
     let metrics_enabled = config.metrics_enabled;
     let development_fixtures_enabled = config.development_fixtures.is_some();
+    let runtime_delivery = Arc::new(RuntimeDeliveryOperations::new(
+        config.runtime_assignments.clone(),
+        reconciler.clone(),
+        store.clone(),
+    ));
     let tenant_environments = config.tenant_store.clone().map(|tenant_store| {
         Arc::new(TenantEnvironmentOperations::new(
             tenant_store,
@@ -500,6 +309,7 @@ pub fn router(
         auth,
         reconciler,
         store,
+        runtime_delivery,
     })))
 }
 
@@ -992,51 +802,13 @@ async fn runtime_work(
     Path(environment): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let Some(token) = bearer(&headers) else {
-        return error_response(StatusCode::UNAUTHORIZED, "missing bearer token");
-    };
-    let Some(assigned) = runtime_assignment(&state.config, token) else {
-        return error_response(StatusCode::FORBIDDEN, "invalid runtime credential");
-    };
-    let Some(instance) = runtime_instance(&headers) else {
-        return error_response(StatusCode::BAD_REQUEST, "missing runtime instance identity");
-    };
-    if assigned != environment {
-        return error_response(
-            StatusCode::FORBIDDEN,
-            "runtime credential is not assigned to this environment",
-        );
-    }
-    match state.reconciler.pending_work(environment.clone()).await {
-        Ok(Some(plan)) => {
-            let owner = runtime_owner(token, instance);
-            let expires_at = crate::now_millis().saturating_add(2 * 60 * 1000);
-            match state
-                .store
-                .claim_runtime_plan(&environment, &plan.id, &owner, expires_at)
-            {
-                Ok(Some(claim)) => Json(RuntimeWork {
-                    environment,
-                    plan: Some(plan),
-                    claim: Some(claim),
-                })
-                .into_response(),
-                Ok(None) => Json(RuntimeWork {
-                    environment,
-                    plan: None,
-                    claim: None,
-                })
-                .into_response(),
-                Err(error) => error_response(StatusCode::SERVICE_UNAVAILABLE, error.to_string()),
-            }
-        }
-        Ok(None) => Json(RuntimeWork {
-            environment,
-            plan: None,
-            claim: None,
-        })
-        .into_response(),
-        Err(error) => error_response(StatusCode::SERVICE_UNAVAILABLE, error.to_string()),
+    match state
+        .runtime_delivery
+        .claim_work(bearer(&headers), runtime_instance(&headers), &environment)
+        .await
+    {
+        Ok(work) => Json(work).into_response(),
+        Err(error) => runtime_delivery_error(error),
     }
 }
 
@@ -1046,47 +818,18 @@ async fn runtime_complete(
     headers: HeaderMap,
     Json(completion): Json<crate::reconciler::RuntimeCompletion>,
 ) -> Response {
-    let Some(token) = bearer(&headers) else {
-        return error_response(StatusCode::UNAUTHORIZED, "missing bearer token");
-    };
-    let Some(assigned) = runtime_assignment(&state.config, token) else {
-        return error_response(StatusCode::FORBIDDEN, "invalid runtime credential");
-    };
-    let Some(instance) = runtime_instance(&headers) else {
-        return error_response(StatusCode::BAD_REQUEST, "missing runtime instance identity");
-    };
-    if assigned != environment {
-        return error_response(
-            StatusCode::FORBIDDEN,
-            "runtime credential is not assigned to this environment",
-        );
-    }
-    let completion_json = match serde_json::to_string(&completion) {
-        Ok(json) => json,
-        Err(error) => return error_response(StatusCode::BAD_REQUEST, error.to_string()),
-    };
-    if let Err(error) = state
-        .reconciler
-        .validate_completion(environment.clone(), completion.clone())
-        .await
-    {
-        return error_response(StatusCode::BAD_REQUEST, format!("{error:#}"));
-    }
-    if let Err(error) = state.store.complete_runtime_plan(
-        &completion.plan_id,
-        &runtime_owner(token, instance),
-        completion.generation,
-        &completion_json,
-    ) {
-        return error_response(StatusCode::CONFLICT, error.to_string());
-    }
     match state
-        .reconciler
-        .complete_work(environment, completion)
+        .runtime_delivery
+        .complete(
+            bearer(&headers),
+            runtime_instance(&headers),
+            &environment,
+            completion,
+        )
         .await
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")),
+        Err(error) => runtime_delivery_error(error),
     }
 }
 
@@ -1096,31 +839,14 @@ async fn runtime_heartbeat(
     headers: HeaderMap,
     Json(heartbeat): Json<RuntimeHeartbeat>,
 ) -> Response {
-    let Some(token) = bearer(&headers) else {
-        return error_response(StatusCode::UNAUTHORIZED, "missing bearer token");
-    };
-    let Some(assigned) = runtime_assignment(&state.config, token) else {
-        return error_response(StatusCode::FORBIDDEN, "invalid runtime credential");
-    };
-    let Some(instance) = runtime_instance(&headers) else {
-        return error_response(StatusCode::BAD_REQUEST, "missing runtime instance identity");
-    };
-    if assigned != environment {
-        return error_response(
-            StatusCode::FORBIDDEN,
-            "runtime credential is not assigned to this environment",
-        );
-    }
-    let expires_at = crate::now_millis().saturating_add(2 * 60 * 1000);
-    match state.store.renew_runtime_plan(
-        &heartbeat.plan_id,
-        &runtime_owner(token, instance),
-        heartbeat.generation,
-        expires_at,
+    match state.runtime_delivery.renew(
+        bearer(&headers),
+        runtime_instance(&headers),
+        &environment,
+        &heartbeat,
     ) {
-        Ok(Some(claim)) => Json(claim).into_response(),
-        Ok(_) => error_response(StatusCode::CONFLICT, "runtime claim is no longer active"),
-        Err(error) => error_response(StatusCode::CONFLICT, error.to_string()),
+        Ok(claim) => Json(claim).into_response(),
+        Err(error) => runtime_delivery_error(error),
     }
 }
 
@@ -1131,58 +857,19 @@ async fn runtime_inventory(
     headers: HeaderMap,
     Json(report): Json<RuntimeInventoryReport>,
 ) -> Response {
-    let Some(token) = bearer(&headers) else {
-        return error_response(StatusCode::UNAUTHORIZED, "missing bearer token");
-    };
-    let Some(assigned) = runtime_assignment(&state.config, token) else {
-        return error_response(StatusCode::FORBIDDEN, "invalid runtime credential");
-    };
-    let Some(_instance) = runtime_instance(&headers) else {
-        return error_response(StatusCode::BAD_REQUEST, "missing runtime instance identity");
-    };
-    if assigned != environment {
-        return error_response(
-            StatusCode::FORBIDDEN,
-            "runtime credential is not assigned to this environment",
-        );
-    }
-    if report.source.trim().is_empty() || report.source.len() > 64 {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "inventory source must be 1..=64 characters",
-        );
-    }
-    // Reject secret-like source labels without treating source as a fact key.
-    let source_lower = report.source.to_ascii_lowercase();
-    for needle in ["bearer ", "password=", "secret=", "token="] {
-        if source_lower.contains(needle) {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                "inventory source must not contain credential material",
-            );
-        }
-    }
     match state
-        .reconciler
-        .apply_inventory_facts(environment.clone(), report.facts)
+        .runtime_delivery
+        .report_inventory(
+            bearer(&headers),
+            runtime_instance(&headers),
+            &environment,
+            report,
+        )
         .await
     {
-        Ok(applied) => Json(RuntimeInventoryResponse {
-            environment,
-            source: report.source,
-            applied,
-        })
-        .into_response(),
-        Err(error) => error_response(StatusCode::BAD_REQUEST, format!("{error:#}")),
+        Ok(response) => Json(response).into_response(),
+        Err(error) => runtime_delivery_error(error),
     }
-}
-
-fn runtime_owner(token: &str, instance: &str) -> String {
-    let mut digest = Sha256::new();
-    digest.update(token.as_bytes());
-    digest.update([0]);
-    digest.update(instance.as_bytes());
-    format!("runtime:{:x}", digest.finalize())
 }
 
 fn runtime_instance(headers: &HeaderMap) -> Option<&str> {
@@ -1197,27 +884,6 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
         .ok()?
         .strip_prefix("Bearer ")
         .filter(|token| !token.is_empty())
-}
-
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    let mut difference = left.len() ^ right.len();
-    let length = left.len().max(right.len());
-    for index in 0..length {
-        difference |= usize::from(*left.get(index).unwrap_or(&0) ^ *right.get(index).unwrap_or(&0));
-    }
-    difference == 0
-}
-
-/// Match a runtime bearer against configured assignments without short-circuiting
-/// on the first unequal length comparison alone.
-fn runtime_assignment(config: &ServerConfig, token: &str) -> Option<String> {
-    let mut matched = None;
-    for (candidate, environment) in &config.runtime_assignments {
-        if constant_time_eq(candidate.as_bytes(), token.as_bytes()) {
-            matched = Some(environment.clone());
-        }
-    }
-    matched
 }
 
 fn audit(
@@ -1244,6 +910,22 @@ fn error_response(status: StatusCode, error: impl Into<String>) -> Response {
         }),
     )
         .into_response()
+}
+
+fn runtime_delivery_error(error: RuntimeDeliveryError) -> Response {
+    let status = match error {
+        RuntimeDeliveryError::MissingCredential => StatusCode::UNAUTHORIZED,
+        RuntimeDeliveryError::InvalidCredential | RuntimeDeliveryError::ForeignEnvironment => {
+            StatusCode::FORBIDDEN
+        }
+        RuntimeDeliveryError::InvalidInstance | RuntimeDeliveryError::InvalidRequest(_) => {
+            StatusCode::BAD_REQUEST
+        }
+        RuntimeDeliveryError::Conflict(_) => StatusCode::CONFLICT,
+        RuntimeDeliveryError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+        RuntimeDeliveryError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    error_response(status, error.to_string())
 }
 
 fn tenant_environment_error(error: TenantEnvironmentError) -> Response {
