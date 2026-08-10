@@ -12,10 +12,12 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::client::Ctx;
+use crate::plan::PlanState;
 use crate::plan::{
     EnvironmentInspectReport, EnvironmentListEntry, FleetStatusReport, Plan, StatusRow,
 };
-use crate::reconciler::{ReconcileDiagnostics, Reconciler, RuntimeCompletion, TickReport};
+use crate::reconciler::{ReconcileDiagnostics, Reconciler, TickReport};
 use crate::storage::{OperationalStore, RuntimeClaim};
 
 pub type ReconcileFuture<'a> =
@@ -33,6 +35,22 @@ pub type FleetStatusFuture<'a> =
     Pin<Box<dyn Future<Output = anyhow::Result<FleetStatusReport>> + Send + 'a>>;
 pub type InventoryFuture<'a> =
     Pin<Box<dyn Future<Output = anyhow::Result<Vec<String>>> + Send + 'a>>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeStepReceipt {
+    pub step_id: String,
+    pub succeeded: bool,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeCompletion {
+    pub plan_id: String,
+    pub generation: u64,
+    pub succeeded: bool,
+    pub detail: String,
+    pub receipts: Vec<RuntimeStepReceipt>,
+}
 
 /// Shared application view used by embedded and remote hosts.
 pub trait ReconcilePort: Send + Sync {
@@ -104,7 +122,10 @@ impl ReconcilePort for Reconciler {
         environment: String,
         completion: RuntimeCompletion,
     ) -> CompletionFuture<'_> {
-        Box::pin(async move { self.complete_runtime_work(&environment, &completion).await })
+        Box::pin(async move {
+            let mut ctx = self.ctx_clone();
+            complete_runtime_work(&mut ctx, &environment, &completion).await
+        })
     }
 
     fn validate_completion(
@@ -113,8 +134,8 @@ impl ReconcilePort for Reconciler {
         completion: RuntimeCompletion,
     ) -> CompletionFuture<'_> {
         Box::pin(async move {
-            self.validate_runtime_completion(&environment, &completion)
-                .await
+            let mut ctx = self.ctx_clone();
+            validate_runtime_completion(&mut ctx, &environment, &completion).await
         })
     }
 
@@ -171,6 +192,173 @@ impl ReconcilePort for Reconciler {
     fn diagnostics_snapshot(&self) -> ReconcileDiagnostics {
         Reconciler::diagnostics_snapshot(self)
     }
+}
+
+pub(crate) async fn complete_runtime_work(
+    ctx: &mut Ctx,
+    environment: &str,
+    completion: &RuntimeCompletion,
+) -> anyhow::Result<()> {
+    validate_runtime_completion(ctx, environment, completion).await?;
+    let mut stored = crate::plan::load(ctx, &completion.plan_id).await?;
+    let terminal = if completion.succeeded {
+        PlanState::Succeeded
+    } else {
+        PlanState::Failed
+    };
+    if matches!(stored.state, PlanState::Succeeded | PlanState::Failed) {
+        return Ok(());
+    }
+    if stored.state == PlanState::Computed {
+        stored.state = PlanState::Running;
+        stored.status_detail = "claimed by assigned environment runtime".into();
+        crate::plan::store(ctx, &stored).await?;
+    }
+    let observed_at = crate::now_millis();
+    let mut environment_object = None;
+    if completion.succeeded && ctx.outcome_export_enabled() {
+        if crate::apply::environment_lease_status(ctx, environment)
+            .await?
+            .is_some()
+        {
+            anyhow::bail!("environment {environment} has an apply in progress");
+        }
+        let mut object = ctx
+            .get(&crate::ontology::env_id(environment))
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!("environment {environment} disappeared during outcome enqueue")
+            })?;
+        crate::plan::update_runtime_deployments_object(
+            ctx,
+            &mut object,
+            &stored.steps,
+            observed_at,
+        )
+        .await?;
+        environment_object = Some(object);
+    } else if completion.succeeded {
+        for step in &stored.steps {
+            crate::plan::reconcile_deployment(ctx, environment, &step.product, Some(&step.to))
+                .await?;
+        }
+    }
+    let provider_events = if ctx.outcome_export_enabled() {
+        if environment_object.is_none() {
+            environment_object = Some(
+                ctx.get(&crate::ontology::env_id(environment))
+                    .await?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "environment {environment} disappeared during outcome enqueue"
+                        )
+                    })?,
+            );
+        }
+        let environment_object = environment_object
+            .as_ref()
+            .expect("outcome export always loads the environment");
+        stored
+            .steps
+            .iter()
+            .filter_map(|step| {
+                completion
+                    .receipts
+                    .iter()
+                    .find(|receipt| receipt.step_id == step.id)
+                    .map(|receipt| (step, receipt))
+            })
+            .filter_map(|(step, receipt)| {
+                crate::terminal_outcome::classify(
+                    step.action,
+                    crate::terminal_outcome::Observation::Runtime {
+                        succeeded: receipt.succeeded,
+                        detail: &receipt.detail,
+                    },
+                )
+                .map(|terminal_state| (step, terminal_state))
+            })
+            .map(|(step, terminal_state)| {
+                crate::providers::terminal_outcome_record(
+                    &stored,
+                    step,
+                    &format!(
+                        "tenkai:runtime-deployment:{}:{}:{}",
+                        stored.id, completion.generation, step.id
+                    ),
+                    terminal_state,
+                    environment_object,
+                    observed_at,
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?
+    } else {
+        Vec::new()
+    };
+    stored.state = terminal;
+    stored.status_detail = completion.detail.clone();
+    if completion.succeeded && ctx.outcome_export_enabled() {
+        crate::plan::store_with_environment_and_provider_events(
+            ctx,
+            &stored,
+            environment_object.expect("successful outcome export updates its environment"),
+            &provider_events,
+        )
+        .await?;
+    } else {
+        crate::plan::store_with_provider_events(ctx, &stored, &provider_events).await?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn validate_runtime_completion(
+    ctx: &mut Ctx,
+    environment: &str,
+    completion: &RuntimeCompletion,
+) -> anyhow::Result<()> {
+    let stored = crate::plan::load(ctx, &completion.plan_id).await?;
+    anyhow::ensure!(
+        stored.environment == environment,
+        "plan {} belongs to {}, not {environment}",
+        completion.plan_id,
+        stored.environment
+    );
+    let expected = stored
+        .steps
+        .iter()
+        .map(|step| step.id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let received = completion
+        .receipts
+        .iter()
+        .map(|receipt| receipt.step_id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    anyhow::ensure!(
+        expected == received && received.len() == completion.receipts.len(),
+        "runtime completion receipts must cover every plan step exactly once"
+    );
+    anyhow::ensure!(
+        !completion.succeeded || completion.receipts.iter().all(|receipt| receipt.succeeded),
+        "a successful runtime completion cannot contain a failed step receipt"
+    );
+    let terminal = if completion.succeeded {
+        PlanState::Succeeded
+    } else {
+        PlanState::Failed
+    };
+    if matches!(stored.state, PlanState::Succeeded | PlanState::Failed) {
+        anyhow::ensure!(
+            stored.state == terminal,
+            "runtime completion conflicts with terminal plan state"
+        );
+        return Ok(());
+    }
+    anyhow::ensure!(
+        matches!(stored.state, PlanState::Computed | PlanState::Running),
+        "runtime plan is not executable"
+    );
+    Ok(())
 }
 
 #[derive(Debug, Serialize, Deserialize)]

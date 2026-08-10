@@ -14,6 +14,9 @@ use crate::ontology::KIND_ENVIRONMENT;
 use crate::plan::{self, PlanState};
 use crate::reconcile_fence::{FenceAdmission, FenceGuard, ReconcileTickFence};
 
+// Preserve the public protocol path while runtime delivery owns the types.
+pub use crate::runtime_delivery::{RuntimeCompletion, RuntimeStepReceipt};
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub initial_backoff: Duration,
@@ -67,22 +70,6 @@ pub struct EnvironmentResult {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TickReport {
     pub environments: Vec<EnvironmentResult>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RuntimeStepReceipt {
-    pub step_id: String,
-    pub succeeded: bool,
-    pub detail: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RuntimeCompletion {
-    pub plan_id: String,
-    pub generation: u64,
-    pub succeeded: bool,
-    pub detail: String,
-    pub receipts: Vec<RuntimeStepReceipt>,
 }
 
 impl TickReport {
@@ -542,171 +529,27 @@ impl Reconciler {
         Ok(())
     }
 
-    pub async fn complete_runtime_work(
-        &self,
-        environment: &str,
-        completion: &RuntimeCompletion,
-    ) -> Result<()> {
-        self.validate_runtime_completion(environment, completion)
-            .await?;
-        let mut ctx = self.ctx.clone();
-        let mut stored = plan::load(&mut ctx, &completion.plan_id).await?;
-        let terminal = if completion.succeeded {
-            PlanState::Succeeded
-        } else {
-            PlanState::Failed
-        };
-        if matches!(stored.state, PlanState::Succeeded | PlanState::Failed) {
-            return Ok(());
-        }
-        if stored.state == PlanState::Computed {
-            stored.state = PlanState::Running;
-            stored.status_detail = "claimed by assigned environment runtime".into();
-            plan::store(&mut ctx, &stored).await?;
-        }
-        let observed_at = crate::now_millis();
-        let mut environment_object = None;
-        if completion.succeeded && ctx.outcome_export_enabled() {
-            if apply::environment_lease_status(&mut ctx, environment)
-                .await?
-                .is_some()
-            {
-                bail!("environment {environment} has an apply in progress");
-            }
-            let mut object = ctx
-                .get(&crate::ontology::env_id(environment))
-                .await?
-                .with_context(|| {
-                    format!("environment {environment} disappeared during outcome enqueue")
-                })?;
-            plan::update_runtime_deployments_object(
-                &mut ctx,
-                &mut object,
-                &stored.steps,
-                observed_at,
-            )
-            .await?;
-            environment_object = Some(object);
-        } else if completion.succeeded {
-            for step in &stored.steps {
-                plan::reconcile_deployment(&mut ctx, environment, &step.product, Some(&step.to))
-                    .await?;
-            }
-        }
-        let provider_events = if ctx.outcome_export_enabled() {
-            if environment_object.is_none() {
-                environment_object = Some(
-                    ctx.get(&crate::ontology::env_id(environment))
-                        .await?
-                        .with_context(|| {
-                            format!("environment {environment} disappeared during outcome enqueue")
-                        })?,
-                );
-            }
-            let environment_object = environment_object
-                .as_ref()
-                .expect("outcome export always loads the environment");
-            stored
-                .steps
-                .iter()
-                .filter_map(|step| {
-                    completion
-                        .receipts
-                        .iter()
-                        .find(|receipt| receipt.step_id == step.id)
-                        .map(|receipt| (step, receipt))
-                })
-                .filter_map(|(step, receipt)| {
-                    crate::terminal_outcome::classify(
-                        step.action,
-                        crate::terminal_outcome::Observation::Runtime {
-                            succeeded: receipt.succeeded,
-                            detail: &receipt.detail,
-                        },
-                    )
-                    .map(|terminal_state| (step, terminal_state))
-                })
-                .map(|(step, terminal_state)| {
-                    crate::providers::terminal_outcome_record(
-                        &stored,
-                        step,
-                        &format!(
-                            "tenkai:runtime-deployment:{}:{}:{}",
-                            stored.id, completion.generation, step.id
-                        ),
-                        terminal_state,
-                        environment_object,
-                        observed_at,
-                    )
-                    .map_err(anyhow::Error::from)
-                })
-                .collect::<Result<Vec<_>>>()?
-        } else {
-            Vec::new()
-        };
-        stored.state = terminal;
-        stored.status_detail = completion.detail.clone();
-        if completion.succeeded && ctx.outcome_export_enabled() {
-            plan::store_with_environment_and_provider_events(
-                &mut ctx,
-                &stored,
-                environment_object.expect("successful outcome export updates its environment"),
-                &provider_events,
-            )
-            .await?;
-        } else {
-            plan::store_with_provider_events(&mut ctx, &stored, &provider_events).await?;
-        }
-        Ok(())
-    }
-
+    /// Compatibility shim; runtime delivery owns completion validation.
+    #[deprecated(note = "use the runtime_delivery interface")]
     pub async fn validate_runtime_completion(
         &self,
         environment: &str,
         completion: &RuntimeCompletion,
     ) -> Result<()> {
         let mut ctx = self.ctx.clone();
-        let stored = plan::load(&mut ctx, &completion.plan_id).await?;
-        if stored.environment != environment {
-            bail!(
-                "plan {} belongs to {}, not {environment}",
-                completion.plan_id,
-                stored.environment
-            );
-        }
-        let expected = stored
-            .steps
-            .iter()
-            .map(|step| step.id.as_str())
-            .collect::<HashSet<_>>();
-        let received = completion
-            .receipts
-            .iter()
-            .map(|receipt| receipt.step_id.as_str())
-            .collect::<HashSet<_>>();
-        if expected != received || received.len() != completion.receipts.len() {
-            bail!("runtime completion receipts must cover every plan step exactly once");
-        }
-        if completion.succeeded && completion.receipts.iter().any(|receipt| !receipt.succeeded) {
-            bail!("a successful runtime completion cannot contain a failed step receipt");
-        }
-        let terminal = if completion.succeeded {
-            PlanState::Succeeded
-        } else {
-            PlanState::Failed
-        };
-        if matches!(stored.state, PlanState::Succeeded | PlanState::Failed) {
-            anyhow::ensure!(
-                stored.state == terminal,
-                "runtime completion conflicts with terminal plan state"
-            );
-            return Ok(());
-        }
-        anyhow::ensure!(
-            matches!(stored.state, PlanState::Computed | PlanState::Running),
-            "runtime plan is not executable"
-        );
-        Ok(())
+        crate::runtime_delivery::validate_runtime_completion(&mut ctx, environment, completion)
+            .await
+    }
+
+    /// Compatibility shim; runtime delivery owns durable completion effects.
+    #[deprecated(note = "use the runtime_delivery interface")]
+    pub async fn complete_runtime_work(
+        &self,
+        environment: &str,
+        completion: &RuntimeCompletion,
+    ) -> Result<()> {
+        let mut ctx = self.ctx.clone();
+        crate::runtime_delivery::complete_runtime_work(&mut ctx, environment, completion).await
     }
 
     /// Run complete ticks until Ctrl-C. A slow tick never overlaps its successor.

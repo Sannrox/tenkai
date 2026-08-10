@@ -30,6 +30,9 @@
 //! - [`tenant_environment`] hides authenticated tenant Environment visibility,
 //!   synchronous store adaptation, fixture projections, bounded reconciliation,
 //!   and non-disclosing failures behind one application interface.
+//! - [`runtime_delivery`] owns environment-runtime admission, work claims,
+//!   completion validation and ordering, durable Plan and Deployment effects,
+//!   heartbeat renewal, and inventory admission behind one interface.
 //! - [`software_executor`], [`model_runtime`], [`routing`], and [`staged_artifact`]
 //!   adapt typed delivery products to their target runtimes.
 //! - [`staged_artifact`] also owns the private kind→schema mapping for staged

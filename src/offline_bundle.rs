@@ -13,8 +13,8 @@ use ed25519_dalek::{Signer as _, SigningKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
-use crate::reconciler::{RuntimeCompletion, RuntimeStepReceipt};
 use crate::release_signing::TrustRoots;
+use crate::runtime_delivery::{RuntimeCompletion, RuntimeStepReceipt};
 
 pub const BUNDLE_SCHEMA: &str = "tenkai.offline-bundle.v1";
 pub const RECEIPT_SCHEMA: &str = "tenkai.offline-receipt.v1";
@@ -643,9 +643,13 @@ pub async fn import_receipt(
     use crate::storage::{OfflineImportRecord, OfflineStepImportRecord};
 
     let completion = receipt.runtime_completion();
-    reconciler
-        .validate_runtime_completion(&receipt.statement.environment_id, &completion)
-        .await?;
+    let mut ctx = reconciler.ctx_clone();
+    crate::runtime_delivery::validate_runtime_completion(
+        &mut ctx,
+        &receipt.statement.environment_id,
+        &completion,
+    )
+    .await?;
     let record = OfflineImportRecord {
         bundle_digest: receipt.statement.bundle_digest.clone(),
         environment_id: receipt.statement.environment_id.clone(),
@@ -667,9 +671,12 @@ pub async fn import_receipt(
         })
         .collect::<Vec<_>>();
     store.record_offline_import(&record, &steps)?;
-    reconciler
-        .complete_runtime_work(&receipt.statement.environment_id, &completion)
-        .await
+    crate::runtime_delivery::complete_runtime_work(
+        &mut ctx,
+        &receipt.statement.environment_id,
+        &completion,
+    )
+    .await
 }
 
 #[cfg(test)]

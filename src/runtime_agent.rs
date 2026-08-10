@@ -11,7 +11,7 @@ use tokio::process::Command;
 
 use crate::inventory::{self, RUNTIME_INVENTORY_SOURCE};
 use crate::plan::{Plan, Step};
-use crate::reconciler::{RuntimeCompletion, RuntimeStepReceipt};
+use crate::runtime_delivery::{RuntimeCompletion, RuntimeStepReceipt};
 use crate::server::{RuntimeHeartbeat, RuntimeInventoryReport, RuntimeWork};
 
 #[derive(Clone)]
