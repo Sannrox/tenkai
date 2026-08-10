@@ -1223,19 +1223,34 @@ async fn run(cli: Cli) -> Result<()> {
                 println!("applying {} to {}:", stored.id, stored.environment);
                 print_steps(&stored.steps);
             }
+            let authorization = match (
+                approval.as_deref(),
+                approval_trust_roots.as_deref(),
+                allow_unapproved_development,
+            ) {
+                (Some(approval), Some(trust_roots), false) => {
+                    apply::ExecutionAuthorization::Signed {
+                        approval,
+                        trust_roots,
+                    }
+                }
+                (None, None, true) => apply::ExecutionAuthorization::LocalDevelopment {
+                    reason: development_reason
+                        .as_deref()
+                        .expect("clap requires a development reason"),
+                },
+                (None, None, false) => bail!(
+                    "plan execution requires --approval and --approval-trust-roots; local development may explicitly use --allow-unapproved-development with --development-reason"
+                ),
+                _ => unreachable!("clap rejects partial or conflicting authorization modes"),
+            };
             run_plan(
                 &mut ctx,
                 &plan_id,
                 apply::ExecutionOptions {
                     skip_gates,
                     emergency_reason: emergency_reason.as_deref(),
-                    approval: approval.as_deref(),
-                    approval_trust_roots: approval_trust_roots.as_deref(),
-                    unapproved_development_reason: allow_unapproved_development.then(|| {
-                        development_reason
-                            .as_deref()
-                            .expect("clap requires a development reason")
-                    }),
+                    authorization,
                 },
                 PlanResultContext {
                     command: CommandName::Apply,
@@ -1331,13 +1346,11 @@ async fn run(cli: Cli) -> Result<()> {
                     apply::ExecutionOptions {
                         skip_gates: true,
                         emergency_reason: emergency_reason.as_deref(),
-                        approval: None,
-                        approval_trust_roots: None,
-                        unapproved_development_reason: Some(
-                            development_reason
+                        authorization: apply::ExecutionAuthorization::LocalDevelopment {
+                            reason: development_reason
                                 .as_deref()
                                 .expect("clap requires a development reason"),
-                        ),
+                        },
                     },
                     PlanResultContext {
                         command: CommandName::Rollback,

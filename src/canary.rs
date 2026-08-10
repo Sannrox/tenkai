@@ -2508,9 +2508,9 @@ max_startup_seconds = 30
             crate::apply::ExecutionOptions {
                 skip_gates: false,
                 emergency_reason: None,
-                approval: None,
-                approval_trust_roots: None,
-                unapproved_development_reason: Some("model_runtime canary e2e fixture"),
+                authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
+                    reason: "model_runtime canary e2e fixture",
+                },
             },
         )
         .await

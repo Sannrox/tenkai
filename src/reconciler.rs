@@ -807,9 +807,10 @@ async fn reconcile_environment(
             apply::ExecutionOptions {
                 skip_gates,
                 emergency_reason: None,
-                approval: Some(&envelope),
-                approval_trust_roots: Some(roots),
-                unapproved_development_reason: None,
+                authorization: apply::ExecutionAuthorization::Signed {
+                    approval: &envelope,
+                    trust_roots: roots,
+                },
             },
         )
         .await?;
@@ -833,9 +834,7 @@ async fn reconcile_environment(
         apply::ExecutionOptions {
             skip_gates,
             emergency_reason: None,
-            approval: None,
-            approval_trust_roots: None,
-            unapproved_development_reason: Some(reason),
+            authorization: apply::ExecutionAuthorization::LocalDevelopment { reason },
         },
     )
     .await?;

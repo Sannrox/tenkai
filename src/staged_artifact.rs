@@ -575,9 +575,9 @@ document = "agent.json"
             crate::apply::ExecutionOptions {
                 skip_gates: false,
                 emergency_reason: None,
-                approval: None,
-                approval_trust_roots: None,
-                unapproved_development_reason: Some("staged product e2e"),
+                authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
+                    reason: "staged product e2e",
+                },
             },
         )
         .await
