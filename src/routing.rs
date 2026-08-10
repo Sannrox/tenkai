@@ -112,19 +112,16 @@ impl LocalRoutingConfigExecutor {
 impl RoutingConfigExecutor for LocalRoutingConfigExecutor {
     fn apply(&self, config: &RoutingConfig) -> Result<String> {
         let expected = digest(config)?;
-        let parent = self
-            .state_path
-            .parent()
-            .context("routing state path has no parent")?;
-        std::fs::create_dir_all(parent)?;
-        let temporary = self.state_path.with_extension("json.pending");
-        std::fs::write(&temporary, serde_json::to_vec_pretty(config)?)?;
-        let observed: RoutingConfig = serde_json::from_slice(&std::fs::read(&temporary)?)?;
-        if digest(&observed)? != expected {
-            let _ = std::fs::remove_file(&temporary);
-            bail!("routing post-mutation verification failed");
-        }
-        std::fs::rename(&temporary, &self.state_path)?;
+        crate::atomic_state::write_json_verified(
+            &self.state_path,
+            config,
+            |observed: &RoutingConfig| {
+                if digest(observed)? != expected {
+                    bail!("routing post-mutation verification failed");
+                }
+                Ok(())
+            },
+        )?;
         if self.observe()?.as_deref() != Some(expected.as_str()) {
             bail!("routing post-mutation observation differs from requested configuration");
         }
@@ -132,21 +129,13 @@ impl RoutingConfigExecutor for LocalRoutingConfigExecutor {
     }
 
     fn remove(&self) -> Result<()> {
-        match std::fs::remove_file(&self.state_path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error.into()),
-        }
+        crate::atomic_state::remove_if_exists(&self.state_path)
     }
 
     fn observe(&self) -> Result<Option<String>> {
-        match std::fs::read(&self.state_path) {
-            Ok(bytes) => {
-                let config: RoutingConfig = serde_json::from_slice(&bytes)?;
-                Ok(Some(digest(&config)?))
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error.into()),
+        match crate::atomic_state::read_json_optional::<RoutingConfig>(&self.state_path)? {
+            Some(config) => Ok(Some(digest(&config)?)),
+            None => Ok(None),
         }
     }
 }

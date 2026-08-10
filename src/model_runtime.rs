@@ -400,20 +400,17 @@ impl ModelRuntimeExecutor for LocalModelRuntimeExecutor {
             cache.fetch_and_verify(&descriptor.model.source, &descriptor.model.artifact_digest)?;
         }
         let expected = descriptor.digest()?;
-        let parent = self
-            .state_path
-            .parent()
-            .context("model runtime state path has no parent")?;
-        std::fs::create_dir_all(parent)?;
-        let temporary = self.state_path.with_extension("json.pending");
-        std::fs::write(&temporary, serde_json::to_vec_pretty(descriptor)?)?;
-        let observed: ModelRuntimeDescriptor = serde_json::from_slice(&std::fs::read(&temporary)?)?;
-        observed.validate()?;
-        if observed.digest()? != expected {
-            let _ = std::fs::remove_file(&temporary);
-            bail!("model_runtime post-mutation verification failed");
-        }
-        std::fs::rename(&temporary, &self.state_path)?;
+        crate::atomic_state::write_json_verified(
+            &self.state_path,
+            descriptor,
+            |observed: &ModelRuntimeDescriptor| {
+                observed.validate()?;
+                if observed.digest()? != expected {
+                    bail!("model_runtime post-mutation verification failed");
+                }
+                Ok(())
+            },
+        )?;
         if self.observe()?.as_deref() != Some(expected.as_str()) {
             bail!("model_runtime post-mutation observation differs from requested descriptor");
         }
@@ -421,22 +418,16 @@ impl ModelRuntimeExecutor for LocalModelRuntimeExecutor {
     }
 
     fn remove(&self) -> Result<()> {
-        match std::fs::remove_file(&self.state_path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error.into()),
-        }
+        crate::atomic_state::remove_if_exists(&self.state_path)
     }
 
     fn observe(&self) -> Result<Option<String>> {
-        match std::fs::read(&self.state_path) {
-            Ok(bytes) => {
-                let descriptor: ModelRuntimeDescriptor = serde_json::from_slice(&bytes)?;
+        match crate::atomic_state::read_json_optional::<ModelRuntimeDescriptor>(&self.state_path)? {
+            Some(descriptor) => {
                 descriptor.validate()?;
                 Ok(Some(descriptor.digest()?))
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error.into()),
+            None => Ok(None),
         }
     }
 }
@@ -722,30 +713,27 @@ impl ReferenceLlamaCppExecutor {
     }
 
     fn write_descriptor(&self, path: &Path, descriptor: &ModelRuntimeDescriptor) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let temporary = path.with_extension("pending");
-        std::fs::write(&temporary, serde_json::to_vec_pretty(descriptor)?)?;
-        let observed: ModelRuntimeDescriptor = serde_json::from_slice(&std::fs::read(&temporary)?)?;
-        observed.validate()?;
-        if observed.digest()? != descriptor.digest()? {
-            let _ = std::fs::remove_file(&temporary);
-            bail!("model_runtime post-mutation verification failed");
-        }
-        std::fs::rename(&temporary, path)?;
-        Ok(())
+        let expected = descriptor.digest()?;
+        crate::atomic_state::write_json_verified(
+            path,
+            descriptor,
+            |observed: &ModelRuntimeDescriptor| {
+                observed.validate()?;
+                if observed.digest()? != expected {
+                    bail!("model_runtime post-mutation verification failed");
+                }
+                Ok(())
+            },
+        )
     }
 
     fn load_descriptor(path: &Path) -> Result<Option<ModelRuntimeDescriptor>> {
-        match std::fs::read(path) {
-            Ok(bytes) => {
-                let descriptor: ModelRuntimeDescriptor = serde_json::from_slice(&bytes)?;
+        match crate::atomic_state::read_json_optional::<ModelRuntimeDescriptor>(path)? {
+            Some(descriptor) => {
                 descriptor.validate()?;
                 Ok(Some(descriptor))
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error.into()),
+            None => Ok(None),
         }
     }
 
