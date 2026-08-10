@@ -10,6 +10,9 @@
 //!
 //! - [`catalog`] owns immutable release publication, promotion, and lookup.
 //! - [`plan`], [`apply`], and [`reconciler`] own convergence decisions and execution.
+//! - `apply::execution_attempt` hides Plan authorization mode, Environment lease
+//!   admission, maintenance authorization, Canary finalization, lease release,
+//!   and failure precedence behind one typed execution-attempt interface.
 //! - `apply::product_execution` hides product-kind dispatch, adapter setup,
 //!   integrity and health ordering, and failed-activation cleanup policy behind
 //!   the apply workflow's private execution seam.

@@ -24,7 +24,13 @@ use crate::pb::sekai::{Lease, Link, Object};
 use crate::plan::{self, Action, Plan, PlanState, ReleasePin, Step};
 use crate::routing::RoutingConfigExecutor as _;
 
+mod execution_attempt;
 mod product_execution;
+
+#[allow(deprecated)]
+pub use execution_attempt::{
+    ExecutionAuthorization, ExecutionOptions, execute, execute_with_options,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Outcome {
@@ -122,15 +128,6 @@ async fn block_for_maintenance(
 #[cfg(test)]
 fn is_maintenance_block_error(error: &anyhow::Error) -> bool {
     error.downcast_ref::<MaintenanceBlocked>().is_some()
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ExecutionOptions<'a> {
-    pub skip_gates: bool,
-    pub emergency_reason: Option<&'a str>,
-    pub approval: Option<&'a Path>,
-    pub approval_trust_roots: Option<&'a Path>,
-    pub unapproved_development_reason: Option<&'a str>,
 }
 
 enum MaintenanceDecision {
@@ -1354,146 +1351,10 @@ pub(crate) async fn validate_preconditions(ctx: &mut Ctx, plan: &Plan) -> Result
     Ok(())
 }
 
-/// Compatibility entry point retained so downstream crates receive an
-/// actionable authorization error instead of a compile failure.
-#[deprecated(note = "use execute_with_options with explicit plan approval")]
-pub async fn execute(_ctx: &mut Ctx, _plan_id: &str, _skip_gates: bool) -> Result<Vec<Outcome>> {
-    bail!(
-        "plan execution now requires explicit approval; use execute_with_options with signed approval or a recorded local-development bypass"
-    )
-}
-
-/// Execute a stored plan's ordered steps after explicit authorization.
-pub async fn execute_with_options(
-    ctx: &mut Ctx,
-    plan_id: &str,
-    options: ExecutionOptions<'_>,
-) -> Result<Vec<Outcome>> {
-    let emergency_reason = validate_emergency_override(options.emergency_reason)?;
-    let mut stored_plan = plan::load(ctx, plan_id).await?;
-    if !matches!(stored_plan.state, PlanState::Computed | PlanState::Blocked) {
-        bail!(
-            "plan {} is {}, only computed or blocked plans can be applied",
-            stored_plan.id,
-            stored_plan.state
-        );
-    }
-    let now = crate::now_millis();
-    let approval_evidence = match (
-        options.approval,
-        options.approval_trust_roots,
-        options.unapproved_development_reason,
-    ) {
-        (Some(envelope), Some(roots), None) => {
-            crate::plan_approval::verify(&stored_plan, envelope, roots, now, options.skip_gates)?
-        }
-        (None, None, Some(reason)) if ctx.is_embedded() => {
-            crate::plan_approval::local_bypass(&stored_plan, reason, now)?
-        }
-        (None, None, Some(_)) => {
-            bail!("unapproved development execution is available only in embedded mode")
-        }
-        (None, None, None) => bail!(
-            "plan execution requires --approval and --approval-trust-roots; local development may explicitly use --allow-unapproved-development with --development-reason"
-        ),
-        (Some(_), None, _) | (None, Some(_), _) => {
-            bail!("signed plan execution requires both an approval and approval trust roots")
-        }
-        _ => bail!("signed approval and the local-development bypass are mutually exclusive"),
-    };
-    crate::plan_approval::record(ctx, &approval_evidence).await?;
-    let environment = stored_plan.environment.clone();
-    let owner = stored_plan.id.clone();
-    let lease = claim_execution_environment(ctx, &environment, &owner).await?;
-    let authorization = async {
-        let initial_maintenance =
-            maintenance_decision(ctx, &stored_plan.environment, emergency_reason).await?;
-        record_maintenance_decision(ctx, &stored_plan, &initial_maintenance).await?;
-        if let MaintenanceDecision::Denied(detail) = &initial_maintenance {
-            block_for_maintenance(ctx, &lease, &mut stored_plan, options.skip_gates, detail)
-                .await
-                .map(|_| ())?;
-        }
-        Ok::<_, anyhow::Error>(())
-    }
-    .await;
-    if let Err(error) = authorization {
-        let error = if emergency_reason.is_some() {
-            let detail = format!("emergency maintenance override was not authorized: {error}");
-            match block_for_maintenance(ctx, &lease, &mut stored_plan, options.skip_gates, &detail)
-                .await
-            {
-                Err(blocked) => blocked.context(detail),
-                Ok(_) => unreachable!("maintenance authorization failure always blocks"),
-            }
-        } else {
-            error
-        };
-        let unlock = release_environment(ctx, &lease).await;
-        return match unlock {
-            Ok(()) => Err(error),
-            Err(unlock) => Err(error.context(format!(
-                "releasing environment apply lease also failed: {unlock}"
-            ))),
-        };
-    }
-    let canary_plan = stored_plan.clone();
-    let execution_lease = lease.clone();
-    let execution_emergency_reason = emergency_reason.map(str::to_string);
-    let execution_approval = options.approval.map(std::path::Path::to_path_buf);
-    let execution_approval_trust_roots = options
-        .approval_trust_roots
-        .map(std::path::Path::to_path_buf);
-    let execution_unapproved_reason = options.unapproved_development_reason.map(str::to_string);
-    let skip_gates = options.skip_gates;
-    let canary_execution =
-        crate::canary::execute_attempt(ctx, &canary_plan, options.skip_gates, move |ctx| {
-            Box::pin(async move {
-                execute_locked(
-                    ctx,
-                    stored_plan,
-                    ExecutionOptions {
-                        skip_gates,
-                        emergency_reason: execution_emergency_reason.as_deref(),
-                        approval: execution_approval.as_deref(),
-                        approval_trust_roots: execution_approval_trust_roots.as_deref(),
-                        unapproved_development_reason: execution_unapproved_reason.as_deref(),
-                    },
-                    &execution_lease,
-                )
-                .await
-            })
-        })
-        .await;
-    let result = canary_execution.execution;
-    let canary_finalization_error = canary_execution.finalization_error;
-    let unlock = release_environment(ctx, &lease).await;
-    let released_result = match (result, unlock) {
-        (Ok(outcomes), Ok(())) => Ok(outcomes),
-        (Err(error), Ok(())) => Err(error),
-        (Err(error), Err(unlock)) => Err(error.context(format!(
-            "releasing environment apply lease also failed: {unlock}; after verifying no apply is running, retry `tenkaictl env unlock {environment}` once the lease expires"
-        ))),
-        (Ok(_), Err(error)) => Err(error.context(format!(
-            "releasing environment apply lease failed; after verifying no apply is running, retry `tenkaictl env unlock {environment}` once the lease expires"
-        ))),
-    };
-    match (released_result, canary_finalization_error) {
-        (Ok(outcomes), None) => Ok(outcomes),
-        (Ok(_), Some(error)) => Err(error.context(format!(
-            "apply completed but canary evidence finalization failed; run `tenkaictl canary repair {plan_id}`"
-        ))),
-        (Err(error), None) => Err(error),
-        (Err(error), Some(finalization)) => Err(error.context(format!(
-            "canary evidence finalization also failed: {finalization}"
-        ))),
-    }
-}
-
 async fn execute_locked(
     ctx: &mut Ctx,
     mut stored_plan: Plan,
-    options: ExecutionOptions<'_>,
+    options: execution_attempt::AttemptExecutionPolicy<'_>,
     lease: &EnvironmentLease,
 ) -> Result<Vec<Outcome>> {
     let skip_gates = options.skip_gates;
