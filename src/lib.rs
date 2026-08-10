@@ -1,8 +1,23 @@
-//! tenkai — local-first, constraint-based delivery control plane.
+//! Tenkai is a local-first, constraint-based delivery control plane.
 //!
-//! Current v0 uses sekai as its operational store and chisei for eval gates. The
-//! accepted standalone architecture in ADR 0001 moves authority to Tenkai-owned
-//! persistence and makes sekai-chisei an operation-dependent integration.
+//! The application core owns releases, channels, environments, plans, approvals,
+//! execution, rollback, and recovery state. [`storage::OperationalStore`] is the
+//! persistence seam shared by embedded and server hosts. Sekai-Chisei integrations
+//! are derived, retryable providers unless an operation explicitly requires their
+//! evidence; they are never the recovery path.
+//!
+//! The crate is organized around a small set of application seams:
+//!
+//! - [`catalog`] owns immutable release publication, promotion, and lookup.
+//! - [`plan`], [`apply`], and [`reconciler`] own convergence decisions and execution.
+//! - [`storage`] and [`tenant_store`] provide operational persistence adapters.
+//! - [`software_executor`], [`model_runtime`], [`routing`], and [`staged_artifact`]
+//!   adapt typed delivery products to their target runtimes.
+//! - [`providers`] and [`client`] contain optional Sekai-Chisei integration.
+//! - [`embedded`] and [`server`] host the same application core; transport is not
+//!   a domain seam.
+//!
+//! See ADR 0001 for the ownership and service-evolution rules.
 
 pub mod apply;
 pub mod assertion_verifier;

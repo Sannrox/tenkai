@@ -522,7 +522,8 @@ impl PostgresTenantOperationalStore {
     }
 }
 
-/// One tenant's Postgres schema partition implementing [`OperationalStore`].
+/// One tenant's Postgres schema partition implementing
+/// [`OperationalStore`](crate::storage::OperationalStore).
 #[derive(Clone)]
 pub struct PostgresTenantPartition {
     tenant_id: String,
