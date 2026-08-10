@@ -205,7 +205,7 @@ impl FixtureEnvironmentProjection {
         }
     }
 
-    pub fn fleet_row(&self) -> crate::plan::FleetEnvironmentRow {
+    pub fn fleet_row(&self) -> crate::fleet::FleetEnvironmentRow {
         let product_count = self
             .channels
             .iter()
@@ -219,7 +219,7 @@ impl FixtureEnvironmentProjection {
             "awaiting_approval" => (0, 0, product_count, false, "ok", "behind"),
             _ => (0, 0, product_count, false, "n/a", "empty"),
         };
-        crate::plan::FleetEnvironmentRow {
+        crate::fleet::FleetEnvironmentRow {
             name: self.environment.id.clone(),
             id: format!("tenkai:env:{}", self.environment.id),
             description: self.description.clone(),
