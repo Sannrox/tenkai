@@ -13,6 +13,8 @@
 //! - [`storage`] and [`tenant_store`] provide operational persistence adapters.
 //! - [`software_executor`], [`model_runtime`], [`routing`], and [`staged_artifact`]
 //!   adapt typed delivery products to their target runtimes.
+//! - [`atomic_state`] hides verified atomic local state-file mutation shared by
+//!   those local executor adapters.
 //! - [`providers`] and [`client`] contain optional Sekai-Chisei integration.
 //! - [`embedded`] and [`server`] host the same application core; transport is not
 //!   a domain seam.
@@ -21,6 +23,7 @@
 
 pub mod apply;
 pub mod assertion_verifier;
+pub mod atomic_state;
 pub mod auth_context;
 pub mod canary;
 pub mod catalog;

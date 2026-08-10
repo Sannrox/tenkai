@@ -163,20 +163,13 @@ impl LocalStagedArtifactExecutor {
     }
 
     pub fn apply_json_bytes(&self, bytes: &[u8], expected_digest: &str) -> Result<String> {
-        let parent = self
-            .state_path
-            .parent()
-            .context("staged artifact state path has no parent")?;
-        std::fs::create_dir_all(parent)?;
-        let temporary = self.state_path.with_extension("json.pending");
-        std::fs::write(&temporary, bytes)?;
-        let observed = std::fs::read(&temporary)?;
-        let observed_digest = format!("{:x}", Sha256::digest(&observed));
-        if observed_digest != expected_digest {
-            let _ = std::fs::remove_file(&temporary);
-            bail!("staged artifact post-mutation verification failed");
-        }
-        std::fs::rename(&temporary, &self.state_path)?;
+        crate::atomic_state::write_bytes_verified(&self.state_path, bytes, |observed| {
+            let observed_digest = format!("{:x}", Sha256::digest(observed));
+            if observed_digest != expected_digest {
+                bail!("staged artifact post-mutation verification failed");
+            }
+            Ok(())
+        })?;
         Ok(expected_digest.into())
     }
 
@@ -187,18 +180,13 @@ impl LocalStagedArtifactExecutor {
     }
 
     pub fn remove(&self) -> Result<()> {
-        match std::fs::remove_file(&self.state_path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error.into()),
-        }
+        crate::atomic_state::remove_if_exists(&self.state_path)
     }
 
     pub fn observe_digest(&self) -> Result<Option<String>> {
-        match std::fs::read(&self.state_path) {
-            Ok(bytes) => Ok(Some(format!("{:x}", Sha256::digest(bytes)))),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error.into()),
+        match crate::atomic_state::read_optional(&self.state_path)? {
+            Some(bytes) => Ok(Some(format!("{:x}", Sha256::digest(bytes)))),
+            None => Ok(None),
         }
     }
 }
