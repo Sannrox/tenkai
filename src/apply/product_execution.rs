@@ -12,7 +12,7 @@ async fn prepare_fenced_mutation(
     content: &ReleaseContent,
 ) -> Result<()> {
     refresh_environment_lease(ctx, lease).await?;
-    verify_content_integrity(content)?;
+    verify_integrity(content)?;
     Ok(())
 }
 
@@ -115,7 +115,7 @@ pub(super) async fn activate(
         },
         error => Ok(error),
     }?;
-    match verify_content_integrity(content) {
+    match verify_integrity(content) {
         Ok(()) => Ok(result),
         Err(error) => Ok(Err(error.to_string())),
     }
@@ -167,7 +167,7 @@ pub(super) async fn deactivate(
     match content.manifest.deploy.uninstall.as_deref() {
         Some(command) if !command.is_empty() => {
             let result = run_mutation_command(ctx, lease, content, command).await?;
-            match verify_content_integrity(content) {
+            match verify_integrity(content) {
                 Ok(()) => Ok(result),
                 Err(error) => Ok(Err(error.to_string())),
             }

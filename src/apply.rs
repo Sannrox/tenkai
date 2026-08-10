@@ -4,6 +4,7 @@
 //! answer "what ran, when, gated by what, and what happened" after the fact.
 
 use std::collections::HashMap;
+#[cfg(test)]
 use std::path::Path;
 
 #[cfg(test)]
@@ -27,6 +28,7 @@ use crate::routing::RoutingConfigExecutor as _;
 mod execution_attempt;
 mod execution_lease;
 mod product_execution;
+mod release_content;
 
 pub(crate) use execution_lease::{
     ENVIRONMENT_LEASE_NAMESPACE, EnvironmentLease, claim_environment, environment_lease_status,
@@ -34,6 +36,7 @@ pub(crate) use execution_lease::{
 };
 pub use execution_lease::{EnvironmentLeaseInspect, inspect_environment_lease, unlock_environment};
 use execution_lease::{claim_execution_environment, run_mutation_command};
+use release_content::{ReleaseContent, admit as admit_release, verify_integrity};
 
 #[allow(deprecated)]
 pub use execution_attempt::{
@@ -317,25 +320,6 @@ fn gate_config_ref(release_digest: &str, artifact_digest: &str, suite_digest: &s
     format!("tenkai:{:x}", hasher.finalize())
 }
 
-struct ReleaseContent {
-    manifest: Manifest,
-    artifact_digest: String,
-    workdir: std::path::PathBuf,
-    environment: String,
-    product: String,
-    mutation_lock: std::path::PathBuf,
-    routing_state: std::path::PathBuf,
-    model_runtime_state: std::path::PathBuf,
-}
-
-fn verify_content_integrity(content: &ReleaseContent) -> Result<()> {
-    let actual = manifest::artifact_digest(&content.workdir, &content.manifest.immutable_inputs())?;
-    if actual != content.artifact_digest {
-        bail!("immutable deployment inputs changed while executing release");
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 async fn activate(content: &ReleaseContent) -> Result<Result<(), String>> {
     let install = run_command(
@@ -360,7 +344,7 @@ async fn activate(content: &ReleaseContent) -> Result<Result<(), String>> {
         },
         error => Ok(error),
     }?;
-    match verify_content_integrity(content) {
+    match verify_integrity(content) {
         Ok(()) => Ok(result),
         Err(error) => Ok(Err(error.to_string())),
     }
@@ -377,7 +361,7 @@ async fn deactivate(content: &ReleaseContent) -> Result<Result<(), String>> {
                 &content.product,
             )
             .await?;
-            match verify_content_integrity(content) {
+            match verify_integrity(content) {
                 Ok(()) => Ok(result),
                 Err(error) => Ok(Err(error.to_string())),
             }
@@ -486,7 +470,7 @@ async fn compensate_activation(
     let mut restored = step.from.is_none();
 
     if let (Some(previous), Some(pin)) = (step.from.as_deref(), step.restore.as_ref())
-        && let Ok(previous_content) = release_content(ctx, pin, env, &step.product).await
+        && let Ok(previous_content) = admit_release(ctx, pin, env, &step.product).await
         && matches!(
             product_execution::activate(ctx, lease, &previous_content).await,
             Ok(Ok(()))
@@ -503,104 +487,6 @@ async fn compensate_activation(
     if !cleaned || !restored || step.from.is_none() {
         let _ = set_env_unknown(ctx, lease, env, &step.product, &failure).await;
     }
-}
-
-async fn release_content(
-    ctx: &mut Ctx,
-    pin: &ReleasePin,
-    environment: &str,
-    product: &str,
-) -> Result<ReleaseContent> {
-    use crate::catalog::CatalogReader as _;
-
-    let descriptor = crate::catalog::EmbeddedCatalog::new(ctx)
-        .lookup_release(&pin.release_id, environment)
-        .await?;
-    let Some(obj) = ctx.get(&pin.release_id).await? else {
-        bail!("release object {} not found", pin.release_id);
-    };
-    if obj.kind != KIND_RELEASE {
-        bail!(
-            "object {} is {}, not {KIND_RELEASE}",
-            pin.release_id,
-            obj.kind
-        );
-    }
-    if obj
-        .properties
-        .get("recalled_at")
-        .is_some_and(|value| !value.is_empty())
-    {
-        bail!("release {} is recalled", pin.release_id);
-    }
-    // Validate the exact snapshot consumed below as well as the Catalog
-    // descriptor fetched above; the compatibility store does not yet provide
-    // a transactional read spanning those records.
-    crate::catalog::require_deployable_trust(ctx, &obj, environment).await?;
-    let raw = obj.properties.get("manifest").cloned().unwrap_or_default();
-    let stored_digest = obj.properties.get("digest").cloned().unwrap_or_default();
-    let actual_digest = manifest::digest(&raw);
-    if descriptor.manifest_digest != pin.digest
-        || stored_digest != pin.digest
-        || actual_digest != pin.digest
-    {
-        bail!(
-            "release {} content no longer matches pinned digest {}",
-            pin.release_id,
-            pin.digest
-        );
-    }
-    let manifest = manifest::parse_raw(&raw)
-        .with_context(|| format!("parsing stored manifest of {}", pin.release_id))?;
-    if descriptor.artifact_digest != pin.artifact_digest || descriptor.content_path != pin.workdir {
-        bail!(
-            "release {} descriptor no longer matches its plan pin",
-            pin.release_id
-        );
-    }
-    let actual_artifact_digest = manifest::artifact_digest(
-        Path::new(&descriptor.content_path),
-        &manifest.immutable_inputs(),
-    )?;
-    if actual_artifact_digest != descriptor.artifact_digest {
-        bail!(
-            "release {} immutable deploy inputs no longer match pinned artifact digest {}",
-            pin.release_id,
-            pin.artifact_digest
-        );
-    }
-    let workdir = manifest::execution_workdir(
-        Path::new(&descriptor.content_path),
-        &manifest.immutable_inputs(),
-        &pin.artifact_digest,
-        environment,
-        product,
-    )?;
-    let state_dir = Path::new(&descriptor.content_path)
-        .parent()
-        .and_then(Path::parent)
-        .context("release snapshot is not inside the Tenkai state directory")?;
-    Ok(ReleaseContent {
-        manifest,
-        artifact_digest: pin.artifact_digest.clone(),
-        workdir,
-        environment: environment.to_string(),
-        product: product.to_string(),
-        mutation_lock: state_dir
-            .join("runtime")
-            .join(environment)
-            .join(".mutation.lock"),
-        routing_state: state_dir
-            .join("runtime")
-            .join(environment)
-            .join("routing")
-            .join(format!("{product}.json")),
-        model_runtime_state: state_dir
-            .join("runtime")
-            .join(environment)
-            .join("model_runtime")
-            .join(format!("{product}.json")),
-    })
 }
 
 fn record(id: String, kind: &str, name: String, properties: HashMap<String, String>) -> Object {
@@ -758,7 +644,7 @@ async fn execute_locked(
                 artifact_digest: step.artifact_digest.clone(),
                 workdir: step.workdir.clone(),
             };
-            let content = release_content(ctx, &target, &env, &step.product).await?;
+            let content = admit_release(ctx, &target, &env, &step.product).await?;
             let Some(suite) = content
                 .manifest
                 .gate
@@ -916,9 +802,9 @@ async fn execute_step(
         artifact_digest: step.artifact_digest.clone(),
         workdir: step.workdir.clone(),
     };
-    let content = release_content(ctx, &target, env, &step.product).await?;
+    let content = admit_release(ctx, &target, env, &step.product).await?;
     let restore_content = match step.restore.as_ref() {
-        Some(pin) => Some(release_content(ctx, pin, env, &step.product).await?),
+        Some(pin) => Some(admit_release(ctx, pin, env, &step.product).await?),
         None => None,
     };
 
