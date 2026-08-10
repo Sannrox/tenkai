@@ -9,7 +9,7 @@ use std::path::Path;
 
 use anyhow::{Context as _, Result, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use ed25519_dalek::{Signature, Signer as _, SigningKey};
+use ed25519_dalek::{Signer as _, SigningKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
@@ -169,20 +169,7 @@ fn validate_path(path: &str) -> Result<()> {
 }
 
 fn signing_key_id(key: &SigningKey) -> String {
-    format!(
-        "sha256:{:x}",
-        Sha256::digest(key.verifying_key().to_bytes())
-    )
-}
-
-fn signature_bytes(value: &str) -> Result<Signature> {
-    let decoded = STANDARD
-        .decode(value)
-        .context("decoding Ed25519 signature")?;
-    let bytes: [u8; 64] = decoded
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("Ed25519 signature must decode to exactly 64 bytes"))?;
-    Ok(Signature::from_bytes(&bytes))
+    crate::signature_verification::key_id(&key.verifying_key().to_bytes())
 }
 
 fn verifying_key(
@@ -195,14 +182,11 @@ fn verifying_key(
         .iter()
         .find(|signer| signer.key_id == key_id)
         .with_context(|| format!("offline signer {key_id} is not currently trusted"))?;
-    let decoded = STANDARD
-        .decode(&signer.public_key)
-        .context("decoding offline signer public key")?;
-    let bytes: [u8; 32] = decoded
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("offline signer public key must be exactly 32 bytes"))?;
-    let key = ed25519_dalek::VerifyingKey::from_bytes(&bytes)
-        .context("offline signer public key is invalid")?;
+    let key = crate::signature_verification::trusted_key(
+        "offline signer public key",
+        &signer.public_key,
+        &signer.key_id,
+    )?;
     Ok((signer.identity.clone(), key))
 }
 
@@ -405,11 +389,12 @@ impl BundleEnvelope {
         if self.statement.exporter_identity != identity {
             bail!("bundle exporter identity does not match its trusted signing identity");
         }
-        key.verify_strict(
+        crate::signature_verification::verify_strict(
+            &key,
+            "offline bundle signature",
+            &self.signature,
             &self.statement.canonical_bytes()?,
-            &signature_bytes(&self.signature)?,
-        )
-        .context("offline bundle signature verification failed")?;
+        )?;
         let expected = self
             .statement
             .entries
@@ -607,11 +592,12 @@ impl ReceiptEnvelope {
             bail!("offline receipt completion time is invalid");
         }
         let (identity, key) = verifying_key(roots, &self.key_id)?;
-        key.verify_strict(
+        crate::signature_verification::verify_strict(
+            &key,
+            "offline receipt signature",
+            &self.signature,
             &self.statement.canonical_bytes()?,
-            &signature_bytes(&self.signature)?,
-        )
-        .context("offline receipt signature verification failed")?;
+        )?;
         Ok(VerifiedReceipt {
             signer_identity: identity,
             statement: self.statement.clone(),
@@ -943,6 +929,75 @@ mod tests {
                 .verify(&roots(&runtime, "runtime"), &wrong_scope, &verified, 4_000)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn bundle_and_receipt_trust_roots_bind_key_ids_to_public_keys() {
+        let exporter = SigningKey::from_bytes(&[7; 32]);
+        let mismatched_key_id = format!("sha256:{}", "a".repeat(64));
+        let mismatched_roots = TrustRoots {
+            version: 1,
+            signers: vec![TrustedSigner {
+                key_id: mismatched_key_id.clone(),
+                identity: "exporter".into(),
+                public_key: STANDARD.encode(exporter.verifying_key().to_bytes()),
+            }],
+        };
+        let mut archive = bundle(&exporter);
+        archive.key_id = mismatched_key_id.clone();
+        let error = archive
+            .verify(&mismatched_roots, "tenant-1", "airgap-1", 2_000)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("does not match its public key"));
+
+        let verified = bundle(&exporter)
+            .verify(&roots(&exporter, "exporter"), "tenant-1", "airgap-1", 2_000)
+            .unwrap();
+        let runtime = SigningKey::from_bytes(&[9; 32]);
+        let mut receipt = ReceiptEnvelope::create(
+            ReceiptStatement {
+                bundle_digest: verified.digest.clone(),
+                tenant_id: "tenant-1".into(),
+                environment_id: "airgap-1".into(),
+                runtime_id: "runtime-1".into(),
+                plan_id: "plan-1".into(),
+                plan_digest: verified.statement.plan_digest.clone(),
+                generation: 1,
+                succeeded: true,
+                detail: "completed".into(),
+                completed_at_unix_ms: 3_000,
+                receipts: vec![OfflineStepReceipt {
+                    receipt_id: offline_receipt_id("airgap-1", "plan-1", "step-1", 1),
+                    step_id: "step-1".into(),
+                    attempt: 1,
+                    succeeded: true,
+                    result_digest: digest(b"installed"),
+                }],
+            },
+            &runtime,
+        )
+        .unwrap();
+        receipt.key_id = mismatched_key_id.clone();
+        let runtime_roots = TrustRoots {
+            version: 1,
+            signers: vec![TrustedSigner {
+                key_id: mismatched_key_id.clone(),
+                identity: "runtime".into(),
+                public_key: STANDARD.encode(runtime.verifying_key().to_bytes()),
+            }],
+        };
+        let scope = ReceiptTrustScope {
+            tenant_id: "tenant-1".into(),
+            environment_id: "airgap-1".into(),
+            runtime_id: "runtime-1".into(),
+            key_id: mismatched_key_id,
+        };
+        let error = receipt
+            .verify(&runtime_roots, &scope, &verified, 4_000)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("does not match its public key"));
     }
 
     #[test]

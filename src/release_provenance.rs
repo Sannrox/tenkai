@@ -8,7 +8,6 @@ use std::io::Read as _;
 use std::path::Path;
 
 use anyhow::{Result, bail};
-use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
@@ -219,12 +218,10 @@ impl ProvenanceEnvelope {
         {
             bail!("release provenance freshness interval is invalid");
         }
-        let signature = base64::engine::general_purpose::STANDARD
-            .decode(&self.signature)
-            .map_err(|_| anyhow::anyhow!("release provenance signature is not valid base64"))?;
-        if signature.len() != 64 {
-            bail!("release provenance signature must contain 64 bytes");
-        }
+        crate::signature_verification::decode_exact::<64>(
+            "release provenance signature",
+            &self.signature,
+        )?;
         Ok(())
     }
 
@@ -265,6 +262,7 @@ impl ProvenanceEnvelope {
     }
 
     pub fn verify_issuer(&self, roots: &TrustRoots) -> Result<()> {
+        roots.validate()?;
         let signer = roots
             .signers
             .iter()
@@ -278,22 +276,17 @@ impl ProvenanceEnvelope {
         if signer.identity != self.issuer {
             bail!("release provenance issuer does not match its trusted key identity");
         }
-        let public_key = base64::engine::general_purpose::STANDARD
-            .decode(&signer.public_key)
-            .map_err(|_| anyhow::anyhow!("trusted provenance public key is not valid base64"))?;
-        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(
-            public_key
-                .as_slice()
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("trusted provenance public key must be 32 bytes"))?,
+        let verifying_key = crate::signature_verification::trusted_key(
+            "trusted provenance public key",
+            &signer.public_key,
+            &signer.key_id,
         )?;
-        let signature = base64::engine::general_purpose::STANDARD
-            .decode(&self.signature)
-            .map_err(|_| anyhow::anyhow!("release provenance signature is not valid base64"))?;
-        let signature = ed25519_dalek::Signature::from_slice(&signature)?;
-        verifying_key
-            .verify_strict(&self.signed_bytes()?, &signature)
-            .map_err(|_| anyhow::anyhow!("release provenance issuer signature is invalid"))
+        crate::signature_verification::verify_strict(
+            &verifying_key,
+            "release provenance issuer signature",
+            &self.signature,
+            &self.signed_bytes()?,
+        )
     }
 
     pub fn projection(&self) -> Result<ProvenanceProjection> {
@@ -413,6 +406,7 @@ pub fn validate_release_binding(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
     use ed25519_dalek::Signer as _;
 
     fn envelope(profile: &str) -> ProvenanceEnvelope {
@@ -514,6 +508,31 @@ mod tests {
         let mut tampered = envelope;
         tampered.subject = "other-subject".into();
         assert!(tampered.verify_issuer(&roots).is_err());
+    }
+
+    #[test]
+    fn issuer_trust_root_is_bound_to_its_public_key() {
+        let mut envelope = envelope(GOVERNED_SUBJECT_PROFILE);
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[9_u8; 32]);
+        let mismatched_key_id = format!("sha256:{}", "a".repeat(64));
+        envelope.issuer_key_id = mismatched_key_id.clone();
+        envelope.signature = base64::engine::general_purpose::STANDARD.encode(
+            signing_key
+                .sign(&envelope.signed_bytes().unwrap())
+                .to_bytes(),
+        );
+        let roots = TrustRoots {
+            version: crate::release_signing::TRUST_ROOT_VERSION,
+            signers: vec![crate::release_signing::TrustedSigner {
+                key_id: mismatched_key_id,
+                identity: envelope.issuer.clone(),
+                public_key: base64::engine::general_purpose::STANDARD
+                    .encode(signing_key.verifying_key().to_bytes()),
+            }],
+        };
+
+        let error = envelope.verify_issuer(&roots).unwrap_err().to_string();
+        assert!(error.contains("does not match its public key"));
     }
 
     #[test]
