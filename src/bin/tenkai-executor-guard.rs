@@ -25,13 +25,15 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    tenkai::apply::executor_guard(
-        &args.lock,
-        &args.workdir,
-        &args.environment,
-        &args.product,
+    tenkai::fenced_mutation::supervise(
+        tenkai::fenced_mutation::MutationCommand {
+            lock_path: &args.lock,
+            workdir: &args.workdir,
+            environment: &args.environment,
+            product: &args.product,
+            command: &args.command,
+        },
         args.generation,
-        &args.command,
     )
     .await
 }
