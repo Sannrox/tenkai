@@ -39,16 +39,6 @@ pub struct Outcome {
     pub detail: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum EnvironmentTransition {
-    Unchanged,
-    Deployed {
-        version: String,
-        previous: Option<String>,
-    },
-    Unknown,
-}
-
 async fn maintenance_decision(
     ctx: &mut Ctx,
     environment: &str,
@@ -627,36 +617,7 @@ async fn set_env_deployed(
     version: &str,
     previous: Option<&str>,
 ) -> Result<()> {
-    let Some(mut env_obj) = ctx.get(&env_id(env)).await? else {
-        bail!("environment {env} disappeared during apply");
-    };
-    env_obj
-        .properties
-        .insert(format!("deployed.{product}"), version.to_string());
-    env_obj.properties.insert(
-        format!("deployed_release.{product}"),
-        release_id(product, version),
-    );
-    if let Some(prev) = previous {
-        env_obj
-            .properties
-            .insert(format!("deployed_prev.{product}"), prev.to_string());
-    }
-    env_obj
-        .properties
-        .remove(&format!("deployment_health.{product}"));
-    env_obj
-        .properties
-        .remove(&format!("deployment_error.{product}"));
-    env_obj.updated = crate::now_millis();
-    ctx.guarded_update(
-        env_obj,
-        ENVIRONMENT_LEASE_NAMESPACE,
-        &lease.environment,
-        &lease.fencing_token,
-    )
-    .await?;
-    Ok(())
+    crate::environment::record_deployed(ctx, lease, env, product, version, previous).await
 }
 
 async fn set_env_unknown(
@@ -666,91 +627,7 @@ async fn set_env_unknown(
     product: &str,
     detail: &str,
 ) -> Result<()> {
-    let Some(mut environment) = ctx.get(&env_id(env)).await? else {
-        bail!("environment {env} disappeared during apply");
-    };
-    environment
-        .properties
-        .remove(&format!("deployed.{product}"));
-    environment
-        .properties
-        .remove(&format!("deployed_release.{product}"));
-    environment
-        .properties
-        .insert(format!("deployment_health.{product}"), "unknown".into());
-    environment
-        .properties
-        .insert(format!("deployment_error.{product}"), detail.to_string());
-    for prefix in [
-        "deployment_unknown_plan.",
-        "deployment_unknown_step.",
-        "deployment_unknown_attempt.",
-    ] {
-        environment.properties.remove(&format!("{prefix}{product}"));
-    }
-    environment.updated = crate::now_millis();
-    ctx.guarded_update(
-        environment,
-        ENVIRONMENT_LEASE_NAMESPACE,
-        &lease.environment,
-        &lease.fencing_token,
-    )
-    .await?;
-    Ok(())
-}
-
-fn transition_environment(
-    environment: &mut Object,
-    product: &str,
-    transition: &EnvironmentTransition,
-    detail: &str,
-    observed_at: i64,
-) {
-    match transition {
-        EnvironmentTransition::Unchanged => return,
-        EnvironmentTransition::Deployed { version, previous } => {
-            environment
-                .properties
-                .insert(format!("deployed.{product}"), version.clone());
-            environment.properties.insert(
-                format!("deployed_release.{product}"),
-                release_id(product, version),
-            );
-            if let Some(previous) = previous {
-                environment
-                    .properties
-                    .insert(format!("deployed_prev.{product}"), previous.clone());
-            }
-            environment
-                .properties
-                .remove(&format!("deployment_health.{product}"));
-            environment
-                .properties
-                .remove(&format!("deployment_error.{product}"));
-            for prefix in [
-                "deployment_unknown_plan.",
-                "deployment_unknown_step.",
-                "deployment_unknown_attempt.",
-            ] {
-                environment.properties.remove(&format!("{prefix}{product}"));
-            }
-        }
-        EnvironmentTransition::Unknown => {
-            environment
-                .properties
-                .remove(&format!("deployed.{product}"));
-            environment
-                .properties
-                .remove(&format!("deployed_release.{product}"));
-            environment
-                .properties
-                .insert(format!("deployment_health.{product}"), "unknown".into());
-            environment
-                .properties
-                .insert(format!("deployment_error.{product}"), detail.into());
-        }
-    }
-    environment.updated = observed_at;
+    crate::environment::record_unknown(ctx, lease, env, product, detail).await
 }
 
 async fn set_plan_state(
@@ -812,15 +689,15 @@ fn object_environment_claim_id(environment: &str) -> String {
 const ENVIRONMENT_LEASE_MS: i64 = 2 * 60 * 60 * 1000;
 const EXECUTION_LEASE_MS: i64 = 30_000;
 const MANUAL_UNLOCK_LEASE_MS: i64 = 5_000;
-const ENVIRONMENT_LEASE_NAMESPACE: &str = "tenkai/environment-execution";
+pub(crate) const ENVIRONMENT_LEASE_NAMESPACE: &str = "tenkai/environment-execution";
 const REL_ACTIVE_ENVIRONMENT_EXECUTION: &str = "active_environment_execution";
 
 #[derive(Clone)]
 pub(crate) struct EnvironmentLease {
-    environment: String,
+    pub(crate) environment: String,
     owner: String,
-    generation: u64,
-    fencing_token: String,
+    pub(crate) generation: u64,
+    pub(crate) fencing_token: String,
     ttl_ms: i64,
 }
 
@@ -1049,7 +926,10 @@ async fn claim_environment_with_options(
     Ok(environment_lease)
 }
 
-async fn refresh_environment_lease(ctx: &mut Ctx, lease: &EnvironmentLease) -> Result<()> {
+pub(crate) async fn refresh_environment_lease(
+    ctx: &mut Ctx,
+    lease: &EnvironmentLease,
+) -> Result<()> {
     let refreshed = ctx
         .refresh_lease(
             ENVIRONMENT_LEASE_NAMESPACE,
@@ -1564,7 +1444,7 @@ async fn execute_step(
                 env,
                 plan_oid,
                 &outcome,
-                EnvironmentTransition::Unknown,
+                crate::environment::DeploymentTransition::Unknown,
             )
             .await?;
             return Ok(outcome);
@@ -1588,7 +1468,7 @@ async fn execute_step(
                 env,
                 plan_oid,
                 &outcome,
-                EnvironmentTransition::Deployed {
+                crate::environment::DeploymentTransition::Deployed {
                     version: step.to.clone(),
                     previous: step.from.clone(),
                 },
@@ -1621,7 +1501,7 @@ async fn execute_step(
                             env,
                             plan_oid,
                             &outcome,
-                            EnvironmentTransition::Unknown,
+                            crate::environment::DeploymentTransition::Unknown,
                         )
                         .await?;
                         return Ok(outcome);
@@ -1636,9 +1516,9 @@ async fn execute_step(
                             detail,
                         },
                         if recovered {
-                            EnvironmentTransition::Unchanged
+                            crate::environment::DeploymentTransition::Unchanged
                         } else {
-                            EnvironmentTransition::Unknown
+                            crate::environment::DeploymentTransition::Unknown
                         },
                     )
                 }
@@ -1653,9 +1533,9 @@ async fn execute_step(
                             detail,
                         },
                         if cleaned {
-                            EnvironmentTransition::Unchanged
+                            crate::environment::DeploymentTransition::Unchanged
                         } else {
-                            EnvironmentTransition::Unknown
+                            crate::environment::DeploymentTransition::Unknown
                         },
                     )
                 }
@@ -1674,172 +1554,21 @@ async fn record_deployment(
     env: &str,
     plan_oid: &str,
     outcome: &Outcome,
-    environment_transition: EnvironmentTransition,
+    environment_transition: crate::environment::DeploymentTransition,
 ) -> Result<()> {
-    let now = crate::now_millis();
-    let did = deployment_id(env, &outcome.step.product, now);
-    let mut deployment = record(
-        did.clone(),
-        KIND_DEPLOYMENT,
-        format!(
-            "{} {} -> {} ({env})",
-            outcome.step.product,
-            outcome.step.from.clone().unwrap_or_else(|| "none".into()),
-            outcome.step.to
-        ),
-        HashMap::from([
-            ("environment".into(), env.to_string()),
-            ("product".into(), outcome.step.product.clone()),
-            (
-                "from_version".into(),
-                outcome.step.from.clone().unwrap_or_default(),
-            ),
-            ("to_version".into(), outcome.step.to.clone()),
-            ("status".into(), "failed".into()),
-            ("detail".into(), "deployment bookkeeping incomplete".into()),
-            ("lease_generation".into(), lease.generation.to_string()),
-        ]),
-    );
-    ctx.guarded_create(
-        deployment.clone(),
-        ENVIRONMENT_LEASE_NAMESPACE,
-        &lease.environment,
-        &lease.fencing_token,
+    crate::environment::record_deployment_observation(
+        ctx,
+        lease,
+        crate::environment::DeploymentObservation {
+            environment: env,
+            plan_id: plan_oid,
+            step: &outcome.step,
+            status: &outcome.status,
+            detail: &outcome.detail,
+            transition: environment_transition,
+        },
     )
-    .await?;
-    // Links are append-only, deterministic audit enrichment for this immutable
-    // generation-tagged attempt; they cannot overwrite active environment or
-    // plan state. If takeover happens here, guarded finalization below fails
-    // closed and leaves the attempt explicitly marked bookkeeping-incomplete.
-    refresh_environment_lease(ctx, lease).await?;
-    ctx.link(&did, &outcome.step.release_id, REL_DEPLOYED_RELEASE)
-        .await?;
-    refresh_environment_lease(ctx, lease).await?;
-    ctx.link(&did, &env_id(env), REL_IN_ENVIRONMENT).await?;
-    refresh_environment_lease(ctx, lease).await?;
-    ctx.link(&did, plan_oid, REL_PART_OF_PLAN).await?;
-    deployment
-        .properties
-        .insert("status".into(), outcome.status.clone());
-    deployment
-        .properties
-        .insert("detail".into(), outcome.detail.clone());
-    let observed_at = crate::now_millis();
-    deployment.updated = observed_at;
-    let mut environment = if ctx.outcome_export_enabled()
-        || environment_transition != EnvironmentTransition::Unchanged
-    {
-        Some(
-            ctx.get(&env_id(env))
-                .await?
-                .with_context(|| format!("environment {env} disappeared during outcome enqueue"))?,
-        )
-    } else {
-        None
-    };
-    if let Some(environment) = environment.as_mut()
-        && environment_transition != EnvironmentTransition::Unchanged
-    {
-        transition_environment(
-            environment,
-            &outcome.step.product,
-            &environment_transition,
-            &outcome.detail,
-            observed_at,
-        );
-        if environment_transition == EnvironmentTransition::Unknown {
-            environment.properties.insert(
-                format!("deployment_unknown_plan.{}", outcome.step.product),
-                plan_oid.into(),
-            );
-            environment.properties.insert(
-                format!("deployment_unknown_step.{}", outcome.step.product),
-                outcome.step.id.clone(),
-            );
-            environment.properties.insert(
-                format!("deployment_unknown_attempt.{}", outcome.step.product),
-                did.clone(),
-            );
-        }
-    }
-    let provider_events = if ctx.outcome_export_enabled() {
-        let plan = plan::load(ctx, plan_oid).await?;
-        let environment = environment
-            .as_ref()
-            .expect("outcome export always loads the environment");
-        crate::terminal_outcome::classify(
-            outcome.step.action,
-            crate::terminal_outcome::Observation::Controller {
-                status: &outcome.status,
-                detail: &outcome.detail,
-                had_previous_release: outcome.step.from.is_some(),
-            },
-        )
-        .map(|terminal_state| {
-            crate::providers::terminal_outcome_record(
-                &plan,
-                &outcome.step,
-                &did,
-                terminal_state,
-                environment,
-                observed_at,
-            )
-            .map_err(anyhow::Error::from)
-        })
-        .transpose()?
-        .into_iter()
-        .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-    let update_result = if ctx.outcome_export_enabled() {
-        let mut objects = vec![deployment];
-        if environment_transition != EnvironmentTransition::Unchanged {
-            objects.push(environment.expect("an environment transition always loads its object"));
-        }
-        ctx.guarded_update_objects_with_provider_events(
-            &objects,
-            ENVIRONMENT_LEASE_NAMESPACE,
-            &lease.environment,
-            &lease.fencing_token,
-            &provider_events,
-        )
-        .await
-    } else {
-        if environment_transition != EnvironmentTransition::Unchanged {
-            ctx.guarded_update(
-                environment.expect("an environment transition always loads its object"),
-                ENVIRONMENT_LEASE_NAMESPACE,
-                &lease.environment,
-                &lease.fencing_token,
-            )
-            .await?;
-        }
-        ctx.guarded_update(
-            deployment,
-            ENVIRONMENT_LEASE_NAMESPACE,
-            &lease.environment,
-            &lease.fencing_token,
-        )
-        .await
-        .map(|_| ())
-    };
-    match update_result {
-        Ok(_) => Ok(()),
-        Err(error) => {
-            let persisted = ctx.get(&did).await;
-            if matches!(
-                persisted,
-                Ok(Some(ref object))
-                    if object.properties.get("status") == Some(&outcome.status)
-                        && object.properties.get("detail") == Some(&outcome.detail)
-            ) {
-                Ok(())
-            } else {
-                Err(error)
-            }
-        }
-    }
+    .await
 }
 
 #[cfg(test)]

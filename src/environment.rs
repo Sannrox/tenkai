@@ -14,6 +14,25 @@ use crate::ontology::*;
 use crate::pb::sekai::Object;
 use crate::plan::{Plan, PlanState, Step};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DeploymentTransition {
+    Unchanged,
+    Deployed {
+        version: String,
+        previous: Option<String>,
+    },
+    Unknown,
+}
+
+pub(crate) struct DeploymentObservation<'a> {
+    pub environment: &'a str,
+    pub plan_id: &'a str,
+    pub step: &'a Step,
+    pub status: &'a str,
+    pub detail: &'a str,
+    pub transition: DeploymentTransition,
+}
+
 pub(crate) fn environment_record(
     existing: Option<Object>,
     name: &str,
@@ -209,6 +228,303 @@ pub(crate) async fn update_runtime_deployments_object(
         .await?;
     }
     Ok(())
+}
+
+pub(crate) async fn record_deployed(
+    ctx: &mut Ctx,
+    lease: &crate::apply::EnvironmentLease,
+    environment_name: &str,
+    product: &str,
+    version: &str,
+    previous: Option<&str>,
+) -> Result<()> {
+    let mut object = environment(ctx, environment_name).await?;
+    object
+        .properties
+        .insert(format!("deployed.{product}"), version.to_string());
+    object.properties.insert(
+        format!("deployed_release.{product}"),
+        release_id(product, version),
+    );
+    if let Some(previous) = previous {
+        object
+            .properties
+            .insert(format!("deployed_prev.{product}"), previous.to_string());
+    }
+    object
+        .properties
+        .remove(&format!("deployment_health.{product}"));
+    object
+        .properties
+        .remove(&format!("deployment_error.{product}"));
+    object.updated = crate::now_millis();
+    guarded_update(ctx, lease, object).await
+}
+
+pub(crate) async fn record_unknown(
+    ctx: &mut Ctx,
+    lease: &crate::apply::EnvironmentLease,
+    environment_name: &str,
+    product: &str,
+    detail: &str,
+) -> Result<()> {
+    let mut object = environment(ctx, environment_name).await?;
+    transition_deployment(
+        &mut object,
+        product,
+        &DeploymentTransition::Unknown,
+        detail,
+        crate::now_millis(),
+    );
+    clear_unknown_origin(&mut object, product);
+    guarded_update(ctx, lease, object).await
+}
+
+pub(crate) async fn record_deployment_observation(
+    ctx: &mut Ctx,
+    lease: &crate::apply::EnvironmentLease,
+    observation: DeploymentObservation<'_>,
+) -> Result<()> {
+    let observed_at = crate::now_millis();
+    let attempt_id = deployment_id(
+        observation.environment,
+        &observation.step.product,
+        observed_at,
+    );
+    let mut deployment = Object {
+        id: attempt_id.clone(),
+        kind: KIND_DEPLOYMENT.into(),
+        name: format!(
+            "{} {} -> {} ({})",
+            observation.step.product,
+            observation.step.from.as_deref().unwrap_or("none"),
+            observation.step.to,
+            observation.environment
+        ),
+        namespace: NS.into(),
+        external_id: String::new(),
+        properties: HashMap::from([
+            ("environment".into(), observation.environment.to_string()),
+            ("product".into(), observation.step.product.clone()),
+            (
+                "from_version".into(),
+                observation.step.from.clone().unwrap_or_default(),
+            ),
+            ("to_version".into(), observation.step.to.clone()),
+            ("status".into(), "failed".into()),
+            ("detail".into(), "deployment bookkeeping incomplete".into()),
+            ("lease_generation".into(), lease.generation.to_string()),
+        ]),
+        created: observed_at,
+        updated: observed_at,
+    };
+    ctx.guarded_create(
+        deployment.clone(),
+        crate::apply::ENVIRONMENT_LEASE_NAMESPACE,
+        &lease.environment,
+        &lease.fencing_token,
+    )
+    .await?;
+    crate::apply::refresh_environment_lease(ctx, lease).await?;
+    ctx.link(
+        &attempt_id,
+        &observation.step.release_id,
+        REL_DEPLOYED_RELEASE,
+    )
+    .await?;
+    crate::apply::refresh_environment_lease(ctx, lease).await?;
+    ctx.link(
+        &attempt_id,
+        &env_id(observation.environment),
+        REL_IN_ENVIRONMENT,
+    )
+    .await?;
+    crate::apply::refresh_environment_lease(ctx, lease).await?;
+    ctx.link(&attempt_id, observation.plan_id, REL_PART_OF_PLAN)
+        .await?;
+
+    deployment
+        .properties
+        .insert("status".into(), observation.status.into());
+    deployment
+        .properties
+        .insert("detail".into(), observation.detail.into());
+    deployment.updated = crate::now_millis();
+    let mut environment = if ctx.outcome_export_enabled()
+        || observation.transition != DeploymentTransition::Unchanged
+    {
+        Some(environment(ctx, observation.environment).await?)
+    } else {
+        None
+    };
+    if let Some(environment) = environment.as_mut()
+        && observation.transition != DeploymentTransition::Unchanged
+    {
+        transition_deployment(
+            environment,
+            &observation.step.product,
+            &observation.transition,
+            observation.detail,
+            deployment.updated,
+        );
+        if observation.transition == DeploymentTransition::Unknown {
+            environment.properties.insert(
+                format!("deployment_unknown_plan.{}", observation.step.product),
+                observation.plan_id.into(),
+            );
+            environment.properties.insert(
+                format!("deployment_unknown_step.{}", observation.step.product),
+                observation.step.id.clone(),
+            );
+            environment.properties.insert(
+                format!("deployment_unknown_attempt.{}", observation.step.product),
+                attempt_id.clone(),
+            );
+        }
+    }
+    let provider_events = if ctx.outcome_export_enabled() {
+        let plan = crate::plan::load(ctx, observation.plan_id).await?;
+        let environment = environment
+            .as_ref()
+            .expect("outcome export loads Environment");
+        crate::terminal_outcome::classify(
+            observation.step.action,
+            crate::terminal_outcome::Observation::Controller {
+                status: observation.status,
+                detail: observation.detail,
+                had_previous_release: observation.step.from.is_some(),
+            },
+        )
+        .map(|terminal_state| {
+            crate::providers::terminal_outcome_record(
+                &plan,
+                observation.step,
+                &attempt_id,
+                terminal_state,
+                environment,
+                deployment.updated,
+            )
+            .map_err(anyhow::Error::from)
+        })
+        .transpose()?
+        .into_iter()
+        .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let update_result = if ctx.outcome_export_enabled() {
+        let mut objects = vec![deployment];
+        if observation.transition != DeploymentTransition::Unchanged {
+            objects.push(environment.expect("an Environment transition loads its object"));
+        }
+        ctx.guarded_update_objects_with_provider_events(
+            &objects,
+            crate::apply::ENVIRONMENT_LEASE_NAMESPACE,
+            &lease.environment,
+            &lease.fencing_token,
+            &provider_events,
+        )
+        .await
+    } else {
+        if observation.transition != DeploymentTransition::Unchanged {
+            guarded_update(
+                ctx,
+                lease,
+                environment.expect("an Environment transition loads its object"),
+            )
+            .await?;
+        }
+        guarded_update(ctx, lease, deployment).await
+    };
+    match update_result {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let persisted = ctx.get(&attempt_id).await;
+            if matches!(
+                persisted,
+                Ok(Some(ref object))
+                    if object.properties.get("status").map(String::as_str) == Some(observation.status)
+                        && object.properties.get("detail").map(String::as_str) == Some(observation.detail)
+            ) {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+async fn guarded_update(
+    ctx: &mut Ctx,
+    lease: &crate::apply::EnvironmentLease,
+    object: Object,
+) -> Result<()> {
+    ctx.guarded_update(
+        object,
+        crate::apply::ENVIRONMENT_LEASE_NAMESPACE,
+        &lease.environment,
+        &lease.fencing_token,
+    )
+    .await?;
+    Ok(())
+}
+
+fn clear_unknown_origin(environment: &mut Object, product: &str) {
+    for prefix in [
+        "deployment_unknown_plan.",
+        "deployment_unknown_step.",
+        "deployment_unknown_attempt.",
+    ] {
+        environment.properties.remove(&format!("{prefix}{product}"));
+    }
+}
+
+fn transition_deployment(
+    environment: &mut Object,
+    product: &str,
+    transition: &DeploymentTransition,
+    detail: &str,
+    observed_at: i64,
+) {
+    match transition {
+        DeploymentTransition::Unchanged => return,
+        DeploymentTransition::Deployed { version, previous } => {
+            environment
+                .properties
+                .insert(format!("deployed.{product}"), version.clone());
+            environment.properties.insert(
+                format!("deployed_release.{product}"),
+                release_id(product, version),
+            );
+            if let Some(previous) = previous {
+                environment
+                    .properties
+                    .insert(format!("deployed_prev.{product}"), previous.clone());
+            }
+            environment
+                .properties
+                .remove(&format!("deployment_health.{product}"));
+            environment
+                .properties
+                .remove(&format!("deployment_error.{product}"));
+            clear_unknown_origin(environment, product);
+        }
+        DeploymentTransition::Unknown => {
+            environment
+                .properties
+                .remove(&format!("deployed.{product}"));
+            environment
+                .properties
+                .remove(&format!("deployed_release.{product}"));
+            environment
+                .properties
+                .insert(format!("deployment_health.{product}"), "unknown".into());
+            environment
+                .properties
+                .insert(format!("deployment_error.{product}"), detail.into());
+        }
+    }
+    environment.updated = observed_at;
 }
 
 /// Subscribe an environment to a product channel. The channel must exist.
@@ -745,5 +1061,96 @@ fn operator_safe_status_detail(plan: &Plan) -> String {
             "plan execution failed; inspect authorized Tenkai audit evidence".into()
         }
         PlanState::Computed | PlanState::Running | PlanState::Succeeded => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn environment_object() -> Object {
+        Object {
+            id: env_id("stage"),
+            kind: KIND_ENVIRONMENT.into(),
+            name: "stage".into(),
+            namespace: NS.into(),
+            external_id: String::new(),
+            properties: HashMap::from([
+                ("deployment_health.api".into(), "unknown".into()),
+                ("deployment_error.api".into(), "old failure".into()),
+                ("deployment_unknown_plan.api".into(), "old-plan".into()),
+                ("deployment_unknown_step.api".into(), "old-step".into()),
+                (
+                    "deployment_unknown_attempt.api".into(),
+                    "old-attempt".into(),
+                ),
+            ]),
+            created: 1,
+            updated: 1,
+        }
+    }
+
+    #[test]
+    fn deployed_observation_replaces_unknown_state() {
+        let mut environment = environment_object();
+
+        transition_deployment(
+            &mut environment,
+            "api",
+            &DeploymentTransition::Deployed {
+                version: "2.0.0".into(),
+                previous: Some("1.0.0".into()),
+            },
+            "",
+            42,
+        );
+
+        assert_eq!(environment.properties.get("deployed.api").unwrap(), "2.0.0");
+        assert_eq!(
+            environment.properties.get("deployed_release.api").unwrap(),
+            &release_id("api", "2.0.0")
+        );
+        assert_eq!(
+            environment.properties.get("deployed_prev.api").unwrap(),
+            "1.0.0"
+        );
+        assert!(!environment.properties.contains_key("deployment_health.api"));
+        assert!(
+            !environment
+                .properties
+                .contains_key("deployment_unknown_plan.api")
+        );
+        assert_eq!(environment.updated, 42);
+    }
+
+    #[test]
+    fn unknown_observation_clears_claimed_deployment() {
+        let mut environment = environment_object();
+        environment
+            .properties
+            .insert("deployed.api".into(), "1.0.0".into());
+        environment
+            .properties
+            .insert("deployed_release.api".into(), release_id("api", "1.0.0"));
+
+        transition_deployment(
+            &mut environment,
+            "api",
+            &DeploymentTransition::Unknown,
+            "cleanup failed",
+            84,
+        );
+
+        assert!(!environment.properties.contains_key("deployed.api"));
+        assert!(!environment.properties.contains_key("deployed_release.api"));
+        assert_eq!(
+            environment.properties.get("deployment_health.api").unwrap(),
+            "unknown"
+        );
+        assert_eq!(
+            environment.properties.get("deployment_error.api").unwrap(),
+            "cleanup failed"
+        );
+        assert_eq!(environment.updated, 84);
     }
 }
