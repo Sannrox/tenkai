@@ -10,6 +10,9 @@
 //!
 //! - [`catalog`] owns immutable release publication, promotion, and lookup.
 //! - [`plan`], [`apply`], and [`reconciler`] own convergence decisions and execution.
+//! - `plan::release_selection` hides version constraints, Environment capability
+//!   facts, model-runtime sibling discovery, rollout ceilings, and deterministic
+//!   variant selection behind one private release-selection interface.
 //! - `apply::execution_attempt` hides Plan authorization mode, Environment lease
 //!   admission, maintenance authorization, Canary finalization, lease release,
 //!   and failure precedence behind one typed execution-attempt interface.
