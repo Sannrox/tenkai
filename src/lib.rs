@@ -13,6 +13,9 @@
 //! - `apply::execution_attempt` hides Plan authorization mode, Environment lease
 //!   admission, maintenance authorization, Canary finalization, lease release,
 //!   and failure precedence behind one typed execution-attempt interface.
+//! - `apply::execution_lease` hides Environment execution admission, generation
+//!   fencing, legacy claim compatibility, takeover, inspection, and release
+//!   behind one private ownership interface shared by execution callers.
 //! - `apply::product_execution` hides product-kind dispatch, adapter setup,
 //!   integrity and health ordering, and failed-activation cleanup policy behind
 //!   the apply workflow's private execution seam.
