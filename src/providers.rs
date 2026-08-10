@@ -1095,7 +1095,7 @@ pub async fn deliver_optional_event<S, F, Fut>(
     delivery: F,
 ) -> Result<DeliveryStatus, ProviderError>
 where
-    S: OperationalStore + ?Sized,
+    S: crate::provider_event::ProviderEventStore + ?Sized,
     F: FnOnce(ProviderEvent, String) -> Fut,
     Fut: Future<Output = Result<(), ProviderError>>,
 {
@@ -1195,7 +1195,7 @@ pub async fn deliver_outcome_batch<S, P>(
     limit: usize,
 ) -> Result<(usize, usize), ProviderError>
 where
-    S: OperationalStore + ?Sized,
+    S: crate::provider_event::ProviderEventStore + ?Sized,
     P: OutcomeProvider + ?Sized,
 {
     let claim_token = format!("outcome-worker:{}", uuid::Uuid::new_v4());
