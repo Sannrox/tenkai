@@ -16,6 +16,8 @@
 //! - [`fleet`] owns pure fleet posture aggregation, drift comparison, and
 //!   baseline I/O so callers do not re-encode inspect→posture classification.
 //! - [`storage`] and [`tenant_store`] provide operational persistence adapters.
+//! - [`environment`] owns Environment identity, subscriptions, constraints,
+//!   facts, deployment observations, and operator readback behind one interface.
 //! - [`tenant_environment`] hides authenticated tenant Environment visibility,
 //!   synchronous store adaptation, fixture projections, bounded reconciliation,
 //!   and non-disclosing failures behind one application interface.
@@ -53,6 +55,7 @@ pub mod delivery_conformance;
 pub mod dev_sign;
 pub mod development_fixtures;
 pub mod embedded;
+pub mod environment;
 pub mod federated_identity;
 pub mod fenced_mutation;
 pub mod fleet;
