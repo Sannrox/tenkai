@@ -130,3 +130,8 @@ internal refactor should preserve typed validators, public manifests, stored
 release interpretation, and fail-closed unknown-version behavior. It does not
 require a public Design Discussion because this research does not recommend
 public consolidation.
+
+**Follow-up (implemented):** `src/staged_artifact.rs` now owns that private
+kind→schema mapping behind `is_staged_kind` / `activate` / `deactivate` /
+`validate_document_bytes`. Public kinds and stored release interpretation are
+unchanged.

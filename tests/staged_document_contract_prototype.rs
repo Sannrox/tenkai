@@ -1,92 +1,14 @@
-//! Research-only prototype for issue #188.
+//! Regression for issue #188: staged kinds share one production mapping.
 //!
-//! This proves that the three staged document schemas can share an internal
-//! registry/validation call shape without changing their public identities.
+//! Public product identities stay separate; document path, state namespace, and
+//! typed validation are resolved through the `staged_artifact` interface.
 
-use anyhow::Result;
-use serde_json::Value;
-use tenkai::manifest::{Manifest, ProductKind};
-use tenkai::staged_artifact::{AgentDefinitionDocument, EvalSuiteDocument, PolicyBundleDocument};
+use std::path::Path;
 
-struct StagedSchema {
-    kind: ProductKind,
-    document_path: for<'a> fn(&'a Manifest) -> Result<&'a str>,
-    state_namespace: &'static str,
-    validate_json: fn(&[u8]) -> Result<Value>,
-}
-
-fn policy_path(manifest: &Manifest) -> Result<&str> {
-    Ok(manifest
-        .policy
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("policy section is required"))?
-        .document
-        .as_str())
-}
-
-fn eval_path(manifest: &Manifest) -> Result<&str> {
-    Ok(manifest
-        .eval_suite_product
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("eval_suite_product section is required"))?
-        .document
-        .as_str())
-}
-
-fn agent_path(manifest: &Manifest) -> Result<&str> {
-    Ok(manifest
-        .agent
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("agent section is required"))?
-        .document
-        .as_str())
-}
-
-fn validate_policy(bytes: &[u8]) -> Result<Value> {
-    let document: PolicyBundleDocument = serde_json::from_slice(bytes)?;
-    document.validate()?;
-    Ok(serde_json::to_value(document)?)
-}
-
-fn validate_eval(bytes: &[u8]) -> Result<Value> {
-    let document: EvalSuiteDocument = serde_json::from_slice(bytes)?;
-    document.validate()?;
-    Ok(serde_json::to_value(document)?)
-}
-
-fn validate_agent(bytes: &[u8]) -> Result<Value> {
-    let document: AgentDefinitionDocument = serde_json::from_slice(bytes)?;
-    document.validate()?;
-    Ok(serde_json::to_value(document)?)
-}
-
-const SCHEMAS: [StagedSchema; 3] = [
-    StagedSchema {
-        kind: ProductKind::PolicyBundle,
-        document_path: policy_path,
-        state_namespace: "policy_bundle",
-        validate_json: validate_policy,
-    },
-    StagedSchema {
-        kind: ProductKind::EvalSuite,
-        document_path: eval_path,
-        state_namespace: "eval_suite",
-        validate_json: validate_eval,
-    },
-    StagedSchema {
-        kind: ProductKind::AgentDefinition,
-        document_path: agent_path,
-        state_namespace: "agent_definition",
-        validate_json: validate_agent,
-    },
-];
-
-fn schema(kind: ProductKind) -> &'static StagedSchema {
-    SCHEMAS
-        .iter()
-        .find(|candidate| candidate.kind == kind)
-        .expect("prototype registry covers every staged kind")
-}
+use tenkai::manifest::ProductKind;
+use tenkai::staged_artifact::{
+    is_staged_kind, staged_document_path, state_path_for, validate_document_bytes,
+};
 
 #[test]
 fn shared_registry_preserves_typed_validation() {
@@ -102,6 +24,7 @@ kind = "policy_bundle"
 document = "policy.json"
 "#,
             "policy.json",
+            "policy_bundle",
             br#"{"version":1,"policies":[{"id":"allow-deploy","effect":"allow","action":"deploy"}]}"#
                 .as_slice(),
         ),
@@ -116,6 +39,7 @@ kind = "eval_suite"
 document = "suite.json"
 "#,
             "suite.json",
+            "eval_suite",
             br#"{"version":1,"suite_id":"gate-smoke","cases":["health"]}"#.as_slice(),
         ),
         (
@@ -129,36 +53,46 @@ kind = "agent_definition"
 document = "agent.json"
 "#,
             "agent.json",
+            "agent_definition",
             br#"{"version":1,"agent_id":"ops-agent","runtime":"local","entrypoint":"agents/ops.toml"}"#
                 .as_slice(),
         ),
     ];
 
-    for (kind, raw_manifest, expected_path, bytes) in fixtures {
-        let descriptor = schema(kind);
+    for (kind, raw_manifest, expected_path, namespace, bytes) in fixtures {
+        assert!(is_staged_kind(kind));
         let manifest = tenkai::manifest::parse_raw(raw_manifest).unwrap();
+        assert_eq!(staged_document_path(&manifest).unwrap(), expected_path);
         assert_eq!(
-            (descriptor.document_path)(&manifest).unwrap(),
-            expected_path
+            state_path_for(kind, Path::new("/state"), "product"),
+            Path::new("/state").join(namespace).join("product.json")
         );
-        assert!(!descriptor.state_namespace.is_empty());
-        (descriptor.validate_json)(bytes).unwrap();
+        validate_document_bytes(kind, bytes).unwrap();
     }
 
     assert!(
-        (schema(ProductKind::PolicyBundle).validate_json)(br#"{"version":1,"policies":[]}"#)
+        validate_document_bytes(ProductKind::PolicyBundle, br#"{"version":1,"policies":[]}"#)
             .is_err()
     );
     assert!(
-        (schema(ProductKind::EvalSuite).validate_json)(
+        validate_document_bytes(
+            ProductKind::EvalSuite,
             br#"{"version":1,"suite_id":"gate-smoke","cases":["health","health"]}"#
         )
         .is_err()
     );
     assert!(
-        (schema(ProductKind::AgentDefinition).validate_json)(
+        validate_document_bytes(
+            ProductKind::AgentDefinition,
             br#"{"version":1,"agent_id":"ops-agent","runtime":"local","entrypoint":"../secret"}"#
         )
         .is_err()
+    );
+    assert!(!is_staged_kind(ProductKind::Software));
+    assert!(
+        validate_document_bytes(ProductKind::Software, b"{}")
+            .unwrap_err()
+            .to_string()
+            .contains("not a staged JSON artifact")
     );
 }

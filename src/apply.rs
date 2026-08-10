@@ -428,56 +428,20 @@ async fn activate_fenced(
             .map(|_| ())
             .map_err(|error| error.to_string()));
     }
-    if matches!(
-        content.manifest.product.kind,
-        ProductKind::PolicyBundle | ProductKind::EvalSuite | ProductKind::AgentDefinition
-    ) {
+    if crate::staged_artifact::is_staged_kind(content.manifest.product.kind) {
         refresh_environment_lease(ctx, lease).await?;
         verify_content_integrity(content)?;
-        let relative = match crate::staged_artifact::staged_document_path(&content.manifest) {
-            Ok(path) => path,
-            Err(error) => return Ok(Err(error.to_string())),
-        };
-        let path = content.workdir.join(relative);
         let state_root = content
             .routing_state
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."));
-        let state = crate::staged_artifact::state_path_for(
-            content.manifest.product.kind,
+        return Ok(crate::staged_artifact::activate(
+            &content.manifest,
+            &content.workdir,
             state_root,
             &content.product,
-        );
-        let executor = crate::staged_artifact::LocalStagedArtifactExecutor::new(state);
-        let result = match content.manifest.product.kind {
-            ProductKind::PolicyBundle => match crate::staged_artifact::load_policy_bundle(&path) {
-                Ok(doc) => executor
-                    .apply_serializable(&doc)
-                    .map(|_| ())
-                    .map_err(|error| error.to_string()),
-                Err(error) => Err(error.to_string()),
-            },
-            ProductKind::EvalSuite => {
-                match crate::staged_artifact::load_eval_suite_document(&path) {
-                    Ok(doc) => executor
-                        .apply_serializable(&doc)
-                        .map(|_| ())
-                        .map_err(|error| error.to_string()),
-                    Err(error) => Err(error.to_string()),
-                }
-            }
-            ProductKind::AgentDefinition => {
-                match crate::staged_artifact::load_agent_definition(&path) {
-                    Ok(doc) => executor
-                        .apply_serializable(&doc)
-                        .map(|_| ())
-                        .map_err(|error| error.to_string()),
-                    Err(error) => Err(error.to_string()),
-                }
-            }
-            _ => unreachable!(),
-        };
-        return Ok(result);
+        )
+        .map_err(|error| error.to_string()));
     }
     if let Some(executor) = crate::software_executor::selected_software_executor() {
         refresh_environment_lease(ctx, lease).await?;
@@ -561,25 +525,18 @@ async fn deactivate_fenced(
             .map_err(|error| error.to_string()),
         );
     }
-    if matches!(
-        content.manifest.product.kind,
-        ProductKind::PolicyBundle | ProductKind::EvalSuite | ProductKind::AgentDefinition
-    ) {
+    if crate::staged_artifact::is_staged_kind(content.manifest.product.kind) {
         refresh_environment_lease(ctx, lease).await?;
         let state_root = content
             .routing_state
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."));
-        let state = crate::staged_artifact::state_path_for(
+        return Ok(crate::staged_artifact::deactivate(
             content.manifest.product.kind,
             state_root,
             &content.product,
-        );
-        return Ok(
-            crate::staged_artifact::LocalStagedArtifactExecutor::new(state)
-                .remove()
-                .map_err(|error| error.to_string()),
-        );
+        )
+        .map_err(|error| error.to_string()));
     }
     if let Some(executor) = crate::software_executor::selected_software_executor() {
         refresh_environment_lease(ctx, lease).await?;
@@ -662,12 +619,9 @@ async fn cleanup_failed_install_fenced(
 ) -> Result<(bool, String)> {
     if matches!(
         content.manifest.product.kind,
-        ProductKind::RoutingConfig
-            | ProductKind::ModelRuntime
-            | ProductKind::PolicyBundle
-            | ProductKind::EvalSuite
-            | ProductKind::AgentDefinition
-    ) {
+        ProductKind::RoutingConfig | ProductKind::ModelRuntime
+    ) || crate::staged_artifact::is_staged_kind(content.manifest.product.kind)
+    {
         // Descriptor validation is pre-mutation and local adapters publish
         // atomically, so a failed target does not require shell uninstall cleanup.
         return Ok((true, failure));

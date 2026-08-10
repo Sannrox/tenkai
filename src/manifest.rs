@@ -355,10 +355,7 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
     if manifest.product.kind == ProductKind::ModelRuntime {
         crate::model_runtime::ModelRuntimeDescriptor::from_manifest(&manifest)?;
     }
-    if matches!(
-        manifest.product.kind,
-        ProductKind::PolicyBundle | ProductKind::EvalSuite | ProductKind::AgentDefinition
-    ) {
+    if crate::staged_artifact::is_staged_kind(manifest.product.kind) {
         crate::staged_artifact::validate_staged_manifest(&manifest, &workdir)?;
     }
     Ok(LoadedManifest {

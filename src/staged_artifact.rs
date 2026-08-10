@@ -4,6 +4,11 @@
 //! and plan/apply like routing_config. Apply stages content-addressed JSON only;
 //! Tenkai does not become an IdP, policy engine UI, eval runner, or agent
 //! orchestrator.
+//!
+//! Callers use a small interface ([`is_staged_kind`], [`activate`],
+//! [`deactivate`], [`validate_staged_manifest`]). Kind-specific document
+//! paths, state namespaces, and schema validators stay local to this module
+//! so dispatch does not reappear at every call site (see research #188).
 
 use std::path::{Path, PathBuf};
 
@@ -12,6 +17,135 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::manifest::{Manifest, ProductKind};
+
+/// Private mapping from a public staged product kind to its schema locality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StagedKind {
+    PolicyBundle,
+    EvalSuite,
+    AgentDefinition,
+}
+
+impl StagedKind {
+    fn from_product(kind: ProductKind) -> Option<Self> {
+        match kind {
+            ProductKind::PolicyBundle => Some(Self::PolicyBundle),
+            ProductKind::EvalSuite => Some(Self::EvalSuite),
+            ProductKind::AgentDefinition => Some(Self::AgentDefinition),
+            _ => None,
+        }
+    }
+
+    fn state_namespace(self) -> &'static str {
+        match self {
+            Self::PolicyBundle => "policy_bundle",
+            Self::EvalSuite => "eval_suite",
+            Self::AgentDefinition => "agent_definition",
+        }
+    }
+
+    fn document_path(self, manifest: &Manifest) -> Result<&str> {
+        match self {
+            Self::PolicyBundle => manifest
+                .policy
+                .as_ref()
+                .map(|section| section.document.as_str())
+                .context("policy_bundle needs [policy].document"),
+            Self::EvalSuite => manifest
+                .eval_suite_product
+                .as_ref()
+                .map(|section| section.document.as_str())
+                .context("eval_suite needs [eval_suite_product].document"),
+            Self::AgentDefinition => manifest
+                .agent
+                .as_ref()
+                .map(|section| section.document.as_str())
+                .context("agent_definition needs [agent].document"),
+        }
+    }
+
+    fn load_canonical_bytes(self, path: &Path) -> Result<Vec<u8>> {
+        match self {
+            Self::PolicyBundle => {
+                let doc = load_policy_bundle(path)?;
+                Ok(serde_json::to_vec_pretty(&doc)?)
+            }
+            Self::EvalSuite => {
+                let doc = load_eval_suite_document(path)?;
+                Ok(serde_json::to_vec_pretty(&doc)?)
+            }
+            Self::AgentDefinition => {
+                let doc = load_agent_definition(path)?;
+                Ok(serde_json::to_vec_pretty(&doc)?)
+            }
+        }
+    }
+
+    fn validate_bytes(self, bytes: &[u8]) -> Result<()> {
+        match self {
+            Self::PolicyBundle => {
+                let doc: PolicyBundleDocument =
+                    serde_json::from_slice(bytes).context("parsing policy_bundle document")?;
+                doc.validate()
+            }
+            Self::EvalSuite => {
+                let doc: EvalSuiteDocument =
+                    serde_json::from_slice(bytes).context("parsing eval_suite document")?;
+                doc.validate()
+            }
+            Self::AgentDefinition => {
+                let doc: AgentDefinitionDocument =
+                    serde_json::from_slice(bytes).context("parsing agent_definition document")?;
+                doc.validate()
+            }
+        }
+    }
+
+    fn state_path(self, base: &Path, product: &str) -> PathBuf {
+        base.join(self.state_namespace())
+            .join(format!("{product}.json"))
+    }
+}
+
+/// True when `kind` stages a versioned JSON descriptor through this module.
+pub fn is_staged_kind(kind: ProductKind) -> bool {
+    StagedKind::from_product(kind).is_some()
+}
+
+/// Validate kind-specific document bytes without reading the filesystem.
+pub fn validate_document_bytes(kind: ProductKind, bytes: &[u8]) -> Result<()> {
+    let staged =
+        StagedKind::from_product(kind).context("product kind is not a staged JSON artifact")?;
+    staged.validate_bytes(bytes)
+}
+
+/// Load, validate, and atomically stage the document for a staged product.
+///
+/// Resolves the kind-specific document path, re-canonicalizes through the
+/// typed schema, and writes under the kind's state namespace.
+pub fn activate(
+    manifest: &Manifest,
+    workdir: &Path,
+    state_root: &Path,
+    product: &str,
+) -> Result<()> {
+    let staged = StagedKind::from_product(manifest.product.kind)
+        .context("product kind is not a staged JSON artifact")?;
+    let relative = staged.document_path(manifest)?;
+    crate::manifest::validate_input_path("staged.document", relative)?;
+    let bytes = staged.load_canonical_bytes(&workdir.join(relative))?;
+    let digest = format!("{:x}", Sha256::digest(&bytes));
+    LocalStagedArtifactExecutor::new(staged.state_path(state_root, product))
+        .apply_json_bytes(&bytes, &digest)
+        .map(|_| ())
+}
+
+/// Remove the staged document for `product` under the kind's state namespace.
+pub fn deactivate(kind: ProductKind, state_root: &Path, product: &str) -> Result<()> {
+    let staged =
+        StagedKind::from_product(kind).context("product kind is not a staged JSON artifact")?;
+    LocalStagedArtifactExecutor::new(staged.state_path(state_root, product)).remove()
+}
 
 pub const POLICY_BUNDLE_VERSION: u32 = 1;
 pub const EVAL_SUITE_PRODUCT_VERSION: u32 = 1;
@@ -193,53 +327,25 @@ impl LocalStagedArtifactExecutor {
 
 /// Relative document path from a staged-product manifest.
 pub fn staged_document_path(manifest: &Manifest) -> Result<&str> {
-    match manifest.product.kind {
-        ProductKind::PolicyBundle => manifest
-            .policy
-            .as_ref()
-            .map(|s| s.document.as_str())
-            .context("policy_bundle needs [policy].document"),
-        ProductKind::EvalSuite => manifest
-            .eval_suite_product
-            .as_ref()
-            .map(|s| s.document.as_str())
-            .context("eval_suite needs [eval_suite_product].document"),
-        ProductKind::AgentDefinition => manifest
-            .agent
-            .as_ref()
-            .map(|s| s.document.as_str())
-            .context("agent_definition needs [agent].document"),
-        _ => bail!("product kind is not a staged JSON artifact"),
-    }
+    let staged = StagedKind::from_product(manifest.product.kind)
+        .context("product kind is not a staged JSON artifact")?;
+    staged.document_path(manifest)
 }
 
 pub fn validate_staged_manifest(manifest: &Manifest, workdir: &Path) -> Result<()> {
-    let relative = staged_document_path(manifest)?;
+    let staged =
+        StagedKind::from_product(manifest.product.kind).context("not a staged product kind")?;
+    let relative = staged.document_path(manifest)?;
     crate::manifest::validate_input_path("staged.document", relative)?;
-    let path = workdir.join(relative);
-    match manifest.product.kind {
-        ProductKind::PolicyBundle => {
-            load_policy_bundle(&path)?;
-        }
-        ProductKind::EvalSuite => {
-            load_eval_suite_document(&path)?;
-        }
-        ProductKind::AgentDefinition => {
-            load_agent_definition(&path)?;
-        }
-        _ => bail!("not a staged product kind"),
-    }
+    staged.load_canonical_bytes(&workdir.join(relative))?;
     Ok(())
 }
 
 pub fn state_path_for(kind: ProductKind, base: &Path, product: &str) -> PathBuf {
-    let leaf = match kind {
-        ProductKind::PolicyBundle => "policy_bundle",
-        ProductKind::EvalSuite => "eval_suite",
-        ProductKind::AgentDefinition => "agent_definition",
-        _ => "staged",
-    };
-    base.join(leaf).join(format!("{product}.json"))
+    match StagedKind::from_product(kind) {
+        Some(staged) => staged.state_path(base, product),
+        None => base.join("staged").join(format!("{product}.json")),
+    }
 }
 
 #[cfg(test)]
@@ -295,6 +401,49 @@ mod tests {
             entrypoint: "../secret".into(),
         };
         assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn activate_and_deactivate_use_kind_namespace() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-staged-activate-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let workdir = root.join("src");
+        std::fs::create_dir_all(&workdir).unwrap();
+        std::fs::write(
+            workdir.join("policy.json"),
+            r#"{"version":1,"policies":[{"id":"allow-deploy","effect":"allow","action":"deploy"}]}"#,
+        )
+        .unwrap();
+        let raw = r#"
+[product]
+name = "deploy-policy"
+version = "1.0.0"
+kind = "policy_bundle"
+
+[policy]
+document = "policy.json"
+"#;
+        let manifest = crate::manifest::parse_raw(raw).unwrap();
+        assert!(is_staged_kind(manifest.product.kind));
+        activate(&manifest, &workdir, &root.join("state"), "deploy-policy").unwrap();
+        let state = state_path_for(
+            ProductKind::PolicyBundle,
+            &root.join("state"),
+            "deploy-policy",
+        );
+        assert!(state.exists());
+        assert!(state.to_string_lossy().contains("policy_bundle"));
+        deactivate(
+            ProductKind::PolicyBundle,
+            &root.join("state"),
+            "deploy-policy",
+        )
+        .unwrap();
+        assert!(!state.exists());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
