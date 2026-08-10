@@ -51,6 +51,7 @@ pub mod dev_sign;
 pub mod development_fixtures;
 pub mod embedded;
 pub mod federated_identity;
+pub mod fenced_mutation;
 pub mod fleet;
 pub mod inventory;
 pub mod maintenance;

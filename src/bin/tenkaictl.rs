@@ -598,13 +598,15 @@ async fn run(cli: Cli) -> Result<()> {
         command,
     } = &cli.command
     {
-        return tenkai::apply::executor_guard(
-            lock,
-            workdir,
-            environment,
-            product,
+        return tenkai::fenced_mutation::supervise(
+            tenkai::fenced_mutation::MutationCommand {
+                lock_path: lock,
+                workdir,
+                environment,
+                product,
+                command,
+            },
             *generation,
-            command,
         )
         .await;
     }
