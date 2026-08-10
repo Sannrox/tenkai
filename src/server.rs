@@ -816,7 +816,7 @@ async fn runtime_complete(
     State(state): State<Arc<AppState>>,
     Path(environment): Path<String>,
     headers: HeaderMap,
-    Json(completion): Json<crate::reconciler::RuntimeCompletion>,
+    Json(completion): Json<crate::runtime_delivery::RuntimeCompletion>,
 ) -> Response {
     match state
         .runtime_delivery
@@ -1108,7 +1108,7 @@ mod tests {
         fn complete_work(
             &self,
             _environment: String,
-            _completion: crate::reconciler::RuntimeCompletion,
+            _completion: crate::runtime_delivery::RuntimeCompletion,
         ) -> CompletionFuture<'_> {
             Box::pin(async { Ok(()) })
         }
@@ -1116,7 +1116,7 @@ mod tests {
         fn validate_completion(
             &self,
             _environment: String,
-            _completion: crate::reconciler::RuntimeCompletion,
+            _completion: crate::runtime_delivery::RuntimeCompletion,
         ) -> CompletionFuture<'_> {
             Box::pin(async { Ok(()) })
         }
@@ -1425,7 +1425,7 @@ mod tests {
                     .header("x-tenkai-runtime-instance", "instance-a")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        serde_json::to_vec(&crate::reconciler::RuntimeCompletion {
+                        serde_json::to_vec(&crate::runtime_delivery::RuntimeCompletion {
                             plan_id: "plan-1".into(),
                             generation,
                             succeeded: true,
