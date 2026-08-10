@@ -16,6 +16,9 @@
 //! - [`fleet`] owns pure fleet posture aggregation, drift comparison, and
 //!   baseline I/O so callers do not re-encode inspect→posture classification.
 //! - [`storage`] and [`tenant_store`] provide operational persistence adapters.
+//! - [`tenant_environment`] hides authenticated tenant Environment visibility,
+//!   synchronous store adaptation, fixture projections, bounded reconciliation,
+//!   and non-disclosing failures behind one application interface.
 //! - [`software_executor`], [`model_runtime`], [`routing`], and [`staged_artifact`]
 //!   adapt typed delivery products to their target runtimes.
 //! - [`staged_artifact`] also owns the private kind→schema mapping for staged
@@ -75,6 +78,7 @@ mod signature_verification;
 pub mod software_executor;
 pub mod staged_artifact;
 pub mod storage;
+pub mod tenant_environment;
 pub mod tenant_isolation;
 pub mod tenant_store;
 mod terminal_outcome;

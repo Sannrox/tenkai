@@ -28,6 +28,9 @@ use crate::runtime_capabilities::{
     community_sqlite_profile, validate_runtime_capabilities,
 };
 use crate::storage::{AuditRecord, OperationalStore};
+use crate::tenant_environment::{
+    TenantEnvironmentError, TenantEnvironmentOperations, TenantEnvironmentView,
+};
 use crate::tenant_isolation::NON_DISCLOSING_DENY;
 use crate::tenant_store::TenantOperationalStore;
 
@@ -197,6 +200,42 @@ impl ReconcilePort for Reconciler {
     }
 }
 
+struct ReconcileTenantEnvironmentView {
+    reconciler: Arc<dyn ReconcilePort>,
+}
+
+impl TenantEnvironmentView for ReconcileTenantEnvironmentView {
+    fn inspect_without_outcome_export(
+        &self,
+        environment: String,
+    ) -> crate::tenant_environment::TenantEnvironmentFuture<'_, crate::plan::EnvironmentInspectReport>
+    {
+        self.reconciler
+            .inspect_environment_without_outcome_export(environment)
+    }
+
+    fn status(
+        &self,
+        environment: String,
+    ) -> crate::tenant_environment::TenantEnvironmentFuture<'_, Vec<crate::plan::StatusRow>> {
+        self.reconciler.environment_status(environment)
+    }
+
+    fn fleet_without_outcome_export(
+        &self,
+    ) -> crate::tenant_environment::TenantEnvironmentFuture<'_, crate::plan::FleetStatusReport>
+    {
+        self.reconciler.fleet_status_without_outcome_export()
+    }
+
+    fn reconcile_bounded(
+        &self,
+        environments: Vec<String>,
+    ) -> crate::tenant_environment::TenantEnvironmentFuture<'_, TickReport> {
+        self.reconciler.reconcile_environments(environments)
+    }
+}
+
 #[derive(Clone)]
 pub struct ServerConfig {
     pub management_token: String,
@@ -347,6 +386,7 @@ struct AppState {
     reconciler: Arc<dyn ReconcilePort>,
     store: Arc<dyn OperationalStore>,
     tenant_store: Option<Arc<dyn TenantOperationalStore>>,
+    tenant_environments: Option<Arc<TenantEnvironmentOperations>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -404,6 +444,14 @@ pub fn router(
     let auth = config.build_auth_stack()?;
     let metrics_enabled = config.metrics_enabled;
     let development_fixtures_enabled = config.development_fixtures.is_some();
+    let tenant_environments = config.tenant_store.clone().map(|tenant_store| {
+        Arc::new(TenantEnvironmentOperations::new(
+            tenant_store,
+            Arc::new(ReconcileTenantEnvironmentView {
+                reconciler: reconciler.clone(),
+            }),
+        ))
+    });
     let mut router = Router::new()
         .route("/healthz", get(health))
         .route("/readyz", get(ready))
@@ -447,6 +495,7 @@ pub fn router(
     }
     Ok(router.with_state(Arc::new(AppState {
         tenant_store: config.tenant_store.clone(),
+        tenant_environments,
         config,
         auth,
         reconciler,
@@ -695,51 +744,13 @@ async fn fleet_status(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
         Ok(context) => context,
         Err(response) => return *response,
     };
-    if let Err(response) = require_tenant_scope(&state, &context, None).await {
-        return *response;
-    }
     if state.config.requirements.tenant_mode {
-        let Some(tenant_store) = state.tenant_store.clone() else {
-            return error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "tenant mode is enabled but no tenant store is configured",
-            );
+        let Some(operations) = state.tenant_environments.as_ref() else {
+            return tenant_environment_error(TenantEnvironmentError::StoreUnavailable);
         };
-        // Tenant mode: only environments in the tenant partition (non-leaking).
-        let projections = match run_blocking_tenant_store(move || {
-            let allowed = tenant_store.list_environment_ids_for(&context)?;
-            let mut fixture_rows = Vec::new();
-            let mut reconciler_ids = Vec::new();
-            for id in &allowed {
-                match tenant_store.development_fixture_environment_for(&context, id)? {
-                    Some(projection) => fixture_rows.push(projection.fleet_row()),
-                    None => reconciler_ids.push(id.clone()),
-                }
-            }
-            Ok::<_, crate::tenant_isolation::IsolationError>((fixture_rows, reconciler_ids))
-        })
-        .await
-        {
-            Ok(Ok(rows)) => rows,
-            Ok(Err(error)) => {
-                return error_response(StatusCode::FORBIDDEN, error.public_message());
-            }
-            Err(response) => return response,
-        };
-        let (fixture_rows, reconciler_ids) = projections;
-        return match state.reconciler.fleet_status_without_outcome_export().await {
-            Ok(mut report) => {
-                report
-                    .environments
-                    .retain(|row| reconciler_ids.iter().any(|id| id == &row.name));
-                report.environments.extend(fixture_rows);
-                report
-                    .environments
-                    .sort_by(|left, right| left.name.cmp(&right.name));
-                let rebuilt = crate::plan::fleet_status_from_rows(report.environments);
-                Json(rebuilt).into_response()
-            }
-            Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")),
+        return match operations.fleet_status(&context).await {
+            Ok(report) => Json(report).into_response(),
+            Err(error) => tenant_environment_error(error),
         };
     }
     match state.reconciler.fleet_status().await {
@@ -753,45 +764,13 @@ async fn list_environments(State(state): State<Arc<AppState>>, headers: HeaderMa
         Ok(context) => context,
         Err(response) => return *response,
     };
-    if let Err(response) = require_tenant_scope(&state, &context, None).await {
-        return *response;
-    }
     if state.config.requirements.tenant_mode {
-        let Some(tenant_store) = state.tenant_store.clone() else {
-            return error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "tenant mode is enabled but no tenant store is configured",
-            );
+        let Some(operations) = state.tenant_environments.as_ref() else {
+            return tenant_environment_error(TenantEnvironmentError::StoreUnavailable);
         };
-        let result = match run_blocking_tenant_store(move || {
-            let ids = tenant_store.list_environment_ids_for(&context)?;
-            let mut entries = Vec::with_capacity(ids.len());
-            for name in ids {
-                match tenant_store.development_fixture_environment_for(&context, &name)? {
-                    Some(projection) => entries.push(projection.list_entry()),
-                    None => entries.push(crate::plan::EnvironmentListEntry {
-                        name: name.clone(),
-                        id: format!("tenkai:env:{name}"),
-                        description: String::new(),
-                        subscription_count: 0,
-                        deployed_product_count: 0,
-                        lease_held: false,
-                    }),
-                }
-            }
-            Ok::<_, crate::tenant_isolation::IsolationError>(entries)
-        })
-        .await
-        {
-            Ok(result) => result,
-            Err(response) => return response,
-        };
-        return match result {
-            Ok(ids) => {
-                // Non-leakage: foreign tenant markers never appear.
-                Json(ids).into_response()
-            }
-            Err(error) => error_response(StatusCode::FORBIDDEN, error.public_message()),
+        return match operations.list(&context).await {
+            Ok(entries) => Json(entries).into_response(),
+            Err(error) => tenant_environment_error(error),
         };
     }
     match state.reconciler.list_environments().await {
@@ -809,45 +788,17 @@ async fn inspect_environment(
         Ok(context) => context,
         Err(response) => return *response,
     };
-    if let Err(response) = require_tenant_scope(&state, &context, Some(&environment)).await {
-        return *response;
-    }
     if state.config.requirements.tenant_mode {
-        let Some(tenant_store) = state.tenant_store.clone() else {
-            return error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "tenant mode is enabled but no tenant store is configured",
-            );
+        let Some(operations) = state.tenant_environments.as_ref() else {
+            return tenant_environment_error(TenantEnvironmentError::StoreUnavailable);
         };
-        let fixture_environment_id = environment.clone();
-        let fixture_environment = match run_blocking_tenant_store(move || {
-            tenant_store.development_fixture_environment_for(&context, &fixture_environment_id)
-        })
-        .await
-        {
-            Ok(result) => result,
-            Err(response) => return response,
+        return match operations.inspect(&context, &environment).await {
+            Ok(report) => Json(report).into_response(),
+            Err(error) => tenant_environment_error(error),
         };
-        match fixture_environment {
-            Ok(Some(projection)) => return Json(projection.inspect_report()).into_response(),
-            Ok(None) => {}
-            Err(error) => {
-                return error_response(StatusCode::FORBIDDEN, error.public_message());
-            }
-        }
     }
     let store_environment = environment.clone();
-    let inspection = if state.config.requirements.tenant_mode {
-        // The reconciler's embedded context is tenant-free. Until the tenant
-        // partition exposes the same projection, skip the shared outbox read
-        // entirely rather than validating or returning community rows.
-        state
-            .reconciler
-            .inspect_environment_without_outcome_export(environment)
-            .await
-    } else {
-        state.reconciler.inspect_environment(environment).await
-    };
+    let inspection = state.reconciler.inspect_environment(environment).await;
     match inspection {
         Ok(mut report) => {
             if !state.config.requirements.tenant_mode && report.terminal_outcomes.is_empty() {
@@ -866,12 +817,7 @@ async fn inspect_environment(
         Err(error) => {
             let message = format!("{error:#}");
             if message.contains("not registered") {
-                // Preserve non-disclosing posture under tenant mode.
-                if state.config.requirements.tenant_mode {
-                    error_response(StatusCode::NOT_FOUND, NON_DISCLOSING_DENY)
-                } else {
-                    error_response(StatusCode::NOT_FOUND, message)
-                }
+                error_response(StatusCode::NOT_FOUND, message)
             } else {
                 error_response(StatusCode::INTERNAL_SERVER_ERROR, message)
             }
@@ -898,43 +844,21 @@ async fn environment_status(
         Ok(context) => context,
         Err(response) => return *response,
     };
-    if let Err(response) = require_tenant_scope(&state, &context, Some(&environment)).await {
-        return *response;
-    }
     if state.config.requirements.tenant_mode {
-        let Some(tenant_store) = state.tenant_store.clone() else {
-            return error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "tenant mode is enabled but no tenant store is configured",
-            );
+        let Some(operations) = state.tenant_environments.as_ref() else {
+            return tenant_environment_error(TenantEnvironmentError::StoreUnavailable);
         };
-        let fixture_environment_id = environment.clone();
-        let fixture_environment = match run_blocking_tenant_store(move || {
-            tenant_store.development_fixture_environment_for(&context, &fixture_environment_id)
-        })
-        .await
-        {
-            Ok(result) => result,
-            Err(response) => return response,
+        return match operations.status(&context, &environment).await {
+            Ok(rows) => Json(rows).into_response(),
+            Err(error) => tenant_environment_error(error),
         };
-        match fixture_environment {
-            Ok(Some(projection)) => return Json(projection.status_rows()).into_response(),
-            Ok(None) => {}
-            Err(error) => {
-                return error_response(StatusCode::FORBIDDEN, error.public_message());
-            }
-        }
     }
     match state.reconciler.environment_status(environment).await {
         Ok(rows) => Json(rows).into_response(),
         Err(error) => {
             let message = format!("{error:#}");
             if message.contains("not registered") {
-                if state.config.requirements.tenant_mode {
-                    error_response(StatusCode::NOT_FOUND, NON_DISCLOSING_DENY)
-                } else {
-                    error_response(StatusCode::NOT_FOUND, message)
-                }
+                error_response(StatusCode::NOT_FOUND, message)
             } else {
                 error_response(StatusCode::INTERNAL_SERVER_ERROR, message)
             }
@@ -1020,31 +944,24 @@ async fn reconcile(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Re
     if let Err(error) = audit(&*state.store, &actor, "reconcile.requested", "*") {
         return error_response(StatusCode::SERVICE_UNAVAILABLE, error.to_string());
     }
-    let allowed_environments = if state.config.requirements.tenant_mode {
-        let Some(tenant_store) = state.tenant_store.clone() else {
-            return error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "tenant mode is enabled but no tenant store is configured",
-            );
+    let result = if state.config.requirements.tenant_mode {
+        let Some(operations) = state.tenant_environments.as_ref() else {
+            return tenant_environment_error(TenantEnvironmentError::StoreUnavailable);
         };
-        let tenant_context = context.clone();
-        match run_blocking_tenant_store(move || {
-            tenant_store.list_environment_ids_for(&tenant_context)
-        })
-        .await
-        {
-            Ok(Ok(ids)) => Some(ids),
-            Ok(Err(error)) => {
-                return error_response(StatusCode::FORBIDDEN, error.public_message());
+        match operations.reconcile(&context).await {
+            Ok(report) => Ok(report),
+            Err(error) => {
+                if let Err(audit_error) = audit(&*state.store, &actor, "reconcile.failed", "*") {
+                    return error_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        audit_error.to_string(),
+                    );
+                }
+                return tenant_environment_error(error);
             }
-            Err(response) => return response,
         }
     } else {
-        None
-    };
-    let result = match allowed_environments {
-        Some(environments) => state.reconciler.reconcile_environments(environments).await,
-        None => state.reconciler.reconcile().await,
+        state.reconciler.reconcile().await
     };
     match result {
         Ok(report) => {
@@ -1327,6 +1244,21 @@ fn error_response(status: StatusCode, error: impl Into<String>) -> Response {
         }),
     )
         .into_response()
+}
+
+fn tenant_environment_error(error: TenantEnvironmentError) -> Response {
+    match error {
+        TenantEnvironmentError::StoreUnavailable => {
+            error_response(StatusCode::SERVICE_UNAVAILABLE, "tenant store unavailable")
+        }
+        TenantEnvironmentError::NotFound => {
+            error_response(StatusCode::NOT_FOUND, NON_DISCLOSING_DENY)
+        }
+        TenantEnvironmentError::Denied(message) => error_response(StatusCode::FORBIDDEN, message),
+        TenantEnvironmentError::Internal(message) => {
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, message)
+        }
+    }
 }
 
 #[derive(Clone)]
