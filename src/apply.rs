@@ -2297,21 +2297,28 @@ async fn record_deployment(
         let environment = environment
             .as_ref()
             .expect("outcome export always loads the environment");
-        terminal_outcome_state(outcome)
-            .map(|terminal_state| {
-                crate::providers::terminal_outcome_record(
-                    &plan,
-                    &outcome.step,
-                    &did,
-                    terminal_state,
-                    environment,
-                    observed_at,
-                )
-                .map_err(anyhow::Error::from)
-            })
-            .transpose()?
-            .into_iter()
-            .collect::<Vec<_>>()
+        crate::terminal_outcome::classify(
+            outcome.step.action,
+            crate::terminal_outcome::Observation::Controller {
+                status: &outcome.status,
+                detail: &outcome.detail,
+                had_previous_release: outcome.step.from.is_some(),
+            },
+        )
+        .map(|terminal_state| {
+            crate::providers::terminal_outcome_record(
+                &plan,
+                &outcome.step,
+                &did,
+                terminal_state,
+                environment,
+                observed_at,
+            )
+            .map_err(anyhow::Error::from)
+        })
+        .transpose()?
+        .into_iter()
+        .collect::<Vec<_>>()
     } else {
         Vec::new()
     };
@@ -2365,89 +2372,11 @@ async fn record_deployment(
     }
 }
 
-fn terminal_outcome_state(outcome: &Outcome) -> Option<crate::providers::TerminalOutcomeState> {
-    use crate::providers::TerminalOutcomeState;
-
-    if outcome.status == "failed"
-        && [
-            "deployment command interrupted",
-            "deployment command terminated",
-        ]
-        .iter()
-        .any(|marker| outcome.detail.starts_with(marker))
-    {
-        return Some(TerminalOutcomeState::ExecutionCancelled);
-    }
-    match (outcome.step.action, outcome.status.as_str()) {
-        (Action::Rollback, "succeeded") => Some(TerminalOutcomeState::RollbackSucceeded),
-        (_, "succeeded") => Some(TerminalOutcomeState::DeploymentSucceeded),
-        (_, "rolled_back") => Some(TerminalOutcomeState::AutomaticRollbackSucceeded),
-        (Action::Rollback, "failed") => Some(TerminalOutcomeState::RollbackFailed),
-        (_, "failed") if outcome.step.from.is_some() => Some(TerminalOutcomeState::RollbackFailed),
-        (_, "failed") => Some(TerminalOutcomeState::DeploymentFailed),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::manifest::{DeploySection, GateSection, ProductSection};
     use crate::pb::chisei::EvaluationGateCaseResult;
-
-    fn classified_outcome(action: Action, status: &str, detail: &str) -> Outcome {
-        Outcome {
-            step: Step {
-                id: "plan:step:0".into(),
-                order: 0,
-                product: "api".into(),
-                action,
-                from: Some("1.0.0".into()),
-                to: "2.0.0".into(),
-                release_id: "tenkai:release:api@2.0.0".into(),
-                release_digest: "sha256:release".into(),
-                artifact_digest: "sha256:artifact".into(),
-                workdir: "/tmp/api".into(),
-                restore: None,
-            },
-            status: status.into(),
-            detail: detail.into(),
-        }
-    }
-
-    #[test]
-    fn terminal_deployment_states_are_distinct_and_bounded() {
-        use crate::providers::TerminalOutcomeState;
-
-        assert_eq!(
-            terminal_outcome_state(&classified_outcome(Action::Upgrade, "succeeded", "")),
-            Some(TerminalOutcomeState::DeploymentSucceeded)
-        );
-        let mut failed_install = classified_outcome(Action::Install, "failed", "");
-        failed_install.step.from = None;
-        assert_eq!(
-            terminal_outcome_state(&failed_install),
-            Some(TerminalOutcomeState::DeploymentFailed)
-        );
-        assert_eq!(
-            terminal_outcome_state(&classified_outcome(Action::Upgrade, "rolled_back", "")),
-            Some(TerminalOutcomeState::AutomaticRollbackSucceeded)
-        );
-        assert_eq!(
-            terminal_outcome_state(&classified_outcome(Action::Rollback, "succeeded", "")),
-            Some(TerminalOutcomeState::RollbackSucceeded)
-        );
-        assert_eq!(
-            terminal_outcome_state(&classified_outcome(Action::Rollback, "failed", "")),
-            Some(TerminalOutcomeState::RollbackFailed)
-        );
-        let cancelled =
-            classified_outcome(Action::Upgrade, "failed", "deployment command interrupted");
-        assert_eq!(
-            terminal_outcome_state(&cancelled),
-            Some(TerminalOutcomeState::ExecutionCancelled)
-        );
-    }
 
     #[test]
     fn emergency_override_requires_a_reason() {
