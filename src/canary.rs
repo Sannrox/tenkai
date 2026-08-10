@@ -1,6 +1,8 @@
 //! Canary promotion policy and evidence evaluation.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::future::Future;
+use std::pin::Pin;
 
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -1105,6 +1107,41 @@ pub async fn confirm_policy_active(ctx: &mut Ctx, expected: &ActiveCanaryPolicy)
     Ok(())
 }
 
+/// Run one complete promotion transaction while the Canary policy and lock
+/// remain valid. The caller supplies only the Catalog mutation; lock fencing,
+/// authorization freshness, and release compensation stay inside this module.
+pub(crate) async fn guarded_promotion<T, F>(
+    ctx: &mut Ctx,
+    product: &str,
+    version: &str,
+    target_channel: &str,
+    owner: &str,
+    promote: F,
+) -> Result<T>
+where
+    F: for<'a> FnOnce(&'a mut Ctx) -> Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>,
+{
+    let lock = claim_promotion_lock(ctx, product, target_channel, owner).await?;
+    let result = async {
+        let authorization = authorize_promotion(ctx, product, version, target_channel).await?;
+        if let Some(expected) = authorization.as_ref() {
+            confirm_policy_active(ctx, expected).await?;
+        }
+        confirm_promotion_lock(ctx, &lock).await?;
+        promote(ctx).await
+    }
+    .await;
+    let unlock = release_promotion_lock(ctx, &lock).await;
+    match (result, unlock) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(unlock)) => {
+            Err(error.context(format!("releasing promotion lock also failed: {unlock}")))
+        }
+        (Ok(_), Err(error)) => Err(error.context("releasing promotion lock failed")),
+    }
+}
+
 fn evidence_release(step: &crate::plan::Step) -> Option<&str> {
     match step.action {
         Action::Rollback => step.restore.as_ref().map(|pin| pin.release_id.as_str()),
@@ -1427,6 +1464,60 @@ pub(crate) async fn finish_attempt(
             Err(error.context(format!("releasing promotion locks also failed: {unlock}")))
         }
         (Ok(()), Err(error)) => Err(error.context("releasing promotion locks failed")),
+    }
+}
+
+pub(crate) struct AttemptExecution {
+    pub execution: Result<Vec<Outcome>>,
+    pub finalization_error: Option<anyhow::Error>,
+}
+
+/// Run the complete Canary attempt lifecycle around one apply execution.
+/// Snapshot, start, and terminal evidence ordering are not exposed to callers.
+pub(crate) async fn execute_attempt<F>(
+    ctx: &mut Ctx,
+    plan: &Plan,
+    gates_skipped: bool,
+    execute: F,
+) -> AttemptExecution
+where
+    F: for<'a> FnOnce(
+        &'a mut Ctx,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Outcome>>> + Send + 'a>>,
+{
+    let attempt_id = match begin_attempt(ctx, plan, gates_skipped).await {
+        Ok(attempt_id) => attempt_id,
+        Err(error) => {
+            return AttemptExecution {
+                execution: Err(error.context("snapshotting canary policies before execution")),
+                finalization_error: None,
+            };
+        }
+    };
+    if let Some(attempt_id) = attempt_id.as_deref()
+        && let Err(error) = mark_attempt_started(ctx, attempt_id).await
+    {
+        return AttemptExecution {
+            execution: Err(error.context("marking canary attempt as started")),
+            finalization_error: None,
+        };
+    }
+    let execution = execute(ctx).await;
+    let finalization_error = match attempt_id.as_deref() {
+        Some(attempt_id) => finish_attempt(
+            ctx,
+            &plan.id,
+            attempt_id,
+            false,
+            execution.as_ref().ok().map(Vec::as_slice),
+        )
+        .await
+        .err(),
+        None => None,
+    };
+    AttemptExecution {
+        execution,
+        finalization_error,
     }
 }
 

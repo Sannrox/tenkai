@@ -818,6 +818,7 @@ const MANUAL_UNLOCK_LEASE_MS: i64 = 5_000;
 const ENVIRONMENT_LEASE_NAMESPACE: &str = "tenkai/environment-execution";
 const REL_ACTIVE_ENVIRONMENT_EXECUTION: &str = "active_environment_execution";
 
+#[derive(Clone)]
 pub(crate) struct EnvironmentLease {
     environment: String,
     owner: String,
@@ -1617,51 +1618,36 @@ pub async fn execute_with_options(
             ))),
         };
     }
-    let mut canary_finalization_error = None;
-    let result = match crate::canary::begin_attempt(ctx, &stored_plan, options.skip_gates).await {
-        Ok(attempt_id) => {
-            let start_result = match attempt_id.as_deref() {
-                Some(attempt_id) => crate::canary::mark_attempt_started(ctx, attempt_id)
-                    .await
-                    .context("marking canary attempt as started"),
-                None => Ok(()),
-            };
-            match start_result {
-                Err(error) => Err(error),
-                Ok(()) => {
-                    let result = execute_locked(
-                        ctx,
-                        stored_plan,
-                        ExecutionOptions {
-                            skip_gates: options.skip_gates,
-                            emergency_reason,
-                            approval: options.approval,
-                            approval_trust_roots: options.approval_trust_roots,
-                            unapproved_development_reason: options.unapproved_development_reason,
-                        },
-                        &lease,
-                    )
-                    .await;
-                    if let Some(attempt_id) = attempt_id
-                        // This executor has no reliable post-mutation error boundary. Keep
-                        // errored attempts pending until explicit repair so promotion fails closed.
-                        && let Err(error) = crate::canary::finish_attempt(
-                            ctx,
-                            plan_id,
-                            &attempt_id,
-                            false,
-                            result.as_ref().ok().map(Vec::as_slice),
-                        )
-                        .await
-                    {
-                        canary_finalization_error = Some(error);
-                    }
-                    result
-                }
-            }
-        }
-        Err(error) => Err(error.context("snapshotting canary policies before execution")),
-    };
+    let canary_plan = stored_plan.clone();
+    let execution_lease = lease.clone();
+    let execution_emergency_reason = emergency_reason.map(str::to_string);
+    let execution_approval = options.approval.map(std::path::Path::to_path_buf);
+    let execution_approval_trust_roots = options
+        .approval_trust_roots
+        .map(std::path::Path::to_path_buf);
+    let execution_unapproved_reason = options.unapproved_development_reason.map(str::to_string);
+    let skip_gates = options.skip_gates;
+    let canary_execution =
+        crate::canary::execute_attempt(ctx, &canary_plan, options.skip_gates, move |ctx| {
+            Box::pin(async move {
+                execute_locked(
+                    ctx,
+                    stored_plan,
+                    ExecutionOptions {
+                        skip_gates,
+                        emergency_reason: execution_emergency_reason.as_deref(),
+                        approval: execution_approval.as_deref(),
+                        approval_trust_roots: execution_approval_trust_roots.as_deref(),
+                        unapproved_development_reason: execution_unapproved_reason.as_deref(),
+                    },
+                    &execution_lease,
+                )
+                .await
+            })
+        })
+        .await;
+    let result = canary_execution.execution;
+    let canary_finalization_error = canary_execution.finalization_error;
     let unlock = release_environment(ctx, &lease).await;
     let released_result = match (result, unlock) {
         (Ok(outcomes), Ok(())) => Ok(outcomes),
