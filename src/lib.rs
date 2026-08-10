@@ -13,6 +13,8 @@
 //! - [`storage`] and [`tenant_store`] provide operational persistence adapters.
 //! - [`software_executor`], [`model_runtime`], [`routing`], and [`staged_artifact`]
 //!   adapt typed delivery products to their target runtimes.
+//! - [`staged_artifact`] also owns the private kind→schema mapping for staged
+//!   JSON products so apply/publish call sites do not re-encode that dispatch.
 //! - [`atomic_state`] hides verified atomic local state-file mutation shared by
 //!   those local executor adapters.
 //! - [`providers`] and [`client`] contain optional Sekai-Chisei integration.
