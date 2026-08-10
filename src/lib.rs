@@ -10,6 +10,9 @@
 //!
 //! - [`catalog`] owns immutable release publication, promotion, and lookup.
 //! - [`plan`], [`apply`], and [`reconciler`] own convergence decisions and execution.
+//! - `apply::product_execution` hides product-kind dispatch, adapter setup,
+//!   integrity and health ordering, and failed-activation cleanup policy behind
+//!   the apply workflow's private execution seam.
 //! - [`fleet`] owns pure fleet posture aggregation, drift comparison, and
 //!   baseline I/O so callers do not re-encode inspect→posture classification.
 //! - [`storage`] and [`tenant_store`] provide operational persistence adapters.
