@@ -10,6 +10,10 @@ use crate::client::Ctx;
 use crate::ontology::*;
 use crate::pb::sekai::Object;
 
+mod release_selection;
+
+pub use release_selection::model_requirements_fit;
+
 pub(crate) use crate::environment::update_runtime_deployments_object;
 pub use crate::environment::{
     ENVIRONMENT_FACT_KEYS, EnvironmentInspectReport, EnvironmentListEntry,
@@ -415,308 +419,6 @@ async fn pin_release(ctx: &mut Ctx, id: &str, environment: &str) -> Result<Relea
     })
 }
 
-/// Resolve channel head against environment version pin/range constraints and,
-/// for `model_runtime` products, hardware-class requirements vs environment facts.
-///
-/// - `constraint.version_pin.<product>` forces that exact published version
-///   (overrides channel head when different). The pin must still satisfy
-///   model_runtime requirements when the product is a model runtime.
-/// - `constraint.version_range.<product>` is `min..max` (semver, min inclusive,
-///   max exclusive). Selected version must lie in the range.
-/// - Related `model_runtime` variants are **all published releases of the same
-///   product name**. Among candidates in range (or only the pin), plan selects
-///   the highest semver whose `[requirements]` fit environment facts, and fails
-///   closed when none fit.
-async fn resolve_constrained_release(
-    ctx: &mut Ctx,
-    env_obj: &Object,
-    env: &str,
-    product: &str,
-    channel_version: &str,
-    channel_release: &str,
-) -> Result<(String, String)> {
-    let pin_key = format!("constraint.version_pin.{product}");
-    let range_key = format!("constraint.version_range.{product}");
-    let pin = env_obj.properties.get(&pin_key).cloned();
-    let range = env_obj.properties.get(&range_key).cloned();
-
-    if let Some(pin) = pin.as_ref() {
-        if pin.trim().is_empty() {
-            bail!("constraint version pin for {product} must not be empty");
-        }
-        let pinned_release = release_id(product, pin);
-        if ctx.get(&pinned_release).await?.is_none() {
-            bail!(
-                "version pin {pin} for {product} in {env} is not published (constraint {pin_key})"
-            );
-        }
-        if let Some(range) = range.as_ref()
-            && !version_in_range(pin, range)?
-        {
-            bail!(
-                "version pin {pin} for {product} in {env} violates version range constraint {range:?} ({range_key})"
-            );
-        }
-        // Pin forces one release; still fail closed if model requirements miss.
-        ensure_model_runtime_fits(ctx, env, product, pin, &pinned_release).await?;
-        if pin != channel_version {
-            return Ok((pin.clone(), pinned_release));
-        }
-        return Ok((channel_version.into(), channel_release.into()));
-    }
-
-    if let Some(range) = range.as_ref()
-        && !version_in_range(channel_version, range)?
-    {
-        // Channel head out of range: still try hardware selection among in-range
-        // model_runtime siblings; for non-model products fail as before.
-        if !release_is_model_runtime(ctx, channel_release).await? {
-            bail!(
-                "channel head {channel_version} for {product} in {env} violates version range constraint {range:?} ({range_key})"
-            );
-        }
-    }
-
-    if release_is_model_runtime(ctx, channel_release).await?
-        || product_has_model_runtime_release(ctx, product).await?
-    {
-        return select_model_runtime_variant(
-            ctx,
-            env,
-            product,
-            channel_version,
-            channel_release,
-            range.as_deref(),
-        )
-        .await;
-    }
-
-    if let Some(range) = range.as_ref()
-        && !version_in_range(channel_version, range)?
-    {
-        bail!(
-            "channel head {channel_version} for {product} in {env} violates version range constraint {range:?} ({range_key})"
-        );
-    }
-    Ok((channel_version.into(), channel_release.into()))
-}
-
-async fn release_is_model_runtime(ctx: &mut Ctx, release: &str) -> Result<bool> {
-    let Some(object) = ctx.get(release).await? else {
-        return Ok(false);
-    };
-    let Some(raw) = object.properties.get("manifest") else {
-        return Ok(false);
-    };
-    let manifest = crate::manifest::parse_raw(raw)
-        .with_context(|| format!("parsing stored manifest of {release}"))?;
-    Ok(manifest.product.kind == crate::manifest::ProductKind::ModelRuntime)
-}
-
-async fn product_has_model_runtime_release(ctx: &mut Ctx, product: &str) -> Result<bool> {
-    let pid = product_id(product);
-    let releases = ctx.linked(&pid, REL_RELEASE_OF, "in").await?;
-    for release in releases {
-        if release_is_model_runtime(ctx, &release.id).await? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-/// Match model_runtime `[requirements]` against environment capability facts.
-///
-/// - `architecture` fact must be one of `requirements.architecture`
-/// - `memory_gib` fact must be an integer ≥ `requirements.memory_gib`
-/// - when `requirements.accelerator` is non-empty, `accelerator` fact must be
-///   one of those values
-pub fn model_requirements_fit(
-    env: &str,
-    product: &str,
-    version: &str,
-    facts: &std::collections::BTreeMap<String, String>,
-    requirements: &crate::manifest::ModelRequirementsSection,
-) -> Result<()> {
-    let architecture = facts.get("architecture").ok_or_else(|| {
-        anyhow::anyhow!(
-            "model_runtime {product}@{version} requires environment fact architecture for {env}; set it with `tenkaictl env facts set {env} architecture=…`"
-        )
-    })?;
-    if !requirements
-        .architecture
-        .iter()
-        .any(|allowed| allowed == architecture)
-    {
-        bail!(
-            "model_runtime {product}@{version} requirements.architecture {:?} does not include environment {env} fact architecture={architecture}",
-            requirements.architecture
-        );
-    }
-
-    let memory_raw = facts.get("memory_gib").ok_or_else(|| {
-        anyhow::anyhow!(
-            "model_runtime {product}@{version} requires environment fact memory_gib for {env}; set it with `tenkaictl env facts set {env} memory_gib=…`"
-        )
-    })?;
-    let memory: u32 = memory_raw.parse().with_context(|| {
-        format!("environment {env} fact memory_gib={memory_raw:?} is not a non-negative integer")
-    })?;
-    if memory < requirements.memory_gib {
-        bail!(
-            "model_runtime {product}@{version} requires memory_gib>={} but environment {env} fact memory_gib={memory}",
-            requirements.memory_gib
-        );
-    }
-
-    if !requirements.accelerator.is_empty() {
-        let accelerator = facts.get("accelerator").ok_or_else(|| {
-            anyhow::anyhow!(
-                "model_runtime {product}@{version} requires environment fact accelerator for {env}; set it with `tenkaictl env facts set {env} accelerator=…`"
-            )
-        })?;
-        if !requirements
-            .accelerator
-            .iter()
-            .any(|allowed| allowed == accelerator)
-        {
-            bail!(
-                "model_runtime {product}@{version} requirements.accelerator {:?} does not include environment {env} fact accelerator={accelerator}",
-                requirements.accelerator
-            );
-        }
-    }
-    Ok(())
-}
-
-async fn ensure_model_runtime_fits(
-    ctx: &mut Ctx,
-    env: &str,
-    product: &str,
-    version: &str,
-    release: &str,
-) -> Result<()> {
-    let Some(object) = ctx.get(release).await? else {
-        bail!("release {release} is not published");
-    };
-    let Some(raw) = object.properties.get("manifest") else {
-        return Ok(());
-    };
-    let manifest = crate::manifest::parse_raw(raw)
-        .with_context(|| format!("parsing stored manifest of {release}"))?;
-    if manifest.product.kind != crate::manifest::ProductKind::ModelRuntime {
-        return Ok(());
-    }
-    let requirements = manifest.requirements.as_ref().ok_or_else(|| {
-        anyhow::anyhow!("model_runtime {product}@{version} has no [requirements] section")
-    })?;
-    let facts = list_environment_facts(ctx, env).await?;
-    model_requirements_fit(env, product, version, &facts, requirements)
-}
-
-async fn select_model_runtime_variant(
-    ctx: &mut Ctx,
-    env: &str,
-    product: &str,
-    channel_version: &str,
-    channel_release: &str,
-    range: Option<&str>,
-) -> Result<(String, String)> {
-    let facts = list_environment_facts(ctx, env).await?;
-    let pid = product_id(product);
-    let linked = ctx.linked(&pid, REL_RELEASE_OF, "in").await?;
-    let channel_semver = semver::Version::parse(channel_version).ok();
-    let mut candidates = Vec::new();
-    for release in linked {
-        let Some(version) = release.properties.get("version").cloned() else {
-            continue;
-        };
-        if let Some(range) = range
-            && !version_in_range(&version, range)?
-        {
-            continue;
-        }
-        // Channel head is the rollout ceiling: only published siblings at or
-        // below the promoted head are eligible fallback variants.
-        if let (Some(head), Ok(candidate)) = (&channel_semver, semver::Version::parse(&version))
-            && candidate > *head
-        {
-            continue;
-        }
-        let Some(raw) = release.properties.get("manifest") else {
-            continue;
-        };
-        let manifest = crate::manifest::parse_raw(raw)
-            .with_context(|| format!("parsing stored manifest of {}", release.id))?;
-        if manifest.product.kind != crate::manifest::ProductKind::ModelRuntime {
-            continue;
-        }
-        let Some(requirements) = manifest.requirements.as_ref() else {
-            continue;
-        };
-        if model_requirements_fit(env, product, &version, &facts, requirements).is_ok() {
-            candidates.push((version, release.id));
-        }
-    }
-
-    if candidates.is_empty() {
-        // Prefer a precise error from the channel head when it is a model_runtime.
-        if let Err(head_error) =
-            ensure_model_runtime_fits(ctx, env, product, channel_version, channel_release).await
-        {
-            bail!(
-                "no model_runtime variant of {product} fits environment {env} facts (architecture/memory_gib/accelerator); channel head rejected: {head_error}"
-            );
-        }
-        bail!(
-            "no model_runtime variant of {product} fits environment {env} facts (architecture/memory_gib/accelerator); publish a feasible variant or relax constraints"
-        );
-    }
-
-    // Deterministic: highest semver wins; fall back to version string order.
-    candidates.sort_by(|(a, _), (b, _)| {
-        match (semver::Version::parse(a), semver::Version::parse(b)) {
-            (Ok(av), Ok(bv)) => av.cmp(&bv),
-            _ => a.cmp(b),
-        }
-    });
-    let (version, release) = candidates
-        .pop()
-        .expect("candidates non-empty after empty check");
-    Ok((version, release))
-}
-
-fn version_in_range(version: &str, range: &str) -> Result<bool> {
-    let Some((min, max)) = range.split_once("..") else {
-        bail!("version range must be min..max, got {range:?}");
-    };
-    let version =
-        semver::Version::parse(version).with_context(|| format!("invalid version {version:?}"))?;
-    let min = semver::Version::parse(min.trim())
-        .with_context(|| format!("invalid version range minimum in {range:?}"))?;
-    let max = semver::Version::parse(max.trim())
-        .with_context(|| format!("invalid version range maximum in {range:?}"))?;
-    if min >= max {
-        bail!("version range minimum must be less than maximum in {range:?}");
-    }
-    Ok(version >= min && version < max)
-}
-
-async fn enforce_capability_constraints(ctx: &mut Ctx, env_obj: &Object, env: &str) -> Result<()> {
-    for (key, expected) in &env_obj.properties {
-        let Some(fact_key) = key.strip_prefix("constraint.require_fact.") else {
-            continue;
-        };
-        crate::environment::validate_fact_key(fact_key)?;
-        let actual = crate::environment::require_environment_fact(ctx, env, fact_key).await?;
-        if expected != "*" && expected != &actual {
-            bail!(
-                "environment {env} fact {fact_key}={actual} does not satisfy constraint {expected:?} ({key})"
-            );
-        }
-    }
-    Ok(())
-}
-
 async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateInput>, Vec<Step>)> {
     let env_obj = crate::environment::environment(ctx, env).await?;
     let channels = ctx.linked(&env_obj.id, REL_SUBSCRIBES, "out").await?;
@@ -753,16 +455,19 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
         if channel_version.is_empty() || channel_release.is_empty() {
             continue; // channel exists but nothing promoted yet
         }
-        let (desired, release) = resolve_constrained_release(
+        let selected = release_selection::select(
             ctx,
             &env_obj,
             env,
-            &product,
-            &channel_version,
-            &channel_release,
+            release_selection::ChannelHead {
+                product: &product,
+                version: &channel_version,
+                release_id: &channel_release,
+            },
         )
         .await?;
-        enforce_capability_constraints(ctx, &env_obj, env).await?;
+        let desired = selected.version;
+        let release = selected.release_id;
         let target = pin_release(ctx, &release, env).await?;
         if env_obj
             .properties
@@ -782,7 +487,7 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
             .properties
             .get(&format!("deployed.{product}"))
             .cloned();
-        let kind = release_product_kind(ctx, &release).await?;
+        let kind = selected.kind;
         inputs.push(DesiredStateInput {
             product: product.clone(),
             channel,
@@ -844,23 +549,6 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
         )
         .collect();
     Ok((inputs, steps))
-}
-
-async fn release_product_kind(
-    ctx: &mut Ctx,
-    release: &str,
-) -> Result<crate::manifest::ProductKind> {
-    let object = ctx
-        .get(release)
-        .await?
-        .with_context(|| format!("release {release} not found for product kind lookup"))?;
-    let raw = object
-        .properties
-        .get("manifest")
-        .with_context(|| format!("release {release} has no stored manifest"))?;
-    let manifest = crate::manifest::parse_raw(raw)
-        .with_context(|| format!("parsing stored manifest of {release}"))?;
-    Ok(manifest.product.kind)
 }
 
 /// Deterministic step ranking for coordinated model_runtime + routing_config
@@ -1238,16 +926,6 @@ mod tests {
     fn semantic_version_direction_is_recorded() {
         assert_eq!(classify_change("2.0.0", "1.9.0"), Action::Downgrade);
         assert_eq!(classify_change("1.9.0", "2.0.0"), Action::Upgrade);
-    }
-
-    #[test]
-    fn version_range_is_half_open() {
-        assert!(version_in_range("1.0.0", "1.0.0..2.0.0").unwrap());
-        assert!(version_in_range("1.9.9", "1.0.0..2.0.0").unwrap());
-        assert!(!version_in_range("2.0.0", "1.0.0..2.0.0").unwrap());
-        assert!(!version_in_range("0.9.0", "1.0.0..2.0.0").unwrap());
-        assert!(version_in_range("bad", "1.0.0..2.0.0").is_err());
-        assert!(version_in_range("1.0.0", "2.0.0..1.0.0").is_err());
     }
 
     #[test]
