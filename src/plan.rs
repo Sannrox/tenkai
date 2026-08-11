@@ -10,6 +10,7 @@ use crate::client::Ctx;
 use crate::ontology::*;
 use crate::pb::sekai::Object;
 
+mod lifecycle;
 mod release_selection;
 
 pub use release_selection::model_requirements_fit;
@@ -186,173 +187,16 @@ impl Plan {
     }
 
     pub(crate) fn to_object(&self) -> Result<Object> {
-        let now = crate::now_millis();
-        Ok(Object {
-            id: self.id.clone(),
-            kind: KIND_PLAN.into(),
-            name: format!("{} plan {}", self.environment, self.created_at),
-            namespace: NS.into(),
-            external_id: String::new(),
-            properties: HashMap::from([
-                ("format_version".into(), self.format_version.to_string()),
-                ("environment".into(), self.environment.clone()),
-                ("created_at".into(), self.created_at.to_string()),
-                ("content_digest".into(), self.executable_digest()?),
-                ("plan".into(), serde_json::to_string(self)?),
-                ("status".into(), self.state.to_string()),
-            ]),
-            created: self.created_at,
-            updated: now,
-        })
-    }
-
-    fn from_object(object: &Object) -> Result<Self> {
-        if object.kind != KIND_PLAN {
-            bail!("object {} is {}, not {KIND_PLAN}", object.id, object.kind);
-        }
-        let raw = object
-            .properties
-            .get("plan")
-            .with_context(|| format!("plan object {} has no serialized plan", object.id))?;
-        let plan: Self = serde_json::from_str(raw)
-            .with_context(|| format!("parsing stored plan {}", object.id))?;
-        if plan.format_version != PLAN_FORMAT_VERSION {
-            bail!(
-                "plan {} uses unsupported format version {}",
-                object.id,
-                plan.format_version
-            );
-        }
-        if plan.maintenance_blocked && plan.state != PlanState::Blocked {
-            bail!(
-                "plan {} has a maintenance-block marker outside the blocked state",
-                plan.id
-            );
-        }
-        if plan.id != object.id {
-            bail!(
-                "stored plan id {} does not match object id {}",
-                plan.id,
-                object.id
-            );
-        }
-        let expected_content_id = content_address(
-            &plan.environment,
-            plan.created_at,
-            &plan.inputs,
-            &plan.steps,
-        )?;
-        if plan.content_id != expected_content_id
-            || plan.id != plan_id(&plan.environment, plan.created_at, &expected_content_id)
-        {
-            bail!(
-                "stored plan {} does not match its content-addressed id",
-                object.id
-            );
-        }
-        for (order, step) in plan.steps.iter().enumerate() {
-            if step.order != order as u32 || step.id != format!("{}:step:{order}", plan.id) {
-                bail!("stored plan {} has invalid step ordering or ids", object.id);
-            }
-        }
-        let status = object
-            .properties
-            .get("status")
-            .with_context(|| format!("plan object {} has no lifecycle status", object.id))?;
-        if status != &plan.state.to_string() {
-            bail!("stored plan {} has inconsistent lifecycle state", object.id);
-        }
-        let stored_digest = object
-            .properties
-            .get("content_digest")
-            .with_context(|| format!("plan object {} has no content digest", object.id))?;
-        if plan.executable_digest()? != *stored_digest {
-            bail!("stored plan {} executable content was mutated", object.id);
-        }
-        Ok(plan)
+        lifecycle::to_object(self)
     }
 }
 
 pub async fn store(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
-    store_with_provider_events(ctx, plan, &[]).await
-}
-
-pub(crate) async fn store_with_provider_events(
-    ctx: &mut Ctx,
-    plan: &Plan,
-    provider_events: &[crate::storage::ProviderEventRecord],
-) -> Result<()> {
-    let object = validated_plan_object(ctx, plan).await?;
-    ctx.put_with_provider_events(object, provider_events)
-        .await?;
-    Ok(())
-}
-
-pub(crate) async fn store_with_environment_and_provider_events(
-    ctx: &mut Ctx,
-    plan: &Plan,
-    environment: Object,
-    provider_events: &[crate::storage::ProviderEventRecord],
-) -> Result<()> {
-    let plan_object = validated_plan_object(ctx, plan).await?;
-    ctx.put_objects_with_provider_events(&[plan_object, environment], provider_events)
-        .await
-}
-
-async fn validated_plan_object(ctx: &mut Ctx, plan: &Plan) -> Result<Object> {
-    let existing = ctx.get(&plan.id).await?;
-    if let Some(existing) = existing.as_ref() {
-        let stored = Plan::from_object(existing)?;
-        if stored.executable_digest()? != plan.executable_digest()? {
-            bail!("plan {} executable content is immutable", plan.id);
-        }
-        if stored.state == plan.state
-            && stored.state != PlanState::Blocked
-            && (stored.gates_skipped != plan.gates_skipped
-                || stored.status_detail != plan.status_detail
-                || stored.maintenance_blocked != plan.maintenance_blocked)
-        {
-            bail!("plan {} lifecycle audit fields are immutable", plan.id);
-        }
-        let valid_transition = stored.state == plan.state
-            || matches!(
-                (stored.state, plan.state),
-                (PlanState::Computed, PlanState::Running)
-                    | (PlanState::Computed, PlanState::Blocked)
-                    | (PlanState::Blocked, PlanState::Running)
-                    | (PlanState::Running, PlanState::Blocked)
-                    | (PlanState::Running, PlanState::Succeeded)
-                    | (PlanState::Running, PlanState::Failed)
-            );
-        if !valid_transition {
-            bail!(
-                "plan {} cannot transition from {} to {}",
-                plan.id,
-                stored.state,
-                plan.state
-            );
-        }
-    }
-    let mut object = plan.to_object()?;
-    if let Some(existing) = existing.as_ref() {
-        for property in [
-            "last_emergency_override_reason",
-            "last_emergency_override_correlation",
-        ] {
-            if let Some(value) = existing.properties.get(property) {
-                object.properties.insert(property.into(), value.clone());
-            }
-        }
-    }
-    Ok(object)
+    lifecycle::store(ctx, plan).await
 }
 
 pub async fn load(ctx: &mut Ctx, id: &str) -> Result<Plan> {
-    let object = ctx
-        .get(id)
-        .await?
-        .with_context(|| format!("plan {id} not found"))?;
-    Plan::from_object(&object)
+    lifecycle::load(ctx, id).await
 }
 
 /// Load plans for one environment without scanning the full plan kind set.
@@ -367,32 +211,7 @@ pub async fn list_for_environment(
     environment: &str,
     statuses: Option<&[PlanState]>,
 ) -> Result<Vec<Plan>> {
-    anyhow::ensure!(
-        !environment.trim().is_empty(),
-        "environment is required for plan work selection"
-    );
-    let objects = ctx
-        .find_by_property(KIND_PLAN, "environment", environment)
-        .await?;
-    let mut plans = Vec::with_capacity(objects.len());
-    for object in objects {
-        let plan = Plan::from_object(&object)?;
-        if plan.environment != environment {
-            bail!(
-                "plan {} property index returned environment {}, expected {environment}",
-                plan.id,
-                plan.environment
-            );
-        }
-        if let Some(allowed) = statuses
-            && !allowed.contains(&plan.state)
-        {
-            continue;
-        }
-        plans.push(plan);
-    }
-    plans.sort_by_key(|plan| plan.created_at);
-    Ok(plans)
+    lifecycle::list_for_environment(ctx, environment, statuses).await
 }
 
 /// Oldest plan for `environment` whose status is in `statuses`, or `None`.
@@ -401,8 +220,18 @@ pub async fn oldest_for_environment(
     environment: &str,
     statuses: &[PlanState],
 ) -> Result<Option<Plan>> {
-    let plans = list_for_environment(ctx, environment, Some(statuses)).await?;
-    Ok(plans.into_iter().next())
+    lifecycle::oldest_for_environment(ctx, environment, statuses).await
+}
+
+pub(crate) use lifecycle::{Persistence, Transition};
+
+pub(crate) async fn transition(
+    ctx: &mut Ctx,
+    plan: &mut Plan,
+    update: Transition,
+    persistence: Persistence<'_>,
+) -> Result<()> {
+    lifecycle::transition(ctx, plan, update, persistence).await
 }
 
 async fn pin_release(ctx: &mut Ctx, id: &str, environment: &str) -> Result<ReleasePin> {
@@ -769,7 +598,7 @@ mod tests {
     fn serialized_plan_round_trips() {
         let plan = example_plan();
         let object = plan.to_object().unwrap();
-        assert_eq!(Plan::from_object(&object).unwrap(), plan);
+        assert_eq!(lifecycle::from_object(&object).unwrap(), plan);
     }
 
     fn plan_for(env: &str, created_at: i64, state: PlanState) -> Plan {
@@ -877,7 +706,7 @@ mod tests {
             blocked.executable_digest().unwrap()
         );
         assert!(
-            Plan::from_object(&blocked.to_object().unwrap())
+            lifecycle::from_object(&blocked.to_object().unwrap())
                 .unwrap()
                 .maintenance_blocked
         );
@@ -892,7 +721,7 @@ mod tests {
         object
             .properties
             .insert("plan".into(), serde_json::to_string(&changed).unwrap());
-        let error = Plan::from_object(&object).unwrap_err().to_string();
+        let error = lifecycle::from_object(&object).unwrap_err().to_string();
         assert!(error.contains("content-addressed id"));
     }
 

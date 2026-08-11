@@ -75,18 +75,18 @@ pub(super) async fn transition(
     gates_skipped: bool,
     detail: impl Into<String>,
 ) -> Result<()> {
-    plan.state = state;
-    plan.gates_skipped = Some(gates_skipped);
-    plan.status_detail = detail.into();
-    plan.maintenance_blocked = false;
-    ctx.guarded_update(
-        plan.to_object()?,
-        ENVIRONMENT_LEASE_NAMESPACE,
-        &lease.environment,
-        &lease.fencing_token,
+    plan::transition(
+        ctx,
+        plan,
+        plan::Transition::execution(state, gates_skipped, detail),
+        plan::Persistence::Guarded {
+            namespace: ENVIRONMENT_LEASE_NAMESPACE,
+            key: &lease.environment,
+            fencing_token: &lease.fencing_token,
+            confirm_ambiguous: false,
+        },
     )
-    .await?;
-    Ok(())
+    .await
 }
 
 /// Confirm an ambiguous write by reading the exact intended terminal state.
@@ -98,21 +98,18 @@ pub(super) async fn transition_confirmed(
     gates_skipped: bool,
     detail: impl Into<String>,
 ) -> Result<()> {
-    let detail = detail.into();
-    if let Err(error) = transition(ctx, lease, plan, state, gates_skipped, detail.clone()).await {
-        let persisted = plan::load(ctx, &plan.id).await;
-        if !matches!(
-            persisted,
-            Ok(ref stored)
-                if stored.state == state
-                    && stored.gates_skipped == Some(gates_skipped)
-                    && stored.status_detail == detail
-                    && !stored.maintenance_blocked
-        ) {
-            return Err(error);
-        }
-    }
-    Ok(())
+    plan::transition(
+        ctx,
+        plan,
+        plan::Transition::execution(state, gates_skipped, detail),
+        plan::Persistence::Guarded {
+            namespace: ENVIRONMENT_LEASE_NAMESPACE,
+            key: &lease.environment,
+            fencing_token: &lease.fencing_token,
+            confirm_ambiguous: true,
+        },
+    )
+    .await
 }
 
 #[cfg(test)]
