@@ -203,8 +203,8 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
     if manifest.product.name.is_empty() || manifest.product.version.is_empty() {
         bail!("manifest needs product.name and product.version");
     }
-    match manifest.product.kind {
-        ProductKind::Software => {
+    match manifest.product.kind.policy().target() {
+        crate::product_kind::ProductTarget::Software => {
             if manifest.routing.is_some() {
                 bail!("software manifests cannot declare a routing section");
             }
@@ -225,7 +225,7 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
                 bail!("software manifest needs a non-empty deploy.install command");
             }
         }
-        ProductKind::RoutingConfig => {
+        crate::product_kind::ProductTarget::RoutingConfig => {
             if !manifest.deploy.install.trim().is_empty()
                 || manifest.deploy.uninstall.is_some()
                 || manifest.deploy.health.is_some()
@@ -254,7 +254,7 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
             }
             validate_input_path("routing.config", &routing.config)?;
         }
-        ProductKind::ModelRuntime => {
+        crate::product_kind::ProductTarget::ModelRuntime => {
             if manifest.routing.is_some() {
                 bail!("model_runtime manifests cannot declare a routing section");
             }
@@ -278,7 +278,7 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
             // Full section validation lives in the model_runtime contract.
             crate::model_runtime::ModelRuntimeDescriptor::from_manifest(&manifest)?;
         }
-        ProductKind::PolicyBundle | ProductKind::EvalSuite | ProductKind::AgentDefinition => {
+        crate::product_kind::ProductTarget::Staged(staged_kind) => {
             if manifest.routing.is_some()
                 || manifest.model.is_some()
                 || manifest.runtime.is_some()
@@ -299,8 +299,8 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
                     manifest.product.kind
                 );
             }
-            match manifest.product.kind {
-                ProductKind::PolicyBundle => {
+            match staged_kind {
+                crate::product_kind::StagedKind::PolicyBundle => {
                     if manifest.eval_suite_product.is_some() || manifest.agent.is_some() {
                         bail!("policy_bundle cannot declare eval_suite_product or agent sections");
                     }
@@ -310,7 +310,7 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
                         .context("policy_bundle needs a [policy] section")?;
                     validate_input_path("policy.document", &section.document)?;
                 }
-                ProductKind::EvalSuite => {
+                crate::product_kind::StagedKind::EvalSuite => {
                     if manifest.policy.is_some() || manifest.agent.is_some() {
                         bail!("eval_suite cannot declare policy or agent sections");
                     }
@@ -320,7 +320,7 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
                         .context("eval_suite needs an [eval_suite_product] section")?;
                     validate_input_path("eval_suite_product.document", &section.document)?;
                 }
-                ProductKind::AgentDefinition => {
+                crate::product_kind::StagedKind::AgentDefinition => {
                     if manifest.policy.is_some() || manifest.eval_suite_product.is_some() {
                         bail!(
                             "agent_definition cannot declare policy or eval_suite_product sections"
@@ -332,7 +332,6 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
                         .context("agent_definition needs an [agent] section")?;
                     validate_input_path("agent.document", &section.document)?;
                 }
-                _ => unreachable!(),
             }
         }
     }

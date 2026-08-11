@@ -17,25 +17,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::manifest::{Manifest, ProductKind};
-
-/// Private mapping from a public staged product kind to its schema locality.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StagedKind {
-    PolicyBundle,
-    EvalSuite,
-    AgentDefinition,
-}
+use crate::product_kind::StagedKind;
 
 impl StagedKind {
-    fn from_product(kind: ProductKind) -> Option<Self> {
-        match kind {
-            ProductKind::PolicyBundle => Some(Self::PolicyBundle),
-            ProductKind::EvalSuite => Some(Self::EvalSuite),
-            ProductKind::AgentDefinition => Some(Self::AgentDefinition),
-            _ => None,
-        }
-    }
-
     fn state_namespace(self) -> &'static str {
         match self {
             Self::PolicyBundle => "policy_bundle",
@@ -109,13 +93,15 @@ impl StagedKind {
 
 /// True when `kind` stages a versioned JSON descriptor through this module.
 pub fn is_staged_kind(kind: ProductKind) -> bool {
-    StagedKind::from_product(kind).is_some()
+    kind.policy().staged_kind().is_some()
 }
 
 /// Validate kind-specific document bytes without reading the filesystem.
 pub fn validate_document_bytes(kind: ProductKind, bytes: &[u8]) -> Result<()> {
-    let staged =
-        StagedKind::from_product(kind).context("product kind is not a staged JSON artifact")?;
+    let staged = kind
+        .policy()
+        .staged_kind()
+        .context("product kind is not a staged JSON artifact")?;
     staged.validate_bytes(bytes)
 }
 
@@ -129,7 +115,11 @@ pub fn activate(
     state_root: &Path,
     product: &str,
 ) -> Result<()> {
-    let staged = StagedKind::from_product(manifest.product.kind)
+    let staged = manifest
+        .product
+        .kind
+        .policy()
+        .staged_kind()
         .context("product kind is not a staged JSON artifact")?;
     let relative = staged.document_path(manifest)?;
     crate::manifest::validate_input_path("staged.document", relative)?;
@@ -142,8 +132,10 @@ pub fn activate(
 
 /// Remove the staged document for `product` under the kind's state namespace.
 pub fn deactivate(kind: ProductKind, state_root: &Path, product: &str) -> Result<()> {
-    let staged =
-        StagedKind::from_product(kind).context("product kind is not a staged JSON artifact")?;
+    let staged = kind
+        .policy()
+        .staged_kind()
+        .context("product kind is not a staged JSON artifact")?;
     LocalStagedArtifactExecutor::new(staged.state_path(state_root, product)).remove()
 }
 
@@ -327,14 +319,22 @@ impl LocalStagedArtifactExecutor {
 
 /// Relative document path from a staged-product manifest.
 pub fn staged_document_path(manifest: &Manifest) -> Result<&str> {
-    let staged = StagedKind::from_product(manifest.product.kind)
+    let staged = manifest
+        .product
+        .kind
+        .policy()
+        .staged_kind()
         .context("product kind is not a staged JSON artifact")?;
     staged.document_path(manifest)
 }
 
 pub fn validate_staged_manifest(manifest: &Manifest, workdir: &Path) -> Result<()> {
-    let staged =
-        StagedKind::from_product(manifest.product.kind).context("not a staged product kind")?;
+    let staged = manifest
+        .product
+        .kind
+        .policy()
+        .staged_kind()
+        .context("not a staged product kind")?;
     let relative = staged.document_path(manifest)?;
     crate::manifest::validate_input_path("staged.document", relative)?;
     staged.load_canonical_bytes(&workdir.join(relative))?;
@@ -342,7 +342,7 @@ pub fn validate_staged_manifest(manifest: &Manifest, workdir: &Path) -> Result<(
 }
 
 pub fn state_path_for(kind: ProductKind, base: &Path, product: &str) -> PathBuf {
-    match StagedKind::from_product(kind) {
+    match kind.policy().staged_kind() {
         Some(staged) => staged.state_path(base, product),
         None => base.join("staged").join(format!("{product}.json")),
     }

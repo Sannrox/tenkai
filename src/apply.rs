@@ -13,7 +13,7 @@ use std::os::unix::process::CommandExt as _;
 use std::process::Stdio;
 
 use crate::client::Ctx;
-use crate::manifest::{self, Manifest, ProductKind};
+use crate::manifest::{self, Manifest};
 use crate::model_runtime::ModelRuntimeExecutor as _;
 use crate::ontology::*;
 use crate::pb::sekai::Object;
@@ -254,7 +254,7 @@ async fn execute_locked(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::{DeploySection, GateSection, ProductSection};
+    use crate::manifest::{DeploySection, GateSection, ProductKind, ProductSection};
 
     fn test_dir(name: &str) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!(
