@@ -47,7 +47,7 @@ pub async fn execute_with_options(
     plan_id: &str,
     options: ExecutionOptions<'_>,
 ) -> Result<Vec<Outcome>> {
-    let emergency_reason = validate_emergency_override(options.emergency_reason)?;
+    let emergency_reason = start_admission::validate_emergency_override(options.emergency_reason)?;
     let mut stored_plan = plan::load(ctx, plan_id).await?;
     if !matches!(stored_plan.state, PlanState::Computed | PlanState::Blocked) {
         bail!(
@@ -80,30 +80,15 @@ pub async fn execute_with_options(
     let environment = stored_plan.environment.clone();
     let owner = stored_plan.id.clone();
     let lease = claim_execution_environment(ctx, &environment, &owner).await?;
-    let authorization = async {
-        let initial_maintenance =
-            maintenance_decision(ctx, &stored_plan.environment, emergency_reason).await?;
-        record_maintenance_decision(ctx, &stored_plan, &initial_maintenance).await?;
-        if let MaintenanceDecision::Denied(detail) = &initial_maintenance {
-            block_for_maintenance(ctx, &lease, &mut stored_plan, options.skip_gates, detail)
-                .await
-                .map(|_| ())?;
-        }
-        Ok::<_, anyhow::Error>(())
-    }
-    .await;
-    if let Err(error) = authorization {
-        let error = if emergency_reason.is_some() {
-            let detail = format!("emergency maintenance override was not authorized: {error}");
-            match block_for_maintenance(ctx, &lease, &mut stored_plan, options.skip_gates, &detail)
-                .await
-            {
-                Err(blocked) => blocked.context(detail),
-                Ok(_) => unreachable!("maintenance authorization failure always blocks"),
-            }
-        } else {
-            error
-        };
+    if let Err(error) = start_admission::authorize_maintenance(
+        ctx,
+        &lease,
+        &mut stored_plan,
+        options.skip_gates,
+        emergency_reason,
+    )
+    .await
+    {
         let unlock = release_environment(ctx, &lease).await;
         return match unlock {
             Ok(()) => Err(error),
