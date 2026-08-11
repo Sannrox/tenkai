@@ -24,6 +24,7 @@ use anyhow::{Context as _, Result};
 mod execution_admission;
 mod execution_attempt;
 mod execution_lease;
+mod outcome;
 mod plan_completion;
 mod product_execution;
 mod release_content;
@@ -37,19 +38,13 @@ pub(crate) use execution_lease::{
 };
 pub use execution_lease::{EnvironmentLeaseInspect, inspect_environment_lease, unlock_environment};
 use execution_lease::{claim_execution_environment, run_mutation_command};
+pub use outcome::{Outcome, StepOutcomeStatus};
 use release_content::{ReleaseContent, admit as admit_release, verify_integrity};
 
 #[allow(deprecated)]
 pub use execution_attempt::{
     ExecutionAuthorization, ExecutionOptions, execute, execute_with_options,
 };
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct Outcome {
-    pub step: Step,
-    pub status: String, // succeeded | failed | rolled_back
-    pub detail: String,
-}
 
 #[cfg(test)]
 async fn run_command(
@@ -246,7 +241,7 @@ async fn execute_locked(
                 return Err(error);
             }
         };
-        if completion.record(outcome) {
+        if completion.record(outcome)? {
             break;
         }
     }

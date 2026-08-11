@@ -147,10 +147,14 @@ async fn execute_authorized(
         },
     )
     .await?;
-    if let Some(failed) = outcomes
-        .iter()
-        .find(|outcome| outcome.status != "succeeded")
-    {
+    let mut failed = None;
+    for outcome in &outcomes {
+        if !outcome.classified_status()?.is_success() {
+            failed = Some(outcome);
+            break;
+        }
+    }
+    if let Some(failed) = failed {
         bail!(
             "environment {} failed while reconciling {}: {}",
             environment,

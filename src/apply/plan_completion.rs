@@ -19,17 +19,13 @@ impl ExecutionCompletion {
     }
 
     /// Record one Step result and return whether Plan execution must stop.
-    pub(super) fn record(&mut self, outcome: Outcome) -> bool {
-        self.terminal_state = match outcome.status.as_str() {
-            "succeeded" => self.terminal_state,
-            "blocked" => PlanState::Blocked,
-            _ => PlanState::Failed,
-        };
+    pub(super) fn record(&mut self, outcome: Outcome) -> Result<bool> {
+        self.terminal_state = outcome.plan_state()?;
         if self.terminal_state != PlanState::Succeeded {
             self.detail = outcome.detail.clone();
         }
         self.outcomes.push(outcome);
-        self.terminal_state != PlanState::Succeeded
+        Ok(self.terminal_state != PlanState::Succeeded)
     }
 
     /// Persist the terminal state and return the collected Step outcomes.
@@ -116,9 +112,9 @@ pub(super) async fn transition_confirmed(
 mod tests {
     use super::*;
 
-    fn outcome(status: &str, detail: &str) -> Outcome {
-        Outcome {
-            step: Step {
+    fn outcome(status: StepOutcomeStatus, detail: &str) -> Outcome {
+        Outcome::new(
+            Step {
                 id: "step-1".into(),
                 order: 0,
                 product: "api".into(),
@@ -131,17 +127,25 @@ mod tests {
                 workdir: ".".into(),
                 restore: None,
             },
-            status: status.into(),
-            detail: detail.into(),
-        }
+            status,
+            detail,
+        )
     }
 
     #[test]
     fn completion_stops_on_blocked_and_preserves_detail() {
         let mut completion = ExecutionCompletion::new();
 
-        assert!(!completion.record(outcome("succeeded", "")));
-        assert!(completion.record(outcome("blocked", "gate denied")));
+        assert!(
+            !completion
+                .record(outcome(StepOutcomeStatus::Succeeded, ""))
+                .unwrap()
+        );
+        assert!(
+            completion
+                .record(outcome(StepOutcomeStatus::Blocked, "gate denied"))
+                .unwrap()
+        );
         assert_eq!(completion.terminal_state, PlanState::Blocked);
         assert_eq!(completion.detail, "gate denied");
         assert_eq!(completion.outcomes.len(), 2);
@@ -151,7 +155,11 @@ mod tests {
     fn completion_treats_non_success_as_failure() {
         let mut completion = ExecutionCompletion::new();
 
-        assert!(completion.record(outcome("rolled_back", "activation failed")));
+        assert!(
+            completion
+                .record(outcome(StepOutcomeStatus::RolledBack, "activation failed"))
+                .unwrap()
+        );
         assert_eq!(completion.terminal_state, PlanState::Failed);
         assert_eq!(completion.detail, "activation failed");
     }

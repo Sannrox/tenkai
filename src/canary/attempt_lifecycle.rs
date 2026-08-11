@@ -3,59 +3,61 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use crate::apply::StepOutcomeStatus;
+
 use super::*;
 
 fn evidence_status(
     plan: &Plan,
     outcome: &Outcome,
     gates_skipped: bool,
-) -> (
+) -> Result<(
     GateOutcome,
     ExecutionOutcome,
     HealthOutcome,
     RollbackOutcome,
-) {
+)> {
     let gate = if gates_skipped {
         GateOutcome::Skipped
-    } else if outcome.status == "blocked" && outcome.detail.starts_with("gate ") {
+    } else if outcome.is_gate_blocked()? {
         GateOutcome::Blocked
     } else {
         GateOutcome::Satisfied
     };
     if outcome.step.action == Action::Rollback && plan.state == PlanState::Succeeded {
-        return (
+        return Ok((
             gate,
             ExecutionOutcome::Succeeded,
             HealthOutcome::PassedOrNotConfigured,
             RollbackOutcome::Succeeded,
-        );
+        ));
     }
-    match outcome.status.as_str() {
-        "succeeded" => (
+    Ok(match outcome.classified_status()? {
+        StepOutcomeStatus::Succeeded => (
             gate,
             ExecutionOutcome::Succeeded,
             HealthOutcome::PassedOrNotConfigured,
             RollbackOutcome::NotNeeded,
         ),
-        "blocked" => (
+        StepOutcomeStatus::Blocked => (
             gate,
             ExecutionOutcome::Blocked,
             HealthOutcome::NotRun,
             RollbackOutcome::NotNeeded,
         ),
-        "rolled_back" => (
+        StepOutcomeStatus::RolledBack => (
             gate,
             ExecutionOutcome::Failed,
             HealthOutcome::FailedOrUnknown,
             RollbackOutcome::Succeeded,
         ),
-        _ => (
+        StepOutcomeStatus::Failed => (
             gate,
             ExecutionOutcome::Failed,
             HealthOutcome::FailedOrUnknown,
             RollbackOutcome::FailedOrUnknown,
         ),
-    }
+    })
 }
 
 pub(crate) async fn begin_attempt(
@@ -253,7 +255,7 @@ async fn persist_attempt(
     bail!("could not allocate canary attempt for plan {}", plan.id)
 }
 
-fn reconstructed_outcomes(plan: &Plan, deployments: &[Object]) -> Vec<Outcome> {
+fn reconstructed_outcomes(plan: &Plan, deployments: &[Object]) -> Result<Vec<Outcome>> {
     plan.steps
         .iter()
         .filter_map(|step| {
@@ -266,18 +268,22 @@ fn reconstructed_outcomes(plan: &Plan, deployments: &[Object]) -> Vec<Outcome> {
                             && deployment.properties.get("to_version") == Some(&step.to))
                 })
                 .max_by_key(|deployment| deployment.created);
-            deployment.map(|deployment| Outcome {
-                step: step.clone(),
-                status: deployment
+            deployment.map(|deployment| -> Result<Outcome> {
+                let status = deployment
                     .properties
                     .get("status")
-                    .cloned()
-                    .unwrap_or_else(|| "failed".into()),
-                detail: deployment
-                    .properties
-                    .get("detail")
-                    .cloned()
-                    .unwrap_or_else(|| plan.status_detail.clone()),
+                    .map(String::as_str)
+                    .unwrap_or("failed");
+                let classified = StepOutcomeStatus::parse(status)?;
+                Ok(Outcome::new(
+                    step.clone(),
+                    classified,
+                    deployment
+                        .properties
+                        .get("detail")
+                        .cloned()
+                        .unwrap_or_else(|| plan.status_detail.clone()),
+                ))
             })
         })
         .collect()
@@ -566,7 +572,7 @@ async fn repair_pending_locked(ctx: &mut Ctx, plan_id: &str) -> Result<usize> {
                     attempt.id
                 )
             })?,
-            None => reconstructed_outcomes(&plan, &attempt_deployments),
+            None => reconstructed_outcomes(&plan, &attempt_deployments)?,
         };
         let snapshot: CanaryAttemptSnapshot =
             serde_json::from_str(object_property(&attempt, "policies")?)?;
@@ -656,7 +662,8 @@ async fn record_plan_outcomes(
                 .unwrap_or_default()
                 .max(attempt_started_at);
             let recorded_at = crate::now_millis().max(executed_at);
-            let (gate, execution, health, rollback) = evidence_status(plan, outcome, gates_skipped);
+            let (gate, execution, health, rollback) =
+                evidence_status(plan, outcome, gates_skipped)?;
             let evidence = CanaryOutcome {
                 release_id: release.into(),
                 release_digest: active.policy.release_digest.clone(),

@@ -34,6 +34,9 @@
 //! - `apply::plan_completion` hides Step outcome classification, terminal Plan
 //!   state selection, execution-error persistence precedence, and ambiguous
 //!   durable transition confirmation behind one private completion interface.
+//! - `apply::outcome` owns the closed Step outcome vocabulary, stable serialized
+//!   spellings, fail-closed persistence admission, and caller-facing lifecycle
+//!   classification behind the public Outcome interface.
 //! - `apply::product_execution` hides product-kind dispatch, adapter setup,
 //!   integrity and health ordering, and failed-activation cleanup policy behind
 //!   the apply workflow's private execution seam.
