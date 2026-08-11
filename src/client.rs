@@ -1109,8 +1109,10 @@ mod tests {
     };
     use crate::pb::sekai::{
         ActionOp, ActionTypeDef, CreateActionTypeRequest, CreateActionTypeResponse,
-        CreateObjectRequest, CreateObjectResponse, DeleteObjectRequest, DeleteObjectResponse,
-        GetObjectRequest, GetObjectResponse, Object, ObjectChange, UpdateObjectRequest,
+        CreateLinkRequest, CreateLinkResponse, CreateObjectRequest, CreateObjectResponse,
+        DeleteLinkRequest, DeleteLinkResponse, DeleteObjectRequest, DeleteObjectResponse,
+        GetLinkedObjectsRequest, GetLinkedObjectsResponse, GetLinksRequest, GetLinksResponse,
+        GetObjectRequest, GetObjectResponse, Link, Object, ObjectChange, UpdateObjectRequest,
         UpdateObjectResponse,
     };
     use sekai_client::{ClientConfig, RetryPolicy, SdkErrorCode};
@@ -1135,6 +1137,7 @@ mod tests {
         actions: Arc<Mutex<Vec<ActionTypeDef>>>,
         metadata: Arc<Mutex<Vec<CapturedMetadata>>>,
         objects: Arc<Mutex<BTreeMap<String, Object>>>,
+        links: Arc<Mutex<BTreeMap<String, Link>>>,
         create_failures: Arc<AtomicUsize>,
         create_internal_failures: Arc<AtomicUsize>,
         update_failures: Arc<AtomicUsize>,
@@ -1148,6 +1151,7 @@ mod tests {
                 actions: Arc::new(Mutex::new(Vec::new())),
                 metadata: Arc::new(Mutex::new(Vec::new())),
                 objects: Arc::new(Mutex::new(BTreeMap::new())),
+                links: Arc::new(Mutex::new(BTreeMap::new())),
                 create_failures: Arc::new(AtomicUsize::new(0)),
                 create_internal_failures: Arc::new(AtomicUsize::new(0)),
                 update_failures: Arc::new(AtomicUsize::new(0)),
@@ -1277,6 +1281,121 @@ mod tests {
         }
     }
 
+    struct CreateLinkRpc(MockSekaiState);
+
+    impl tonic::server::UnaryService<CreateLinkRequest> for CreateLinkRpc {
+        type Response = CreateLinkResponse;
+        type Future = Pin<
+            Box<dyn Future<Output = Result<tonic::Response<Self::Response>, tonic::Status>> + Send>,
+        >;
+
+        fn call(&mut self, request: tonic::Request<CreateLinkRequest>) -> Self::Future {
+            let state = self.0.clone();
+            Box::pin(async move {
+                let request = request.into_inner();
+                let link = request.link.unwrap_or_default();
+                let mut links = state.links.lock().unwrap();
+                if links.contains_key(&link.id) {
+                    return Err(tonic::Status::already_exists("link already exists"));
+                }
+                links.insert(link.id.clone(), link.clone());
+                Ok(tonic::Response::new(CreateLinkResponse {
+                    link: Some(link),
+                }))
+            })
+        }
+    }
+
+    struct DeleteLinkRpc(MockSekaiState);
+
+    impl tonic::server::UnaryService<DeleteLinkRequest> for DeleteLinkRpc {
+        type Response = DeleteLinkResponse;
+        type Future = Pin<
+            Box<dyn Future<Output = Result<tonic::Response<Self::Response>, tonic::Status>> + Send>,
+        >;
+
+        fn call(&mut self, request: tonic::Request<DeleteLinkRequest>) -> Self::Future {
+            let state = self.0.clone();
+            Box::pin(async move {
+                let removed = state.links.lock().unwrap().remove(&request.into_inner().id);
+                match removed {
+                    Some(_) => Ok(tonic::Response::new(DeleteLinkResponse {})),
+                    None => Err(tonic::Status::not_found("link not found")),
+                }
+            })
+        }
+    }
+
+    struct GetLinksRpc(MockSekaiState);
+
+    impl tonic::server::UnaryService<GetLinksRequest> for GetLinksRpc {
+        type Response = GetLinksResponse;
+        type Future = Pin<
+            Box<dyn Future<Output = Result<tonic::Response<Self::Response>, tonic::Status>> + Send>,
+        >;
+
+        fn call(&mut self, request: tonic::Request<GetLinksRequest>) -> Self::Future {
+            let state = self.0.clone();
+            Box::pin(async move {
+                let request = request.into_inner();
+                let links = state
+                    .links
+                    .lock()
+                    .unwrap()
+                    .values()
+                    .filter(|link| {
+                        link.relation == request.relation
+                            && match request.direction.as_str() {
+                                "out" => link.from_id == request.object_id,
+                                "in" => link.to_id == request.object_id,
+                                _ => false,
+                            }
+                    })
+                    .cloned()
+                    .collect();
+                Ok(tonic::Response::new(GetLinksResponse { links }))
+            })
+        }
+    }
+
+    struct GetLinkedObjectsRpc(MockSekaiState);
+
+    impl tonic::server::UnaryService<GetLinkedObjectsRequest> for GetLinkedObjectsRpc {
+        type Response = GetLinkedObjectsResponse;
+        type Future = Pin<
+            Box<dyn Future<Output = Result<tonic::Response<Self::Response>, tonic::Status>> + Send>,
+        >;
+
+        fn call(&mut self, request: tonic::Request<GetLinkedObjectsRequest>) -> Self::Future {
+            let state = self.0.clone();
+            Box::pin(async move {
+                let request = request.into_inner();
+                let linked_ids = state
+                    .links
+                    .lock()
+                    .unwrap()
+                    .values()
+                    .filter_map(|link| {
+                        if link.relation != request.relation {
+                            return None;
+                        }
+                        match request.direction.as_str() {
+                            "out" if link.from_id == request.object_id => Some(link.to_id.clone()),
+                            "in" if link.to_id == request.object_id => Some(link.from_id.clone()),
+                            _ => None,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let objects = state.objects.lock().unwrap();
+                let objects = linked_ids
+                    .into_iter()
+                    .filter_map(|id| objects.get(&id).cloned())
+                    .collect();
+                Ok(tonic::Response::new(GetLinkedObjectsResponse { objects }))
+            })
+        }
+    }
+
     struct CreateActionTypeRpc(MockSekaiState);
 
     impl tonic::server::UnaryService<CreateActionTypeRequest> for CreateActionTypeRpc {
@@ -1343,6 +1462,22 @@ mod tests {
                     "/sekai.SekaiService/DeleteObject" => {
                         let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
                         grpc.unary(DeleteObjectRpc(state), request).await
+                    }
+                    "/sekai.SekaiService/CreateLink" => {
+                        let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
+                        grpc.unary(CreateLinkRpc(state), request).await
+                    }
+                    "/sekai.SekaiService/DeleteLink" => {
+                        let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
+                        grpc.unary(DeleteLinkRpc(state), request).await
+                    }
+                    "/sekai.SekaiService/GetLinks" => {
+                        let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
+                        grpc.unary(GetLinksRpc(state), request).await
+                    }
+                    "/sekai.SekaiService/GetLinkedObjects" => {
+                        let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
+                        grpc.unary(GetLinkedObjectsRpc(state), request).await
                     }
                     "/sekai.SekaiService/CreateActionType" => {
                         let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
@@ -1433,6 +1568,97 @@ mod tests {
         assert_eq!(ctx.get(id).await.unwrap(), None);
     }
 
+    async fn assert_relation_lifecycle(mut ctx: Ctx) {
+        let source = Object {
+            id: "tenkai:conformance:source".into(),
+            kind: "tenkai.conformance".into(),
+            name: "source".into(),
+            ..Default::default()
+        };
+        let target = Object {
+            id: "tenkai:conformance:target".into(),
+            kind: "tenkai.conformance".into(),
+            name: "target".into(),
+            ..Default::default()
+        };
+        ctx.create_once(source.clone()).await.unwrap();
+        ctx.create_once(target.clone()).await.unwrap();
+
+        assert!(
+            ctx.links(&source.id, "depends_on")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            ctx.linked(&source.id, "depends_on", "out")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        ctx.link(&source.id, &target.id, "depends_on")
+            .await
+            .unwrap();
+        ctx.link(&source.id, &target.id, "depends_on")
+            .await
+            .unwrap();
+        let links = ctx.links(&source.id, "depends_on").await.unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].id,
+            format!("{}--depends_on--{}", source.id, target.id)
+        );
+        assert_eq!(links[0].from_id, source.id);
+        assert_eq!(links[0].to_id, target.id);
+        assert_eq!(links[0].relation, "depends_on");
+        assert!(links[0].created > 0);
+        assert_eq!(
+            ctx.linked(&source.id, "depends_on", "out").await.unwrap(),
+            vec![target.clone()]
+        );
+        assert_eq!(
+            ctx.linked(&target.id, "depends_on", "in").await.unwrap(),
+            vec![source.clone()]
+        );
+
+        let strict = Link {
+            id: "tenkai:conformance:strict-link".into(),
+            from_id: source.id.clone(),
+            to_id: target.id.clone(),
+            relation: "locked_by".into(),
+            created: 42,
+        };
+        ctx.create_link_once(strict.clone()).await.unwrap();
+        let error = ctx.create_link_once(strict).await.unwrap_err();
+        assert_eq!(error.code(), tonic::Code::AlreadyExists);
+
+        ctx.unlink(&source.id, &target.id, "depends_on")
+            .await
+            .unwrap();
+        ctx.unlink(&source.id, &target.id, "depends_on")
+            .await
+            .unwrap();
+        assert!(
+            ctx.links(&source.id, "depends_on")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            ctx.linked(&source.id, "depends_on", "out")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            ctx.linked(&target.id, "depends_on", "in")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     #[tokio::test]
     async fn embedded_ctx_conforms_to_object_lifecycle() {
         let path = std::env::temp_dir().join(format!(
@@ -1448,6 +1674,24 @@ mod tests {
     async fn remote_ctx_conforms_to_object_lifecycle() {
         let (ctx, server) = remote_ctx(MockSekaiState::default()).await;
         assert_object_lifecycle(ctx).await;
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn embedded_ctx_conforms_to_relation_lifecycle() {
+        let path = std::env::temp_dir().join(format!(
+            "tenkai-ctx-relation-conformance-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let ctx = Ctx::embedded(&path).unwrap();
+        assert_relation_lifecycle(ctx).await;
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn remote_ctx_conforms_to_relation_lifecycle() {
+        let (ctx, server) = remote_ctx(MockSekaiState::default()).await;
+        assert_relation_lifecycle(ctx).await;
         server.abort();
     }
 
