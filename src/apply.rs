@@ -19,8 +19,9 @@ use crate::ontology::*;
 use crate::pb::sekai::Object;
 use crate::plan::{self, Action, Plan, PlanState, ReleasePin, Step};
 use crate::routing::RoutingConfigExecutor as _;
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result};
 
+mod execution_admission;
 mod execution_attempt;
 mod execution_lease;
 mod plan_completion;
@@ -29,6 +30,7 @@ mod release_content;
 mod start_admission;
 mod step_lifecycle;
 
+pub(crate) use execution_admission::{CandidateAdmission, classify_candidate};
 pub(crate) use execution_lease::{
     ENVIRONMENT_LEASE_NAMESPACE, EnvironmentLease, claim_environment, environment_lease_status,
     refresh_environment_lease, release_environment,
@@ -203,56 +205,6 @@ fn record(id: String, kind: &str, name: String, properties: HashMap<String, Stri
     }
 }
 
-pub(crate) async fn validate_preconditions(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
-    let environment = ctx
-        .get(&env_id(&plan.environment))
-        .await?
-        .with_context(|| format!("environment {} not found", plan.environment))?;
-    for step in &plan.steps {
-        if step.action != Action::Rollback
-            && environment
-                .properties
-                .get(&format!("deployment_health.{}", step.product))
-                .is_some_and(|health| health == "unknown")
-        {
-            bail!(
-                "plan {} cannot apply {} while its deployment state is unknown; reconcile or roll back first",
-                plan.id,
-                step.product
-            );
-        }
-        let actual = environment
-            .properties
-            .get(&format!("deployed.{}", step.product));
-        if actual != step.from.as_ref() {
-            bail!(
-                "plan {} is stale for {}: expected deployed version {:?}, found {:?}",
-                plan.id,
-                step.product,
-                step.from,
-                actual
-            );
-        }
-    }
-    for input in &plan.inputs {
-        let channel = ctx
-            .get(&input.channel_id)
-            .await?
-            .with_context(|| format!("channel {} not found", input.channel_id))?;
-        if channel.properties.get("current_version") != Some(&input.desired_version)
-            || channel.properties.get("current_release") != Some(&input.release_id)
-        {
-            bail!(
-                "plan {} is stale for {}: channel {} no longer selects the approved release",
-                plan.id,
-                input.product,
-                input.channel
-            );
-        }
-    }
-    Ok(())
-}
-
 async fn execute_locked(
     ctx: &mut Ctx,
     mut stored_plan: Plan,
@@ -260,7 +212,7 @@ async fn execute_locked(
     lease: &EnvironmentLease,
 ) -> Result<Vec<Outcome>> {
     let skip_gates = options.skip_gates;
-    validate_preconditions(ctx, &stored_plan).await?;
+    execution_admission::admit(ctx, &stored_plan).await?;
     let plan_id = stored_plan.id.clone();
     let env = stored_plan.environment.clone();
     let steps = stored_plan.steps.clone();

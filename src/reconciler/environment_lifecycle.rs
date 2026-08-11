@@ -73,7 +73,8 @@ async fn select_plan(ctx: &mut Ctx, environment: &str, approval_required: bool) 
         plan::list_for_environment(ctx, environment, Some(&[PlanState::Computed])).await?
     {
         if !candidate.steps.is_empty()
-            && apply::validate_preconditions(ctx, &candidate).await.is_ok()
+            && apply::classify_candidate(ctx, &candidate).await?
+                == apply::CandidateAdmission::Admissible
         {
             return Ok(candidate);
         }
