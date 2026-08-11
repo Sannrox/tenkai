@@ -25,6 +25,9 @@
 //! - `apply::execution_lease` hides Environment execution admission, generation
 //!   fencing, legacy claim compatibility, takeover, inspection, and release
 //!   behind one private ownership interface shared by execution callers.
+//! - `apply::start_admission` hides evaluation-evidence validation, maintenance
+//!   authorization and timing races, emergency-override recording, and durable
+//!   blocked/running Plan transitions behind one private start interface.
 //! - `apply::product_execution` hides product-kind dispatch, adapter setup,
 //!   integrity and health ordering, and failed-activation cleanup policy behind
 //!   the apply workflow's private execution seam.
