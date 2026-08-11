@@ -25,6 +25,9 @@
 //! - `apply::product_execution` hides product-kind dispatch, adapter setup,
 //!   integrity and health ordering, and failed-activation cleanup policy behind
 //!   the apply workflow's private execution seam.
+//! - `apply::step_lifecycle` hides target and restore admission, rollback cleanup,
+//!   activation recovery, Environment observation, and bookkeeping compensation
+//!   behind one private Plan Step execution interface.
 //! - [`fleet`] owns pure fleet posture aggregation, drift comparison, and
 //!   baseline I/O so callers do not re-encode inspect→posture classification.
 //! - [`storage`] and [`tenant_store`] provide operational persistence adapters.

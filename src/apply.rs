@@ -29,6 +29,7 @@ mod execution_attempt;
 mod execution_lease;
 mod product_execution;
 mod release_content;
+mod step_lifecycle;
 
 pub(crate) use execution_lease::{
     ENVIRONMENT_LEASE_NAMESPACE, EnvironmentLease, claim_environment, environment_lease_status,
@@ -370,53 +371,6 @@ async fn deactivate(content: &ReleaseContent) -> Result<Result<(), String>> {
     }
 }
 
-async fn restore_previous_fenced(
-    ctx: &mut Ctx,
-    lease: &EnvironmentLease,
-    content: &ReleaseContent,
-    version: &str,
-    failure: String,
-) -> Result<(bool, String)> {
-    let channel_note = crate::software_executor::rollback_channel_note(&content.product, version);
-    // Tag activation failures during rollback as restore phase (#150).
-    let restore_result = match product_execution::activate(ctx, lease, content).await {
-        Ok(Ok(())) => Ok(Ok(())),
-        Ok(Err(detail)) => Ok(Err(crate::software_executor::format_software_phase_error(
-            crate::software_executor::SoftwareDeployPhase::Restore,
-            &content.product,
-            version,
-            &content.environment,
-            &detail,
-        ))),
-        Err(error) => Err(error),
-    };
-    Ok(match restore_result {
-        Ok(Ok(())) => (
-            true,
-            format!("{failure}; restored {version}; {channel_note}"),
-        ),
-        Ok(Err(restore)) => (
-            false,
-            format!(
-                "{failure}; restore or health check of {version} also failed: {restore}; {channel_note}"
-            ),
-        ),
-        Err(error) => (
-            false,
-            format!(
-                "{failure}; restore executor failed for {version}: {}; {channel_note}",
-                crate::software_executor::format_software_phase_error(
-                    crate::software_executor::SoftwareDeployPhase::Restore,
-                    &content.product,
-                    version,
-                    &content.environment,
-                    &error.to_string(),
-                )
-            ),
-        ),
-    })
-}
-
 #[cfg(test)]
 async fn restore_previous(
     content: &ReleaseContent,
@@ -454,41 +408,6 @@ async fn cleanup_failed_install(
     })
 }
 
-async fn compensate_activation(
-    ctx: &mut Ctx,
-    lease: &EnvironmentLease,
-    env: &str,
-    step: &Step,
-    content: &ReleaseContent,
-    failure: &anyhow::Error,
-) {
-    let failure = format!("deployment bookkeeping failed after activation: {failure}");
-    let cleaned = matches!(
-        product_execution::deactivate(ctx, lease, content).await,
-        Ok(Ok(()))
-    );
-    let mut restored = step.from.is_none();
-
-    if let (Some(previous), Some(pin)) = (step.from.as_deref(), step.restore.as_ref())
-        && let Ok(previous_content) = admit_release(ctx, pin, env, &step.product).await
-        && matches!(
-            product_execution::activate(ctx, lease, &previous_content).await,
-            Ok(Ok(()))
-        )
-    {
-        restored = set_env_deployed(ctx, lease, env, &step.product, previous, Some(&step.to))
-            .await
-            .is_ok();
-    }
-
-    // A graph write already failed, so this update is necessarily best effort.
-    // Marking the target unknown is safer than claiming a version that may not
-    // match the external deployment after incomplete compensation.
-    if !cleaned || !restored || step.from.is_none() {
-        let _ = set_env_unknown(ctx, lease, env, &step.product, &failure).await;
-    }
-}
-
 fn record(id: String, kind: &str, name: String, properties: HashMap<String, String>) -> Object {
     let now = crate::now_millis();
     Object {
@@ -501,27 +420,6 @@ fn record(id: String, kind: &str, name: String, properties: HashMap<String, Stri
         created: now,
         updated: now,
     }
-}
-
-async fn set_env_deployed(
-    ctx: &mut Ctx,
-    lease: &EnvironmentLease,
-    env: &str,
-    product: &str,
-    version: &str,
-    previous: Option<&str>,
-) -> Result<()> {
-    crate::environment::record_deployed(ctx, lease, env, product, version, previous).await
-}
-
-async fn set_env_unknown(
-    ctx: &mut Ctx,
-    lease: &EnvironmentLease,
-    env: &str,
-    product: &str,
-    detail: &str,
-) -> Result<()> {
-    crate::environment::record_unknown(ctx, lease, env, product, detail).await
 }
 
 async fn set_plan_state(
@@ -741,7 +639,7 @@ async fn execute_locked(
             .await?;
             return Err(error.context(detail));
         }
-        let outcome = match execute_step(ctx, lease, &env, &plan_id, &step).await {
+        let outcome = match step_lifecycle::execute(ctx, lease, &env, &plan_id, &step).await {
             Ok(outcome) => outcome,
             Err(error) => {
                 set_plan_state(
@@ -787,179 +685,6 @@ async fn execute_locked(
     .await?;
 
     Ok(outcomes)
-}
-
-async fn execute_step(
-    ctx: &mut Ctx,
-    lease: &EnvironmentLease,
-    env: &str,
-    plan_oid: &str,
-    step: &Step,
-) -> Result<Outcome> {
-    let target = ReleasePin {
-        release_id: step.release_id.clone(),
-        digest: step.release_digest.clone(),
-        artifact_digest: step.artifact_digest.clone(),
-        workdir: step.workdir.clone(),
-    };
-    let content = admit_release(ctx, &target, env, &step.product).await?;
-    let restore_content = match step.restore.as_ref() {
-        Some(pin) => Some(admit_release(ctx, pin, env, &step.product).await?),
-        None => None,
-    };
-
-    if step.action == Action::Rollback
-        && let Some(outgoing) = restore_content.as_ref()
-        && outgoing
-            .manifest
-            .deploy
-            .uninstall
-            .as_deref()
-            .is_some_and(|command| !command.is_empty())
-    {
-        let cleanup_failure = match product_execution::deactivate(ctx, lease, outgoing).await {
-            Ok(Ok(())) => None,
-            Ok(Err(detail)) => Some(detail),
-            Err(error) => Some(format!("cleanup executor failed: {error}")),
-        };
-        if let Some(detail) = cleanup_failure {
-            let detail = format!("rollback blocked: outgoing release cleanup failed: {detail}");
-            let outcome = Outcome {
-                step: step.clone(),
-                status: "failed".into(),
-                detail,
-            };
-            record_deployment(
-                ctx,
-                lease,
-                env,
-                plan_oid,
-                &outcome,
-                crate::environment::DeploymentTransition::Unknown,
-            )
-            .await?;
-            return Ok(outcome);
-        }
-    }
-
-    let activation = match product_execution::activate(ctx, lease, &content).await {
-        Ok(result) => result,
-        Err(error) => Err(format!("deployment executor failed: {error}")),
-    };
-    let outcome = match activation {
-        Ok(()) => {
-            let outcome = Outcome {
-                step: step.clone(),
-                status: "succeeded".into(),
-                detail: String::new(),
-            };
-            if let Err(error) = record_deployment(
-                ctx,
-                lease,
-                env,
-                plan_oid,
-                &outcome,
-                crate::environment::DeploymentTransition::Deployed {
-                    version: step.to.clone(),
-                    previous: step.from.clone(),
-                },
-            )
-            .await
-            {
-                compensate_activation(ctx, lease, env, step, &content, &error).await;
-                return Err(error);
-            }
-            return Ok(outcome);
-        }
-        Err(detail) => {
-            // Install or health failed: try to restore the previous release.
-            match &step.from {
-                Some(prev) => {
-                    let (cleaned, detail) =
-                        product_execution::cleanup_failed_activation(ctx, lease, &content, detail)
-                            .await?;
-                    let Some(prev_content) = restore_content.as_ref() else {
-                        let detail =
-                            format!("{detail}; step {} has no pinned restore release", step.id);
-                        let outcome = Outcome {
-                            step: step.clone(),
-                            status: "failed".into(),
-                            detail,
-                        };
-                        record_deployment(
-                            ctx,
-                            lease,
-                            env,
-                            plan_oid,
-                            &outcome,
-                            crate::environment::DeploymentTransition::Unknown,
-                        )
-                        .await?;
-                        return Ok(outcome);
-                    };
-                    let (restored, detail) =
-                        restore_previous_fenced(ctx, lease, prev_content, prev, detail).await?;
-                    let recovered = cleaned && restored;
-                    (
-                        Outcome {
-                            step: step.clone(),
-                            status: if recovered { "rolled_back" } else { "failed" }.into(),
-                            detail,
-                        },
-                        if recovered {
-                            crate::environment::DeploymentTransition::Unchanged
-                        } else {
-                            crate::environment::DeploymentTransition::Unknown
-                        },
-                    )
-                }
-                None => {
-                    let (cleaned, detail) =
-                        product_execution::cleanup_failed_activation(ctx, lease, &content, detail)
-                            .await?;
-                    (
-                        Outcome {
-                            step: step.clone(),
-                            status: "failed".into(),
-                            detail,
-                        },
-                        if cleaned {
-                            crate::environment::DeploymentTransition::Unchanged
-                        } else {
-                            crate::environment::DeploymentTransition::Unknown
-                        },
-                    )
-                }
-            }
-        }
-    };
-
-    let (outcome, environment_transition) = outcome;
-    record_deployment(ctx, lease, env, plan_oid, &outcome, environment_transition).await?;
-    Ok(outcome)
-}
-
-async fn record_deployment(
-    ctx: &mut Ctx,
-    lease: &EnvironmentLease,
-    env: &str,
-    plan_oid: &str,
-    outcome: &Outcome,
-    environment_transition: crate::environment::DeploymentTransition,
-) -> Result<()> {
-    crate::environment::record_deployment_observation(
-        ctx,
-        lease,
-        crate::environment::DeploymentObservation {
-            environment: env,
-            plan_id: plan_oid,
-            step: &outcome.step,
-            status: &outcome.status,
-            detail: &outcome.detail,
-            transition: environment_transition,
-        },
-    )
-    .await
 }
 
 #[cfg(test)]
