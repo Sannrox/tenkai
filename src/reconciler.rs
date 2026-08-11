@@ -8,11 +8,12 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::apply;
 use crate::client::Ctx;
 use crate::ontology::KIND_ENVIRONMENT;
 use crate::plan::{self, PlanState};
 use crate::reconcile_fence::{FenceAdmission, FenceGuard, ReconcileTickFence};
+
+mod environment_lifecycle;
 
 // Preserve the public protocol path while runtime delivery owns the types.
 pub use crate::runtime_delivery::{RuntimeCompletion, RuntimeStepReceipt};
@@ -459,14 +460,20 @@ impl Reconciler {
                             .await
                             .expect("semaphore remains open");
                         let _fence = fence_guard;
-                        let result = reconcile_environment(
+                        let result = environment_lifecycle::reconcile(
                             &mut ctx,
-                            &name,
-                            config.skip_gates,
-                            runtime_managed,
-                            config.unapproved_development_reason.as_deref(),
-                            config.approval_directory.as_deref(),
-                            config.approval_trust_roots.as_deref(),
+                            environment_lifecycle::Request {
+                                environment: &name,
+                                runtime_managed,
+                                policy: environment_lifecycle::Policy {
+                                    skip_gates: config.skip_gates,
+                                    unapproved_development_reason: config
+                                        .unapproved_development_reason
+                                        .as_deref(),
+                                    approval_directory: config.approval_directory.as_deref(),
+                                    approval_trust_roots: config.approval_trust_roots.as_deref(),
+                                },
+                            },
                         )
                         .await;
                         guard.finish(result.is_ok());
@@ -572,149 +579,6 @@ impl Reconciler {
             }
         }
     }
-}
-
-async fn reconcile_environment(
-    ctx: &mut Ctx,
-    environment: &str,
-    skip_gates: bool,
-    runtime_managed: bool,
-    unapproved_development_reason: Option<&str>,
-    approval_directory: Option<&std::path::Path>,
-    approval_trust_roots: Option<&std::path::Path>,
-) -> Result<EnvironmentStatus> {
-    if runtime_managed {
-        // Environment-scoped plan query (not a full-kind scan).
-        if let Some(plan) = plan::oldest_for_environment(
-            ctx,
-            environment,
-            &[PlanState::Computed, PlanState::Running],
-        )
-        .await?
-        {
-            return Ok(EnvironmentStatus::AwaitingRuntime {
-                plan_id: plan.id,
-                steps: plan.steps.len(),
-            });
-        }
-        let stored = plan::create(ctx, environment).await?;
-        if stored.steps.is_empty() {
-            return Ok(EnvironmentStatus::Current);
-        }
-        return Ok(EnvironmentStatus::AwaitingRuntime {
-            plan_id: stored.id,
-            steps: stored.steps.len(),
-        });
-    }
-    if recover_or_detect_active_plan(ctx, environment).await? {
-        return Ok(EnvironmentStatus::Busy);
-    }
-    let approval_required =
-        unapproved_development_reason.is_none() || environment != "local" || !ctx.is_embedded();
-    let stored = if approval_required {
-        // Environment-scoped plan query (not a full-kind scan).
-        let mut computed = Vec::new();
-        for candidate in
-            plan::list_for_environment(ctx, environment, Some(&[PlanState::Computed])).await?
-        {
-            if !candidate.steps.is_empty()
-                && apply::validate_preconditions(ctx, &candidate).await.is_ok()
-            {
-                computed.push(candidate);
-            }
-        }
-        // list_for_environment already orders by created_at ascending.
-        match computed.into_iter().next() {
-            Some(stored) => stored,
-            None => plan::create(ctx, environment).await?,
-        }
-    } else {
-        plan::create(ctx, environment).await?
-    };
-    if stored.steps.is_empty() {
-        return Ok(EnvironmentStatus::Current);
-    }
-    let plan_id = stored.id;
-    let steps = stored.steps.len();
-    if approval_required {
-        let (Some(directory), Some(roots)) = (approval_directory, approval_trust_roots) else {
-            return Ok(EnvironmentStatus::AwaitingApproval { plan_id, steps });
-        };
-        let envelope = directory.join(format!("{plan_id}.json"));
-        if !envelope.is_file() {
-            return Ok(EnvironmentStatus::AwaitingApproval { plan_id, steps });
-        }
-        let outcomes = apply::execute_with_options(
-            ctx,
-            &plan_id,
-            apply::ExecutionOptions {
-                skip_gates,
-                emergency_reason: None,
-                authorization: apply::ExecutionAuthorization::Signed {
-                    approval: &envelope,
-                    trust_roots: roots,
-                },
-            },
-        )
-        .await?;
-        if let Some(failed) = outcomes
-            .iter()
-            .find(|outcome| outcome.status != "succeeded")
-        {
-            bail!(
-                "environment {environment} failed while reconciling {}: {}",
-                failed.step.product,
-                failed.detail
-            );
-        }
-        return Ok(EnvironmentStatus::Applied { plan_id, steps });
-    }
-    let reason = unapproved_development_reason
-        .expect("authorization was classified as an embedded local-development bypass");
-    let outcomes = apply::execute_with_options(
-        ctx,
-        &plan_id,
-        apply::ExecutionOptions {
-            skip_gates,
-            emergency_reason: None,
-            authorization: apply::ExecutionAuthorization::LocalDevelopment { reason },
-        },
-    )
-    .await?;
-    if let Some(failed) = outcomes
-        .iter()
-        .find(|outcome| outcome.status != "succeeded")
-    {
-        bail!(
-            "environment {environment} failed while reconciling {}: {}",
-            failed.step.product,
-            failed.detail
-        );
-    }
-    Ok(EnvironmentStatus::Applied { plan_id, steps })
-}
-
-/// Deterministically terminate plans orphaned by a stopped controller. An active
-/// generation-fenced lease proves another process still owns the environment.
-async fn recover_or_detect_active_plan(ctx: &mut Ctx, environment: &str) -> Result<bool> {
-    // Environment-scoped plan query (not a full-kind scan).
-    let running = plan::list_for_environment(ctx, environment, Some(&[PlanState::Running])).await?;
-    if running.is_empty() {
-        return Ok(false);
-    }
-    if apply::environment_lease_status(ctx, environment)
-        .await?
-        .is_some()
-    {
-        return Ok(true);
-    }
-    for mut abandoned in running {
-        abandoned.state = PlanState::Failed;
-        abandoned.status_detail =
-            "controller stopped after execution began; lease expired before recovery".into();
-        plan::store(ctx, &abandoned).await?;
-    }
-    Ok(false)
 }
 
 #[cfg(test)]
