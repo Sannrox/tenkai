@@ -210,9 +210,16 @@ pub(crate) async fn complete_runtime_work(
         return Ok(());
     }
     if stored.state == PlanState::Computed {
-        stored.state = PlanState::Running;
-        stored.status_detail = "claimed by assigned environment runtime".into();
-        crate::plan::store(ctx, &stored).await?;
+        crate::plan::transition(
+            ctx,
+            &mut stored,
+            crate::plan::Transition::new(
+                PlanState::Running,
+                "claimed by assigned environment runtime",
+            ),
+            crate::plan::Persistence::Standard,
+        )
+        .await?;
     }
     let observed_at = crate::now_millis();
     let mut environment_object = None;
@@ -296,18 +303,26 @@ pub(crate) async fn complete_runtime_work(
     } else {
         Vec::new()
     };
-    stored.state = terminal;
-    stored.status_detail = completion.detail.clone();
     if completion.succeeded && ctx.outcome_export_enabled() {
-        crate::plan::store_with_environment_and_provider_events(
+        crate::plan::transition(
             ctx,
-            &stored,
-            environment_object.expect("successful outcome export updates its environment"),
-            &provider_events,
+            &mut stored,
+            crate::plan::Transition::new(terminal, completion.detail.clone()),
+            crate::plan::Persistence::WithEnvironmentAndProviderEvents {
+                environment: environment_object
+                    .expect("successful outcome export updates its environment"),
+                provider_events: &provider_events,
+            },
         )
         .await?;
     } else {
-        crate::plan::store_with_provider_events(ctx, &stored, &provider_events).await?;
+        crate::plan::transition(
+            ctx,
+            &mut stored,
+            crate::plan::Transition::new(terminal, completion.detail.clone()),
+            crate::plan::Persistence::WithProviderEvents(&provider_events),
+        )
+        .await?;
     }
     Ok(())
 }

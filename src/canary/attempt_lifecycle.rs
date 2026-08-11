@@ -482,11 +482,16 @@ async fn repair_pending_locked(ctx: &mut Ctx, plan_id: &str) -> Result<usize> {
         );
     }
     if has_started_pending && stored_plan.state == PlanState::Running {
-        stored_plan.state = PlanState::Failed;
-        stored_plan.status_detail =
-            "apply was interrupted; canary repair finalized the orphaned execution after its environment lease ended"
-                .into();
-        crate::plan::store(ctx, &stored_plan).await?;
+        crate::plan::transition(
+            ctx,
+            &mut stored_plan,
+            crate::plan::Transition::new(
+                PlanState::Failed,
+                "apply was interrupted; canary repair finalized the orphaned execution after its environment lease ended",
+            ),
+            crate::plan::Persistence::Standard,
+        )
+        .await?;
     }
     let mut repaired = 0;
     for mut attempt in attempts {

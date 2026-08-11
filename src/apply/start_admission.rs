@@ -206,15 +206,16 @@ async fn block_for_maintenance(
     skip_gates: bool,
     detail: &str,
 ) -> Result<()> {
-    plan.state = PlanState::Blocked;
-    plan.gates_skipped = Some(skip_gates);
-    plan.status_detail = detail.into();
-    plan.maintenance_blocked = true;
-    ctx.guarded_update(
-        plan.to_object()?,
-        ENVIRONMENT_LEASE_NAMESPACE,
-        &lease.environment,
-        &lease.fencing_token,
+    plan::transition(
+        ctx,
+        plan,
+        plan::Transition::maintenance_blocked(skip_gates, detail),
+        plan::Persistence::Guarded {
+            namespace: ENVIRONMENT_LEASE_NAMESPACE,
+            key: &lease.environment,
+            fencing_token: &lease.fencing_token,
+            confirm_ambiguous: false,
+        },
     )
     .await?;
     Err(MaintenanceBlocked(detail.to_string()).into())

@@ -178,10 +178,16 @@ async fn recover_or_detect_active_plan(ctx: &mut Ctx, environment: &str) -> Resu
         return Ok(true);
     }
     for mut abandoned in running {
-        abandoned.state = PlanState::Failed;
-        abandoned.status_detail =
-            "controller stopped after execution began; lease expired before recovery".into();
-        plan::store(ctx, &abandoned).await?;
+        plan::transition(
+            ctx,
+            &mut abandoned,
+            plan::Transition::new(
+                PlanState::Failed,
+                "controller stopped after execution began; lease expired before recovery",
+            ),
+            plan::Persistence::Standard,
+        )
+        .await?;
     }
     Ok(false)
 }
