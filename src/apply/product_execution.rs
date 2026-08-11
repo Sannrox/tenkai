@@ -1,6 +1,7 @@
 //! Product target lifecycle behind the apply workflow's private execution seam.
 
 use super::*;
+use crate::product_kind::{CleanupPolicy, ProductTarget};
 
 /// Refresh the environment fence and re-check release content integrity.
 ///
@@ -26,7 +27,7 @@ pub(super) async fn activate(
     lease: &EnvironmentLease,
     content: &ReleaseContent,
 ) -> Result<Result<(), String>> {
-    if content.manifest.product.kind == ProductKind::RoutingConfig {
+    if content.manifest.product.kind.policy().target() == ProductTarget::RoutingConfig {
         prepare_fenced_mutation(ctx, lease, content).await?;
         let routing = content
             .manifest
@@ -44,7 +45,7 @@ pub(super) async fn activate(
             .map(|_| ())
             .map_err(|error| error.to_string()));
     }
-    if content.manifest.product.kind == ProductKind::ModelRuntime {
+    if content.manifest.product.kind.policy().target() == ProductTarget::ModelRuntime {
         prepare_fenced_mutation(ctx, lease, content).await?;
         let descriptor =
             crate::model_runtime::ModelRuntimeDescriptor::from_manifest(&content.manifest)?;
@@ -58,7 +59,10 @@ pub(super) async fn activate(
             .map(|_| ())
             .map_err(|error| error.to_string()));
     }
-    if crate::staged_artifact::is_staged_kind(content.manifest.product.kind) {
+    if matches!(
+        content.manifest.product.kind.policy().target(),
+        ProductTarget::Staged(_)
+    ) {
         prepare_fenced_mutation(ctx, lease, content).await?;
         let state_root = content
             .routing_state
@@ -127,7 +131,7 @@ pub(super) async fn deactivate(
     lease: &EnvironmentLease,
     content: &ReleaseContent,
 ) -> Result<Result<(), String>> {
-    if content.manifest.product.kind == ProductKind::RoutingConfig {
+    if content.manifest.product.kind.policy().target() == ProductTarget::RoutingConfig {
         refresh_environment_lease(ctx, lease).await?;
         return Ok(
             crate::routing::LocalRoutingConfigExecutor::new(content.routing_state.clone())
@@ -135,7 +139,7 @@ pub(super) async fn deactivate(
                 .map_err(|error| error.to_string()),
         );
     }
-    if content.manifest.product.kind == ProductKind::ModelRuntime {
+    if content.manifest.product.kind.policy().target() == ProductTarget::ModelRuntime {
         refresh_environment_lease(ctx, lease).await?;
         return Ok(
             crate::model_runtime::ReferenceLlamaCppExecutor::for_operator_host(
@@ -145,7 +149,10 @@ pub(super) async fn deactivate(
             .map_err(|error| error.to_string()),
         );
     }
-    if crate::staged_artifact::is_staged_kind(content.manifest.product.kind) {
+    if matches!(
+        content.manifest.product.kind.policy().target(),
+        ProductTarget::Staged(_)
+    ) {
         refresh_environment_lease(ctx, lease).await?;
         let state_root = content
             .routing_state
@@ -183,7 +190,7 @@ pub(super) async fn cleanup_failed_activation(
     content: &ReleaseContent,
     failure: String,
 ) -> Result<(bool, String)> {
-    if cleanup_policy(content.manifest.product.kind) == CleanupPolicy::Atomic {
+    if content.manifest.product.kind.policy().cleanup() == CleanupPolicy::Atomic {
         // Descriptor validation is pre-mutation and local adapters publish
         // atomically, so a failed target does not require shell uninstall cleanup.
         return Ok((true, failure));
@@ -199,22 +206,6 @@ pub(super) async fn cleanup_failed_activation(
         },
         None => (false, failure),
     })
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CleanupPolicy {
-    Atomic,
-    UninstallIfDeclared,
-}
-
-fn cleanup_policy(kind: ProductKind) -> CleanupPolicy {
-    if matches!(kind, ProductKind::RoutingConfig | ProductKind::ModelRuntime)
-        || crate::staged_artifact::is_staged_kind(kind)
-    {
-        CleanupPolicy::Atomic
-    } else {
-        CleanupPolicy::UninstallIfDeclared
-    }
 }
 
 fn software_request(content: &ReleaseContent) -> crate::software_executor::SoftwareApplyRequest {
@@ -233,6 +224,7 @@ fn software_request(content: &ReleaseContent) -> crate::software_executor::Softw
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::manifest::ProductKind;
 
     #[test]
     fn cleanup_policy_covers_every_product_kind() {
@@ -243,10 +235,10 @@ mod tests {
             ProductKind::EvalSuite,
             ProductKind::AgentDefinition,
         ] {
-            assert_eq!(cleanup_policy(kind), CleanupPolicy::Atomic);
+            assert_eq!(kind.policy().cleanup(), CleanupPolicy::Atomic);
         }
         assert_eq!(
-            cleanup_policy(ProductKind::Software),
+            ProductKind::Software.policy().cleanup(),
             CleanupPolicy::UninstallIfDeclared
         );
     }

@@ -56,6 +56,9 @@
 //!   heartbeat renewal, and inventory admission behind one interface.
 //! - [`software_executor`], [`model_runtime`], [`routing`], and [`staged_artifact`]
 //!   adapt typed delivery products to their target runtimes.
+//! - `product_kind` owns the closed Product-kind policy for manifest target
+//!   classification, staged identity, cleanup semantics, and coordinated
+//!   model/routing rollout rank without introducing a trait seam.
 //! - [`staged_artifact`] also owns the private kind→schema mapping for staged
 //!   JSON products so apply/publish call sites do not re-encode that dispatch.
 //! - [`atomic_state`] hides verified atomic local state-file mutation shared by
@@ -106,6 +109,7 @@ pub mod plan;
 pub mod plan_approval;
 pub mod plan_priors;
 pub mod postgres_tenant;
+mod product_kind;
 pub mod provider_event;
 pub mod providers;
 pub mod reconcile_fence;

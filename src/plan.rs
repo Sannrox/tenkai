@@ -388,14 +388,12 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
 /// model_runtime (retire generation). Other products keep a neutral rank and
 /// sort by product name among themselves.
 pub fn model_routing_rollout_rank(kind: crate::manifest::ProductKind, action: Action) -> u8 {
-    use crate::manifest::ProductKind;
-    match (kind, action) {
-        (ProductKind::ModelRuntime, Action::Install | Action::Upgrade) => 0,
-        (ProductKind::RoutingConfig, Action::Install | Action::Upgrade) => 1,
-        (ProductKind::RoutingConfig, Action::Downgrade | Action::Rollback) => 0,
-        (ProductKind::ModelRuntime, Action::Downgrade | Action::Rollback) => 1,
-        _ => 2,
-    }
+    use crate::product_kind::RolloutDirection;
+    let direction = match action {
+        Action::Install | Action::Upgrade => RolloutDirection::Forward,
+        Action::Downgrade | Action::Rollback => RolloutDirection::Reverse,
+    };
+    kind.policy().rollout_rank(direction)
 }
 
 /// Reject unsafe model/routing step order (routing switch before model ready,
