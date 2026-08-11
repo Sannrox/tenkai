@@ -1,5 +1,7 @@
 //! Connection to a local sekai-chisei server, plus thin object/link helpers.
 
+mod object_lifecycle;
+
 use anyhow::{Context as _, Result};
 use prost::Message;
 use std::path::Path;
@@ -13,10 +15,9 @@ use crate::pb::sekai::{
     AcquireLeaseRequest, ActionRequest, ActionResult, ActionTypeDef, CreateActionTypeRequest,
     CreateActionTypeResponse, CreateLinkRequest, CreateLinkResponse, CreateObjectRequest,
     CreateObjectResponse, CreateSchemaTypeRequest, CreateSchemaTypeResponse, Decision,
-    DeleteLinkRequest, DeleteLinkResponse, DeleteObjectRequest, DeleteObjectResponse,
-    DenyActionRequest, ExecuteActionRequest, ExecuteActionResponse, FindByPropertyRequest,
-    GetLeaseRequest, GetLeaseResponse, GetLinkedObjectsRequest, GetLinkedObjectsResponse,
-    GetLinksRequest, GetLinksResponse, GetObjectRequest, GetObjectResponse, Lease,
+    DeleteLinkRequest, DeleteLinkResponse, DenyActionRequest, ExecuteActionRequest,
+    ExecuteActionResponse, FindByPropertyRequest, GetLeaseRequest, GetLeaseResponse,
+    GetLinkedObjectsRequest, GetLinkedObjectsResponse, GetLinksRequest, GetLinksResponse, Lease,
     LeasePrecondition, Link, ListActionTypesRequest, ListActionTypesResponse, ListDecisionsRequest,
     ListDecisionsResponse, ListFilter, ListObjectChangesRequest, ListObjectChangesResponse,
     ListObjectsRequest, ListObjectsResponse, ListSchemaTypesRequest, ListSchemaTypesResponse,
@@ -88,6 +89,15 @@ pub struct Ctx {
 enum Backend {
     Remote { client: Arc<RemoteClient> },
     Embedded(Arc<crate::embedded::EmbeddedStore>),
+}
+
+impl Backend {
+    fn object_lifecycle(&self) -> object_lifecycle::ObjectLifecycle<'_> {
+        match self {
+            Self::Remote { client } => object_lifecycle::ObjectLifecycle::Remote(client),
+            Self::Embedded(store) => object_lifecycle::ObjectLifecycle::Embedded(store),
+        }
+    }
 }
 
 fn sdk_error_status(error: SdkError) -> tonic::Status {
@@ -266,34 +276,6 @@ impl Ctx {
             .unary(path, request, options)
             .await
             .map_err(sdk_error_status)
-    }
-
-    async fn remote_object_conflict(&self, id: &str) -> bool {
-        let object: std::result::Result<GetObjectResponse, tonic::Status> = self
-            .remote_unary(
-                "/sekai.SekaiService/GetObject",
-                GetObjectRequest { id: id.into() },
-                CallOptions::default(),
-            )
-            .await;
-        match object {
-            Ok(response) => response.object.is_some(),
-            Err(status) if status.code() == tonic::Code::NotFound => {
-                let changes: std::result::Result<ListObjectChangesResponse, tonic::Status> = self
-                    .remote_unary(
-                        "/sekai.SekaiService/ListObjectChanges",
-                        ListObjectChangesRequest {
-                            object_id: id.into(),
-                            limit: 1,
-                            offset: 0,
-                        },
-                        CallOptions::default(),
-                    )
-                    .await;
-                changes.is_ok_and(|response| !response.changes.is_empty())
-            }
-            Err(_) => false,
-        }
     }
 
     async fn remote_schema_exists(&self, kind: &str) -> bool {
@@ -591,21 +573,7 @@ impl Ctx {
 
     /// Get an object by id; `None` on not-found.
     pub async fn get(&mut self, id: &str) -> Result<Option<Object>> {
-        let Some(store) = self.embedded_store() else {
-            let response: std::result::Result<GetObjectResponse, tonic::Status> = self
-                .remote_unary(
-                    "/sekai.SekaiService/GetObject",
-                    GetObjectRequest { id: id.into() },
-                    CallOptions::default(),
-                )
-                .await;
-            return match response {
-                Ok(response) => Ok(response.object),
-                Err(status) if status.code() == tonic::Code::NotFound => Ok(None),
-                Err(status) => Err(status.into()),
-            };
-        };
-        store.get(id)
+        self.backend.object_lifecycle().get(id).await
     }
 
     /// Create an object without falling back to update when its id exists.
@@ -613,72 +581,16 @@ impl Ctx {
         &mut self,
         object: Object,
     ) -> std::result::Result<Object, tonic::Status> {
-        if let Some(store) = self.embedded_store() {
-            return store.create(object);
-        }
-        let object_id = object.id.clone();
-        let response: std::result::Result<CreateObjectResponse, tonic::Status> = self
-            .remote_unary::<CreateObjectRequest, CreateObjectResponse>(
-                "/sekai.SekaiService/CreateObject",
-                canonical_create_request(object, None),
-                CallOptions::default(),
-            )
-            .await;
-        let response = match response {
-            Ok(response) => response,
-            Err(status)
-                if status.code() == tonic::Code::Internal
-                    && self.remote_object_conflict(&object_id).await =>
-            {
-                return Err(tonic::Status::already_exists("object already exists"));
-            }
-            Err(status) => return Err(status),
-        };
-        Ok(response.object.unwrap_or_default())
+        self.backend.object_lifecycle().create_once(object).await
     }
 
     pub async fn delete(&mut self, id: &str) -> Result<()> {
-        if let Some(store) = self.embedded_store() {
-            return store.delete(id);
-        }
-        let _: DeleteObjectResponse = self
-            .remote_unary(
-                "/sekai.SekaiService/DeleteObject",
-                DeleteObjectRequest {
-                    id: id.into(),
-                    lease_precondition: None,
-                },
-                CallOptions::default(),
-            )
-            .await?;
-        Ok(())
+        self.backend.object_lifecycle().delete(id).await
     }
 
     /// Create the object, or update it if the id already exists.
     pub async fn put(&mut self, object: Object) -> Result<Object> {
-        if let Some(store) = self.embedded_store() {
-            return store.put(object);
-        }
-        let existing = self.get(&object.id).await?;
-        if existing.is_some() {
-            let response: UpdateObjectResponse = self
-                .remote_unary(
-                    "/sekai.SekaiService/UpdateObject",
-                    canonical_update_request(object, None),
-                    CallOptions::default(),
-                )
-                .await?;
-            Ok(response.object.unwrap_or_default())
-        } else {
-            let response: CreateObjectResponse = self
-                .remote_unary(
-                    "/sekai.SekaiService/CreateObject",
-                    canonical_create_request(object, None),
-                    CallOptions::default(),
-                )
-                .await?;
-            Ok(response.object.unwrap_or_default())
-        }
+        self.backend.object_lifecycle().put(object).await
     }
 
     pub(crate) async fn put_with_provider_events(
