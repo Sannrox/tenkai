@@ -49,11 +49,11 @@ pub(super) async fn execute(
             Err(error) => Some(format!("cleanup executor failed: {error}")),
         };
         if let Some(detail) = cleanup_failure {
-            let outcome = Outcome {
-                step: step.clone(),
-                status: "failed".into(),
-                detail: format!("rollback blocked: outgoing release cleanup failed: {detail}"),
-            };
+            let outcome = Outcome::new(
+                step.clone(),
+                StepOutcomeStatus::Failed,
+                format!("rollback blocked: outgoing release cleanup failed: {detail}"),
+            );
             record(
                 ctx,
                 lease,
@@ -73,11 +73,7 @@ pub(super) async fn execute(
     };
     let outcome = match activation {
         Ok(()) => {
-            let outcome = Outcome {
-                step: step.clone(),
-                status: "succeeded".into(),
-                detail: String::new(),
-            };
+            let outcome = Outcome::new(step.clone(), StepOutcomeStatus::Succeeded, String::new());
             if let Err(error) = record(
                 ctx,
                 lease,
@@ -129,11 +125,7 @@ async fn recover_activation(
             .await?;
     let Some(previous) = step.from.as_deref() else {
         return Ok((
-            Outcome {
-                step: step.clone(),
-                status: "failed".into(),
-                detail,
-            },
+            Outcome::new(step.clone(), StepOutcomeStatus::Failed, detail),
             Some(if cleaned {
                 crate::environment::DeploymentTransition::Unchanged
             } else {
@@ -142,11 +134,11 @@ async fn recover_activation(
         ));
     };
     let Some(previous_content) = restore_content else {
-        let outcome = Outcome {
-            step: step.clone(),
-            status: "failed".into(),
-            detail: format!("{detail}; step {} has no pinned restore release", step.id),
-        };
+        let outcome = Outcome::new(
+            step.clone(),
+            StepOutcomeStatus::Failed,
+            format!("{detail}; step {} has no pinned restore release", step.id),
+        );
         record(
             ctx,
             step_context.lease,
@@ -162,11 +154,15 @@ async fn recover_activation(
         restore_previous(ctx, step_context.lease, previous_content, previous, detail).await?;
     let recovered = cleaned && restored;
     Ok((
-        Outcome {
-            step: step.clone(),
-            status: if recovered { "rolled_back" } else { "failed" }.into(),
+        Outcome::new(
+            step.clone(),
+            if recovered {
+                StepOutcomeStatus::RolledBack
+            } else {
+                StepOutcomeStatus::Failed
+            },
             detail,
-        },
+        ),
         Some(if recovered {
             crate::environment::DeploymentTransition::Unchanged
         } else {

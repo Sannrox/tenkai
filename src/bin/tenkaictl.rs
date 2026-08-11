@@ -1625,20 +1625,22 @@ async fn run_plan(
     let mut failed = false;
     for o in &outcomes {
         if result_context.output == OutputFormat::JsonV1 {
-            failed |= o.status != "succeeded";
+            failed |= !o.classified_status()?.is_success();
             continue;
         }
-        match o.status.as_str() {
-            "succeeded" => println!("  ok        {:<24} {}", o.step.product, o.step.to),
-            "blocked" => {
+        match o.classified_status()? {
+            apply::StepOutcomeStatus::Succeeded => {
+                println!("  ok        {:<24} {}", o.step.product, o.step.to)
+            }
+            apply::StepOutcomeStatus::Blocked => {
                 failed = true;
                 println!("  BLOCKED   {:<24} {}", o.step.product, o.detail);
             }
-            "rolled_back" => {
+            apply::StepOutcomeStatus::RolledBack => {
                 failed = true;
                 println!("  ROLLBACK  {:<24} {}", o.step.product, o.detail);
             }
-            _ => {
+            apply::StepOutcomeStatus::Failed => {
                 failed = true;
                 println!("  FAILED    {:<24} {}", o.step.product, o.detail);
             }

@@ -90,11 +90,7 @@ pub(super) async fn admit(
                 GateDecision::Allowed => continue,
                 GateDecision::Denied(detail) | GateDecision::Unavailable(detail) => detail,
             };
-            let outcome = Outcome {
-                step: step.clone(),
-                status: "blocked".into(),
-                detail: detail.clone(),
-            };
+            let outcome = Outcome::new(step.clone(), StepOutcomeStatus::Blocked, detail.clone());
             plan_completion::transition_confirmed(
                 ctx,
                 lease,
