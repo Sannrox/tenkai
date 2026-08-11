@@ -13,6 +13,9 @@
 //!   trust verification, immutable replay, persistence, and graph-link ordering
 //!   behind one admission interface.
 //! - [`plan`], [`apply`], and [`reconciler`] own convergence decisions and execution.
+//! - `canary::attempt_lifecycle` hides Canary policy snapshots, promotion-lock
+//!   coordination, attempt start and finalization ordering, durable outcome
+//!   evidence, and crash repair behind execution and repair interfaces.
 //! - `plan::release_selection` hides version constraints, Environment capability
 //!   facts, model-runtime sibling discovery, rollout ceilings, and deterministic
 //!   variant selection behind one private release-selection interface.
