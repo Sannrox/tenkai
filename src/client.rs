@@ -1197,10 +1197,12 @@ mod tests {
     };
     use crate::pb::sekai::{
         ActionOp, ActionTypeDef, CreateActionTypeRequest, CreateActionTypeResponse,
-        CreateObjectRequest, CreateObjectResponse, GetObjectRequest, GetObjectResponse, Object,
-        ObjectChange, UpdateObjectRequest, UpdateObjectResponse,
+        CreateObjectRequest, CreateObjectResponse, DeleteObjectRequest, DeleteObjectResponse,
+        GetObjectRequest, GetObjectResponse, Object, ObjectChange, UpdateObjectRequest,
+        UpdateObjectResponse,
     };
     use sekai_client::{ClientConfig, RetryPolicy, SdkErrorCode};
+    use std::collections::BTreeMap;
     use std::convert::Infallible;
     use std::future::Future;
     use std::pin::Pin;
@@ -1220,7 +1222,7 @@ mod tests {
         updates: Arc<Mutex<Vec<UpdateObjectRequest>>>,
         actions: Arc<Mutex<Vec<ActionTypeDef>>>,
         metadata: Arc<Mutex<Vec<CapturedMetadata>>>,
-        get_object: Arc<Mutex<Option<Object>>>,
+        objects: Arc<Mutex<BTreeMap<String, Object>>>,
         create_failures: Arc<AtomicUsize>,
         create_internal_failures: Arc<AtomicUsize>,
         update_failures: Arc<AtomicUsize>,
@@ -1233,7 +1235,7 @@ mod tests {
                 updates: Arc::new(Mutex::new(Vec::new())),
                 actions: Arc::new(Mutex::new(Vec::new())),
                 metadata: Arc::new(Mutex::new(Vec::new())),
-                get_object: Arc::new(Mutex::new(None)),
+                objects: Arc::new(Mutex::new(BTreeMap::new())),
                 create_failures: Arc::new(AtomicUsize::new(0)),
                 create_internal_failures: Arc::new(AtomicUsize::new(0)),
                 update_failures: Arc::new(AtomicUsize::new(0)),
@@ -1271,9 +1273,18 @@ mod tests {
                     return Err(tonic::Status::unavailable("transient create failure"));
                 }
                 if consume_failure(&state.create_internal_failures) {
-                    *state.get_object.lock().unwrap() = Some(object.clone());
+                    state
+                        .objects
+                        .lock()
+                        .unwrap()
+                        .insert(object.id.clone(), object.clone());
                     return Err(tonic::Status::internal("UNIQUE constraint failed"));
                 }
+                let mut objects = state.objects.lock().unwrap();
+                if objects.contains_key(&object.id) {
+                    return Err(tonic::Status::already_exists("object already exists"));
+                }
+                objects.insert(object.id.clone(), object.clone());
                 Ok(tonic::Response::new(CreateObjectResponse {
                     object: Some(object),
                 }))
@@ -1293,12 +1304,7 @@ mod tests {
             let state = self.0.clone();
             Box::pin(async move {
                 let id = request.into_inner().id;
-                let object = state
-                    .get_object
-                    .lock()
-                    .unwrap()
-                    .clone()
-                    .filter(|object| object.id == id);
+                let object = state.objects.lock().unwrap().get(&id).cloned();
                 match object {
                     Some(object) => Ok(tonic::Response::new(GetObjectResponse {
                         object: Some(object),
@@ -1326,9 +1332,35 @@ mod tests {
                 if consume_failure(&state.update_failures) {
                     return Err(tonic::Status::unavailable("transient update failure"));
                 }
+                let mut objects = state.objects.lock().unwrap();
+                if !objects.contains_key(&object.id) {
+                    return Err(tonic::Status::not_found("object not found"));
+                }
+                objects.insert(object.id.clone(), object.clone());
                 Ok(tonic::Response::new(UpdateObjectResponse {
                     object: Some(object),
                 }))
+            })
+        }
+    }
+
+    struct DeleteObjectRpc(MockSekaiState);
+
+    impl tonic::server::UnaryService<DeleteObjectRequest> for DeleteObjectRpc {
+        type Response = DeleteObjectResponse;
+        type Future = Pin<
+            Box<dyn Future<Output = Result<tonic::Response<Self::Response>, tonic::Status>> + Send>,
+        >;
+
+        fn call(&mut self, request: tonic::Request<DeleteObjectRequest>) -> Self::Future {
+            let state = self.0.clone();
+            Box::pin(async move {
+                state
+                    .objects
+                    .lock()
+                    .unwrap()
+                    .remove(&request.into_inner().id);
+                Ok(tonic::Response::new(DeleteObjectResponse {}))
             })
         }
     }
@@ -1396,6 +1428,10 @@ mod tests {
                         let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
                         grpc.unary(UpdateObjectRpc(state), request).await
                     }
+                    "/sekai.SekaiService/DeleteObject" => {
+                        let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
+                        grpc.unary(DeleteObjectRpc(state), request).await
+                    }
                     "/sekai.SekaiService/CreateActionType" => {
                         let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
                         grpc.unary(CreateActionTypeRpc(state), request).await
@@ -1421,6 +1457,86 @@ mod tests {
 
     impl tonic::server::NamedService for MockSekaiState {
         const NAME: &'static str = "sekai.SekaiService";
+    }
+
+    async fn remote_ctx(state: MockSekaiState) -> (Ctx, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_state = state.clone();
+        let server = tokio::spawn(async move {
+            Server::builder()
+                .add_service(server_state)
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+                .unwrap();
+        });
+        let client = super::RemoteClient::connect(ClientConfig::new(
+            format!("http://{address}"),
+            "tenkai.conformance",
+        ))
+        .await
+        .unwrap();
+        (
+            Ctx {
+                backend: Backend::Remote {
+                    client: Arc::new(client),
+                },
+                canary_schema_preflight: Arc::new(OnceCell::new()),
+                outcome_export_enabled: false,
+                outcome_inspection_enabled: false,
+            },
+            server,
+        )
+    }
+
+    async fn assert_object_lifecycle(mut ctx: Ctx) {
+        let id = "tenkai:conformance:object";
+        assert_eq!(ctx.get(id).await.unwrap(), None);
+
+        let original = Object {
+            id: id.into(),
+            kind: "tenkai.conformance".into(),
+            name: "original".into(),
+            properties: [("environment".into(), "test".into())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        assert_eq!(ctx.create_once(original.clone()).await.unwrap(), original);
+        assert_eq!(ctx.get(id).await.unwrap(), Some(original.clone()));
+
+        let mut conflicting = original.clone();
+        conflicting.name = "must-not-replace".into();
+        let error = ctx.create_once(conflicting).await.unwrap_err();
+        assert_eq!(error.code(), tonic::Code::AlreadyExists);
+        assert_eq!(ctx.get(id).await.unwrap(), Some(original.clone()));
+
+        let mut updated = original;
+        updated.name = "updated".into();
+        updated.properties.insert("status".into(), "ready".into());
+        assert_eq!(ctx.put(updated.clone()).await.unwrap(), updated);
+        assert_eq!(ctx.get(id).await.unwrap(), Some(updated));
+
+        ctx.delete(id).await.unwrap();
+        assert_eq!(ctx.get(id).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn embedded_ctx_conforms_to_object_lifecycle() {
+        let path = std::env::temp_dir().join(format!(
+            "tenkai-ctx-conformance-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let ctx = Ctx::embedded(&path).unwrap();
+        assert_object_lifecycle(ctx).await;
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn remote_ctx_conforms_to_object_lifecycle() {
+        let (ctx, server) = remote_ctx(MockSekaiState::default()).await;
+        assert_object_lifecycle(ctx).await;
+        server.abort();
     }
 
     #[test]
