@@ -67,6 +67,9 @@
 //!   The client's private object-lifecycle module hides embedded/remote adapter
 //!   selection, RPC paths, not-found mapping, conflict recovery, and upsert
 //!   selection behind the shared `Ctx` object interface.
+//!   Its private relation-lifecycle module likewise hides deterministic link
+//!   identity, duplicate normalization, direction semantics, and deletion
+//!   across embedded and remote adapters.
 //! - [`provider_event`] hides durable optional-provider event admission,
 //!   claiming, fencing, sequencing, retry, poison isolation, and
 //!   acknowledgement behind one delivery interface; authoritative store
