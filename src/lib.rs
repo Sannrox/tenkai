@@ -9,6 +9,9 @@
 //! The crate is organized around a small set of application seams:
 //!
 //! - [`catalog`] owns immutable release publication, promotion, and lookup.
+//!   Its private publication module concentrates content identity, provenance,
+//!   trust verification, immutable replay, persistence, and graph-link ordering
+//!   behind one admission interface.
 //! - [`plan`], [`apply`], and [`reconciler`] own convergence decisions and execution.
 //! - `plan::release_selection` hides version constraints, Environment capability
 //!   facts, model-runtime sibling discovery, rollout ceilings, and deterministic
