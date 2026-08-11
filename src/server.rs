@@ -11,7 +11,7 @@ use axum::{Json, Router};
 use serde::Serialize;
 
 use crate::auth_context::{
-    AuthHostConfig, AuthMode, AuthStack, AuthenticatedRequestContext, CommunityTokenAuthenticator,
+    AuthHostConfig, AuthStack, AuthenticatedRequestContext, CommunityTokenAuthenticator,
     CredentialMaterial, EnterpriseAuthExtension, PrincipalIdentity, PrincipalKind,
     build_auth_stack,
 };
@@ -19,6 +19,7 @@ use crate::development_fixtures::DevelopmentFixture;
 use crate::federated_identity::{
     FederatingAuthExtension, FederationConfig, IdentityDirectory, reject_caller_selected_tenant,
 };
+use crate::management_operations::{ManagementError, ManagementOperations};
 use crate::reconciler::TickReport;
 use crate::runtime_capabilities::{
     ProvidedCapabilities, RuntimeRequirements, community_auth_capabilities,
@@ -30,48 +31,9 @@ pub use crate::runtime_delivery::{
     RuntimeInventoryResponse, RuntimeWork, StatusEnvFuture, WorkFuture,
 };
 use crate::runtime_delivery::{RuntimeDeliveryError, RuntimeDeliveryOperations};
-use crate::storage::{AuditRecord, OperationalStore};
-use crate::tenant_environment::{
-    TenantEnvironmentError, TenantEnvironmentOperations, TenantEnvironmentView,
-};
+use crate::storage::OperationalStore;
 use crate::tenant_isolation::NON_DISCLOSING_DENY;
 use crate::tenant_store::TenantOperationalStore;
-
-struct ReconcileTenantEnvironmentView {
-    reconciler: Arc<dyn ReconcilePort>,
-}
-
-impl TenantEnvironmentView for ReconcileTenantEnvironmentView {
-    fn inspect_without_outcome_export(
-        &self,
-        environment: String,
-    ) -> crate::tenant_environment::TenantEnvironmentFuture<'_, crate::plan::EnvironmentInspectReport>
-    {
-        self.reconciler
-            .inspect_environment_without_outcome_export(environment)
-    }
-
-    fn status(
-        &self,
-        environment: String,
-    ) -> crate::tenant_environment::TenantEnvironmentFuture<'_, Vec<crate::plan::StatusRow>> {
-        self.reconciler.environment_status(environment)
-    }
-
-    fn fleet_without_outcome_export(
-        &self,
-    ) -> crate::tenant_environment::TenantEnvironmentFuture<'_, crate::plan::FleetStatusReport>
-    {
-        self.reconciler.fleet_status_without_outcome_export()
-    }
-
-    fn reconcile_bounded(
-        &self,
-        environments: Vec<String>,
-    ) -> crate::tenant_environment::TenantEnvironmentFuture<'_, TickReport> {
-        self.reconciler.reconcile_environments(environments)
-    }
-}
 
 #[derive(Clone)]
 pub struct ServerConfig {
@@ -219,11 +181,10 @@ impl ServerConfig {
 
 struct AppState {
     config: ServerConfig,
-    auth: AuthStack,
     reconciler: Arc<dyn ReconcilePort>,
     store: Arc<dyn OperationalStore>,
     tenant_store: Option<Arc<dyn TenantOperationalStore>>,
-    tenant_environments: Option<Arc<TenantEnvironmentOperations>>,
+    management: Arc<ManagementOperations>,
     runtime_delivery: Arc<RuntimeDeliveryOperations>,
 }
 
@@ -253,14 +214,13 @@ pub fn router(
         reconciler.clone(),
         store.clone(),
     ));
-    let tenant_environments = config.tenant_store.clone().map(|tenant_store| {
-        Arc::new(TenantEnvironmentOperations::new(
-            tenant_store,
-            Arc::new(ReconcileTenantEnvironmentView {
-                reconciler: reconciler.clone(),
-            }),
-        ))
-    });
+    let management = Arc::new(ManagementOperations::new(
+        auth,
+        config.requirements.tenant_mode,
+        reconciler.clone(),
+        store.clone(),
+        config.tenant_store.clone(),
+    ));
     let mut router = Router::new()
         .route("/healthz", get(health))
         .route("/readyz", get(ready))
@@ -304,9 +264,8 @@ pub fn router(
     }
     Ok(router.with_state(Arc::new(AppState {
         tenant_store: config.tenant_store.clone(),
-        tenant_environments,
+        management,
         config,
-        auth,
         reconciler,
         store,
         runtime_delivery,
@@ -482,6 +441,15 @@ fn authenticate_management(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<AuthenticatedRequestContext, Box<Response>> {
+    let credential =
+        management_credential(headers).map_err(|error| Box::new(management_error(error)))?;
+    state
+        .management
+        .authenticate(&credential)
+        .map_err(|error| Box::new(management_error(error)))
+}
+
+fn management_credential(headers: &HeaderMap) -> Result<CredentialMaterial, ManagementError> {
     // Caller-selected tenant metadata cannot select federation/tenant authority.
     if reject_caller_selected_tenant(
         headers
@@ -491,10 +459,9 @@ fn authenticate_management(
     )
     .is_err()
     {
-        return Err(Box::new(error_response(
-            StatusCode::FORBIDDEN,
-            "caller metadata cannot select tenant authority",
-        )));
+        return Err(ManagementError::Forbidden(
+            "caller metadata cannot select tenant authority".into(),
+        ));
     }
     let bearer_token = bearer(headers).map(str::to_string);
     let assertion = headers
@@ -503,10 +470,7 @@ fn authenticate_management(
         .map(|raw| raw.as_bytes().to_vec())
         .filter(|bytes| !bytes.is_empty());
     if bearer_token.is_none() && assertion.is_none() {
-        return Err(Box::new(error_response(
-            StatusCode::UNAUTHORIZED,
-            "missing bearer token",
-        )));
+        return Err(ManagementError::Unauthorized("missing bearer token".into()));
     }
     let request_id = headers
         .get("x-request-id")
@@ -515,77 +479,32 @@ fn authenticate_management(
         .filter(|value| !value.is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let credential = CredentialMaterial {
+    Ok(CredentialMaterial {
         request_id,
         bearer_token,
         assertion,
-    };
-    match state.auth.authenticate(&credential) {
-        Ok(context) => {
-            if state.auth.mode() == AuthMode::Community && context.tenant().is_some() {
-                // Community stack must never surface tenant authority.
-                return Err(Box::new(error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "community auth stack produced tenant context",
-                )));
-            }
-            Ok(context)
-        }
-        Err(crate::auth_context::AuthError::Unauthorized(_)) => Err(Box::new(error_response(
-            StatusCode::FORBIDDEN,
-            "invalid management credential",
-        ))),
-        Err(crate::auth_context::AuthError::InvalidCredential(_)) => Err(Box::new(error_response(
-            StatusCode::UNAUTHORIZED,
-            "invalid management credential",
-        ))),
-        Err(error) => {
-            eprintln!("management authentication failed: {error}");
-            Err(Box::new(error_response(
-                StatusCode::FORBIDDEN,
-                "invalid management credential",
-            )))
-        }
-    }
+    })
 }
 
 async fn fleet_status(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    let context = match authenticate_management(&state, &headers) {
-        Ok(context) => context,
-        Err(response) => return *response,
+    let credential = match management_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return management_error(error),
     };
-    if state.config.requirements.tenant_mode {
-        let Some(operations) = state.tenant_environments.as_ref() else {
-            return tenant_environment_error(TenantEnvironmentError::StoreUnavailable);
-        };
-        return match operations.fleet_status(&context).await {
-            Ok(report) => Json(report).into_response(),
-            Err(error) => tenant_environment_error(error),
-        };
-    }
-    match state.reconciler.fleet_status().await {
+    match state.management.fleet_status(&credential).await {
         Ok(report) => Json(report).into_response(),
-        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")),
+        Err(error) => management_error(error),
     }
 }
 
 async fn list_environments(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    let context = match authenticate_management(&state, &headers) {
-        Ok(context) => context,
-        Err(response) => return *response,
+    let credential = match management_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return management_error(error),
     };
-    if state.config.requirements.tenant_mode {
-        let Some(operations) = state.tenant_environments.as_ref() else {
-            return tenant_environment_error(TenantEnvironmentError::StoreUnavailable);
-        };
-        return match operations.list(&context).await {
-            Ok(entries) => Json(entries).into_response(),
-            Err(error) => tenant_environment_error(error),
-        };
-    }
-    match state.reconciler.list_environments().await {
+    match state.management.list_environments(&credential).await {
         Ok(entries) => Json(entries).into_response(),
-        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")),
+        Err(error) => management_error(error),
     }
 }
 
@@ -594,55 +513,18 @@ async fn inspect_environment(
     Path(environment): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let context = match authenticate_management(&state, &headers) {
-        Ok(context) => context,
-        Err(response) => return *response,
+    let credential = match management_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return management_error(error),
     };
-    if state.config.requirements.tenant_mode {
-        let Some(operations) = state.tenant_environments.as_ref() else {
-            return tenant_environment_error(TenantEnvironmentError::StoreUnavailable);
-        };
-        return match operations.inspect(&context, &environment).await {
-            Ok(report) => Json(report).into_response(),
-            Err(error) => tenant_environment_error(error),
-        };
+    match state
+        .management
+        .inspect_environment(&credential, &environment)
+        .await
+    {
+        Ok(report) => Json(report).into_response(),
+        Err(error) => management_error(error),
     }
-    let store_environment = environment.clone();
-    let inspection = state.reconciler.inspect_environment(environment).await;
-    match inspection {
-        Ok(mut report) => {
-            if !state.config.requirements.tenant_mode && report.terminal_outcomes.is_empty() {
-                match terminal_outcomes_from_store(state.store.as_ref(), &store_environment) {
-                    Ok(outcomes) => report.terminal_outcomes = outcomes,
-                    Err(error) => {
-                        return error_response(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            format!("{error:#}"),
-                        );
-                    }
-                }
-            }
-            Json(report).into_response()
-        }
-        Err(error) => {
-            let message = format!("{error:#}");
-            if message.contains("not registered") {
-                error_response(StatusCode::NOT_FOUND, message)
-            } else {
-                error_response(StatusCode::INTERNAL_SERVER_ERROR, message)
-            }
-        }
-    }
-}
-
-fn terminal_outcomes_from_store(
-    store: &dyn OperationalStore,
-    environment: &str,
-) -> anyhow::Result<Vec<crate::providers::TerminalOutcomeProjection>> {
-    let records =
-        store.list_provider_events(crate::providers::OUTCOME_PROVIDER_KIND, environment, 128)?;
-    crate::providers::project_terminal_outcomes(&records, environment, crate::now_millis())
-        .map_err(anyhow::Error::from)
 }
 
 async fn environment_status(
@@ -650,29 +532,17 @@ async fn environment_status(
     Path(environment): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let context = match authenticate_management(&state, &headers) {
-        Ok(context) => context,
-        Err(response) => return *response,
+    let credential = match management_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return management_error(error),
     };
-    if state.config.requirements.tenant_mode {
-        let Some(operations) = state.tenant_environments.as_ref() else {
-            return tenant_environment_error(TenantEnvironmentError::StoreUnavailable);
-        };
-        return match operations.status(&context, &environment).await {
-            Ok(rows) => Json(rows).into_response(),
-            Err(error) => tenant_environment_error(error),
-        };
-    }
-    match state.reconciler.environment_status(environment).await {
+    match state
+        .management
+        .environment_status(&credential, &environment)
+        .await
+    {
         Ok(rows) => Json(rows).into_response(),
-        Err(error) => {
-            let message = format!("{error:#}");
-            if message.contains("not registered") {
-                error_response(StatusCode::NOT_FOUND, message)
-            } else {
-                error_response(StatusCode::INTERNAL_SERVER_ERROR, message)
-            }
-        }
+        Err(error) => management_error(error),
     }
 }
 
@@ -743,57 +613,13 @@ async fn ready(State(state): State<Arc<AppState>>) -> Response {
 }
 
 async fn reconcile(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    let context = match authenticate_management(&state, &headers) {
-        Ok(context) => context,
-        Err(response) => return *response,
+    let credential = match management_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return management_error(error),
     };
-    if let Err(response) = require_tenant_scope(&state, &context, None).await {
-        return *response;
-    }
-    let actor = context.principal_id().to_string();
-    if let Err(error) = audit(&*state.store, &actor, "reconcile.requested", "*") {
-        return error_response(StatusCode::SERVICE_UNAVAILABLE, error.to_string());
-    }
-    let result = if state.config.requirements.tenant_mode {
-        let Some(operations) = state.tenant_environments.as_ref() else {
-            return tenant_environment_error(TenantEnvironmentError::StoreUnavailable);
-        };
-        match operations.reconcile(&context).await {
-            Ok(report) => Ok(report),
-            Err(error) => {
-                if let Err(audit_error) = audit(&*state.store, &actor, "reconcile.failed", "*") {
-                    return error_response(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        audit_error.to_string(),
-                    );
-                }
-                return tenant_environment_error(error);
-            }
-        }
-    } else {
-        state.reconciler.reconcile().await
-    };
-    match result {
-        Ok(report) => {
-            let outcome = if report.failures() == 0 {
-                "reconcile.completed"
-            } else {
-                "reconcile.failed"
-            };
-            if let Err(error) = audit(&*state.store, &actor, outcome, "*") {
-                return error_response(StatusCode::SERVICE_UNAVAILABLE, error.to_string());
-            }
-            Json(report).into_response()
-        }
-        Err(error) => match audit(&*state.store, &actor, "reconcile.failed", "*") {
-            Ok(()) => error_response(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")),
-            Err(audit_error) => error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                format!(
-                    "reconciliation failed: {error:#}; recording failure audit also failed: {audit_error}"
-                ),
-            ),
-        },
+    match state.management.reconcile(&credential).await {
+        Ok(report) => Json(report).into_response(),
+        Err(error) => management_error(error),
     }
 }
 
@@ -886,22 +712,6 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
         .filter(|token| !token.is_empty())
 }
 
-fn audit(
-    store: &dyn OperationalStore,
-    principal: &str,
-    operation: &str,
-    resource: &str,
-) -> crate::storage::Result<()> {
-    store.append_audit(&AuditRecord {
-        id: uuid::Uuid::new_v4().to_string(),
-        occurred_at: crate::now_millis(),
-        principal: principal.into(),
-        operation: operation.into(),
-        resource: resource.into(),
-        outcome: operation.rsplit('.').next().unwrap_or(operation).into(),
-    })
-}
-
 fn error_response(status: StatusCode, error: impl Into<String>) -> Response {
     (
         status,
@@ -928,16 +738,15 @@ fn runtime_delivery_error(error: RuntimeDeliveryError) -> Response {
     error_response(status, error.to_string())
 }
 
-fn tenant_environment_error(error: TenantEnvironmentError) -> Response {
+fn management_error(error: ManagementError) -> Response {
     match error {
-        TenantEnvironmentError::StoreUnavailable => {
-            error_response(StatusCode::SERVICE_UNAVAILABLE, "tenant store unavailable")
+        ManagementError::Unauthorized(message) => error_response(StatusCode::UNAUTHORIZED, message),
+        ManagementError::Forbidden(message) => error_response(StatusCode::FORBIDDEN, message),
+        ManagementError::NotFound(message) => error_response(StatusCode::NOT_FOUND, message),
+        ManagementError::Unavailable(message) => {
+            error_response(StatusCode::SERVICE_UNAVAILABLE, message)
         }
-        TenantEnvironmentError::NotFound => {
-            error_response(StatusCode::NOT_FOUND, NON_DISCLOSING_DENY)
-        }
-        TenantEnvironmentError::Denied(message) => error_response(StatusCode::FORBIDDEN, message),
-        TenantEnvironmentError::Internal(message) => {
+        ManagementError::Internal(message) => {
             error_response(StatusCode::INTERNAL_SERVER_ERROR, message)
         }
     }
