@@ -64,6 +64,9 @@
 //! - [`atomic_state`] hides verified atomic local state-file mutation shared by
 //!   those local executor adapters.
 //! - [`providers`] and [`client`] contain optional Sekai-Chisei integration.
+//!   The client's private object-lifecycle module hides embedded/remote adapter
+//!   selection, RPC paths, not-found mapping, conflict recovery, and upsert
+//!   selection behind the shared `Ctx` object interface.
 //! - [`provider_event`] hides durable optional-provider event admission,
 //!   claiming, fencing, sequencing, retry, poison isolation, and
 //!   acknowledgement behind one delivery interface; authoritative store
