@@ -23,6 +23,7 @@ use anyhow::{Context as _, Result, bail};
 
 mod execution_attempt;
 mod execution_lease;
+mod plan_completion;
 mod product_execution;
 mod release_content;
 mod start_admission;
@@ -202,54 +203,6 @@ fn record(id: String, kind: &str, name: String, properties: HashMap<String, Stri
     }
 }
 
-async fn set_plan_state(
-    ctx: &mut Ctx,
-    lease: &EnvironmentLease,
-    plan: &mut Plan,
-    state: PlanState,
-    gates_skipped: bool,
-    detail: impl Into<String>,
-) -> Result<()> {
-    plan.state = state;
-    plan.gates_skipped = Some(gates_skipped);
-    plan.status_detail = detail.into();
-    plan.maintenance_blocked = false;
-    ctx.guarded_update(
-        plan.to_object()?,
-        ENVIRONMENT_LEASE_NAMESPACE,
-        &lease.environment,
-        &lease.fencing_token,
-    )
-    .await?;
-    Ok(())
-}
-
-async fn set_plan_state_confirmed(
-    ctx: &mut Ctx,
-    lease: &EnvironmentLease,
-    plan: &mut Plan,
-    state: PlanState,
-    gates_skipped: bool,
-    detail: impl Into<String>,
-) -> Result<()> {
-    let detail = detail.into();
-    if let Err(error) = set_plan_state(ctx, lease, plan, state, gates_skipped, detail.clone()).await
-    {
-        let persisted = plan::load(ctx, &plan.id).await;
-        if !matches!(
-            persisted,
-            Ok(ref stored)
-                if stored.state == state
-                    && stored.gates_skipped == Some(gates_skipped)
-                    && stored.status_detail == detail
-                    && !stored.maintenance_blocked
-        ) {
-            return Err(error);
-        }
-    }
-    Ok(())
-}
-
 pub(crate) async fn validate_preconditions(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
     let environment = ctx
         .get(&env_id(&plan.environment))
@@ -325,71 +278,30 @@ async fn execute_locked(
         return Ok(outcomes);
     }
 
-    let mut outcomes = Vec::new();
-    let mut plan_failed = false;
-    let mut plan_blocked = false;
-    let mut final_detail = String::new();
+    let mut completion = plan_completion::ExecutionCompletion::new();
 
     for step in steps {
         if let Err(error) = refresh_environment_lease(ctx, lease).await {
             let detail = format!("refreshing environment apply lease failed: {error}");
-            set_plan_state(
-                ctx,
-                lease,
-                &mut stored_plan,
-                PlanState::Failed,
-                skip_gates,
-                &detail,
-            )
-            .await?;
+            plan_completion::fail(ctx, lease, &mut stored_plan, skip_gates, &detail).await?;
             return Err(error.context(detail));
         }
         let outcome = match step_lifecycle::execute(ctx, lease, &env, &plan_id, &step).await {
             Ok(outcome) => outcome,
             Err(error) => {
-                set_plan_state(
-                    ctx,
-                    lease,
-                    &mut stored_plan,
-                    PlanState::Failed,
-                    skip_gates,
-                    error.to_string(),
-                )
-                .await?;
+                plan_completion::fail(ctx, lease, &mut stored_plan, skip_gates, error.to_string())
+                    .await?;
                 return Err(error);
             }
         };
-        if outcome.status == "blocked" {
-            plan_blocked = true;
-            final_detail = outcome.detail.clone();
-        } else if outcome.status != "succeeded" {
-            plan_failed = true;
-            final_detail = outcome.detail.clone();
-        }
-        outcomes.push(outcome);
-        if plan_blocked || plan_failed {
+        if completion.record(outcome) {
             break;
         }
     }
 
-    let final_state = if plan_blocked {
-        PlanState::Blocked
-    } else if plan_failed {
-        PlanState::Failed
-    } else {
-        PlanState::Succeeded
-    };
-    set_plan_state_confirmed(
-        ctx,
-        lease,
-        &mut stored_plan,
-        final_state,
-        skip_gates,
-        final_detail,
-    )
-    .await?;
-
-    Ok(outcomes)
+    completion
+        .finish(ctx, lease, &mut stored_plan, skip_gates)
+        .await
 }
 
 #[cfg(test)]

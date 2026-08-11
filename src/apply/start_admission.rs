@@ -95,7 +95,7 @@ pub(super) async fn admit(
                 status: "blocked".into(),
                 detail: detail.clone(),
             };
-            set_plan_state_confirmed(
+            plan_completion::transition_confirmed(
                 ctx,
                 lease,
                 plan,
@@ -125,7 +125,15 @@ pub(super) async fn admit(
         )
         .await?;
     }
-    set_plan_state_confirmed(ctx, lease, plan, PlanState::Running, policy.skip_gates, "").await?;
+    plan_completion::transition_confirmed(
+        ctx,
+        lease,
+        plan,
+        PlanState::Running,
+        policy.skip_gates,
+        "",
+    )
+    .await?;
     let running_maintenance =
         maintenance_decision(ctx, &plan.environment, policy.emergency_reason).await?;
     match running_maintenance {
