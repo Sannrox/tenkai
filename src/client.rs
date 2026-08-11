@@ -1,6 +1,7 @@
 //! Connection to a local sekai-chisei server, plus thin object/link helpers.
 
 mod object_lifecycle;
+mod relation_lifecycle;
 
 use anyhow::{Context as _, Result};
 use prost::Message;
@@ -13,11 +14,9 @@ use tonic::Status;
 use crate::pb::chisei::{GetEvaluationGateEvidenceRequest, GetEvaluationGateEvidenceResponse};
 use crate::pb::sekai::{
     AcquireLeaseRequest, ActionRequest, ActionResult, ActionTypeDef, CreateActionTypeRequest,
-    CreateActionTypeResponse, CreateLinkRequest, CreateLinkResponse, CreateObjectRequest,
-    CreateObjectResponse, CreateSchemaTypeRequest, CreateSchemaTypeResponse, Decision,
-    DeleteLinkRequest, DeleteLinkResponse, DenyActionRequest, ExecuteActionRequest,
-    ExecuteActionResponse, FindByPropertyRequest, GetLeaseRequest, GetLeaseResponse,
-    GetLinkedObjectsRequest, GetLinkedObjectsResponse, GetLinksRequest, GetLinksResponse, Lease,
+    CreateActionTypeResponse, CreateObjectRequest, CreateObjectResponse, CreateSchemaTypeRequest,
+    CreateSchemaTypeResponse, Decision, DenyActionRequest, ExecuteActionRequest,
+    ExecuteActionResponse, FindByPropertyRequest, GetLeaseRequest, GetLeaseResponse, Lease,
     LeasePrecondition, Link, ListActionTypesRequest, ListActionTypesResponse, ListDecisionsRequest,
     ListDecisionsResponse, ListFilter, ListObjectChangesRequest, ListObjectChangesResponse,
     ListObjectsRequest, ListObjectsResponse, ListSchemaTypesRequest, ListSchemaTypesResponse,
@@ -96,6 +95,13 @@ impl Backend {
         match self {
             Self::Remote { client } => object_lifecycle::ObjectLifecycle::Remote(client),
             Self::Embedded(store) => object_lifecycle::ObjectLifecycle::Embedded(store),
+        }
+    }
+
+    fn relation_lifecycle(&self) -> relation_lifecycle::RelationLifecycle<'_> {
+        match self {
+            Self::Remote { client } => relation_lifecycle::RelationLifecycle::Remote(client),
+            Self::Embedded(store) => relation_lifecycle::RelationLifecycle::Embedded(store),
         }
     }
 }
@@ -303,21 +309,6 @@ impl Ctx {
                 .iter()
                 .any(|action| action.name == name)
         })
-    }
-
-    async fn remote_link_exists(&self, from_id: &str, relation: &str, link_id: &str) -> bool {
-        let response: std::result::Result<GetLinksResponse, tonic::Status> = self
-            .remote_unary(
-                "/sekai.SekaiService/GetLinks",
-                GetLinksRequest {
-                    object_id: from_id.into(),
-                    relation: relation.into(),
-                    direction: "out".into(),
-                },
-                CallOptions::default(),
-            )
-            .await;
-        response.is_ok_and(|response| response.links.iter().any(|link| link.id == link_id))
     }
 
     fn embedded_store(&self) -> Option<&crate::embedded::EmbeddedStore> {
@@ -714,42 +705,10 @@ impl Ctx {
 
     /// Create a link with a deterministic id; already-exists is treated as success.
     pub async fn link(&mut self, from_id: &str, to_id: &str, relation: &str) -> Result<()> {
-        let link = Link {
-            id: format!("{from_id}--{relation}--{to_id}"),
-            from_id: from_id.into(),
-            to_id: to_id.into(),
-            relation: relation.into(),
-            created: crate::now_millis(),
-        };
-        if let Some(store) = self.embedded_store() {
-            return store.create_link(link, false).map_err(anyhow::Error::from);
-        }
-        let link_id = link.id.clone();
-        let from_id = link.from_id.clone();
-        let relation_name = link.relation.clone();
-        let response: std::result::Result<CreateLinkResponse, tonic::Status> = self
-            .remote_unary(
-                "/sekai.SekaiService/CreateLink",
-                CreateLinkRequest {
-                    link: Some(link),
-                    fail_if_exists: true,
-                },
-                CallOptions::default(),
-            )
-            .await;
-        match response {
-            Ok(_) => Ok(()),
-            Err(status) if status.code() == tonic::Code::AlreadyExists => Ok(()),
-            Err(status)
-                if status.code() == tonic::Code::Internal
-                    && self
-                        .remote_link_exists(&from_id, &relation_name, &link_id)
-                        .await =>
-            {
-                Ok(())
-            }
-            Err(status) => Err(status.into()),
-        }
+        self.backend
+            .relation_lifecycle()
+            .link(from_id, to_id, relation)
+            .await
     }
 
     /// Create one exact link and preserve duplicate errors for lock acquisition.
@@ -757,53 +716,17 @@ impl Ctx {
         &mut self,
         link: Link,
     ) -> std::result::Result<(), tonic::Status> {
-        if let Some(store) = self.embedded_store() {
-            return store.create_link(link, true);
-        }
-        let link_id = link.id.clone();
-        let from_id = link.from_id.clone();
-        let relation_name = link.relation.clone();
-        let response: std::result::Result<CreateLinkResponse, tonic::Status> = self
-            .remote_unary::<CreateLinkRequest, CreateLinkResponse>(
-                "/sekai.SekaiService/CreateLink",
-                CreateLinkRequest {
-                    link: Some(link),
-                    fail_if_exists: true,
-                },
-                CallOptions::default(),
-            )
-            .await;
-        match response {
-            Ok(_) => Ok(()),
-            Err(status)
-                if status.code() == tonic::Code::Internal
-                    && self
-                        .remote_link_exists(&from_id, &relation_name, &link_id)
-                        .await =>
-            {
-                Err(tonic::Status::already_exists("link already exists"))
-            }
-            Err(status) => Err(status),
-        }
+        self.backend
+            .relation_lifecycle()
+            .create_link_once(link)
+            .await
     }
 
     pub async fn unlink(&mut self, from_id: &str, to_id: &str, relation: &str) -> Result<()> {
-        let id = format!("{from_id}--{relation}--{to_id}");
-        if let Some(store) = self.embedded_store() {
-            return store.unlink(&id);
-        }
-        let response: std::result::Result<DeleteLinkResponse, tonic::Status> = self
-            .remote_unary(
-                "/sekai.SekaiService/DeleteLink",
-                DeleteLinkRequest { id },
-                CallOptions::default(),
-            )
-            .await;
-        match response {
-            Ok(_) => Ok(()),
-            Err(status) if status.code() == tonic::Code::NotFound => Ok(()),
-            Err(status) => Err(status.into()),
-        }
+        self.backend
+            .relation_lifecycle()
+            .unlink(from_id, to_id, relation)
+            .await
     }
 
     pub async fn linked(
@@ -812,21 +735,10 @@ impl Ctx {
         relation: &str,
         direction: &str,
     ) -> Result<Vec<Object>> {
-        if let Some(store) = self.embedded_store() {
-            return store.linked(object_id, relation, direction);
-        }
-        let response: GetLinkedObjectsResponse = self
-            .remote_unary(
-                "/sekai.SekaiService/GetLinkedObjects",
-                GetLinkedObjectsRequest {
-                    object_id: object_id.into(),
-                    relation: relation.into(),
-                    direction: direction.into(),
-                },
-                CallOptions::default(),
-            )
-            .await?;
-        Ok(response.objects)
+        self.backend
+            .relation_lifecycle()
+            .linked(object_id, relation, direction)
+            .await
     }
 
     pub async fn find_by_property(
@@ -857,21 +769,10 @@ impl Ctx {
     }
 
     pub async fn links(&mut self, object_id: &str, relation: &str) -> Result<Vec<Link>> {
-        if let Some(store) = self.embedded_store() {
-            return store.links(object_id, relation, "out");
-        }
-        let response: GetLinksResponse = self
-            .remote_unary(
-                "/sekai.SekaiService/GetLinks",
-                GetLinksRequest {
-                    object_id: object_id.into(),
-                    relation: relation.into(),
-                    direction: "out".into(),
-                },
-                CallOptions::default(),
-            )
-            .await?;
-        Ok(response.links)
+        self.backend
+            .relation_lifecycle()
+            .links(object_id, relation)
+            .await
     }
 
     pub async fn list_kind(&mut self, kind: &str) -> Result<Vec<Object>> {
