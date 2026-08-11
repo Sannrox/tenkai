@@ -61,9 +61,10 @@
 //! - [`atomic_state`] hides verified atomic local state-file mutation shared by
 //!   those local executor adapters.
 //! - [`providers`] and [`client`] contain optional Sekai-Chisei integration.
-//! - [`provider_event`] is the narrow persistence interface for durable optional
-//!   provider-event claiming, fencing, sequencing, retry, and acknowledgement;
-//!   authoritative store adapters retain transactional enqueue ownership.
+//! - [`provider_event`] hides durable optional-provider event admission,
+//!   claiming, fencing, sequencing, retry, poison isolation, and
+//!   acknowledgement behind one delivery interface; authoritative store
+//!   adapters retain transactional enqueue ownership.
 //! - `signature_verification` hides shared signed-format framing, digest
 //!   grammar, key-id derivation, and Ed25519 verification while each domain
 //!   module retains its own statement shape and policy rules. Enterprise JWT
