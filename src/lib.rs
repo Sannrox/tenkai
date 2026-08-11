@@ -73,6 +73,7 @@ pub mod fenced_mutation;
 pub mod fleet;
 pub mod inventory;
 pub mod maintenance;
+mod management_operations;
 pub mod manifest;
 pub mod metrics;
 pub mod model_runtime;
