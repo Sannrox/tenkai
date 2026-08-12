@@ -5,6 +5,7 @@
 //! optional tenant context from trusted credentials. Ordinary caller metadata
 //! cannot select a tenant.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -111,6 +112,33 @@ pub enum PrincipalKind {
     Management,
 }
 
+/// Delivery-domain capability enforced after authentication.
+///
+/// Authentication proves identity; these capabilities authorize Tenkai
+/// management use cases. Missing capabilities fail closed for gated routes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryCapability {
+    /// Read fleet/environment inspection surfaces.
+    Read,
+    /// Mutating management operations such as reconcile.
+    Management,
+}
+
+/// Capabilities implied by a verified principal kind when no explicit delivery
+/// capability claim is present.
+///
+/// Human and Runtime principals receive none unless an assertion carries an
+/// explicit `tenkai_capabilities` claim (fail closed for management APIs).
+pub fn default_delivery_capabilities(kind: PrincipalKind) -> BTreeSet<DeliveryCapability> {
+    match kind {
+        PrincipalKind::Management | PrincipalKind::Service => {
+            BTreeSet::from([DeliveryCapability::Read, DeliveryCapability::Management])
+        }
+        PrincipalKind::Human | PrincipalKind::Runtime => BTreeSet::new(),
+    }
+}
+
 /// Backend-neutral authenticated request context consumed by Tenkai use cases.
 ///
 /// Principal identity is always set. Tenant context is optional and only present
@@ -122,6 +150,9 @@ pub struct AuthenticatedRequestContext {
     pub principal: PrincipalIdentity,
     tenant: Option<TenantContext>,
     pub authenticator_id: String,
+    /// Delivery-domain capabilities. Absent/empty means no management API use.
+    #[serde(default)]
+    delivery_capabilities: BTreeSet<DeliveryCapability>,
 }
 
 impl AuthenticatedRequestContext {
@@ -135,6 +166,25 @@ impl AuthenticatedRequestContext {
 
     pub fn principal_id(&self) -> &str {
         &self.principal.id
+    }
+
+    pub fn delivery_capabilities(&self) -> &BTreeSet<DeliveryCapability> {
+        &self.delivery_capabilities
+    }
+
+    pub fn has_delivery_capability(&self, required: DeliveryCapability) -> bool {
+        match required {
+            DeliveryCapability::Read => {
+                self.delivery_capabilities
+                    .contains(&DeliveryCapability::Read)
+                    || self
+                        .delivery_capabilities
+                        .contains(&DeliveryCapability::Management)
+            }
+            DeliveryCapability::Management => self
+                .delivery_capabilities
+                .contains(&DeliveryCapability::Management),
+        }
     }
 
     pub fn validate(&self) -> Result<(), AuthError> {
@@ -182,6 +232,7 @@ pub struct AuthenticatedRequestContextBuilder {
     principal: PrincipalIdentity,
     authenticator_id: String,
     tenant: Option<TenantContext>,
+    delivery_capabilities: BTreeSet<DeliveryCapability>,
 }
 
 impl AuthenticatedRequestContextBuilder {
@@ -190,11 +241,13 @@ impl AuthenticatedRequestContextBuilder {
         principal: PrincipalIdentity,
         authenticator_id: impl Into<String>,
     ) -> Self {
+        let delivery_capabilities = default_delivery_capabilities(principal.kind);
         Self {
             request_id: request_id.into(),
             principal,
             authenticator_id: authenticator_id.into(),
             tenant: None,
+            delivery_capabilities,
         }
     }
 
@@ -218,6 +271,18 @@ impl AuthenticatedRequestContextBuilder {
         Ok(self)
     }
 
+    /// Replace delivery capabilities with an explicit verified set.
+    ///
+    /// Authenticators that see an explicit capability claim must call this so
+    /// missing claims are not silently widened from principal kind defaults.
+    pub fn with_delivery_capabilities(
+        mut self,
+        capabilities: impl IntoIterator<Item = DeliveryCapability>,
+    ) -> Self {
+        self.delivery_capabilities = capabilities.into_iter().collect();
+        self
+    }
+
     pub fn build(self) -> Result<AuthenticatedRequestContext, AuthError> {
         let context = AuthenticatedRequestContext {
             contract_version: AUTH_CONTEXT_CONTRACT_VERSION,
@@ -225,6 +290,7 @@ impl AuthenticatedRequestContextBuilder {
             principal: self.principal,
             tenant: self.tenant,
             authenticator_id: self.authenticator_id,
+            delivery_capabilities: self.delivery_capabilities,
         };
         context.validate()?;
         Ok(context)
@@ -361,9 +427,12 @@ pub fn build_auth_stack(
                 extension_id: extension.extension_id().into(),
             };
             Ok(AuthStack {
-                authenticator: Arc::new(EnterpriseAuthenticatorAdapter {
-                    extension,
-                    authority: authority.clone(),
+                authenticator: Arc::new(DualStackAuthenticator {
+                    community,
+                    enterprise: EnterpriseAuthenticatorAdapter {
+                        extension,
+                        authority: authority.clone(),
+                    },
                 }),
                 tenant_authority: Some(authority),
                 mode: AuthMode::Enterprise,
@@ -384,9 +453,12 @@ pub fn build_auth_stack(
                 extension_id: extension.extension_id().into(),
             };
             Ok(AuthStack {
-                authenticator: Arc::new(EnterpriseAuthenticatorAdapter {
-                    extension,
-                    authority: authority.clone(),
+                authenticator: Arc::new(DualStackAuthenticator {
+                    community,
+                    enterprise: EnterpriseAuthenticatorAdapter {
+                        extension,
+                        authority: authority.clone(),
+                    },
                 }),
                 tenant_authority: Some(authority),
                 mode: AuthMode::Enterprise,
@@ -457,6 +529,44 @@ impl CredentialAuthenticator for EnterpriseAuthenticatorAdapter {
                     None => Ok(context),
                 }
             })
+    }
+}
+
+/// Prefer the community management bearer when present and valid; otherwise use
+/// the enterprise assertion path. Enabling enterprise auth therefore does not
+/// silently disable the host management token break-glass path.
+struct DualStackAuthenticator {
+    community: Arc<dyn CredentialAuthenticator>,
+    enterprise: EnterpriseAuthenticatorAdapter,
+}
+
+impl CredentialAuthenticator for DualStackAuthenticator {
+    fn authenticator_id(&self) -> &str {
+        self.enterprise.authenticator_id()
+    }
+
+    fn authenticate(
+        &self,
+        credential: &CredentialMaterial,
+    ) -> Result<AuthenticatedRequestContext, AuthError> {
+        credential.validate()?;
+        if credential.bearer_token.is_some() {
+            match self.community.authenticate(credential) {
+                Ok(context) => return Ok(context),
+                Err(error) if credential.assertion.is_some() => {
+                    // Invalid/unknown bearer with a simultaneous assertion falls
+                    // through to enterprise verification instead of failing open.
+                    let _ = error;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        if credential.assertion.is_some() {
+            return self.enterprise.authenticate(credential);
+        }
+        Err(AuthError::InvalidCredential(
+            "enterprise dual-stack authenticator requires a community bearer or assertion".into(),
+        ))
     }
 }
 
@@ -817,6 +927,75 @@ mod tests {
                 assertion: Some(b"tenant=evil".to_vec()),
             })
             .unwrap();
+        assert!(context.tenant().is_none());
+    }
+
+    #[test]
+    fn community_management_principal_receives_management_capability() {
+        let stack = build_auth_stack(&AuthHostConfig::community(), None, community_auth()).unwrap();
+        let context = stack
+            .authenticate(&CredentialMaterial {
+                request_id: "cap-1".into(),
+                bearer_token: Some("management-secret".into()),
+                assertion: None,
+            })
+            .unwrap();
+        assert!(context.has_delivery_capability(DeliveryCapability::Management));
+        assert!(context.has_delivery_capability(DeliveryCapability::Read));
+    }
+
+    #[test]
+    fn enterprise_human_defaults_to_no_delivery_capabilities() {
+        let extension: Arc<dyn EnterpriseAuthExtension> = Arc::new(StubEnterpriseAuth {
+            id: "enterprise-auth".into(),
+            version: AUTH_CONTEXT_CONTRACT_VERSION,
+            audience: "tenkai-server".into(),
+            tenant_id: "tenant-a".into(),
+            principal_id: "user:42".into(),
+        });
+        let config = AuthHostConfig {
+            required_extension_id: Some("enterprise-auth".into()),
+            expected_contract_version: AUTH_CONTEXT_CONTRACT_VERSION,
+            expected_audience: Some("tenkai-server".into()),
+        };
+        let stack = build_auth_stack(&config, Some(extension), community_auth()).unwrap();
+        let context = stack
+            .authenticate(&CredentialMaterial {
+                request_id: "cap-2".into(),
+                bearer_token: None,
+                assertion: Some(b"good".to_vec()),
+            })
+            .unwrap();
+        assert_eq!(context.principal.kind, PrincipalKind::Human);
+        assert!(!context.has_delivery_capability(DeliveryCapability::Read));
+        assert!(!context.has_delivery_capability(DeliveryCapability::Management));
+    }
+
+    #[test]
+    fn enterprise_dual_stack_keeps_community_management_token() {
+        let extension: Arc<dyn EnterpriseAuthExtension> = Arc::new(StubEnterpriseAuth {
+            id: "enterprise-auth".into(),
+            version: AUTH_CONTEXT_CONTRACT_VERSION,
+            audience: "tenkai-server".into(),
+            tenant_id: "tenant-a".into(),
+            principal_id: "user:42".into(),
+        });
+        let config = AuthHostConfig {
+            required_extension_id: Some("enterprise-auth".into()),
+            expected_contract_version: AUTH_CONTEXT_CONTRACT_VERSION,
+            expected_audience: Some("tenkai-server".into()),
+        };
+        let stack = build_auth_stack(&config, Some(extension), community_auth()).unwrap();
+        let context = stack
+            .authenticate(&CredentialMaterial {
+                request_id: "dual-1".into(),
+                bearer_token: Some("management-secret".into()),
+                assertion: None,
+            })
+            .unwrap();
+        assert_eq!(context.principal_id(), "management");
+        assert_eq!(context.principal.kind, PrincipalKind::Management);
+        assert!(context.has_delivery_capability(DeliveryCapability::Management));
         assert!(context.tenant().is_none());
     }
 }

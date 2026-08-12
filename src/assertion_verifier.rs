@@ -19,8 +19,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth_context::{
     AUTH_CONTEXT_CONTRACT_VERSION, AuthError, AuthenticatedRequestContext,
-    AuthenticatedRequestContextBuilder, CredentialMaterial, EnterpriseAuthExtension,
-    PrincipalIdentity, PrincipalKind, TenantDerivationAuthority,
+    AuthenticatedRequestContextBuilder, CredentialMaterial, DeliveryCapability,
+    EnterpriseAuthExtension, PrincipalIdentity, PrincipalKind, TenantDerivationAuthority,
 };
 
 /// Object-safe verifier for opaque enterprise assertions.
@@ -46,6 +46,11 @@ pub struct VerifiedAssertionClaims {
     pub principal_kind: PrincipalKind,
     /// Optional tenant id derived only from verified claims (never caller headers).
     pub tenant_id: Option<String>,
+    /// Explicit delivery capabilities from `tenkai_capabilities`.
+    ///
+    /// `None` means the claim was absent and defaults from `principal_kind`
+    /// apply. `Some(empty)` means the claim was present but granted nothing.
+    pub delivery_capabilities: Option<std::collections::BTreeSet<DeliveryCapability>>,
 }
 
 /// Clock skew allowed when comparing `exp` / `nbf` (seconds).
@@ -230,6 +235,9 @@ struct JwtClaims {
     tenant_id: Option<String>,
     #[serde(default)]
     tenkai_tenant: Option<String>,
+    /// Explicit delivery RBAC claim: `["read"]`, `["management"]`, or both.
+    #[serde(default)]
+    tenkai_capabilities: Option<Vec<String>>,
 }
 
 fn validate_claims(
@@ -285,6 +293,10 @@ fn validate_claims(
         .clone()
         .or_else(|| claims.tenkai_tenant.clone())
         .filter(|value| !value.trim().is_empty());
+    let delivery_capabilities = match &claims.tenkai_capabilities {
+        None => None,
+        Some(values) => Some(parse_delivery_capabilities(values)?),
+    };
     Ok(VerifiedAssertionClaims {
         issuer: claims.iss.clone(),
         audience: claims.aud.clone(),
@@ -293,7 +305,30 @@ fn validate_claims(
         not_before: claims.nbf,
         principal_kind,
         tenant_id,
+        delivery_capabilities,
     })
+}
+
+fn parse_delivery_capabilities(
+    values: &[String],
+) -> Result<std::collections::BTreeSet<DeliveryCapability>, AuthError> {
+    let mut capabilities = std::collections::BTreeSet::new();
+    for value in values {
+        match value.as_str() {
+            "read" => {
+                capabilities.insert(DeliveryCapability::Read);
+            }
+            "management" => {
+                capabilities.insert(DeliveryCapability::Management);
+            }
+            other => {
+                return Err(AuthError::Unauthorized(format!(
+                    "unsupported tenkai_capabilities value {other:?}"
+                )));
+            }
+        }
+    }
+    Ok(capabilities)
 }
 
 fn select_key<'a>(
@@ -404,6 +439,11 @@ impl EnterpriseAuthExtension for JwtEnterpriseAuthExtension {
             },
             self.extension_id.clone(),
         );
+        // Explicit claim wins (including empty → deny). Absent claim keeps the
+        // principal-kind defaults from the builder (Human/Runtime → none).
+        if let Some(capabilities) = claims.delivery_capabilities {
+            builder = builder.with_delivery_capabilities(capabilities);
+        }
         match (&claims.tenant_id, self.require_tenant) {
             (Some(tenant_id), _) => {
                 builder = builder.with_tenant(tenant_id, authority)?;
@@ -599,6 +639,56 @@ mod tests {
         let token = mint_jwt(&signing, &claims, Some("k1"));
         let err = v.verify(token.as_bytes(), now).unwrap_err().to_string();
         assert!(err.contains("conflicting tenant"), "{err}");
+    }
+
+    #[test]
+    fn human_jwt_without_capabilities_has_empty_delivery_set() {
+        let (signing, public_b64) = keypair();
+        let jwt = verifier(&public_b64);
+        let extension = Arc::new(JwtEnterpriseAuthExtension::from_jwt_verifier(
+            "jwt-ref", jwt, true,
+        ));
+        let now = now_unix_secs();
+        let token = mint_jwt(&signing, &base_claims(now), Some("k1"));
+        let ctx = extension
+            .authenticate(
+                &CredentialMaterial {
+                    request_id: "cap-1".into(),
+                    bearer_token: None,
+                    assertion: Some(token.into_bytes()),
+                },
+                &TenantDerivationAuthority::new("jwt-ref"),
+            )
+            .unwrap();
+        assert_eq!(ctx.principal.kind, PrincipalKind::Human);
+        assert!(!ctx.has_delivery_capability(DeliveryCapability::Read));
+        assert!(!ctx.has_delivery_capability(DeliveryCapability::Management));
+    }
+
+    #[test]
+    fn tenkai_capabilities_claim_is_honored_and_unknown_values_fail_closed() {
+        let (signing, public_b64) = keypair();
+        let v = verifier(&public_b64);
+        let now = 1_700_000_000_i64;
+        let mut claims = base_claims(now);
+        claims.insert(
+            "tenkai_capabilities".into(),
+            serde_json::json!(["read", "management"]),
+        );
+        let token = mint_jwt(&signing, &claims, Some("k1"));
+        let verified = v.verify(token.as_bytes(), now).unwrap();
+        assert_eq!(
+            verified.delivery_capabilities,
+            Some(std::collections::BTreeSet::from([
+                DeliveryCapability::Read,
+                DeliveryCapability::Management,
+            ]))
+        );
+
+        claims.insert("tenkai_capabilities".into(), serde_json::json!(["admin"]));
+        let bad = mint_jwt(&signing, &claims, Some("k1"));
+        let err = v.verify(bad.as_bytes(), now).unwrap_err().to_string();
+        assert!(err.contains("tenkai_capabilities"), "{err}");
     }
 
     #[test]
