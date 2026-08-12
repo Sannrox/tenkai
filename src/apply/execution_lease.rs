@@ -172,6 +172,19 @@ async fn claim_environment_with_options(
             }
         }
     }
+    // Maintenance/canary claims must not silently reclaim an expired active
+    // lease via AcquireLease. Embedded (and the mock) treat expired holders as
+    // free for acquire, which would otherwise skip the unlock gate and the
+    // AlreadyExists → takeover path below.
+    if !automatic_takeover
+        && let Some(existing) = get_environment_lease(ctx, environment).await?
+        && existing.status == "active"
+        && existing.expires_at_ms <= now
+    {
+        bail!(
+            "environment {environment} has an expired apply lease; verify no operation is running, then run `tenkaictl env unlock {environment}`"
+        );
+    }
     let lease = match ctx
         .acquire_lease(ENVIRONMENT_LEASE_NAMESPACE, environment, owner, ttl_ms)
         .await
@@ -511,4 +524,51 @@ pub async fn unlock_environment(ctx: &mut Ctx, environment: &str) -> Result<Stri
         release_object_environment_claim(ctx, environment).await?;
     }
     Ok(format!("removed apply lease for environment {environment}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::Ctx;
+
+    fn context(name: &str) -> Ctx {
+        let database = std::env::temp_dir().join(format!(
+            "tenkai-execution-lease-{name}-{}-{}.db",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let _ = std::fs::remove_file(&database);
+        Ctx::embedded(database).unwrap()
+    }
+
+    #[tokio::test]
+    async fn claim_environment_requires_unlock_for_expired_lease() {
+        let mut ctx = context("expired-unlock");
+        ctx.acquire_lease(ENVIRONMENT_LEASE_NAMESPACE, "prod", "owner-a", 1)
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let err = match claim_environment(&mut ctx, "prod", "owner-b").await {
+            Ok(_) => panic!("expired lease must require unlock"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            err.contains("expired apply lease") && err.contains("env unlock"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_execution_environment_takeovers_expired_lease() {
+        let mut ctx = context("expired-takeover");
+        ctx.acquire_lease(ENVIRONMENT_LEASE_NAMESPACE, "prod", "owner-a", 1)
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let lease = claim_execution_environment(&mut ctx, "prod", "owner-b")
+            .await
+            .unwrap();
+        assert!(lease.generation >= 2);
+        release_environment(&mut ctx, &lease).await.unwrap();
+    }
 }

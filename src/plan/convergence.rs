@@ -203,6 +203,17 @@ pub(super) fn validate_model_routing_rollout_order(
             _ => {}
         }
     }
+    let has_forward = last_forward_model.is_some() || last_forward_routing.is_some();
+    let has_reverse = last_reverse_model.is_some() || last_reverse_routing.is_some();
+    let has_model = last_forward_model.is_some() || last_reverse_model.is_some();
+    let has_routing = last_forward_routing.is_some() || last_reverse_routing.is_some();
+    // Rank bands collide across directions, so mixed model/routing directions
+    // can sort by product name into an unsafe retire-before-drain order.
+    if has_forward && has_reverse && has_model && has_routing {
+        bail!(
+            "unsafe mixed model/routing rollout directions; split forward and reverse changes into separate plans"
+        );
+    }
     if let (Some(model_i), Some(routing_i)) = (last_forward_model, last_forward_routing)
         && model_i > routing_i
     {
@@ -361,6 +372,18 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("unsafe rollback order"), "{err}");
+    }
+
+    #[test]
+    fn model_routing_rejects_mixed_forward_and_reverse_directions() {
+        use crate::manifest::ProductKind;
+        let err = validate_model_routing_rollout_order(&[
+            (ProductKind::ModelRuntime, Action::Downgrade),
+            (ProductKind::RoutingConfig, Action::Upgrade),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("mixed model/routing"), "{err}");
     }
 
     #[test]

@@ -315,11 +315,47 @@ impl EmbeddedStore {
         fencing_token: &str,
         create: bool,
     ) -> Result<Object> {
-        self.require_active_lease(namespace, key, fencing_token)?;
+        // Lease check and mutation must share one transaction. A split
+        // require_active_lease + create/put window lets another holder
+        // takeover/re-acquire and still lose to a stale fenced write.
+        let mut connection = self.connection()?;
+        let tx = connection.transaction()?;
+        require_active_lease_in(&tx, namespace, key, fencing_token)?;
         if create {
-            return self.create(object).map_err(anyhow::Error::from);
+            let changed = tx.execute(
+                "INSERT OR IGNORE INTO embedded_objects(id,kind,payload) VALUES(?1,?2,?3)",
+                params![object.id, object.kind, object.encode_to_vec()],
+            )?;
+            if changed == 0 {
+                return Err(anyhow::Error::new(tonic::Status::already_exists(format!(
+                    "object {} already exists",
+                    object.id
+                ))));
+            }
+            replace_object_properties(&tx, &object)?;
+            tx.commit()?;
+            return Ok(object);
         }
-        self.put(object)
+        let previous: Option<Object> = decode_optional(
+            tx.query_row(
+                "SELECT payload FROM embedded_objects WHERE id=?1",
+                [&object.id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?,
+            "object",
+        )?;
+        tx.execute(
+            "INSERT INTO embedded_objects(id,kind,payload) VALUES(?1,?2,?3)
+             ON CONFLICT(id) DO UPDATE SET kind=excluded.kind,payload=excluded.payload",
+            params![object.id, object.kind, object.encode_to_vec()],
+        )?;
+        replace_object_properties(&tx, &object)?;
+        if let Some(previous) = previous {
+            record_changes(&tx, &previous, &object, &self.principal)?;
+        }
+        tx.commit()?;
+        Ok(object)
     }
 
     pub fn delete(&self, id: &str) -> Result<()> {
@@ -717,16 +753,6 @@ impl EmbeddedStore {
         Ok(lease)
     }
 
-    fn require_active_lease(
-        &self,
-        namespace: &str,
-        key: &str,
-        fencing_token: &str,
-    ) -> Result<Lease> {
-        let connection = self.connection()?;
-        require_active_lease_in(&connection, namespace, key, fencing_token)
-    }
-
     fn record_decision(
         &self,
         action: &str,
@@ -1113,6 +1139,63 @@ mod tests {
                 .fencing_token,
             lease.fencing_token
         );
+    }
+
+    #[test]
+    fn guarded_put_requires_active_lease_in_the_write_transaction() {
+        let store = EmbeddedStore::open_in_memory().unwrap();
+        let lease = store
+            .acquire_lease("tenkai/environment-execution", "prod", "owner-a", 1)
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let takeover = store
+            .takeover_lease(
+                "tenkai/environment-execution",
+                "prod",
+                "owner-b",
+                &lease.fencing_token,
+                lease.expires_at_ms,
+                60_000,
+            )
+            .unwrap();
+        let object = Object {
+            id: "tenkai:env:prod:execution:v2".into(),
+            kind: "tenkai.environment_execution".into(),
+            name: "prod".into(),
+            ..Default::default()
+        };
+        let stale = store
+            .guarded_put(
+                object.clone(),
+                "tenkai/environment-execution",
+                "prod",
+                &lease.fencing_token,
+                true,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(stale.contains("stale"), "{stale}");
+        store
+            .guarded_put(
+                object.clone(),
+                "tenkai/environment-execution",
+                "prod",
+                &takeover.fencing_token,
+                true,
+            )
+            .unwrap();
+        let mut updated = object;
+        updated.name = "held".into();
+        store
+            .guarded_put(
+                updated.clone(),
+                "tenkai/environment-execution",
+                "prod",
+                &takeover.fencing_token,
+                false,
+            )
+            .unwrap();
+        assert_eq!(store.get(&updated.id).unwrap(), Some(updated));
     }
 
     #[tokio::test]

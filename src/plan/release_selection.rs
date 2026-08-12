@@ -35,8 +35,7 @@ pub(super) async fn select(
     environment_name: &str,
     channel: ChannelHead<'_>,
 ) -> Result<SelectedRelease> {
-    enforce_capability_constraints(ctx, environment, environment_name).await?;
-    let (version, release_id) = resolve_constrained_release(
+    let (version, release_id) = resolve_subscription_selection(
         ctx,
         environment,
         environment_name,
@@ -51,6 +50,31 @@ pub(super) async fn select(
         release_id,
         kind,
     })
+}
+
+/// Recompute the constrained desired release identity for one subscription.
+///
+/// Admission must compare against this selection, not the raw channel head:
+/// version pins and model-runtime variant choice intentionally diverge from
+/// `current_version` / `current_release`.
+pub(crate) async fn resolve_subscription_selection(
+    ctx: &mut Ctx,
+    environment: &Object,
+    environment_name: &str,
+    product: &str,
+    channel_version: &str,
+    channel_release: &str,
+) -> Result<(String, String)> {
+    enforce_capability_constraints(ctx, environment, environment_name).await?;
+    resolve_constrained_release(
+        ctx,
+        environment,
+        environment_name,
+        product,
+        channel_version,
+        channel_release,
+    )
+    .await
 }
 
 async fn resolve_constrained_release(

@@ -13,6 +13,7 @@ mod lifecycle;
 mod release_selection;
 
 pub use release_selection::model_requirements_fit;
+pub(crate) use release_selection::resolve_subscription_selection;
 
 pub(crate) use crate::environment::update_runtime_deployments_object;
 pub use crate::environment::{
