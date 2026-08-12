@@ -1825,7 +1825,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 [[package]]
 name = "sekai-client"
 version = "0.1.2"
-source = "git+https://github.com/Sannrox/sekai-chisei?rev=1a3ab137e146c10e36b5ba3ece74c25f16db860a#1a3ab137e146c10e36b5ba3ece74c25f16db860a"
+source = "git+https://github.com/Sannrox/sekai-chisei?rev=67157d1fa242ac2f133c88243ef23b56f88042e6#67157d1fa242ac2f133c88243ef23b56f88042e6"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1846,7 +1846,7 @@ dependencies = [
 [[package]]
 name = "sekai-proto"
 version = "1.0.1"
-source = "git+https://github.com/Sannrox/sekai-chisei?rev=1a3ab137e146c10e36b5ba3ece74c25f16db860a#1a3ab137e146c10e36b5ba3ece74c25f16db860a"
+source = "git+https://github.com/Sannrox/sekai-chisei?rev=67157d1fa242ac2f133c88243ef23b56f88042e6#67157d1fa242ac2f133c88243ef23b56f88042e6"
 dependencies = [
  "prost",
  "prost-types",

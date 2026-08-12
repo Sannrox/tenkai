@@ -211,51 +211,9 @@ message ObjectChange {
   int64 timestamp = 7;
 }
 
-message ActionRequest {
-  string action = 1;
-  map<string, string> params = 2;
-  // Advisory display label only. Authorization uses the authenticated caller
-  // principal from request metadata, not this field.
-  string actor = 3;
-}
-
-message ActionResult {
-  string action = 1;
-  string message = 2;
-  bool dry_run = 3;              // set when the call was a dry run (no mutation)
-  repeated string planned_ops = 4; // ops that would run, in order
-  string decision = 5;          // resolved policy decision: allow|deny|require_approval
-  string approval_id = 6;       // set when the action was held for approval (Phase B)
-}
-
-message ActionParamDef {
-  string name = 1;
-  string type = 2;
-  bool required = 3;
-  repeated string enum_values = 4;
-}
-
-message ActionOp {
-  string op = 1;
-  string property = 2;
-  string value_from = 3;
-  string relation = 4;
-}
-
-message ActionTypeDef {
-  string name = 1;
-  string description = 2;
-  repeated ActionParamDef params = 3;
-  repeated ActionOp ops = 4;
-  string target_kind = 5;
-  int64 created = 6;
-  // Optional purpose required to invoke this action. Empty means no purpose gate.
-  string required_purpose = 7;
-}
-
-// A versioned description of an existing native query, retrieval, or action
-// surface. Object and action schemas reuse the canonical definitions above;
-// the catalog does not introduce a second schema language.
+// A versioned description of an existing native query or retrieval surface.
+// Object schemas reuse the canonical definitions above; the catalog does not
+// introduce a second schema language.
 message CapabilityEntry {
   string name = 1;
   string description = 2;
@@ -273,7 +231,7 @@ message CapabilityEntry {
   string approval_behavior = 14; // none | may_require | required
   repeated CapabilityLimit limits = 15;
   ObjectType object_type = 16;
-  ActionTypeDef action_type = 17;
+  reserved 17; // removed pre-1.0 legacy graph ActionTypeDef projection
   repeated string evidence_requirements = 18;
   // Product tier for discovery filters (#386 / research #383): core | advanced | experimental.
   // Empty means untagged (treated as advanced for filtering).
@@ -698,17 +656,7 @@ message VerifyAttestationResponse {
   bool decision_linked = 6;    // linked audit decision binds this attestation back
   string error = 7;
 }
-// Compatibility authoring path for clients that still invoke the legacy graph
-// mutation DSL through ExecuteAction. This deliberately preserves the
-// ActionTypeDef registry and is not a governed ActionType admission operation.
-message CreateActionTypeRequest { ActionTypeDef action_type = 1; }
-message CreateActionTypeResponse { ActionTypeDef action_type = 1; }
-message ListActionTypesRequest {}
-message ListActionTypesResponse { repeated ActionTypeDef action_types = 1; }
-message DeleteActionTypeRequest { string name = 1; }
-message DeleteActionTypeResponse {}
-
-// Governed Action type registry (#396 / research #395). Distinct from graph ActionTypeDef.
+// Governed Action type registry (#396 / research #395).
 message GovernedActionType {
   string namespace = 1;
   string type_id = 2;
@@ -743,7 +691,7 @@ message SetGovernedActionTypeEnabledRequest {
 }
 message SetGovernedActionTypeEnabledResponse { GovernedActionType type = 1; }
 
-// Governed ActionInstance admission (#397 / research #395). Not graph ExecuteAction.
+// Governed ActionInstance admission (#397 / research #395).
 message ActionInstance {
   string instance_id = 1;
   string namespace = 2;
@@ -932,12 +880,6 @@ message ReportActionClaimEventRequest {
 message ReportActionClaimEventResponse { bool replay = 1; }
 
 
-message ExecuteActionRequest {
-  ActionRequest request = 1;
-  bool dry_run = 2; // when true, plan and policy-check without mutating
-}
-message ExecuteActionResponse { ActionResult result = 1; }
-
 // --- Governed action policy (Plan 9) ---
 message ActionPolicy {
   string scope = 1;                          // e.g. "agent:codex-app" or a namespace
@@ -954,38 +896,6 @@ message GetActionPolicyRequest { string scope = 1; }
 message GetActionPolicyResponse { ActionPolicy policy = 1; }
 message ListActionPoliciesRequest {}
 message ListActionPoliciesResponse { repeated ActionPolicy policies = 1; }
-
-// --- Governed action approvals (Plan 9, Phase B) ---
-message ActionApproval {
-  string id = 1;
-  string status = 2;                 // pending | approved | denied
-  string actor = 3;                  // proposing principal
-  string action = 4;
-  map<string, string> params = 5;    // redacted for display
-  string work_unit = 6;
-  string policy_scope = 7;
-  string risk_class = 8;
-  string target_id = 9;
-  int64 created = 10;
-  int64 updated = 11;
-  string decided_by = 12;
-  string outcome = 13;
-}
-
-message ApproveActionRequest { string approval_id = 1; }
-message ApproveActionResponse {
-  ActionResult result = 1;
-  ActionApproval approval = 2;
-}
-message DenyActionRequest {
-  string approval_id = 1;
-  string reason = 2;
-}
-message DenyActionResponse { ActionApproval approval = 1; }
-message ListPendingApprovalsRequest {
-  string status = 1; // "" or "pending" for pending only, "all" for every status, or a specific status
-}
-message ListPendingApprovalsResponse { repeated ActionApproval approvals = 1; }
 
 message GetLineageRequest { string object_id = 1; int32 max_nodes = 2; }
 message GetLineageResponse { LineageResult result = 1; }
@@ -1241,6 +1151,35 @@ message EvidenceSubmissionResult {
 
 message RegisterEvidenceSchemaRequest { EvidenceSchemaDefinition definition = 1; }
 message RegisterEvidenceSchemaResponse {}
+// Built-in reference evidence adapter discovery (not tenant connector config).
+message EvidenceAdapterProfile {
+  string adapter_id = 1;
+  string family = 2;
+  string evidence_type = 3;
+  string schema_id = 4;
+  string schema_version = 5;
+  string source_type = 6;
+  string signal = 7;
+  string delivery = 8;
+  bool requires_expiry = 9;
+  string reference_example = 10;
+  string description = 11;
+  bool schema_registered = 12;
+}
+message EvidenceAdapterFamily {
+  string family = 1;
+  string display_name = 2;
+  string description = 3;
+  repeated string adapter_ids = 4;
+}
+message ListEvidenceAdaptersRequest {
+  // When true, only adapters whose schema_id+version are registered here.
+  bool registered_only = 1;
+}
+message ListEvidenceAdaptersResponse {
+  repeated EvidenceAdapterProfile adapters = 1;
+  repeated EvidenceAdapterFamily families = 2;
+}
 message SubmitEvidenceRequest { EvidenceEnvelope envelope = 1; }
 message SubmitEvidenceResponse { EvidenceSubmissionResult result = 1; }
 message GetEvidenceSubmissionRequest { string submission_id = 1; }
@@ -1418,17 +1357,12 @@ service SekaiService {
   rpc ListAttestations(ListAttestationsRequest) returns (ListAttestationsResponse);
   rpc VerifyAttestation(VerifyAttestationRequest) returns (VerifyAttestationResponse);
 
-  // Compatibility RPC for legacy graph ExecuteAction clients. Governed action
-  // types use PutGovernedActionType and remain a distinct registry.
-  rpc CreateActionType(CreateActionTypeRequest) returns (CreateActionTypeResponse);
-  rpc ListActionTypes(ListActionTypesRequest) returns (ListActionTypesResponse);
-  rpc DeleteActionType(DeleteActionTypeRequest) returns (DeleteActionTypeResponse);
   // Governed Action type registry (#396).
   rpc PutGovernedActionType(PutGovernedActionTypeRequest) returns (PutGovernedActionTypeResponse);
   rpc GetGovernedActionType(GetGovernedActionTypeRequest) returns (GetGovernedActionTypeResponse);
   rpc ListGovernedActionTypes(ListGovernedActionTypesRequest) returns (ListGovernedActionTypesResponse);
   rpc SetGovernedActionTypeEnabled(SetGovernedActionTypeEnabledRequest) returns (SetGovernedActionTypeEnabledResponse);
-  // Governed ActionInstance admission (#397). Not ExecuteAction.
+  // Governed ActionInstance admission (#397).
   rpc SubmitActionInstance(SubmitActionInstanceRequest) returns (SubmitActionInstanceResponse);
   rpc GetActionInstance(GetActionInstanceRequest) returns (GetActionInstanceResponse);
   rpc ListActionInstances(ListActionInstancesRequest) returns (ListActionInstancesResponse);
@@ -1441,13 +1375,9 @@ service SekaiService {
   rpc HeartbeatActionClaim(HeartbeatActionClaimRequest) returns (HeartbeatActionClaimResponse);
   rpc AckActionWork(AckActionWorkRequest) returns (AckActionWorkResponse);
   rpc ReportActionClaimEvent(ReportActionClaimEventRequest) returns (ReportActionClaimEventResponse);
-  rpc ExecuteAction(ExecuteActionRequest) returns (ExecuteActionResponse);
   rpc SetActionPolicy(SetActionPolicyRequest) returns (SetActionPolicyResponse);
   rpc GetActionPolicy(GetActionPolicyRequest) returns (GetActionPolicyResponse);
   rpc ListActionPolicies(ListActionPoliciesRequest) returns (ListActionPoliciesResponse);
-  rpc ApproveAction(ApproveActionRequest) returns (ApproveActionResponse);
-  rpc DenyAction(DenyActionRequest) returns (DenyActionResponse);
-  rpc ListPendingApprovals(ListPendingApprovalsRequest) returns (ListPendingApprovalsResponse);
   rpc GetLineage(GetLineageRequest) returns (GetLineageResponse);
 
   rpc CreateContentionScope(CreateContentionScopeRequest) returns (CreateContentionScopeResponse);
@@ -1473,6 +1403,7 @@ service SekaiService {
   rpc ListCredentials(ListCredentialsRequest) returns (ListCredentialsResponse);
   rpc GetProvenanceReport(GetProvenanceReportRequest) returns (GetProvenanceReportResponse);
   rpc RegisterEvidenceSchema(RegisterEvidenceSchemaRequest) returns (RegisterEvidenceSchemaResponse);
+  rpc ListEvidenceAdapters(ListEvidenceAdaptersRequest) returns (ListEvidenceAdaptersResponse);
   rpc SubmitEvidence(SubmitEvidenceRequest) returns (SubmitEvidenceResponse);
   rpc GetEvidenceSubmission(GetEvidenceSubmissionRequest) returns (GetEvidenceSubmissionResponse);
   rpc ListEvidenceSubmissions(ListEvidenceSubmissionsRequest) returns (ListEvidenceSubmissionsResponse);

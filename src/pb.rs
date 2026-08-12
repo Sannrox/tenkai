@@ -1,9 +1,10 @@
 //! Generated gRPC bindings for the vendored sekai-chisei protos.
 //!
 //! The protos in `proto/vendor/` are copied verbatim from the sekai-chisei
-//! repository at commit `11d1787b331de8af3688aaba2655d107ef9a4ef1`; tenkai
-//! is a pure client of that contract. The vendored Sekai proto includes the
-//! authenticated graph-action compatibility RPC retained for this client.
+//! repository at commit `67157d1fa242ac2f133c88243ef23b56f88042e6`; tenkai
+//! is a pure client of that contract. Legacy graph ActionTypeDef RPCs were
+//! removed on that revision; remote Tenkai uses the governed Action surface,
+//! while embedded hosts keep Tenkai-local graph-action definitions.
 
 pub mod sekai {
     tonic::include_proto!("sekai");
@@ -11,6 +12,12 @@ pub mod sekai {
 
 pub mod chisei {
     tonic::include_proto!("chisei");
+}
+
+/// Tenkai-owned embedded graph-action definitions (not part of the Sekai wire
+/// contract after sekai-chisei removed the legacy Actions DSL).
+pub mod graph_action {
+    tonic::include_proto!("tenkai.graph_action.v1");
 }
 
 /// Version 1 of the server/environment-runtime pull protocol.

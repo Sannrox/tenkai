@@ -76,9 +76,10 @@
 //!   Its private lease-lifecycle module hides acquire/get/refresh/release/
 //!   takeover fencing, request-id binding, and not-found mapping behind the
 //!   shared `Ctx` lease interface.
-//!   Its private action-lifecycle module hides action-type registration,
-//!   execute/preview, deferred deny, conflict recovery, and decision listing
-//!   behind the shared `Ctx` governed-action interface.
+//!   Its private action-lifecycle module hides embedded graph-action
+//!   registration/execution and remote governed Action Type / ActionInstance
+//!   admission, conflict recovery, and decision listing behind the shared
+//!   `Ctx` action interface.
 //! - [`provider_event`] hides durable optional-provider event admission,
 //!   claiming, fencing, sequencing, retry, poison isolation, and
 //!   acknowledgement behind one delivery interface; authoritative store

@@ -1,11 +1,14 @@
 # ADR 0012: Legacy graph-action compatibility boundary
 
-- Status: Accepted
+- Status: Superseded by [ADR 0015](0015-governed-action-remote-migration.md)
 - Date: 2026-08-04
 - Issue: [#208](https://github.com/Sannrox/tenkai/issues/208)
 - Owner: Tenkai maintainers
 - Related: [ADR 0001](0001-standalone-core-and-service-evolution.md)
 - Dependency: [Sekai-Chisei #522](https://github.com/Sannrox/sekai-chisei/pull/522)
+- Superseded-by: [ADR 0015](0015-governed-action-remote-migration.md) after
+  [Sekai-Chisei #587](https://github.com/Sannrox/sekai-chisei/pull/587) removed
+  the legacy graph Actions DSL
 
 ## Context
 

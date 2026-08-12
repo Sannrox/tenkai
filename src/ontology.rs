@@ -3,7 +3,8 @@
 use anyhow::{Result, bail};
 
 use crate::client::Ctx;
-use crate::pb::sekai::{ActionOp, ActionParamDef, ActionTypeDef, ObjectType, PropertyDef};
+use crate::pb::graph_action::{ActionOp, ActionParamDef, ActionTypeDef};
+use crate::pb::sekai::{ObjectType, PropertyDef};
 
 pub const NS: &str = "tenkai";
 
@@ -144,6 +145,82 @@ fn configure_maintenance_action() -> ActionTypeDef {
         created: crate::now_millis(),
         required_purpose: String::new(),
     }
+}
+
+/// Built-in graph-action definitions owned by Tenkai.
+///
+/// Remote hosts still need these local mutation plans after Sekai admits a
+/// governed ActionInstance; embedded hosts persist the same definitions.
+pub fn known_actions() -> Vec<ActionTypeDef> {
+    vec![
+        ActionTypeDef {
+            name: ACTION_SUBSCRIBE.into(),
+            description: "Authorize and create an environment channel subscription".into(),
+            params: vec![string_param("channel_id")],
+            ops: vec![ActionOp {
+                op: "create_link".into(),
+                property: "channel_id".into(),
+                value_from: String::new(),
+                relation: REL_SUBSCRIBES.into(),
+            }],
+            target_kind: KIND_ENVIRONMENT.into(),
+            created: crate::now_millis(),
+            required_purpose: String::new(),
+        },
+        configure_maintenance_action(),
+        ActionTypeDef {
+            name: ACTION_EMERGENCY_OVERRIDE.into(),
+            description: "Authorize and audit an emergency maintenance-window override".into(),
+            params: vec![string_param("reason"), string_param("correlation")],
+            ops: vec![
+                ActionOp {
+                    op: "set_property".into(),
+                    property: "last_emergency_override_reason".into(),
+                    value_from: "reason".into(),
+                    relation: String::new(),
+                },
+                ActionOp {
+                    op: "set_property".into(),
+                    property: "last_emergency_override_correlation".into(),
+                    value_from: "correlation".into(),
+                    relation: String::new(),
+                },
+            ],
+            target_kind: KIND_PLAN.into(),
+            created: crate::now_millis(),
+            required_purpose: String::new(),
+        },
+        ActionTypeDef {
+            name: ACTION_REPLACE_SUBSCRIPTION.into(),
+            description: "Authorize and atomically replace an environment channel subscription"
+                .into(),
+            params: vec![string_param("channel_id"), string_param("old_link_id")],
+            ops: vec![
+                ActionOp {
+                    op: "create_link".into(),
+                    property: "channel_id".into(),
+                    value_from: String::new(),
+                    relation: REL_SUBSCRIBES.into(),
+                },
+                ActionOp {
+                    op: "delete_link".into(),
+                    property: String::new(),
+                    value_from: "old_link_id".into(),
+                    relation: String::new(),
+                },
+            ],
+            target_kind: KIND_ENVIRONMENT.into(),
+            created: crate::now_millis(),
+            required_purpose: String::new(),
+        },
+    ]
+}
+
+/// Look up one built-in Tenkai graph-action definition by name.
+pub fn known_action(name: &str) -> Option<ActionTypeDef> {
+    known_actions()
+        .into_iter()
+        .find(|action| action.name == name)
 }
 
 /// Register the tenkai schema types; existing types are left untouched.
@@ -463,69 +540,7 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
             Err(status) => return Err(status.into()),
         }
     }
-    let actions = [
-        ActionTypeDef {
-            name: ACTION_SUBSCRIBE.into(),
-            description: "Authorize and create an environment channel subscription".into(),
-            params: vec![string_param("channel_id")],
-            ops: vec![ActionOp {
-                op: "create_link".into(),
-                property: "channel_id".into(),
-                value_from: String::new(),
-                relation: REL_SUBSCRIBES.into(),
-            }],
-            target_kind: KIND_ENVIRONMENT.into(),
-            created: crate::now_millis(),
-            required_purpose: String::new(),
-        },
-        configure_maintenance_action(),
-        ActionTypeDef {
-            name: ACTION_EMERGENCY_OVERRIDE.into(),
-            description: "Authorize and audit an emergency maintenance-window override".into(),
-            params: vec![string_param("reason"), string_param("correlation")],
-            ops: vec![
-                ActionOp {
-                    op: "set_property".into(),
-                    property: "last_emergency_override_reason".into(),
-                    value_from: "reason".into(),
-                    relation: String::new(),
-                },
-                ActionOp {
-                    op: "set_property".into(),
-                    property: "last_emergency_override_correlation".into(),
-                    value_from: "correlation".into(),
-                    relation: String::new(),
-                },
-            ],
-            target_kind: KIND_PLAN.into(),
-            created: crate::now_millis(),
-            required_purpose: String::new(),
-        },
-        ActionTypeDef {
-            name: ACTION_REPLACE_SUBSCRIPTION.into(),
-            description: "Authorize and atomically replace an environment channel subscription"
-                .into(),
-            params: vec![string_param("channel_id"), string_param("old_link_id")],
-            ops: vec![
-                ActionOp {
-                    op: "create_link".into(),
-                    property: "channel_id".into(),
-                    value_from: String::new(),
-                    relation: REL_SUBSCRIBES.into(),
-                },
-                ActionOp {
-                    op: "delete_link".into(),
-                    property: String::new(),
-                    value_from: "old_link_id".into(),
-                    relation: String::new(),
-                },
-            ],
-            target_kind: KIND_ENVIRONMENT.into(),
-            created: crate::now_millis(),
-            required_purpose: String::new(),
-        },
-    ];
-    for action in actions {
+    for action in known_actions() {
         let name = action.name.clone();
         match ctx.register_action(action).await {
             Ok(()) => registered.push(name),

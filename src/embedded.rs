@@ -7,9 +7,8 @@ use anyhow::{Context, Result, bail};
 use prost::Message;
 use rusqlite::{Connection, DatabaseName, OptionalExtension, params};
 
-use crate::pb::sekai::{
-    ActionResult, ActionTypeDef, Decision, Lease, Link, Object, ObjectChange, ObjectType,
-};
+use crate::pb::graph_action::{ActionResult, ActionTypeDef};
+use crate::pb::sekai::{Decision, Lease, Link, Object, ObjectChange, ObjectType};
 use crate::storage::{ProviderEventRecord, enqueue_provider_event_in};
 
 const SCHEMA_VERSION: u32 = 4;

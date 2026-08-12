@@ -14,12 +14,13 @@ use tokio::sync::OnceCell;
 use tonic::Status;
 
 use crate::pb::chisei::{GetEvaluationGateEvidenceRequest, GetEvaluationGateEvidenceResponse};
+use crate::pb::graph_action::{ActionResult, ActionTypeDef};
 use crate::pb::sekai::{
-    ActionResult, ActionTypeDef, CreateObjectRequest, CreateObjectResponse,
-    CreateSchemaTypeRequest, CreateSchemaTypeResponse, Decision, FindByPropertyRequest, Lease,
-    LeasePrecondition, Link, ListFilter, ListObjectChangesRequest, ListObjectChangesResponse,
-    ListObjectsRequest, ListObjectsResponse, ListSchemaTypesRequest, ListSchemaTypesResponse,
-    Object, ObjectChange, ObjectType, UpdateObjectRequest, UpdateObjectResponse,
+    CreateObjectRequest, CreateObjectResponse, CreateSchemaTypeRequest, CreateSchemaTypeResponse,
+    Decision, FindByPropertyRequest, Lease, LeasePrecondition, Link, ListFilter,
+    ListObjectChangesRequest, ListObjectChangesResponse, ListObjectsRequest, ListObjectsResponse,
+    ListSchemaTypesRequest, ListSchemaTypesResponse, Object, ObjectChange, ObjectType,
+    UpdateObjectRequest, UpdateObjectResponse,
 };
 use sekai_client::{
     CallOptions, ClientConfig, CoreLoopClient, GrpcTransport, RetryPolicy, SdkError, SdkErrorCode,
@@ -83,35 +84,44 @@ pub struct Ctx {
 
 #[derive(Clone)]
 enum Backend {
-    Remote { client: Arc<RemoteClient> },
+    Remote {
+        client: Arc<RemoteClient>,
+        action_defs: action_lifecycle::RemoteActionDefs,
+    },
     Embedded(Arc<crate::embedded::EmbeddedStore>),
 }
 
 impl Backend {
     fn object_lifecycle(&self) -> object_lifecycle::ObjectLifecycle<'_> {
         match self {
-            Self::Remote { client } => object_lifecycle::ObjectLifecycle::Remote(client),
+            Self::Remote { client, .. } => object_lifecycle::ObjectLifecycle::Remote(client),
             Self::Embedded(store) => object_lifecycle::ObjectLifecycle::Embedded(store),
         }
     }
 
     fn relation_lifecycle(&self) -> relation_lifecycle::RelationLifecycle<'_> {
         match self {
-            Self::Remote { client } => relation_lifecycle::RelationLifecycle::Remote(client),
+            Self::Remote { client, .. } => relation_lifecycle::RelationLifecycle::Remote(client),
             Self::Embedded(store) => relation_lifecycle::RelationLifecycle::Embedded(store),
         }
     }
 
     fn lease_lifecycle(&self) -> lease_lifecycle::LeaseLifecycle<'_> {
         match self {
-            Self::Remote { client } => lease_lifecycle::LeaseLifecycle::Remote(client),
+            Self::Remote { client, .. } => lease_lifecycle::LeaseLifecycle::Remote(client),
             Self::Embedded(store) => lease_lifecycle::LeaseLifecycle::Embedded(store),
         }
     }
 
     fn action_lifecycle(&self) -> action_lifecycle::ActionLifecycle<'_> {
         match self {
-            Self::Remote { client } => action_lifecycle::ActionLifecycle::Remote(client),
+            Self::Remote {
+                client,
+                action_defs,
+            } => action_lifecycle::ActionLifecycle::Remote {
+                client,
+                action_defs,
+            },
             Self::Embedded(store) => action_lifecycle::ActionLifecycle::Embedded(store),
         }
     }
@@ -191,6 +201,7 @@ pub async fn connect() -> Result<Ctx> {
     Ok(Ctx {
         backend: Backend::Remote {
             client: Arc::new(client),
+            action_defs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         },
         canary_schema_preflight: Arc::new(OnceCell::new()),
         outcome_export_enabled: false,
@@ -268,7 +279,7 @@ impl Ctx {
 
     fn remote(&self) -> Result<&RemoteClient> {
         match &self.backend {
-            Backend::Remote { client } => Ok(client.as_ref()),
+            Backend::Remote { client, .. } => Ok(client.as_ref()),
             Backend::Embedded(_) => {
                 anyhow::bail!("operation requires a configured remote provider")
             }
@@ -795,7 +806,7 @@ impl Ctx {
                 .context("governed emergency override has no authenticated actor evidence"),
             "require_approval" => {
                 anyhow::bail!(
-                    "emergency maintenance override requires approval {}; the pinned Sekai API cannot safely resume approved actions, so this apply remains blocked",
+                    "emergency maintenance override requires approval {}; governed ActionInstance admission denies require_approval and Tenkai does not resume deferred overrides",
                     result.approval_id,
                 )
             }
@@ -848,18 +859,20 @@ mod tests {
         Backend, Ctx, action_actor_from_changes, canonical_create_request,
         canonical_update_request, lease_precondition, token_transport_is_safe,
     };
+    use crate::pb::graph_action::{ActionOp, ActionTypeDef};
     use crate::pb::sekai::{
-        AcquireLeaseRequest, AcquireLeaseResponse, ActionOp, ActionRequest, ActionResult,
-        ActionTypeDef, CreateActionTypeRequest, CreateActionTypeResponse, CreateLinkRequest,
+        AcquireLeaseRequest, AcquireLeaseResponse, ActionInstance, CreateLinkRequest,
         CreateLinkResponse, CreateObjectRequest, CreateObjectResponse, Decision, DeleteLinkRequest,
-        DeleteLinkResponse, DeleteObjectRequest, DeleteObjectResponse, DenyActionRequest,
-        DenyActionResponse, ExecuteActionRequest, ExecuteActionResponse, GetLeaseRequest,
+        DeleteLinkResponse, DeleteObjectRequest, DeleteObjectResponse,
+        GetGovernedActionTypeRequest, GetGovernedActionTypeResponse, GetLeaseRequest,
         GetLeaseResponse, GetLinkedObjectsRequest, GetLinkedObjectsResponse, GetLinksRequest,
-        GetLinksResponse, GetObjectRequest, GetObjectResponse, Lease, Link, ListActionTypesRequest,
-        ListActionTypesResponse, ListDecisionsRequest, ListDecisionsResponse, Object, ObjectChange,
+        GetLinksResponse, GetObjectRequest, GetObjectResponse, GovernedActionType, Lease, Link,
+        ListActionPoliciesRequest, ListActionPoliciesResponse, ListDecisionsRequest,
+        ListDecisionsResponse, Object, ObjectChange, PutGovernedActionTypeRequest,
+        PutGovernedActionTypeResponse, RecordDecisionRequest, RecordDecisionResponse,
         RefreshLeaseRequest, RefreshLeaseResponse, ReleaseLeaseRequest, ReleaseLeaseResponse,
-        TakeoverExpiredLeaseRequest, TakeoverExpiredLeaseResponse, UpdateObjectRequest,
-        UpdateObjectResponse,
+        SubmitActionInstanceRequest, SubmitActionInstanceResponse, TakeoverExpiredLeaseRequest,
+        TakeoverExpiredLeaseResponse, UpdateObjectRequest, UpdateObjectResponse,
     };
     use sekai_client::{ClientConfig, RetryPolicy, SdkErrorCode};
     use std::collections::BTreeMap;
@@ -880,13 +893,12 @@ mod tests {
     struct MockSekaiState {
         creates: Arc<Mutex<Vec<CreateObjectRequest>>>,
         updates: Arc<Mutex<Vec<UpdateObjectRequest>>>,
-        actions: Arc<Mutex<Vec<ActionTypeDef>>>,
+        governed_actions: Arc<Mutex<Vec<GovernedActionType>>>,
         metadata: Arc<Mutex<Vec<CapturedMetadata>>>,
         objects: Arc<Mutex<BTreeMap<String, Object>>>,
         links: Arc<Mutex<BTreeMap<String, Link>>>,
         leases: Arc<Mutex<BTreeMap<(String, String), Lease>>>,
         decisions: Arc<Mutex<Vec<Decision>>>,
-        denials: Arc<Mutex<Vec<(String, String)>>>,
         create_failures: Arc<AtomicUsize>,
         create_internal_failures: Arc<AtomicUsize>,
         update_failures: Arc<AtomicUsize>,
@@ -897,13 +909,12 @@ mod tests {
             Self {
                 creates: Arc::new(Mutex::new(Vec::new())),
                 updates: Arc::new(Mutex::new(Vec::new())),
-                actions: Arc::new(Mutex::new(Vec::new())),
+                governed_actions: Arc::new(Mutex::new(Vec::new())),
                 metadata: Arc::new(Mutex::new(Vec::new())),
                 objects: Arc::new(Mutex::new(BTreeMap::new())),
                 links: Arc::new(Mutex::new(BTreeMap::new())),
                 leases: Arc::new(Mutex::new(BTreeMap::new())),
                 decisions: Arc::new(Mutex::new(Vec::new())),
-                denials: Arc::new(Mutex::new(Vec::new())),
                 create_failures: Arc::new(AtomicUsize::new(0)),
                 create_internal_failures: Arc::new(AtomicUsize::new(0)),
                 update_failures: Arc::new(AtomicUsize::new(0)),
@@ -1342,15 +1353,15 @@ mod tests {
         }
     }
 
-    struct CreateActionTypeRpc(MockSekaiState);
+    struct PutGovernedActionTypeRpc(MockSekaiState);
 
-    impl tonic::server::UnaryService<CreateActionTypeRequest> for CreateActionTypeRpc {
-        type Response = CreateActionTypeResponse;
+    impl tonic::server::UnaryService<PutGovernedActionTypeRequest> for PutGovernedActionTypeRpc {
+        type Response = PutGovernedActionTypeResponse;
         type Future = Pin<
             Box<dyn Future<Output = Result<tonic::Response<Self::Response>, tonic::Status>> + Send>,
         >;
 
-        fn call(&mut self, request: tonic::Request<CreateActionTypeRequest>) -> Self::Future {
+        fn call(&mut self, request: tonic::Request<PutGovernedActionTypeRequest>) -> Self::Future {
             let state = self.0.clone();
             Box::pin(async move {
                 let principal = request
@@ -1368,125 +1379,146 @@ mod tests {
                     .lock()
                     .unwrap()
                     .push((principal, authorization));
-                let action = request.into_inner().action_type.unwrap_or_default();
-                state.actions.lock().unwrap().push(action.clone());
-                Ok(tonic::Response::new(CreateActionTypeResponse {
-                    action_type: Some(action),
+                let mut action = request.into_inner().r#type.unwrap_or_default();
+                if action.created_at_ms == 0 {
+                    action.created_at_ms = mock_now_ms();
+                }
+                action.enabled = true;
+                state.governed_actions.lock().unwrap().push(action.clone());
+                Ok(tonic::Response::new(PutGovernedActionTypeResponse {
+                    r#type: Some(action),
                 }))
             })
         }
     }
 
-    struct ListActionTypesRpc(MockSekaiState);
+    struct GetGovernedActionTypeRpc(MockSekaiState);
 
-    impl tonic::server::UnaryService<ListActionTypesRequest> for ListActionTypesRpc {
-        type Response = ListActionTypesResponse;
+    impl tonic::server::UnaryService<GetGovernedActionTypeRequest> for GetGovernedActionTypeRpc {
+        type Response = GetGovernedActionTypeResponse;
         type Future = Pin<
             Box<dyn Future<Output = Result<tonic::Response<Self::Response>, tonic::Status>> + Send>,
         >;
 
-        fn call(&mut self, request: tonic::Request<ListActionTypesRequest>) -> Self::Future {
+        fn call(&mut self, request: tonic::Request<GetGovernedActionTypeRequest>) -> Self::Future {
             let state = self.0.clone();
+            Box::pin(async move {
+                let request = request.into_inner();
+                let action = state
+                    .governed_actions
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|candidate| {
+                        candidate.namespace == request.namespace
+                            && candidate.type_id == request.type_id
+                            && candidate.version == request.version
+                    })
+                    .cloned()
+                    .ok_or_else(|| tonic::Status::not_found("governed action type not found"))?;
+                Ok(tonic::Response::new(GetGovernedActionTypeResponse {
+                    r#type: Some(action),
+                }))
+            })
+        }
+    }
+
+    struct ListActionPoliciesRpc;
+
+    impl tonic::server::UnaryService<ListActionPoliciesRequest> for ListActionPoliciesRpc {
+        type Response = ListActionPoliciesResponse;
+        type Future = Pin<
+            Box<dyn Future<Output = Result<tonic::Response<Self::Response>, tonic::Status>> + Send>,
+        >;
+
+        fn call(&mut self, request: tonic::Request<ListActionPoliciesRequest>) -> Self::Future {
             Box::pin(async move {
                 let _ = request;
-                let action_types = state.actions.lock().unwrap().clone();
-                Ok(tonic::Response::new(ListActionTypesResponse {
-                    action_types,
+                Ok(tonic::Response::new(ListActionPoliciesResponse {
+                    policies: Vec::new(),
                 }))
             })
         }
     }
 
-    struct ExecuteActionRpc(MockSekaiState);
+    struct SubmitActionInstanceRpc(MockSekaiState);
 
-    impl tonic::server::UnaryService<ExecuteActionRequest> for ExecuteActionRpc {
-        type Response = ExecuteActionResponse;
+    impl tonic::server::UnaryService<SubmitActionInstanceRequest> for SubmitActionInstanceRpc {
+        type Response = SubmitActionInstanceResponse;
         type Future = Pin<
             Box<dyn Future<Output = Result<tonic::Response<Self::Response>, tonic::Status>> + Send>,
         >;
 
-        fn call(&mut self, request: tonic::Request<ExecuteActionRequest>) -> Self::Future {
+        fn call(&mut self, request: tonic::Request<SubmitActionInstanceRequest>) -> Self::Future {
             let state = self.0.clone();
             Box::pin(async move {
                 let request = request.into_inner();
-                let ActionRequest { action, params, .. } = request.request.unwrap_or_default();
-                let registered = state
-                    .actions
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .find(|candidate| candidate.name == action)
-                    .cloned()
-                    .ok_or_else(|| tonic::Status::not_found("action type not found"))?;
-                let target_id = params
-                    .get("id")
-                    .cloned()
-                    .ok_or_else(|| tonic::Status::invalid_argument("missing id"))?;
-                let planned_ops = registered
-                    .ops
-                    .iter()
-                    .map(|op| op.op.clone())
-                    .collect::<Vec<_>>();
-                if !request.dry_run {
-                    let mut objects = state.objects.lock().unwrap();
-                    let target = objects
-                        .get_mut(&target_id)
-                        .ok_or_else(|| tonic::Status::not_found("target not found"))?;
-                    for op in &registered.ops {
-                        if op.op == "set_property" {
-                            let value = params.get(&op.value_from).cloned().ok_or_else(|| {
-                                tonic::Status::invalid_argument(format!(
-                                    "missing {}",
-                                    op.value_from
-                                ))
-                            })?;
-                            target.properties.insert(op.property.clone(), value);
-                        }
-                    }
-                    target.updated = mock_now_ms();
-                    state.decisions.lock().unwrap().push(Decision {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        timestamp: mock_now_ms(),
-                        actor: "remote-mock".into(),
-                        action: action.clone(),
-                        reason: "allowed".into(),
-                        evidence: params,
-                        target_id,
-                        outcome: "allow".into(),
-                    });
+                let exists = state.governed_actions.lock().unwrap().iter().any(|action| {
+                    action.namespace == request.namespace
+                        && action.type_id == request.type_id
+                        && action.version == request.version
+                        && action.enabled
+                });
+                if !exists {
+                    return Err(tonic::Status::failed_precondition(
+                        "governed action type missing or disabled",
+                    ));
                 }
-                Ok(tonic::Response::new(ExecuteActionResponse {
-                    result: Some(ActionResult {
-                        action,
-                        message: "allowed by remote mock".into(),
-                        dry_run: request.dry_run,
-                        planned_ops,
-                        decision: "allow".into(),
-                        approval_id: String::new(),
+                let now = mock_now_ms();
+                Ok(tonic::Response::new(SubmitActionInstanceResponse {
+                    instance: Some(ActionInstance {
+                        instance_id: uuid::Uuid::new_v4().to_string(),
+                        namespace: request.namespace,
+                        type_id: request.type_id,
+                        version: request.version,
+                        principal: "remote-mock".into(),
+                        parameters_json: request.parameters_json,
+                        request_digest: "sha256:mock".into(),
+                        idempotency_key: request.idempotency_key,
+                        operation_id: uuid::Uuid::new_v4().to_string(),
+                        status: "admitted".into(),
+                        deny_reason: String::new(),
+                        evidence_submission_ids: request.evidence_submission_ids,
+                        policy_decision: "allow".into(),
+                        budget_decision: "not_configured".into(),
+                        created_at_ms: now,
+                        decided_at_ms: now,
                     }),
+                    replay: false,
                 }))
             })
         }
     }
 
-    struct DenyActionRpc(MockSekaiState);
+    struct RecordDecisionRpc(MockSekaiState);
 
-    impl tonic::server::UnaryService<DenyActionRequest> for DenyActionRpc {
-        type Response = DenyActionResponse;
+    impl tonic::server::UnaryService<RecordDecisionRequest> for RecordDecisionRpc {
+        type Response = RecordDecisionResponse;
         type Future = Pin<
             Box<dyn Future<Output = Result<tonic::Response<Self::Response>, tonic::Status>> + Send>,
         >;
 
-        fn call(&mut self, request: tonic::Request<DenyActionRequest>) -> Self::Future {
+        fn call(&mut self, request: tonic::Request<RecordDecisionRequest>) -> Self::Future {
             let state = self.0.clone();
             Box::pin(async move {
-                let request = request.into_inner();
-                state
-                    .denials
-                    .lock()
-                    .unwrap()
-                    .push((request.approval_id, request.reason));
-                Ok(tonic::Response::new(DenyActionResponse { approval: None }))
+                let principal = request
+                    .metadata()
+                    .get("x-principal")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("remote-mock")
+                    .to_owned();
+                let mut decision = request
+                    .into_inner()
+                    .decision
+                    .ok_or_else(|| tonic::Status::invalid_argument("decision required"))?;
+                decision.actor = principal;
+                if decision.timestamp <= 0 {
+                    decision.timestamp = mock_now_ms();
+                }
+                state.decisions.lock().unwrap().push(decision.clone());
+                Ok(tonic::Response::new(RecordDecisionResponse {
+                    decision: Some(decision),
+                }))
             })
         }
     }
@@ -1588,21 +1620,25 @@ mod tests {
                         let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
                         grpc.unary(TakeoverExpiredLeaseRpc(state), request).await
                     }
-                    "/sekai.SekaiService/CreateActionType" => {
+                    "/sekai.SekaiService/PutGovernedActionType" => {
                         let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
-                        grpc.unary(CreateActionTypeRpc(state), request).await
+                        grpc.unary(PutGovernedActionTypeRpc(state), request).await
                     }
-                    "/sekai.SekaiService/ListActionTypes" => {
+                    "/sekai.SekaiService/GetGovernedActionType" => {
                         let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
-                        grpc.unary(ListActionTypesRpc(state), request).await
+                        grpc.unary(GetGovernedActionTypeRpc(state), request).await
                     }
-                    "/sekai.SekaiService/ExecuteAction" => {
+                    "/sekai.SekaiService/ListActionPolicies" => {
                         let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
-                        grpc.unary(ExecuteActionRpc(state), request).await
+                        grpc.unary(ListActionPoliciesRpc, request).await
                     }
-                    "/sekai.SekaiService/DenyAction" => {
+                    "/sekai.SekaiService/SubmitActionInstance" => {
                         let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
-                        grpc.unary(DenyActionRpc(state), request).await
+                        grpc.unary(SubmitActionInstanceRpc(state), request).await
+                    }
+                    "/sekai.SekaiService/RecordDecision" => {
+                        let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
+                        grpc.unary(RecordDecisionRpc(state), request).await
                     }
                     "/sekai.SekaiService/ListDecisions" => {
                         let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
@@ -1652,6 +1688,7 @@ mod tests {
             Ctx {
                 backend: Backend::Remote {
                     client: Arc::new(client),
+                    action_defs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
                 },
                 canary_schema_preflight: Arc::new(OnceCell::new()),
                 outcome_export_enabled: false,
@@ -2144,6 +2181,7 @@ mod tests {
         let mut ctx = Ctx {
             backend: Backend::Remote {
                 client: Arc::new(client),
+                action_defs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             },
             canary_schema_preflight: Arc::new(OnceCell::new()),
             outcome_export_enabled: false,
@@ -2212,6 +2250,7 @@ mod tests {
         let mut ctx = Ctx {
             backend: Backend::Remote {
                 client: Arc::new(client),
+                action_defs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             },
             canary_schema_preflight: Arc::new(OnceCell::new()),
             outcome_export_enabled: false,
@@ -2230,7 +2269,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remote_graph_action_registration_uses_compatibility_rpc() {
+    async fn remote_graph_action_registration_uses_governed_rpc() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let state = MockSekaiState::default();
@@ -2261,6 +2300,7 @@ mod tests {
         let mut ctx = Ctx {
             backend: Backend::Remote {
                 client: Arc::new(client),
+                action_defs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             },
             canary_schema_preflight: Arc::new(OnceCell::new()),
             outcome_export_enabled: false,
@@ -2283,7 +2323,13 @@ mod tests {
 
         ctx.register_action(action.clone()).await.unwrap();
 
-        assert_eq!(state.actions.lock().unwrap().as_slice(), [action]);
+        let registered = state.governed_actions.lock().unwrap().clone();
+        assert_eq!(registered.len(), 1);
+        assert_eq!(registered[0].namespace, "tenkai");
+        assert_eq!(registered[0].type_id, action.name);
+        assert_eq!(registered[0].version, "1");
+        assert!(registered[0].enabled);
+        assert!(registered[0].parameter_schema_json.contains("\"id\""));
         assert_eq!(
             state.metadata.lock().unwrap().as_slice(),
             [(

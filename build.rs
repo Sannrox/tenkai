@@ -1,6 +1,7 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=proto/vendor/sekai.proto");
     println!("cargo:rerun-if-changed=proto/vendor/chisei.proto");
+    println!("cargo:rerun-if-changed=proto/tenkai/graph_action.proto");
     println!("cargo:rerun-if-changed=proto/tenkai/runtime/v1/runtime.proto");
     unsafe {
         std::env::set_var("PROTOC", protoc_bin_vendored::protoc_bin_path()?);
@@ -12,6 +13,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &[
                 "proto/vendor/sekai.proto",
                 "proto/vendor/chisei.proto",
+                "proto/tenkai/graph_action.proto",
                 "proto/tenkai/runtime/v1/runtime.proto",
             ],
             &["proto/vendor/", "proto/"],
