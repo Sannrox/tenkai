@@ -34,33 +34,10 @@ pub(super) async fn admit(
     environment: &str,
     product: &str,
 ) -> Result<ReleaseContent> {
-    use crate::catalog::CatalogReader as _;
-
-    let descriptor = crate::catalog::EmbeddedCatalog::new(ctx)
-        .lookup_release(&pin.release_id, environment)
-        .await?;
-    let Some(object) = ctx.get(&pin.release_id).await? else {
-        bail!("release object {} not found", pin.release_id);
-    };
-    if object.kind != KIND_RELEASE {
-        bail!(
-            "object {} is {}, not {KIND_RELEASE}",
-            pin.release_id,
-            object.kind
-        );
-    }
-    if object
-        .properties
-        .get("recalled_at")
-        .is_some_and(|value| !value.is_empty())
-    {
-        bail!("release {} is recalled", pin.release_id);
-    }
-
-    // Validate the exact snapshot consumed below as well as the Catalog
-    // descriptor fetched above; the compatibility store does not yet provide
-    // a transactional read spanning those records.
-    crate::catalog::require_deployable_trust(ctx, &object, environment).await?;
+    let snapshot =
+        crate::catalog::load_deployable_snapshot(ctx, &pin.release_id, environment).await?;
+    let descriptor = snapshot.descriptor;
+    let object = snapshot.object;
     let raw = object
         .properties
         .get("manifest")
