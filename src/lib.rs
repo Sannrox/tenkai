@@ -10,8 +10,11 @@
 //!
 //! - [`catalog`] owns immutable release publication, promotion, and lookup.
 //!   Its private publication module concentrates content identity, provenance,
-//!   trust verification, immutable replay, persistence, and graph-link ordering
-//!   behind one admission interface.
+//!   immutable replay, persistence, and graph-link ordering behind one
+//!   admission interface.
+//!   Its private trust module hides linked verification-claim loading, envelope
+//!   checks, unsigned-local-only policy, two-read deployable snapshots, inspect,
+//!   and reverify behind one lookup interface.
 //! - [`plan`], [`apply`], and [`reconciler`] own convergence decisions and execution.
 //! - `canary::attempt_lifecycle` hides Canary policy snapshots, promotion-lock
 //!   coordination, attempt start and finalization ordering, durable outcome
