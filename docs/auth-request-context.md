@@ -81,12 +81,20 @@ authenticate through the composed `AuthStack` in `src/server.rs`:
 1. Extract the bearer token (runtime tokens remain on separate routes).
 2. Build `CredentialMaterial` with a request id (`x-request-id` or generated).
 3. Call `AuthStack::authenticate` — never raw token equality alone.
-4. Use the returned principal for audit; optional tenant is only present when an
+4. Enforce delivery capabilities after authentication (`read` for inspect/fleet
+   surfaces; `management` for reconcile and other mutations). Missing
+   capabilities fail closed.
+5. Use the returned principal for audit; optional tenant is only present when an
    enterprise extension derived it under host authority.
 
 Caller-selected headers such as `x-tenkai-tenant` cannot attach tenant context.
 When enterprise authentication is required, startup fails if the extension is
 missing (capability negotiation and `build_auth_stack` both fail closed).
+
+When an enterprise extension is loaded, `AuthStack` is **dual-stack**: a valid
+community management bearer still authenticates (break-glass / host secret
+path), and enterprise assertions authenticate through the extension. Enabling
+enterprise auth therefore does not silently disable `TENKAI_MANAGEMENT_TOKEN`.
 
 ## Enterprise authentication extension
 
@@ -136,8 +144,20 @@ public_key = "<base64-encoded-32-byte-Ed25519-public-key>"
 
 Load with `JwtVerifierConfig::load(path)` / `JwtAssertionVerifier::from_path`.
 Required claims: `iss`, `aud`, `sub`, `exp`. Optional: `nbf`, `principal_kind`,
-`tenant_id` (or `tenkai_tenant`). Fail closed on bad signature, wrong audience,
-wrong issuer, or expiry outside clock skew.
+`tenant_id` (or `tenkai_tenant`), `tenkai_capabilities` (array of `read` and/or
+`management`). Fail closed on bad signature, wrong audience, wrong issuer,
+unsupported capability values, or expiry outside clock skew.
+
+Delivery authorization after JWT authentication:
+
+| Claim surface | Effect |
+| --- | --- |
+| `tenkai_capabilities` present | Exact set is used (empty set denies management APIs) |
+| claim absent + `principal_kind=management` or `service` | Grants `read` + `management` |
+| claim absent + `principal_kind=human` (default) or `runtime` | Grants nothing; reconcile/fleet/inspect deny |
+
+Community management tokens map to `PrincipalKind::Management` and therefore keep
+full delivery capabilities under dual-stack enterprise hosts.
 
 **Wire vs stub:**
 
@@ -238,8 +258,11 @@ linking Tenkai domain logic to one identity product.
    parameters.
 3. Only startup-granted `TenantDerivationAuthority` enables
    `with_tenant`.
-4. Tenkai domain authorization still applies after authentication.
-5. Credentials stay outside plans, receipts, and operational payloads.
+4. Tenkai domain authorization still applies after authentication, including
+   fail-closed delivery capabilities for management HTTP routes.
+5. Credentials stay outside plans, receipts, operational payloads, and deploy
+   shell environments (deploy children use an allowlisted env, not the parent
+   process env).
 
 ## Relationship to providers
 

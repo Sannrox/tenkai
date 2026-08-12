@@ -1349,16 +1349,35 @@ mod tests {
                 Some("management") => PrincipalKind::Management,
                 _ => PrincipalKind::Human,
             };
-            crate::auth_context::AuthenticatedRequestContextBuilder::new(
+            let mut builder = crate::auth_context::AuthenticatedRequestContextBuilder::new(
                 credential.request_id.clone(),
                 PrincipalIdentity {
                     id: principal.into(),
                     kind,
                 },
                 self.extension_id(),
-            )
-            .with_tenant(tenant, authority)?
-            .build()
+            );
+            if let Some(capabilities) = value.get("capabilities").and_then(|value| value.as_array())
+            {
+                let mut parsed = std::collections::BTreeSet::new();
+                for capability in capabilities {
+                    match capability.as_str() {
+                        Some("read") => {
+                            parsed.insert(crate::auth_context::DeliveryCapability::Read);
+                        }
+                        Some("management") => {
+                            parsed.insert(crate::auth_context::DeliveryCapability::Management);
+                        }
+                        _ => {
+                            return Err(crate::auth_context::AuthError::Unauthorized(
+                                "unsupported capability claim".into(),
+                            ));
+                        }
+                    }
+                }
+                builder = builder.with_delivery_capabilities(parsed);
+            }
+            builder.with_tenant(tenant, authority)?.build()
         }
     }
 
@@ -1398,7 +1417,7 @@ mod tests {
                 &CredentialMaterial {
                     request_id: "seed-a".into(),
                     bearer_token: None,
-                    assertion: Some(br#"{"tenant":"tenant-a","principal":"user-a"}"#.to_vec()),
+                    assertion: Some(br#"{"tenant":"tenant-a","principal":"user-a","capabilities":["read","management"]}"#.to_vec()),
                 },
                 &authority,
             )
@@ -1408,7 +1427,7 @@ mod tests {
                 &CredentialMaterial {
                     request_id: "seed-b".into(),
                     bearer_token: None,
-                    assertion: Some(br#"{"tenant":"tenant-b","principal":"user-b"}"#.to_vec()),
+                    assertion: Some(br#"{"tenant":"tenant-b","principal":"user-b","capabilities":["read","management"]}"#.to_vec()),
                 },
                 &authority,
             )
@@ -1443,7 +1462,7 @@ mod tests {
                 Request::get("/v1/environments")
                     .header(
                         "x-tenkai-assertion",
-                        r#"{"tenant":"tenant-a","principal":"user-a"}"#,
+                        r#"{"tenant":"tenant-a","principal":"user-a","capabilities":["read","management"]}"#,
                     )
                     .body(Body::empty())
                     .unwrap(),
@@ -1468,7 +1487,7 @@ mod tests {
                 Request::get("/v1/environments/env-b")
                     .header(
                         "x-tenkai-assertion",
-                        r#"{"tenant":"tenant-a","principal":"user-a"}"#,
+                        r#"{"tenant":"tenant-a","principal":"user-a","capabilities":["read","management"]}"#,
                     )
                     .body(Body::empty())
                     .unwrap(),
@@ -1494,7 +1513,7 @@ mod tests {
                 Request::get("/v1/environments/env-b/status")
                     .header(
                         "x-tenkai-assertion",
-                        r#"{"tenant":"tenant-a","principal":"user-a"}"#,
+                        r#"{"tenant":"tenant-a","principal":"user-a","capabilities":["read","management"]}"#,
                     )
                     .body(Body::empty())
                     .unwrap(),
@@ -1519,7 +1538,7 @@ mod tests {
                 Request::get("/v1/fleet/status")
                     .header(
                         "x-tenkai-assertion",
-                        r#"{"tenant":"tenant-a","principal":"user-a"}"#,
+                        r#"{"tenant":"tenant-a","principal":"user-a","capabilities":["read","management"]}"#,
                     )
                     .body(Body::empty())
                     .unwrap(),
@@ -1543,7 +1562,7 @@ mod tests {
                 Request::post("/v1/reconcile")
                     .header(
                         "x-tenkai-assertion",
-                        r#"{"tenant":"tenant-a","principal":"user-a"}"#,
+                        r#"{"tenant":"tenant-a","principal":"user-a","capabilities":["read","management"]}"#,
                     )
                     .body(Body::empty())
                     .unwrap(),
