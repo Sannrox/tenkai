@@ -1,0 +1,44 @@
+syntax = "proto3";
+package tenkai.graph_action.v1;
+
+// Tenkai-owned embedded graph-action definitions.
+//
+// These messages preserve the wire layout of the pre-1.0 sekai ActionTypeDef
+// family so existing embedded SQLite action-type payloads remain decodable.
+// Remote Tenkai no longer sends these types to Sekai-Chisei; remote registration
+// and admission use the governed Action Type / ActionInstance surface instead.
+
+message ActionParamDef {
+  string name = 1;
+  string type = 2;
+  bool required = 3;
+  repeated string enum_values = 4;
+}
+
+message ActionOp {
+  string op = 1;
+  string property = 2;
+  string value_from = 3;
+  string relation = 4;
+}
+
+message ActionTypeDef {
+  string name = 1;
+  string description = 2;
+  repeated ActionParamDef params = 3;
+  repeated ActionOp ops = 4;
+  string target_kind = 5;
+  int64 created = 6;
+  // Optional purpose required to invoke this action. Empty means no purpose gate.
+  string required_purpose = 7;
+}
+
+message ActionResult {
+  string action = 1;
+  string message = 2;
+  bool dry_run = 3;
+  repeated string planned_ops = 4;
+  // allow | deny | require_approval
+  string decision = 5;
+  string approval_id = 6;
+}

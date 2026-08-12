@@ -251,6 +251,39 @@ message GetEvaluationGateEvidenceResponse {
   EvaluationGateEvidence evidence = 2;
 }
 
+// Runs the closed v1 lookup-vs-golden promotion gate against authorized graph
+// state. The server never calls a provider and never applies route policy.
+message RunLookupFirstPromotionGateRequest {
+  string contract_version = 1; // chisei.lookup-first-promotion-gate/v1
+  string namespace = 2;
+  // Canonical JSON for the operator-owned versioned gate suite.
+  string suite_json = 3;
+}
+message LookupFirstPromotionGateCaseResult {
+  string id = 1;
+  string answer_path = 2; // lookup_hit | model_path
+  string lookup_refusal = 3;
+  bool passed = 4;
+  string detail = 5;
+}
+message LookupFirstPromotionGateReport {
+  string contract_version = 1;
+  string suite_id = 2;
+  string namespace = 3;
+  string suite_digest = 4;
+  string audit_decision_id = 5;
+  string verdict = 6; // allow | deny
+  uint64 lookup_hits = 7;
+  uint64 model_path = 8;
+  uint64 lookup_refusals = 9;
+  uint64 passed = 10;
+  uint64 failed = 11;
+  repeated LookupFirstPromotionGateCaseResult cases = 12;
+}
+message RunLookupFirstPromotionGateResponse {
+  LookupFirstPromotionGateReport report = 1;
+}
+
 // Immutable, operator-controlled deterministic evaluator metadata. This
 // registers deployed implementation identity; it never uploads executable code.
 message EvaluatorResourceLimits {
@@ -1296,6 +1329,7 @@ service ChiseiService {
   rpc PutEvaluationPlan(PutEvaluationPlanRequest) returns (PutEvaluationPlanResponse);
   rpc ResolveEvaluationPlan(ResolveEvaluationPlanRequest) returns (ResolveEvaluationPlanResponse);
   rpc GetEvaluationGateEvidence(GetEvaluationGateEvidenceRequest) returns (GetEvaluationGateEvidenceResponse);
+  rpc RunLookupFirstPromotionGate(RunLookupFirstPromotionGateRequest) returns (RunLookupFirstPromotionGateResponse);
   rpc GetSampleObservation(GetSampleObservationRequest) returns (GetSampleObservationResponse);
 
 }

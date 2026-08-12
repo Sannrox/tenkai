@@ -11,6 +11,7 @@
 - [0009 — Multi-replica reconcile and HA capability profile](0009-multi-replica-reconcile-and-ha-profile.md)
 - [0010 — Supported operating profiles](0010-supported-operating-profiles.md)
 - [0011 — Shikigami worker-pool lifecycle ownership](0011-shikigami-worker-pool-lifecycle.md)
-- [0012 — Legacy graph-action compatibility boundary](0012-legacy-graph-action-compatibility-boundary.md)
+- [0012 — Legacy graph-action compatibility boundary](0012-legacy-graph-action-compatibility-boundary.md) (superseded by 0015)
 - [0013 — Evaluation gate evidence projection](0013-evaluation-gate-evidence-projection.md)
 - [0014 — Versioned Rust client facade](0014-versioned-rust-client-facade.md)
+- [0015 — Governed-action remote migration](0015-governed-action-remote-migration.md)

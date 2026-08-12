@@ -437,19 +437,11 @@ async fn replace_governed_configuration(
     {
         Ok(result) if result.decision == "allow" => None,
         Ok(result) if result.decision == "require_approval" => {
-            let approval_id = result.approval_id;
-            ctx.deny_action(
-                &approval_id,
-                "Tenkai does not support deferred maintenance-window updates",
-            )
-            .await
-            .with_context(|| {
-                format!(
-                    "maintenance-window update requires approval {approval_id}, and cancelling the stale update failed; do not approve it"
-                )
-            })?;
+            // Governed admit already denies require_approval; there is no
+            // deferred approval queue left to cancel.
             bail!(
-                "maintenance-window update requires approval {approval_id}; the pending update was cancelled"
+                "maintenance-window update requires approval {}; governed ActionInstance admission denied it and Tenkai does not support deferred schedule updates",
+                result.approval_id
             );
         }
         Ok(result) => {

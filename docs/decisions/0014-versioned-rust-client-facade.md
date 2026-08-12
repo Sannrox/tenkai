@@ -22,8 +22,9 @@ them with a different authority would change behavior and trust boundaries.
 
 ## Decision
 
-Tenkai uses `sekai-client` 0.1.2 at the merged Sekai-Chisei revision
-`1a3ab137e146c10e36b5ba3ece74c25f16db860a`. The client and its direct
+Tenkai uses `sekai-client` 0.1.2. The pinned Sekai-Chisei revision is tracked by
+[ADR 0015](0015-governed-action-remote-migration.md) (`67157d1fa242ac2f133c88243ef23b56f88042e6`
+at the time of the governed-action migration). The client and its direct
 `sekai-proto` dependency are Apache-2.0 licensed, matching the current
 Sekai-Chisei workspace license.
 
