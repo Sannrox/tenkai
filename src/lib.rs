@@ -22,6 +22,9 @@
 //! - `plan::lifecycle` hides immutable Plan encoding, lifecycle transition rules,
 //!   audit preservation, indexed reads, fencing, ambiguous-write confirmation,
 //!   and atomic Environment/provider-event persistence behind one private interface.
+//! - `plan::convergence` hides desired-vs-deployed snapshotting, model/routing
+//!   rollout order, immutable plan materialization, and rollback step
+//!   construction behind one private planning interface.
 //! - `apply::execution_attempt` hides Plan authorization mode, Environment lease
 //!   admission, maintenance authorization, Canary finalization, lease release,
 //!   and failure precedence behind one typed execution-attempt interface.

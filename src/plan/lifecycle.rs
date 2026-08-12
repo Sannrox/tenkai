@@ -1,5 +1,7 @@
 //! Immutable Plan encoding, lifecycle transitions, reads, and durable effects.
 
+use std::collections::HashMap;
+
 use super::*;
 
 pub(crate) struct Transition {
