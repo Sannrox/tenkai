@@ -53,20 +53,20 @@ async fn run_command(
     environment: &str,
     product: &str,
 ) -> Result<Result<(), String>> {
-    let identity_digest = manifest::digest(&format!("{environment}\0{product}"));
-    let compose_project = format!("tenkai-{}", &identity_digest[..16]);
     let mut command = tokio::process::Command::new("sh");
     command
         .arg("-c")
         .arg(cmd)
         .current_dir(workdir)
         .kill_on_drop(true)
-        .env_remove("SEKAI_AUTH_TOKEN")
-        .env("TENKAI_ENVIRONMENT", environment)
-        .env("TENKAI_PRODUCT", product)
-        .env("COMPOSE_PROJECT_NAME", compose_project)
+        .env_clear()
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    // Match production deploy children: clear parent env and allowlist only.
+    for (key, value) in crate::fenced_mutation::deploy_child_environment(environment, product, None)
+    {
+        command.env(key, value);
+    }
     command.as_std_mut().process_group(0);
     let mut child = command.spawn().context("spawning deployment command")?;
     let process_group = child.id().map(|id| -(id as i32));

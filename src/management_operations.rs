@@ -6,7 +6,9 @@
 
 use std::sync::Arc;
 
-use crate::auth_context::{AuthMode, AuthStack, AuthenticatedRequestContext, CredentialMaterial};
+use crate::auth_context::{
+    AuthMode, AuthStack, AuthenticatedRequestContext, CredentialMaterial, DeliveryCapability,
+};
 use crate::plan::{EnvironmentInspectReport, EnvironmentListEntry, FleetStatusReport, StatusRow};
 use crate::providers::TerminalOutcomeProjection;
 use crate::reconciler::TickReport;
@@ -123,11 +125,25 @@ impl ManagementOperations {
         }
     }
 
+    fn require_capability(
+        context: &AuthenticatedRequestContext,
+        required: DeliveryCapability,
+    ) -> Result<(), ManagementError> {
+        if context.has_delivery_capability(required) {
+            Ok(())
+        } else {
+            Err(ManagementError::Forbidden(
+                "insufficient delivery capability".into(),
+            ))
+        }
+    }
+
     pub(crate) async fn fleet_status(
         &self,
         credential: &CredentialMaterial,
     ) -> Result<FleetStatusReport, ManagementError> {
         let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
         if self.tenant_mode {
             return self
                 .tenant_operations()?
@@ -143,6 +159,7 @@ impl ManagementOperations {
         credential: &CredentialMaterial,
     ) -> Result<Vec<EnvironmentListEntry>, ManagementError> {
         let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
         if self.tenant_mode {
             return self
                 .tenant_operations()?
@@ -159,6 +176,7 @@ impl ManagementOperations {
         environment: &str,
     ) -> Result<EnvironmentInspectReport, ManagementError> {
         let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
         if self.tenant_mode {
             return self
                 .tenant_operations()?
@@ -184,6 +202,7 @@ impl ManagementOperations {
         environment: &str,
     ) -> Result<Vec<StatusRow>, ManagementError> {
         let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
         if self.tenant_mode {
             return self
                 .tenant_operations()?
@@ -202,6 +221,7 @@ impl ManagementOperations {
         credential: &CredentialMaterial,
     ) -> Result<TickReport, ManagementError> {
         let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
         let tenant_operations = if self.tenant_mode {
             if context.tenant().is_none() {
                 return Err(ManagementError::Forbidden("unauthenticated".into()));
@@ -291,4 +311,325 @@ fn map_environment_error(error: anyhow::Error) -> ManagementError {
 
 fn internal(error: anyhow::Error) -> ManagementError {
     ManagementError::Internal(format!("{error:#}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::assertion_verifier::{
+        JwtAssertionVerifier, JwtEnterpriseAuthExtension, JwtTrustedKey, JwtVerifierConfig,
+    };
+    use crate::auth_context::{
+        AUTH_CONTEXT_CONTRACT_VERSION, AuthHostConfig, CommunityTokenAuthenticator,
+        PrincipalIdentity, PrincipalKind, build_auth_stack,
+    };
+    use crate::runtime_delivery::{
+        CompletionFuture, FleetStatusFuture, HealthFuture, InspectEnvFuture, InventoryFuture,
+        ListEnvFuture, ReconcileFuture, StatusEnvFuture, WorkFuture,
+    };
+    use crate::storage::SqliteStore;
+    use base64::Engine as _;
+    use ed25519_dalek::{Signer as _, SigningKey};
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    struct FixedReconciler;
+
+    impl ReconcilePort for FixedReconciler {
+        fn reconcile(&self) -> ReconcileFuture<'_> {
+            Box::pin(async {
+                Ok(TickReport {
+                    environments: vec![crate::reconciler::EnvironmentResult {
+                        environment: "prod".into(),
+                        status: crate::reconciler::EnvironmentStatus::Current,
+                    }],
+                })
+            })
+        }
+
+        fn pending_work(&self, environment: String) -> WorkFuture<'_> {
+            Box::pin(async move {
+                Ok(Some(crate::plan::Plan {
+                    format_version: 1,
+                    id: "plan-1".into(),
+                    content_id: "sha256:plan".into(),
+                    environment,
+                    created_at: 1,
+                    inputs: Vec::new(),
+                    steps: Vec::new(),
+                    state: crate::plan::PlanState::Computed,
+                    gates_skipped: None,
+                    status_detail: String::new(),
+                    maintenance_blocked: false,
+                    prior_warnings: Vec::new(),
+                }))
+            })
+        }
+
+        fn check_health(&self) -> HealthFuture<'_> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn complete_work(
+            &self,
+            _environment: String,
+            _completion: crate::runtime_delivery::RuntimeCompletion,
+        ) -> CompletionFuture<'_> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn validate_completion(
+            &self,
+            _environment: String,
+            _completion: crate::runtime_delivery::RuntimeCompletion,
+        ) -> CompletionFuture<'_> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn list_environments(&self) -> ListEnvFuture<'_> {
+            Box::pin(async {
+                Ok(vec![EnvironmentListEntry {
+                    name: "prod".into(),
+                    id: "tenkai:env:prod".into(),
+                    description: "fixture".into(),
+                    subscription_count: 0,
+                    deployed_product_count: 0,
+                    lease_held: false,
+                }])
+            })
+        }
+
+        fn inspect_environment(&self, environment: String) -> InspectEnvFuture<'_> {
+            Box::pin(async move {
+                Ok(EnvironmentInspectReport {
+                    name: environment,
+                    id: "tenkai:env:prod".into(),
+                    description: "fixture".into(),
+                    subscriptions: Vec::new(),
+                    facts: Default::default(),
+                    lease: crate::apply::EnvironmentLeaseInspect {
+                        held: false,
+                        owner: None,
+                        generation: None,
+                        expires_at_ms: None,
+                        status: "absent".into(),
+                    },
+                    latest_plan: None,
+                    terminal_outcomes: Vec::new(),
+                    execution_note: "fixture".into(),
+                })
+            })
+        }
+
+        fn environment_status(&self, _environment: String) -> StatusEnvFuture<'_> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn fleet_status(&self) -> FleetStatusFuture<'_> {
+            Box::pin(async {
+                Ok(FleetStatusReport {
+                    environments: Vec::new(),
+                    environment_count: 0,
+                    environments_current: 0,
+                    environments_behind: 0,
+                    environments_unhealthy: 0,
+                    environments_empty: 0,
+                })
+            })
+        }
+
+        fn apply_inventory_facts(
+            &self,
+            _environment: String,
+            _facts: BTreeMap<String, String>,
+        ) -> InventoryFuture<'_> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn diagnostics_snapshot(&self) -> crate::reconciler::ReconcileDiagnostics {
+            crate::reconciler::ReconcileDiagnostics {
+                ticks_total: 0,
+                ticks_failed: 0,
+                last_outcome: "ok".into(),
+                last_environments_total: 0,
+                last_environments_failed: 0,
+                environments_busy_total: 0,
+            }
+        }
+    }
+
+    fn keypair() -> (SigningKey, String) {
+        let signing = SigningKey::from_bytes(&[11_u8; 32]);
+        let public_b64 =
+            base64::engine::general_purpose::STANDARD.encode(signing.verifying_key().as_bytes());
+        (signing, public_b64)
+    }
+
+    fn mint_jwt(signing_key: &SigningKey, claims: &BTreeMap<String, serde_json::Value>) -> String {
+        let header = serde_json::json!({ "alg": "EdDSA", "typ": "JWT", "kid": "k1" });
+        let header_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&header).unwrap());
+        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(claims).unwrap());
+        let signing_input = format!("{header_b64}.{payload_b64}");
+        let signature = signing_key.sign(signing_input.as_bytes());
+        let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature.to_bytes());
+        format!("{header_b64}.{payload_b64}.{sig_b64}")
+    }
+
+    fn enterprise_ops(public_b64: &str) -> ManagementOperations {
+        let verifier = JwtAssertionVerifier::new(JwtVerifierConfig {
+            issuer: "https://idp.example.test/".into(),
+            audience: "tenkai-control-plane".into(),
+            keys: vec![JwtTrustedKey {
+                key_id: Some("k1".into()),
+                public_key: public_b64.into(),
+            }],
+            clock_skew_secs: 60,
+        })
+        .unwrap();
+        let extension = Arc::new(JwtEnterpriseAuthExtension::from_jwt_verifier(
+            "jwt-ref", verifier, false,
+        ));
+        let community = Arc::new(
+            CommunityTokenAuthenticator::new(
+                "auth.community",
+                [(
+                    "management-secret".into(),
+                    PrincipalIdentity {
+                        id: "management".into(),
+                        kind: PrincipalKind::Management,
+                    },
+                )],
+            )
+            .unwrap(),
+        );
+        let auth = build_auth_stack(
+            &AuthHostConfig {
+                required_extension_id: Some("jwt-ref".into()),
+                expected_contract_version: AUTH_CONTEXT_CONTRACT_VERSION,
+                expected_audience: Some("tenkai-control-plane".into()),
+            },
+            Some(extension),
+            community,
+        )
+        .unwrap();
+        ManagementOperations::new(
+            auth,
+            false,
+            Arc::new(FixedReconciler),
+            Arc::new(SqliteStore::open_in_memory().unwrap()),
+            None,
+        )
+    }
+
+    fn human_claims(
+        now: i64,
+        capabilities: Option<Vec<&str>>,
+    ) -> BTreeMap<String, serde_json::Value> {
+        let mut claims = BTreeMap::from([
+            (
+                "iss".into(),
+                serde_json::Value::String("https://idp.example.test/".into()),
+            ),
+            (
+                "aud".into(),
+                serde_json::Value::String("tenkai-control-plane".into()),
+            ),
+            ("sub".into(), serde_json::Value::String("user-42".into())),
+            ("exp".into(), serde_json::json!(now + 3600)),
+            (
+                "principal_kind".into(),
+                serde_json::Value::String("human".into()),
+            ),
+        ]);
+        if let Some(capabilities) = capabilities {
+            claims.insert(
+                "tenkai_capabilities".into(),
+                serde_json::Value::Array(
+                    capabilities
+                        .into_iter()
+                        .map(|value| serde_json::Value::String(value.into()))
+                        .collect(),
+                ),
+            );
+        }
+        claims
+    }
+
+    #[tokio::test]
+    async fn jwt_without_management_capability_cannot_reconcile_or_read_fleet() {
+        let (signing, public_b64) = keypair();
+        let ops = enterprise_ops(&public_b64);
+        let now = crate::assertion_verifier::now_unix_secs();
+        let token = mint_jwt(&signing, &human_claims(now, None));
+        let credential = CredentialMaterial {
+            request_id: "req-human".into(),
+            bearer_token: None,
+            assertion: Some(token.into_bytes()),
+        };
+
+        let reconcile = ops.reconcile(&credential).await.unwrap_err();
+        assert!(
+            matches!(reconcile, ManagementError::Forbidden(ref msg) if msg.contains("capability")),
+            "{reconcile:?}"
+        );
+        let fleet = ops.fleet_status(&credential).await.unwrap_err();
+        assert!(
+            matches!(fleet, ManagementError::Forbidden(ref msg) if msg.contains("capability")),
+            "{fleet:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn jwt_with_read_only_capability_cannot_reconcile() {
+        let (signing, public_b64) = keypair();
+        let ops = enterprise_ops(&public_b64);
+        let now = crate::assertion_verifier::now_unix_secs();
+        let token = mint_jwt(&signing, &human_claims(now, Some(vec!["read"])));
+        let credential = CredentialMaterial {
+            request_id: "req-read".into(),
+            bearer_token: None,
+            assertion: Some(token.into_bytes()),
+        };
+
+        ops.fleet_status(&credential).await.unwrap();
+        let reconcile = ops.reconcile(&credential).await.unwrap_err();
+        assert!(
+            matches!(reconcile, ManagementError::Forbidden(ref msg) if msg.contains("capability")),
+            "{reconcile:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn jwt_with_management_capability_can_reconcile() {
+        let (signing, public_b64) = keypair();
+        let ops = enterprise_ops(&public_b64);
+        let now = crate::assertion_verifier::now_unix_secs();
+        let token = mint_jwt(
+            &signing,
+            &human_claims(now, Some(vec!["read", "management"])),
+        );
+        let credential = CredentialMaterial {
+            request_id: "req-mgmt".into(),
+            bearer_token: None,
+            assertion: Some(token.into_bytes()),
+        };
+        let report = ops.reconcile(&credential).await.unwrap();
+        assert_eq!(report.environments.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn community_management_token_remains_usable_under_enterprise_dual_stack() {
+        let (_, public_b64) = keypair();
+        let ops = enterprise_ops(&public_b64);
+        let credential = CredentialMaterial {
+            request_id: "req-community".into(),
+            bearer_token: Some("management-secret".into()),
+            assertion: None,
+        };
+        let report = ops.reconcile(&credential).await.unwrap();
+        assert_eq!(report.environments[0].environment, "prod");
+        ops.fleet_status(&credential).await.unwrap();
+    }
 }

@@ -4,6 +4,8 @@
 //! protocol, mutation locking, process-group cleanup, signals, and timeouts.
 //! Callers retain lease ownership and expose only refresh plus generation.
 
+use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
 use std::fs::OpenOptions;
 use std::future::Future;
 use std::io::{Read as _, Write as _};
@@ -27,6 +29,31 @@ pub struct MutationCommand<'a> {
     pub product: &'a str,
     pub command: &'a str,
 }
+
+/// Parent-process variables that may be inherited by deploy children.
+///
+/// Control-plane credentials (`TENKAI_MANAGEMENT_TOKEN`, `TENKAI_RUNTIME_TOKEN`,
+/// outcome-provider tokens, `SEKAI_AUTH_TOKEN`, and similar) are intentionally
+/// absent. Deploy shells receive only this allowlist plus the explicit Tenkai
+/// fencing/identity variables set by [`configure_deploy_child_env`].
+const DEPLOY_CHILD_INHERITED_ENV: &[&str] = &[
+    "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TMP", "TEMP", "TZ",
+];
+
+/// Secrets and control-plane credentials that must never reach deploy shells.
+const DEPLOY_CHILD_FORBIDDEN_ENV: &[&str] = &[
+    "SEKAI_AUTH_TOKEN",
+    "TENKAI_MANAGEMENT_TOKEN",
+    "TENKAI_RUNTIME_TOKEN",
+    "TENKAI_RUNTIME_TOKENS",
+    "TENKAI_OUTCOME_PROVIDER_TOKEN",
+    "TENKAI_OUTCOME_PROVIDER_URL",
+    "TENKAI_OUTCOME_PROVIDER_PRINCIPAL",
+    "TENKAI_OUTCOME_PROVIDER_REGISTRATION",
+    "TENKAI_JWT_VERIFIER_CONFIG",
+    "TENKAI_POSTGRES_URL",
+    "TENKAI_DEVELOPMENT_FIXTURE_PRINCIPALS",
+];
 
 fn executor_guard_executable() -> Result<PathBuf> {
     if let Some(configured) = std::env::var_os("TENKAI_EXECUTOR_GUARD") {
@@ -58,6 +85,52 @@ fn executor_guard_executable() -> Result<PathBuf> {
     )
 }
 
+/// Build the scrubbed environment for a deploy child process.
+///
+/// Starts empty (no parent inheritance), copies only
+/// [`DEPLOY_CHILD_INHERITED_ENV`], then sets fencing/identity variables.
+pub fn deploy_child_environment(
+    environment: &str,
+    product: &str,
+    fencing_generation: Option<u64>,
+) -> BTreeMap<OsString, OsString> {
+    let mut env = BTreeMap::new();
+    for key in DEPLOY_CHILD_INHERITED_ENV {
+        if let Some(value) = std::env::var_os(key) {
+            env.insert(OsString::from(*key), value);
+        }
+    }
+    let identity_digest = crate::manifest::digest(&format!("{environment}\0{product}"));
+    env.insert(
+        OsString::from("TENKAI_ENVIRONMENT"),
+        OsString::from(environment),
+    );
+    env.insert(OsString::from("TENKAI_PRODUCT"), OsString::from(product));
+    env.insert(
+        OsString::from("COMPOSE_PROJECT_NAME"),
+        OsString::from(format!("tenkai-{}", &identity_digest[..16])),
+    );
+    if let Some(generation) = fencing_generation {
+        env.insert(
+            OsString::from("TENKAI_FENCING_GENERATION"),
+            OsString::from(generation.to_string()),
+        );
+    }
+    env
+}
+
+fn configure_deploy_child_env(
+    command: &mut tokio::process::Command,
+    environment: &str,
+    product: &str,
+    fencing_generation: Option<u64>,
+) {
+    command.env_clear();
+    for (key, value) in deploy_child_environment(environment, product, fencing_generation) {
+        command.env(key, value);
+    }
+}
+
 pub async fn run(
     fence: &mut dyn MutationFence,
     mutation: MutationCommand<'_>,
@@ -75,6 +148,14 @@ pub async fn run(
     {
         guard_command.arg("__executor-guard");
     }
+    // Scrub credentials before the trusted guard as defense in depth; the
+    // untrusted install shell is scrubbed again in [`supervise`].
+    configure_deploy_child_env(
+        &mut guard_command,
+        mutation.environment,
+        mutation.product,
+        Some(fence.generation()),
+    );
     guard_command
         .arg("--lock")
         .arg(mutation.lock_path)
@@ -89,7 +170,6 @@ pub async fn run(
         .arg("--command")
         .arg(mutation.command)
         .kill_on_drop(true)
-        .env_remove("SEKAI_AUTH_TOKEN")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -165,24 +245,20 @@ pub async fn supervise(mutation: MutationCommand<'_>, generation: u64) -> Result
     if go != *b"G" {
         bail!("executor guard did not receive start authorization");
     }
-    let identity_digest =
-        crate::manifest::digest(&format!("{}\0{}", mutation.environment, mutation.product));
     let mut child = tokio::process::Command::new("sh");
     child
         .arg("-c")
         .arg(mutation.command)
         .current_dir(mutation.workdir)
         .kill_on_drop(true)
-        .env_remove("SEKAI_AUTH_TOKEN")
-        .env("TENKAI_ENVIRONMENT", mutation.environment)
-        .env("TENKAI_PRODUCT", mutation.product)
-        .env("TENKAI_FENCING_GENERATION", generation.to_string())
-        .env(
-            "COMPOSE_PROJECT_NAME",
-            format!("tenkai-{}", &identity_digest[..16]),
-        )
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    configure_deploy_child_env(
+        &mut child,
+        mutation.environment,
+        mutation.product,
+        Some(generation),
+    );
     child.as_std_mut().process_group(0);
     let mut child = child.spawn().context("spawning deployment command")?;
     let process_group = child.id().context("deployment command has no process id")? as i32;
@@ -208,5 +284,149 @@ async fn wait_for_process_group_exit(process_group: i32) -> Result<()> {
             return Err(error.into());
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deploy_child_environment_excludes_control_plane_secrets() {
+        let keys = [
+            ("TENKAI_MANAGEMENT_TOKEN", "mgmt-secret"),
+            ("TENKAI_RUNTIME_TOKEN", "runtime-secret"),
+            ("TENKAI_RUNTIME_TOKENS", r#"{"t":"prod"}"#),
+            ("TENKAI_OUTCOME_PROVIDER_TOKEN", "outcome-secret"),
+            ("SEKAI_AUTH_TOKEN", "sekai-secret"),
+            ("TENKAI_POSTGRES_URL", "postgres://secret"),
+            ("PATH", "/usr/bin:/bin"),
+        ];
+        let mut previous = Vec::new();
+        for (key, value) in keys {
+            previous.push((key, std::env::var_os(key)));
+            // SAFETY: test-only, single-threaded env mutation around one assertion.
+            unsafe { std::env::set_var(key, value) };
+        }
+
+        let env = deploy_child_environment("lab", "app", Some(7));
+        let env_keys: Vec<String> = env
+            .keys()
+            .map(|key| key.to_string_lossy().into_owned())
+            .collect();
+
+        for forbidden in DEPLOY_CHILD_FORBIDDEN_ENV {
+            assert!(
+                !env.contains_key(OsStr::new(forbidden)),
+                "deploy child env must not contain {forbidden}"
+            );
+        }
+        assert_eq!(
+            env.get(OsStr::new("TENKAI_ENVIRONMENT"))
+                .map(|value| value.as_os_str()),
+            Some(OsStr::new("lab"))
+        );
+        assert_eq!(
+            env.get(OsStr::new("TENKAI_PRODUCT"))
+                .map(|value| value.as_os_str()),
+            Some(OsStr::new("app"))
+        );
+        assert_eq!(
+            env.get(OsStr::new("TENKAI_FENCING_GENERATION"))
+                .map(|value| value.as_os_str()),
+            Some(OsStr::new("7"))
+        );
+        assert!(
+            env.contains_key(OsStr::new("PATH")),
+            "PATH should remain available for install tools"
+        );
+        assert!(
+            env_keys.iter().all(|key| {
+                DEPLOY_CHILD_INHERITED_ENV.contains(&key.as_str())
+                    || key == "TENKAI_ENVIRONMENT"
+                    || key == "TENKAI_PRODUCT"
+                    || key == "TENKAI_FENCING_GENERATION"
+                    || key == "COMPOSE_PROJECT_NAME"
+            }),
+            "unexpected deploy child keys: {env_keys:?}"
+        );
+
+        for (key, value) in previous {
+            match value {
+                Some(value) => unsafe { std::env::set_var(key, value) },
+                None => unsafe { std::env::remove_var(key) },
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn deploy_shell_child_does_not_inherit_management_or_runtime_tokens() {
+        let dir = std::env::temp_dir().join(format!(
+            "tenkai-deploy-env-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("env.txt");
+        let script = format!(
+            "env | sort > {}",
+            out.to_string_lossy().replace('\'', "'\\''")
+        );
+
+        let previous = [
+            (
+                "TENKAI_MANAGEMENT_TOKEN",
+                std::env::var_os("TENKAI_MANAGEMENT_TOKEN"),
+            ),
+            (
+                "TENKAI_RUNTIME_TOKEN",
+                std::env::var_os("TENKAI_RUNTIME_TOKEN"),
+            ),
+            ("SEKAI_AUTH_TOKEN", std::env::var_os("SEKAI_AUTH_TOKEN")),
+            (
+                "TENKAI_OUTCOME_PROVIDER_TOKEN",
+                std::env::var_os("TENKAI_OUTCOME_PROVIDER_TOKEN"),
+            ),
+        ];
+        unsafe {
+            std::env::set_var("TENKAI_MANAGEMENT_TOKEN", "mgmt-should-not-leak");
+            std::env::set_var("TENKAI_RUNTIME_TOKEN", "runtime-should-not-leak");
+            std::env::set_var("SEKAI_AUTH_TOKEN", "sekai-should-not-leak");
+            std::env::set_var("TENKAI_OUTCOME_PROVIDER_TOKEN", "outcome-should-not-leak");
+        }
+
+        let mut child = tokio::process::Command::new("sh");
+        child.arg("-c").arg(&script).current_dir(&dir);
+        configure_deploy_child_env(&mut child, "lab", "app", Some(3));
+        let status = child.status().await.unwrap();
+        assert!(status.success());
+
+        let dumped = std::fs::read_to_string(&out).unwrap();
+        for forbidden in [
+            "TENKAI_MANAGEMENT_TOKEN=",
+            "TENKAI_RUNTIME_TOKEN=",
+            "SEKAI_AUTH_TOKEN=",
+            "TENKAI_OUTCOME_PROVIDER_TOKEN=",
+            "mgmt-should-not-leak",
+            "runtime-should-not-leak",
+            "sekai-should-not-leak",
+            "outcome-should-not-leak",
+        ] {
+            assert!(
+                !dumped.contains(forbidden),
+                "child env dump unexpectedly contained {forbidden}: {dumped}"
+            );
+        }
+        assert!(dumped.contains("TENKAI_ENVIRONMENT=lab"));
+        assert!(dumped.contains("TENKAI_PRODUCT=app"));
+        assert!(dumped.contains("TENKAI_FENCING_GENERATION=3"));
+
+        for (key, value) in previous {
+            match value {
+                Some(value) => unsafe { std::env::set_var(key, value) },
+                None => unsafe { std::env::remove_var(key) },
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
