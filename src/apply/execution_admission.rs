@@ -109,9 +109,34 @@ async fn inspect(ctx: &mut Ctx, plan: &Plan) -> Result<Result<(), Rejection>> {
                 channel_id: input.channel_id.clone(),
             }));
         };
-        if channel.properties.get("current_version") != Some(&input.desired_version)
-            || channel.properties.get("current_release") != Some(&input.release_id)
-        {
+        let channel_version = channel
+            .properties
+            .get("current_version")
+            .map(String::as_str)
+            .unwrap_or_default();
+        let channel_release = channel
+            .properties
+            .get("current_release")
+            .map(String::as_str)
+            .unwrap_or_default();
+        if channel_version.is_empty() || channel_release.is_empty() {
+            return Ok(Err(Rejection::ChannelMoved {
+                product: input.product.clone(),
+                channel: input.channel.clone(),
+            }));
+        }
+        // DesiredStateInput stores the constrained selection, which may differ
+        // from the raw channel head (version pins / model-runtime variants).
+        let selected = crate::plan::resolve_subscription_selection(
+            ctx,
+            &environment,
+            &plan.environment,
+            &input.product,
+            channel_version,
+            channel_release,
+        )
+        .await?;
+        if selected.0 != input.desired_version || selected.1 != input.release_id {
             return Ok(Err(Rejection::ChannelMoved {
                 product: input.product.clone(),
                 channel: input.channel.clone(),
@@ -311,5 +336,41 @@ mod tests {
                 .to_string()
                 .contains("channel stable no longer selects")
         );
+    }
+
+    #[tokio::test]
+    async fn version_pin_below_channel_head_remains_admissible() {
+        let mut ctx = context("version-pin");
+        put_current_state(&mut ctx).await;
+        ctx.put(object(
+            "tenkai:release:api@1.0.0".into(),
+            "tenkai.release",
+            "api@1.0.0",
+            HashMap::from([("version".into(), "1.0.0".into())]),
+        ))
+        .await
+        .unwrap();
+        let mut environment = ctx.get(&env_id("prod")).await.unwrap().unwrap();
+        environment
+            .properties
+            .insert("constraint.version_pin.api".into(), "1.0.0".into());
+        environment
+            .properties
+            .insert("deployed.api".into(), "0.9.0".into());
+        ctx.put(environment).await.unwrap();
+
+        let mut pinned = plan();
+        pinned.inputs[0].desired_version = "1.0.0".into();
+        pinned.inputs[0].release_id = "tenkai:release:api@1.0.0".into();
+        pinned.inputs[0].deployed_version = Some("0.9.0".into());
+        pinned.steps[0].from = Some("0.9.0".into());
+        pinned.steps[0].to = "1.0.0".into();
+        pinned.steps[0].release_id = "tenkai:release:api@1.0.0".into();
+
+        assert_eq!(
+            classify_candidate(&mut ctx, &pinned).await.unwrap(),
+            CandidateAdmission::Admissible
+        );
+        admit(&mut ctx, &pinned).await.unwrap();
     }
 }
