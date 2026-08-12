@@ -1,5 +1,6 @@
 //! Connection to a local sekai-chisei server, plus thin object/link helpers.
 
+mod lease_lifecycle;
 mod object_lifecycle;
 mod relation_lifecycle;
 
@@ -13,16 +14,14 @@ use tonic::Status;
 
 use crate::pb::chisei::{GetEvaluationGateEvidenceRequest, GetEvaluationGateEvidenceResponse};
 use crate::pb::sekai::{
-    AcquireLeaseRequest, ActionRequest, ActionResult, ActionTypeDef, CreateActionTypeRequest,
-    CreateActionTypeResponse, CreateObjectRequest, CreateObjectResponse, CreateSchemaTypeRequest,
-    CreateSchemaTypeResponse, Decision, DenyActionRequest, ExecuteActionRequest,
-    ExecuteActionResponse, FindByPropertyRequest, GetLeaseRequest, GetLeaseResponse, Lease,
-    LeasePrecondition, Link, ListActionTypesRequest, ListActionTypesResponse, ListDecisionsRequest,
-    ListDecisionsResponse, ListFilter, ListObjectChangesRequest, ListObjectChangesResponse,
-    ListObjectsRequest, ListObjectsResponse, ListSchemaTypesRequest, ListSchemaTypesResponse,
-    Object, ObjectChange, ObjectType, RefreshLeaseRequest, RefreshLeaseResponse,
-    ReleaseLeaseRequest, ReleaseLeaseResponse, TakeoverExpiredLeaseRequest,
-    TakeoverExpiredLeaseResponse, UpdateObjectRequest, UpdateObjectResponse,
+    ActionRequest, ActionResult, ActionTypeDef, CreateActionTypeRequest, CreateActionTypeResponse,
+    CreateObjectRequest, CreateObjectResponse, CreateSchemaTypeRequest, CreateSchemaTypeResponse,
+    Decision, DenyActionRequest, ExecuteActionRequest, ExecuteActionResponse,
+    FindByPropertyRequest, Lease, LeasePrecondition, Link, ListActionTypesRequest,
+    ListActionTypesResponse, ListDecisionsRequest, ListDecisionsResponse, ListFilter,
+    ListObjectChangesRequest, ListObjectChangesResponse, ListObjectsRequest, ListObjectsResponse,
+    ListSchemaTypesRequest, ListSchemaTypesResponse, Object, ObjectChange, ObjectType,
+    UpdateObjectRequest, UpdateObjectResponse,
 };
 use sekai_client::{
     CallOptions, ClientConfig, CoreLoopClient, GrpcTransport, RetryPolicy, SdkError, SdkErrorCode,
@@ -102,6 +101,13 @@ impl Backend {
         match self {
             Self::Remote { client } => relation_lifecycle::RelationLifecycle::Remote(client),
             Self::Embedded(store) => relation_lifecycle::RelationLifecycle::Embedded(store),
+        }
+    }
+
+    fn lease_lifecycle(&self) -> lease_lifecycle::LeaseLifecycle<'_> {
+        match self {
+            Self::Remote { client } => lease_lifecycle::LeaseLifecycle::Remote(client),
+            Self::Embedded(store) => lease_lifecycle::LeaseLifecycle::Embedded(store),
         }
     }
 }
@@ -421,45 +427,14 @@ impl Ctx {
         owner: &str,
         ttl_ms: i64,
     ) -> Result<Lease> {
-        if let Some(store) = self.embedded_store() {
-            return store.acquire_lease(namespace, key, owner, ttl_ms);
-        }
-        let request_id = uuid::Uuid::new_v4().to_string();
-        let response: crate::pb::sekai::AcquireLeaseResponse = self
-            .remote_unary(
-                "/sekai.SekaiService/AcquireLease",
-                AcquireLeaseRequest {
-                    namespace: namespace.into(),
-                    key: key.into(),
-                    owner: owner.into(),
-                    ttl_ms,
-                    request_id: request_id.clone(),
-                },
-                CallOptions::default().with_request_id(request_id),
-            )
-            .await?;
-        response.lease.context("provider returned an empty lease")
+        self.backend
+            .lease_lifecycle()
+            .acquire(namespace, key, owner, ttl_ms)
+            .await
     }
 
     pub(crate) async fn get_lease(&mut self, namespace: &str, key: &str) -> Result<Option<Lease>> {
-        if let Some(store) = self.embedded_store() {
-            return store.get_lease(namespace, key);
-        }
-        let response: std::result::Result<GetLeaseResponse, tonic::Status> = self
-            .remote_unary(
-                "/sekai.SekaiService/GetLease",
-                GetLeaseRequest {
-                    namespace: namespace.into(),
-                    key: key.into(),
-                },
-                CallOptions::default(),
-            )
-            .await;
-        match response {
-            Ok(response) => Ok(response.lease),
-            Err(status) if status.code() == tonic::Code::NotFound => Ok(None),
-            Err(status) => Err(status.into()),
-        }
+        self.backend.lease_lifecycle().get(namespace, key).await
     }
 
     pub(crate) async fn refresh_lease(
@@ -469,26 +444,10 @@ impl Ctx {
         fencing_token: &str,
         ttl_ms: i64,
     ) -> Result<Lease> {
-        if let Some(store) = self.embedded_store() {
-            return store.refresh_lease(namespace, key, fencing_token, ttl_ms);
-        }
-        let request_id = uuid::Uuid::new_v4().to_string();
-        let response: RefreshLeaseResponse = self
-            .remote_unary(
-                "/sekai.SekaiService/RefreshLease",
-                RefreshLeaseRequest {
-                    namespace: namespace.into(),
-                    key: key.into(),
-                    fencing_token: fencing_token.into(),
-                    ttl_ms,
-                    request_id: request_id.clone(),
-                },
-                CallOptions::default().with_request_id(request_id),
-            )
-            .await?;
-        response
-            .lease
-            .context("provider returned an empty refreshed lease")
+        self.backend
+            .lease_lifecycle()
+            .refresh(namespace, key, fencing_token, ttl_ms)
+            .await
     }
 
     pub(crate) async fn release_lease(
@@ -497,25 +456,10 @@ impl Ctx {
         key: &str,
         fencing_token: &str,
     ) -> Result<Lease> {
-        if let Some(store) = self.embedded_store() {
-            return store.release_lease(namespace, key, fencing_token);
-        }
-        let request_id = uuid::Uuid::new_v4().to_string();
-        let response: ReleaseLeaseResponse = self
-            .remote_unary(
-                "/sekai.SekaiService/ReleaseLease",
-                ReleaseLeaseRequest {
-                    namespace: namespace.into(),
-                    key: key.into(),
-                    fencing_token: fencing_token.into(),
-                    request_id: request_id.clone(),
-                },
-                CallOptions::default().with_request_id(request_id),
-            )
-            .await?;
-        response
-            .lease
-            .context("provider returned an empty released lease")
+        self.backend
+            .lease_lifecycle()
+            .release(namespace, key, fencing_token)
+            .await
     }
 
     pub(crate) async fn takeover_expired_lease(
@@ -527,35 +471,17 @@ impl Ctx {
         expected_expires_at_ms: i64,
         ttl_ms: i64,
     ) -> Result<Lease> {
-        if let Some(store) = self.embedded_store() {
-            return store.takeover_lease(
+        self.backend
+            .lease_lifecycle()
+            .takeover(
                 namespace,
                 key,
                 owner,
                 expected_fencing_token,
                 expected_expires_at_ms,
                 ttl_ms,
-            );
-        }
-        let request_id = uuid::Uuid::new_v4().to_string();
-        let response: TakeoverExpiredLeaseResponse = self
-            .remote_unary(
-                "/sekai.SekaiService/TakeoverExpiredLease",
-                TakeoverExpiredLeaseRequest {
-                    namespace: namespace.into(),
-                    key: key.into(),
-                    owner: owner.into(),
-                    expected_fencing_token: expected_fencing_token.into(),
-                    expected_expires_at_ms,
-                    ttl_ms,
-                    request_id: request_id.clone(),
-                },
-                CallOptions::default().with_request_id(request_id),
             )
-            .await?;
-        response
-            .lease
-            .context("provider returned an empty takeover lease")
+            .await
     }
 
     pub(crate) fn canary_schema_preflight(&self) -> Arc<OnceCell<()>> {
@@ -1009,11 +935,14 @@ mod tests {
         canonical_update_request, lease_precondition, token_transport_is_safe,
     };
     use crate::pb::sekai::{
-        ActionOp, ActionTypeDef, CreateActionTypeRequest, CreateActionTypeResponse,
-        CreateLinkRequest, CreateLinkResponse, CreateObjectRequest, CreateObjectResponse,
-        DeleteLinkRequest, DeleteLinkResponse, DeleteObjectRequest, DeleteObjectResponse,
+        AcquireLeaseRequest, AcquireLeaseResponse, ActionOp, ActionTypeDef,
+        CreateActionTypeRequest, CreateActionTypeResponse, CreateLinkRequest, CreateLinkResponse,
+        CreateObjectRequest, CreateObjectResponse, DeleteLinkRequest, DeleteLinkResponse,
+        DeleteObjectRequest, DeleteObjectResponse, GetLeaseRequest, GetLeaseResponse,
         GetLinkedObjectsRequest, GetLinkedObjectsResponse, GetLinksRequest, GetLinksResponse,
-        GetObjectRequest, GetObjectResponse, Link, Object, ObjectChange, UpdateObjectRequest,
+        GetObjectRequest, GetObjectResponse, Lease, Link, Object, ObjectChange,
+        RefreshLeaseRequest, RefreshLeaseResponse, ReleaseLeaseRequest, ReleaseLeaseResponse,
+        TakeoverExpiredLeaseRequest, TakeoverExpiredLeaseResponse, UpdateObjectRequest,
         UpdateObjectResponse,
     };
     use sekai_client::{ClientConfig, RetryPolicy, SdkErrorCode};
@@ -1039,6 +968,7 @@ mod tests {
         metadata: Arc<Mutex<Vec<CapturedMetadata>>>,
         objects: Arc<Mutex<BTreeMap<String, Object>>>,
         links: Arc<Mutex<BTreeMap<String, Link>>>,
+        leases: Arc<Mutex<BTreeMap<(String, String), Lease>>>,
         create_failures: Arc<AtomicUsize>,
         create_internal_failures: Arc<AtomicUsize>,
         update_failures: Arc<AtomicUsize>,
@@ -1053,11 +983,23 @@ mod tests {
                 metadata: Arc::new(Mutex::new(Vec::new())),
                 objects: Arc::new(Mutex::new(BTreeMap::new())),
                 links: Arc::new(Mutex::new(BTreeMap::new())),
+                leases: Arc::new(Mutex::new(BTreeMap::new())),
                 create_failures: Arc::new(AtomicUsize::new(0)),
                 create_internal_failures: Arc::new(AtomicUsize::new(0)),
                 update_failures: Arc::new(AtomicUsize::new(0)),
             }
         }
+    }
+
+    fn mock_now_ms() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+    }
+
+    fn mock_lease_key(namespace: &str, key: &str) -> (String, String) {
+        (namespace.to_owned(), key.to_owned())
     }
 
     fn consume_failure(counter: &AtomicUsize) -> bool {
@@ -1297,6 +1239,189 @@ mod tests {
         }
     }
 
+    struct AcquireLeaseRpc(MockSekaiState);
+
+    impl tonic::server::UnaryService<AcquireLeaseRequest> for AcquireLeaseRpc {
+        type Response = AcquireLeaseResponse;
+        type Future = Pin<
+            Box<dyn Future<Output = Result<tonic::Response<Self::Response>, tonic::Status>> + Send>,
+        >;
+
+        fn call(&mut self, request: tonic::Request<AcquireLeaseRequest>) -> Self::Future {
+            let state = self.0.clone();
+            Box::pin(async move {
+                let request = request.into_inner();
+                if request.ttl_ms <= 0 {
+                    return Err(tonic::Status::invalid_argument("ttl_ms must be positive"));
+                }
+                let now = mock_now_ms();
+                let key = mock_lease_key(&request.namespace, &request.key);
+                let mut leases = state.leases.lock().unwrap();
+                if let Some(current) = leases.get(&key)
+                    && current.status == "active"
+                    && current.expires_at_ms > now
+                {
+                    return Err(tonic::Status::already_exists(format!(
+                        "lease {}/{} is held by {}",
+                        request.namespace, request.key, current.owner
+                    )));
+                }
+                let generation = leases
+                    .get(&key)
+                    .map_or(1, |lease| lease.generation.saturating_add(1));
+                let lease = Lease {
+                    namespace: request.namespace,
+                    key: request.key,
+                    generation,
+                    fencing_token: uuid::Uuid::new_v4().to_string(),
+                    owner: request.owner,
+                    status: "active".into(),
+                    acquired_at_ms: now,
+                    refreshed_at_ms: now,
+                    expires_at_ms: now.saturating_add(request.ttl_ms),
+                    released_at_ms: 0,
+                    site_id: String::new(),
+                };
+                leases.insert(key, lease.clone());
+                Ok(tonic::Response::new(AcquireLeaseResponse {
+                    lease: Some(lease),
+                }))
+            })
+        }
+    }
+
+    struct GetLeaseRpc(MockSekaiState);
+
+    impl tonic::server::UnaryService<GetLeaseRequest> for GetLeaseRpc {
+        type Response = GetLeaseResponse;
+        type Future = Pin<
+            Box<dyn Future<Output = Result<tonic::Response<Self::Response>, tonic::Status>> + Send>,
+        >;
+
+        fn call(&mut self, request: tonic::Request<GetLeaseRequest>) -> Self::Future {
+            let state = self.0.clone();
+            Box::pin(async move {
+                let request = request.into_inner();
+                let key = mock_lease_key(&request.namespace, &request.key);
+                match state.leases.lock().unwrap().get(&key).cloned() {
+                    Some(lease) => Ok(tonic::Response::new(GetLeaseResponse {
+                        lease: Some(lease),
+                    })),
+                    None => Err(tonic::Status::not_found("lease not found")),
+                }
+            })
+        }
+    }
+
+    struct RefreshLeaseRpc(MockSekaiState);
+
+    impl tonic::server::UnaryService<RefreshLeaseRequest> for RefreshLeaseRpc {
+        type Response = RefreshLeaseResponse;
+        type Future = Pin<
+            Box<dyn Future<Output = Result<tonic::Response<Self::Response>, tonic::Status>> + Send>,
+        >;
+
+        fn call(&mut self, request: tonic::Request<RefreshLeaseRequest>) -> Self::Future {
+            let state = self.0.clone();
+            Box::pin(async move {
+                let request = request.into_inner();
+                let key = mock_lease_key(&request.namespace, &request.key);
+                let mut leases = state.leases.lock().unwrap();
+                let Some(lease) = leases.get_mut(&key) else {
+                    return Err(tonic::Status::not_found("lease not found"));
+                };
+                if lease.status != "active" || lease.fencing_token != request.fencing_token {
+                    return Err(tonic::Status::failed_precondition("lease refresh rejected"));
+                }
+                let now = mock_now_ms();
+                lease.refreshed_at_ms = now;
+                lease.expires_at_ms = now.saturating_add(request.ttl_ms);
+                Ok(tonic::Response::new(RefreshLeaseResponse {
+                    lease: Some(lease.clone()),
+                }))
+            })
+        }
+    }
+
+    struct ReleaseLeaseRpc(MockSekaiState);
+
+    impl tonic::server::UnaryService<ReleaseLeaseRequest> for ReleaseLeaseRpc {
+        type Response = ReleaseLeaseResponse;
+        type Future = Pin<
+            Box<dyn Future<Output = Result<tonic::Response<Self::Response>, tonic::Status>> + Send>,
+        >;
+
+        fn call(&mut self, request: tonic::Request<ReleaseLeaseRequest>) -> Self::Future {
+            let state = self.0.clone();
+            Box::pin(async move {
+                let request = request.into_inner();
+                let key = mock_lease_key(&request.namespace, &request.key);
+                let mut leases = state.leases.lock().unwrap();
+                let Some(lease) = leases.get_mut(&key) else {
+                    return Err(tonic::Status::not_found("lease not found"));
+                };
+                if lease.status != "active" || lease.fencing_token != request.fencing_token {
+                    return Err(tonic::Status::failed_precondition("lease release rejected"));
+                }
+                lease.status = "released".into();
+                lease.released_at_ms = mock_now_ms();
+                Ok(tonic::Response::new(ReleaseLeaseResponse {
+                    lease: Some(lease.clone()),
+                }))
+            })
+        }
+    }
+
+    struct TakeoverExpiredLeaseRpc(MockSekaiState);
+
+    impl tonic::server::UnaryService<TakeoverExpiredLeaseRequest> for TakeoverExpiredLeaseRpc {
+        type Response = TakeoverExpiredLeaseResponse;
+        type Future = Pin<
+            Box<dyn Future<Output = Result<tonic::Response<Self::Response>, tonic::Status>> + Send>,
+        >;
+
+        fn call(&mut self, request: tonic::Request<TakeoverExpiredLeaseRequest>) -> Self::Future {
+            let state = self.0.clone();
+            Box::pin(async move {
+                let request = request.into_inner();
+                if request.ttl_ms <= 0 {
+                    return Err(tonic::Status::invalid_argument("ttl_ms must be positive"));
+                }
+                let key = mock_lease_key(&request.namespace, &request.key);
+                let mut leases = state.leases.lock().unwrap();
+                let Some(current) = leases.get(&key).cloned() else {
+                    return Err(tonic::Status::not_found("lease not found"));
+                };
+                let now = mock_now_ms();
+                if current.fencing_token != request.expected_fencing_token
+                    || current.expires_at_ms != request.expected_expires_at_ms
+                    || current.expires_at_ms > now
+                {
+                    return Err(tonic::Status::failed_precondition(
+                        "lease takeover precondition failed",
+                    ));
+                }
+                let lease = Lease {
+                    namespace: request.namespace,
+                    key: request.key,
+                    generation: current.generation.saturating_add(1),
+                    fencing_token: uuid::Uuid::new_v4().to_string(),
+                    owner: request.owner,
+                    status: "active".into(),
+                    acquired_at_ms: now,
+                    refreshed_at_ms: now,
+                    expires_at_ms: now.saturating_add(request.ttl_ms),
+                    released_at_ms: 0,
+                    site_id: String::new(),
+                };
+                leases.insert(key, lease.clone());
+                Ok(tonic::Response::new(TakeoverExpiredLeaseResponse {
+                    lease: Some(lease),
+                }))
+            })
+        }
+    }
+
     struct CreateActionTypeRpc(MockSekaiState);
 
     impl tonic::server::UnaryService<CreateActionTypeRequest> for CreateActionTypeRpc {
@@ -1379,6 +1504,26 @@ mod tests {
                     "/sekai.SekaiService/GetLinkedObjects" => {
                         let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
                         grpc.unary(GetLinkedObjectsRpc(state), request).await
+                    }
+                    "/sekai.SekaiService/AcquireLease" => {
+                        let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
+                        grpc.unary(AcquireLeaseRpc(state), request).await
+                    }
+                    "/sekai.SekaiService/GetLease" => {
+                        let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
+                        grpc.unary(GetLeaseRpc(state), request).await
+                    }
+                    "/sekai.SekaiService/RefreshLease" => {
+                        let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
+                        grpc.unary(RefreshLeaseRpc(state), request).await
+                    }
+                    "/sekai.SekaiService/ReleaseLease" => {
+                        let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
+                        grpc.unary(ReleaseLeaseRpc(state), request).await
+                    }
+                    "/sekai.SekaiService/TakeoverExpiredLease" => {
+                        let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
+                        grpc.unary(TakeoverExpiredLeaseRpc(state), request).await
                     }
                     "/sekai.SekaiService/CreateActionType" => {
                         let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
@@ -1593,6 +1738,94 @@ mod tests {
     async fn remote_ctx_conforms_to_relation_lifecycle() {
         let (ctx, server) = remote_ctx(MockSekaiState::default()).await;
         assert_relation_lifecycle(ctx).await;
+        server.abort();
+    }
+
+    async fn assert_lease_lifecycle(mut ctx: Ctx) {
+        let namespace = "tenkai";
+        let key = "environment/conformance";
+        assert_eq!(ctx.get_lease(namespace, key).await.unwrap(), None);
+
+        let acquired = ctx
+            .acquire_lease(namespace, key, "owner-a", 5_000)
+            .await
+            .unwrap();
+        assert_eq!(acquired.namespace, namespace);
+        assert_eq!(acquired.key, key);
+        assert_eq!(acquired.owner, "owner-a");
+        assert_eq!(acquired.status, "active");
+        assert!(!acquired.fencing_token.is_empty());
+        assert_eq!(
+            ctx.get_lease(namespace, key).await.unwrap(),
+            Some(acquired.clone())
+        );
+
+        let conflict = ctx
+            .acquire_lease(namespace, key, "owner-b", 5_000)
+            .await
+            .unwrap_err();
+        let status = conflict
+            .downcast_ref::<tonic::Status>()
+            .expect("lease conflict should surface as tonic Status");
+        assert_eq!(status.code(), tonic::Code::AlreadyExists);
+
+        let refreshed = ctx
+            .refresh_lease(namespace, key, &acquired.fencing_token, 8_000)
+            .await
+            .unwrap();
+        assert_eq!(refreshed.fencing_token, acquired.fencing_token);
+        assert!(refreshed.expires_at_ms >= acquired.expires_at_ms);
+        assert_eq!(refreshed.status, "active");
+
+        let released = ctx
+            .release_lease(namespace, key, &acquired.fencing_token)
+            .await
+            .unwrap();
+        assert_eq!(released.status, "released");
+        assert!(released.released_at_ms > 0);
+
+        let reacquired = ctx
+            .acquire_lease(namespace, key, "owner-c", 1)
+            .await
+            .unwrap();
+        assert_eq!(reacquired.owner, "owner-c");
+        assert_eq!(reacquired.status, "active");
+        assert_ne!(reacquired.fencing_token, acquired.fencing_token);
+        assert!(reacquired.generation > acquired.generation);
+
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let takeover = ctx
+            .takeover_expired_lease(
+                namespace,
+                key,
+                "owner-d",
+                &reacquired.fencing_token,
+                reacquired.expires_at_ms,
+                5_000,
+            )
+            .await
+            .unwrap();
+        assert_eq!(takeover.owner, "owner-d");
+        assert_eq!(takeover.status, "active");
+        assert_ne!(takeover.fencing_token, reacquired.fencing_token);
+        assert!(takeover.generation > reacquired.generation);
+    }
+
+    #[tokio::test]
+    async fn embedded_ctx_conforms_to_lease_lifecycle() {
+        let path = std::env::temp_dir().join(format!(
+            "tenkai-ctx-lease-conformance-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let ctx = Ctx::embedded(&path).unwrap();
+        assert_lease_lifecycle(ctx).await;
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn remote_ctx_conforms_to_lease_lifecycle() {
+        let (ctx, server) = remote_ctx(MockSekaiState::default()).await;
+        assert_lease_lifecycle(ctx).await;
         server.abort();
     }
 
