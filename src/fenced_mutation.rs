@@ -5,7 +5,7 @@
 //! Callers retain lease ownership and expose only refresh plus generation.
 
 use std::collections::BTreeMap;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::future::Future;
 use std::io::{Read as _, Write as _};
@@ -38,21 +38,6 @@ pub struct MutationCommand<'a> {
 /// fencing/identity variables set by [`configure_deploy_child_env`].
 const DEPLOY_CHILD_INHERITED_ENV: &[&str] = &[
     "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TMP", "TEMP", "TZ",
-];
-
-/// Secrets and control-plane credentials that must never reach deploy shells.
-const DEPLOY_CHILD_FORBIDDEN_ENV: &[&str] = &[
-    "SEKAI_AUTH_TOKEN",
-    "TENKAI_MANAGEMENT_TOKEN",
-    "TENKAI_RUNTIME_TOKEN",
-    "TENKAI_RUNTIME_TOKENS",
-    "TENKAI_OUTCOME_PROVIDER_TOKEN",
-    "TENKAI_OUTCOME_PROVIDER_URL",
-    "TENKAI_OUTCOME_PROVIDER_PRINCIPAL",
-    "TENKAI_OUTCOME_PROVIDER_REGISTRATION",
-    "TENKAI_JWT_VERIFIER_CONFIG",
-    "TENKAI_POSTGRES_URL",
-    "TENKAI_DEVELOPMENT_FIXTURE_PRINCIPALS",
 ];
 
 fn executor_guard_executable() -> Result<PathBuf> {
@@ -290,6 +275,22 @@ async fn wait_for_process_group_exit(process_group: i32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsStr;
+
+    /// Secrets and control-plane credentials that must never reach deploy shells.
+    const DEPLOY_CHILD_FORBIDDEN_ENV: &[&str] = &[
+        "SEKAI_AUTH_TOKEN",
+        "TENKAI_MANAGEMENT_TOKEN",
+        "TENKAI_RUNTIME_TOKEN",
+        "TENKAI_RUNTIME_TOKENS",
+        "TENKAI_OUTCOME_PROVIDER_TOKEN",
+        "TENKAI_OUTCOME_PROVIDER_URL",
+        "TENKAI_OUTCOME_PROVIDER_PRINCIPAL",
+        "TENKAI_OUTCOME_PROVIDER_REGISTRATION",
+        "TENKAI_JWT_VERIFIER_CONFIG",
+        "TENKAI_POSTGRES_URL",
+        "TENKAI_DEVELOPMENT_FIXTURE_PRINCIPALS",
+    ];
 
     #[test]
     fn deploy_child_environment_excludes_control_plane_secrets() {
