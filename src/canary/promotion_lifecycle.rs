@@ -3,7 +3,7 @@
 use super::*;
 use crate::auth_context::{AuthenticatedRequestContext, DeliveryCapability};
 
-fn require_management(actor: &AuthenticatedRequestContext) -> Result<()> {
+pub(crate) fn require_management(actor: &AuthenticatedRequestContext) -> Result<()> {
     actor
         .require_delivery_capability(DeliveryCapability::Management)
         .map_err(|error| anyhow::anyhow!("{error}"))
