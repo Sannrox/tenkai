@@ -19,6 +19,9 @@
 //! - `canary::attempt_lifecycle` hides Canary policy snapshots, promotion-lock
 //!   coordination, attempt start and finalization ordering, durable outcome
 //!   evidence, and crash repair behind execution and repair interfaces.
+//!   Its private evaluation module hides pending-attempt admission, terminal
+//!   failure synthesis, outcome↔attempt↔plan↔deployment consistency, and
+//!   cohort evaluation behind one promotion-evaluation interface.
 //! - `plan::release_selection` hides version constraints, Environment capability
 //!   facts, model-runtime sibling discovery, rollout ceilings, and deterministic
 //!   variant selection behind one private release-selection interface.
