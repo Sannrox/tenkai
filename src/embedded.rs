@@ -478,6 +478,17 @@ impl EmbeddedStore {
         decode_many(payloads, "object")
     }
 
+    /// List object ids of `kind` without decoding protobuf payloads.
+    pub fn list_kind_ids(&self, kind: &str) -> Result<Vec<String>> {
+        let connection = self.connection()?;
+        let mut statement =
+            connection.prepare("SELECT id FROM embedded_objects WHERE kind=?1 ORDER BY id")?;
+        let ids = statement
+            .query_map([kind], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(ids)
+    }
+
     pub fn register_schema(&self, schema: ObjectType) -> std::result::Result<(), tonic::Status> {
         let connection = self
             .connection()
@@ -1349,6 +1360,9 @@ mod tests {
             .find_by_property("tenkai.plan", "environment", "missing")
             .unwrap();
         assert!(empty.is_empty());
+        let ids = store.list_kind_ids("tenkai.plan").unwrap();
+        assert_eq!(ids, vec!["plan-a1", "plan-a2", "plan-b1", "plan-c1"]);
+        assert_eq!(store.list_kind("tenkai.plan").unwrap().len(), ids.len());
         assert!(
             store
                 .find_by_property("", "environment", "env_a")

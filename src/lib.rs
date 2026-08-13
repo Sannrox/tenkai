@@ -17,8 +17,9 @@
 //!   and reverify behind one lookup interface.
 //! - [`plan`], [`apply`], and [`reconciler`] own convergence decisions and execution.
 //!   The reconciler's private tick-admission module hides in-flight/backoff
-//!   admission, optional multi-host fencing, concurrency, join, and diagnostics
-//!   behind one tick interface; environment_lifecycle remains the per-env worker.
+//!   admission, optional multi-host fencing, concurrency, join, diagnostics,
+//!   and an environment-name index so ticks do not `list_kind` the fleet when
+//!   membership is unchanged; environment_lifecycle remains the per-env worker.
 //! - `canary::attempt_lifecycle` hides Canary policy snapshots, promotion-lock
 //!   coordination, attempt start and finalization ordering, durable outcome
 //!   evidence, and crash repair behind execution and repair interfaces.
