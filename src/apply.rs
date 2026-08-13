@@ -233,7 +233,16 @@ async fn execute_locked(
             plan_completion::fail(ctx, lease, &mut stored_plan, skip_gates, &detail).await?;
             return Err(error.context(detail));
         }
-        let outcome = match step_lifecycle::execute(ctx, lease, &env, &plan_id, &step).await {
+        let outcome = match step_lifecycle::execute(
+            ctx,
+            lease,
+            &env,
+            &plan_id,
+            &step,
+            options.software_executor,
+        )
+        .await
+        {
             Ok(outcome) => outcome,
             Err(error) => {
                 plan_completion::fail(ctx, lease, &mut stored_plan, skip_gates, error.to_string())

@@ -26,6 +26,7 @@ pub(super) async fn activate(
     ctx: &mut Ctx,
     lease: &EnvironmentLease,
     content: &ReleaseContent,
+    software: Option<&dyn crate::software_executor::SoftwareExecutor>,
 ) -> Result<Result<(), String>> {
     if content.manifest.product.kind.policy().target() == ProductTarget::RoutingConfig {
         prepare_fenced_mutation(ctx, lease, content).await?;
@@ -76,15 +77,13 @@ pub(super) async fn activate(
         )
         .map_err(|error| error.to_string()));
     }
-    if let Some(executor) = crate::software_executor::selected_software_executor() {
+    if let Some(executor) = software {
         prepare_fenced_mutation(ctx, lease, content).await?;
         let request = software_request(content);
         let install = executor.apply(&request).map_err(|error| {
-            crate::software_executor::format_software_phase_error(
+            software_phase_error(
                 crate::software_executor::SoftwareDeployPhase::Apply,
-                &content.product,
-                &content.manifest.product.version,
-                &content.environment,
+                content,
                 &error.to_string(),
             )
         });
@@ -93,11 +92,9 @@ pub(super) async fn activate(
                 Some(command) if !command.is_empty() => {
                     match run_mutation_command(ctx, lease, content, command).await? {
                         Ok(()) => Ok(()),
-                        Err(error) => Err(crate::software_executor::format_software_phase_error(
+                        Err(error) => Err(software_phase_error(
                             crate::software_executor::SoftwareDeployPhase::Health,
-                            &content.product,
-                            &content.manifest.product.version,
-                            &content.environment,
+                            content,
                             &error,
                         )),
                     }
@@ -130,6 +127,7 @@ pub(super) async fn deactivate(
     ctx: &mut Ctx,
     lease: &EnvironmentLease,
     content: &ReleaseContent,
+    software: Option<&dyn crate::software_executor::SoftwareExecutor>,
 ) -> Result<Result<(), String>> {
     if content.manifest.product.kind.policy().target() == ProductTarget::RoutingConfig {
         refresh_environment_lease(ctx, lease).await?;
@@ -165,11 +163,17 @@ pub(super) async fn deactivate(
         )
         .map_err(|error| error.to_string()));
     }
-    if let Some(executor) = crate::software_executor::selected_software_executor() {
+    if let Some(executor) = software {
         refresh_environment_lease(ctx, lease).await?;
         return Ok(executor
             .remove(&software_request(content))
-            .map_err(|error| error.to_string()));
+            .map_err(|error| {
+                software_phase_error(
+                    crate::software_executor::SoftwareDeployPhase::Remove,
+                    content,
+                    &error.to_string(),
+                )
+            }));
     }
     match content.manifest.deploy.uninstall.as_deref() {
         Some(command) if !command.is_empty() => {
@@ -189,6 +193,7 @@ pub(super) async fn cleanup_failed_activation(
     lease: &EnvironmentLease,
     content: &ReleaseContent,
     failure: String,
+    software: Option<&dyn crate::software_executor::SoftwareExecutor>,
 ) -> Result<(bool, String)> {
     if content.manifest.product.kind.policy().cleanup() == CleanupPolicy::Atomic {
         // Descriptor validation is pre-mutation and local adapters publish
@@ -196,7 +201,7 @@ pub(super) async fn cleanup_failed_activation(
         return Ok((true, failure));
     }
     Ok(match content.manifest.deploy.uninstall.as_deref() {
-        Some(_) => match deactivate(ctx, lease, content).await {
+        Some(_) => match deactivate(ctx, lease, content, software).await {
             Ok(Ok(())) => (true, format!("{failure}; cleaned up failed install")),
             Ok(Err(cleanup)) => (false, format!("{failure}; cleanup also failed: {cleanup}")),
             Err(error) => (
@@ -218,6 +223,20 @@ fn software_request(content: &ReleaseContent) -> crate::software_executor::Softw
             "tenkai:release:{}@{}",
             content.product, content.manifest.product.version
         ),
+    )
+}
+
+fn software_phase_error(
+    phase: crate::software_executor::SoftwareDeployPhase,
+    content: &ReleaseContent,
+    detail: &str,
+) -> String {
+    crate::software_executor::format_software_phase_error(
+        phase,
+        &content.product,
+        &content.manifest.product.version,
+        &content.environment,
+        detail,
     )
 }
 

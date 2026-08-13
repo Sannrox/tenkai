@@ -1282,6 +1282,7 @@ async fn run(cli: Cli) -> Result<()> {
                     skip_gates,
                     emergency_reason: emergency_reason.as_deref(),
                     authorization,
+                    software_executor: None,
                 },
                 PlanResultContext {
                     command: CommandName::Apply,
@@ -1382,6 +1383,7 @@ async fn run(cli: Cli) -> Result<()> {
                                 .as_deref()
                                 .expect("clap requires a development reason"),
                         },
+                        software_executor: None,
                     },
                     PlanResultContext {
                         command: CommandName::Rollback,
@@ -1652,6 +1654,14 @@ async fn run_plan(
     execution: apply::ExecutionOptions<'_>,
     result_context: PlanResultContext<'_>,
 ) -> Result<()> {
+    let software =
+        tenkai::software_executor::selected_software_executor().map(std::sync::Arc::from);
+    let execution = apply::ExecutionOptions {
+        skip_gates: execution.skip_gates,
+        emergency_reason: execution.emergency_reason,
+        authorization: execution.authorization,
+        software_executor: software,
+    };
     let outcomes = apply::execute_with_options(ctx, plan_id, execution).await?;
     let mut failed = false;
     for o in &outcomes {

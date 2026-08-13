@@ -52,7 +52,8 @@
 //!   classification behind the public Outcome interface.
 //! - `apply::product_execution` hides product-kind dispatch, adapter setup,
 //!   integrity and health ordering, and failed-activation cleanup policy behind
-//!   the apply workflow's private execution seam.
+//!   the apply workflow's private execution seam. Software adapters are supplied
+//!   by the host through execution options rather than read from process env.
 //! - `apply::step_lifecycle` hides target and restore admission, rollback cleanup,
 //!   activation recovery, Environment observation, and bookkeeping compensation
 //!   behind one private Plan Step execution interface.
@@ -69,6 +70,10 @@
 //!   heartbeat renewal, and inventory admission behind one interface.
 //! - [`software_executor`], [`model_runtime`], [`routing`], and [`staged_artifact`]
 //!   adapt typed delivery products to their target runtimes.
+//!   Software executor hosts select Helm, native Kubernetes, or fake adapters
+//!   and pass them through apply execution options; the private diagnostics
+//!   module hides credential-free stderr capture and sanitization shared by
+//!   Helm and kubectl.
 //! - `product_kind` owns the closed Product-kind policy for manifest target
 //!   classification, staged identity, cleanup semantics, and coordinated
 //!   model/routing rollout rank without introducing a trait seam.

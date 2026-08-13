@@ -137,6 +137,7 @@ async fn execute_authorized(
     skip_gates: bool,
     authorization: apply::ExecutionAuthorization<'_>,
 ) -> Result<EnvironmentStatus> {
+    let software = crate::software_executor::selected_software_executor().map(std::sync::Arc::from);
     let outcomes = apply::execute_with_options(
         ctx,
         plan_id,
@@ -144,6 +145,7 @@ async fn execute_authorized(
             skip_gates,
             emergency_reason: None,
             authorization,
+            software_executor: software,
         },
     )
     .await?;
