@@ -15,7 +15,7 @@ use crate::reconcile_fence::ReconcileTickFence;
 mod environment_lifecycle;
 mod tick_admission;
 
-use tick_admission::SchedulerState;
+use tick_admission::{EnvironmentIndex, SchedulerState};
 
 // Preserve the public protocol path while runtime delivery owns the types.
 pub use crate::runtime_delivery::{RuntimeCompletion, RuntimeStepReceipt};
@@ -188,6 +188,7 @@ pub struct Reconciler {
     ctx: Ctx,
     config: Config,
     state: Arc<Mutex<SchedulerState>>,
+    environment_index: Arc<Mutex<EnvironmentIndex>>,
     tick_lock: Arc<tokio::sync::Mutex<()>>,
     runtime_environments: Arc<HashSet<String>>,
     diagnostics: Arc<Mutex<ReconcileDiagnostics>>,
@@ -216,6 +217,7 @@ impl Reconciler {
             ctx,
             config,
             state: Arc::new(Mutex::new(SchedulerState::default())),
+            environment_index: Arc::new(Mutex::new(EnvironmentIndex::default())),
             tick_lock: Arc::new(tokio::sync::Mutex::new(())),
             runtime_environments: Arc::new(HashSet::new()),
             diagnostics: Arc::new(Mutex::new(ReconcileDiagnostics::default())),
@@ -281,6 +283,7 @@ impl Reconciler {
             ctx: self.ctx.clone(),
             config: self.config.clone(),
             state: Arc::clone(&self.state),
+            environment_index: Arc::clone(&self.environment_index),
             tick_lock: self.tick_lock.as_ref(),
             runtime_environments: Arc::clone(&self.runtime_environments),
             diagnostics: Arc::clone(&self.diagnostics),
@@ -376,6 +379,25 @@ mod tests {
             fence_ttl_ms: 30_000,
             instance_id: "reconciler-test".into(),
         }
+    }
+
+    fn temp_ctx(label: &str) -> (std::path::PathBuf, Ctx) {
+        let database = std::env::temp_dir().join(format!(
+            "tenkai-{label}-{}-{}.db",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let _ = std::fs::remove_file(&database);
+        (database, Ctx::embedded(&database).unwrap())
+    }
+
+    async fn registered_ctx(label: &str, environments: &[&str]) -> (std::path::PathBuf, Ctx) {
+        let (database, mut ctx) = temp_ctx(label);
+        crate::ontology::register(&mut ctx).await.unwrap();
+        for name in environments {
+            plan::env_add(&mut ctx, name, *name).await.unwrap();
+        }
+        (database, ctx)
     }
 
     fn test_plan(env: &str, created_at: i64, state: PlanState) -> Plan {
@@ -489,16 +511,7 @@ mod tests {
 
     #[tokio::test]
     async fn bounded_tick_excludes_foreign_work_before_reconcile() {
-        let database = std::env::temp_dir().join(format!(
-            "tenkai-bounded-reconcile-{}-{}.db",
-            std::process::id(),
-            crate::now_millis()
-        ));
-        let _ = std::fs::remove_file(&database);
-        let mut ctx = Ctx::embedded(&database).unwrap();
-        crate::ontology::register(&mut ctx).await.unwrap();
-        plan::env_add(&mut ctx, "env-a", "tenant a").await.unwrap();
-        plan::env_add(&mut ctx, "env-b", "tenant b").await.unwrap();
+        let (database, ctx) = registered_ctx("bounded-reconcile", &["env-a", "env-b"]).await;
 
         let reconciler = Reconciler::new(ctx, config()).unwrap();
         let report = reconciler
@@ -513,6 +526,178 @@ mod tests {
             !serde_json::to_string(&report).unwrap().contains("env-b"),
             "foreign environment must be excluded before reconcile admission"
         );
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
+    async fn unbounded_tick_does_not_list_kind_when_membership_is_unchanged() {
+        let names: Vec<String> = (0..8).map(|i| format!("env-{i}")).collect();
+        let env_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let (database, ctx) = registered_ctx("tick-env-index", &env_refs).await;
+        let reconciler = Reconciler::new(ctx, config()).unwrap();
+
+        let (reports, log) = super::tick_admission::admission_io::capture(|| async {
+            let first = reconciler.run_once().await.unwrap();
+            let second = reconciler.run_once().await.unwrap();
+            (first, second)
+        })
+        .await;
+        let (first, second) = reports;
+
+        assert_eq!(first.environments.len(), 8);
+        assert_eq!(second.environments.len(), 8);
+        assert_eq!(
+            first
+                .environments
+                .iter()
+                .map(|row| row.environment.as_str())
+                .collect::<Vec<_>>(),
+            names.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        assert_eq!(log.list_kinds, vec![crate::ontology::KIND_ENVIRONMENT]);
+        assert_eq!(log.list_kind_ids, vec![crate::ontology::KIND_ENVIRONMENT]);
+        assert!(
+            log.gets.is_empty(),
+            "unchanged membership must not get environment objects: {:?}",
+            log.gets
+        );
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
+    async fn bounded_tick_gets_only_allowed_environment_names() {
+        let (database, ctx) =
+            registered_ctx("bounded-env-gets", &["env-a", "env-b", "env-c"]).await;
+        let reconciler = Reconciler::new(ctx, config()).unwrap();
+
+        let (report, log) = super::tick_admission::admission_io::capture(|| async {
+            reconciler
+                .run_once_for(&["env-a".into(), "unknown".into()])
+                .await
+                .unwrap()
+        })
+        .await;
+
+        assert_eq!(report.environments.len(), 1);
+        assert_eq!(report.environments[0].environment, "env-a");
+        assert!(
+            log.list_kinds.is_empty(),
+            "bounded tick listed the fleet: {:?}",
+            log.list_kinds
+        );
+        assert!(
+            log.list_kind_ids.is_empty(),
+            "bounded tick listed fleet ids: {:?}",
+            log.list_kind_ids
+        );
+        let mut gets = log.gets;
+        gets.sort();
+        assert_eq!(
+            gets,
+            vec![
+                crate::ontology::env_id("env-a"),
+                crate::ontology::env_id("unknown"),
+            ]
+        );
+        assert!(
+            !gets.iter().any(|id| id == &crate::ontology::env_id("env-b")
+                || id == &crate::ontology::env_id("env-c")),
+            "bounded tick must not get unmentioned environments"
+        );
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
+    async fn unbounded_tick_gets_only_environments_that_appeared() {
+        let (database, mut ctx) = registered_ctx("tick-env-appear", &["env-a", "env-b"]).await;
+        let reconciler = Reconciler::new(ctx.clone(), config()).unwrap();
+
+        let (reports, log) = super::tick_admission::admission_io::capture(|| async {
+            let first = reconciler.run_once().await.unwrap();
+            plan::env_add(&mut ctx, "env-c", "env-c").await.unwrap();
+            let second = reconciler.run_once().await.unwrap();
+            (first, second)
+        })
+        .await;
+        let (first, second) = reports;
+
+        assert_eq!(
+            first
+                .environments
+                .iter()
+                .map(|row| row.environment.as_str())
+                .collect::<Vec<_>>(),
+            ["env-a", "env-b"]
+        );
+        assert_eq!(
+            second
+                .environments
+                .iter()
+                .map(|row| row.environment.as_str())
+                .collect::<Vec<_>>(),
+            ["env-a", "env-b", "env-c"]
+        );
+        assert_eq!(log.list_kinds.len(), 1);
+        assert_eq!(log.list_kind_ids.len(), 1);
+        assert_eq!(log.gets, vec![crate::ontology::env_id("env-c")]);
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
+    async fn unbounded_tick_drops_disappeared_environments_without_getting_them() {
+        let (database, mut ctx) = registered_ctx("tick-env-disappear", &["env-a", "env-b"]).await;
+        let reconciler = Reconciler::new(ctx.clone(), config()).unwrap();
+
+        let (reports, log) = super::tick_admission::admission_io::capture(|| async {
+            let first = reconciler.run_once().await.unwrap();
+            ctx.delete(&crate::ontology::env_id("env-b")).await.unwrap();
+            let second = reconciler.run_once().await.unwrap();
+            (first, second)
+        })
+        .await;
+        let (first, second) = reports;
+
+        assert_eq!(first.environments.len(), 2);
+        assert_eq!(
+            second
+                .environments
+                .iter()
+                .map(|row| row.environment.as_str())
+                .collect::<Vec<_>>(),
+            ["env-a"]
+        );
+        assert_eq!(log.list_kinds.len(), 1);
+        assert_eq!(log.list_kind_ids.len(), 1);
+        assert!(
+            log.gets.is_empty(),
+            "disappeared environments are dropped from the index without get: {:?}",
+            log.gets
+        );
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
+    async fn fence_busy_still_admits_without_listing_unmentioned_environments() {
+        use crate::reconcile_fence::SharedReconcileFence;
+
+        let (database, ctx) = registered_ctx("tick-fence-busy", &["env-a", "env-b"]).await;
+        let fence = SharedReconcileFence::new().into_arc();
+        let now = crate::now_millis();
+        fence.try_begin("env-a", "other-host", now, 30_000).unwrap();
+        let reconciler = Reconciler::new(ctx, config())
+            .unwrap()
+            .with_shared_fence(fence);
+
+        let (report, log) = super::tick_admission::admission_io::capture(|| async {
+            reconciler.run_once_for(&["env-a".into()]).await.unwrap()
+        })
+        .await;
+
+        assert_eq!(report.environments.len(), 1);
+        assert_eq!(report.environments[0].environment, "env-a");
+        assert_eq!(report.environments[0].status, EnvironmentStatus::Busy);
+        assert!(log.list_kinds.is_empty());
+        assert_eq!(log.gets, vec![crate::ontology::env_id("env-a")]);
         let _ = std::fs::remove_file(&database);
     }
 
