@@ -35,6 +35,7 @@ pub const REL_IN_ENVIRONMENT: &str = "in_environment";
 pub const REL_PART_OF_PLAN: &str = "part_of_plan";
 pub const REL_GOVERNS_RELEASE: &str = "governs_release";
 pub const REL_EVIDENCE_FOR_POLICY: &str = "evidence_for_policy";
+pub const REL_ATTEMPT_FOR_POLICY: &str = "attempt_for_policy";
 pub const REL_AUDITS_PROMOTION: &str = "audits_promotion";
 pub const ACTION_SUBSCRIBE: &str = "tenkai.subscribe";
 pub const ACTION_REPLACE_SUBSCRIPTION: &str = "tenkai.replace_subscription";
