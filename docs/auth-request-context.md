@@ -85,7 +85,8 @@ authenticate through the composed `AuthStack` in `src/server.rs`:
    surfaces; `management` for reconcile, Catalog promote, and canary policy
    mutations). Missing capabilities fail closed. Catalog `promote` /
    `authorize_promotion` / `configure` / `set_designated` / `unlock_promotion`
-   require `DeliveryCapability::Management` before canary evaluation.
+   / `repair_pending` require `DeliveryCapability::Management` before canary
+   evaluation or attempt/plan/outcome mutation.
 5. Use the returned principal for audit; optional tenant is only present when an
    enterprise extension derived it under host authority.
 
@@ -156,7 +157,7 @@ Delivery authorization after JWT authentication:
 | --- | --- |
 | `tenkai_capabilities` present | Exact set is used (empty set denies management APIs) |
 | claim absent + `principal_kind=management` or `service` | Grants `read` + `management` |
-| claim absent + `principal_kind=human` (default) or `runtime` | Grants nothing; reconcile/fleet/inspect/promote deny |
+| claim absent + `principal_kind=human` (default) or `runtime` | Grants nothing; reconcile/fleet/inspect/promote/repair deny |
 
 Community management tokens map to `PrincipalKind::Management` and therefore keep
 full delivery capabilities under dual-stack enterprise hosts.

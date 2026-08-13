@@ -954,7 +954,8 @@ async fn run(cli: Cli) -> Result<()> {
                 );
             }
             CanaryCommand::Repair { plan_id } => {
-                let repaired = canary::repair_pending(&mut ctx, &plan_id).await?;
+                let actor = embedded_management_actor()?;
+                let repaired = canary::repair_pending(&mut ctx, &actor, &plan_id).await?;
                 println!("repaired {repaired} canary attempt(s) for {plan_id}");
             }
             CanaryCommand::Unlock { product, channel } => {

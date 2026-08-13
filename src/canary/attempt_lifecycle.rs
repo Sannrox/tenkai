@@ -4,6 +4,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use crate::apply::StepOutcomeStatus;
+use crate::auth_context::AuthenticatedRequestContext;
 
 use super::*;
 
@@ -415,7 +416,7 @@ async fn finish_attempt_locked(
         .await?
         .with_context(|| format!("canary attempt {attempt_id} not found"))?;
     match object_property(&attempt, "status")? {
-        "ready" => return repair_pending_locked(ctx, plan_id).await.map(|_| ()),
+        "ready" => return finalize_pending_attempts(ctx, plan_id).await.map(|_| ()),
         "complete" | "abandoned" => return Ok(()),
         "pending" => {}
         status => bail!("canary attempt {attempt_id} has invalid status {status}"),
@@ -455,11 +456,16 @@ async fn finish_attempt_locked(
     );
     attempt.updated = crate::now_millis().max(attempt.created);
     ctx.put(attempt).await?;
-    repair_pending_locked(ctx, plan_id).await?;
+    finalize_pending_attempts(ctx, plan_id).await?;
     Ok(())
 }
 
-pub async fn repair_pending(ctx: &mut Ctx, plan_id: &str) -> Result<usize> {
+pub async fn repair_pending(
+    ctx: &mut Ctx,
+    actor: &AuthenticatedRequestContext,
+    plan_id: &str,
+) -> Result<usize> {
+    super::promotion_lifecycle::require_management(actor)?;
     let attempts = ctx
         .find_by_property(KIND_CANARY_ATTEMPT, "plan_id", plan_id)
         .await?;
@@ -469,9 +475,13 @@ pub async fn repair_pending(ctx: &mut Ctx, plan_id: &str) -> Result<usize> {
             serde_json::from_str(object_property(attempt, "policies")?)?;
         policies.extend(snapshot.policies);
     }
-    let owner = format!("attempt-repair:{plan_id}:{}", crate::now_millis());
+    let owner = format!(
+        "attempt-repair:{}:{plan_id}:{}",
+        actor.principal_id(),
+        crate::now_millis()
+    );
     let locks = claim_policy_locks(ctx, &policies, &owner).await?;
-    let result = repair_pending_locked(ctx, plan_id).await;
+    let result = repair_pending_locked(ctx, actor, plan_id).await;
     let unlock = release_policy_locks(ctx, &locks).await;
     match (result, unlock) {
         (Ok(repaired), Ok(())) => Ok(repaired),
@@ -483,7 +493,16 @@ pub async fn repair_pending(ctx: &mut Ctx, plan_id: &str) -> Result<usize> {
     }
 }
 
-async fn repair_pending_locked(ctx: &mut Ctx, plan_id: &str) -> Result<usize> {
+async fn repair_pending_locked(
+    ctx: &mut Ctx,
+    actor: &AuthenticatedRequestContext,
+    plan_id: &str,
+) -> Result<usize> {
+    super::promotion_lifecycle::require_management(actor)?;
+    finalize_pending_attempts(ctx, plan_id).await
+}
+
+async fn finalize_pending_attempts(ctx: &mut Ctx, plan_id: &str) -> Result<usize> {
     let mut stored_plan = crate::plan::load(ctx, plan_id).await?;
     let deployments = ctx.linked(plan_id, REL_PART_OF_PLAN, "in").await?;
     let attempts = ctx

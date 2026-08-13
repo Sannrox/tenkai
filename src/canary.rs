@@ -982,6 +982,59 @@ max_startup_seconds = 30
         (ctx, actor)
     }
 
+    async fn insert_pending_attempt(ctx: &mut Ctx, plan_id: &str, sequence: u16) -> String {
+        let id = format!("{plan_id}:canary-attempt:{sequence}");
+        let now = crate::now_millis();
+        ctx.create_once(Object {
+            id: id.clone(),
+            kind: KIND_CANARY_ATTEMPT.into(),
+            name: format!("{plan_id} pending repair attempt"),
+            namespace: NS.into(),
+            external_id: String::new(),
+            properties: HashMap::from([
+                ("plan_id".into(), plan_id.into()),
+                ("initial_plan_state".into(), "computed".into()),
+                ("gates_skipped".into(), "false".into()),
+                ("status".into(), "pending".into()),
+                ("policies".into(), r#"{"policies":[]}"#.into()),
+            ]),
+            created: now,
+            updated: now,
+        })
+        .await
+        .unwrap();
+        id
+    }
+
+    async fn pending_repair_plan(ctx: &mut Ctx) -> String {
+        crate::plan::subscribe(ctx, "local", "qwen-canary", "canary")
+            .await
+            .unwrap();
+        crate::plan::set_environment_fact(ctx, "local", "architecture", "arm64")
+            .await
+            .unwrap();
+        crate::plan::set_environment_fact(ctx, "local", "accelerator", "cpu")
+            .await
+            .unwrap();
+        crate::plan::set_environment_fact(ctx, "local", "memory_gib", "16")
+            .await
+            .unwrap();
+        let plan = crate::plan::create(ctx, "local").await.unwrap();
+        insert_pending_attempt(ctx, &plan.id, 0).await;
+        plan.id
+    }
+
+    async fn attempt_status(ctx: &mut Ctx, attempt_id: &str) -> String {
+        ctx.get(attempt_id)
+            .await
+            .unwrap()
+            .expect("canary attempt")
+            .properties
+            .get("status")
+            .cloned()
+            .expect("attempt status")
+    }
+
     #[tokio::test]
     async fn jwt_human_without_caps_cannot_promote_or_mutate_canary() {
         let root = std::env::temp_dir().join(format!(
@@ -1020,6 +1073,11 @@ max_startup_seconds = 30
         );
         capability_error(
             unlock_promotion(&mut ctx, &human, "qwen-canary", "stable")
+                .await
+                .unwrap_err(),
+        );
+        capability_error(
+            repair_pending(&mut ctx, &human, "tenkai:plan:unauthenticated-repair")
                 .await
                 .unwrap_err(),
         );
@@ -1248,6 +1306,172 @@ max_startup_seconds = 30
         crate::catalog::promote(&mut ctx, &community, "qwen-canary@1.0.0", "canary")
             .await
             .unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn jwt_human_without_caps_cannot_repair_pending() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-canary-repair-authz-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let (mut ctx, management) = published_canary_fixture(&root).await;
+        let plan_id = pending_repair_plan(&mut ctx).await;
+        let attempt_id = format!("{plan_id}:canary-attempt:0");
+        let human = crate::auth_context::test_human_context("human-repair");
+        capability_error(
+            repair_pending(&mut ctx, &human, &plan_id)
+                .await
+                .unwrap_err(),
+        );
+        assert_eq!(attempt_status(&mut ctx, &attempt_id).await, "pending");
+        let repaired = repair_pending(&mut ctx, &management, &plan_id)
+            .await
+            .unwrap();
+        assert_eq!(repaired, 1);
+        assert_eq!(attempt_status(&mut ctx, &attempt_id).await, "abandoned");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn jwt_without_management_capability_cannot_repair() {
+        use crate::assertion_verifier::{
+            JwtAssertionVerifier, JwtEnterpriseAuthExtension, JwtTrustedKey, JwtVerifierConfig,
+        };
+        use crate::auth_context::{
+            AUTH_CONTEXT_CONTRACT_VERSION, AuthHostConfig, CommunityTokenAuthenticator,
+            CredentialMaterial, PrincipalIdentity, PrincipalKind, build_auth_stack,
+        };
+        use base64::Engine as _;
+        use ed25519_dalek::{Signer as _, SigningKey};
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+
+        let signing = SigningKey::from_bytes(&[13_u8; 32]);
+        let public_b64 =
+            base64::engine::general_purpose::STANDARD.encode(signing.verifying_key().as_bytes());
+        let verifier = JwtAssertionVerifier::new(JwtVerifierConfig {
+            issuer: "https://idp.example.test/".into(),
+            audience: "tenkai-control-plane".into(),
+            keys: vec![JwtTrustedKey {
+                key_id: Some("k1".into()),
+                public_key: public_b64,
+            }],
+            clock_skew_secs: 60,
+        })
+        .unwrap();
+        let extension = Arc::new(JwtEnterpriseAuthExtension::from_jwt_verifier(
+            "jwt-ref", verifier, false,
+        ));
+        let community_auth = Arc::new(
+            CommunityTokenAuthenticator::new(
+                "auth.community",
+                [(
+                    "management-secret".into(),
+                    PrincipalIdentity {
+                        id: "management".into(),
+                        kind: PrincipalKind::Management,
+                    },
+                )],
+            )
+            .unwrap(),
+        );
+        let auth = build_auth_stack(
+            &AuthHostConfig {
+                required_extension_id: Some("jwt-ref".into()),
+                expected_contract_version: AUTH_CONTEXT_CONTRACT_VERSION,
+                expected_audience: Some("tenkai-control-plane".into()),
+            },
+            Some(extension),
+            community_auth,
+        )
+        .unwrap();
+        let now = crate::assertion_verifier::now_unix_secs();
+        let mut claims: BTreeMap<String, serde_json::Value> = BTreeMap::from([
+            (
+                "iss".into(),
+                serde_json::Value::String("https://idp.example.test/".into()),
+            ),
+            (
+                "aud".into(),
+                serde_json::Value::String("tenkai-control-plane".into()),
+            ),
+            ("sub".into(), serde_json::Value::String("user-42".into())),
+            ("exp".into(), serde_json::json!(now + 3600)),
+            (
+                "principal_kind".into(),
+                serde_json::Value::String("human".into()),
+            ),
+        ]);
+        let header = serde_json::json!({ "alg": "EdDSA", "typ": "JWT", "kid": "k1" });
+        let header_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&header).unwrap());
+        let sign = |claims: &BTreeMap<String, serde_json::Value>| {
+            let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(serde_json::to_vec(claims).unwrap());
+            let signing_input = format!("{header_b64}.{payload_b64}");
+            let signature = signing.sign(signing_input.as_bytes());
+            format!(
+                "{header_b64}.{payload_b64}.{}",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature.to_bytes())
+            )
+        };
+        let human = auth
+            .authenticate(&CredentialMaterial {
+                request_id: "req-human-repair".into(),
+                bearer_token: None,
+                assertion: Some(sign(&claims).into_bytes()),
+            })
+            .unwrap();
+        assert_eq!(human.principal.kind, PrincipalKind::Human);
+        assert!(
+            !human.has_delivery_capability(crate::auth_context::DeliveryCapability::Management)
+        );
+
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-canary-repair-jwt-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let (mut ctx, _) = published_canary_fixture(&root).await;
+        let plan_id = pending_repair_plan(&mut ctx).await;
+        let first_attempt = format!("{plan_id}:canary-attempt:0");
+        capability_error(
+            repair_pending(&mut ctx, &human, &plan_id)
+                .await
+                .unwrap_err(),
+        );
+        assert_eq!(attempt_status(&mut ctx, &first_attempt).await, "pending");
+
+        claims.insert(
+            "tenkai_capabilities".into(),
+            serde_json::json!(["read", "management"]),
+        );
+        let capable = auth
+            .authenticate(&CredentialMaterial {
+                request_id: "req-mgmt-jwt-repair".into(),
+                bearer_token: None,
+                assertion: Some(sign(&claims).into_bytes()),
+            })
+            .unwrap();
+        let repaired = repair_pending(&mut ctx, &capable, &plan_id).await.unwrap();
+        assert_eq!(repaired, 1);
+        assert_eq!(attempt_status(&mut ctx, &first_attempt).await, "abandoned");
+
+        let second_attempt = insert_pending_attempt(&mut ctx, &plan_id, 1).await;
+        let community = auth
+            .authenticate(&CredentialMaterial {
+                request_id: "req-community-repair".into(),
+                bearer_token: Some("management-secret".into()),
+                assertion: None,
+            })
+            .unwrap();
+        let repaired = repair_pending(&mut ctx, &community, &plan_id)
+            .await
+            .unwrap();
+        assert_eq!(repaired, 1);
+        assert_eq!(attempt_status(&mut ctx, &second_attempt).await, "abandoned");
         let _ = std::fs::remove_dir_all(&root);
     }
 
