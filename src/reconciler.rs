@@ -1,6 +1,6 @@
 //! Concurrent, retrying convergence of registered environments.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -9,11 +9,13 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::client::Ctx;
-use crate::ontology::KIND_ENVIRONMENT;
 use crate::plan::{self, PlanState};
-use crate::reconcile_fence::{FenceAdmission, FenceGuard, ReconcileTickFence};
+use crate::reconcile_fence::ReconcileTickFence;
 
 mod environment_lifecycle;
+mod tick_admission;
+
+use tick_admission::SchedulerState;
 
 // Preserve the public protocol path while runtime delivery owns the types.
 pub use crate::runtime_delivery::{RuntimeCompletion, RuntimeStepReceipt};
@@ -181,95 +183,6 @@ impl ReconcileDiagnostics {
     }
 }
 
-#[derive(Default)]
-struct SchedulerState {
-    in_flight: HashSet<String>,
-    retries: HashMap<String, RetryState>,
-}
-
-struct RetryState {
-    failures: u32,
-    retry_at: i64,
-}
-
-enum Admission {
-    Started,
-    Busy,
-    Deferred(i64),
-}
-
-impl SchedulerState {
-    fn begin(&mut self, environment: &str, now: i64) -> Admission {
-        if self.in_flight.contains(environment) {
-            return Admission::Busy;
-        }
-        if let Some(retry) = self.retries.get(environment)
-            && retry.retry_at > now
-        {
-            return Admission::Deferred(retry.retry_at);
-        }
-        self.in_flight.insert(environment.into());
-        Admission::Started
-    }
-
-    fn finish(&mut self, environment: &str, succeeded: bool, now: i64, config: &Config) {
-        self.in_flight.remove(environment);
-        if succeeded {
-            self.retries.remove(environment);
-            return;
-        }
-        let failures = self
-            .retries
-            .get(environment)
-            .map_or(1, |retry| retry.failures.saturating_add(1));
-        let multiplier = 1_u32 << failures.saturating_sub(1).min(31);
-        let delay = config
-            .initial_backoff
-            .saturating_mul(multiplier)
-            .min(config.max_backoff);
-        let delay = i64::try_from(delay.as_millis()).unwrap_or(i64::MAX);
-        self.retries.insert(
-            environment.into(),
-            RetryState {
-                failures,
-                retry_at: now.saturating_add(delay),
-            },
-        );
-    }
-}
-
-struct AdmissionGuard {
-    environment: String,
-    state: Arc<Mutex<SchedulerState>>,
-    config: Config,
-    completed: bool,
-}
-
-impl AdmissionGuard {
-    fn finish(mut self, succeeded: bool) {
-        self.state.lock().expect("reconciler state lock").finish(
-            &self.environment,
-            succeeded,
-            crate::now_millis(),
-            &self.config,
-        );
-        self.completed = true;
-    }
-}
-
-impl Drop for AdmissionGuard {
-    fn drop(&mut self) {
-        if !self.completed {
-            self.state.lock().expect("reconciler state lock").finish(
-                &self.environment,
-                false,
-                crate::now_millis(),
-                &self.config,
-            );
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct Reconciler {
     ctx: Ctx,
@@ -364,154 +277,17 @@ impl Reconciler {
         &self,
         allowed_environments: Option<HashSet<String>>,
     ) -> Result<TickReport> {
-        // Periodic and requested ticks share this lock so a successful request
-        // always represents a complete tick rather than a transient Busy report.
-        let _tick = self.tick_lock.lock().await;
-        let mut listing = self.ctx.clone();
-        let mut environments = listing.list_kind(KIND_ENVIRONMENT).await?;
-        if let Some(allowed) = &allowed_environments {
-            // Scope work selection before admission, fencing, planning, leasing,
-            // or execution. Unknown identities are silently excluded.
-            environments.retain(|environment| allowed.contains(&environment.name));
-        }
-        environments.sort_by(|left, right| left.name.cmp(&right.name));
-        let permits = Arc::new(tokio::sync::Semaphore::new(self.config.max_concurrency));
-        let mut jobs = tokio::task::JoinSet::new();
-        let mut report = TickReport::default();
-
-        for environment in environments {
-            let name = environment.name;
-            match self
-                .state
-                .lock()
-                .expect("reconciler state lock")
-                .begin(&name, crate::now_millis())
-            {
-                Admission::Busy => report.environments.push(EnvironmentResult {
-                    environment: name,
-                    status: EnvironmentStatus::Busy,
-                }),
-                Admission::Deferred(retry_at) => report.environments.push(EnvironmentResult {
-                    environment: name,
-                    status: EnvironmentStatus::Deferred { retry_at },
-                }),
-                Admission::Started => {
-                    // Multi-host fence (optional): at most one live claim per environment.
-                    let fence_guard = if let Some(fence) = &self.shared_fence {
-                        let now = crate::now_millis();
-                        match fence.try_begin(
-                            &name,
-                            &self.config.instance_id,
-                            now,
-                            self.config.fence_ttl_ms,
-                        ) {
-                            Ok(FenceAdmission::Started { generation }) => Some(FenceGuard::new(
-                                Arc::clone(fence),
-                                name.clone(),
-                                self.config.instance_id.clone(),
-                                generation,
-                            )),
-                            Ok(FenceAdmission::Busy { .. }) | Ok(FenceAdmission::Stale) => {
-                                self.state.lock().expect("reconciler state lock").finish(
-                                    &name,
-                                    true, // not a local failure; clear in_flight
-                                    crate::now_millis(),
-                                    &self.config,
-                                );
-                                report.environments.push(EnvironmentResult {
-                                    environment: name,
-                                    status: EnvironmentStatus::Busy,
-                                });
-                                continue;
-                            }
-                            Err(error) => {
-                                self.state.lock().expect("reconciler state lock").finish(
-                                    &name,
-                                    false,
-                                    crate::now_millis(),
-                                    &self.config,
-                                );
-                                report.environments.push(EnvironmentResult {
-                                    environment: name,
-                                    status: EnvironmentStatus::Failed {
-                                        error: format!("reconcile fence: {error}"),
-                                    },
-                                });
-                                continue;
-                            }
-                        }
-                    } else {
-                        None
-                    };
-
-                    let mut ctx = self.ctx.clone();
-                    let config = self.config.clone();
-                    let runtime_managed = self.runtime_environments.contains(&name);
-                    let guard = AdmissionGuard {
-                        environment: name.clone(),
-                        state: Arc::clone(&self.state),
-                        config: config.clone(),
-                        completed: false,
-                    };
-                    let permits = Arc::clone(&permits);
-                    jobs.spawn(async move {
-                        let _permit = permits
-                            .acquire_owned()
-                            .await
-                            .expect("semaphore remains open");
-                        let _fence = fence_guard;
-                        let result = environment_lifecycle::reconcile(
-                            &mut ctx,
-                            environment_lifecycle::Request {
-                                environment: &name,
-                                runtime_managed,
-                                policy: environment_lifecycle::Policy {
-                                    skip_gates: config.skip_gates,
-                                    unapproved_development_reason: config
-                                        .unapproved_development_reason
-                                        .as_deref(),
-                                    approval_directory: config.approval_directory.as_deref(),
-                                    approval_trust_roots: config.approval_trust_roots.as_deref(),
-                                },
-                            },
-                        )
-                        .await;
-                        guard.finish(result.is_ok());
-                        (name, result)
-                    });
-                }
-            }
-        }
-
-        while let Some(job) = jobs.join_next().await {
-            let (environment, status) = match job {
-                Ok((environment, Ok(status))) => (environment, status),
-                Ok((environment, Err(error))) => (
-                    environment,
-                    EnvironmentStatus::Failed {
-                        error: format!("{error:#}"),
-                    },
-                ),
-                Err(error) => (
-                    "unknown".into(),
-                    EnvironmentStatus::Failed {
-                        error: format!("reconciler environment task failed: {error}"),
-                    },
-                ),
-            };
-            report.environments.push(EnvironmentResult {
-                environment,
-                status,
-            });
-        }
-        report
-            .environments
-            .sort_by(|left, right| left.environment.cmp(&right.environment));
-        self.diagnostics
-            .lock()
-            .expect("reconciler diagnostics lock")
-            .record_tick(&report);
-        Ok(report)
+        tick_admission::run(tick_admission::TickRequest {
+            ctx: self.ctx.clone(),
+            config: self.config.clone(),
+            state: Arc::clone(&self.state),
+            tick_lock: self.tick_lock.as_ref(),
+            runtime_environments: Arc::clone(&self.runtime_environments),
+            diagnostics: Arc::clone(&self.diagnostics),
+            shared_fence: self.shared_fence.clone(),
+            allowed_environments,
+        })
+        .await
     }
 
     /// Return the oldest executable plan visible to this environment in the
@@ -583,6 +359,7 @@ impl Reconciler {
 
 #[cfg(test)]
 mod tests {
+    use super::tick_admission::Admission;
     use super::*;
     use crate::client::Ctx;
     use crate::plan::{self, Plan, PlanState};
