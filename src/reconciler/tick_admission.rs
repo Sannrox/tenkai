@@ -204,12 +204,12 @@ pub(super) async fn run(request: TickRequest<'_>) -> Result<TickReport> {
     let mut report = TickReport::default();
 
     for name in names {
-        match request
+        let admission = request
             .state
             .lock()
             .expect("reconciler state lock")
-            .begin(&name, crate::now_millis())
-        {
+            .begin(&name, crate::now_millis());
+        match admission {
             Admission::Busy => report.environments.push(EnvironmentResult {
                 environment: name,
                 status: EnvironmentStatus::Busy,
