@@ -244,7 +244,10 @@ async fn persist_attempt(
             updated: started_at,
         };
         match ctx.create_once(object).await {
-            Ok(_) => return Ok(Some(id)),
+            Ok(_) => {
+                link_attempt_to_policies(ctx, &id, &snapshot.policies).await?;
+                return Ok(Some(id));
+            }
             Err(status)
                 if status.code() == tonic::Code::AlreadyExists
                     || (status.code() == tonic::Code::Internal
@@ -253,6 +256,22 @@ async fn persist_attempt(
         }
     }
     bail!("could not allocate canary attempt for plan {}", plan.id)
+}
+
+async fn link_attempt_to_policies(
+    ctx: &mut Ctx,
+    attempt_id: &str,
+    policies: &[ActiveCanaryPolicy],
+) -> Result<()> {
+    for policy in policies {
+        ctx.link(
+            attempt_id,
+            &policy_record_id(policy),
+            REL_ATTEMPT_FOR_POLICY,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 fn reconstructed_outcomes(plan: &Plan, deployments: &[Object]) -> Result<Vec<Outcome>> {
@@ -768,4 +787,80 @@ async fn record_plan_outcomes(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plan::PLAN_FORMAT_VERSION;
+
+    #[tokio::test]
+    async fn persist_attempt_links_each_snapshotted_policy() {
+        let database = std::env::temp_dir().join(format!(
+            "tenkai-canary-persist-{}-{}.db",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let _ = std::fs::remove_file(&database);
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        let policy = CanaryPolicy {
+            release_id: "tenkai:release:api@1.2.3".into(),
+            release_digest: "manifest".into(),
+            artifact_digest: "artifact".into(),
+            product: "api".into(),
+            version: "1.2.3".into(),
+            target_channel: "stable".into(),
+            cohort: vec!["canary-a".into()],
+            success_policy: SuccessPolicy::All,
+        };
+        let first = ActiveCanaryPolicy::new(policy.clone(), 1).unwrap();
+        let mut other = policy;
+        other.target_channel = "beta".into();
+        let second = ActiveCanaryPolicy::new(other, 2).unwrap();
+        let plan = Plan {
+            format_version: PLAN_FORMAT_VERSION,
+            id: "tenkai:plan:canary-a:1:content".into(),
+            content_id: "content".into(),
+            environment: "canary-a".into(),
+            created_at: 1,
+            inputs: Vec::new(),
+            steps: Vec::new(),
+            state: PlanState::Computed,
+            gates_skipped: None,
+            status_detail: String::new(),
+            maintenance_blocked: false,
+            prior_warnings: Vec::new(),
+        };
+
+        let attempt_id =
+            persist_attempt(&mut ctx, &plan, false, vec![first.clone(), second.clone()])
+                .await
+                .unwrap()
+                .unwrap();
+
+        let first_linked = ctx
+            .linked(&policy_record_id(&first), REL_ATTEMPT_FOR_POLICY, "in")
+            .await
+            .unwrap();
+        let second_linked = ctx
+            .linked(&policy_record_id(&second), REL_ATTEMPT_FOR_POLICY, "in")
+            .await
+            .unwrap();
+        assert_eq!(
+            first_linked
+                .iter()
+                .map(|object| object.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![attempt_id.as_str()]
+        );
+        assert_eq!(
+            second_linked
+                .iter()
+                .map(|object| object.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![attempt_id.as_str()]
+        );
+
+        let _ = std::fs::remove_file(database);
+    }
 }
