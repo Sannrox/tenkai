@@ -395,7 +395,7 @@ mod tests {
         let (database, mut ctx) = temp_ctx(label);
         crate::ontology::register(&mut ctx).await.unwrap();
         for name in environments {
-            plan::env_add(&mut ctx, name, *name).await.unwrap();
+            plan::env_add(&mut ctx, name, name).await.unwrap();
         }
         (database, ctx)
     }
