@@ -1,6 +1,13 @@
 //! Canary policy persistence, promotion fencing, authorization, and compensation.
 
 use super::*;
+use crate::auth_context::{AuthenticatedRequestContext, DeliveryCapability};
+
+fn require_management(actor: &AuthenticatedRequestContext) -> Result<()> {
+    actor
+        .require_delivery_capability(DeliveryCapability::Management)
+        .map_err(|error| anyhow::anyhow!("{error}"))
+}
 
 fn policy_id(product: &str, version: &str, target_channel: &str) -> String {
     format!("tenkai:canary-policy:{product}@{version}:{target_channel}")
@@ -158,9 +165,11 @@ pub(crate) async fn confirm_promotion_lock(ctx: &mut Ctx, lock: &PromotionLock) 
 
 pub async fn unlock_promotion(
     ctx: &mut Ctx,
+    actor: &AuthenticatedRequestContext,
     product: &str,
     target_channel: &str,
 ) -> Result<String> {
+    require_management(actor)?;
     validate_identifier("product", product)?;
     if target_channel != POLICY_DISCOVERY_LOCK_CHANNEL {
         validate_identifier("channel", target_channel)?;
@@ -322,11 +331,21 @@ async fn active_from_pointer(ctx: &mut Ctx, pointer: &Object) -> Result<ActiveCa
     Ok(active)
 }
 
-pub async fn set_designated(ctx: &mut Ctx, environment: &str, designated: bool) -> Result<String> {
+pub async fn set_designated(
+    ctx: &mut Ctx,
+    actor: &AuthenticatedRequestContext,
+    environment: &str,
+    designated: bool,
+) -> Result<String> {
+    require_management(actor)?;
     crate::ontology::require_canary_schema(ctx).await?;
     validate_identifier("environment", environment)?;
     let id = env_id(environment);
-    let owner = format!("canary-designation:{}", crate::now_millis());
+    let owner = format!(
+        "canary-designation:{}:{}",
+        actor.principal_id(),
+        crate::now_millis()
+    );
     let lease = crate::apply::claim_environment(ctx, environment, &owner).await?;
     let result = async {
         let environment_object = ctx
@@ -408,18 +427,24 @@ async fn is_designated(ctx: &mut Ctx, environment: &str, product: &str) -> Resul
 
 pub async fn configure(
     ctx: &mut Ctx,
+    actor: &AuthenticatedRequestContext,
     spec: &str,
     target_channel: &str,
     cohort: Vec<String>,
     reactivate: bool,
 ) -> Result<ActiveCanaryPolicy> {
+    require_management(actor)?;
     let product = spec
         .split_once('@')
         .map(|(product, _)| product)
         .unwrap_or(spec);
     validate_identifier("product", product)?;
     validate_identifier("channel", target_channel)?;
-    let owner = format!("policy:{spec}:{}", crate::now_millis());
+    let owner = format!(
+        "policy:{}:{spec}:{}",
+        actor.principal_id(),
+        crate::now_millis()
+    );
     let discovery =
         claim_promotion_lock(ctx, product, POLICY_DISCOVERY_LOCK_CHANNEL, &owner).await?;
     let target = match claim_promotion_lock(ctx, product, target_channel, &owner).await {
@@ -594,6 +619,7 @@ async fn maybe_active_policy(
 
 async fn record_promotion_audit(
     ctx: &mut Ctx,
+    actor: &AuthenticatedRequestContext,
     active: &ActiveCanaryPolicy,
     evaluation: &PromotionEvaluation,
 ) -> Result<()> {
@@ -628,6 +654,8 @@ async fn record_promotion_audit(
                 ("allowed".into(), evaluation.allowed.to_string()),
                 ("evaluated_at".into(), evaluated_at.to_string()),
                 ("evaluation".into(), serialized.clone()),
+                ("principal_id".into(), actor.principal_id().into()),
+                ("principal_kind".into(), actor.principal_kind_name().into()),
             ]),
             created: evaluated_at,
             updated: evaluated_at,
@@ -655,15 +683,17 @@ async fn record_promotion_audit(
 
 pub async fn authorize_promotion(
     ctx: &mut Ctx,
+    actor: &AuthenticatedRequestContext,
     product: &str,
     version: &str,
     target_channel: &str,
 ) -> Result<Option<ActiveCanaryPolicy>> {
+    require_management(actor)?;
     let Some(active) = maybe_active_policy(ctx, product, version, target_channel).await? else {
         return Ok(None);
     };
     let evaluation = evaluate_active(ctx, &active).await?;
-    record_promotion_audit(ctx, &active, &evaluation).await?;
+    record_promotion_audit(ctx, actor, &active, &evaluation).await?;
     if !evaluation.allowed {
         let blocked = evaluation
             .cohort
@@ -699,6 +729,7 @@ pub async fn confirm_policy_active(ctx: &mut Ctx, expected: &ActiveCanaryPolicy)
 /// authorization freshness, and release compensation stay inside this module.
 pub(crate) async fn guarded_promotion<T, F>(
     ctx: &mut Ctx,
+    actor: &AuthenticatedRequestContext,
     product: &str,
     version: &str,
     target_channel: &str,
@@ -708,9 +739,11 @@ pub(crate) async fn guarded_promotion<T, F>(
 where
     F: for<'a> FnOnce(&'a mut Ctx) -> Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>,
 {
+    require_management(actor)?;
     let lock = claim_promotion_lock(ctx, product, target_channel, owner).await?;
     let result = async {
-        let authorization = authorize_promotion(ctx, product, version, target_channel).await?;
+        let authorization =
+            authorize_promotion(ctx, actor, product, version, target_channel).await?;
         if let Some(expected) = authorization.as_ref() {
             confirm_policy_active(ctx, expected).await?;
         }

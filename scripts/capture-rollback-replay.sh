@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TENKAI_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+export TENKAI_MANAGEMENT_TOKEN="${TENKAI_MANAGEMENT_TOKEN:-tenkai-local-management}"
 SEKAI_DIR="${SEKAI_CHISEI_DIR:-$(cd "$TENKAI_DIR/../sekai-chisei" && pwd)}"
 OUTPUT_DIR="${REPLAY_OUTPUT_DIR:-$TENKAI_DIR/artifacts/replay}"
 GRPC_PORT="${REPLAY_GRPC_PORT:-50061}"

@@ -18,9 +18,10 @@ use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};
 
 use crate::auth_context::{
-    AUTH_CONTEXT_CONTRACT_VERSION, AuthError, AuthenticatedRequestContext,
-    AuthenticatedRequestContextBuilder, CredentialMaterial, DeliveryCapability,
-    EnterpriseAuthExtension, PrincipalIdentity, PrincipalKind, TenantDerivationAuthority,
+    AUTH_CONTEXT_CONTRACT_VERSION, AuthError, AuthHostConfig, AuthenticatedRequestContext,
+    AuthenticatedRequestContextBuilder, CommunityTokenAuthenticator, CredentialMaterial,
+    DeliveryCapability, EnterpriseAuthExtension, PrincipalIdentity, PrincipalKind,
+    TenantDerivationAuthority, build_auth_stack,
 };
 
 /// Object-safe verifier for opaque enterprise assertions.
@@ -473,6 +474,79 @@ pub fn public_key_fingerprint(public_key_b64: &str) -> Result<String, AuthError>
     Ok(crate::signature_verification::key_id(key.as_bytes()))
 }
 
+const CLI_JWT_EXTENSION_ID: &str = "auth.jwt.aldunis";
+
+/// Authenticate an embedded CLI management mutation from process credentials.
+///
+/// Community: present `management_token` to `CommunityTokenAuthenticator`.
+/// Enterprise: present `jwt_assertion` verified by `jwt_trust_path`.
+/// Missing credentials fail closed; this never mints a privileged context.
+pub fn authenticate_process_management(
+    request_id: impl Into<String>,
+    management_token: Option<String>,
+    jwt_assertion: Option<Vec<u8>>,
+    jwt_trust_path: Option<&Path>,
+) -> Result<AuthenticatedRequestContext, AuthError> {
+    let request_id = request_id.into();
+    let management_token = management_token.filter(|token| !token.trim().is_empty());
+    let jwt_assertion = jwt_assertion.filter(|assertion| !assertion.is_empty());
+    if management_token.is_none() && jwt_assertion.is_none() {
+        return Err(AuthError::InvalidCredential(
+            "TENKAI_MANAGEMENT_TOKEN or TENKAI_JWT_ASSERTION is required".into(),
+        ));
+    }
+    if jwt_assertion.is_some() && jwt_trust_path.is_none() {
+        return Err(AuthError::InvalidCredential(
+            "TENKAI_JWT_ASSERTION requires TENKAI_JWT_VERIFIER_CONFIG".into(),
+        ));
+    }
+
+    let community_secret = management_token
+        .clone()
+        .unwrap_or_else(|| format!("unusable-{}", uuid::Uuid::new_v4()));
+    let community = Arc::new(CommunityTokenAuthenticator::new(
+        "auth.community",
+        [(
+            community_secret,
+            PrincipalIdentity {
+                id: "management".into(),
+                kind: PrincipalKind::Management,
+            },
+        )],
+    )?);
+
+    let (host, extension) = match jwt_trust_path {
+        Some(path) => {
+            let verifier = JwtAssertionVerifier::from_path(path)?;
+            let audience = verifier.config().audience.clone();
+            let extension: Arc<dyn EnterpriseAuthExtension> =
+                Arc::new(JwtEnterpriseAuthExtension::from_jwt_verifier(
+                    CLI_JWT_EXTENSION_ID,
+                    verifier,
+                    false,
+                ));
+            (
+                AuthHostConfig {
+                    required_extension_id: Some(CLI_JWT_EXTENSION_ID.into()),
+                    expected_contract_version: AUTH_CONTEXT_CONTRACT_VERSION,
+                    expected_audience: Some(audience),
+                },
+                Some(extension),
+            )
+        }
+        None => (AuthHostConfig::community(), None),
+    };
+
+    let stack = build_auth_stack(&host, extension, community).map_err(|error| {
+        AuthError::InvalidCredential(format!("auth stack composition failed: {error}"))
+    })?;
+    stack.authenticate(&CredentialMaterial {
+        request_id,
+        bearer_token: management_token,
+        assertion: jwt_assertion,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -815,5 +889,24 @@ public_key = "{public_b64}"
             err.contains("weak") || err.contains("JWT public key"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn process_management_requires_real_credentials() {
+        let error = authenticate_process_management("req-empty", None, None, None).unwrap_err();
+        assert!(
+            matches!(error, AuthError::InvalidCredential(ref message) if message.contains("TENKAI_MANAGEMENT_TOKEN")),
+            "{error:?}"
+        );
+        let context = authenticate_process_management(
+            "req-mgmt",
+            Some("management-secret".into()),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(context.principal_id(), "management");
+        assert_eq!(context.principal.kind, PrincipalKind::Management);
+        assert!(context.has_delivery_capability(DeliveryCapability::Management));
     }
 }

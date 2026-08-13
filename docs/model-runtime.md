@@ -176,6 +176,7 @@ When neither is set, apply uses `FakeInferenceEngine` (CI-safe).
 export TENKAI_LLAMA_SERVER=/usr/local/bin/llama-server   # or TENKAI_USE_REAL_LLAMA=1
 
 # 1. Publish / promote a model_runtime with loopback health and file:// weights
+export TENKAI_MANAGEMENT_TOKEN='replace-from-secret-store'
 tenkaictl publish examples/model-runtime-local/tenkai.toml --allow-unsigned-development
 tenkaictl promote qwen-coder@0.1.0 stable
 tenkaictl env subscribe local qwen-coder=stable   # if not already subscribed

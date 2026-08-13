@@ -187,6 +187,30 @@ impl AuthenticatedRequestContext {
         }
     }
 
+    /// Fail closed when the authenticated principal lacks a delivery capability.
+    pub fn require_delivery_capability(
+        &self,
+        required: DeliveryCapability,
+    ) -> Result<(), AuthError> {
+        self.validate()?;
+        if self.has_delivery_capability(required) {
+            Ok(())
+        } else {
+            Err(AuthError::Unauthorized(
+                "insufficient delivery capability".into(),
+            ))
+        }
+    }
+
+    pub fn principal_kind_name(&self) -> &'static str {
+        match self.principal.kind {
+            PrincipalKind::Human => "human",
+            PrincipalKind::Service => "service",
+            PrincipalKind::Runtime => "runtime",
+            PrincipalKind::Management => "management",
+        }
+    }
+
     pub fn validate(&self) -> Result<(), AuthError> {
         if self.contract_version != AUTH_CONTEXT_CONTRACT_VERSION {
             return Err(AuthError::IncompatibleContract {
@@ -676,6 +700,36 @@ pub enum AuthStartupError {
 }
 
 #[cfg(test)]
+pub(crate) fn test_management_context(
+    request_id: impl Into<String>,
+) -> AuthenticatedRequestContext {
+    AuthenticatedRequestContextBuilder::new(
+        request_id,
+        PrincipalIdentity {
+            id: "management".into(),
+            kind: PrincipalKind::Management,
+        },
+        "test-auth",
+    )
+    .build()
+    .expect("test management context")
+}
+
+#[cfg(test)]
+pub(crate) fn test_human_context(request_id: impl Into<String>) -> AuthenticatedRequestContext {
+    AuthenticatedRequestContextBuilder::new(
+        request_id,
+        PrincipalIdentity {
+            id: "user-42".into(),
+            kind: PrincipalKind::Human,
+        },
+        "test-auth",
+    )
+    .build()
+    .expect("test human context")
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
@@ -928,6 +982,21 @@ mod tests {
             })
             .unwrap();
         assert!(context.tenant().is_none());
+    }
+
+    #[test]
+    fn missing_management_capability_fails_closed() {
+        let human = test_human_context("cap-deny");
+        let error = human
+            .require_delivery_capability(DeliveryCapability::Management)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            AuthError::Unauthorized(ref message) if message.contains("insufficient delivery capability")
+        ));
+        test_management_context("cap-allow")
+            .require_delivery_capability(DeliveryCapability::Management)
+            .unwrap();
     }
 
     #[test]

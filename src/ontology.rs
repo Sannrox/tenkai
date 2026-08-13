@@ -519,6 +519,16 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
                 prop("allowed", true, "Whether promotion was permitted"),
                 prop("evaluated_at", true, "Decision time in Unix milliseconds"),
                 prop("evaluation", true, "Canonical JSON decision and evidence"),
+                prop(
+                    "principal_id",
+                    true,
+                    "Authenticated principal that requested promotion",
+                ),
+                prop(
+                    "principal_kind",
+                    true,
+                    "Authenticated principal kind that requested promotion",
+                ),
             ],
         ),
         object_type(

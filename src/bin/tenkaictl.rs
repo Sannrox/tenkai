@@ -9,11 +9,33 @@ use anyhow::{Result, bail};
 use clap::error::ErrorKind;
 use clap::{Parser, Subcommand, ValueEnum};
 
+use tenkai::auth_context::AuthenticatedRequestContext;
 use tenkai::command_result::{CommandName, CommandOutcome, CommandResultV1, RetryGuidance};
 use tenkai::{
-    apply, canary, catalog, client, dev_sign, inventory, maintenance, ontology, plan, reconciler,
-    wave,
+    apply, assertion_verifier, canary, catalog, client, dev_sign, inventory, maintenance, ontology,
+    plan, reconciler, wave,
 };
+
+const JWT_VERIFIER_CONFIG_ENV: &str = "TENKAI_JWT_VERIFIER_CONFIG";
+const JWT_ASSERTION_ENV: &str = "TENKAI_JWT_ASSERTION";
+
+fn embedded_management_actor() -> Result<AuthenticatedRequestContext> {
+    let token = std::env::var("TENKAI_MANAGEMENT_TOKEN")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let assertion = std::env::var(JWT_ASSERTION_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(String::into_bytes);
+    let jwt_path = std::env::var_os(JWT_VERIFIER_CONFIG_ENV).map(PathBuf::from);
+    assertion_verifier::authenticate_process_management(
+        uuid::Uuid::new_v4().to_string(),
+        token,
+        assertion,
+        jwt_path.as_deref(),
+    )
+    .map_err(|error| anyhow::anyhow!("{error}"))
+}
 
 #[derive(Parser)]
 #[command(name = "tenkaictl", version, about = "Constraint-based local delivery")]
@@ -893,7 +915,8 @@ async fn run(cli: Cli) -> Result<()> {
                 )
                 .map_err(|message| anyhow::anyhow!(message))?;
             }
-            let message = catalog::promote(&mut ctx, &spec, &channel).await?;
+            let actor = embedded_management_actor()?;
+            let message = catalog::promote(&mut ctx, &actor, &spec, &channel).await?;
             if output == OutputFormat::JsonV1 {
                 let product = spec.split_once('@').map_or(spec.as_str(), |value| value.0);
                 print_machine_result(
@@ -906,7 +929,11 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Canary { command } => match command {
             CanaryCommand::Designate { env, remove } => {
-                println!("{}", canary::set_designated(&mut ctx, &env, !remove).await?);
+                let actor = embedded_management_actor()?;
+                println!(
+                    "{}",
+                    canary::set_designated(&mut ctx, &actor, &env, !remove).await?
+                );
             }
             CanaryCommand::Policy {
                 spec,
@@ -914,8 +941,10 @@ async fn run(cli: Cli) -> Result<()> {
                 cohort,
                 reactivate,
             } => {
+                let actor = embedded_management_actor()?;
                 let active =
-                    canary::configure(&mut ctx, &spec, &channel, cohort, reactivate).await?;
+                    canary::configure(&mut ctx, &actor, &spec, &channel, cohort, reactivate)
+                        .await?;
                 println!(
                     "canary policy {} active for {} -> {} with cohort {}",
                     active.digest(),
@@ -929,9 +958,10 @@ async fn run(cli: Cli) -> Result<()> {
                 println!("repaired {repaired} canary attempt(s) for {plan_id}");
             }
             CanaryCommand::Unlock { product, channel } => {
+                let actor = embedded_management_actor()?;
                 println!(
                     "{}",
-                    canary::unlock_promotion(&mut ctx, &product, &channel).await?
+                    canary::unlock_promotion(&mut ctx, &actor, &product, &channel).await?
                 );
             }
         },
