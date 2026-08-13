@@ -374,7 +374,7 @@ mod eval_io {
 mod tests {
     use super::*;
     use crate::plan::{DesiredStateInput, PLAN_FORMAT_VERSION, Step};
-    use sha2::{Digest as _, Sha256};
+    use sha2::Sha256;
 
     fn policy() -> CanaryPolicy {
         CanaryPolicy {
