@@ -7,6 +7,7 @@ struct StepContext<'a> {
     lease: &'a EnvironmentLease,
     environment: &'a str,
     plan_id: &'a str,
+    software: Option<&'a dyn crate::software_executor::SoftwareExecutor>,
 }
 
 /// Execute one immutable Plan Step and durably record its Environment outcome.
@@ -16,11 +17,13 @@ pub(super) async fn execute(
     environment: &str,
     plan_id: &str,
     step: &Step,
+    software: Option<&dyn crate::software_executor::SoftwareExecutor>,
 ) -> Result<Outcome> {
     let step_context = StepContext {
         lease,
         environment,
         plan_id,
+        software,
     };
     let target = ReleasePin {
         release_id: step.release_id.clone(),
@@ -43,11 +46,12 @@ pub(super) async fn execute(
             .as_deref()
             .is_some_and(|command| !command.is_empty())
     {
-        let cleanup_failure = match product_execution::deactivate(ctx, lease, outgoing).await {
-            Ok(Ok(())) => None,
-            Ok(Err(detail)) => Some(detail),
-            Err(error) => Some(format!("cleanup executor failed: {error}")),
-        };
+        let cleanup_failure =
+            match product_execution::deactivate(ctx, lease, outgoing, software).await {
+                Ok(Ok(())) => None,
+                Ok(Err(detail)) => Some(detail),
+                Err(error) => Some(format!("cleanup executor failed: {error}")),
+            };
         if let Some(detail) = cleanup_failure {
             let outcome = Outcome::new(
                 step.clone(),
@@ -67,7 +71,7 @@ pub(super) async fn execute(
         }
     }
 
-    let activation = match product_execution::activate(ctx, lease, &content).await {
+    let activation = match product_execution::activate(ctx, lease, &content, software).await {
         Ok(result) => result,
         Err(error) => Err(format!("deployment executor failed: {error}")),
     };
@@ -87,7 +91,8 @@ pub(super) async fn execute(
             )
             .await
             {
-                compensate_activation(ctx, lease, environment, step, &content, &error).await;
+                compensate_activation(ctx, lease, environment, step, &content, &error, software)
+                    .await;
                 return Err(error);
             }
             return Ok(outcome);
@@ -120,9 +125,14 @@ async fn recover_activation(
     restore_content: Option<&ReleaseContent>,
     detail: String,
 ) -> Result<(Outcome, Option<crate::environment::DeploymentTransition>)> {
-    let (cleaned, detail) =
-        product_execution::cleanup_failed_activation(ctx, step_context.lease, content, detail)
-            .await?;
+    let (cleaned, detail) = product_execution::cleanup_failed_activation(
+        ctx,
+        step_context.lease,
+        content,
+        detail,
+        step_context.software,
+    )
+    .await?;
     let Some(previous) = step.from.as_deref() else {
         return Ok((
             Outcome::new(step.clone(), StepOutcomeStatus::Failed, detail),
@@ -150,8 +160,15 @@ async fn recover_activation(
         .await?;
         return Ok((outcome, None));
     };
-    let (restored, detail) =
-        restore_previous(ctx, step_context.lease, previous_content, previous, detail).await?;
+    let (restored, detail) = restore_previous(
+        ctx,
+        step_context.lease,
+        previous_content,
+        previous,
+        detail,
+        step_context.software,
+    )
+    .await?;
     let recovered = cleaned && restored;
     Ok((
         Outcome::new(
@@ -177,9 +194,10 @@ async fn restore_previous(
     content: &ReleaseContent,
     version: &str,
     failure: String,
+    software: Option<&dyn crate::software_executor::SoftwareExecutor>,
 ) -> Result<(bool, String)> {
     let channel_note = crate::software_executor::rollback_channel_note(&content.product, version);
-    let restore_result = match product_execution::activate(ctx, lease, content).await {
+    let restore_result = match product_execution::activate(ctx, lease, content, software).await {
         Ok(Ok(())) => Ok(Ok(())),
         Ok(Err(detail)) => Ok(Err(crate::software_executor::format_software_phase_error(
             crate::software_executor::SoftwareDeployPhase::Restore,
@@ -224,17 +242,18 @@ async fn compensate_activation(
     step: &Step,
     content: &ReleaseContent,
     failure: &anyhow::Error,
+    software: Option<&dyn crate::software_executor::SoftwareExecutor>,
 ) {
     let failure = format!("deployment bookkeeping failed after activation: {failure}");
     let cleaned = matches!(
-        product_execution::deactivate(ctx, lease, content).await,
+        product_execution::deactivate(ctx, lease, content, software).await,
         Ok(Ok(()))
     );
     let mut restored = step.from.is_none();
     if let (Some(previous), Some(pin)) = (step.from.as_deref(), step.restore.as_ref())
         && let Ok(previous_content) = admit_release(ctx, pin, environment, &step.product).await
         && matches!(
-            product_execution::activate(ctx, lease, &previous_content).await,
+            product_execution::activate(ctx, lease, &previous_content, software).await,
             Ok(Ok(()))
         )
     {

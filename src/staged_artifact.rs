@@ -579,6 +579,7 @@ document = "agent.json"
                 authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
                     reason: "staged product e2e",
                 },
+                software_executor: None,
             },
         )
         .await

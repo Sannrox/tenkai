@@ -31,6 +31,11 @@ client is a valid follow-on if dependency weight is accepted later.
 | `HelmSoftwareExecutor` | Helm chart path |
 | `KubernetesSoftwareExecutor` | Native manifests path |
 
+Hosts (`tenkaictl`, the reconciler) select the adapter from
+`TENKAI_SOFTWARE_EXECUTOR` and pass it into apply. Apply does not read that
+env var during activate/deactivate. Helm and kubectl failures capture sanitized
+stderr; kubeconfig is never placed on `SoftwareApplyRequest`.
+
 ## Helm enablement
 
 ```bash
