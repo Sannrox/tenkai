@@ -702,6 +702,22 @@ impl Ctx {
         }
     }
 
+    /// List ids of `kind` without materializing embedded object payloads.
+    ///
+    /// Remote adapters still page `ListObjects` and keep only ids; there is no
+    /// cheaper name/id RPC on the vendored protocol.
+    pub(crate) async fn list_kind_ids(&mut self, kind: &str) -> Result<Vec<String>> {
+        if let Some(store) = self.embedded_store() {
+            return store.list_kind_ids(kind);
+        }
+        Ok(self
+            .list_kind(kind)
+            .await?
+            .into_iter()
+            .map(|object| object.id)
+            .collect())
+    }
+
     pub async fn execute_action_result(
         &mut self,
         action: &str,
