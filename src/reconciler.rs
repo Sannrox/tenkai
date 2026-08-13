@@ -388,7 +388,7 @@ mod tests {
             crate::now_millis()
         ));
         let _ = std::fs::remove_file(&database);
-        (database, Ctx::embedded(&database).unwrap())
+        (database.clone(), Ctx::embedded(&database).unwrap())
     }
 
     async fn registered_ctx(label: &str, environments: &[&str]) -> (std::path::PathBuf, Ctx) {
