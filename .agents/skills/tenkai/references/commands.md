@@ -48,6 +48,7 @@ tenkaictl publish <manifest> \
   --trust-roots <release-trust.toml>
 tenkaictl release verify <product>@<version> \
   --trust-roots <release-trust.toml>
+export TENKAI_MANAGEMENT_TOKEN="<load-from-secret-store>"
 tenkaictl promote <product>@<version> <channel>
 ```
 

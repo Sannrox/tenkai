@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::auth_context::{AuthenticatedRequestContext, DeliveryCapability};
 use crate::client::Ctx;
 use crate::manifest;
 use crate::ontology::*;
@@ -508,7 +509,15 @@ pub async fn publish_with_result(
 }
 
 /// Point a channel of the product at an already-published release.
-pub async fn promote(ctx: &mut Ctx, spec: &str, channel: &str) -> Result<String> {
+pub async fn promote(
+    ctx: &mut Ctx,
+    actor: &AuthenticatedRequestContext,
+    spec: &str,
+    channel: &str,
+) -> Result<String> {
+    actor
+        .require_delivery_capability(DeliveryCapability::Management)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
     let Some((name, version)) = spec.split_once('@') else {
         bail!("expected <product>@<version>, got {spec:?}");
     };
@@ -519,7 +528,11 @@ pub async fn promote(ctx: &mut Ctx, spec: &str, channel: &str) -> Result<String>
     if ctx.get(&rid).await?.is_none() {
         bail!("release {name}@{version} is not published");
     }
-    let owner = format!("promotion:{spec}:{}", crate::now_millis());
+    let owner = format!(
+        "promotion:{}:{spec}:{}",
+        actor.principal_id(),
+        crate::now_millis()
+    );
     let name = name.to_string();
     let version = version.to_string();
     let channel = channel.to_string();
@@ -527,7 +540,7 @@ pub async fn promote(ctx: &mut Ctx, spec: &str, channel: &str) -> Result<String>
     let promotion_version = version.clone();
     let promotion_channel = channel.clone();
     let promoted_release = rid.clone();
-    crate::canary::guarded_promotion(ctx, &name, &version, &channel, &owner, move |ctx| {
+    crate::canary::guarded_promotion(ctx, actor, &name, &version, &channel, &owner, move |ctx| {
         Box::pin(async move {
             let cid = channel_id(&promotion_name, &promotion_channel);
             let channel_head = object(

@@ -56,6 +56,7 @@ PRODUCT_VERSION="hello-minikube@0.1.0"
 DB="${TENKAI_DATABASE:-$ROOT/.tenkai-dogfood-minikube/tenkai.db}"
 mkdir -p "$(dirname "$DB")"
 export TENKAI_DATABASE="$DB"
+export TENKAI_MANAGEMENT_TOKEN="${TENKAI_MANAGEMENT_TOKEN:-tenkai-local-management}"
 
 parse_plan_id() {
   local out="$1"

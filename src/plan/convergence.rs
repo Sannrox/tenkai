@@ -470,10 +470,11 @@ max_startup_seconds = 60
         crate::catalog::publish(&mut ctx, &q8_dir.join("tenkai.toml"), &options)
             .await
             .unwrap();
-        crate::catalog::promote(&mut ctx, "qwen-coder@1.0.0", "stable")
+        let actor = crate::auth_context::test_management_context("convergence-promote");
+        crate::catalog::promote(&mut ctx, &actor, "qwen-coder@1.0.0", "stable")
             .await
             .unwrap();
-        crate::catalog::promote(&mut ctx, "qwen-coder@1.1.0", "stable")
+        crate::catalog::promote(&mut ctx, &actor, "qwen-coder@1.1.0", "stable")
             .await
             .unwrap();
 

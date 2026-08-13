@@ -532,13 +532,14 @@ document = "agent.json"
                 .await
                 .unwrap();
         }
-        crate::catalog::promote(&mut ctx, "deploy-policy@1.0.0", "stable")
+        let actor = crate::auth_context::test_management_context("staged-promote");
+        crate::catalog::promote(&mut ctx, &actor, "deploy-policy@1.0.0", "stable")
             .await
             .unwrap();
-        crate::catalog::promote(&mut ctx, "gate-smoke-suite@1.0.0", "stable")
+        crate::catalog::promote(&mut ctx, &actor, "gate-smoke-suite@1.0.0", "stable")
             .await
             .unwrap();
-        crate::catalog::promote(&mut ctx, "ops-agent-def@1.0.0", "stable")
+        crate::catalog::promote(&mut ctx, &actor, "ops-agent-def@1.0.0", "stable")
             .await
             .unwrap();
 
