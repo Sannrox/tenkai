@@ -14,8 +14,11 @@ Its Rust contract version is `CATALOG_CONTRACT_VERSION = 1`.
   and an opaque content locator. Missing, malformed, untrusted, or recalled
   releases fail closed.
 - **Promote** changes one channel head through one governed operation. The
-  authorization decision, audit record, and head mutation share the adapter's
-  atomic commit boundary; a transport must not acknowledge a partial result.
+  caller must present an `AuthenticatedRequestContext` with
+  `DeliveryCapability::Management` before canary evaluation. The authorization
+  decision, audit record (including `principal_id` and `principal_kind`), and
+  head mutation share the adapter's atomic commit boundary; a transport must
+  not acknowledge a partial result.
 - **Recall** is an ordered, authenticated mutation that makes subsequent lookup
   and planning fail closed. Recall does not delete immutable descriptors or
   bytes, and rollback to recalled content requires a separate explicit recovery

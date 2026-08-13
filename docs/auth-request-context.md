@@ -82,8 +82,10 @@ authenticate through the composed `AuthStack` in `src/server.rs`:
 2. Build `CredentialMaterial` with a request id (`x-request-id` or generated).
 3. Call `AuthStack::authenticate` — never raw token equality alone.
 4. Enforce delivery capabilities after authentication (`read` for inspect/fleet
-   surfaces; `management` for reconcile and other mutations). Missing
-   capabilities fail closed.
+   surfaces; `management` for reconcile, Catalog promote, and canary policy
+   mutations). Missing capabilities fail closed. Catalog `promote` /
+   `authorize_promotion` / `configure` / `set_designated` / `unlock_promotion`
+   require `DeliveryCapability::Management` before canary evaluation.
 5. Use the returned principal for audit; optional tenant is only present when an
    enterprise extension derived it under host authority.
 
@@ -154,7 +156,7 @@ Delivery authorization after JWT authentication:
 | --- | --- |
 | `tenkai_capabilities` present | Exact set is used (empty set denies management APIs) |
 | claim absent + `principal_kind=management` or `service` | Grants `read` + `management` |
-| claim absent + `principal_kind=human` (default) or `runtime` | Grants nothing; reconcile/fleet/inspect deny |
+| claim absent + `principal_kind=human` (default) or `runtime` | Grants nothing; reconcile/fleet/inspect/promote deny |
 
 Community management tokens map to `PrincipalKind::Management` and therefore keep
 full delivery capabilities under dual-stack enterprise hosts.

@@ -848,14 +848,18 @@ max_startup_seconds = 30
             .unwrap();
 
         publish_unsigned_model(&mut ctx, &manifest_dir).await;
+        let actor = crate::auth_context::test_management_context("canary-e2e");
         // Canary channel is free of promotion policy so the cohort can apply first.
-        crate::catalog::promote(&mut ctx, "qwen-canary@1.0.0", "canary")
+        crate::catalog::promote(&mut ctx, &actor, "qwen-canary@1.0.0", "canary")
             .await
             .unwrap();
 
-        set_designated(&mut ctx, "local", true).await.unwrap();
+        set_designated(&mut ctx, &actor, "local", true)
+            .await
+            .unwrap();
         configure(
             &mut ctx,
+            &actor,
             "qwen-canary@1.0.0",
             "stable",
             vec!["local".into()],
@@ -865,7 +869,7 @@ max_startup_seconds = 30
         .unwrap();
 
         // Missing canary evidence blocks wider promote with an actionable error.
-        let missing = crate::catalog::promote(&mut ctx, "qwen-canary@1.0.0", "stable")
+        let missing = crate::catalog::promote(&mut ctx, &actor, "qwen-canary@1.0.0", "stable")
             .await
             .unwrap_err()
             .to_string();
@@ -877,7 +881,7 @@ max_startup_seconds = 30
         // Successful model_runtime apply on the canary records policy-bound evidence.
         apply_local_model_canary(&mut ctx, "qwen-canary", "canary").await;
 
-        let promoted = crate::catalog::promote(&mut ctx, "qwen-canary@1.0.0", "stable")
+        let promoted = crate::catalog::promote(&mut ctx, &actor, "qwen-canary@1.0.0", "stable")
             .await
             .unwrap();
         assert!(
@@ -888,6 +892,7 @@ max_startup_seconds = 30
         // Content/policy reactivation invalidates prior evidence (#7 invariant).
         configure(
             &mut ctx,
+            &actor,
             "qwen-canary@1.0.0",
             "stable",
             vec!["local".into()],
@@ -895,7 +900,7 @@ max_startup_seconds = 30
         )
         .await
         .unwrap();
-        let stale = crate::catalog::promote(&mut ctx, "qwen-canary@1.0.0", "stable")
+        let stale = crate::catalog::promote(&mut ctx, &actor, "qwen-canary@1.0.0", "stable")
             .await
             .unwrap_err()
             .to_string();
@@ -905,15 +910,18 @@ max_startup_seconds = 30
         );
 
         // Failed cohort member: configure two-member policy; second env never applies.
-        set_designated(&mut ctx, "stage", true).await.unwrap();
+        set_designated(&mut ctx, &actor, "stage", true)
+            .await
+            .unwrap();
         // Promote a second model version without canary evidence to exercise missing.
         write_model_runtime_manifest(&manifest_dir, "qwen-canary", "1.1.0");
         publish_unsigned_model(&mut ctx, &manifest_dir).await;
-        crate::catalog::promote(&mut ctx, "qwen-canary@1.1.0", "canary")
+        crate::catalog::promote(&mut ctx, &actor, "qwen-canary@1.1.0", "canary")
             .await
             .unwrap();
         configure(
             &mut ctx,
+            &actor,
             "qwen-canary@1.1.0",
             "stable",
             vec!["local".into(), "stage".into()],
@@ -922,7 +930,7 @@ max_startup_seconds = 30
         .await
         .unwrap();
         apply_local_model_canary(&mut ctx, "qwen-canary", "canary").await;
-        let incomplete = crate::catalog::promote(&mut ctx, "qwen-canary@1.1.0", "stable")
+        let incomplete = crate::catalog::promote(&mut ctx, &actor, "qwen-canary@1.1.0", "stable")
             .await
             .unwrap_err()
             .to_string();
@@ -938,6 +946,308 @@ max_startup_seconds = 30
             assert!(!sample.contains("TENKAI_MANAGEMENT_TOKEN"));
         }
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn capability_error(error: impl ToString) -> String {
+        let message = error.to_string();
+        assert!(
+            message.contains("insufficient delivery capability"),
+            "expected capability denial, got: {message}"
+        );
+        assert!(
+            !message.contains("canary promotion blocked"),
+            "capability gate must fail before evaluate_active, got: {message}"
+        );
+        message
+    }
+
+    async fn published_canary_fixture(
+        root: &std::path::Path,
+    ) -> (Ctx, crate::auth_context::AuthenticatedRequestContext) {
+        let database = root.join("tenkai.db");
+        let manifest_dir = root.join("model");
+        std::fs::create_dir_all(&manifest_dir).unwrap();
+        write_model_runtime_manifest(&manifest_dir, "qwen-canary", "1.0.0");
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::plan::env_add(&mut ctx, "local", "canary host")
+            .await
+            .unwrap();
+        publish_unsigned_model(&mut ctx, &manifest_dir).await;
+        let actor = crate::auth_context::test_management_context("canary-authz");
+        crate::catalog::promote(&mut ctx, &actor, "qwen-canary@1.0.0", "canary")
+            .await
+            .unwrap();
+        (ctx, actor)
+    }
+
+    #[tokio::test]
+    async fn jwt_human_without_caps_cannot_promote_or_mutate_canary() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-canary-authz-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let (mut ctx, management) = published_canary_fixture(&root).await;
+        let human = crate::auth_context::test_human_context("human-no-caps");
+        capability_error(
+            crate::catalog::promote(&mut ctx, &human, "qwen-canary@1.0.0", "canary")
+                .await
+                .unwrap_err(),
+        );
+        capability_error(
+            authorize_promotion(&mut ctx, &human, "qwen-canary", "1.0.0", "canary")
+                .await
+                .unwrap_err(),
+        );
+        capability_error(
+            set_designated(&mut ctx, &human, "local", true)
+                .await
+                .unwrap_err(),
+        );
+        capability_error(
+            configure(
+                &mut ctx,
+                &human,
+                "qwen-canary@1.0.0",
+                "stable",
+                vec!["local".into()],
+                false,
+            )
+            .await
+            .unwrap_err(),
+        );
+        capability_error(
+            unlock_promotion(&mut ctx, &human, "qwen-canary", "stable")
+                .await
+                .unwrap_err(),
+        );
+
+        set_designated(&mut ctx, &management, "local", true)
+            .await
+            .unwrap();
+        configure(
+            &mut ctx,
+            &management,
+            "qwen-canary@1.0.0",
+            "stable",
+            vec!["local".into()],
+            false,
+        )
+        .await
+        .unwrap();
+        apply_local_model_canary(&mut ctx, "qwen-canary", "canary").await;
+        capability_error(
+            crate::catalog::promote(&mut ctx, &human, "qwen-canary@1.0.0", "stable")
+                .await
+                .unwrap_err(),
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn management_principal_can_promote_when_canary_evidence_allows() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-canary-mgmt-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let (mut ctx, management) = published_canary_fixture(&root).await;
+        set_designated(&mut ctx, &management, "local", true)
+            .await
+            .unwrap();
+        configure(
+            &mut ctx,
+            &management,
+            "qwen-canary@1.0.0",
+            "stable",
+            vec!["local".into()],
+            false,
+        )
+        .await
+        .unwrap();
+        apply_local_model_canary(&mut ctx, "qwen-canary", "canary").await;
+        let promoted =
+            crate::catalog::promote(&mut ctx, &management, "qwen-canary@1.0.0", "stable")
+                .await
+                .unwrap();
+        assert!(
+            promoted.contains("promoted") && promoted.contains("stable"),
+            "{promoted}"
+        );
+
+        let audits = ctx.list_kind(KIND_PROMOTION_AUDIT).await.unwrap();
+        let latest = audits.last().expect("promotion audit");
+        assert_eq!(
+            latest.properties.get("principal_id").map(String::as_str),
+            Some("management")
+        );
+        assert_eq!(
+            latest.properties.get("principal_kind").map(String::as_str),
+            Some("management")
+        );
+        assert_eq!(
+            latest.properties.get("allowed").map(String::as_str),
+            Some("true")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn jwt_without_management_capability_cannot_promote() {
+        use crate::assertion_verifier::{
+            JwtAssertionVerifier, JwtEnterpriseAuthExtension, JwtTrustedKey, JwtVerifierConfig,
+        };
+        use crate::auth_context::{
+            AUTH_CONTEXT_CONTRACT_VERSION, AuthHostConfig, CommunityTokenAuthenticator,
+            CredentialMaterial, PrincipalIdentity, PrincipalKind, build_auth_stack,
+        };
+        use base64::Engine as _;
+        use ed25519_dalek::{Signer as _, SigningKey};
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+
+        let signing = SigningKey::from_bytes(&[11_u8; 32]);
+        let public_b64 =
+            base64::engine::general_purpose::STANDARD.encode(signing.verifying_key().as_bytes());
+        let verifier = JwtAssertionVerifier::new(JwtVerifierConfig {
+            issuer: "https://idp.example.test/".into(),
+            audience: "tenkai-control-plane".into(),
+            keys: vec![JwtTrustedKey {
+                key_id: Some("k1".into()),
+                public_key: public_b64,
+            }],
+            clock_skew_secs: 60,
+        })
+        .unwrap();
+        let extension = Arc::new(JwtEnterpriseAuthExtension::from_jwt_verifier(
+            "jwt-ref", verifier, false,
+        ));
+        let community = Arc::new(
+            CommunityTokenAuthenticator::new(
+                "auth.community",
+                [(
+                    "management-secret".into(),
+                    PrincipalIdentity {
+                        id: "management".into(),
+                        kind: PrincipalKind::Management,
+                    },
+                )],
+            )
+            .unwrap(),
+        );
+        let auth = build_auth_stack(
+            &AuthHostConfig {
+                required_extension_id: Some("jwt-ref".into()),
+                expected_contract_version: AUTH_CONTEXT_CONTRACT_VERSION,
+                expected_audience: Some("tenkai-control-plane".into()),
+            },
+            Some(extension),
+            community,
+        )
+        .unwrap();
+        let now = crate::assertion_verifier::now_unix_secs();
+        let mut claims: BTreeMap<String, serde_json::Value> = BTreeMap::from([
+            (
+                "iss".into(),
+                serde_json::Value::String("https://idp.example.test/".into()),
+            ),
+            (
+                "aud".into(),
+                serde_json::Value::String("tenkai-control-plane".into()),
+            ),
+            ("sub".into(), serde_json::Value::String("user-42".into())),
+            ("exp".into(), serde_json::json!(now + 3600)),
+            (
+                "principal_kind".into(),
+                serde_json::Value::String("human".into()),
+            ),
+        ]);
+        let header = serde_json::json!({ "alg": "EdDSA", "typ": "JWT", "kid": "k1" });
+        let header_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&header).unwrap());
+        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&claims).unwrap());
+        let signing_input = format!("{header_b64}.{payload_b64}");
+        let signature = signing.sign(signing_input.as_bytes());
+        let token = format!(
+            "{header_b64}.{payload_b64}.{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature.to_bytes())
+        );
+        let human = auth
+            .authenticate(&CredentialMaterial {
+                request_id: "req-human".into(),
+                bearer_token: None,
+                assertion: Some(token.into_bytes()),
+            })
+            .unwrap();
+        assert_eq!(human.principal.kind, PrincipalKind::Human);
+        assert!(
+            !human.has_delivery_capability(crate::auth_context::DeliveryCapability::Management)
+        );
+
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-canary-jwt-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let (mut ctx, management) = published_canary_fixture(&root).await;
+        set_designated(&mut ctx, &management, "local", true)
+            .await
+            .unwrap();
+        configure(
+            &mut ctx,
+            &management,
+            "qwen-canary@1.0.0",
+            "stable",
+            vec!["local".into()],
+            false,
+        )
+        .await
+        .unwrap();
+        apply_local_model_canary(&mut ctx, "qwen-canary", "canary").await;
+        capability_error(
+            crate::catalog::promote(&mut ctx, &human, "qwen-canary@1.0.0", "stable")
+                .await
+                .unwrap_err(),
+        );
+
+        claims.insert(
+            "tenkai_capabilities".into(),
+            serde_json::json!(["read", "management"]),
+        );
+        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&claims).unwrap());
+        let signing_input = format!("{header_b64}.{payload_b64}");
+        let signature = signing.sign(signing_input.as_bytes());
+        let capable = auth
+            .authenticate(&CredentialMaterial {
+                request_id: "req-mgmt-jwt".into(),
+                bearer_token: None,
+                assertion: Some(
+                    format!(
+                        "{header_b64}.{payload_b64}.{}",
+                        base64::engine::general_purpose::URL_SAFE_NO_PAD
+                            .encode(signature.to_bytes())
+                    )
+                    .into_bytes(),
+                ),
+            })
+            .unwrap();
+        let community = auth
+            .authenticate(&CredentialMaterial {
+                request_id: "req-community".into(),
+                bearer_token: Some("management-secret".into()),
+                assertion: None,
+            })
+            .unwrap();
+        crate::catalog::promote(&mut ctx, &capable, "qwen-canary@1.0.0", "stable")
+            .await
+            .unwrap();
+        crate::catalog::promote(&mut ctx, &community, "qwen-canary@1.0.0", "canary")
+            .await
+            .unwrap();
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -9,6 +9,7 @@ Fixture product: reuse [../model-runtime-local/tenkai.toml](../model-runtime-loc
 `FakeInferenceEngine` (no real llama binary).
 
 ```bash
+export TENKAI_MANAGEMENT_TOKEN='replace-from-secret-store'
 tenkaictl init
 tenkaictl canary designate local
 tenkaictl publish ../model-runtime-local/tenkai.toml --allow-unsigned-development

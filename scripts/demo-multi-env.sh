@@ -22,6 +22,7 @@ fi
 rm -rf "$STATE"
 mkdir -p "$STATE"
 export TENKAI_DATABASE="$STATE/tenkai.db"
+export TENKAI_MANAGEMENT_TOKEN="${TENKAI_MANAGEMENT_TOKEN:-tenkai-local-management}"
 
 run() {
   echo "+ $BIN $*"

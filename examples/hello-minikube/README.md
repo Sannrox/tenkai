@@ -68,6 +68,7 @@ export TENKAI_DATABASE=$PWD/.tenkai-dogfood-minikube/tenkai.db
 
 ```bash
 export TENKAI_SOFTWARE_EXECUTOR=kubernetes
+export TENKAI_MANAGEMENT_TOKEN="${TENKAI_MANAGEMENT_TOKEN:-tenkai-local-management}"
 DB=$PWD/.tenkai-dogfood-minikube/tenkai.db
 BIN=./target/debug/tenkaictl
 KEYS=.tenkai-dev-keys
