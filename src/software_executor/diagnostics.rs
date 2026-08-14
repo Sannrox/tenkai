@@ -124,6 +124,10 @@ fn looks_like_credential_key(name: &str) -> bool {
         "idtoken",
         "privatekey",
         "privatekeydata",
+        "clientcertificatedata",
+        "clientkeydata",
+        "certificateauthoritydata",
+        "clientkey",
         "secretaccesskey",
         "accesskeyid",
         "accesskey",
@@ -139,8 +143,17 @@ fn looks_like_credential_key(name: &str) -> bool {
         "bearer",
         "secret",
         "token",
+        "databaseurl",
+        "postgresurl",
+        "mysqlurl",
+        "redisurl",
     ];
-    FRAGMENTS.iter().any(|frag| compact.contains(frag))
+    if FRAGMENTS.iter().any(|frag| compact.contains(frag)) {
+        return true;
+    }
+    // TENKAI_*URL and names that compact to a postgres/database URL shape.
+    (compact.starts_with("tenkai") && compact.ends_with("url"))
+        || (compact.contains("postgres") && compact.len() > "postgres".len())
 }
 
 /// Read a bare or JSON-quoted identifier starting at `i`.
@@ -259,6 +272,67 @@ fn skip_credential_value(
     Some(j)
 }
 
+const OMITTED_SENSITIVE_OUTPUT: &str = "kubectl output omitted (looked like secret or certificate material); inspect the cluster with kubectl describe and avoid pasting secrets into Tenkai";
+
+/// YAML/JSON kubeconfig `users:` / `user:` blocks are fail-closed: omit entirely.
+fn looks_like_kubeconfig_user_block(lower: &str, compact: &str) -> bool {
+    if compact.contains("\"users\":") || compact.contains("\"user\":{") {
+        return true;
+    }
+    lower.lines().any(|line| {
+        let t = line.trim_start();
+        yaml_mapping_key(t, "users") || yaml_mapping_key(t, "user")
+    })
+}
+
+fn yaml_mapping_key(trimmed_line: &str, key: &str) -> bool {
+    let Some(rest) = trimmed_line.strip_prefix(key) else {
+        return false;
+    };
+    rest.is_empty() || rest.starts_with(':')
+}
+
+/// If `chars[i..]` is `scheme://userinfo@host`, return the index of `@`.
+fn uri_userinfo_at(chars: &[char], i: usize) -> Option<usize> {
+    if i > 0 {
+        let prev = chars[i - 1];
+        if prev.is_ascii_alphanumeric() || prev == '_' || prev == '-' || prev == '.' {
+            return None;
+        }
+    }
+    if i >= chars.len() || !chars[i].is_ascii_alphabetic() {
+        return None;
+    }
+    let mut j = i + 1;
+    while j < chars.len()
+        && (chars[j].is_ascii_alphanumeric() || matches!(chars[j], '+' | '-' | '.'))
+    {
+        j += 1;
+    }
+    if j + 2 >= chars.len() || chars[j] != ':' || chars[j + 1] != '/' || chars[j + 2] != '/' {
+        return None;
+    }
+    let authority = j + 3;
+    let mut k = authority;
+    let mut at = None;
+    while k < chars.len() {
+        let c = chars[k];
+        if c.is_whitespace() || matches!(c, '/' | '?' | '#' | '"' | '\'' | '<' | '>' | ')') {
+            break;
+        }
+        if c == '@' {
+            at = Some(k);
+            break;
+        }
+        k += 1;
+    }
+    let at = at?;
+    if at == authority {
+        return None;
+    }
+    Some(at)
+}
+
 /// Strip credential-like substrings from diagnostic text.
 pub fn sanitize_diagnostic_text(raw: &str) -> String {
     // Bound work before scanning (kubectl can emit large payloads).
@@ -277,6 +351,9 @@ pub fn sanitize_diagnostic_text(raw: &str) -> String {
     let lower = cleaned.to_ascii_lowercase();
     // Collapse whitespace so formatted JSON/YAML still matches.
     let compact: String = lower.chars().filter(|c| !c.is_whitespace()).collect();
+    if looks_like_kubeconfig_user_block(&lower, &compact) {
+        return OMITTED_SENSITIVE_OUTPUT.into();
+    }
     for structure in [
         "kind:secret",
         "\"kind\":\"secret\"",
@@ -284,16 +361,17 @@ pub fn sanitize_diagnostic_text(raw: &str) -> String {
         "beginrsaprivate",
         "beginopensshprivate",
         "beginprivatekey",
+        "beginecprivatekey",
+        "beginencryptedprivatekey",
+        "begindsaprivatekey",
         "\"stringdata\"",
         "stringdata:",
-        // Structured Secret data maps (not bare "data:" which matches "metadata:")
+        // Structured Secret data maps (not bare "data:" / "*-data:" keys).
         "\"data\":{",
-        "\ndata:",
         ".dockerconfigjson",
     ] {
         if compact.contains(&structure.replace('\n', "")) || lower.contains(structure) {
-            return "kubectl output omitted (looked like secret or certificate material); inspect the cluster with kubectl describe and avoid pasting secrets into Tenkai"
-                .into();
+            return OMITTED_SENSITIVE_OUTPUT.into();
         }
     }
     // YAML map start for secret data field at line begin.
@@ -301,8 +379,7 @@ pub fn sanitize_diagnostic_text(raw: &str) -> String {
         let t = line.trim_start();
         t.starts_with("data:") || t.starts_with("stringdata:")
     }) {
-        return "kubectl output omitted (looked like secret or certificate material); inspect the cluster with kubectl describe and avoid pasting secrets into Tenkai"
-            .into();
+        return OMITTED_SENSITIVE_OUTPUT.into();
     }
     let mut out = String::with_capacity(cleaned.len().min(512));
     let chars: Vec<char> = cleaned.chars().collect();
@@ -333,6 +410,16 @@ pub fn sanitize_diagnostic_text(raw: &str) -> String {
                 continue;
             }
         }
+
+        if let Some(at) = uri_userinfo_at(&chars, i) {
+            while i + 2 < chars.len() && !(chars[i] == '/' && chars[i + 1] == '/') {
+                out.push(chars[i]);
+                i += 1;
+            }
+            out.push_str("//[redacted]");
+            i = at;
+            continue;
+        }
         out.push(chars[i]);
         i += 1;
     }
@@ -342,4 +429,152 @@ pub fn sanitize_diagnostic_text(raw: &str) -> String {
         capped.push('…');
     }
     capped.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SoftwareDeployPhase, format_software_phase_error, sanitize_diagnostic_text};
+
+    fn assert_no_leak(sample: &str, leaked: &[&str]) -> String {
+        let cleaned = sanitize_diagnostic_text(sample);
+        for secret in leaked {
+            assert!(
+                !cleaned.contains(secret),
+                "leaked {secret:?} in {sample:?} -> {cleaned}"
+            );
+        }
+        cleaned
+    }
+
+    #[test]
+    fn redacts_uri_userinfo_and_database_url_keys() {
+        let url = assert_no_leak(
+            "helm failed: postgres://app:s3cret@db.internal/tenkai",
+            &["s3cret", "app:s3cret"],
+        );
+        assert!(url.contains("[redacted]"), "{url}");
+        assert!(url.contains("postgres://"), "{url}");
+        assert!(url.contains("db.internal"), "{url}");
+
+        let env = assert_no_leak(
+            "TENKAI_POSTGRES_URL=postgres://app:s3cret@db.internal/tenkai",
+            &["s3cret", "app:s3cret", "postgres://app"],
+        );
+        assert!(env.contains("[redacted]"), "{env}");
+
+        for sample in [
+            "mysql://root:s3cret@127.0.0.1:3306/app",
+            "redis://default:s3cret@cache:6379/0",
+            "https://deploy:s3cret@registry.example/v2/",
+            "APP_DATABASE_URL=postgres://app:s3cret@db.internal/tenkai",
+            "FOO_POSTGRES_PASSWORD=s3cret",
+        ] {
+            let cleaned = assert_no_leak(sample, &["s3cret"]);
+            assert!(
+                cleaned.contains("[redacted]") || cleaned.contains("omitted"),
+                "{sample:?} -> {cleaned}"
+            );
+        }
+    }
+
+    #[test]
+    fn redacts_kubeconfig_data_fields_without_pem() {
+        for sample in [
+            "client-certificate-data: dGVzdA==",
+            "client-key-data: dGVzdA==",
+            "certificate-authority-data: dGVzdA==",
+            r#"{"client-certificate-data":"dGVzdA=="}"#,
+            "client-key: dGVzdA==",
+        ] {
+            let cleaned = assert_no_leak(sample, &["dGVzdA=="]);
+            assert!(cleaned.contains("[redacted]"), "{sample:?} -> {cleaned}");
+        }
+    }
+
+    #[test]
+    fn omits_additional_pem_private_key_markers() {
+        for marker in [
+            "BEGIN EC PRIVATE KEY",
+            "BEGIN ENCRYPTED PRIVATE KEY",
+            "BEGIN DSA PRIVATE KEY",
+            "BEGIN PRIVATE KEY",
+            "BEGIN RSA PRIVATE KEY",
+            "BEGIN OPENSSH PRIVATE KEY",
+        ] {
+            let sample =
+                format!("error: -----{marker}-----\nMIIFakePemFixture\n-----END PRIVATE KEY-----");
+            let cleaned = assert_no_leak(&sample, &["MIIFakePemFixture"]);
+            assert!(cleaned.contains("omitted"), "{marker} -> {cleaned}");
+        }
+    }
+
+    #[test]
+    fn omits_kubeconfig_users_user_block() {
+        let yaml = "\
+apiVersion: v1
+kind: Config
+users:
+- name: minikube
+  user:
+    client-certificate-data: dGVzdA==
+    client-key-data: dGVzdA==
+";
+        let cleaned = assert_no_leak(yaml, &["dGVzdA==", "minikube"]);
+        assert!(cleaned.contains("omitted"), "{cleaned}");
+
+        let json = r#"{"users":[{"name":"minikube","user":{"token":"s3cret"}}]}"#;
+        let cleaned = assert_no_leak(json, &["s3cret", "minikube"]);
+        assert!(cleaned.contains("omitted"), "{cleaned}");
+
+        let inline_user = "user:\n  token: s3cret";
+        let cleaned = assert_no_leak(inline_user, &["s3cret"]);
+        assert!(cleaned.contains("omitted"), "{cleaned}");
+    }
+
+    #[test]
+    fn keeps_existing_covered_shapes() {
+        let bearer = assert_no_leak(
+            "Authorization: Bearer s3cret-token\nnext",
+            &["s3cret-token"],
+        );
+        assert!(bearer.contains("[redacted]"), "{bearer}");
+
+        let path = assert_no_leak("users[].user.token: s3cret", &["s3cret"]);
+        assert!(path.contains("[redacted]"), "{path}");
+
+        let secret = assert_no_leak(
+            r#"Error from server: {"kind": "Secret", "data": {"api-key": "s3cret"}}"#,
+            &["s3cret"],
+        );
+        assert!(
+            secret.contains("omitted") || secret.contains("secret"),
+            "{secret}"
+        );
+
+        let safe = sanitize_diagnostic_text(
+            "error: deployment.apps \"hello\" not found in namespace=local",
+        );
+        assert!(safe.contains("not found"), "{safe}");
+        assert!(
+            safe.contains("namespace=local") || safe.contains("namespace"),
+            "{safe}"
+        );
+    }
+
+    #[test]
+    fn phase_error_sanitizes_before_persist_shape() {
+        let err = format_software_phase_error(
+            SoftwareDeployPhase::Apply,
+            "api",
+            "1.0.0",
+            "stage",
+            "helm failed: postgres://app:s3cret@db.internal/tenkai",
+        );
+        assert!(!err.contains("s3cret"), "{err}");
+        assert!(err.contains("phase=apply"), "{err}");
+        assert!(
+            err.contains("[redacted]") || err.contains("omitted"),
+            "{err}"
+        );
+    }
 }
