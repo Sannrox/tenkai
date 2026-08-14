@@ -151,9 +151,8 @@ fn looks_like_credential_key(name: &str) -> bool {
     if FRAGMENTS.iter().any(|frag| compact.contains(frag)) {
         return true;
     }
-    // TENKAI_*URL and names that compact to a postgres/database URL shape.
-    (compact.starts_with("tenkai") && compact.ends_with("url"))
-        || (compact.contains("postgres") && compact.len() > "postgres".len())
+    // TENKAI_*URL (postgresurl / databaseurl fragments cover *POSTGRES_URL / *DATABASE_URL).
+    compact.starts_with("tenkai") && compact.ends_with("url")
 }
 
 /// Read a bare or JSON-quoted identifier starting at `i`.
@@ -292,6 +291,19 @@ fn yaml_mapping_key(trimmed_line: &str, key: &str) -> bool {
     rest.is_empty() || rest.starts_with(':')
 }
 
+/// True when `chars[..key_start]` ends with `namespace=` (phase-error wrapper).
+fn preceded_by_namespace_equals(chars: &[char], key_start: usize) -> bool {
+    const NEEDLE: &[char] = &['n', 'a', 'm', 'e', 's', 'p', 'a', 'c', 'e', '='];
+    if key_start < NEEDLE.len() {
+        return false;
+    }
+    let start = key_start - NEEDLE.len();
+    chars[start..key_start]
+        .iter()
+        .zip(NEEDLE.iter())
+        .all(|(a, b)| a.eq_ignore_ascii_case(b))
+}
+
 /// If `chars[i..]` is `scheme://userinfo@host`, return the index of `@`.
 fn uri_userinfo_at(chars: &[char], i: usize) -> Option<usize> {
     if i > 0 {
@@ -404,6 +416,22 @@ pub fn sanitize_diagnostic_text(raw: &str) -> String {
             } else {
                 CredentialValueStyle::RestOfLine
             };
+            // `system:serviceaccount:...` is a Kubernetes username, not a YAML assignment.
+            // Rest-of-line redaction here drops the required Forbidden reason.
+            if matches!(style, CredentialValueStyle::RestOfLine) && i > 0 && chars[i - 1] == ':' {
+                out.push(chars[i]);
+                i += 1;
+                continue;
+            }
+            // Re-sanitizing `run_captured_command` output sees
+            // `environment/namespace=<id>:` and would eat the failure text.
+            if matches!(style, CredentialValueStyle::RestOfLine)
+                && preceded_by_namespace_equals(&chars, i)
+            {
+                out.push(chars[i]);
+                i += 1;
+                continue;
+            }
             if let Some(end) = skip_credential_value(&chars, after_key, style) {
                 out.push_str("[redacted]");
                 i = end;
@@ -575,6 +603,63 @@ users:
         assert!(
             err.contains("[redacted]") || err.contains("omitted"),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn resanitize_of_phase_error_keeps_required_text() {
+        // apply maps run_captured_command errors through format_software_phase_error,
+        // which sanitizes the already-wrapped string a second time.
+        for environment in ["postgres-prod", "token-prod", "secret-store", "stage"] {
+            let inner = format!(
+                "software deploy phase=apply product=api environment/namespace={environment}: helm upgrade --install failed (status exit status 1): Error: UPGRADE FAILED: timed out waiting for the condition"
+            );
+            let cleaned = sanitize_diagnostic_text(&inner);
+            assert!(
+                cleaned.contains("timed out waiting for the condition"),
+                "{environment}: dropped required text -> {cleaned}"
+            );
+            assert!(
+                !cleaned.contains("s3cret"),
+                "{environment}: unexpected leak -> {cleaned}"
+            );
+            let wrapped = format_software_phase_error(
+                SoftwareDeployPhase::Apply,
+                "api",
+                "1.0.0",
+                environment,
+                &inner,
+            );
+            assert!(
+                wrapped.contains("timed out waiting for the condition"),
+                "{environment}: phase wrap dropped required text -> {wrapped}"
+            );
+        }
+    }
+
+    #[test]
+    fn rbac_serviceaccount_keeps_forbidden_reason() {
+        let sample = "Error from server (Forbidden): error when creating \"deploy.yaml\": deployments.apps is forbidden: User \"system:serviceaccount:default:foo\" cannot create resource \"deployments\" in API group \"apps\" in the namespace \"prod\"";
+        let cleaned = sanitize_diagnostic_text(sample);
+        assert!(
+            cleaned.contains("cannot create resource"),
+            "dropped RBAC reason -> {cleaned}"
+        );
+        assert!(
+            cleaned.contains("system:serviceaccount:default:foo"),
+            "dropped subject -> {cleaned}"
+        );
+        assert!(cleaned.contains("Forbidden"), "{cleaned}");
+    }
+
+    #[test]
+    fn postgres_named_resource_keeps_rollout_reason() {
+        let cleaned = sanitize_diagnostic_text(
+            "Error: cannot patch postgres-prod: timeout waiting for rollout",
+        );
+        assert!(
+            cleaned.contains("timeout waiting for rollout"),
+            "dropped rollout reason -> {cleaned}"
         );
     }
 }
