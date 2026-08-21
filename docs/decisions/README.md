@@ -15,3 +15,4 @@
 - [0013 — Evaluation gate evidence projection](0013-evaluation-gate-evidence-projection.md)
 - [0014 — Versioned Rust client facade](0014-versioned-rust-client-facade.md)
 - [0015 — Governed-action remote migration](0015-governed-action-remote-migration.md)
+- [0016 — Bounded same-version remediations](0016-same-version-remediation.md)

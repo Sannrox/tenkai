@@ -19,10 +19,12 @@ pub(crate) use crate::environment::update_runtime_deployments_object;
 pub use crate::environment::{
     ENVIRONMENT_FACT_KEYS, EnvironmentInspectReport, EnvironmentListEntry,
     EnvironmentPlanStepSummary, EnvironmentPlanSummary, EnvironmentSubscriptionView, StatusRow,
-    apply_runtime_inventory_facts, clear_environment_constraint, clear_environment_fact, env_add,
-    fleet_status, inspect_environment, inspect_environment_with_outcomes,
-    list_environment_constraints, list_environment_facts, list_environments, reconcile_deployment,
-    require_environment_fact, set_environment_constraint, set_environment_fact, status, subscribe,
+    apply_runtime_inventory_facts, clear_environment_constraint, clear_environment_fact,
+    clear_environment_overlay, env_add, fleet_status, inspect_environment,
+    inspect_environment_with_outcomes, list_environment_constraints, list_environment_facts,
+    list_environment_overlays, list_environments, overlay_digest, product_overlays,
+    reconcile_deployment, require_environment_fact, set_environment_constraint,
+    set_environment_fact, set_environment_overlay, status, subscribe, subscription_state,
 };
 pub use crate::fleet::{
     FleetDriftSummary, FleetEnvironmentRow, FleetPostureSnapshot, FleetStatusReport,
@@ -38,6 +40,7 @@ pub enum Action {
     Upgrade,
     Downgrade,
     Rollback,
+    Restart,
 }
 
 impl std::fmt::Display for Action {
@@ -47,6 +50,7 @@ impl std::fmt::Display for Action {
             Action::Upgrade => "upgrade",
             Action::Downgrade => "downgrade",
             Action::Rollback => "rollback",
+            Action::Restart => "restart",
         };
         f.write_str(s)
     }
@@ -128,6 +132,9 @@ pub struct Plan {
     /// Advisory prior warnings (optional planner intelligence). Never hard-blocks.
     #[serde(default)]
     pub prior_warnings: Vec<String>,
+    /// Audited reason that admits rollback onto recalled Catalog content.
+    #[serde(default)]
+    pub recalled_recovery_reason: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -139,6 +146,8 @@ struct ExecutableContent<'a> {
     created_at: i64,
     inputs: &'a [DesiredStateInput],
     steps: &'a [Step],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recalled_recovery_reason: Option<&'a str>,
 }
 
 fn content_address(
@@ -146,18 +155,30 @@ fn content_address(
     created_at: i64,
     inputs: &[DesiredStateInput],
     steps: &[Step],
+    recalled_recovery_reason: Option<&str>,
 ) -> Result<String> {
     let mut normalized_steps = steps.to_vec();
     for step in &mut normalized_steps {
         step.id.clear();
     }
-    let bytes = serde_json::to_vec(&(
-        PLAN_FORMAT_VERSION,
-        environment,
-        created_at,
-        inputs,
-        normalized_steps,
-    ))?;
+    let bytes = if let Some(reason) = recalled_recovery_reason.filter(|value| !value.is_empty()) {
+        serde_json::to_vec(&(
+            PLAN_FORMAT_VERSION,
+            environment,
+            created_at,
+            inputs,
+            normalized_steps,
+            reason,
+        ))?
+    } else {
+        serde_json::to_vec(&(
+            PLAN_FORMAT_VERSION,
+            environment,
+            created_at,
+            inputs,
+            normalized_steps,
+        ))?
+    };
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
@@ -171,6 +192,7 @@ impl Plan {
             created_at: self.created_at,
             inputs: &self.inputs,
             steps: &self.steps,
+            recalled_recovery_reason: self.recalled_recovery_reason.as_deref(),
         };
         let bytes = serde_json::to_vec(&content)?;
         Ok(format!("{:x}", Sha256::digest(bytes)))
@@ -236,8 +258,34 @@ pub async fn create_from_steps(ctx: &mut Ctx, env: &str, steps: Vec<Step>) -> Re
     convergence::create_from_steps(ctx, env, steps).await
 }
 
+pub async fn create_from_steps_with_recovery(
+    ctx: &mut Ctx,
+    env: &str,
+    steps: Vec<Step>,
+    reason: String,
+) -> Result<Plan> {
+    convergence::create_from_steps_with_recovery(ctx, env, steps, reason).await
+}
+
 pub async fn rollback_step(ctx: &mut Ctx, env: &str, product: &str) -> Result<Step> {
     convergence::rollback_step(ctx, env, product).await
+}
+
+pub async fn rollback_step_with_recovery(
+    ctx: &mut Ctx,
+    env: &str,
+    product: &str,
+    recovery: Option<&str>,
+) -> Result<Step> {
+    convergence::rollback_step_with_recovery(ctx, env, product, recovery).await
+}
+
+pub async fn restart_step(ctx: &mut Ctx, env: &str, product: &str) -> Result<Step> {
+    convergence::restart_step(ctx, env, product).await
+}
+
+pub async fn create_for_reconcile(ctx: &mut Ctx, env: &str) -> Result<Plan> {
+    convergence::create_for_reconcile(ctx, env).await
 }
 
 pub fn model_routing_rollout_rank(kind: crate::manifest::ProductKind, action: Action) -> u8 {
@@ -294,17 +342,47 @@ mod tests {
             status_detail: String::new(),
             maintenance_blocked: false,
             prior_warnings: Vec::new(),
+            recalled_recovery_reason: None,
         };
         plan.content_id = content_address(
             &plan.environment,
             plan.created_at,
             &plan.inputs,
             &plan.steps,
+            plan.recalled_recovery_reason.as_deref(),
         )
         .unwrap();
         plan.id = plan_id(&plan.environment, plan.created_at, &plan.content_id);
         plan.steps[0].id = format!("{}:step:0", plan.id);
         plan
+    }
+
+    #[test]
+    fn recalled_recovery_reason_is_part_of_signed_plan_identity() {
+        let mut left = example_plan();
+        let mut right = example_plan();
+        right.recalled_recovery_reason = Some("restore last known-good".into());
+        left.content_id = content_address(
+            &left.environment,
+            left.created_at,
+            &left.inputs,
+            &left.steps,
+            left.recalled_recovery_reason.as_deref(),
+        )
+        .unwrap();
+        right.content_id = content_address(
+            &right.environment,
+            right.created_at,
+            &right.inputs,
+            &right.steps,
+            right.recalled_recovery_reason.as_deref(),
+        )
+        .unwrap();
+        assert_ne!(left.content_id, right.content_id);
+        assert_ne!(
+            left.executable_digest().unwrap(),
+            right.executable_digest().unwrap()
+        );
     }
 
     #[test]
@@ -324,6 +402,7 @@ mod tests {
             plan.created_at,
             &plan.inputs,
             &plan.steps,
+            plan.recalled_recovery_reason.as_deref(),
         )
         .unwrap();
         plan.id = plan_id(&plan.environment, plan.created_at, &plan.content_id);

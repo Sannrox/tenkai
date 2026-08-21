@@ -33,9 +33,13 @@ pub(super) async fn admit(
     pin: &ReleasePin,
     environment: &str,
     product: &str,
+    recalled_recovery: bool,
 ) -> Result<ReleaseContent> {
-    let snapshot =
-        crate::catalog::load_deployable_snapshot(ctx, &pin.release_id, environment).await?;
+    let snapshot = if recalled_recovery {
+        crate::catalog::load_recoverable_snapshot(ctx, &pin.release_id, environment).await?
+    } else {
+        crate::catalog::load_deployable_snapshot(ctx, &pin.release_id, environment).await?
+    };
     let descriptor = snapshot.descriptor;
     let object = snapshot.object;
     let raw = object

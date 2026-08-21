@@ -26,7 +26,7 @@ client is a valid follow-on if dependency weight is accepted later.
 
 | Type | Role |
 | --- | --- |
-| `SoftwareExecutor` | apply / remove / observe |
+| `SoftwareExecutor` | apply / remove / observe / restart |
 | `FakeSoftwareExecutor` | CI without cluster |
 | `HelmSoftwareExecutor` | Helm chart path |
 | `KubernetesSoftwareExecutor` | Native manifests path |
@@ -47,7 +47,8 @@ tenkaictl reconcile --once
 ```text
 helm upgrade --install <product> <workdir> \
   --namespace <environment> --create-namespace --wait --timeout 5m \
-  --set tenkai.version=<version> --set tenkai.releaseId=<release_id>
+  --set tenkai.version=<version> --set tenkai.releaseId=<release_id> \
+  [--set tenkai.configDigest=<digest> --set tenkai.config.<key>=<value> ...]
 ```
 
 ## Native Kubernetes enablement
@@ -72,6 +73,9 @@ Rules:
   - `tenkai.product`
   - `tenkai.version`
   - `tenkai.release-id` (sanitized for Kubernetes label charset)
+- When a non-secret overlay digest is present, apply and restart also annotate
+  `tenkai.config-digest` on Deployments and StatefulSets labeled
+  `tenkai.product`.
 - Product, version, and environment names must not contain path separators.
 
 Kustomize is **not** supported in this surface.
@@ -96,6 +100,20 @@ tenkaictl reconcile --once
 Remove walks manifests in **reverse** sorted order with `--ignore-not-found`.
 
 Observe: `kubectl get -f` for each file; **Present** only if all succeed.
+**Mismatched** when a live `tenkai.version` label (or Helm `tenkai.version` /
+`tenkai.releaseId` / `tenkai.configDigest` values) disagrees with the requested
+pin. **Unknown** never becomes a Plan.
+
+Restart (same version): Helm `upgrade --install` with `tenkai.restartNonce` and
+any current non-secret overlays; native **re-apply** of the pinned manifests,
+then `kubectl rollout restart` of Deployments/StatefulSets labeled
+`tenkai.product`. Native restart fails closed when no labeled workload exists
+after apply.
+Reconcile may emit a Restart plan when Helm/Kubernetes observe is `Absent` or
+`Mismatched`, recorded apply health is `unhealthy`, or environment overlays
+changed since the last apply. `tenkaictl plan` does not probe live targets or
+execute `deploy.health`, but it does emit Restart when Tenkai-owned overlays
+are stale.
 
 ### Optional live smoke
 

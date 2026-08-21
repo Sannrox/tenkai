@@ -61,13 +61,15 @@ reconcile an uncertain outcome; changed content requires a new version.
 tenkaictl env add <environment> --description "<description>"
 tenkaictl env subscribe <environment> <product>=<channel>
 tenkaictl env facts list <environment>
+tenkaictl env overlay list <environment>
 tenkaictl env constraints list <environment>
 tenkaictl env maintenance list <environment>
 ```
 
 Consult `tenkaictl env <subcommand> --help` before changing facts,
-constraints, maintenance windows, or canary policy. Inspect the environment
-again after each configuration mutation.
+overlays, constraints, maintenance windows, or canary policy. Inspect the
+environment again after each configuration mutation. Overlay changes can emit a
+same-version Restart without a new product version. Secrets are not overlays.
 
 ## Plan and apply
 
@@ -81,14 +83,21 @@ tenkaictl env inspect <environment>
 ```
 
 Plans are stored dry runs over current desired state. Applying an old plan does
-not mean applying newly changed desired state. Maintenance-blocked plans do not
-resume automatically; rerun the same apply when policy permits.
+not mean applying newly changed desired state. A maintenance-blocked plan may be
+re-applied or resumed by reconcile when the resolved environment and product
+windows are open. Product windows are configured with
+`tenkaictl product maintenance`.
 
 ## Reconcile and roll back
 
 ```sh
 tenkaictl reconcile --once
 tenkaictl rollback <product> --env <environment>
+tenkaictl rollback <product> --env <environment> \
+  --allow-recalled-recovery --recovery-reason "<audited reason>"
+tenkaictl restart <product> --env <environment>
+tenkaictl release recall <product>@<version>
+tenkaictl product maintenance list <product>
 ```
 
 Use one-shot reconciliation for a bounded agent operation. Continuous

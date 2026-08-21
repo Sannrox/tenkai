@@ -19,6 +19,8 @@ pub enum CommandName {
     Status,
     InspectEnvironment,
     Rollback,
+    Restart,
+    Recall,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

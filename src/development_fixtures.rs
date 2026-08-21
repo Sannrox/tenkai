@@ -150,6 +150,7 @@ impl FixtureEnvironmentProjection {
                     health,
                     error,
                     head: projection.head.clone(),
+                    overlay_stale: false,
                 }
             })
             .collect()
@@ -174,6 +175,8 @@ impl FixtureEnvironmentProjection {
                 deployed: row.deployed,
                 health: row.health,
                 error: row.error,
+                overlay_digest: None,
+                applied_overlay: None,
             })
             .collect();
         crate::plan::EnvironmentInspectReport {
@@ -182,6 +185,7 @@ impl FixtureEnvironmentProjection {
             description: self.description.clone(),
             subscriptions,
             facts: BTreeMap::new(),
+            overlays: BTreeMap::new(),
             lease: crate::apply::EnvironmentLeaseInspect {
                 held: false,
                 owner: None,

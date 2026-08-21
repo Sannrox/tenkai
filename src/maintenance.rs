@@ -13,7 +13,8 @@ use sha2::{Digest as _, Sha256};
 
 use crate::client::Ctx;
 use crate::ontology::{
-    ACTION_CONFIGURE_MAINTENANCE, KIND_MAINTENANCE_CONFIG, NS, env_id, validate_identifier,
+    ACTION_CONFIGURE_MAINTENANCE, ACTION_CONFIGURE_PRODUCT_MAINTENANCE, KIND_MAINTENANCE_CONFIG,
+    KIND_PRODUCT_MAINTENANCE_CONFIG, NS, env_id, validate_identifier,
 };
 use crate::pb::sekai::Object;
 use crate::pb::sekai::{Decision, ObjectChange};
@@ -314,17 +315,19 @@ fn has_governed_evidence(
     object: &Object,
     decisions: &[Decision],
     changes: &[ObjectChange],
+    action: &str,
+    scope_field: &str,
 ) -> bool {
     let Some(correlation) = object.properties.get("last_update_correlation") else {
         return false;
     };
     let Some(decision) = decisions.iter().find(|decision| {
-        decision.action == ACTION_CONFIGURE_MAINTENANCE
+        decision.action == action
             && decision.reason == "execute_action"
             && decision.target_id == object.id
             && decision.evidence.get("decision").map(String::as_str) == Some("allow")
             && decision.evidence.get("correlation") == Some(correlation)
-            && decision.evidence.get("environment") == object.properties.get("environment")
+            && decision.evidence.get(scope_field) == object.properties.get(scope_field)
             && decision.evidence.get(WINDOWS_PROPERTY) == object.properties.get(WINDOWS_PROPERTY)
             && decision.evidence.get("revision") == object.properties.get("revision")
     }) else {
@@ -388,7 +391,13 @@ async fn decode_governed_configuration(
     } else {
         Vec::new()
     };
-    if !has_governed_evidence(object, &decisions, &changes) {
+    if !has_governed_evidence(
+        object,
+        &decisions,
+        &changes,
+        ACTION_CONFIGURE_MAINTENANCE,
+        "environment",
+    ) {
         bail!(
             "maintenance configuration {} has no matching governed-action evidence",
             object.id
@@ -476,6 +485,134 @@ async fn replace_governed_configuration(
     }
     persisted_windows?;
     Ok(())
+}
+
+async fn replace_governed_product_configuration(
+    ctx: &mut Ctx,
+    product: &str,
+    config_id: &str,
+    windows: &[Window],
+) -> Result<()> {
+    let encoded = serde_json::to_string(windows)?;
+    let new_revision = revision(&encoded);
+    let correlation = uuid::Uuid::new_v4().to_string();
+    let params = HashMap::from([
+        ("id".into(), config_id.into()),
+        ("product".into(), product.into()),
+        (WINDOWS_PROPERTY.into(), encoded.clone()),
+        ("revision".into(), new_revision.clone()),
+        ("correlation".into(), correlation.clone()),
+    ]);
+    match ctx
+        .preview_action_result(ACTION_CONFIGURE_PRODUCT_MAINTENANCE, params.clone())
+        .await
+        .context("checking product maintenance-window update policy")?
+    {
+        result if result.decision == "allow" => {}
+        result if result.decision == "require_approval" => {
+            bail!(
+                "product maintenance-window update requires approval; deferred schedule updates are not supported"
+            );
+        }
+        result => {
+            bail!(
+                "product maintenance-window update was not allowed: {}",
+                result.decision
+            );
+        }
+    }
+    let action_error = match ctx
+        .execute_action_result(ACTION_CONFIGURE_PRODUCT_MAINTENANCE, params)
+        .await
+    {
+        Ok(result) if result.decision == "allow" => None,
+        Ok(result) if result.decision == "require_approval" => {
+            bail!(
+                "product maintenance-window update requires approval {}; governed ActionInstance admission denied it and Tenkai does not support deferred schedule updates",
+                result.approval_id
+            );
+        }
+        Ok(result) => {
+            bail!(
+                "product maintenance-window update was not allowed: {}",
+                result.decision
+            );
+        }
+        Err(error) => Some(error.context("updating product maintenance windows")),
+    };
+    let persisted = ctx
+        .get(config_id)
+        .await?
+        .context("product maintenance configuration disappeared during governed update")?;
+    let persisted_windows = decode_governed_product_configuration(ctx, &persisted, product).await;
+    let persisted_matches = matches!(&persisted_windows, Ok(stored) if stored == windows);
+    if persisted.properties.get("last_update_correlation") != Some(&correlation)
+        || persisted.properties.get(WINDOWS_PROPERTY) != Some(&encoded)
+        || persisted.properties.get("revision") != Some(&new_revision)
+        || !persisted_matches
+    {
+        if let Some(error) = action_error {
+            return match persisted_windows {
+                Ok(_) => Err(error.context("the requested configuration was not committed")),
+                Err(evidence) => Err(error.context(format!(
+                    "the requested configuration lacks valid commit evidence: {evidence}"
+                ))),
+            };
+        }
+        persisted_windows?;
+        bail!("product maintenance-window configuration was not persisted as requested");
+    }
+    persisted_windows?;
+    Ok(())
+}
+
+async fn decode_governed_product_configuration(
+    ctx: &mut Ctx,
+    object: &Object,
+    product: &str,
+) -> Result<Vec<Window>> {
+    let windows = decode_product_configuration(object, product)?;
+    let changes = ctx
+        .object_changes(&object.id)
+        .await
+        .context("loading product maintenance-window change evidence")?;
+    let correlation_change =
+        object
+            .properties
+            .get("last_update_correlation")
+            .and_then(|correlation| {
+                changes
+                    .iter()
+                    .filter(|change| {
+                        change.field == "properties.last_update_correlation"
+                            && change.new_value == *correlation
+                    })
+                    .max_by_key(|change| change.timestamp)
+            });
+    let decisions = if let Some(change) = correlation_change {
+        ctx.action_decisions(
+            &change.changed_by,
+            ACTION_CONFIGURE_PRODUCT_MAINTENANCE,
+            change.timestamp.saturating_sub(1),
+        )
+        .await
+        .context("loading product maintenance-window authorization decisions")?
+    } else {
+        Vec::new()
+    };
+    if !has_governed_evidence(
+        object,
+        &decisions,
+        &changes,
+        ACTION_CONFIGURE_PRODUCT_MAINTENANCE,
+        "product",
+    ) {
+        bail!(
+            "product maintenance configuration {} has no matching governed-action evidence",
+            object.id
+        );
+    }
+    Ok(windows)
 }
 
 pub async fn ensure_configuration(ctx: &mut Ctx, environment: &str) -> Result<()> {
@@ -682,12 +819,213 @@ pub fn weekday_values(value: &str) -> Result<Vec<u32>> {
     Ok(days)
 }
 
+fn product_config_id(product: &str) -> String {
+    format!("tenkai:product-maintenance:{product}")
+}
+
+/// Open only when every operand is open. Empty product windows stay unrestricted.
+pub fn intersect(left: Eligibility, right: Eligibility) -> Eligibility {
+    match (left, right) {
+        (Eligibility::Invalid { detail }, _) | (_, Eligibility::Invalid { detail }) => {
+            Eligibility::Invalid { detail }
+        }
+        (Eligibility::Closed { next_opens_at: a }, Eligibility::Closed { next_opens_at: b }) => {
+            Eligibility::Closed {
+                next_opens_at: match (a, b) {
+                    (Some(left), Some(right)) => Some(left.max(right)),
+                    (Some(value), None) | (None, Some(value)) => Some(value),
+                    (None, None) => None,
+                },
+            }
+        }
+        (Eligibility::Closed { next_opens_at }, Eligibility::Open { .. })
+        | (Eligibility::Open { .. }, Eligibility::Closed { next_opens_at }) => {
+            Eligibility::Closed { next_opens_at }
+        }
+        (
+            Eligibility::Open {
+                window,
+                closes_at: left,
+            },
+            Eligibility::Open {
+                closes_at: right, ..
+            },
+        ) => Eligibility::Open {
+            window,
+            closes_at: left.min(right),
+        },
+    }
+}
+
+fn decode_product_configuration(object: &Object, product: &str) -> Result<Vec<Window>> {
+    if object.kind != KIND_PRODUCT_MAINTENANCE_CONFIG {
+        bail!(
+            "object {} is {}, not {KIND_PRODUCT_MAINTENANCE_CONFIG}",
+            object.id,
+            object.kind
+        );
+    }
+    if object.properties.get("product").map(String::as_str) != Some(product) {
+        bail!(
+            "product maintenance configuration {} has the wrong product",
+            object.id
+        );
+    }
+    let raw = object
+        .properties
+        .get(WINDOWS_PROPERTY)
+        .context("product maintenance configuration has no windows")?;
+    if object.properties.get("revision") != Some(&revision(raw)) {
+        bail!(
+            "product maintenance configuration {} has an invalid revision",
+            object.id
+        );
+    }
+    let windows: Vec<Window> = serde_json::from_str(raw)?;
+    for window in &windows {
+        window.validate()?;
+    }
+    Ok(windows)
+}
+
+/// Missing product configuration means unrestricted.
+pub async fn list_product(ctx: &mut Ctx, product: &str) -> Result<Vec<Window>> {
+    validate_identifier("product", product)?;
+    match ctx.get(&product_config_id(product)).await? {
+        Some(object) if object.properties.contains_key("last_update_correlation") => {
+            decode_governed_product_configuration(ctx, &object, product).await
+        }
+        Some(object) => {
+            let windows = decode_product_configuration(&object, product)?;
+            if windows.is_empty() {
+                Ok(windows)
+            } else {
+                bail!(
+                    "product maintenance configuration {} has no matching governed-action evidence",
+                    object.id
+                );
+            }
+        }
+        None => Ok(Vec::new()),
+    }
+}
+
+pub async fn set_product(ctx: &mut Ctx, product: &str, window: Window) -> Result<String> {
+    window.validate()?;
+    update_product(ctx, product, |windows| {
+        windows.retain(|current| current.identity != window.identity);
+        windows.push(window.clone());
+        windows.sort_by(|left, right| left.identity.cmp(&right.identity));
+        Ok(format!(
+            "maintenance window {} configured for product {product}",
+            window.identity
+        ))
+    })
+    .await
+}
+
+pub async fn remove_product(ctx: &mut Ctx, product: &str, identity: &str) -> Result<String> {
+    validate_identifier("maintenance-window identity", identity)?;
+    update_product(ctx, product, |windows| {
+        let before = windows.len();
+        windows.retain(|window| window.identity != identity);
+        if windows.len() == before {
+            bail!("maintenance window {identity} is not configured for product {product}");
+        }
+        Ok(format!(
+            "maintenance window {identity} removed from product {product}"
+        ))
+    })
+    .await
+}
+
+async fn update_product(
+    ctx: &mut Ctx,
+    product: &str,
+    change: impl FnOnce(&mut Vec<Window>) -> Result<String>,
+) -> Result<String> {
+    validate_identifier("product", product)?;
+    let id = product_config_id(product);
+    let mut windows = list_product(ctx, product).await?;
+    let message = change(&mut windows)?;
+    let now = crate::now_millis();
+    if ctx.get(&id).await?.is_none() {
+        let encoded = "[]".to_string();
+        match ctx
+            .create_once(Object {
+                id: id.clone(),
+                kind: KIND_PRODUCT_MAINTENANCE_CONFIG.into(),
+                name: format!("{product} product maintenance windows"),
+                namespace: NS.into(),
+                external_id: String::new(),
+                properties: HashMap::from([
+                    ("product".into(), product.into()),
+                    (WINDOWS_PROPERTY.into(), encoded.clone()),
+                    ("revision".into(), revision(&encoded)),
+                ]),
+                created: now,
+                updated: now,
+            })
+            .await
+        {
+            Ok(_) => {}
+            Err(status) if status.code() == tonic::Code::AlreadyExists => {}
+            Err(status)
+                if status.code() == tonic::Code::Internal
+                    && status.message().contains("UNIQUE") => {}
+            Err(status) => return Err(status.into()),
+        }
+    }
+    replace_governed_product_configuration(ctx, product, &id, &windows).await?;
+    Ok(message)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn at(value: &str) -> DateTime<Utc> {
         value.parse().unwrap()
+    }
+
+    #[test]
+    fn intersect_requires_every_window_to_be_open() {
+        let open = Eligibility::Open {
+            window: "env".into(),
+            closes_at: 200,
+        };
+        let product = Eligibility::Open {
+            window: "product".into(),
+            closes_at: 100,
+        };
+        assert!(matches!(
+            intersect(open.clone(), product),
+            Eligibility::Open { closes_at: 100, .. }
+        ));
+        assert!(matches!(
+            intersect(
+                open,
+                Eligibility::Closed {
+                    next_opens_at: Some(50)
+                }
+            ),
+            Eligibility::Closed {
+                next_opens_at: Some(50)
+            }
+        ));
+        assert!(matches!(
+            intersect(
+                Eligibility::Closed {
+                    next_opens_at: Some(10)
+                },
+                Eligibility::Closed {
+                    next_opens_at: Some(20)
+                }
+            ),
+            Eligibility::Closed {
+                next_opens_at: Some(20)
+            }
+        ));
     }
 
     #[test]
@@ -809,7 +1147,13 @@ mod tests {
             ]),
             ..Default::default()
         };
-        assert!(!has_governed_evidence(&configuration, &[], &[]));
+        assert!(!has_governed_evidence(
+            &configuration,
+            &[],
+            &[],
+            ACTION_CONFIGURE_MAINTENANCE,
+            "environment",
+        ));
         assert!(!has_governed_evidence(
             &configuration,
             &[],
@@ -817,7 +1161,9 @@ mod tests {
                 field: "properties.windows".into(),
                 new_value: "[]".into(),
                 ..Default::default()
-            }]
+            }],
+            ACTION_CONFIGURE_MAINTENANCE,
+            "environment",
         ));
     }
 
@@ -870,7 +1216,9 @@ mod tests {
         assert!(has_governed_evidence(
             &configuration,
             std::slice::from_ref(&decision),
-            &[older_change.clone(), action_change.clone()]
+            &[older_change.clone(), action_change.clone()],
+            ACTION_CONFIGURE_MAINTENANCE,
+            "environment",
         ));
 
         let direct_change = ObjectChange {
@@ -882,7 +1230,9 @@ mod tests {
         assert!(!has_governed_evidence(
             &configuration,
             &[decision],
-            &[older_change, direct_change, action_change]
+            &[older_change, direct_change, action_change],
+            ACTION_CONFIGURE_MAINTENANCE,
+            "environment",
         ));
     }
 }

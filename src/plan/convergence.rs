@@ -20,15 +20,71 @@ async fn pin_release(ctx: &mut Ctx, id: &str, environment: &str) -> Result<Relea
     let descriptor = crate::catalog::EmbeddedCatalog::new(ctx)
         .lookup_release(id, environment)
         .await?;
-    Ok(ReleasePin {
+    Ok(release_pin(descriptor))
+}
+
+async fn pin_release_for_recovery(
+    ctx: &mut Ctx,
+    id: &str,
+    environment: &str,
+) -> Result<ReleasePin> {
+    let snapshot = crate::catalog::load_recoverable_snapshot(ctx, id, environment).await?;
+    Ok(release_pin(snapshot.descriptor))
+}
+
+fn release_pin(descriptor: crate::catalog::ReleaseDescriptor) -> ReleasePin {
+    ReleasePin {
         release_id: descriptor.release_id,
         digest: descriptor.manifest_digest,
         artifact_digest: descriptor.artifact_digest,
         workdir: descriptor.content_path,
-    })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ConvergencePolicy {
+    observe_live: bool,
+}
+
+impl ConvergencePolicy {
+    fn catalog_only() -> Self {
+        Self {
+            observe_live: false,
+        }
+    }
+
+    fn reconcile() -> Self {
+        Self { observe_live: true }
+    }
+}
+
+async fn release_is_recalled(ctx: &mut Ctx, release_id: &str) -> Result<bool> {
+    crate::catalog::release_is_recalled(ctx, release_id).await
+}
+
+fn cluster_observe_executor() -> Option<Box<dyn crate::software_executor::SoftwareExecutor>> {
+    match std::env::var("TENKAI_SOFTWARE_EXECUTOR") {
+        Ok(value)
+            if value.eq_ignore_ascii_case("helm")
+                || value.eq_ignore_ascii_case("kubernetes")
+                || value.eq_ignore_ascii_case("k8s")
+                || value.eq_ignore_ascii_case("native") =>
+        {
+            crate::software_executor::selected_software_executor()
+        }
+        _ => None,
+    }
 }
 
 async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateInput>, Vec<Step>)> {
+    compute_snapshot_with_policy(ctx, env, ConvergencePolicy::catalog_only()).await
+}
+
+async fn compute_snapshot_with_policy(
+    ctx: &mut Ctx,
+    env: &str,
+    policy: ConvergencePolicy,
+) -> Result<(Vec<DesiredStateInput>, Vec<Step>)> {
     let env_obj = crate::environment::environment(ctx, env).await?;
     let channels = ctx.linked(&env_obj.id, REL_SUBSCRIBES, "out").await?;
 
@@ -77,6 +133,11 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
         .await?;
         let desired = selected.version;
         let release = selected.release_id;
+        if release_is_recalled(ctx, &release).await? {
+            bail!(
+                "channel head {release} is recalled; promote another release before converging {product} in {env}"
+            );
+        }
         let target = pin_release(ctx, &release, env).await?;
         if env_obj
             .properties
@@ -108,19 +169,71 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
             deployed_version: deployed.clone(),
         });
         match deployed {
-            Some(v) if v == desired => {}
+            Some(v) if v == desired => {
+                let mut restart = false;
+                if policy.observe_live
+                    && let Some(executor) = cluster_observe_executor()
+                {
+                    let request = crate::software_executor::request_from_parts(
+                        product.clone(),
+                        desired.clone(),
+                        env,
+                        &target.workdir,
+                        release.clone(),
+                    );
+                    let request = crate::software_executor::with_overlays(
+                        request,
+                        crate::environment::product_overlays(&env_obj, &product)
+                            .unwrap_or_default(),
+                    );
+                    match executor.observe(&request)? {
+                        crate::software_executor::SoftwareObserveStatus::Absent
+                        | crate::software_executor::SoftwareObserveStatus::Mismatched => {
+                            restart = true;
+                        }
+                        crate::software_executor::SoftwareObserveStatus::Present
+                        | crate::software_executor::SoftwareObserveStatus::Unknown => {}
+                    }
+                }
+                let overlay_digest = crate::environment::overlay_digest(
+                    &crate::environment::product_overlays(&env_obj, &product).unwrap_or_default(),
+                );
+                let applied = env_obj
+                    .properties
+                    .get(&format!("applied_config.{product}"))
+                    .cloned()
+                    .unwrap_or_default();
+                if overlay_digest != applied {
+                    restart = true;
+                }
+                if env_obj
+                    .properties
+                    .get(&format!("deployment_health.{product}"))
+                    .is_some_and(|health| health == "unhealthy")
+                {
+                    restart = true;
+                }
+                if restart {
+                    pending.push((
+                        product,
+                        Action::Restart,
+                        Some(v),
+                        desired,
+                        target,
+                        None,
+                        kind,
+                    ));
+                }
+            }
             Some(v) => {
                 let action = classify_change(&v, &desired);
-                let restore = pin_release(ctx, &release_id(&product, &v), env).await?;
-                pending.push((
-                    product,
-                    action,
-                    Some(v),
-                    desired,
-                    target,
-                    Some(restore),
-                    kind,
-                ));
+                let current_id = release_id(&product, &v);
+                let restore = if release_is_recalled(ctx, &current_id).await? {
+                    None
+                } else {
+                    Some(pin_release(ctx, &current_id, env).await?)
+                };
+                pending.push((product, action, Some(v), desired, target, restore, kind));
             }
             None => pending.push((product, Action::Install, None, desired, target, None, kind)),
         }
@@ -170,7 +283,7 @@ async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateI
 pub(super) fn model_routing_rollout_rank(kind: crate::manifest::ProductKind, action: Action) -> u8 {
     use crate::product_kind::RolloutDirection;
     let direction = match action {
-        Action::Install | Action::Upgrade => RolloutDirection::Forward,
+        Action::Install | Action::Upgrade | Action::Restart => RolloutDirection::Forward,
         Action::Downgrade | Action::Rollback => RolloutDirection::Reverse,
     };
     kind.policy().rollout_rank(direction)
@@ -239,7 +352,14 @@ pub(super) async fn compute(ctx: &mut Ctx, env: &str) -> Result<Vec<Step>> {
 /// Compute and persist an immutable executable plan before any step is run.
 pub(super) async fn create(ctx: &mut Ctx, env: &str) -> Result<Plan> {
     let (inputs, mut steps) = compute_snapshot(ctx, env).await?;
-    create_with_content(ctx, env, inputs, &mut steps).await
+    create_with_content(ctx, env, inputs, &mut steps, None).await
+}
+
+/// Reconcile planning may emit Restart steps from live observe/health evidence.
+pub(super) async fn create_for_reconcile(ctx: &mut Ctx, env: &str) -> Result<Plan> {
+    let (inputs, mut steps) =
+        compute_snapshot_with_policy(ctx, env, ConvergencePolicy::reconcile()).await?;
+    create_with_content(ctx, env, inputs, &mut steps, None).await
 }
 
 /// Persist an explicitly constructed operation, such as a rollback, as a plan.
@@ -249,7 +369,17 @@ pub(super) async fn create_from_steps(
     mut steps: Vec<Step>,
 ) -> Result<Plan> {
     crate::environment::environment(ctx, env).await?;
-    create_with_content(ctx, env, Vec::new(), &mut steps).await
+    create_with_content(ctx, env, Vec::new(), &mut steps, None).await
+}
+
+pub(super) async fn create_from_steps_with_recovery(
+    ctx: &mut Ctx,
+    env: &str,
+    mut steps: Vec<Step>,
+    reason: String,
+) -> Result<Plan> {
+    crate::environment::environment(ctx, env).await?;
+    create_with_content(ctx, env, Vec::new(), &mut steps, Some(reason)).await
 }
 
 async fn create_with_content(
@@ -257,12 +387,19 @@ async fn create_with_content(
     env: &str,
     inputs: Vec<DesiredStateInput>,
     steps: &mut [Step],
+    recalled_recovery_reason: Option<String>,
 ) -> Result<Plan> {
     let created_at = crate::now_millis();
     for (order, step) in steps.iter_mut().enumerate() {
         step.order = order as u32;
     }
-    let content_id = content_address(env, created_at, &inputs, steps)?;
+    let content_id = content_address(
+        env,
+        created_at,
+        &inputs,
+        steps,
+        recalled_recovery_reason.as_deref(),
+    )?;
     let id = plan_id(env, created_at, &content_id);
     for (order, step) in steps.iter_mut().enumerate() {
         step.id = format!("{id}:step:{order}");
@@ -280,6 +417,7 @@ async fn create_with_content(
         status_detail: String::new(),
         maintenance_blocked: false,
         prior_warnings: Vec::new(),
+        recalled_recovery_reason,
     };
     // Optional advisory priors (default off). Never hard-block or change steps.
     let mut plan = plan;
@@ -296,7 +434,25 @@ async fn create_with_content(
 
 /// A rollback step to the previously deployed version of one product.
 pub(super) async fn rollback_step(ctx: &mut Ctx, env: &str, product: &str) -> Result<Step> {
+    rollback_step_with_recovery(ctx, env, product, None).await
+}
+
+pub(super) async fn rollback_step_with_recovery(
+    ctx: &mut Ctx,
+    env: &str,
+    product: &str,
+    recovery: Option<&str>,
+) -> Result<Step> {
     validate_identifier("product", product)?;
+    if let Some(reason) = recovery {
+        let trimmed = reason.trim();
+        if trimmed.is_empty() {
+            bail!("recalled recovery requires a non-empty --recovery-reason");
+        }
+        if trimmed.chars().any(|c| c.is_control()) {
+            bail!("recovery reason must not contain control characters");
+        }
+    }
     let env_obj = crate::environment::environment(ctx, env).await?;
     let current = env_obj
         .properties
@@ -310,9 +466,31 @@ pub(super) async fn rollback_step(ctx: &mut Ctx, env: &str, product: &str) -> Re
     else {
         bail!("no previous version of {product} recorded in {env} — nothing to roll back to");
     };
-    let target = pin_release(ctx, &release_id(product, &prev), env).await?;
+    let prev_id = release_id(product, &prev);
+    let prev_recalled = release_is_recalled(ctx, &prev_id).await?;
+    if prev_recalled && recovery.is_none() {
+        bail!(
+            "cannot roll back onto recalled release {prev_id}; pass --allow-recalled-recovery --recovery-reason"
+        );
+    }
+    let target = if prev_recalled {
+        pin_release_for_recovery(ctx, &prev_id, env).await?
+    } else {
+        pin_release(ctx, &prev_id, env).await?
+    };
     let restore = match current.as_deref() {
-        Some(version) => Some(pin_release(ctx, &release_id(product, version), env).await?),
+        Some(version) => {
+            let current_id = release_id(product, version);
+            if release_is_recalled(ctx, &current_id).await? {
+                if recovery.is_some() {
+                    Some(pin_release_for_recovery(ctx, &current_id, env).await?)
+                } else {
+                    None
+                }
+            } else {
+                Some(pin_release(ctx, &current_id, env).await?)
+            }
+        }
         None => None,
     };
     Ok(Step {
@@ -330,9 +508,47 @@ pub(super) async fn rollback_step(ctx: &mut Ctx, env: &str, product: &str) -> Re
     })
 }
 
+/// A same-version restart of the currently deployed release.
+pub(super) async fn restart_step(ctx: &mut Ctx, env: &str, product: &str) -> Result<Step> {
+    validate_identifier("product", product)?;
+    let env_obj = crate::environment::environment(ctx, env).await?;
+    let Some(current) = env_obj
+        .properties
+        .get(&format!("deployed.{product}"))
+        .cloned()
+        .filter(|value| !value.is_empty())
+    else {
+        bail!("no deployed version of {product} recorded in {env} — nothing to restart");
+    };
+    let current_id = release_id(product, &current);
+    if release_is_recalled(ctx, &current_id).await? {
+        bail!("cannot restart recalled release {current_id}");
+    }
+    let target = pin_release(ctx, &current_id, env).await?;
+    Ok(Step {
+        id: format!("{}:restart:{product}", env_id(env)),
+        order: 0,
+        release_id: target.release_id,
+        release_digest: target.digest,
+        artifact_digest: target.artifact_digest,
+        workdir: target.workdir,
+        restore: None,
+        product: product.into(),
+        action: Action::Restart,
+        from: Some(current.clone()),
+        to: current,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restart_is_neutral_for_model_routing_order() {
+        use crate::manifest::ProductKind;
+        validate_model_routing_rollout_order(&[(ProductKind::Software, Action::Restart)]).unwrap();
+    }
 
     #[test]
     fn semantic_version_direction_is_recorded() {
@@ -515,6 +731,120 @@ max_startup_seconds = 60
             .unwrap();
         let plan = create(&mut ctx, "local").await.unwrap();
         assert_eq!(plan.steps[0].to, "1.1.0");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    async fn published_software(ctx: &mut Ctx, root: &std::path::Path, version: &str) {
+        let dir = root.join(version);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("tenkai.toml"),
+            format!(
+                r#"
+[product]
+name = "api"
+version = "{version}"
+
+[deploy]
+install = "true"
+"#
+            ),
+        )
+        .unwrap();
+        crate::catalog::publish(
+            ctx,
+            &dir.join("tenkai.toml"),
+            &crate::catalog::PublishOptions {
+                allow_unsigned_development: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn overlay_change_emits_same_version_restart() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-overlay-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let database = root.join("tenkai.db");
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        published_software(&mut ctx, &root, "1.0.0").await;
+        let actor = crate::auth_context::test_management_context("overlay-promote");
+        crate::catalog::promote(&mut ctx, &actor, "api@1.0.0", "stable")
+            .await
+            .unwrap();
+        env_add(&mut ctx, "local", "fixture").await.unwrap();
+        subscribe(&mut ctx, "local", "api", "stable").await.unwrap();
+        let mut env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        env.properties.insert("deployed.api".into(), "1.0.0".into());
+        env.properties
+            .insert("deployed_release.api".into(), release_id("api", "1.0.0"));
+        ctx.put(env).await.unwrap();
+
+        let idle = create(&mut ctx, "local").await.unwrap();
+        assert!(idle.steps.is_empty(), "{idle:?}");
+
+        set_environment_overlay(&mut ctx, "local", "api", "region", "eu")
+            .await
+            .unwrap();
+        let plan = create(&mut ctx, "local").await.unwrap();
+        assert_eq!(plan.steps.len(), 1);
+        assert_eq!(plan.steps[0].action, Action::Restart);
+        assert_eq!(plan.steps[0].from.as_deref(), Some("1.0.0"));
+        assert_eq!(plan.steps[0].to, "1.0.0");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn rollback_onto_recalled_pin_requires_audited_reason() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-recovery-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let database = root.join("tenkai.db");
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        published_software(&mut ctx, &root, "1.0.0").await;
+        published_software(&mut ctx, &root, "1.1.0").await;
+        env_add(&mut ctx, "local", "fixture").await.unwrap();
+        let mut env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        env.properties.insert("deployed.api".into(), "1.1.0".into());
+        env.properties
+            .insert("deployed_prev.api".into(), "1.0.0".into());
+        ctx.put(env).await.unwrap();
+        let actor = crate::auth_context::test_management_context("recovery-recall");
+        crate::catalog::recall(&mut ctx, &actor, "api@1.0.0")
+            .await
+            .unwrap();
+
+        let denied = rollback_step(&mut ctx, "local", "api")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(denied.contains("recalled"), "{denied}");
+
+        let step = rollback_step_with_recovery(
+            &mut ctx,
+            "local",
+            "api",
+            Some("restore last known-good after faulty recall"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(step.action, Action::Rollback);
+        assert_eq!(step.to, "1.0.0");
 
         let _ = std::fs::remove_dir_all(&root);
     }

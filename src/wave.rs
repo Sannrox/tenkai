@@ -295,10 +295,13 @@ mod tests {
                     deployed: deployed.map(str::to_string),
                     health: health.map(str::to_string),
                     error: error.map(str::to_string),
+                    overlay_digest: None,
+                    applied_overlay: None,
                     state: state.into(),
                 }]
             },
             facts: Default::default(),
+            overlays: Default::default(),
             lease: crate::apply::EnvironmentLeaseInspect {
                 held: false,
                 owner: None,

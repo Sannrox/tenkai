@@ -362,6 +362,7 @@ mod tests {
                     status_detail: String::new(),
                     maintenance_blocked: false,
                     prior_warnings: Vec::new(),
+                    recalled_recovery_reason: None,
                 }))
             })
         }
@@ -407,6 +408,7 @@ mod tests {
                     description: "fixture".into(),
                     subscriptions: Vec::new(),
                     facts: Default::default(),
+                    overlays: Default::default(),
                     lease: crate::apply::EnvironmentLeaseInspect {
                         held: false,
                         owner: None,

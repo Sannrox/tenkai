@@ -30,7 +30,7 @@ pub(super) async fn authorize_maintenance(
     emergency_reason: Option<&str>,
 ) -> Result<()> {
     let authorization = async {
-        let decision = maintenance_decision(ctx, &plan.environment, emergency_reason).await?;
+        let decision = maintenance_decision(ctx, plan, emergency_reason).await?;
         if let MaintenanceDecision::EmergencyOverride(reason) = &decision {
             ctx.authorize_emergency_override(&plan.id, reason).await?;
         }
@@ -69,7 +69,8 @@ pub(super) async fn admit(
                 artifact_digest: step.artifact_digest.clone(),
                 workdir: step.workdir.clone(),
             };
-            let content = admit_release(ctx, &target, &plan.environment, &step.product).await?;
+            let content =
+                admit_release(ctx, &target, &plan.environment, &step.product, false).await?;
             let Some(suite) = content
                 .manifest
                 .gate
@@ -104,8 +105,7 @@ pub(super) async fn admit(
         }
     }
 
-    let final_maintenance =
-        maintenance_decision(ctx, &plan.environment, policy.emergency_reason).await?;
+    let final_maintenance = maintenance_decision(ctx, plan, policy.emergency_reason).await?;
     if let MaintenanceDecision::Denied(detail) = &final_maintenance {
         block_for_maintenance(ctx, lease, plan, policy.skip_gates, detail).await?;
     }
@@ -130,8 +130,7 @@ pub(super) async fn admit(
         "",
     )
     .await?;
-    let running_maintenance =
-        maintenance_decision(ctx, &plan.environment, policy.emergency_reason).await?;
+    let running_maintenance = maintenance_decision(ctx, plan, policy.emergency_reason).await?;
     match running_maintenance {
         MaintenanceDecision::Denied(detail) => {
             block_for_maintenance(ctx, lease, plan, policy.skip_gates, &detail).await?;
@@ -153,19 +152,31 @@ pub(super) async fn admit(
 
 async fn maintenance_decision(
     ctx: &mut Ctx,
-    environment: &str,
+    plan: &Plan,
     emergency_reason: Option<&str>,
 ) -> Result<MaintenanceDecision> {
-    let eligibility = match maintenance::list(ctx, environment).await {
-        Ok(windows) => {
-            let now = chrono::DateTime::from_timestamp_millis(crate::now_millis())
-                .context("current time is outside the supported maintenance-window range")?;
-            maintenance::evaluate(&windows, now)
-        }
+    let now = chrono::DateTime::from_timestamp_millis(crate::now_millis())
+        .context("current time is outside the supported maintenance-window range")?;
+    let env_eligibility = match maintenance::list(ctx, &plan.environment).await {
+        Ok(windows) => maintenance::evaluate(&windows, now),
         Err(error) => Eligibility::Invalid {
             detail: format!("maintenance window configuration is invalid: {error}"),
         },
     };
+    let mut eligibility = env_eligibility;
+    let mut products: Vec<String> = plan.steps.iter().map(|step| step.product.clone()).collect();
+    products.sort();
+    products.dedup();
+    for product in products {
+        let product_eligibility = match maintenance::list_product(ctx, &product).await {
+            Ok(windows) if windows.is_empty() => continue,
+            Ok(windows) => maintenance::evaluate(&windows, now),
+            Err(error) => Eligibility::Invalid {
+                detail: format!("product maintenance window configuration is invalid: {error}"),
+            },
+        };
+        eligibility = maintenance::intersect(eligibility, product_eligibility);
+    }
     if let Some(reason) = emergency_reason {
         return Ok(MaintenanceDecision::EmergencyOverride(reason.into()));
     }

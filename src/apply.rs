@@ -233,6 +233,10 @@ async fn execute_locked(
             plan_completion::fail(ctx, lease, &mut stored_plan, skip_gates, &detail).await?;
             return Err(error.context(detail));
         }
+        let recalled_recovery = stored_plan
+            .recalled_recovery_reason
+            .as_deref()
+            .is_some_and(|reason| !reason.trim().is_empty());
         let outcome = match step_lifecycle::execute(
             ctx,
             lease,
@@ -240,6 +244,7 @@ async fn execute_locked(
             &plan_id,
             &step,
             options.software_executor,
+            recalled_recovery,
         )
         .await
         {

@@ -79,7 +79,7 @@ pub(super) async fn activate(
     }
     if let Some(executor) = software {
         prepare_fenced_mutation(ctx, lease, content).await?;
-        let request = software_request(content);
+        let request = software_request(ctx, content).await?;
         let install = executor.apply(&request).map_err(|error| {
             software_phase_error(
                 crate::software_executor::SoftwareDeployPhase::Apply,
@@ -120,6 +120,44 @@ pub(super) async fn activate(
         Ok(()) => Ok(result),
         Err(error) => Ok(Err(error.to_string())),
     }
+}
+
+/// Re-apply the current pin without changing the recorded version.
+pub(super) async fn restart(
+    ctx: &mut Ctx,
+    lease: &EnvironmentLease,
+    content: &ReleaseContent,
+    software: Option<&dyn crate::software_executor::SoftwareExecutor>,
+) -> Result<Result<(), String>> {
+    if let Some(executor) = software {
+        prepare_fenced_mutation(ctx, lease, content).await?;
+        let request = software_request(ctx, content).await?;
+        let bounce = executor.restart(&request).map_err(|error| {
+            software_phase_error(
+                crate::software_executor::SoftwareDeployPhase::Restart,
+                content,
+                &error.to_string(),
+            )
+        });
+        let result = match bounce {
+            Ok(()) => match &content.manifest.deploy.health {
+                Some(command) if !command.is_empty() => {
+                    match run_mutation_command(ctx, lease, content, command).await? {
+                        Ok(()) => Ok(()),
+                        Err(error) => Err(software_phase_error(
+                            crate::software_executor::SoftwareDeployPhase::Health,
+                            content,
+                            &error,
+                        )),
+                    }
+                }
+                _ => Ok(()),
+            },
+            Err(error) => Err(error),
+        };
+        return Ok(result);
+    }
+    activate(ctx, lease, content, software).await
 }
 
 /// Deactivate one release under the current environment fence.
@@ -166,7 +204,7 @@ pub(super) async fn deactivate(
     if let Some(executor) = software {
         refresh_environment_lease(ctx, lease).await?;
         return Ok(executor
-            .remove(&software_request(content))
+            .remove(&software_request(ctx, content).await?)
             .map_err(|error| {
                 software_phase_error(
                     crate::software_executor::SoftwareDeployPhase::Remove,
@@ -213,17 +251,25 @@ pub(super) async fn cleanup_failed_activation(
     })
 }
 
-fn software_request(content: &ReleaseContent) -> crate::software_executor::SoftwareApplyRequest {
-    crate::software_executor::request_from_parts(
-        content.product.clone(),
-        content.manifest.product.version.clone(),
-        content.environment.clone(),
-        &content.workdir,
-        format!(
-            "tenkai:release:{}@{}",
-            content.product, content.manifest.product.version
+async fn software_request(
+    ctx: &mut Ctx,
+    content: &ReleaseContent,
+) -> Result<crate::software_executor::SoftwareApplyRequest> {
+    let env_obj = crate::environment::environment(ctx, &content.environment).await?;
+    let overlays = crate::environment::product_overlays(&env_obj, &content.product)?;
+    Ok(crate::software_executor::with_overlays(
+        crate::software_executor::request_from_parts(
+            content.product.clone(),
+            content.manifest.product.version.clone(),
+            content.environment.clone(),
+            &content.workdir,
+            format!(
+                "tenkai:release:{}@{}",
+                content.product, content.manifest.product.version
+            ),
         ),
-    )
+        overlays,
+    ))
 }
 
 fn software_phase_error(

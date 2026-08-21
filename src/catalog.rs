@@ -17,8 +17,8 @@ use crate::release_signing::{self, VerificationEvidence};
 mod publication;
 mod trust;
 
-pub(crate) use trust::load_deployable_snapshot;
 pub use trust::{inspect_release, require_deployable_trust, reverify_release};
+pub(crate) use trust::{load_deployable_snapshot, load_recoverable_snapshot, release_is_recalled};
 
 /// Version of the transport-independent Catalog application contract.
 pub const CATALOG_CONTRACT_VERSION: u32 = 1;
@@ -576,6 +576,75 @@ pub async fn promote(
     .await
 }
 
+/// Mark a published release recalled. Lookup and planning fail closed afterwards.
+pub async fn recall(
+    ctx: &mut Ctx,
+    actor: &AuthenticatedRequestContext,
+    spec: &str,
+) -> Result<String> {
+    actor
+        .require_delivery_capability(DeliveryCapability::Management)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let mut release = release_for_spec(ctx, spec).await?;
+    if release
+        .properties
+        .get("recalled_at")
+        .is_some_and(|value| !value.is_empty())
+    {
+        return Ok(format!("release {spec} is already recalled"));
+    }
+    let claim_id = release_recall_id(&release.id);
+    let recalled_at = crate::now_millis().to_string();
+    let recalled_by = actor.principal_id().to_string();
+    let proposed = object(
+        claim_id.clone(),
+        KIND_RELEASE_RECALL,
+        format!("recall {}", release.id),
+        HashMap::from([
+            ("release_id".into(), release.id.clone()),
+            ("recalled_at".into(), recalled_at.clone()),
+            ("recalled_by".into(), recalled_by.clone()),
+            (
+                "principal_kind".into(),
+                actor.principal_kind_name().to_string(),
+            ),
+        ]),
+    );
+    let claim = match ctx.create_once(proposed.clone()).await {
+        Ok(claim) => claim,
+        Err(status)
+            if status.code() == tonic::Code::AlreadyExists
+                || (status.code() == tonic::Code::Internal
+                    && status.message().contains("UNIQUE")) =>
+        {
+            ctx.get(&claim_id).await?.ok_or_else(|| {
+                anyhow::anyhow!("release recall claim {claim_id} appeared then vanished")
+            })?
+        }
+        Err(status) => return Err(status.into()),
+    };
+    if claim.kind != KIND_RELEASE_RECALL || claim.properties.get("release_id") != Some(&release.id)
+    {
+        bail!("release {} has conflicting recall evidence", release.id);
+    }
+    let recalled_at = claim
+        .properties
+        .get("recalled_at")
+        .cloned()
+        .filter(|value| !value.is_empty())
+        .unwrap_or(recalled_at);
+    let recalled_by = claim
+        .properties
+        .get("recalled_by")
+        .cloned()
+        .filter(|value| !value.is_empty())
+        .unwrap_or(recalled_by);
+    release.properties.insert("recalled_at".into(), recalled_at);
+    release.properties.insert("recalled_by".into(), recalled_by);
+    ctx.put(release).await?;
+    Ok(format!("recalled {spec}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -816,5 +885,112 @@ mod tests {
             validate_provenance_admission(std::slice::from_ref(&envelope), false, 100_000).is_err()
         );
         assert!(validate_provenance_admission(&[envelope], true, 100_000).is_ok());
+    }
+
+    #[tokio::test]
+    async fn recall_fails_closed_on_lookup() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-recall-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("tenkai.toml"),
+            r#"
+[product]
+name = "api"
+version = "1.0.0"
+
+[deploy]
+install = "true"
+"#,
+        )
+        .unwrap();
+        let database = root.join("tenkai.db");
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let options = PublishOptions {
+            allow_unsigned_development: true,
+            ..Default::default()
+        };
+        publish(&mut ctx, &root.join("tenkai.toml"), &options)
+            .await
+            .unwrap();
+        let actor = crate::auth_context::test_management_context("recall-test");
+        assert!(
+            recall(&mut ctx, &actor, "api@1.0.0")
+                .await
+                .unwrap()
+                .contains("recalled")
+        );
+        let err = crate::catalog::EmbeddedCatalog::new(&mut ctx)
+            .lookup_release("tenkai:release:api@1.0.0", "local")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("recalled"), "{err}");
+        let claim = ctx
+            .get(&release_recall_id("tenkai:release:api@1.0.0"))
+            .await
+            .unwrap()
+            .expect("recall claim");
+        assert_eq!(claim.kind, KIND_RELEASE_RECALL);
+        assert_eq!(
+            claim.properties.get("recalled_by").map(String::as_str),
+            Some(actor.principal_id())
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn recall_claim_fails_closed_before_release_stamp() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-recall-claim-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("tenkai.toml"),
+            r#"
+[product]
+name = "api"
+version = "1.0.0"
+
+[deploy]
+install = "true"
+"#,
+        )
+        .unwrap();
+        let database = root.join("tenkai.db");
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let options = PublishOptions {
+            allow_unsigned_development: true,
+            ..Default::default()
+        };
+        publish(&mut ctx, &root.join("tenkai.toml"), &options)
+            .await
+            .unwrap();
+        ctx.create_once(object(
+            release_recall_id("tenkai:release:api@1.0.0"),
+            KIND_RELEASE_RECALL,
+            "recall tenkai:release:api@1.0.0".into(),
+            HashMap::from([
+                ("release_id".into(), "tenkai:release:api@1.0.0".into()),
+                ("recalled_at".into(), "1".into()),
+                ("recalled_by".into(), "operator".into()),
+            ]),
+        ))
+        .await
+        .unwrap();
+        let err = crate::catalog::EmbeddedCatalog::new(&mut ctx)
+            .lookup_release("tenkai:release:api@1.0.0", "local")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("recalled"), "{err}");
+        let _ = std::fs::remove_dir_all(root);
     }
 }
