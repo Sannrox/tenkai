@@ -380,6 +380,7 @@ mod tests {
             status_detail: String::new(),
             maintenance_blocked: false,
             prior_warnings: Vec::new(),
+            recalled_recovery_reason: None,
         };
         let env = EnvironmentInspectReport {
             name: "local".into(),
@@ -387,6 +388,7 @@ mod tests {
             description: String::new(),
             subscriptions: Vec::new(),
             facts: std::collections::BTreeMap::from([("architecture".into(), "x86_64".into())]),
+            overlays: Default::default(),
             lease: crate::apply::EnvironmentLeaseInspect {
                 held: false,
                 owner: None,
@@ -516,6 +518,7 @@ mod tests {
             status_detail: String::new(),
             maintenance_blocked: false,
             prior_warnings: Vec::new(),
+            recalled_recovery_reason: None,
         };
         let env = EnvironmentInspectReport {
             name: "local".into(),
@@ -523,6 +526,7 @@ mod tests {
             description: String::new(),
             subscriptions: Vec::new(),
             facts: std::collections::BTreeMap::from([("architecture".into(), "x86_64".into())]),
+            overlays: Default::default(),
             lease: crate::apply::EnvironmentLeaseInspect {
                 held: false,
                 owner: None,

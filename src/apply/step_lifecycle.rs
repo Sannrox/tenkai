@@ -18,6 +18,7 @@ pub(super) async fn execute(
     plan_id: &str,
     step: &Step,
     software: Option<&dyn crate::software_executor::SoftwareExecutor>,
+    recalled_recovery: bool,
 ) -> Result<Outcome> {
     let step_context = StepContext {
         lease,
@@ -31,9 +32,12 @@ pub(super) async fn execute(
         artifact_digest: step.artifact_digest.clone(),
         workdir: step.workdir.clone(),
     };
-    let content = admit_release(ctx, &target, environment, &step.product).await?;
+    let admit_recalled = recalled_recovery && step.action == Action::Rollback;
+    let content = admit_release(ctx, &target, environment, &step.product, admit_recalled).await?;
     let restore_content = match step.restore.as_ref() {
-        Some(pin) => Some(admit_release(ctx, pin, environment, &step.product).await?),
+        Some(pin) => {
+            Some(admit_release(ctx, pin, environment, &step.product, admit_recalled).await?)
+        }
         None => None,
     };
 
@@ -71,31 +75,35 @@ pub(super) async fn execute(
         }
     }
 
-    let activation = match product_execution::activate(ctx, lease, &content, software).await {
+    let activation = match if step.action == Action::Restart {
+        product_execution::restart(ctx, lease, &content, software).await
+    } else {
+        product_execution::activate(ctx, lease, &content, software).await
+    } {
         Ok(result) => result,
         Err(error) => Err(format!("deployment executor failed: {error}")),
     };
     let outcome = match activation {
         Ok(()) => {
             let outcome = Outcome::new(step.clone(), StepOutcomeStatus::Succeeded, String::new());
-            if let Err(error) = record(
-                ctx,
-                lease,
-                environment,
-                plan_id,
-                &outcome,
+            let transition = if step.action == Action::Restart {
+                crate::environment::DeploymentTransition::Refreshed
+            } else {
                 crate::environment::DeploymentTransition::Deployed {
                     version: step.to.clone(),
                     previous: step.from.clone(),
-                },
-            )
-            .await
+                }
+            };
+            if let Err(error) = record(ctx, lease, environment, plan_id, &outcome, transition).await
             {
                 compensate_activation(ctx, lease, environment, step, &content, &error, software)
                     .await;
                 return Err(error);
             }
             return Ok(outcome);
+        }
+        Err(detail) if step.action == Action::Restart => {
+            recover_restart(ctx, step_context, step, &content, detail).await?
         }
         Err(detail) => {
             recover_activation(
@@ -115,6 +123,35 @@ pub(super) async fn execute(
         record(ctx, lease, environment, plan_id, &outcome, transition).await?;
     }
     Ok(outcome)
+}
+
+async fn recover_restart(
+    ctx: &mut Ctx,
+    step_context: StepContext<'_>,
+    step: &Step,
+    content: &ReleaseContent,
+    detail: String,
+) -> Result<(Outcome, Option<crate::environment::DeploymentTransition>)> {
+    let reapplied = matches!(
+        product_execution::activate(ctx, step_context.lease, content, step_context.software).await,
+        Ok(Ok(()))
+    );
+    Ok((
+        Outcome::new(
+            step.clone(),
+            StepOutcomeStatus::Failed,
+            if reapplied {
+                format!("{detail}; current pin remains deployed")
+            } else {
+                format!("{detail}; re-apply of the current pin also failed")
+            },
+        ),
+        Some(if reapplied {
+            crate::environment::DeploymentTransition::Refreshed
+        } else {
+            crate::environment::DeploymentTransition::Unknown
+        }),
+    ))
 }
 
 async fn recover_activation(
@@ -244,6 +281,9 @@ async fn compensate_activation(
     failure: &anyhow::Error,
     software: Option<&dyn crate::software_executor::SoftwareExecutor>,
 ) {
+    if step.action == Action::Restart {
+        return;
+    }
     let failure = format!("deployment bookkeeping failed after activation: {failure}");
     let cleaned = matches!(
         product_execution::deactivate(ctx, lease, content, software).await,
@@ -251,7 +291,8 @@ async fn compensate_activation(
     );
     let mut restored = step.from.is_none();
     if let (Some(previous), Some(pin)) = (step.from.as_deref(), step.restore.as_ref())
-        && let Ok(previous_content) = admit_release(ctx, pin, environment, &step.product).await
+        && let Ok(previous_content) =
+            admit_release(ctx, pin, environment, &step.product, false).await
         && matches!(
             product_execution::activate(ctx, lease, &previous_content, software).await,
             Ok(Ok(()))

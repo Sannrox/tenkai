@@ -203,6 +203,29 @@ enum Command {
         /// Start outside maintenance policy and record this reason with the authenticated principal.
         #[arg(long)]
         emergency_reason: Option<String>,
+        /// Admit rollback onto a recalled previous pin.
+        #[arg(long, requires = "recovery_reason")]
+        allow_recalled_recovery: bool,
+        /// Audited reason for restoring recalled Catalog content.
+        #[arg(long, requires = "allow_recalled_recovery")]
+        recovery_reason: Option<String>,
+    },
+    /// Bounce the currently deployed release of a product without changing version.
+    Restart {
+        product: String,
+        #[arg(long, default_value = "local")]
+        env: String,
+        #[arg(long, requires = "development_reason")]
+        allow_unapproved_development: bool,
+        #[arg(long, requires = "allow_unapproved_development")]
+        development_reason: Option<String>,
+        #[arg(long)]
+        emergency_reason: Option<String>,
+    },
+    /// Manage product-level maintenance windows (intersected with environment windows).
+    Product {
+        #[command(subcommand)]
+        command: ProductCommand,
     },
     /// Continuously converge all registered environments.
     Reconcile {
@@ -314,6 +337,8 @@ enum ReleaseCommand {
         #[arg(long)]
         trust_roots: PathBuf,
     },
+    /// Recall a published release so lookup and planning fail closed.
+    Recall { spec: String },
 }
 
 #[derive(Subcommand)]
@@ -405,6 +430,32 @@ enum EnvCommand {
         #[command(subcommand)]
         command: ConstraintsCommand,
     },
+    /// Manage non-secret product overlays that can force a same-version re-apply.
+    Overlay {
+        #[command(subcommand)]
+        command: OverlayCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum OverlayCommand {
+    /// List overlays, optionally for one product.
+    List {
+        env: String,
+        product: Option<String>,
+    },
+    /// Set one overlay, e.g. `set prod api region=eu`.
+    Set {
+        env: String,
+        product: String,
+        spec: String,
+    },
+    /// Clear one overlay key, or every overlay for the product.
+    Clear {
+        env: String,
+        product: String,
+        key: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -441,6 +492,38 @@ enum ConstraintsCommand {
         env: String,
         kind: String,
         name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProductCommand {
+    /// Manage recurring product maintenance windows.
+    Maintenance {
+        #[command(subcommand)]
+        command: ProductMaintenanceCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProductMaintenanceCommand {
+    Set {
+        product: String,
+        identity: String,
+        #[arg(long)]
+        timezone: String,
+        #[arg(long)]
+        weekdays: String,
+        #[arg(long)]
+        start: String,
+        #[arg(long)]
+        duration_minutes: u32,
+    },
+    List {
+        product: String,
+    },
+    Remove {
+        product: String,
+        identity: String,
     },
 }
 
@@ -510,6 +593,10 @@ fn command_name(command: &Command) -> Option<CommandName> {
             command: EnvCommand::Inspect { .. },
         } => Some(CommandName::InspectEnvironment),
         Command::Rollback { .. } => Some(CommandName::Rollback),
+        Command::Restart { .. } => Some(CommandName::Restart),
+        Command::Release {
+            command: ReleaseCommand::Recall { .. },
+        } => Some(CommandName::Recall),
         _ => None,
     }
 }
@@ -520,7 +607,9 @@ fn mutation_retry(command: CommandName) -> RetryGuidance {
         | CommandName::Promote
         | CommandName::Plan
         | CommandName::Apply
-        | CommandName::Rollback => RetryGuidance::ReconcileBeforeRetry,
+        | CommandName::Rollback
+        | CommandName::Restart
+        | CommandName::Recall => RetryGuidance::ReconcileBeforeRetry,
         _ => RetryGuidance::CorrectRequest,
     }
 }
@@ -747,12 +836,12 @@ async fn run(cli: Cli) -> Result<()> {
                     );
                     for r in rows {
                         let deployed = r.deployed.clone().unwrap_or_else(|| "-".into());
-                        let state = match (&r.deployed, r.health.as_deref()) {
-                            (_, Some("unknown")) => "unknown",
-                            (Some(v), _) if *v == r.head => "current",
-                            (Some(_), _) => "behind",
-                            (None, _) => "missing",
-                        };
+                        let state = plan::subscription_state(
+                            r.deployed.as_deref(),
+                            &r.head,
+                            r.health.as_deref(),
+                            r.overlay_stale,
+                        );
                         println!(
                             "{:<24} {:<10} {:<12} {:<12} {state}",
                             r.product, r.channel, deployed, r.head
@@ -883,6 +972,17 @@ async fn run(cli: Cli) -> Result<()> {
             ReleaseCommand::Verify { spec, trust_roots } => {
                 let evidence = catalog::reverify_release(&mut ctx, &spec, &trust_roots).await?;
                 println!("{}", serde_json::to_string_pretty(&evidence)?);
+            }
+            ReleaseCommand::Recall { spec } => {
+                let actor = embedded_management_actor()?;
+                let message = catalog::recall(&mut ctx, &actor, &spec).await?;
+                if output == OutputFormat::JsonV1 {
+                    print_machine_result(
+                        &CommandResultV1::succeeded(CommandName::Recall).resource("release", spec),
+                    )?;
+                } else {
+                    println!("{message}");
+                }
             }
         },
         Command::Approval { command } => match command {
@@ -1205,6 +1305,35 @@ async fn run(cli: Cli) -> Result<()> {
                     );
                 }
             },
+            EnvCommand::Overlay { command } => match command {
+                OverlayCommand::List { env, product } => {
+                    let overlays =
+                        plan::list_environment_overlays(&mut ctx, &env, product.as_deref()).await?;
+                    if overlays.is_empty() {
+                        println!("{env} has no product overlays");
+                    } else {
+                        for (key, value) in overlays {
+                            println!("{key}={value}");
+                        }
+                    }
+                }
+                OverlayCommand::Set { env, product, spec } => {
+                    let Some((key, value)) = spec.split_once('=') else {
+                        bail!("expected <key>=<value>, got {spec:?}");
+                    };
+                    println!(
+                        "{}",
+                        plan::set_environment_overlay(&mut ctx, &env, &product, key, value).await?
+                    );
+                }
+                OverlayCommand::Clear { env, product, key } => {
+                    println!(
+                        "{}",
+                        plan::clear_environment_overlay(&mut ctx, &env, &product, key.as_deref())
+                            .await?
+                    );
+                }
+            },
         },
         Command::Plan { env } => {
             if output == OutputFormat::JsonV1 {
@@ -1313,17 +1442,17 @@ async fn run(cli: Cli) -> Result<()> {
             );
             for r in rows {
                 let deployed = r.deployed.clone().unwrap_or_else(|| "-".into());
-                let state = match (&r.deployed, r.health.as_deref()) {
-                    (_, Some("unknown")) => "unknown",
-                    (Some(v), _) if *v == r.head => "current",
-                    (Some(_), _) => "behind",
-                    (None, _) => "missing",
-                };
+                let state = plan::subscription_state(
+                    r.deployed.as_deref(),
+                    &r.head,
+                    r.health.as_deref(),
+                    r.overlay_stale,
+                );
                 println!(
                     "{:<24} {:<10} {:<12} {:<12} {state}",
                     r.product, r.channel, deployed, r.head
                 );
-                if state == "unknown"
+                if matches!(state, "unknown" | "unhealthy")
                     && let Some(error) = r.error.as_deref()
                 {
                     println!("  recovery required: {error}");
@@ -1357,6 +1486,8 @@ async fn run(cli: Cli) -> Result<()> {
             allow_unapproved_development,
             development_reason,
             emergency_reason,
+            allow_recalled_recovery,
+            recovery_reason,
         } => {
             if output == OutputFormat::JsonV1 {
                 tenkai::command_result::validate_resource_reference(
@@ -1365,8 +1496,28 @@ async fn run(cli: Cli) -> Result<()> {
                 )
                 .map_err(|message| anyhow::anyhow!(message))?;
             }
-            let step = plan::rollback_step(&mut ctx, &env, &product).await?;
-            let stored = plan::create_from_steps(&mut ctx, &env, vec![step]).await?;
+            let recovery = if allow_recalled_recovery {
+                Some(
+                    recovery_reason
+                        .as_deref()
+                        .expect("clap requires a recovery reason"),
+                )
+            } else {
+                None
+            };
+            let step =
+                plan::rollback_step_with_recovery(&mut ctx, &env, &product, recovery).await?;
+            let stored = if let Some(reason) = recovery {
+                plan::create_from_steps_with_recovery(
+                    &mut ctx,
+                    &env,
+                    vec![step],
+                    reason.to_string(),
+                )
+                .await?
+            } else {
+                plan::create_from_steps(&mut ctx, &env, vec![step]).await?
+            };
             if output == OutputFormat::Human {
                 println!("rolling back in {env}:");
                 print_steps(&stored.steps);
@@ -1418,6 +1569,114 @@ async fn run(cli: Cli) -> Result<()> {
                 );
             }
         }
+        Command::Restart {
+            product,
+            env,
+            allow_unapproved_development,
+            development_reason,
+            emergency_reason,
+        } => {
+            let step = plan::restart_step(&mut ctx, &env, &product).await?;
+            let stored = plan::create_from_steps(&mut ctx, &env, vec![step]).await?;
+            if output == OutputFormat::Human {
+                println!("restarting in {env}:");
+                print_steps(&stored.steps);
+            }
+            if allow_unapproved_development {
+                run_plan(
+                    &mut ctx,
+                    &stored.id,
+                    apply::ExecutionOptions {
+                        skip_gates: true,
+                        emergency_reason: emergency_reason.as_deref(),
+                        authorization: apply::ExecutionAuthorization::LocalDevelopment {
+                            reason: development_reason
+                                .as_deref()
+                                .expect("clap requires a development reason"),
+                        },
+                        software_executor: tenkai::software_executor::selected_software_executor()
+                            .map(std::sync::Arc::from),
+                    },
+                    PlanResultContext {
+                        command: CommandName::Restart,
+                        environment: &stored.environment,
+                        step_count: stored.steps.len(),
+                        output,
+                    },
+                )
+                .await?;
+            } else if output == OutputFormat::JsonV1 {
+                let mut result = CommandResultV1::failed(
+                    CommandName::Restart,
+                    "approval_required",
+                    "The restart plan requires signed approval",
+                    RetryGuidance::NotSafe,
+                )
+                .resource("plan", stored.id)
+                .resource("environment", stored.environment)
+                .counts(Some(stored.steps.len()), None);
+                result.outcome = CommandOutcome::AwaitingApproval;
+                return Err(reported_machine_failure(result));
+            } else {
+                bail!(
+                    "restart was not executed; plan {} requires signed approval. Run `tenkaictl apply {}` with --approval and --approval-trust-roots{}",
+                    stored.id,
+                    stored.id,
+                    if emergency_reason.is_some() {
+                        " and repeat --emergency-reason"
+                    } else {
+                        ""
+                    }
+                );
+            }
+        }
+        Command::Product { command } => match command {
+            ProductCommand::Maintenance { command } => match command {
+                ProductMaintenanceCommand::Set {
+                    product,
+                    identity,
+                    timezone,
+                    weekdays,
+                    start,
+                    duration_minutes,
+                } => {
+                    let window = maintenance::Window::new(
+                        identity,
+                        timezone,
+                        maintenance::weekday_values(&weekdays)?,
+                        start,
+                        duration_minutes,
+                    )?;
+                    println!(
+                        "{}",
+                        maintenance::set_product(&mut ctx, &product, window).await?
+                    );
+                }
+                ProductMaintenanceCommand::List { product } => {
+                    let windows = maintenance::list_product(&mut ctx, &product).await?;
+                    if windows.is_empty() {
+                        println!("{product} has no product maintenance windows");
+                    } else {
+                        for window in windows {
+                            println!(
+                                "{} {} weekdays={:?} {} {}m",
+                                window.identity,
+                                window.timezone,
+                                window.weekdays,
+                                window.start,
+                                window.duration_minutes
+                            );
+                        }
+                    }
+                }
+                ProductMaintenanceCommand::Remove { product, identity } => {
+                    println!(
+                        "{}",
+                        maintenance::remove_product(&mut ctx, &product, &identity).await?
+                    );
+                }
+            },
+        },
         Command::Reconcile {
             once,
             interval,
@@ -1750,6 +2009,8 @@ mod tests {
             (CommandName::Status, "environment"),
             (CommandName::InspectEnvironment, "environment"),
             (CommandName::Rollback, "plan"),
+            (CommandName::Restart, "plan"),
+            (CommandName::Recall, "release"),
         ];
         for (command, resource_kind) in cases {
             let result = CommandResultV1::succeeded(command)
@@ -1829,6 +2090,94 @@ mod tests {
                     }
                 }
             }
+        ));
+    }
+
+    #[test]
+    fn parses_restart_and_product_maintenance() {
+        let restart =
+            Cli::try_parse_from(["tenkaictl", "restart", "api", "--env", "prod"]).unwrap();
+        assert!(matches!(
+            restart.command,
+            Command::Restart {
+                ref product,
+                ref env,
+                ..
+            } if product == "api" && env == "prod"
+        ));
+        let product = Cli::try_parse_from([
+            "tenkaictl",
+            "product",
+            "maintenance",
+            "set",
+            "api",
+            "sunday",
+            "--timezone",
+            "UTC",
+            "--weekdays",
+            "sun",
+            "--start",
+            "02:00",
+            "--duration-minutes",
+            "60",
+        ])
+        .unwrap();
+        assert!(matches!(
+            product.command,
+            Command::Product {
+                command: ProductCommand::Maintenance {
+                    command: ProductMaintenanceCommand::Set {
+                        duration_minutes: 60,
+                        ..
+                    }
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_overlay_and_recalled_recovery() {
+        let overlay = Cli::try_parse_from([
+            "tenkaictl",
+            "env",
+            "overlay",
+            "set",
+            "prod",
+            "api",
+            "region=eu",
+        ])
+        .unwrap();
+        assert!(matches!(
+            overlay.command,
+            Command::Env {
+                command: EnvCommand::Overlay {
+                    command: OverlayCommand::Set {
+                        ref env,
+                        ref product,
+                        ref spec,
+                    }
+                }
+            } if env == "prod" && product == "api" && spec == "region=eu"
+        ));
+        let rollback = Cli::try_parse_from([
+            "tenkaictl",
+            "rollback",
+            "api",
+            "--env",
+            "prod",
+            "--allow-recalled-recovery",
+            "--recovery-reason",
+            "restore last known-good",
+        ])
+        .unwrap();
+        assert!(matches!(
+            rollback.command,
+            Command::Rollback {
+                ref product,
+                allow_recalled_recovery: true,
+                recovery_reason: Some(ref reason),
+                ..
+            } if product == "api" && reason == "restore last known-good"
         ));
     }
 

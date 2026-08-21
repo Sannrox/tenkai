@@ -11,9 +11,11 @@ pub const NS: &str = "tenkai";
 pub const KIND_PRODUCT: &str = "tenkai.product";
 pub const KIND_RELEASE: &str = "tenkai.release";
 pub const KIND_RELEASE_VERIFICATION: &str = "tenkai.release_verification";
+pub const KIND_RELEASE_RECALL: &str = "tenkai.release_recall";
 pub const KIND_CHANNEL: &str = "tenkai.channel";
 pub const KIND_ENVIRONMENT: &str = "tenkai.environment";
 pub const KIND_MAINTENANCE_CONFIG: &str = "tenkai.maintenance_config";
+pub const KIND_PRODUCT_MAINTENANCE_CONFIG: &str = "tenkai.product_maintenance_config";
 pub const KIND_PLAN: &str = "tenkai.plan";
 pub const KIND_PLAN_APPROVAL_VERIFICATION: &str = "tenkai.plan_approval_verification";
 pub const KIND_ENVIRONMENT_EXECUTION: &str = "tenkai.environment_execution";
@@ -40,6 +42,8 @@ pub const REL_AUDITS_PROMOTION: &str = "audits_promotion";
 pub const ACTION_SUBSCRIBE: &str = "tenkai.subscribe";
 pub const ACTION_REPLACE_SUBSCRIPTION: &str = "tenkai.replace_subscription";
 pub const ACTION_CONFIGURE_MAINTENANCE: &str = "tenkai.configure_maintenance_windows";
+pub const ACTION_CONFIGURE_PRODUCT_MAINTENANCE: &str =
+    "tenkai.configure_product_maintenance_windows";
 pub const ACTION_EMERGENCY_OVERRIDE: &str = "tenkai.emergency_maintenance_override";
 
 pub fn validate_identifier(label: &str, value: &str) -> Result<()> {
@@ -62,6 +66,9 @@ pub fn release_id(product: &str, version: &str) -> String {
 }
 pub fn release_verification_id(release_id: &str) -> String {
     format!("{release_id}:verification")
+}
+pub fn release_recall_id(release_id: &str) -> String {
+    format!("{release_id}:recall")
 }
 pub fn channel_id(product: &str, channel: &str) -> String {
     format!("tenkai:channel:{product}/{channel}")
@@ -148,6 +155,48 @@ fn configure_maintenance_action() -> ActionTypeDef {
     }
 }
 
+fn configure_product_maintenance_action() -> ActionTypeDef {
+    ActionTypeDef {
+        name: ACTION_CONFIGURE_PRODUCT_MAINTENANCE.into(),
+        description: "Authorize and replace a product's maintenance windows".into(),
+        params: vec![
+            string_param("product"),
+            string_param("windows"),
+            string_param("revision"),
+            string_param("correlation"),
+        ],
+        ops: vec![
+            ActionOp {
+                op: "set_property".into(),
+                property: "product".into(),
+                value_from: "product".into(),
+                relation: String::new(),
+            },
+            ActionOp {
+                op: "set_property".into(),
+                property: "windows".into(),
+                value_from: "windows".into(),
+                relation: String::new(),
+            },
+            ActionOp {
+                op: "set_property".into(),
+                property: "revision".into(),
+                value_from: "revision".into(),
+                relation: String::new(),
+            },
+            ActionOp {
+                op: "set_property".into(),
+                property: "last_update_correlation".into(),
+                value_from: "correlation".into(),
+                relation: String::new(),
+            },
+        ],
+        target_kind: KIND_PRODUCT_MAINTENANCE_CONFIG.into(),
+        created: crate::now_millis(),
+        required_purpose: String::new(),
+    }
+}
+
 /// Built-in graph-action definitions owned by Tenkai.
 ///
 /// Remote hosts still need these local mutation plans after Sekai admits a
@@ -169,6 +218,7 @@ pub fn known_actions() -> Vec<ActionTypeDef> {
             required_purpose: String::new(),
         },
         configure_maintenance_action(),
+        configure_product_maintenance_action(),
         ActionTypeDef {
             name: ACTION_EMERGENCY_OVERRIDE.into(),
             description: "Authorize and audit an emergency maintenance-window override".into(),
@@ -261,6 +311,22 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
                     false,
                     "Bounded payload-free inspection projections",
                 ),
+                prop("recalled_at", false, "Unix-ms timestamp when recalled"),
+                prop("recalled_by", false, "Principal that recalled the release"),
+            ],
+        ),
+        object_type(
+            KIND_RELEASE_RECALL,
+            "An immutable first-writer claim that a release was recalled",
+            vec![
+                prop("release_id", true, "Recalled release object id"),
+                prop("recalled_at", true, "Unix-ms timestamp when recalled"),
+                prop("recalled_by", true, "Principal that recalled the release"),
+                prop(
+                    "principal_kind",
+                    false,
+                    "Authenticated principal kind that recalled the release",
+                ),
             ],
         ),
         object_type(
@@ -324,6 +390,24 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
             ],
         ),
         object_type(
+            KIND_PRODUCT_MAINTENANCE_CONFIG,
+            "Recurring maintenance windows that apply to one product in every environment",
+            vec![
+                prop("product", true, "Product name"),
+                prop(
+                    "windows",
+                    true,
+                    "JSON list of recurring maintenance windows",
+                ),
+                prop("revision", true, "Digest of the current windows JSON"),
+                prop(
+                    "last_update_correlation",
+                    false,
+                    "Correlation recorded by the most recent governed update",
+                ),
+            ],
+        ),
+        object_type(
             KIND_PLAN,
             "A computed set of steps converging one environment on its channels",
             vec![
@@ -350,6 +434,11 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
                     "last_emergency_override_correlation",
                     false,
                     "Correlation token for the last governed maintenance override",
+                ),
+                prop(
+                    "recalled_recovery_reason",
+                    false,
+                    "Audited reason that admits rollback onto recalled content",
                 ),
             ],
         ),

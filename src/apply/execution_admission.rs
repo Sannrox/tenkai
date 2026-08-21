@@ -204,6 +204,7 @@ mod tests {
             status_detail: String::new(),
             maintenance_blocked: false,
             prior_warnings: Vec::new(),
+            recalled_recovery_reason: None,
         }
     }
 

@@ -4,10 +4,11 @@
 //! in-process interface. Planning consumes Environment state but does not own its
 //! mutation or operator readback rules.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 
 use crate::client::Ctx;
 use crate::ontology::*;
@@ -21,6 +22,8 @@ pub(crate) enum DeploymentTransition {
         version: String,
         previous: Option<String>,
     },
+    /// Same-version refresh: health and overlays change, rollback history does not.
+    Refreshed,
     Unknown,
 }
 
@@ -192,10 +195,11 @@ async fn update_reconciled_deployment_object(
     }
     object
         .properties
-        .remove(&format!("deployment_health.{product}"));
+        .insert(format!("deployment_health.{product}"), "healthy".into());
     object
         .properties
         .remove(&format!("deployment_error.{product}"));
+    stamp_applied_overlays(object, product);
     object
         .properties
         .remove(&format!("deployed_prev.{product}"));
@@ -253,10 +257,11 @@ pub(crate) async fn record_deployed(
     }
     object
         .properties
-        .remove(&format!("deployment_health.{product}"));
+        .insert(format!("deployment_health.{product}"), "healthy".into());
     object
         .properties
         .remove(&format!("deployment_error.{product}"));
+    stamp_applied_overlays(&mut object, product);
     object.updated = crate::now_millis();
     guarded_update(ctx, lease, object).await
 }
@@ -488,6 +493,16 @@ fn transition_deployment(
 ) {
     match transition {
         DeploymentTransition::Unchanged => return,
+        DeploymentTransition::Refreshed => {
+            environment
+                .properties
+                .insert(format!("deployment_health.{product}"), "healthy".into());
+            environment
+                .properties
+                .remove(&format!("deployment_error.{product}"));
+            stamp_applied_overlays(environment, product);
+            clear_unknown_origin(environment, product);
+        }
         DeploymentTransition::Deployed { version, previous } => {
             environment
                 .properties
@@ -503,10 +518,11 @@ fn transition_deployment(
             }
             environment
                 .properties
-                .remove(&format!("deployment_health.{product}"));
+                .insert(format!("deployment_health.{product}"), "healthy".into());
             environment
                 .properties
                 .remove(&format!("deployment_error.{product}"));
+            stamp_applied_overlays(environment, product);
             clear_unknown_origin(environment, product);
         }
         DeploymentTransition::Unknown => {
@@ -669,6 +685,25 @@ pub struct StatusRow {
     pub health: Option<String>,
     pub error: Option<String>,
     pub head: String,
+    #[serde(default)]
+    pub overlay_stale: bool,
+}
+
+/// Classify one subscription for inspect, status, and fleet posture.
+pub fn subscription_state(
+    deployed: Option<&str>,
+    head: &str,
+    health: Option<&str>,
+    overlay_stale: bool,
+) -> &'static str {
+    match (deployed, health) {
+        (_, Some("unknown")) => "unknown",
+        (_, Some("unhealthy")) => "unhealthy",
+        (Some(version), _) if version == head && overlay_stale => "config_stale",
+        (Some(version), _) if version == head => "current",
+        (Some(_), _) => "behind",
+        (None, _) => "missing",
+    }
 }
 
 /// Summary row for fleet listing (no credentials).
@@ -696,6 +731,9 @@ pub struct EnvironmentInspectReport {
     pub description: String,
     pub subscriptions: Vec<EnvironmentSubscriptionView>,
     pub facts: std::collections::BTreeMap<String, String>,
+    /// Non-secret product overlays as `product.key=value`.
+    #[serde(default)]
+    pub overlays: BTreeMap<String, String>,
     pub lease: crate::apply::EnvironmentLeaseInspect,
     /// Most recent plan for this environment by `created_at`, if any.
     pub latest_plan: Option<EnvironmentPlanSummary>,
@@ -715,6 +753,10 @@ pub struct EnvironmentSubscriptionView {
     pub deployed: Option<String>,
     pub health: Option<String>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub overlay_digest: Option<String>,
+    #[serde(default)]
+    pub applied_overlay: Option<String>,
     pub state: String,
 }
 
@@ -752,6 +794,12 @@ pub async fn status(ctx: &mut Ctx, env: &str) -> Result<Vec<StatusRow>> {
     let mut rows = Vec::new();
     for ch in channels {
         let product = ch.properties.get("product").cloned().unwrap_or_default();
+        let overlay_digest = overlay_digest_for(&env_obj, &product);
+        let applied = env_obj
+            .properties
+            .get(&format!("applied_config.{product}"))
+            .cloned()
+            .unwrap_or_default();
         rows.push(StatusRow {
             deployed: env_obj
                 .properties
@@ -771,6 +819,7 @@ pub async fn status(ctx: &mut Ctx, env: &str) -> Result<Vec<StatusRow>> {
                 .get("current_version")
                 .cloned()
                 .unwrap_or_else(|| "-".into()),
+            overlay_stale: overlay_digest != applied,
             product,
         });
     }
@@ -854,25 +903,34 @@ async fn inspect_environment_base(ctx: &mut Ctx, env: &str) -> Result<Environmen
     let subscriptions = rows
         .into_iter()
         .map(|row| {
-            let state = match (&row.deployed, row.health.as_deref()) {
-                (_, Some("unknown")) => "unknown",
-                (Some(version), _) if *version == row.head => "current",
-                (Some(_), _) => "behind",
-                (None, _) => "missing",
-            }
-            .to_string();
+            let overlay_digest = overlay_digest_for(&env_obj, &row.product);
+            let applied_overlay = env_obj
+                .properties
+                .get(&format!("applied_config.{}", row.product))
+                .cloned()
+                .filter(|value| !value.is_empty());
+            let config_stale = overlay_digest != applied_overlay.clone().unwrap_or_default();
             EnvironmentSubscriptionView {
-                product: row.product,
+                product: row.product.clone(),
                 channel: row.channel,
-                head: row.head,
-                deployed: row.deployed,
-                health: row.health,
+                head: row.head.clone(),
+                deployed: row.deployed.clone(),
+                health: row.health.clone(),
                 error: row.error,
-                state,
+                overlay_digest: (!overlay_digest.is_empty()).then_some(overlay_digest),
+                applied_overlay,
+                state: subscription_state(
+                    row.deployed.as_deref(),
+                    &row.head,
+                    row.health.as_deref(),
+                    config_stale,
+                )
+                .to_string(),
             }
         })
         .collect();
     let facts = environment_facts_from_object(&env_obj);
+    let overlays = environment_overlays_from_object(&env_obj);
     let lease = crate::apply::inspect_environment_lease(ctx, env).await?;
     let latest_plan = latest_plan_for_environment(ctx, env).await?;
     Ok(EnvironmentInspectReport {
@@ -885,6 +943,7 @@ async fn inspect_environment_base(ctx: &mut Ctx, env: &str) -> Result<Environmen
             .unwrap_or_default(),
         subscriptions,
         facts,
+        overlays,
         lease,
         latest_plan,
         terminal_outcomes: Vec::new(),
@@ -1004,6 +1063,251 @@ pub async fn list_environment_facts(
     Ok(environment_facts_from_object(&env_obj))
 }
 
+const ENVIRONMENT_OVERLAY_PREFIX: &str = "overlay.";
+
+fn reject_credential_material(label: &str, key: &str, value: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        bail!("{label} {key} must not be empty");
+    }
+    if value
+        .chars()
+        .any(|c| c.is_control() || c == '\n' || c == '\r')
+    {
+        bail!("{label} {key} must not contain control characters");
+    }
+    if value.contains(',') || value.contains('=') || value.contains('{') || value.contains('}') {
+        bail!("{label} {key} must not contain ',', '=', '{{', or '}}'");
+    }
+    let compact_key = key
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    // Heuristic denylist, not a secret store. Unknown keys still accept
+    // ordinary values; credential-like names and prefixes fail closed.
+    for fragment in [
+        "password",
+        "passwd",
+        "secret",
+        "token",
+        "bearer",
+        "credential",
+        "privatekey",
+        "apikey",
+        "accesskey",
+        "sessionkey",
+        "kubeconfig",
+        "certificate",
+        "clientkey",
+    ] {
+        if compact_key.contains(fragment) {
+            bail!("{label} key {key} must not look like a credential name");
+        }
+    }
+    let lower = value.to_ascii_lowercase();
+    for needle in ["bearer ", "password=", "secret=", "token="] {
+        if lower.contains(needle) {
+            bail!("{label} {key} must not contain credential material");
+        }
+    }
+    Ok(())
+}
+
+/// Digest of one product's non-secret overlays. Empty overlays yield an empty digest.
+pub fn overlay_digest(values: &BTreeMap<String, String>) -> String {
+    if values.is_empty() {
+        return String::new();
+    }
+    let mut hasher = Sha256::new();
+    for (key, value) in values {
+        hasher.update(key.as_bytes());
+        hasher.update([0]);
+        hasher.update(value.as_bytes());
+        hasher.update([0]);
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn parse_overlay_map(raw: Option<&String>) -> Result<BTreeMap<String, String>> {
+    match raw {
+        None => Ok(BTreeMap::new()),
+        Some(raw) if raw.is_empty() => Ok(BTreeMap::new()),
+        Some(raw) => serde_json::from_str(raw)
+            .with_context(|| "stored product overlay map is not valid JSON"),
+    }
+}
+
+/// Current overlays for one product on an environment object.
+pub fn product_overlays(env_obj: &Object, product: &str) -> Result<BTreeMap<String, String>> {
+    parse_overlay_map(env_obj.properties.get(&format!("overlay.{product}")))
+}
+
+fn overlay_digest_for(env_obj: &Object, product: &str) -> String {
+    product_overlays(env_obj, product)
+        .ok()
+        .map(|values| overlay_digest(&values))
+        .unwrap_or_default()
+}
+
+fn stamp_applied_overlays(environment: &mut Object, product: &str) {
+    let digest = overlay_digest_for(environment, product);
+    if digest.is_empty() {
+        environment
+            .properties
+            .remove(&format!("applied_config.{product}"));
+        environment
+            .properties
+            .remove(&format!("config_digest.{product}"));
+    } else {
+        environment
+            .properties
+            .insert(format!("applied_config.{product}"), digest.clone());
+        environment
+            .properties
+            .insert(format!("config_digest.{product}"), digest);
+    }
+}
+
+fn environment_overlays_from_object(env_obj: &Object) -> BTreeMap<String, String> {
+    let mut overlays = BTreeMap::new();
+    for (key, raw) in &env_obj.properties {
+        let Some(product) = key.strip_prefix(ENVIRONMENT_OVERLAY_PREFIX) else {
+            continue;
+        };
+        if let Ok(values) = parse_overlay_map(Some(raw)) {
+            for (overlay_key, value) in values {
+                overlays.insert(format!("{product}.{overlay_key}"), value);
+            }
+        }
+    }
+    overlays
+}
+
+fn persist_product_overlays(
+    env_obj: &mut Object,
+    product: &str,
+    values: &BTreeMap<String, String>,
+) {
+    let digest = overlay_digest(values);
+    if values.is_empty() {
+        env_obj.properties.remove(&format!("overlay.{product}"));
+        env_obj
+            .properties
+            .remove(&format!("config_digest.{product}"));
+    } else {
+        env_obj.properties.insert(
+            format!("overlay.{product}"),
+            serde_json::to_string(values).expect("overlay map is JSON-serializable"),
+        );
+        env_obj
+            .properties
+            .insert(format!("config_digest.{product}"), digest);
+    }
+}
+
+/// Set a non-secret overlay for one product in an environment.
+pub async fn set_environment_overlay(
+    ctx: &mut Ctx,
+    env: &str,
+    product: &str,
+    key: &str,
+    value: &str,
+) -> Result<String> {
+    validate_identifier("environment", env)?;
+    validate_identifier("product", product)?;
+    validate_identifier("overlay key", key)?;
+    reject_credential_material("overlay", key, value)?;
+    let mut env_obj = environment(ctx, env).await?;
+    let mut values = product_overlays(&env_obj, product)?;
+    values.insert(key.to_string(), value.to_string());
+    persist_product_overlays(&mut env_obj, product, &values);
+    env_obj.updated = crate::now_millis();
+    ctx.put(env_obj).await?;
+    Ok(format!("set {env} overlay {product}.{key}={value}"))
+}
+
+/// Clear one overlay key, or every overlay for the product when `key` is `None`.
+pub async fn clear_environment_overlay(
+    ctx: &mut Ctx,
+    env: &str,
+    product: &str,
+    key: Option<&str>,
+) -> Result<String> {
+    validate_identifier("environment", env)?;
+    validate_identifier("product", product)?;
+    let mut env_obj = environment(ctx, env).await?;
+    let mut values = product_overlays(&env_obj, product)?;
+    match key {
+        Some(key) => {
+            validate_identifier("overlay key", key)?;
+            if values.remove(key).is_none() {
+                bail!("environment {env} has no overlay {product}.{key}");
+            }
+            persist_product_overlays(&mut env_obj, product, &values);
+            env_obj.updated = crate::now_millis();
+            ctx.put(env_obj).await?;
+            Ok(format!("cleared {env} overlay {product}.{key}"))
+        }
+        None => {
+            if values.is_empty() {
+                bail!("environment {env} has no overlays for {product}");
+            }
+            persist_product_overlays(&mut env_obj, product, &BTreeMap::new());
+            env_obj.updated = crate::now_millis();
+            ctx.put(env_obj).await?;
+            Ok(format!("cleared {env} overlays for {product}"))
+        }
+    }
+}
+
+/// List overlays for one product, or every product when `product` is `None`.
+pub async fn list_environment_overlays(
+    ctx: &mut Ctx,
+    env: &str,
+    product: Option<&str>,
+) -> Result<BTreeMap<String, String>> {
+    let env_obj = environment(ctx, env).await?;
+    match product {
+        Some(product) => {
+            validate_identifier("product", product)?;
+            Ok(product_overlays(&env_obj, product)?
+                .into_iter()
+                .map(|(key, value)| (format!("{product}.{key}"), value))
+                .collect())
+        }
+        None => Ok(environment_overlays_from_object(&env_obj)),
+    }
+}
+
+/// Record observed mid-life health without changing the deployed pin.
+pub async fn record_observed_health(
+    ctx: &mut Ctx,
+    env: &str,
+    product: &str,
+    healthy: bool,
+    detail: &str,
+) -> Result<()> {
+    validate_identifier("environment", env)?;
+    validate_identifier("product", product)?;
+    let mut env_obj = environment(ctx, env).await?;
+    env_obj.properties.insert(
+        format!("deployment_health.{product}"),
+        if healthy { "healthy" } else { "unhealthy" }.into(),
+    );
+    if healthy || detail.is_empty() {
+        env_obj
+            .properties
+            .remove(&format!("deployment_error.{product}"));
+    } else {
+        env_obj
+            .properties
+            .insert(format!("deployment_error.{product}"), detail.into());
+    }
+    env_obj.updated = crate::now_millis();
+    ctx.put(env_obj).await?;
+    Ok(())
+}
+
 /// Require a named fact for planning; fail closed when missing.
 pub async fn require_environment_fact(ctx: &mut Ctx, env: &str, key: &str) -> Result<String> {
     validate_fact_key(key)?;
@@ -1114,7 +1418,10 @@ mod tests {
             environment.properties.get("deployed_prev.api").unwrap(),
             "1.0.0"
         );
-        assert!(!environment.properties.contains_key("deployment_health.api"));
+        assert_eq!(
+            environment.properties.get("deployment_health.api").unwrap(),
+            "healthy"
+        );
         assert!(
             !environment
                 .properties
@@ -1152,5 +1459,63 @@ mod tests {
             "cleanup failed"
         );
         assert_eq!(environment.updated, 84);
+    }
+
+    #[test]
+    fn subscription_state_distinguishes_health_and_overlay_drift() {
+        assert_eq!(
+            subscription_state(Some("1.0.0"), "1.0.0", Some("healthy"), false),
+            "current"
+        );
+        assert_eq!(
+            subscription_state(Some("1.0.0"), "1.0.0", Some("healthy"), true),
+            "config_stale"
+        );
+        assert_eq!(
+            subscription_state(Some("1.0.0"), "1.0.0", Some("unhealthy"), false),
+            "unhealthy"
+        );
+        assert_eq!(
+            subscription_state(Some("1.0.0"), "1.0.0", Some("unknown"), true),
+            "unknown"
+        );
+        assert_eq!(
+            subscription_state(Some("1.0.0"), "2.0.0", Some("healthy"), false),
+            "behind"
+        );
+        assert_eq!(subscription_state(None, "1.0.0", None, false), "missing");
+    }
+
+    #[test]
+    fn overlay_digest_is_order_independent_and_empty_when_unset() {
+        let mut first = BTreeMap::new();
+        first.insert("region".into(), "eu".into());
+        first.insert("replicas".into(), "3".into());
+        let mut second = BTreeMap::new();
+        second.insert("replicas".into(), "3".into());
+        second.insert("region".into(), "eu".into());
+        assert_eq!(overlay_digest(&first), overlay_digest(&second));
+        assert!(overlay_digest(&BTreeMap::new()).is_empty());
+    }
+
+    #[test]
+    fn overlay_values_reject_credential_material() {
+        let err = reject_credential_material("overlay", "replicas", "bearer abc")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("credential material"), "{err}");
+        let err = reject_credential_material("overlay", "api_token", "n1")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("credential name"), "{err}");
+    }
+
+    #[test]
+    fn overlay_digest_changes_when_a_value_changes() {
+        let mut first = BTreeMap::new();
+        first.insert("region".into(), "eu".into());
+        let mut second = BTreeMap::new();
+        second.insert("region".into(), "us".into());
+        assert_ne!(overlay_digest(&first), overlay_digest(&second));
     }
 }

@@ -65,10 +65,10 @@ pub fn fleet_row_from_inspect(report: &EnvironmentInspectReport) -> FleetEnviron
     for sub in &report.subscriptions {
         match sub.state.as_str() {
             "current" => products_current += 1,
-            "behind" => products_behind += 1,
+            "behind" | "config_stale" => products_behind += 1,
             "missing" => products_missing += 1,
-            "unknown" => {
-                // Health unknown: still count version drift when known.
+            "unknown" | "unhealthy" => {
+                // Health unknown/unhealthy: still count version drift when known.
                 if sub.deployed.as_ref() == Some(&sub.head) {
                     products_current += 1;
                 } else if sub.deployed.is_some() {
@@ -90,7 +90,9 @@ pub fn fleet_row_from_inspect(report: &EnvironmentInspectReport) -> FleetEnviron
         if sub.health.as_deref() == Some("unknown") {
             saw_unknown = true;
         }
-        if sub.error.as_ref().is_some_and(|error| !error.is_empty()) {
+        if sub.health.as_deref() == Some("unhealthy")
+            || sub.error.as_ref().is_some_and(|error| !error.is_empty())
+        {
             saw_error = true;
         }
     }
@@ -427,9 +429,12 @@ mod tests {
                 deployed: Some("1.0.0".into()),
                 health: Some("healthy".into()),
                 error: None,
+                overlay_digest: None,
+                applied_overlay: None,
                 state: "current".into(),
             }],
             facts: Default::default(),
+            overlays: Default::default(),
             lease: crate::apply::EnvironmentLeaseInspect {
                 held: false,
                 owner: None,
@@ -460,9 +465,12 @@ mod tests {
                 deployed: Some("1.0.0".into()),
                 health: Some("healthy".into()),
                 error: None,
+                overlay_digest: None,
+                applied_overlay: None,
                 state: "behind".into(),
             }],
             facts: Default::default(),
+            overlays: Default::default(),
             lease: crate::apply::EnvironmentLeaseInspect {
                 held: true,
                 owner: Some("owner".into()),
@@ -485,9 +493,12 @@ mod tests {
                 deployed: Some("1.0.0".into()),
                 health: Some("unknown".into()),
                 error: Some("probe failed".into()),
+                overlay_digest: None,
+                applied_overlay: None,
                 state: "unknown".into(),
             }],
             facts: Default::default(),
+            overlays: Default::default(),
             lease: crate::apply::EnvironmentLeaseInspect {
                 held: false,
                 owner: None,
@@ -505,6 +516,7 @@ mod tests {
             description: "idle".into(),
             subscriptions: Vec::new(),
             facts: Default::default(),
+            overlays: Default::default(),
             lease: crate::apply::EnvironmentLeaseInspect {
                 held: false,
                 owner: None,
@@ -538,6 +550,42 @@ mod tests {
         let encoded = serde_json::to_string(&report).unwrap();
         assert!(!encoded.contains("Bearer"));
         assert!(!encoded.contains("token="));
+    }
+
+    #[test]
+    fn fleet_status_treats_config_stale_as_behind() {
+        let stale = EnvironmentInspectReport {
+            name: "edge".into(),
+            id: "tenkai:env:edge".into(),
+            description: "overlay".into(),
+            subscriptions: vec![EnvironmentSubscriptionView {
+                product: "api".into(),
+                channel: "stable".into(),
+                head: "1.0.0".into(),
+                deployed: Some("1.0.0".into()),
+                health: Some("healthy".into()),
+                error: None,
+                overlay_digest: Some("abc".into()),
+                applied_overlay: None,
+                state: "config_stale".into(),
+            }],
+            facts: Default::default(),
+            overlays: Default::default(),
+            lease: crate::apply::EnvironmentLeaseInspect {
+                held: false,
+                owner: None,
+                generation: None,
+                expires_at_ms: None,
+                status: "absent".into(),
+            },
+            latest_plan: None,
+            terminal_outcomes: Vec::new(),
+            execution_note: "fixture".into(),
+        };
+        let report = fleet_status_from_inspects(vec![stale]);
+        assert_eq!(report.environments[0].posture, "behind");
+        assert_eq!(report.environments[0].products_behind, 1);
+        assert!(!report.environments[0].unhealthy);
     }
 
     #[test]

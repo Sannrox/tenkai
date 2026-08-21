@@ -281,7 +281,7 @@ impl VerifiedCanaryOutcome {
                 let deploys_candidate = step.product == outcome.release_product()
                     && matches!(
                         step.action,
-                        Action::Install | Action::Upgrade | Action::Downgrade
+                        Action::Install | Action::Upgrade | Action::Downgrade | Action::Restart
                     )
                     && step.to == outcome.release_version()
                     && step.release_id == outcome.release_id
@@ -393,7 +393,9 @@ pub use attempt_lifecycle::repair_pending;
 fn evidence_release(step: &crate::plan::Step) -> Option<&str> {
     match step.action {
         Action::Rollback => step.restore.as_ref().map(|pin| pin.release_id.as_str()),
-        Action::Install | Action::Upgrade | Action::Downgrade => Some(&step.release_id),
+        Action::Install | Action::Upgrade | Action::Downgrade | Action::Restart => {
+            Some(&step.release_id)
+        }
     }
 }
 
@@ -498,6 +500,7 @@ mod tests {
             status_detail: String::new(),
             maintenance_blocked: false,
             prior_warnings: Vec::new(),
+            recalled_recovery_reason: None,
         }
     }
 

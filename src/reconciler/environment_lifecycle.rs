@@ -50,7 +50,7 @@ async fn reconcile_runtime_managed(ctx: &mut Ctx, environment: &str) -> Result<E
     {
         return Ok(awaiting_runtime(plan));
     }
-    let stored = plan::create(ctx, environment).await?;
+    let stored = plan::create_for_reconcile(ctx, environment).await?;
     if stored.steps.is_empty() {
         Ok(EnvironmentStatus::Current)
     } else {
@@ -67,7 +67,7 @@ fn awaiting_runtime(plan: Plan) -> EnvironmentStatus {
 
 async fn select_plan(ctx: &mut Ctx, environment: &str, approval_required: bool) -> Result<Plan> {
     if !approval_required {
-        return plan::create(ctx, environment).await;
+        return plan::create_for_reconcile(ctx, environment).await;
     }
     for candidate in
         plan::list_for_environment(ctx, environment, Some(&[PlanState::Computed])).await?
@@ -79,7 +79,18 @@ async fn select_plan(ctx: &mut Ctx, environment: &str, approval_required: bool) 
             return Ok(candidate);
         }
     }
-    plan::create(ctx, environment).await
+    for candidate in
+        plan::list_for_environment(ctx, environment, Some(&[PlanState::Blocked])).await?
+    {
+        if candidate.maintenance_blocked
+            && !candidate.steps.is_empty()
+            && apply::classify_candidate(ctx, &candidate).await?
+                == apply::CandidateAdmission::Admissible
+        {
+            return Ok(candidate);
+        }
+    }
+    plan::create_for_reconcile(ctx, environment).await
 }
 
 async fn execute(

@@ -23,21 +23,126 @@ pub(super) async fn descriptor_from_object(
     release: &Object,
     environment: &str,
 ) -> CatalogLookupResult<ReleaseDescriptor> {
+    descriptor_from_object_with_admission(ctx, release, environment, SnapshotAdmission::Standard)
+        .await
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum SnapshotAdmission {
+    Standard,
+    AuditedRecovery,
+}
+
+fn release_object_is_recalled(release: &Object) -> bool {
+    release
+        .properties
+        .get("recalled_at")
+        .is_some_and(|value| !value.is_empty())
+}
+
+pub(crate) async fn release_is_recalled(ctx: &mut Ctx, release_id: &str) -> Result<bool> {
+    if ctx
+        .get(release_id)
+        .await?
+        .is_some_and(|release| release_object_is_recalled(&release))
+    {
+        return Ok(true);
+    }
+    Ok(ctx
+        .get(&release_recall_id(release_id))
+        .await?
+        .is_some_and(|claim| claim.kind == KIND_RELEASE_RECALL))
+}
+
+async fn admit_recall(
+    ctx: &mut Ctx,
+    release: &Object,
+    admission: SnapshotAdmission,
+) -> CatalogLookupResult<()> {
+    if matches!(admission, SnapshotAdmission::AuditedRecovery) {
+        return Ok(());
+    }
+    if release_object_is_recalled(release)
+        || ctx
+            .get(&release_recall_id(&release.id))
+            .await
+            .map_err(CatalogLookupError::Provider)?
+            .is_some_and(|claim| claim.kind == KIND_RELEASE_RECALL)
+    {
+        return Err(CatalogLookupError::Recalled {
+            release_id: release.id.clone(),
+        });
+    }
+    Ok(())
+}
+
+/// Lookup a Release, then re-read and re-admit the snapshot apply will consume.
+///
+/// The compatibility store does not yet provide a transactional read spanning
+/// the Catalog descriptor and the object rows used for pin matching.
+pub(crate) async fn load_deployable_snapshot(
+    ctx: &mut Ctx,
+    release_id: &str,
+    environment: &str,
+) -> Result<DeployableSnapshot> {
+    load_snapshot(ctx, release_id, environment, SnapshotAdmission::Standard).await
+}
+
+/// Same snapshot as deployable lookup, but recalled content is admitted for an
+/// audited rollback recovery. Trust and digest checks still apply.
+pub(crate) async fn load_recoverable_snapshot(
+    ctx: &mut Ctx,
+    release_id: &str,
+    environment: &str,
+) -> Result<DeployableSnapshot> {
+    load_snapshot(
+        ctx,
+        release_id,
+        environment,
+        SnapshotAdmission::AuditedRecovery,
+    )
+    .await
+}
+
+async fn load_snapshot(
+    ctx: &mut Ctx,
+    release_id: &str,
+    environment: &str,
+    admission: SnapshotAdmission,
+) -> Result<DeployableSnapshot> {
+    let first = ctx
+        .get(release_id)
+        .await
+        .map_err(CatalogLookupError::Provider)?
+        .ok_or_else(|| CatalogLookupError::NotFound {
+            release_id: release_id.into(),
+        })?;
+    let descriptor =
+        descriptor_from_object_with_admission(ctx, &first, environment, admission).await?;
+    let Some(object) = ctx.get(release_id).await? else {
+        bail!("release object {release_id} not found");
+    };
+    if object.kind != KIND_RELEASE {
+        bail!("object {release_id} is {}, not {KIND_RELEASE}", object.kind);
+    }
+    admit_recall(ctx, &object, admission).await?;
+    require_deployable_trust(ctx, &object, environment).await?;
+    Ok(DeployableSnapshot { descriptor, object })
+}
+
+async fn descriptor_from_object_with_admission(
+    ctx: &mut Ctx,
+    release: &Object,
+    environment: &str,
+    admission: SnapshotAdmission,
+) -> CatalogLookupResult<ReleaseDescriptor> {
     if release.kind != KIND_RELEASE {
         return Err(CatalogLookupError::Malformed {
             release_id: release.id.clone(),
             reason: format!("object kind is {}, expected {KIND_RELEASE}", release.kind),
         });
     }
-    if release
-        .properties
-        .get("recalled_at")
-        .is_some_and(|value| !value.is_empty())
-    {
-        return Err(CatalogLookupError::Recalled {
-            release_id: release.id.clone(),
-        });
-    }
+    admit_recall(ctx, release, admission).await?;
     require_deployable_trust(ctx, release, environment)
         .await
         .map_err(|error| CatalogLookupError::TrustDenied {
@@ -63,40 +168,6 @@ pub(super) async fn descriptor_from_object(
             reason: error.to_string(),
         })?,
     })
-}
-
-/// Lookup a Release, then re-read and re-admit the snapshot apply will consume.
-///
-/// The compatibility store does not yet provide a transactional read spanning
-/// the Catalog descriptor and the object rows used for pin matching.
-pub(crate) async fn load_deployable_snapshot(
-    ctx: &mut Ctx,
-    release_id: &str,
-    environment: &str,
-) -> Result<DeployableSnapshot> {
-    let first = ctx
-        .get(release_id)
-        .await
-        .map_err(CatalogLookupError::Provider)?
-        .ok_or_else(|| CatalogLookupError::NotFound {
-            release_id: release_id.into(),
-        })?;
-    let descriptor = descriptor_from_object(ctx, &first, environment).await?;
-    let Some(object) = ctx.get(release_id).await? else {
-        bail!("release object {release_id} not found");
-    };
-    if object.kind != KIND_RELEASE {
-        bail!("object {release_id} is {}, not {KIND_RELEASE}", object.kind);
-    }
-    if object
-        .properties
-        .get("recalled_at")
-        .is_some_and(|value| !value.is_empty())
-    {
-        bail!("release {release_id} is recalled");
-    }
-    require_deployable_trust(ctx, &object, environment).await?;
-    Ok(DeployableSnapshot { descriptor, object })
 }
 
 fn stored_provenance(release: &Object) -> Result<Vec<ProvenanceProjection>> {
@@ -430,5 +501,9 @@ mod tests {
             .await
             .unwrap_err();
         assert!(recalled.to_string().contains("recalled"));
+        let recovered = load_recoverable_snapshot(&mut ctx, &release_id("api", "1.0.0"), "local")
+            .await
+            .unwrap();
+        assert_eq!(recovered.descriptor.release_id, release_id("api", "1.0.0"));
     }
 }

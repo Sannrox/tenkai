@@ -14,6 +14,7 @@ pub enum SoftwareDeployPhase {
     Restore,
     /// Uninstall / kubectl delete path (not the same as restore).
     Remove,
+    Restart,
 }
 
 impl SoftwareDeployPhase {
@@ -23,6 +24,7 @@ impl SoftwareDeployPhase {
             Self::Health => "health",
             Self::Restore => "restore",
             Self::Remove => "remove",
+            Self::Restart => "restart",
         }
     }
 }

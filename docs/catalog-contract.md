@@ -19,11 +19,17 @@ Its Rust contract version is `CATALOG_CONTRACT_VERSION = 1`.
   decision, audit record (including `principal_id` and `principal_kind`), and
   head mutation share the adapter's atomic commit boundary; a transport must
   not acknowledge a partial result.
-- **Recall** is an ordered, authenticated mutation that makes subsequent lookup
-  and planning fail closed. Recall does not delete immutable descriptors or
-  bytes, and rollback to recalled content requires a separate explicit recovery
-  policy. The v0 CLI does not expose recall until Tenkai-owned transactional
-  persistence can satisfy this invariant.
+- **Recall** is an ordered, authenticated mutation (`tenkaictl release recall`)
+  that makes subsequent lookup and planning fail closed. The first-writer
+  `tenkai.release_recall` claim records who recalled the release; the release
+  object then carries `recalled_at` / `recalled_by`. Recall does not delete
+  immutable descriptors or bytes. Planning will not target a recalled channel
+  head; a deployed recalled release rolls off to a non-recalled head without
+  restoring the recalled pin. Rollback onto recalled content is denied unless
+  the Plan records an audited `--allow-recalled-recovery --recovery-reason`
+  inside the signed executable digest. Ordinary lookup and channel-head
+  planning stay fail-closed. See
+  [ADR 0016](decisions/0016-same-version-remediation.md).
 
 Publication has the same atomic authorization and audit requirement as
 promotion. The current sekai-backed compatibility adapter keeps its existing

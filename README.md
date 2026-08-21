@@ -78,6 +78,9 @@ documented.
 Publish a new version and `apply` again to upgrade. If the health probe of a
 new release fails, the previous release is restored automatically. Use
 `tenkaictl rollback <product>` to return to the previously deployed version.
+Same-version remediations (`tenkaictl restart`, environment overlays, recall,
+and audited `--allow-recalled-recovery`) are recorded in
+[ADR 0016](docs/decisions/0016-same-version-remediation.md).
 If failed cleanup leaves deployment state unknown, reconcile the external
 target manually, then run `tenkaictl env reconcile <env> <product>` after
 cleanup or add `--deployed <version>` to record the verified live version.
@@ -480,7 +483,8 @@ it ([ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md),
 | Signed plan execution approval | [Plan approval](docs/plan-approval.md) |
 | Catalog application boundary | [Catalog contract](docs/catalog-contract.md); ADR 0001 |
 | Health probes, auto-rollback, deliberate rollback | Quickstart; apply/reconciler |
-| Maintenance windows | CLI `env maintenance` |
+| Same-version restart, recall roll-off, product windows | [ADR 0016](docs/decisions/0016-same-version-remediation.md); `restart`, `release recall`, `product maintenance` |
+| Maintenance windows | CLI `env maintenance` / `product maintenance` |
 | Canary cohort promotion evidence | #7; `src/canary.rs` |
 | Canary × model_runtime promote E2E | [Model runtime](docs/model-runtime.md#canary-promotion-evidence-model_runtime); #108 |
 | Multi-environment list/inspect | `tenkaictl env list` / `env inspect`; #56 |

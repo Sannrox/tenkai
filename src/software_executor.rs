@@ -13,8 +13,9 @@
 //! `deploy.install` path when no executor is supplied. Credential-free
 //! diagnostics for Helm and kubectl live in the private diagnostics module.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 use std::sync::Mutex;
 
 // Path is used by run_kubectl.
@@ -38,6 +39,12 @@ pub struct SoftwareApplyRequest {
     pub workdir: PathBuf,
     /// Optional release digest for audit (never a secret).
     pub release_id: String,
+    /// Non-secret environment overlays passed as Helm `--set tenkai.config.*`.
+    #[serde(default)]
+    pub overlays: BTreeMap<String, String>,
+    /// Digest of `overlays`. Empty when no overlays are set.
+    #[serde(default)]
+    pub config_digest: String,
 }
 
 /// Pluggable software apply path. Tenkai never hard-depends on a cluster.
@@ -45,6 +52,10 @@ pub trait SoftwareExecutor: Send + Sync {
     fn apply(&self, request: &SoftwareApplyRequest) -> Result<()>;
     fn remove(&self, request: &SoftwareApplyRequest) -> Result<()>;
     fn observe(&self, request: &SoftwareApplyRequest) -> Result<SoftwareObserveStatus>;
+    /// Same-version bounce. Default re-applies the current pin.
+    fn restart(&self, request: &SoftwareApplyRequest) -> Result<()> {
+        self.apply(request)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +64,8 @@ pub enum SoftwareObserveStatus {
     Absent,
     Present,
     Unknown,
+    /// Live Tenkai version or release identity does not match the requested pin.
+    Mismatched,
 }
 
 /// Deterministic fake for CI (no cluster, no helm binary).
@@ -151,11 +164,8 @@ impl SoftwareExecutor for HelmSoftwareExecutor {
             .arg("--create-namespace")
             .arg("--wait")
             .arg("--timeout")
-            .arg("5m")
-            .arg("--set")
-            .arg(format!("tenkai.version={}", request.version))
-            .arg("--set")
-            .arg(format!("tenkai.releaseId={}", request.release_id));
+            .arg("5m");
+        apply_helm_set_flags(&mut command, request);
         diagnostics::run_captured_command(
             &mut command,
             SoftwareDeployPhase::Apply,
@@ -196,11 +206,66 @@ impl SoftwareExecutor for HelmSoftwareExecutor {
             .arg(&request.environment)
             .output()
             .with_context(|| format!("starting helm status via {}", self.helm_binary.display()))?;
-        if output.status.success() {
-            Ok(SoftwareObserveStatus::Present)
-        } else {
-            Ok(SoftwareObserveStatus::Absent)
+        if !output.status.success() {
+            return Ok(SoftwareObserveStatus::Absent);
         }
+        let values = Command::new(&self.helm_binary)
+            .arg("get")
+            .arg("values")
+            .arg(&request.product)
+            .arg("--namespace")
+            .arg(&request.environment)
+            .arg("--all")
+            .arg("-o")
+            .arg("json")
+            .output();
+        let Ok(values) = values else {
+            return Ok(SoftwareObserveStatus::Mismatched);
+        };
+        if !values.status.success() {
+            return Ok(SoftwareObserveStatus::Mismatched);
+        }
+        if helm_values_mismatch(&String::from_utf8_lossy(&values.stdout), request) {
+            Ok(SoftwareObserveStatus::Mismatched)
+        } else {
+            Ok(SoftwareObserveStatus::Present)
+        }
+    }
+
+    fn restart(&self, request: &SoftwareApplyRequest) -> Result<()> {
+        validate_request(request)?;
+        if !request.workdir.is_dir() {
+            bail!(
+                "helm chart workdir does not exist: {}",
+                request.workdir.display()
+            );
+        }
+        let nonce = crate::now_millis();
+        let mut command = Command::new(&self.helm_binary);
+        command
+            .arg("upgrade")
+            .arg("--install")
+            .arg(&request.product)
+            .arg(&request.workdir)
+            .arg("--namespace")
+            .arg(&request.environment)
+            .arg("--create-namespace")
+            .arg("--wait")
+            .arg("--timeout")
+            .arg("5m");
+        apply_helm_set_flags(&mut command, request);
+        command
+            .arg("--set")
+            .arg(format!("tenkai.restartNonce={nonce}"));
+        diagnostics::run_captured_command(
+            &mut command,
+            SoftwareDeployPhase::Restart,
+            "upgrade --install --restart",
+            &request.product,
+            &request.environment,
+            "helm",
+            "set TENKAI_HELM_BIN or install helm",
+        )
     }
 }
 
@@ -278,6 +343,7 @@ impl SoftwareExecutor for KubernetesSoftwareExecutor {
             &request.product,
             &request.environment,
         )?;
+        annotate_config_digest(self, request, SoftwareDeployPhase::Apply)?;
         Ok(())
     }
 
@@ -337,7 +403,57 @@ impl SoftwareExecutor for KubernetesSoftwareExecutor {
                 return Ok(SoftwareObserveStatus::Absent);
             }
         }
-        Ok(SoftwareObserveStatus::Present)
+        if kubernetes_labels_mismatch(self, request) {
+            Ok(SoftwareObserveStatus::Mismatched)
+        } else {
+            Ok(SoftwareObserveStatus::Present)
+        }
+    }
+
+    fn restart(&self, request: &SoftwareApplyRequest) -> Result<()> {
+        validate_request(request)?;
+        // Re-apply first so Absent live targets are reinstalled, not bounce-only.
+        self.apply(request)?;
+        let selector = format!("tenkai.product={}", k8s_label_value(&request.product));
+        if !kubernetes_labeled_workloads_exist(self, request, &selector)? {
+            bail!(
+                "no Deployment or StatefulSet labeled tenkai.product={} in namespace {}",
+                request.product,
+                request.environment
+            );
+        }
+        let mut restarted = false;
+        for kind in ["deployment", "statefulset"] {
+            let output = Command::new(&self.kubectl_binary)
+                .arg("rollout")
+                .arg("restart")
+                .arg(kind)
+                .arg("--namespace")
+                .arg(&request.environment)
+                .arg("-l")
+                .arg(&selector)
+                .output()
+                .with_context(|| {
+                    format!(
+                        "starting kubectl rollout restart via {}",
+                        self.kubectl_binary.display()
+                    )
+                })?;
+            if output.status.success()
+                && !kubectl_reports_no_resources(&output)
+                && kubernetes_labeled_workloads_exist(self, request, &selector)?
+            {
+                restarted = true;
+            }
+        }
+        if !restarted {
+            bail!(
+                "no Deployment or StatefulSet labeled tenkai.product={} in namespace {}",
+                request.product,
+                request.environment
+            );
+        }
+        Ok(())
     }
 }
 
@@ -511,10 +627,17 @@ pub fn selected_software_executor() -> Option<Box<dyn SoftwareExecutor>> {
 }
 
 fn request_key(request: &SoftwareApplyRequest) -> String {
-    format!(
-        "{}|{}|{}",
-        request.environment, request.product, request.version
-    )
+    if request.config_digest.is_empty() {
+        format!(
+            "{}|{}|{}",
+            request.environment, request.product, request.version
+        )
+    } else {
+        format!(
+            "{}|{}|{}|{}",
+            request.environment, request.product, request.version, request.config_digest
+        )
+    }
 }
 
 fn validate_request(request: &SoftwareApplyRequest) -> Result<()> {
@@ -547,7 +670,182 @@ pub fn request_from_parts(
         environment: environment.into(),
         workdir: workdir.as_ref().to_path_buf(),
         release_id: release_id.into(),
+        overlays: BTreeMap::new(),
+        config_digest: String::new(),
     }
+}
+
+/// Attach non-secret overlays to a software apply request.
+pub fn with_overlays(
+    mut request: SoftwareApplyRequest,
+    overlays: BTreeMap<String, String>,
+) -> SoftwareApplyRequest {
+    request.config_digest = crate::environment::overlay_digest(&overlays);
+    request.overlays = overlays;
+    request
+}
+
+fn apply_helm_set_flags(command: &mut Command, request: &SoftwareApplyRequest) {
+    command
+        .arg("--set")
+        .arg(format!("tenkai.version={}", request.version))
+        .arg("--set")
+        .arg(format!("tenkai.releaseId={}", request.release_id));
+    command
+        .arg("--set")
+        .arg(format!("tenkai.configDigest={}", request.config_digest));
+    for (key, value) in &request.overlays {
+        command
+            .arg("--set")
+            .arg(format!("tenkai.config.{key}={value}"));
+    }
+}
+
+pub(crate) fn helm_values_mismatch(values_json: &str, request: &SoftwareApplyRequest) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(values_json) else {
+        return true;
+    };
+    let tenkai = value.get("tenkai");
+    let version = tenkai
+        .and_then(|node| node.get("version"))
+        .and_then(|v| v.as_str());
+    if version != Some(request.version.as_str()) {
+        return true;
+    }
+    let release_id = tenkai
+        .and_then(|node| node.get("releaseId"))
+        .and_then(|v| v.as_str());
+    if release_id != Some(request.release_id.as_str()) {
+        return true;
+    }
+    let digest = tenkai
+        .and_then(|node| node.get("configDigest"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if digest != request.config_digest {
+        return true;
+    }
+    false
+}
+
+fn kubernetes_labels_mismatch(
+    executor: &KubernetesSoftwareExecutor,
+    request: &SoftwareApplyRequest,
+) -> bool {
+    let selector = format!("tenkai.product={}", k8s_label_value(&request.product));
+    let output = Command::new(&executor.kubectl_binary)
+        .arg("get")
+        .arg("deploy,statefulset")
+        .arg("--namespace")
+        .arg(&request.environment)
+        .arg("-l")
+        .arg(&selector)
+        .arg("-o")
+        .arg("json")
+        .output();
+    let Ok(output) = output else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    kubernetes_items_mismatch(&String::from_utf8_lossy(&output.stdout), request)
+}
+
+fn kubectl_reports_no_resources(output: &Output) -> bool {
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+    .to_ascii_lowercase();
+    combined.contains("no resources found")
+}
+
+fn kubernetes_labeled_workloads_exist(
+    executor: &KubernetesSoftwareExecutor,
+    request: &SoftwareApplyRequest,
+    selector: &str,
+) -> Result<bool> {
+    let output = Command::new(&executor.kubectl_binary)
+        .arg("get")
+        .arg("deploy,sts")
+        .arg("--namespace")
+        .arg(&request.environment)
+        .arg("-l")
+        .arg(selector)
+        .arg("-o")
+        .arg("name")
+        .output()
+        .with_context(|| {
+            format!(
+                "starting kubectl get via {}",
+                executor.kubectl_binary.display()
+            )
+        })?;
+    if !output.status.success() || kubectl_reports_no_resources(&output) {
+        return Ok(false);
+    }
+    Ok(output
+        .stdout
+        .split(|b| *b == b'\n')
+        .any(|line| !line.iter().all(|b| b.is_ascii_whitespace())))
+}
+
+pub(crate) fn kubernetes_items_mismatch(items_json: &str, request: &SoftwareApplyRequest) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(items_json) else {
+        return false;
+    };
+    let Some(items) = value.get("items").and_then(|items| items.as_array()) else {
+        return false;
+    };
+    let expected_version = k8s_label_value(&request.version);
+    items.iter().any(|item| {
+        let version_mismatch = item
+            .get("metadata")
+            .and_then(|metadata| metadata.get("labels"))
+            .and_then(|labels| labels.get("tenkai.version"))
+            .and_then(|version| version.as_str())
+            .is_some_and(|version| version != expected_version);
+        let live_digest = item
+            .get("metadata")
+            .and_then(|metadata| metadata.get("annotations"))
+            .and_then(|annotations| annotations.get("tenkai.config-digest"))
+            .and_then(|digest| digest.as_str())
+            .unwrap_or("");
+        let digest_mismatch = live_digest != request.config_digest;
+        version_mismatch || digest_mismatch
+    })
+}
+
+fn annotate_config_digest(
+    executor: &KubernetesSoftwareExecutor,
+    request: &SoftwareApplyRequest,
+    phase: SoftwareDeployPhase,
+) -> Result<()> {
+    let selector = format!("tenkai.product={}", k8s_label_value(&request.product));
+    let annotation = if request.config_digest.is_empty() {
+        "tenkai.config-digest-".to_string()
+    } else {
+        format!("tenkai.config-digest={}", request.config_digest)
+    };
+    run_kubectl(
+        &executor.kubectl_binary,
+        &[
+            "annotate",
+            "--overwrite",
+            "deploy,statefulset",
+            "-l",
+            &selector,
+            "--namespace",
+            &request.environment,
+            &annotation,
+        ],
+        phase,
+        "annotate tenkai.config-digest",
+        &request.product,
+        &request.environment,
+    )
 }
 
 #[cfg(test)]
@@ -562,6 +860,8 @@ mod tests {
             environment: "prod".into(),
             workdir: root.to_path_buf(),
             release_id: "tenkai:release:api@1.0.0".into(),
+            overlays: BTreeMap::new(),
+            config_digest: String::new(),
         }
     }
 
@@ -756,6 +1056,63 @@ mod tests {
     }
 
     #[test]
+    fn helm_values_detect_version_and_digest_mismatch() {
+        let root = std::env::temp_dir().join(format!("tenkai-helm-obs-{}", uuid::Uuid::new_v4()));
+        let mut request = sample_request(&root);
+        request.config_digest = "abc".into();
+        assert!(!helm_values_mismatch(
+            r#"{"tenkai":{"version":"1.0.0","releaseId":"tenkai:release:api@1.0.0","configDigest":"abc"}}"#,
+            &request
+        ));
+        assert!(helm_values_mismatch(
+            r#"{"tenkai":{"version":"9.9.9","releaseId":"tenkai:release:api@1.0.0"}}"#,
+            &request
+        ));
+        assert!(helm_values_mismatch(
+            r#"{"tenkai":{"version":"1.0.0","releaseId":"tenkai:release:api@1.0.0","configDigest":"other"}}"#,
+            &request
+        ));
+        assert!(helm_values_mismatch(r#"{"tenkai":{}}"#, &request));
+        assert!(helm_values_mismatch("not-json", &request));
+        let mut empty_digest = request.clone();
+        empty_digest.config_digest.clear();
+        assert!(helm_values_mismatch(
+            r#"{"tenkai":{"version":"1.0.0","releaseId":"tenkai:release:api@1.0.0","configDigest":"stale"}}"#,
+            &empty_digest
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn kubernetes_items_detect_version_label_mismatch() {
+        let root = std::env::temp_dir().join(format!("tenkai-k8s-obs-{}", uuid::Uuid::new_v4()));
+        let request = sample_request(&root);
+        assert!(!kubernetes_items_mismatch(
+            r#"{"items":[{"metadata":{"labels":{"tenkai.version":"1.0.0"}}}]}"#,
+            &request
+        ));
+        assert!(kubernetes_items_mismatch(
+            r#"{"items":[{"metadata":{"labels":{"tenkai.version":"1.0.0"},"annotations":{"tenkai.config-digest":"stale"}}}]}"#,
+            &request
+        ));
+        assert!(kubernetes_items_mismatch(
+            r#"{"items":[{"metadata":{"labels":{"tenkai.version":"0.9.0"}}}]}"#,
+            &request
+        ));
+        let mut with_digest = request.clone();
+        with_digest.config_digest = "abc".into();
+        assert!(kubernetes_items_mismatch(
+            r#"{"items":[{"metadata":{"labels":{"tenkai.version":"1.0.0"}}}]}"#,
+            &with_digest
+        ));
+        assert!(!kubernetes_items_mismatch(
+            r#"{"items":[{"metadata":{"labels":{"tenkai.version":"1.0.0"},"annotations":{"tenkai.config-digest":"abc"}}}]}"#,
+            &with_digest
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn rollback_note_mentions_channel_unchanged() {
         let note = rollback_channel_note("api", "1.0.0");
         assert!(note.contains("restored api to 1.0.0"), "{note}");
@@ -788,6 +1145,8 @@ data:
             environment: format!("tenkai-smoke-{}", &uuid::Uuid::new_v4().to_string()[..8]),
             workdir: root.clone(),
             release_id: "tenkai:release:smoke@0.0.1".into(),
+            overlays: BTreeMap::new(),
+            config_digest: String::new(),
         };
         let executor = KubernetesSoftwareExecutor {
             kubectl_binary: PathBuf::from(binary),

@@ -13,6 +13,8 @@ Version 1 is available only with `--target embedded` for:
 - `status`
 - `env inspect`
 - `rollback`
+- `restart`
+- `release recall` (`recall`)
 
 Every supported invocation writes exactly one compact JSON object to standard
 output:
@@ -35,7 +37,7 @@ The fixed fields are:
 
 - `schema`: exactly `tenkai.command-result/v1`.
 - `command`: `invocation`, `publish`, `promote`, `plan`, `apply`, `status`,
-  `inspect_environment`, or `rollback`.
+  `inspect_environment`, `rollback`, `restart`, or `recall`.
 - `outcome`: `succeeded`, `failed`, `awaiting_approval`, or `unknown`.
 - `retry`: `not_needed`, `correct_request`, `reconcile_before_retry`, or
   `not_safe`.
