@@ -1901,6 +1901,7 @@ async fn run(cli: Cli) -> Result<()> {
                     authorization,
                     software_executor: None,
                     delivery_adapter: None,
+                    delivery_fence: None,
                 },
                 PlanResultContext {
                     command: CommandName::Apply,
@@ -2025,6 +2026,7 @@ async fn run(cli: Cli) -> Result<()> {
                         },
                         software_executor: None,
                         delivery_adapter: None,
+                        delivery_fence: None,
                     },
                     PlanResultContext {
                         command: CommandName::Rollback,
@@ -2087,6 +2089,7 @@ async fn run(cli: Cli) -> Result<()> {
                         software_executor: tenkai::software_executor::selected_software_executor()
                             .map(std::sync::Arc::from),
                         delivery_adapter: None,
+                        delivery_fence: None,
                     },
                     PlanResultContext {
                         command: CommandName::Restart,
@@ -2458,6 +2461,7 @@ async fn run_plan(
         authorization: execution.authorization,
         software_executor: software,
         delivery_adapter: delivery,
+        delivery_fence: None,
     };
     let outcomes = apply::execute_with_options(ctx, plan_id, execution).await?;
     let mut failed = false;

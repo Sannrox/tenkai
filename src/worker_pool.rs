@@ -662,6 +662,7 @@ replicas = 1
                 },
                 software_executor: None,
                 delivery_adapter: None,
+                delivery_fence: None,
             },
         )
         .await

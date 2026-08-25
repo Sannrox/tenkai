@@ -29,6 +29,8 @@ pub struct ExecutionOptions<'a> {
     pub software_executor: Option<Arc<dyn crate::software_executor::SoftwareExecutor>>,
     /// Host-selected external delivery adapter. `None` keeps built-in execution.
     pub delivery_adapter: Option<std::sync::Arc<dyn crate::delivery_bridge::DeliveryAdapter>>,
+    /// Optional tick fence for adapter callbacks. `None` skips extra fencing.
+    pub delivery_fence: Option<std::sync::Arc<dyn crate::reconcile_fence::ReconcileTickFence>>,
 }
 
 impl std::fmt::Debug for ExecutionOptions<'_> {
@@ -40,6 +42,7 @@ impl std::fmt::Debug for ExecutionOptions<'_> {
             .field("authorization", &self.authorization)
             .field("software_executor", &self.software_executor.is_some())
             .field("delivery_adapter", &self.delivery_adapter.is_some())
+            .field("delivery_fence", &self.delivery_fence.is_some())
             .finish()
     }
 }
@@ -50,6 +53,8 @@ pub(super) struct AttemptExecutionPolicy<'a> {
     pub emergency_reason: Option<&'a str>,
     pub software_executor: Option<&'a dyn crate::software_executor::SoftwareExecutor>,
     pub delivery_adapter: Option<std::sync::Arc<dyn crate::delivery_bridge::DeliveryAdapter>>,
+    pub delivery_fence: Option<std::sync::Arc<dyn crate::reconcile_fence::ReconcileTickFence>>,
+    pub approval: Option<(std::path::PathBuf, std::path::PathBuf)>,
 }
 
 /// Compatibility entry point retained so downstream crates receive an
@@ -124,6 +129,14 @@ pub async fn execute_with_options(
     let skip_gates = options.skip_gates;
     let software_executor = options.software_executor;
     let delivery_adapter = options.delivery_adapter.clone();
+    let delivery_fence = options.delivery_fence.clone();
+    let approval = match options.authorization {
+        ExecutionAuthorization::Signed {
+            approval,
+            trust_roots,
+        } => Some((approval.to_path_buf(), trust_roots.to_path_buf())),
+        ExecutionAuthorization::LocalDevelopment { .. } => None,
+    };
     let canary_execution =
         crate::canary::execute_attempt(ctx, &canary_plan, options.skip_gates, move |ctx| {
             Box::pin(async move {
@@ -135,6 +148,8 @@ pub async fn execute_with_options(
                         emergency_reason: execution_emergency_reason.as_deref(),
                         software_executor: software_executor.as_deref(),
                         delivery_adapter,
+                        delivery_fence,
+                        approval,
                     },
                     &execution_lease,
                 )

@@ -819,6 +819,7 @@ max_startup_seconds = 30
                 },
                 software_executor: None,
                 delivery_adapter: None,
+                delivery_fence: None,
             },
         )
         .await
