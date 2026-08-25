@@ -35,6 +35,9 @@ pub struct Manifest {
     /// Agent descriptor path for `agent_definition` products (`[agent]`).
     #[serde(default)]
     pub agent: Option<AgentSection>,
+    /// Prompt package document path for `prompt_package` products (`[prompt]`).
+    #[serde(default)]
+    pub prompt: Option<PromptSection>,
     /// Optional pin to one accepted external change-set closure.
     #[serde(default)]
     pub change_set_pin: Option<ChangeSetPinSection>,
@@ -103,6 +106,13 @@ pub struct AgentSection {
     pub document: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromptSection {
+    /// Immutable prompt package JSON relative to `deploy.workdir`.
+    pub document: String,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProductKind {
@@ -118,6 +128,8 @@ pub enum ProductKind {
     AgentDefinition,
     /// Fixed-replica Shikigami worker-pool lifecycle (not work admission).
     WorkerPool,
+    /// Versioned prompt package staged for an environment (not an authoring system).
+    PromptPackage,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -263,6 +275,7 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
             if manifest.policy.is_some()
                 || manifest.eval_suite_product.is_some()
                 || manifest.agent.is_some()
+                || manifest.prompt.is_some()
             {
                 bail!("software manifests cannot declare staged-product sections");
             }
@@ -344,6 +357,7 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
             if manifest.policy.is_some()
                 || manifest.eval_suite_product.is_some()
                 || manifest.agent.is_some()
+                || manifest.prompt.is_some()
             {
                 bail!("worker_pool manifests cannot declare staged-product sections");
             }
@@ -404,6 +418,21 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
                         .context("agent_definition needs an [agent] section")?;
                     validate_input_path("agent.document", &section.document)?;
                 }
+                crate::product_kind::StagedKind::PromptPackage => {
+                    if manifest.policy.is_some()
+                        || manifest.eval_suite_product.is_some()
+                        || manifest.agent.is_some()
+                    {
+                        bail!(
+                            "prompt_package cannot declare policy, eval_suite_product, or agent sections"
+                        );
+                    }
+                    let section = manifest
+                        .prompt
+                        .as_ref()
+                        .context("prompt_package needs a [prompt] section")?;
+                    validate_input_path("prompt.document", &section.document)?;
+                }
             }
         }
     }
@@ -462,6 +491,11 @@ impl Manifest {
             && !inputs.contains(&agent.document)
         {
             inputs.push(agent.document.clone());
+        }
+        if let Some(prompt) = &self.prompt
+            && !inputs.contains(&prompt.document)
+        {
+            inputs.push(prompt.document.clone());
         }
         inputs
     }
@@ -794,6 +828,7 @@ mod tests {
             policy: None,
             eval_suite_product: None,
             agent: None,
+            prompt: None,
             change_set_pin: None,
             worker_pool: None,
             gate: GateSection::default(),

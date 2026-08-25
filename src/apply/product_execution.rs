@@ -361,6 +361,7 @@ mod tests {
             ProductKind::EvalSuite,
             ProductKind::AgentDefinition,
             ProductKind::WorkerPool,
+            ProductKind::PromptPackage,
         ] {
             assert_eq!(kind.policy().cleanup(), CleanupPolicy::Atomic);
         }

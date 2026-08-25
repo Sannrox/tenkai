@@ -9,6 +9,7 @@ install scripts as the primary path.
 | `policy_bundle` | `[policy].document` | allow/deny policy entries | Stage policy JSON for the environment |
 | `eval_suite` | `[eval_suite_product].document` | suite_id + cases | Stage immutable eval contract |
 | `agent_definition` | `[agent].document` | agent_id, runtime, entrypoint | Stage agent descriptor only |
+| `prompt_package` | `[prompt].document` | package_id, runtime, eval_suite, prompt bodies | Stage exact prompt bytes after evaluation gates |
 
 Source: `src/staged_artifact.rs`, `src/manifest.rs`. Issues: #115, #116, #117.
 

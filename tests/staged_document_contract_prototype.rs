@@ -57,6 +57,23 @@ document = "agent.json"
             br#"{"version":1,"agent_id":"ops-agent","runtime":"local","entrypoint":"agents/ops.toml"}"#
                 .as_slice(),
         ),
+        (
+            ProductKind::PromptPackage,
+            r#"
+[product]
+name = "ops-prompts"
+version = "1.0.0"
+kind = "prompt_package"
+[prompt]
+document = "prompt.json"
+[gate]
+eval_suite = "prompt-quality"
+"#,
+            "prompt.json",
+            "prompt_package",
+            br#"{"version":1,"package_id":"ops-prompts","runtime":"local","eval_suite":"prompt-quality","prompts":[{"id":"system","body":"You are a bounded operator assistant."}]}"#
+                .as_slice(),
+        ),
     ];
 
     for (kind, raw_manifest, expected_path, namespace, bytes) in fixtures {

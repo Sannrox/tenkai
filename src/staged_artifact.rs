@@ -1,4 +1,5 @@
-//! Staged JSON product kinds: policy_bundle, eval_suite, agent_definition.
+//! Staged JSON product kinds: policy_bundle, eval_suite, agent_definition,
+//! prompt_package.
 //!
 //! These kinds deliver versioned descriptor documents through Catalog channels
 //! and plan/apply like routing_config. Apply stages content-addressed JSON only;
@@ -25,6 +26,7 @@ impl StagedKind {
             Self::PolicyBundle => "policy_bundle",
             Self::EvalSuite => "eval_suite",
             Self::AgentDefinition => "agent_definition",
+            Self::PromptPackage => "prompt_package",
         }
     }
 
@@ -45,6 +47,11 @@ impl StagedKind {
                 .as_ref()
                 .map(|section| section.document.as_str())
                 .context("agent_definition needs [agent].document"),
+            Self::PromptPackage => manifest
+                .prompt
+                .as_ref()
+                .map(|section| section.document.as_str())
+                .context("prompt_package needs [prompt].document"),
         }
     }
 
@@ -60,6 +67,10 @@ impl StagedKind {
             }
             Self::AgentDefinition => {
                 let doc = load_agent_definition(path)?;
+                Ok(serde_json::to_vec_pretty(&doc)?)
+            }
+            Self::PromptPackage => {
+                let doc = load_prompt_package(path)?;
                 Ok(serde_json::to_vec_pretty(&doc)?)
             }
         }
@@ -80,6 +91,11 @@ impl StagedKind {
             Self::AgentDefinition => {
                 let doc: AgentDefinitionDocument =
                     serde_json::from_slice(bytes).context("parsing agent_definition document")?;
+                doc.validate()
+            }
+            Self::PromptPackage => {
+                let doc: PromptPackageDocument =
+                    serde_json::from_slice(bytes).context("parsing prompt_package document")?;
                 doc.validate()
             }
         }
@@ -142,6 +158,7 @@ pub fn deactivate(kind: ProductKind, state_root: &Path, product: &str) -> Result
 pub const POLICY_BUNDLE_VERSION: u32 = 1;
 pub const EVAL_SUITE_PRODUCT_VERSION: u32 = 1;
 pub const AGENT_DEFINITION_VERSION: u32 = 1;
+pub const PROMPT_PACKAGE_VERSION: u32 = 1;
 
 /// Policy document delivered as a `policy_bundle` product.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -247,6 +264,71 @@ impl AgentDefinitionDocument {
     }
 }
 
+/// Versioned prompt package staged as an immutable Catalog product.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromptPackageDocument {
+    pub version: u32,
+    pub package_id: String,
+    pub runtime: String,
+    pub eval_suite: String,
+    pub prompts: Vec<PromptEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromptEntry {
+    pub id: String,
+    pub body: String,
+}
+
+impl PromptPackageDocument {
+    pub fn validate(&self) -> Result<()> {
+        if self.version != PROMPT_PACKAGE_VERSION {
+            bail!(
+                "unsupported prompt_package version {}; expected {PROMPT_PACKAGE_VERSION}",
+                self.version
+            );
+        }
+        crate::ontology::validate_identifier("prompt_package.package_id", &self.package_id)?;
+        crate::ontology::validate_identifier("prompt_package.runtime", &self.runtime)?;
+        crate::ontology::validate_identifier("prompt_package.eval_suite", &self.eval_suite)?;
+        if self.prompts.is_empty() {
+            bail!("prompt_package must declare at least one prompt");
+        }
+        let mut seen = std::collections::HashSet::new();
+        for prompt in &self.prompts {
+            crate::ontology::validate_identifier("prompt_package.prompt.id", &prompt.id)?;
+            if !seen.insert(prompt.id.as_str()) {
+                bail!("duplicate prompt id {}", prompt.id);
+            }
+            if prompt.body.trim().is_empty() {
+                bail!("prompt {} body must not be empty", prompt.id);
+            }
+            if prompt.body.contains('\0') {
+                bail!("prompt {} body must not contain NUL", prompt.id);
+            }
+            let lower = prompt.body.to_ascii_lowercase();
+            if lower.contains("begin private key")
+                || lower.contains("api_key")
+                || lower.contains("secret_key")
+            {
+                bail!(
+                    "prompt {} body must not contain credentials or private keys",
+                    prompt.id
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub fn content_digest(&self) -> Result<String> {
+        self.validate()?;
+        let canonical = serde_json::to_vec(self)?;
+        Ok(format!("sha256:{:x}", Sha256::digest(canonical)))
+    }
+}
+
 pub fn load_policy_bundle(path: &Path) -> Result<PolicyBundleDocument> {
     let bytes =
         std::fs::read(path).with_context(|| format!("reading policy_bundle {}", path.display()))?;
@@ -261,6 +343,15 @@ pub fn load_eval_suite_document(path: &Path) -> Result<EvalSuiteDocument> {
         std::fs::read(path).with_context(|| format!("reading eval_suite {}", path.display()))?;
     let doc: EvalSuiteDocument = serde_json::from_slice(&bytes)
         .with_context(|| format!("parsing eval_suite {}", path.display()))?;
+    doc.validate()?;
+    Ok(doc)
+}
+
+pub fn load_prompt_package(path: &Path) -> Result<PromptPackageDocument> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("reading prompt_package {}", path.display()))?;
+    let doc: PromptPackageDocument = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parsing prompt_package {}", path.display()))?;
     doc.validate()?;
     Ok(doc)
 }
@@ -337,7 +428,21 @@ pub fn validate_staged_manifest(manifest: &Manifest, workdir: &Path) -> Result<(
         .context("not a staged product kind")?;
     let relative = staged.document_path(manifest)?;
     crate::manifest::validate_input_path("staged.document", relative)?;
-    staged.load_canonical_bytes(&workdir.join(relative))?;
+    let bytes = staged.load_canonical_bytes(&workdir.join(relative))?;
+    if staged == crate::product_kind::StagedKind::PromptPackage {
+        let doc: PromptPackageDocument = serde_json::from_slice(&bytes)?;
+        let gate = manifest
+            .gate
+            .eval_suite
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("prompt_package requires [gate].eval_suite"))?;
+        if gate != doc.eval_suite {
+            bail!(
+                "prompt_package eval_suite {gate} does not match package evaluation pin {}",
+                doc.eval_suite
+            );
+        }
+    }
     Ok(())
 }
 
@@ -401,6 +506,96 @@ mod tests {
             entrypoint: "../secret".into(),
         };
         assert!(bad.validate().is_err());
+        let package = PromptPackageDocument {
+            version: 1,
+            package_id: "ops-prompts".into(),
+            runtime: "local".into(),
+            eval_suite: "prompt-quality".into(),
+            prompts: vec![PromptEntry {
+                id: "system".into(),
+                body: "You are a bounded operator assistant.".into(),
+            }],
+        };
+        package.validate().unwrap();
+        assert!(package.content_digest().unwrap().starts_with("sha256:"));
+        let secret = PromptPackageDocument {
+            version: 1,
+            package_id: "ops-prompts".into(),
+            runtime: "local".into(),
+            eval_suite: "prompt-quality".into(),
+            prompts: vec![PromptEntry {
+                id: "system".into(),
+                body: "api_key=super-secret".into(),
+            }],
+        };
+        assert!(secret.validate().is_err());
+    }
+
+    #[test]
+    fn prompt_package_requires_matching_eval_gate() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-prompt-gate-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("prompt.json"),
+            r#"{"version":1,"package_id":"ops-prompts","runtime":"local","eval_suite":"prompt-quality","prompts":[{"id":"system","body":"You are a bounded operator assistant."}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("tenkai.toml"),
+            r#"
+[product]
+name = "ops-prompts"
+version = "1.0.0"
+kind = "prompt_package"
+[prompt]
+document = "prompt.json"
+"#,
+        )
+        .unwrap();
+        let err = match crate::manifest::load(&root.join("tenkai.toml")) {
+            Ok(_) => panic!("expected missing eval gate to fail"),
+            Err(error) => error.to_string(),
+        };
+        assert!(err.contains("[gate].eval_suite"), "{err}");
+        std::fs::write(
+            root.join("tenkai.toml"),
+            r#"
+[product]
+name = "ops-prompts"
+version = "1.0.0"
+kind = "prompt_package"
+[prompt]
+document = "prompt.json"
+[gate]
+eval_suite = "other-suite"
+"#,
+        )
+        .unwrap();
+        let err = match crate::manifest::load(&root.join("tenkai.toml")) {
+            Ok(_) => panic!("expected mismatched eval gate to fail"),
+            Err(error) => error.to_string(),
+        };
+        assert!(err.contains("does not match"), "{err}");
+        std::fs::write(
+            root.join("tenkai.toml"),
+            r#"
+[product]
+name = "ops-prompts"
+version = "1.0.0"
+kind = "prompt_package"
+[prompt]
+document = "prompt.json"
+[gate]
+eval_suite = "prompt-quality"
+"#,
+        )
+        .unwrap();
+        crate::manifest::load(&root.join("tenkai.toml")).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
