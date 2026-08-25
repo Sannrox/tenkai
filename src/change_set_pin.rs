@@ -789,6 +789,7 @@ install = "true"
                     reason: "change-set pin baseline",
                 },
                 software_executor: None,
+                delivery_adapter: None,
             },
         )
         .await
@@ -808,6 +809,7 @@ install = "true"
                     reason: "change-set pin apply",
                 },
                 software_executor: None,
+                delivery_adapter: None,
             },
         )
         .await

@@ -776,6 +776,7 @@ document = "agent.json"
                     reason: "staged product e2e",
                 },
                 software_executor: None,
+                delivery_adapter: None,
             },
         )
         .await

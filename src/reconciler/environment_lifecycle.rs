@@ -157,6 +157,7 @@ async fn execute_authorized(
             emergency_reason: None,
             authorization,
             software_executor: software,
+            delivery_adapter: crate::delivery_bridge::selected_delivery_adapter(),
         },
     )
     .await?;

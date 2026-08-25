@@ -225,6 +225,39 @@ async fn execute_locked(
         return Ok(outcomes);
     }
 
+    if let Some(adapter) = options.delivery_adapter.clone() {
+        let report = crate::delivery_bridge::execute_bridged_plan(
+            ctx,
+            adapter.as_ref(),
+            &stored_plan,
+            crate::delivery_bridge::BridgeExecution {
+                expected_environment: &env,
+                approval: None,
+                skip_gates,
+                now: crate::now_millis(),
+                fence: None,
+            },
+        )
+        .await?;
+        let status = if report.recovery_required {
+            StepOutcomeStatus::Failed
+        } else if report.rollback_triggered {
+            StepOutcomeStatus::RolledBack
+        } else if report.state == PlanState::Succeeded {
+            StepOutcomeStatus::Succeeded
+        } else if report.state == PlanState::Failed {
+            StepOutcomeStatus::Failed
+        } else {
+            StepOutcomeStatus::Blocked
+        };
+        return Ok(stored_plan
+            .steps
+            .iter()
+            .cloned()
+            .map(|step| Outcome::new(step, status, report.detail.clone()))
+            .collect());
+    }
+
     let mut completion = plan_completion::ExecutionCompletion::new();
 
     for step in steps {
