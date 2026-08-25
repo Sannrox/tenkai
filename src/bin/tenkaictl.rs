@@ -12,8 +12,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use tenkai::auth_context::AuthenticatedRequestContext;
 use tenkai::command_result::{CommandName, CommandOutcome, CommandResultV1, RetryGuidance};
 use tenkai::{
-    apply, assertion_verifier, canary, catalog, client, connectivity, dev_sign, fleet_workload,
-    inventory, maintenance, offline_bundle, ontology, plan, reconciler, release_signing, wave,
+    apply, assertion_verifier, canary, catalog, client, connectivity, dev_sign, fleet_budget,
+    fleet_workload, inventory, maintenance, offline_bundle, ontology, plan, reconciler,
+    release_signing, wave,
 };
 
 const JWT_VERIFIER_CONFIG_ENV: &str = "TENKAI_JWT_VERIFIER_CONFIG";
@@ -361,6 +362,19 @@ enum FleetCommand {
     Status,
     /// Materialize a deterministic thousand-environment synthetic fleet.
     Generate {
+        #[arg(long)]
+        seed: String,
+        #[arg(long)]
+        product: String,
+        #[arg(long)]
+        channel: String,
+        #[arg(long)]
+        current_version: String,
+        #[arg(long)]
+        behind_version: String,
+    },
+    /// Measure the generated thousand-environment workload against named budgets.
+    Measure {
         #[arg(long)]
         seed: String,
         #[arg(long)]
@@ -1271,6 +1285,29 @@ async fn run(cli: Cli) -> Result<()> {
             };
             let record = fleet_workload::materialize(&mut ctx, &spec).await?;
             println!("{}", fleet_workload::format_workload(&record));
+        }
+        Command::Fleet {
+            command:
+                FleetCommand::Measure {
+                    seed,
+                    product,
+                    channel,
+                    current_version,
+                    behind_version,
+                },
+        } => {
+            let spec = fleet_workload::WorkloadSpec {
+                seed,
+                product,
+                channel,
+                current_version,
+                behind_version,
+            };
+            let budget = fleet_budget::ResourceBudget::ci_embedded_sqlite();
+            let (plan, report) =
+                fleet_budget::measure(&mut ctx, &spec, &cli.database, &budget).await?;
+            println!("{}", fleet_workload::format_workload(&plan));
+            println!("{}", fleet_budget::format_report(&report));
         }
         Command::Fleet {
             command:
@@ -2724,6 +2761,28 @@ mod tests {
             generate.command,
             Command::Fleet {
                 command: FleetCommand::Generate { ref seed, .. }
+            } if seed == "demo-seed"
+        ));
+        let measure = Cli::try_parse_from([
+            "tenkaictl",
+            "fleet",
+            "measure",
+            "--seed",
+            "demo-seed",
+            "--product",
+            "scale-app",
+            "--channel",
+            "stable",
+            "--current-version",
+            "1.1.0",
+            "--behind-version",
+            "1.0.0",
+        ])
+        .unwrap();
+        assert!(matches!(
+            measure.command,
+            Command::Fleet {
+                command: FleetCommand::Measure { ref seed, .. }
             } if seed == "demo-seed"
         ));
     }

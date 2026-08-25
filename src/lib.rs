@@ -132,6 +132,7 @@ pub mod environment;
 pub mod federated_identity;
 pub mod fenced_mutation;
 pub mod fleet;
+pub mod fleet_budget;
 pub mod fleet_workload;
 pub mod inventory;
 pub mod maintenance;

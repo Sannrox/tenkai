@@ -29,4 +29,17 @@ all-healthy mix fail closed. Partial materialization is never reported as a
 complete thousand-environment fleet. Recovery uses `tenkaictl backup` /
 `restore` only.
 
-Budget measurement and fairness under failure are separate issues (#300, #301).
+Budget measurement uses the named `ci-embedded-sqlite` profile (#300). Gates stay
+enabled (`skip_gates=false`). Two reconcile ticks are timed; a miss names the
+limiting resource and fails closed.
+
+```bash
+tenkaictl fleet measure \
+  --seed demo-seed \
+  --product scale-app \
+  --channel stable \
+  --current-version 1.1.0 \
+  --behind-version 1.0.0
+```
+
+Fairness under injected failure is a separate issue (#301).
