@@ -28,6 +28,7 @@ pub const KIND_CANARY_OUTCOME: &str = "tenkai.canary_outcome";
 pub const KIND_PROMOTION_AUDIT: &str = "tenkai.promotion_audit";
 pub const KIND_PROMOTION_LOCK: &str = "tenkai.promotion_lock";
 pub const KIND_WAVE: &str = "tenkai.wave";
+pub const KIND_CONNECTIVITY_UPGRADE: &str = "tenkai.connectivity_upgrade";
 
 pub const REL_RELEASE_OF: &str = "release_of";
 pub const REL_HAS_RELEASE_VERIFICATION: &str = "has_release_verification";
@@ -79,6 +80,9 @@ pub fn env_id(name: &str) -> String {
 }
 pub fn wave_id(name: &str) -> String {
     format!("tenkai:wave:{name}")
+}
+pub fn connectivity_upgrade_id(name: &str) -> String {
+    format!("tenkai:connectivity-upgrade:{name}")
 }
 pub fn plan_id(env: &str, ts: i64, content_id: &str) -> String {
     format!("tenkai:plan:{env}:{ts}:{content_id}")
@@ -654,6 +658,23 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
                 prop("record", true, "Canonical JSON wave record"),
             ],
         ),
+        object_type(
+            KIND_CONNECTIVITY_UPGRADE,
+            "A durable upgrade coordinator spanning connected, intermittent, and isolated environments",
+            vec![
+                prop("name", true, "Operator-provided upgrade name"),
+                prop(
+                    "identity_digest",
+                    true,
+                    "Digest of the content-bound upgrade identity",
+                ),
+                prop("product", true, "Product name pinned by this upgrade"),
+                prop("version", true, "Release version pinned by this upgrade"),
+                prop("channel", true, "Channel whose head must match the pin"),
+                prop("status", true, "Upgrade lifecycle status"),
+                prop("record", true, "Canonical JSON upgrade record"),
+            ],
+        ),
     ];
 
     let mut registered = Vec::new();
@@ -680,6 +701,20 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
         }
     }
     Ok(registered)
+}
+
+/// Verify once per connected client that an administrator registered upgrade types.
+pub async fn require_connectivity_upgrade_schema(ctx: &mut Ctx) -> Result<()> {
+    let schemas = ctx.schemas().await?;
+    if !schemas
+        .iter()
+        .any(|schema| schema.kind == KIND_CONNECTIVITY_UPGRADE)
+    {
+        bail!(
+            "connectivity-upgrade schema upgrade required (missing {KIND_CONNECTIVITY_UPGRADE}); ask an administrator to run `tenkaictl init`"
+        );
+    }
+    Ok(())
 }
 
 /// Verify once per connected client that an administrator registered wave types.

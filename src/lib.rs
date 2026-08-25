@@ -58,6 +58,8 @@
 //! - `apply::step_lifecycle` hides target and restore admission, rollback cleanup,
 //!   activation recovery, Environment observation, and bookkeeping compensation
 //!   behind one private Plan Step execution interface.
+//! - [`connectivity`] coordinates one signed upgrade across connected,
+//!   intermittent, and isolated environments without a second executor.
 //! - [`fleet`] owns pure fleet posture aggregation, drift comparison, and
 //!   baseline I/O so callers do not re-encode inspect→posture classification.
 //! - [`storage`] and [`tenant_store`] provide operational persistence adapters.
@@ -121,6 +123,7 @@ pub mod catalog;
 pub mod change_set_pin;
 pub mod client;
 pub mod command_result;
+pub mod connectivity;
 pub mod delivery_conformance;
 pub mod dev_sign;
 pub mod development_fixtures;

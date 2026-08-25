@@ -12,8 +12,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use tenkai::auth_context::AuthenticatedRequestContext;
 use tenkai::command_result::{CommandName, CommandOutcome, CommandResultV1, RetryGuidance};
 use tenkai::{
-    apply, assertion_verifier, canary, catalog, client, dev_sign, inventory, maintenance, ontology,
-    plan, reconciler, wave,
+    apply, assertion_verifier, canary, catalog, client, connectivity, dev_sign, inventory,
+    maintenance, ontology, plan, reconciler, wave,
 };
 
 const JWT_VERIFIER_CONFIG_ENV: &str = "TENKAI_JWT_VERIFIER_CONFIG";
@@ -145,6 +145,11 @@ enum Command {
     Wave {
         #[command(subcommand)]
         command: WaveCommand,
+    },
+    /// One signed upgrade across connected, intermittent, and isolated environments.
+    Upgrade {
+        #[command(subcommand)]
+        command: UpgradeCommand,
     },
     /// Show the steps that would converge the environment (dry run).
     Plan {
@@ -472,6 +477,61 @@ enum WaveCommand {
 }
 
 #[derive(Subcommand)]
+enum UpgradeCommand {
+    /// Admit a durable connectivity-class upgrade.
+    Start {
+        name: String,
+        #[arg(long)]
+        product: String,
+        #[arg(long)]
+        version: String,
+        #[arg(long)]
+        channel: String,
+        /// Comma-separated environment names.
+        #[arg(long)]
+        cohort: String,
+    },
+    /// Show uniform upgrade status across connectivity classes.
+    Status { name: String },
+    /// Advance the next pending or interrupted environment.
+    Advance {
+        name: String,
+        #[arg(long, requires = "development_reason")]
+        allow_unapproved_development: bool,
+        #[arg(long, requires = "allow_unapproved_development")]
+        development_reason: Option<String>,
+    },
+    /// Interrupt an intermittent transfer before verified content.
+    Interrupt { name: String, env: String },
+    /// Resume a verified intermittent transfer.
+    Resume { name: String, env: String },
+    /// Bind a verified isolated bundle digest.
+    BindBundle {
+        name: String,
+        env: String,
+        #[arg(long)]
+        digest: String,
+    },
+    /// Import a signed isolated receipt digest (idempotent; conflicts fail closed).
+    ImportReceipt {
+        name: String,
+        env: String,
+        #[arg(long)]
+        bundle_digest: String,
+        #[arg(long)]
+        receipt_digest: String,
+    },
+    /// Roll back applied environments through Tenkai rollback plans.
+    Rollback {
+        name: String,
+        #[arg(long, requires = "development_reason")]
+        allow_unapproved_development: bool,
+        #[arg(long, requires = "allow_unapproved_development")]
+        development_reason: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum EnvCommand {
     /// Register an environment.
     Add {
@@ -499,6 +559,8 @@ enum EnvCommand {
         #[command(subcommand)]
         command: MaintenanceCommand,
     },
+    /// Set the environment connectivity class (connected, intermittent, isolated).
+    Connectivity { env: String, class: String },
     /// Manage environment capability / inventory facts (architecture, memory, …).
     Facts {
         #[command(subcommand)]
@@ -1189,6 +1251,100 @@ async fn run(cli: Cli) -> Result<()> {
             )
             .await?;
         }
+        Command::Upgrade { command } => match command {
+            UpgradeCommand::Start {
+                name,
+                product,
+                version,
+                channel,
+                cohort,
+            } => {
+                let environments: Vec<String> = cohort
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|env| !env.is_empty())
+                    .map(str::to_string)
+                    .collect();
+                let spec = connectivity::UpgradeSpec {
+                    name,
+                    product,
+                    version,
+                    channel,
+                    environments,
+                };
+                let record = connectivity::start_or_resume(&mut ctx, &spec).await?;
+                println!("{}", connectivity::format_upgrade(&record));
+            }
+            UpgradeCommand::Status { name } => {
+                let record = connectivity::load_upgrade(&mut ctx, &name).await?;
+                println!("{}", connectivity::format_upgrade(&record));
+            }
+            UpgradeCommand::Advance {
+                name,
+                allow_unapproved_development,
+                development_reason,
+            } => {
+                if !allow_unapproved_development {
+                    bail!("upgrade advance requires --allow-unapproved-development in this slice");
+                }
+                let record = connectivity::advance(
+                    &mut ctx,
+                    &name,
+                    apply::ExecutionAuthorization::LocalDevelopment {
+                        reason: development_reason.as_deref().unwrap_or("upgrade"),
+                    },
+                )
+                .await?;
+                println!("{}", connectivity::format_upgrade(&record));
+            }
+            UpgradeCommand::Interrupt { name, env } => {
+                let record = connectivity::interrupt_transfer(&mut ctx, &name, &env).await?;
+                println!("{}", connectivity::format_upgrade(&record));
+            }
+            UpgradeCommand::Resume { name, env } => {
+                let record = connectivity::resume_transfer(&mut ctx, &name, &env).await?;
+                println!("{}", connectivity::format_upgrade(&record));
+            }
+            UpgradeCommand::BindBundle { name, env, digest } => {
+                let record =
+                    connectivity::bind_isolated_bundle(&mut ctx, &name, &env, &digest).await?;
+                println!("{}", connectivity::format_upgrade(&record));
+            }
+            UpgradeCommand::ImportReceipt {
+                name,
+                env,
+                bundle_digest,
+                receipt_digest,
+            } => {
+                let record = connectivity::import_isolated_receipt(
+                    &mut ctx,
+                    &name,
+                    &env,
+                    &bundle_digest,
+                    &receipt_digest,
+                )
+                .await?;
+                println!("{}", connectivity::format_upgrade(&record));
+            }
+            UpgradeCommand::Rollback {
+                name,
+                allow_unapproved_development,
+                development_reason,
+            } => {
+                if !allow_unapproved_development {
+                    bail!("upgrade rollback requires --allow-unapproved-development in this slice");
+                }
+                let record = connectivity::rollback_upgrade(
+                    &mut ctx,
+                    &name,
+                    apply::ExecutionAuthorization::LocalDevelopment {
+                        reason: development_reason.as_deref().unwrap_or("upgrade rollback"),
+                    },
+                )
+                .await?;
+                println!("{}", connectivity::format_upgrade(&record));
+            }
+        },
         Command::Wave { command } => match command {
             WaveCommand::Run {
                 cohort,
@@ -1412,6 +1568,13 @@ async fn run(cli: Cli) -> Result<()> {
                     println!("{}", maintenance::repair(&mut ctx, &env).await?);
                 }
             },
+            EnvCommand::Connectivity { env, class } => {
+                let class = connectivity::ConnectivityClass::parse(&class)?;
+                println!(
+                    "{}",
+                    connectivity::set_connectivity_class(&mut ctx, &env, class).await?
+                );
+            }
             EnvCommand::Facts { command } => match command {
                 FactsCommand::List { env } => {
                     let facts = plan::list_environment_facts(&mut ctx, &env).await?;
@@ -2541,6 +2704,40 @@ mod tests {
                 skip_gates: true,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn parses_connectivity_upgrade_commands() {
+        let connectivity =
+            Cli::try_parse_from(["tenkaictl", "env", "connectivity", "site-b", "intermittent"])
+                .unwrap();
+        assert!(matches!(
+            connectivity.command,
+            Command::Env {
+                command: EnvCommand::Connectivity { ref env, ref class }
+            } if env == "site-b" && class == "intermittent"
+        ));
+        let start = Cli::try_parse_from([
+            "tenkaictl",
+            "upgrade",
+            "start",
+            "fleet-1",
+            "--product",
+            "edge-app",
+            "--version",
+            "1.0.0",
+            "--channel",
+            "stable",
+            "--cohort",
+            "site-a,site-b,site-c",
+        ])
+        .unwrap();
+        assert!(matches!(
+            start.command,
+            Command::Upgrade {
+                command: UpgradeCommand::Start { ref name, .. }
+            } if name == "fleet-1"
         ));
     }
 
