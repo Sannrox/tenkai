@@ -13,8 +13,8 @@ use tenkai::auth_context::AuthenticatedRequestContext;
 use tenkai::command_result::{CommandName, CommandOutcome, CommandResultV1, RetryGuidance};
 use tenkai::{
     apply, assertion_verifier, canary, catalog, client, connectivity, dev_sign, fleet_budget,
-    fleet_workload, inventory, maintenance, offline_bundle, ontology, plan, reconciler,
-    release_signing, wave,
+    fleet_fairness, fleet_workload, inventory, maintenance, offline_bundle, ontology, plan,
+    reconciler, release_signing, wave,
 };
 
 const JWT_VERIFIER_CONFIG_ENV: &str = "TENKAI_JWT_VERIFIER_CONFIG";
@@ -385,6 +385,21 @@ enum FleetCommand {
         current_version: String,
         #[arg(long)]
         behind_version: String,
+    },
+    /// Check that failing synthetic environments do not starve the fleet.
+    Fairness {
+        #[arg(long)]
+        seed: String,
+        #[arg(long)]
+        product: String,
+        #[arg(long)]
+        channel: String,
+        #[arg(long)]
+        current_version: String,
+        #[arg(long)]
+        behind_version: String,
+        #[arg(long)]
+        backup: PathBuf,
     },
     /// Poll fleet status and report posture drift versus a baseline or prior sample.
     Watch {
@@ -1308,6 +1323,28 @@ async fn run(cli: Cli) -> Result<()> {
                 fleet_budget::measure(&mut ctx, &spec, &cli.database, &budget).await?;
             println!("{}", fleet_workload::format_workload(&plan));
             println!("{}", fleet_budget::format_report(&report));
+        }
+        Command::Fleet {
+            command:
+                FleetCommand::Fairness {
+                    seed,
+                    product,
+                    channel,
+                    current_version,
+                    behind_version,
+                    backup,
+                },
+        } => {
+            let spec = fleet_workload::WorkloadSpec {
+                seed,
+                product,
+                channel,
+                current_version,
+                behind_version,
+            };
+            let (plan, report) = fleet_fairness::observe(&mut ctx, &spec, &backup).await?;
+            println!("{}", fleet_workload::format_workload(&plan));
+            println!("{}", fleet_fairness::format_report(&report));
         }
         Command::Fleet {
             command:
