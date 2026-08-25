@@ -12,8 +12,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use tenkai::auth_context::AuthenticatedRequestContext;
 use tenkai::command_result::{CommandName, CommandOutcome, CommandResultV1, RetryGuidance};
 use tenkai::{
-    apply, assertion_verifier, canary, catalog, client, connectivity, dev_sign, inventory,
-    maintenance, offline_bundle, ontology, plan, reconciler, release_signing, wave,
+    apply, assertion_verifier, canary, catalog, client, connectivity, dev_sign, fleet_workload,
+    inventory, maintenance, offline_bundle, ontology, plan, reconciler, release_signing, wave,
 };
 
 const JWT_VERIFIER_CONFIG_ENV: &str = "TENKAI_JWT_VERIFIER_CONFIG";
@@ -359,6 +359,19 @@ enum ApprovalCommand {
 enum FleetCommand {
     /// Summarize delivery posture for every environment (embedded or remote).
     Status,
+    /// Materialize a deterministic thousand-environment synthetic fleet.
+    Generate {
+        #[arg(long)]
+        seed: String,
+        #[arg(long)]
+        product: String,
+        #[arg(long)]
+        channel: String,
+        #[arg(long)]
+        current_version: String,
+        #[arg(long)]
+        behind_version: String,
+    },
     /// Poll fleet status and report posture drift versus a baseline or prior sample.
     Watch {
         /// Seconds between samples when not using --once.
@@ -1238,6 +1251,26 @@ async fn run(cli: Cli) -> Result<()> {
         } => {
             let report = plan::fleet_status(&mut ctx).await?;
             print_fleet_status(&report);
+        }
+        Command::Fleet {
+            command:
+                FleetCommand::Generate {
+                    seed,
+                    product,
+                    channel,
+                    current_version,
+                    behind_version,
+                },
+        } => {
+            let spec = fleet_workload::WorkloadSpec {
+                seed,
+                product,
+                channel,
+                current_version,
+                behind_version,
+            };
+            let record = fleet_workload::materialize(&mut ctx, &spec).await?;
+            println!("{}", fleet_workload::format_workload(&record));
         }
         Command::Fleet {
             command:
@@ -2670,6 +2703,28 @@ mod tests {
             Command::Fleet {
                 command: FleetCommand::Status
             }
+        ));
+        let generate = Cli::try_parse_from([
+            "tenkaictl",
+            "fleet",
+            "generate",
+            "--seed",
+            "demo-seed",
+            "--product",
+            "scale-app",
+            "--channel",
+            "stable",
+            "--current-version",
+            "1.1.0",
+            "--behind-version",
+            "1.0.0",
+        ])
+        .unwrap();
+        assert!(matches!(
+            generate.command,
+            Command::Fleet {
+                command: FleetCommand::Generate { ref seed, .. }
+            } if seed == "demo-seed"
         ));
     }
 

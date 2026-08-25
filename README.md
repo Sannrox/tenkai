@@ -493,6 +493,7 @@ it ([ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md),
 | Multi-environment list/inspect | `tenkaictl env list` / `env inspect`; #56 |
 | Authenticated remote status/inspect | `--target remote`; #58 |
 | Fleet status (embedded and remote) | `tenkaictl fleet status`; [server diagnostics](docs/server-diagnostics.md); #91 |
+| Synthetic thousand-environment workload | `tenkaictl fleet generate`; [fleet workload](docs/fleet-workload.md); #299 |
 | Fleet drift watch (baseline + exit codes) | `tenkaictl fleet watch`; [server diagnostics](docs/server-diagnostics.md#fleet-drift-watch); #107 |
 | Environment capability facts + planner constraints | `env facts` / `env constraints`; #63, #57 |
 | Planner model_runtime variant selection by facts | [Model runtime](docs/model-runtime.md); #66 |
