@@ -1,7 +1,7 @@
 # Operational storage
 
-Tenkai owns releases, channel heads, environments, plans, leases, receipts, and
-rollback recovery state. `OperationalStore` is the application boundary for
+Tenkai owns releases, channel heads, environments, plans, leases, receipts,
+rollback recovery state, and durable executable-wave records (ADR 0017). `OperationalStore` is the application boundary for
 that authority. `SqliteStore` is the complete solo-mode adapter; future server
 database adapters must pass the same immutability, lifecycle, idempotency, and
 generation-fencing contract.
