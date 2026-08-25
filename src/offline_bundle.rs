@@ -473,6 +473,13 @@ impl ReceiptStatement {
         Ok(output)
     }
 
+    pub fn digest(&self) -> Result<String> {
+        Ok(format!(
+            "sha256:{:x}",
+            Sha256::digest(self.canonical_bytes()?)
+        ))
+    }
+
     fn validate(&self) -> Result<()> {
         crate::signature_verification::validate_prefixed_digest(
             "bundle digest",
@@ -531,6 +538,23 @@ impl ReceiptEnvelope {
             statement,
             signature: STANDARD.encode(signature.to_bytes()),
         })
+    }
+
+    pub fn load(path: &Path) -> Result<Self> {
+        let raw = std::fs::read(path)
+            .with_context(|| format!("reading offline receipt {}", path.display()))?;
+        serde_json::from_slice(&raw).context("parsing offline receipt")
+    }
+
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let bytes = serde_json::to_vec_pretty(self)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating receipt directory {}", parent.display()))?;
+        }
+        std::fs::write(path, bytes)
+            .with_context(|| format!("writing offline receipt {}", path.display()))?;
+        Ok(())
     }
 
     pub fn verify(

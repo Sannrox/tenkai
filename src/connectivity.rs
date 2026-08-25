@@ -464,17 +464,31 @@ pub async fn bind_isolated_bundle(
     ctx: &mut Ctx,
     name: &str,
     environment: &str,
-    bundle_digest: &str,
+    bundle: &crate::offline_bundle::BundleEnvelope,
+    trust_roots: &crate::release_signing::TrustRoots,
 ) -> Result<UpgradeRecord> {
-    crate::signature_verification::validate_prefixed_digest(
-        "offline bundle digest",
-        bundle_digest,
+    let verified = bundle.verify(
+        trust_roots,
+        crate::ontology::NS,
+        environment,
+        crate::now_millis(),
     )?;
+    let bundle_digest = verified.digest().to_string();
     let mut record = load_upgrade(ctx, name).await?;
     revalidate(&record, ctx).await?;
     let index = env_index(&record, environment)?;
     if record.environments[index].class != ConnectivityClass::Isolated {
         bail!("environment {environment} is not isolated");
+    }
+    let expected_plan = record.environments[index]
+        .plan_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("isolated environment {environment} has no plan"))?;
+    if verified.statement().plan_id != expected_plan {
+        bail!(
+            "offline bundle plan {} does not match upgrade plan {expected_plan}",
+            verified.statement().plan_id
+        );
     }
     if let Some(existing) = record.environments[index]
         .isolated
@@ -487,7 +501,7 @@ pub async fn bind_isolated_bundle(
         );
     }
     record.environments[index].isolated = Some(IsolatedEvidence {
-        bundle_digest: bundle_digest.into(),
+        bundle_digest,
         receipt_digest: record.environments[index]
             .isolated
             .as_ref()
@@ -502,17 +516,38 @@ pub async fn import_isolated_receipt(
     ctx: &mut Ctx,
     name: &str,
     environment: &str,
-    bundle_digest: &str,
-    receipt_digest: &str,
+    receipt: &crate::offline_bundle::ReceiptEnvelope,
+    bundle: &crate::offline_bundle::BundleEnvelope,
+    trust_roots: &crate::release_signing::TrustRoots,
 ) -> Result<UpgradeRecord> {
-    crate::signature_verification::validate_prefixed_digest(
-        "offline bundle digest",
-        bundle_digest,
+    if receipt.key_id == bundle.key_id {
+        bail!("offline receipt must not be signed by the bundle exporter");
+    }
+    let scope = crate::offline_bundle::ReceiptTrustScope {
+        tenant_id: crate::ontology::NS.into(),
+        environment_id: environment.into(),
+        runtime_id: receipt.statement.runtime_id.clone(),
+        key_id: receipt.key_id.clone(),
+    };
+    let verified_bundle = bundle.verify(
+        trust_roots,
+        crate::ontology::NS,
+        environment,
+        crate::now_millis(),
     )?;
-    crate::signature_verification::validate_prefixed_digest(
-        "offline receipt digest",
-        receipt_digest,
-    )?;
+    let verified_receipt =
+        receipt.verify(trust_roots, &scope, &verified_bundle, crate::now_millis())?;
+    if !verified_receipt.statement().succeeded
+        || verified_receipt
+            .statement()
+            .receipts
+            .iter()
+            .any(|step| !step.succeeded)
+    {
+        bail!("offline receipt is not a successful completion");
+    }
+    let bundle_digest = verified_bundle.digest().to_string();
+    let receipt_digest = verified_receipt.statement().digest()?;
     let mut record = load_upgrade(ctx, name).await?;
     revalidate(&record, ctx).await?;
     let index = env_index(&record, environment)?;
@@ -540,8 +575,8 @@ pub async fn import_isolated_receipt(
         }
         None => {
             record.environments[index].isolated = Some(IsolatedEvidence {
-                bundle_digest: bundle_digest.into(),
-                receipt_digest: Some(receipt_digest.into()),
+                bundle_digest,
+                receipt_digest: Some(receipt_digest),
             });
             record.environments[index].detail = "isolated receipt accepted".into();
         }
@@ -877,7 +912,7 @@ pub fn export_isolated_bundle(
     );
     crate::offline_bundle::BundleEnvelope::create(
         crate::offline_bundle::BundleStatement {
-            tenant_id: "tenkai".into(),
+            tenant_id: crate::ontology::NS.into(),
             environment_id: environment.into(),
             plan_id: plan_id.into(),
             plan_digest,
@@ -890,6 +925,67 @@ pub fn export_isolated_bundle(
         },
         payloads,
         exporter,
+    )
+}
+
+pub fn export_isolated_receipt(
+    bundle: &crate::offline_bundle::VerifiedBundle,
+    runtime: &ed25519_dalek::SigningKey,
+    runtime_id: &str,
+    step_id: &str,
+    result: &[u8],
+    now_unix_ms: i64,
+) -> Result<crate::offline_bundle::ReceiptEnvelope> {
+    export_isolated_receipt_outcome(
+        bundle,
+        runtime,
+        runtime_id,
+        step_id,
+        result,
+        true,
+        now_unix_ms,
+    )
+}
+
+pub fn export_isolated_receipt_outcome(
+    bundle: &crate::offline_bundle::VerifiedBundle,
+    runtime: &ed25519_dalek::SigningKey,
+    runtime_id: &str,
+    step_id: &str,
+    result: &[u8],
+    succeeded: bool,
+    now_unix_ms: i64,
+) -> Result<crate::offline_bundle::ReceiptEnvelope> {
+    crate::offline_bundle::ReceiptEnvelope::create(
+        crate::offline_bundle::ReceiptStatement {
+            bundle_digest: bundle.digest().into(),
+            tenant_id: bundle.statement().tenant_id.clone(),
+            environment_id: bundle.statement().environment_id.clone(),
+            runtime_id: runtime_id.into(),
+            plan_id: bundle.statement().plan_id.clone(),
+            plan_digest: bundle.statement().plan_digest.clone(),
+            generation: 1,
+            succeeded,
+            detail: if succeeded {
+                "offline execution completed".into()
+            } else {
+                "offline execution failed".into()
+            },
+            completed_at_unix_ms: now_unix_ms,
+            receipts: vec![crate::offline_bundle::OfflineStepReceipt {
+                receipt_id: crate::offline_bundle::offline_receipt_id(
+                    &bundle.statement().environment_id,
+                    &bundle.statement().plan_id,
+                    step_id,
+                    1,
+                ),
+                step_id: step_id.into(),
+                attempt: 1,
+                succeeded,
+                result_digest: format!("sha256:{:x}", Sha256::digest(result)),
+            }],
+        },
+        runtime,
     )
 }
 
@@ -1000,6 +1096,30 @@ install = "true"
         approval_dir.join(format!("{}.json", plan_id.replace(':', "_")))
     }
 
+    fn isolated_trust_roots(
+        exporter: &SigningKey,
+        runtime: Option<&SigningKey>,
+    ) -> crate::release_signing::TrustRoots {
+        let mut signers = vec![TrustedSigner {
+            key_id: crate::signature_verification::key_id(&exporter.verifying_key().to_bytes()),
+            identity: "exporter".into(),
+            public_key: base64::engine::general_purpose::STANDARD
+                .encode(exporter.verifying_key().to_bytes()),
+        }];
+        if let Some(runtime) = runtime {
+            signers.push(TrustedSigner {
+                key_id: crate::signature_verification::key_id(&runtime.verifying_key().to_bytes()),
+                identity: "airgap-runtime".into(),
+                public_key: base64::engine::general_purpose::STANDARD
+                    .encode(runtime.verifying_key().to_bytes()),
+            });
+        }
+        crate::release_signing::TrustRoots {
+            version: TRUST_ROOT_VERSION,
+            signers,
+        }
+    }
+
     #[tokio::test]
     async fn connected_intermittent_and_isolated_complete_one_signed_upgrade() {
         let root = temp_root("three-class");
@@ -1093,6 +1213,7 @@ install = "true"
             UpgradeEnvironmentStatus::Interrupted
         );
         let exporter = SigningKey::from_bytes(&[7; 32]);
+        let runtime = SigningKey::from_bytes(&[9; 32]);
         let bundle = export_isolated_bundle(
             "site-c",
             isolated.environments[2]
@@ -1105,30 +1226,25 @@ install = "true"
             crate::now_millis(),
         )
         .unwrap();
-        let roots = crate::release_signing::TrustRoots {
-            version: TRUST_ROOT_VERSION,
-            signers: vec![TrustedSigner {
-                key_id: crate::signature_verification::key_id(&exporter.verifying_key().to_bytes()),
-                identity: "exporter".into(),
-                public_key: base64::engine::general_purpose::STANDARD
-                    .encode(exporter.verifying_key().to_bytes()),
-            }],
-        };
-        let verified = bundle
-            .verify(&roots, "tenkai", "site-c", crate::now_millis())
-            .unwrap();
-        bind_isolated_bundle(&mut ctx, "fleet-1", "site-c", verified.digest())
+        let roots = isolated_trust_roots(&exporter, Some(&runtime));
+        bind_isolated_bundle(&mut ctx, "fleet-1", "site-c", &bundle, &roots)
             .await
             .unwrap();
-        import_isolated_receipt(
-            &mut ctx,
-            "fleet-1",
-            "site-c",
-            verified.digest(),
-            verified.digest(),
+        let verified = bundle
+            .verify(&roots, crate::ontology::NS, "site-c", crate::now_millis())
+            .unwrap();
+        let receipt = export_isolated_receipt(
+            &verified,
+            &runtime,
+            "runtime-1",
+            "step-1",
+            b"installed",
+            crate::now_millis(),
         )
-        .await
         .unwrap();
+        import_isolated_receipt(&mut ctx, "fleet-1", "site-c", &receipt, &bundle, &roots)
+            .await
+            .unwrap();
         let finished = advance(
             &mut ctx,
             "fleet-1",
@@ -1151,19 +1267,186 @@ install = "true"
         assert!(status.contains("site-b intermittent applied"));
         assert!(status.contains("site-c isolated applied"));
 
-        let conflict = import_isolated_receipt(
-            &mut ctx,
-            "fleet-1",
+        let conflicting = export_isolated_receipt(
+            &verified,
+            &runtime,
+            "runtime-1",
+            "step-1",
+            b"different result",
+            crate::now_millis(),
+        )
+        .unwrap();
+        let conflict =
+            import_isolated_receipt(&mut ctx, "fleet-1", "site-c", &conflicting, &bundle, &roots)
+                .await
+                .unwrap_err()
+                .to_string();
+        assert!(
+            conflict.contains("conflicting isolated receipt"),
+            "{conflict}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn unverified_isolated_bundle_and_receipt_are_rejected_by_the_coordinator() {
+        let root = temp_root("bogus-archive");
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        published_software(&mut ctx, &root, "1.0.0").await;
+        let actor = crate::auth_context::test_management_context("bogus");
+        crate::catalog::promote(&mut ctx, &actor, "edge-app@1.0.0", "stable")
+            .await
+            .unwrap();
+        prepare_env(&mut ctx, "site-c", ConnectivityClass::Isolated, &actor).await;
+        let spec = UpgradeSpec {
+            name: "fleet-bogus".into(),
+            product: "edge-app".into(),
+            version: "1.0.0".into(),
+            channel: "stable".into(),
+            environments: vec!["site-c".into()],
+        };
+        let started = start_or_resume(&mut ctx, &spec).await.unwrap();
+        let exporter = SigningKey::from_bytes(&[7; 32]);
+        let runtime = SigningKey::from_bytes(&[9; 32]);
+        let bundle = export_isolated_bundle(
             "site-c",
-            verified.digest(),
-            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            started.environments[0]
+                .plan_id
+                .as_deref()
+                .unwrap_or("pending"),
+            &started.release_id,
+            b"immutable payload",
+            &exporter,
+            crate::now_millis(),
+        )
+        .unwrap();
+        let roots = isolated_trust_roots(&exporter, Some(&runtime));
+        let mut forged = bundle.clone();
+        forged.signature = base64::engine::general_purpose::STANDARD.encode([0_u8; 64]);
+        let forged_err = bind_isolated_bundle(&mut ctx, "fleet-bogus", "site-c", &forged, &roots)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            forged_err.contains("signature")
+                || forged_err.contains("verify")
+                || forged_err.contains("offline bundle"),
+            "{forged_err}"
+        );
+        let wrong_env = export_isolated_bundle(
+            "other-site",
+            started.environments[0]
+                .plan_id
+                .as_deref()
+                .unwrap_or("pending"),
+            &started.release_id,
+            b"immutable payload",
+            &exporter,
+            crate::now_millis(),
+        )
+        .unwrap();
+        let scoped = bind_isolated_bundle(&mut ctx, "fleet-bogus", "site-c", &wrong_env, &roots)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            scoped.contains("tenant") || scoped.contains("environment") || scoped.contains("scope"),
+            "{scoped}"
+        );
+
+        bind_isolated_bundle(&mut ctx, "fleet-bogus", "site-c", &bundle, &roots)
+            .await
+            .unwrap();
+        let verified = bundle
+            .verify(&roots, crate::ontology::NS, "site-c", crate::now_millis())
+            .unwrap();
+        let mut bad_receipt = export_isolated_receipt(
+            &verified,
+            &runtime,
+            "runtime-1",
+            "step-1",
+            b"installed",
+            crate::now_millis(),
+        )
+        .unwrap();
+        bad_receipt.signature = base64::engine::general_purpose::STANDARD.encode([1_u8; 64]);
+        let receipt_err = import_isolated_receipt(
+            &mut ctx,
+            "fleet-bogus",
+            "site-c",
+            &bad_receipt,
+            &bundle,
+            &roots,
         )
         .await
         .unwrap_err()
         .to_string();
         assert!(
-            conflict.contains("conflicting isolated receipt"),
-            "{conflict}"
+            receipt_err.contains("signature")
+                || receipt_err.contains("verify")
+                || receipt_err.contains("offline receipt"),
+            "{receipt_err}"
+        );
+        let failed = export_isolated_receipt_outcome(
+            &verified,
+            &runtime,
+            "runtime-1",
+            "step-1",
+            b"failed",
+            false,
+            crate::now_millis(),
+        )
+        .unwrap();
+        let failed_err =
+            import_isolated_receipt(&mut ctx, "fleet-bogus", "site-c", &failed, &bundle, &roots)
+                .await
+                .unwrap_err()
+                .to_string();
+        assert!(
+            failed_err.contains("not a successful completion"),
+            "{failed_err}"
+        );
+        let exporter_signed = export_isolated_receipt(
+            &verified,
+            &exporter,
+            "runtime-1",
+            "step-1",
+            b"installed",
+            crate::now_millis(),
+        )
+        .unwrap();
+        let exporter_err = import_isolated_receipt(
+            &mut ctx,
+            "fleet-bogus",
+            "site-c",
+            &exporter_signed,
+            &bundle,
+            &roots,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            exporter_err.contains("must not be signed by the bundle exporter"),
+            "{exporter_err}"
+        );
+        let other_plan = export_isolated_bundle(
+            "site-c",
+            "other-plan",
+            &started.release_id,
+            b"immutable payload",
+            &exporter,
+            crate::now_millis(),
+        )
+        .unwrap();
+        let plan_err = bind_isolated_bundle(&mut ctx, "fleet-bogus", "site-c", &other_plan, &roots)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            plan_err.contains("does not match upgrade plan"),
+            "{plan_err}"
         );
         let _ = std::fs::remove_dir_all(root);
     }

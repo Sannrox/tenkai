@@ -212,21 +212,36 @@ pub fn reconcile(
         }
     }
 
-    if observed.len() as u32 == spec.replicas
-        && observed.iter().all(|snapshot| {
-            snapshot.version == spec.version
-                && matches!(snapshot.state.as_str(), "ready" | "active")
-                && snapshot.intake == INTAKE_PLANE
-        })
-    {
+    if pool_is_converged(spec, observed) {
         return Ok(WorkerPoolDecision::Apply {
             replicas: spec.replicas,
         });
     }
 
-    Ok(WorkerPoolDecision::Apply {
-        replicas: spec.replicas,
+    if scaling_down || replacing {
+        return Ok(WorkerPoolDecision::Apply {
+            replicas: spec.replicas,
+        });
+    }
+
+    Ok(WorkerPoolDecision::Degraded {
+        reason: format!(
+            "pool is not at the desired replica count and version (observed {}, desired {}, version {})",
+            observed.len(),
+            spec.replicas,
+            spec.version
+        ),
     })
+}
+
+pub fn pool_is_converged(spec: &WorkerPoolSpec, observed: &[WorkerLifecycleSnapshot]) -> bool {
+    !observed.is_empty()
+        && observed.len() as u32 == spec.replicas
+        && observed.iter().all(|snapshot| {
+            snapshot.version == spec.version
+                && matches!(snapshot.state.as_str(), "ready" | "active")
+                && snapshot.intake == INTAKE_PLANE
+        })
 }
 
 pub fn observation(
@@ -235,10 +250,8 @@ pub fn observation(
     decision: &WorkerPoolDecision,
 ) -> WorkerPoolObservation {
     let (state, degraded, detail) = match decision {
-        WorkerPoolDecision::Apply { .. }
-            if observed
-                .iter()
-                .all(|snapshot| snapshot.state == "ready" || snapshot.state == "active") =>
+        WorkerPoolDecision::Apply { replicas }
+            if pool_is_converged(spec, observed) && *replicas == spec.replicas =>
         {
             ("healthy".into(), false, "pool converged".into())
         }
@@ -405,6 +418,59 @@ mod tests {
     }
 
     #[test]
+    fn under_replicated_pool_is_not_healthy_and_does_not_apply_success() {
+        let desired = spec(2);
+        let none = reconcile(&desired, &[], 0, None, 10).unwrap();
+        match &none {
+            WorkerPoolDecision::Degraded { reason } => {
+                assert!(reason.contains("desired replica count"), "{reason}");
+            }
+            other => panic!("expected degraded for zero hosts, got {other:?}"),
+        }
+        let observed = observation(&desired, &[], &none);
+        assert!(observed.degraded);
+        assert_ne!(observed.state, "healthy");
+        assert_eq!(observed.observed_replicas, 0);
+
+        let one = ready_snapshot(&desired, "w1");
+        let decision = reconcile(&desired, std::slice::from_ref(&one), 1, None, 10).unwrap();
+        match &decision {
+            WorkerPoolDecision::Degraded { reason } => {
+                assert!(reason.contains("desired replica count"), "{reason}");
+            }
+            other => panic!("expected degraded for one of two hosts, got {other:?}"),
+        }
+        let observed = observation(&desired, std::slice::from_ref(&one), &decision);
+        assert!(observed.degraded);
+        assert_ne!(observed.state, "healthy");
+        assert_eq!(observed.observed_replicas, 1);
+        assert!(!pool_is_converged(&desired, &[]));
+        assert!(!pool_is_converged(&desired, std::slice::from_ref(&one)));
+    }
+
+    #[test]
+    fn drained_replacement_admits_apply_without_reporting_healthy() {
+        let desired = WorkerPoolSpec {
+            product: "edge-workers".into(),
+            version: "2.0.0".into(),
+            intake: INTAKE_PLANE.into(),
+            replicas: 1,
+            drain_timeout_ms: 1_000,
+        };
+        let previous = spec(1);
+        let mut drained = ready_snapshot(&previous, "w1");
+        drained.state = "ready".into();
+        drained.accepting_claims = true;
+        drained.active_claims = 0;
+        let decision = reconcile(&desired, std::slice::from_ref(&drained), 1, Some(0), 10).unwrap();
+        assert_eq!(decision, WorkerPoolDecision::Apply { replicas: 1 });
+        let observed = observation(&desired, std::slice::from_ref(&drained), &decision);
+        assert!(!observed.degraded);
+        assert_eq!(observed.state, "applying");
+        assert!(!pool_is_converged(&desired, std::slice::from_ref(&drained)));
+    }
+
+    #[test]
     fn drain_success_admits_scale_down() {
         let desired = spec(1);
         let drained = ready_snapshot(&desired, "w1");
@@ -493,6 +559,7 @@ kind = "worker_pool"
 [worker_pool]
 intake = "plane"
 replicas = 1
+drain_timeout_ms = 1000
 "#,
         )
         .unwrap();
@@ -565,7 +632,16 @@ replicas = 1
             .await
             .unwrap()
             .unwrap();
-        let workdir = std::path::PathBuf::from(release.properties.get("workdir").unwrap());
+        let snapshot = std::path::PathBuf::from(release.properties.get("workdir").unwrap());
+        let artifact_digest = release.properties.get("artifact_digest").unwrap();
+        let workdir = crate::manifest::execution_workdir(
+            &snapshot,
+            &[],
+            artifact_digest,
+            "local",
+            "edge-workers",
+        )
+        .unwrap();
         std::fs::create_dir_all(workdir.join("worker")).unwrap();
         let spec = spec(1);
         std::fs::write(

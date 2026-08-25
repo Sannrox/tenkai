@@ -13,7 +13,7 @@ use tenkai::auth_context::AuthenticatedRequestContext;
 use tenkai::command_result::{CommandName, CommandOutcome, CommandResultV1, RetryGuidance};
 use tenkai::{
     apply, assertion_verifier, canary, catalog, client, connectivity, dev_sign, inventory,
-    maintenance, ontology, plan, reconciler, wave,
+    maintenance, offline_bundle, ontology, plan, reconciler, release_signing, wave,
 };
 
 const JWT_VERIFIER_CONFIG_ENV: &str = "TENKAI_JWT_VERIFIER_CONFIG";
@@ -496,6 +496,20 @@ enum UpgradeCommand {
     /// Advance the next pending or interrupted environment.
     Advance {
         name: String,
+        /// Detached tenkai.plan-approval.v1 JSON envelope.
+        #[arg(
+            long,
+            requires = "approval_trust_roots",
+            conflicts_with = "allow_unapproved_development"
+        )]
+        approval: Option<PathBuf>,
+        /// Current Ed25519 trust roots for plan approvers.
+        #[arg(
+            long,
+            requires = "approval",
+            conflicts_with = "allow_unapproved_development"
+        )]
+        approval_trust_roots: Option<PathBuf>,
         #[arg(long, requires = "development_reason")]
         allow_unapproved_development: bool,
         #[arg(long, requires = "allow_unapproved_development")]
@@ -505,21 +519,30 @@ enum UpgradeCommand {
     Interrupt { name: String, env: String },
     /// Resume a verified intermittent transfer.
     Resume { name: String, env: String },
-    /// Bind a verified isolated bundle digest.
+    /// Bind a verified ADR 0003 isolated bundle.
     BindBundle {
         name: String,
         env: String,
+        /// Path to a tenkai.offline-bundle.v1 JSON archive.
         #[arg(long)]
-        digest: String,
+        bundle: PathBuf,
+        /// Trust roots that must authenticate the bundle exporter.
+        #[arg(long)]
+        trust_roots: PathBuf,
     },
-    /// Import a signed isolated receipt digest (idempotent; conflicts fail closed).
+    /// Import a signed ADR 0003 isolated receipt (idempotent; conflicts fail closed).
     ImportReceipt {
         name: String,
         env: String,
+        /// Path to a tenkai.offline-receipt.v1 JSON envelope.
         #[arg(long)]
-        bundle_digest: String,
+        receipt: PathBuf,
+        /// Path to the matching tenkai.offline-bundle.v1 JSON archive.
         #[arg(long)]
-        receipt_digest: String,
+        bundle: PathBuf,
+        /// Trust roots that must authenticate the bundle exporter and receipt runtime.
+        #[arg(long)]
+        trust_roots: PathBuf,
     },
     /// Roll back applied environments through Tenkai rollback plans.
     Rollback {
@@ -1281,20 +1304,18 @@ async fn run(cli: Cli) -> Result<()> {
             }
             UpgradeCommand::Advance {
                 name,
+                approval,
+                approval_trust_roots,
                 allow_unapproved_development,
                 development_reason,
             } => {
-                if !allow_unapproved_development {
-                    bail!("upgrade advance requires --allow-unapproved-development in this slice");
-                }
-                let record = connectivity::advance(
-                    &mut ctx,
-                    &name,
-                    apply::ExecutionAuthorization::LocalDevelopment {
-                        reason: development_reason.as_deref().unwrap_or("upgrade"),
-                    },
-                )
-                .await?;
+                let authorization = upgrade_authorization(
+                    approval.as_deref(),
+                    approval_trust_roots.as_deref(),
+                    allow_unapproved_development,
+                    development_reason.as_deref(),
+                )?;
+                let record = connectivity::advance(&mut ctx, &name, authorization).await?;
                 println!("{}", connectivity::format_upgrade(&record));
             }
             UpgradeCommand::Interrupt { name, env } => {
@@ -1305,23 +1326,36 @@ async fn run(cli: Cli) -> Result<()> {
                 let record = connectivity::resume_transfer(&mut ctx, &name, &env).await?;
                 println!("{}", connectivity::format_upgrade(&record));
             }
-            UpgradeCommand::BindBundle { name, env, digest } => {
+            UpgradeCommand::BindBundle {
+                name,
+                env,
+                bundle,
+                trust_roots,
+            } => {
+                let envelope = offline_bundle::BundleEnvelope::load(&bundle)?;
+                let roots = release_signing::TrustRoots::load(&trust_roots)?;
                 let record =
-                    connectivity::bind_isolated_bundle(&mut ctx, &name, &env, &digest).await?;
+                    connectivity::bind_isolated_bundle(&mut ctx, &name, &env, &envelope, &roots)
+                        .await?;
                 println!("{}", connectivity::format_upgrade(&record));
             }
             UpgradeCommand::ImportReceipt {
                 name,
                 env,
-                bundle_digest,
-                receipt_digest,
+                receipt,
+                bundle,
+                trust_roots,
             } => {
+                let bundle_envelope = offline_bundle::BundleEnvelope::load(&bundle)?;
+                let receipt_envelope = offline_bundle::ReceiptEnvelope::load(&receipt)?;
+                let roots = release_signing::TrustRoots::load(&trust_roots)?;
                 let record = connectivity::import_isolated_receipt(
                     &mut ctx,
                     &name,
                     &env,
-                    &bundle_digest,
-                    &receipt_digest,
+                    &receipt_envelope,
+                    &bundle_envelope,
+                    &roots,
                 )
                 .await?;
                 println!("{}", connectivity::format_upgrade(&record));
@@ -1332,7 +1366,9 @@ async fn run(cli: Cli) -> Result<()> {
                 development_reason,
             } => {
                 if !allow_unapproved_development {
-                    bail!("upgrade rollback requires --allow-unapproved-development in this slice");
+                    bail!(
+                        "upgrade rollback requires --allow-unapproved-development; signed rollback plans are created at apply time and cannot reuse a pre-issued approval envelope"
+                    );
                 }
                 let record = connectivity::rollback_upgrade(
                     &mut ctx,
@@ -2070,6 +2106,27 @@ async fn run(cli: Cli) -> Result<()> {
     Ok(())
 }
 
+fn upgrade_authorization<'a>(
+    approval: Option<&'a std::path::Path>,
+    approval_trust_roots: Option<&'a std::path::Path>,
+    allow_unapproved_development: bool,
+    development_reason: Option<&'a str>,
+) -> Result<apply::ExecutionAuthorization<'a>> {
+    match (approval, approval_trust_roots, allow_unapproved_development) {
+        (Some(approval), Some(trust_roots), false) => Ok(apply::ExecutionAuthorization::Signed {
+            approval,
+            trust_roots,
+        }),
+        (None, None, true) => Ok(apply::ExecutionAuthorization::LocalDevelopment {
+            reason: development_reason.expect("clap requires a development reason"),
+        }),
+        (None, None, false) => bail!(
+            "upgrade execution requires --approval and --approval-trust-roots, or --allow-unapproved-development with --development-reason"
+        ),
+        _ => unreachable!("clap rejects partial or conflicting authorization modes"),
+    }
+}
+
 fn wave_authorization<'a>(
     approval_dir: Option<&'a std::path::Path>,
     approval_trust_roots: Option<&'a std::path::Path>,
@@ -2738,6 +2795,65 @@ mod tests {
             Command::Upgrade {
                 command: UpgradeCommand::Start { ref name, .. }
             } if name == "fleet-1"
+        ));
+        let advance = Cli::try_parse_from([
+            "tenkaictl",
+            "upgrade",
+            "advance",
+            "fleet-1",
+            "--approval",
+            "site-a.json",
+            "--approval-trust-roots",
+            "release-trust.toml",
+        ])
+        .unwrap();
+        assert!(matches!(
+            advance.command,
+            Command::Upgrade {
+                command: UpgradeCommand::Advance {
+                    ref name,
+                    ref approval,
+                    ..
+                }
+            } if name == "fleet-1" && approval.as_deref() == Some(std::path::Path::new("site-a.json"))
+        ));
+        let bind = Cli::try_parse_from([
+            "tenkaictl",
+            "upgrade",
+            "bind-bundle",
+            "fleet-1",
+            "site-c",
+            "--bundle",
+            "site-c.bundle.json",
+            "--trust-roots",
+            "offline-trust.toml",
+        ])
+        .unwrap();
+        assert!(matches!(
+            bind.command,
+            Command::Upgrade {
+                command: UpgradeCommand::BindBundle { ref name, ref env, .. }
+            } if name == "fleet-1" && env == "site-c"
+        ));
+        let import = Cli::try_parse_from([
+            "tenkaictl",
+            "upgrade",
+            "import-receipt",
+            "fleet-1",
+            "site-c",
+            "--receipt",
+            "site-c.receipt.json",
+            "--bundle",
+            "site-c.bundle.json",
+            "--trust-roots",
+            "offline-trust.toml",
+        ])
+        .unwrap();
+        assert!(matches!(
+            import.command,
+            Command::Upgrade {
+                command: UpgradeCommand::ImportReceipt { ref name, ref env, .. }
+            } if name == "fleet-1" && env == "site-c"
         ));
     }
 
