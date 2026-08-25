@@ -903,6 +903,7 @@ mod tests {
             policy: None,
             eval_suite_product: None,
             agent: None,
+            prompt: None,
             change_set_pin: None,
             worker_pool: None,
             gate: GateSection::default(),
