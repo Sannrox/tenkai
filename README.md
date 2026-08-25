@@ -484,6 +484,7 @@ it ([ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md),
 | Scoped pull-based environment runtimes + fencing | [Runtime protocol](docs/runtime-protocol-v1.md); #5, #20 |
 | Signed release publication and provenance | [Release signing](docs/release-signing.md) |
 | Signed plan execution approval | [Plan approval](docs/plan-approval.md) |
+| Portable delivery-manifest profile | [Delivery manifest](docs/delivery-manifest-profile.md); [ADR 0021](docs/decisions/0021-portable-delivery-manifest-profile.md); #291 |
 | Catalog application boundary | [Catalog contract](docs/catalog-contract.md); ADR 0001 |
 | Health probes, auto-rollback, deliberate rollback | Quickstart; apply/reconciler |
 | Same-version restart, recall roll-off, product windows | [ADR 0016](docs/decisions/0016-same-version-remediation.md); `restart`, `release recall`, `product maintenance` |
