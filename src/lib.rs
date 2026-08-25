@@ -10,8 +10,8 @@
 //!
 //! - [`catalog`] owns immutable release publication, promotion, and lookup.
 //!   Its private publication module concentrates content identity, provenance,
-//!   immutable replay, persistence, and graph-link ordering behind one
-//!   admission interface.
+//!   optional change-set closure pins, immutable replay, persistence, and
+//!   graph-link ordering behind one admission interface.
 //!   Its private trust module hides linked verification-claim loading, envelope
 //!   checks, unsigned-local-only policy, two-read deployable snapshots, inspect,
 //!   and reverify behind one lookup interface.
@@ -118,6 +118,7 @@ pub mod atomic_state;
 pub mod auth_context;
 pub mod canary;
 pub mod catalog;
+pub mod change_set_pin;
 pub mod client;
 pub mod command_result;
 pub mod delivery_conformance;

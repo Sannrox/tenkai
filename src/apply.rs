@@ -309,6 +309,7 @@ mod tests {
                 policy: None,
                 eval_suite_product: None,
                 agent: None,
+                change_set_pin: None,
                 gate: GateSection::default(),
             },
             artifact_digest: manifest::artifact_digest(&workdir, &[]).unwrap(),

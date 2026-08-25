@@ -40,6 +40,15 @@ Registered release provenance is an optional immutable Catalog fact. See
 [registered release provenance](release-provenance.md) for its compiled profile
 registry, canonical digest, replay, inspection, and authority boundaries.
 
+An optional `[change_set_pin]` binds the release to one accepted external
+change-set closure. When present, publication requires matching
+`tenkai.change_set_publication_evidence.v1` and fails closed on missing,
+unauthorized, unaccepted, incomplete, unknown-contract, or mismatched member
+evidence. After admission, Tenkai-owned stored pin evidence is sufficient for
+inspect, promote, plan, apply, rollback, recall, and recovery. See
+[change-set closure pins](change-set-pin.md) and
+[ADR 0018](decisions/0018-change-set-closure-pin.md).
+
 ## Transport conformance
 
 Embedded and remote adapters must run the same behavior cases:

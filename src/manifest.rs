@@ -35,8 +35,32 @@ pub struct Manifest {
     /// Agent descriptor path for `agent_definition` products (`[agent]`).
     #[serde(default)]
     pub agent: Option<AgentSection>,
+    /// Optional pin to one accepted external change-set closure.
+    #[serde(default)]
+    pub change_set_pin: Option<ChangeSetPinSection>,
     #[serde(default)]
     pub gate: GateSection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChangeSetMemberSection {
+    pub kind: String,
+    pub id: String,
+    pub digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChangeSetPinSection {
+    pub contract: String,
+    pub namespace: String,
+    pub branch_id: String,
+    pub proposal_id: String,
+    pub base_digest: String,
+    pub closure_digest: String,
+    pub receipt_digest: String,
+    pub members: Vec<ChangeSetMemberSection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -722,6 +746,7 @@ mod tests {
             policy: None,
             eval_suite_product: None,
             agent: None,
+            change_set_pin: None,
             gate: GateSection::default(),
         };
         assert_eq!(manifest.immutable_inputs(), vec!["routing.json"]);

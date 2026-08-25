@@ -458,6 +458,7 @@ document = "suite.json"
                 allow_unsigned_development: true,
                 provenance: Vec::new(),
                 provenance_trust_roots: None,
+                change_set_evidence: None,
             },
         )
         .await
@@ -481,6 +482,7 @@ document = "suite.json"
                 allow_unsigned_development: false,
                 provenance: Vec::new(),
                 provenance_trust_roots: None,
+                change_set_evidence: None,
             },
         )
         .await

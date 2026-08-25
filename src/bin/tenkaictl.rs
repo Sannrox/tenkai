@@ -110,6 +110,9 @@ enum Command {
         /// Trust roots authenticating release-provenance issuers.
         #[arg(long, requires = "provenance")]
         provenance_trust_roots: Option<PathBuf>,
+        /// Bounded change-set publication evidence for a `[change_set_pin]` manifest.
+        #[arg(long)]
+        change_set_evidence: Option<PathBuf>,
     },
     /// Inspect or reverify published release trust evidence.
     Release {
@@ -1020,6 +1023,7 @@ async fn run(cli: Cli) -> Result<()> {
             allow_unsigned_development,
             provenance,
             provenance_trust_roots,
+            change_set_evidence,
         } => {
             let options = catalog::PublishOptions {
                 signature,
@@ -1027,6 +1031,8 @@ async fn run(cli: Cli) -> Result<()> {
                 allow_unsigned_development,
                 provenance,
                 provenance_trust_roots,
+                change_set_evidence: change_set_evidence
+                    .map(tenkai::change_set_pin::ChangeSetEvidenceInput::File),
             };
             if output == OutputFormat::JsonV1 {
                 let published = catalog::publish_with_result(&mut ctx, &manifest, &options).await?;
@@ -2576,6 +2582,8 @@ mod tests {
             "build.json",
             "--provenance-trust-roots",
             "provenance-trust.toml",
+            "--change-set-evidence",
+            "closure.json",
         ])
         .unwrap();
         assert!(matches!(
@@ -2583,8 +2591,10 @@ mod tests {
             Command::Publish {
                 allow_unsigned_development: true,
                 provenance,
+                change_set_evidence,
                 ..
             } if provenance == [PathBuf::from("subject.json"), PathBuf::from("build.json")]
+                && change_set_evidence == Some(PathBuf::from("closure.json"))
         ));
     }
 
