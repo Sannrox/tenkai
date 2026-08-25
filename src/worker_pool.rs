@@ -661,6 +661,7 @@ replicas = 1
                     reason: "worker pool apply",
                 },
                 software_executor: None,
+                delivery_adapter: None,
             },
         )
         .await
