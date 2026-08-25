@@ -19,3 +19,4 @@
 - [0017 — Executable release-wave advancement](0017-executable-release-waves.md)
 - [0018 — Accepted change-set closure pin admission](0018-change-set-closure-pin.md)
 - [0019 — Versioned prompt-package delivery](0019-prompt-package-delivery.md)
+- [0020 — Connectivity-class upgrade lifecycle](0020-connectivity-class-upgrade.md)
