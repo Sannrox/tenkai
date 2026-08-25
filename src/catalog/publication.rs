@@ -35,6 +35,14 @@ pub(super) async fn admit(
     )?;
     release_provenance::validate_release_binding(&provenance, &digest, &artifact_digest)?;
     let (provenance_properties, provenance_digests) = provenance_properties(&provenance)?;
+    let admitted_pin = change_set_pin::admit_publication(
+        loaded.manifest.change_set_pin.as_ref(),
+        options.change_set_evidence.as_ref(),
+    )?;
+    let pin_properties = match &admitted_pin {
+        Some(pin) => change_set_pin::stored_properties(pin)?,
+        None => HashMap::new(),
+    };
     let rid = release_id(&name, &version);
     let preexisting_release = ctx.get(&rid).await?;
     validate_provenance_admission(
@@ -67,6 +75,7 @@ pub(super) async fn admit(
         {
             validate_stored_release_content(&existing, &digest, &artifact_digest)?;
             validate_stored_provenance(&existing, &provenance_properties)?;
+            change_set_pin::validate_stored(&existing, admitted_pin.as_ref())?;
             existing
                 .properties
                 .insert("artifact_digest".into(), artifact_digest.clone());
@@ -91,6 +100,7 @@ pub(super) async fn admit(
             ("workdir".into(), versioned_workdir.display().to_string()),
         ]);
         properties.extend(provenance_properties.clone());
+        properties.extend(pin_properties.clone());
         let release = object(
             rid.clone(),
             KIND_RELEASE,
@@ -122,6 +132,7 @@ pub(super) async fn admit(
                 }
                 validate_stored_release_content(&existing, &digest, &artifact_digest)?;
                 validate_stored_provenance(&existing, &provenance_properties)?;
+                change_set_pin::validate_stored(&existing, admitted_pin.as_ref())?;
                 let mut pinned = existing;
                 pinned
                     .properties

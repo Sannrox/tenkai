@@ -17,3 +17,4 @@
 - [0015 — Governed-action remote migration](0015-governed-action-remote-migration.md)
 - [0016 — Bounded same-version remediations](0016-same-version-remediation.md)
 - [0017 — Executable release-wave advancement](0017-executable-release-waves.md)
+- [0018 — Accepted change-set closure pin admission](0018-change-set-closure-pin.md)

@@ -526,6 +526,7 @@ document = "agent.json"
             allow_unsigned_development: true,
             provenance: Vec::new(),
             provenance_trust_roots: None,
+            change_set_evidence: None,
         };
         for name in ["policy", "eval", "agent"] {
             crate::catalog::publish(&mut ctx, &root.join(name).join("tenkai.toml"), &options)

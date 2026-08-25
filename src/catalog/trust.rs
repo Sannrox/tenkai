@@ -167,6 +167,12 @@ async fn descriptor_from_object_with_admission(
             release_id: release.id.clone(),
             reason: error.to_string(),
         })?,
+        change_set_pin: change_set_pin::stored_projection(release).map_err(|error| {
+            CatalogLookupError::Malformed {
+                release_id: release.id.clone(),
+                reason: error.to_string(),
+            }
+        })?,
     })
 }
 
@@ -344,6 +350,7 @@ pub(super) fn verification_view(
                 statement_digest: Some(evidence.statement_digest),
                 provenance: Some(evidence.provenance),
                 governance_provenance: stored_provenance(release)?,
+                change_set_pin: change_set_pin::stored_projection(release)?,
             })
         }
         "unsigned-development" => {
@@ -363,6 +370,7 @@ pub(super) fn verification_view(
                 statement_digest: None,
                 provenance: None,
                 governance_provenance: stored_provenance(release)?,
+                change_set_pin: change_set_pin::stored_projection(release)?,
             })
         }
         other => bail!("release has unknown verification status {other:?}"),

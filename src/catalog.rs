@@ -7,6 +7,7 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::auth_context::{AuthenticatedRequestContext, DeliveryCapability};
+use crate::change_set_pin::{self, ChangeSetEvidenceInput, ChangeSetPinProjection};
 use crate::client::Ctx;
 use crate::manifest;
 use crate::ontology::*;
@@ -39,6 +40,8 @@ pub struct ReleaseDescriptor {
     pub content_path: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provenance: Vec<ProvenanceProjection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_set_pin: Option<ChangeSetPinProjection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,6 +209,7 @@ pub struct PublishOptions {
     pub allow_unsigned_development: bool,
     pub provenance: Vec<PathBuf>,
     pub provenance_trust_roots: Option<PathBuf>,
+    pub change_set_evidence: Option<ChangeSetEvidenceInput>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -227,6 +231,8 @@ pub struct ReleaseVerificationView {
     pub provenance: Option<release_signing::Provenance>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub governance_provenance: Vec<ProvenanceProjection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_set_pin: Option<ChangeSetPinProjection>,
 }
 
 fn parse_release_spec(spec: &str) -> Result<(&str, &str)> {
@@ -525,9 +531,10 @@ pub async fn promote(
     validate_identifier("version", version)?;
     validate_identifier("channel", channel)?;
     let rid = release_id(name, version);
-    if ctx.get(&rid).await?.is_none() {
+    let Some(release) = ctx.get(&rid).await? else {
         bail!("release {name}@{version} is not published");
-    }
+    };
+    change_set_pin::require_stored_accepted(&release)?;
     let owner = format!(
         "promotion:{}:{spec}:{}",
         actor.principal_id(),
