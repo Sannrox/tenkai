@@ -124,6 +124,7 @@ pub mod change_set_pin;
 pub mod client;
 pub mod command_result;
 pub mod connectivity;
+pub mod delivery_bridge;
 pub mod delivery_conformance;
 pub mod delivery_manifest;
 pub mod dev_sign;
