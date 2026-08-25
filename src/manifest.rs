@@ -38,8 +38,27 @@ pub struct Manifest {
     /// Optional pin to one accepted external change-set closure.
     #[serde(default)]
     pub change_set_pin: Option<ChangeSetPinSection>,
+    /// Fixed-replica worker-pool intent for `kind = "worker_pool"`.
+    #[serde(default)]
+    pub worker_pool: Option<WorkerPoolSection>,
     #[serde(default)]
     pub gate: GateSection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerPoolSection {
+    /// Intake adapter. Managed pools must use `plane`.
+    pub intake: String,
+    /// Desired replica count for this environment-scoped pool.
+    pub replicas: u32,
+    /// Bounded drain wait before scale-down or replacement is refused.
+    #[serde(default = "default_drain_timeout_ms")]
+    pub drain_timeout_ms: u64,
+}
+
+fn default_drain_timeout_ms() -> u64 {
+    5_000
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,6 +116,8 @@ pub enum ProductKind {
     EvalSuite,
     /// Versioned agent runtime descriptor (not an orchestrator).
     AgentDefinition,
+    /// Fixed-replica Shikigami worker-pool lifecycle (not work admission).
+    WorkerPool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -245,6 +266,9 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
             {
                 bail!("software manifests cannot declare staged-product sections");
             }
+            if manifest.worker_pool.is_some() {
+                bail!("software manifests cannot declare a worker_pool section");
+            }
             if manifest.deploy.install.trim().is_empty() {
                 bail!("software manifest needs a non-empty deploy.install command");
             }
@@ -268,6 +292,9 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
                 || manifest.agent.is_some()
             {
                 bail!("routing_config manifests cannot declare staged-product sections");
+            }
+            if manifest.worker_pool.is_some() {
+                bail!("routing_config manifests cannot declare a worker_pool section");
             }
             let routing = manifest
                 .routing
@@ -299,8 +326,28 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
             {
                 bail!("model_runtime manifests cannot declare staged-product sections");
             }
+            if manifest.worker_pool.is_some() {
+                bail!("model_runtime manifests cannot declare a worker_pool section");
+            }
             // Full section validation lives in the model_runtime contract.
             crate::model_runtime::ModelRuntimeDescriptor::from_manifest(&manifest)?;
+        }
+        crate::product_kind::ProductTarget::WorkerPool => {
+            if manifest.routing.is_some()
+                || manifest.model.is_some()
+                || manifest.runtime.is_some()
+                || manifest.requirements.is_some()
+                || manifest.model_health.is_some()
+            {
+                bail!("worker_pool manifests cannot declare routing or model_runtime sections");
+            }
+            if manifest.policy.is_some()
+                || manifest.eval_suite_product.is_some()
+                || manifest.agent.is_some()
+            {
+                bail!("worker_pool manifests cannot declare staged-product sections");
+            }
+            crate::worker_pool::spec_from_manifest(&manifest)?;
         }
         crate::product_kind::ProductTarget::Staged(staged_kind) => {
             if manifest.routing.is_some()
@@ -308,9 +355,10 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
                 || manifest.runtime.is_some()
                 || manifest.requirements.is_some()
                 || manifest.model_health.is_some()
+                || manifest.worker_pool.is_some()
             {
                 bail!(
-                    "{:?} manifests cannot declare routing or model_runtime sections",
+                    "{:?} manifests cannot declare routing, model_runtime, or worker_pool sections",
                     manifest.product.kind
                 );
             }
@@ -747,6 +795,7 @@ mod tests {
             eval_suite_product: None,
             agent: None,
             change_set_pin: None,
+            worker_pool: None,
             gate: GateSection::default(),
         };
         assert_eq!(manifest.immutable_inputs(), vec!["routing.json"]);

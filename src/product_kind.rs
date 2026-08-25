@@ -11,6 +11,7 @@ pub(crate) enum ProductTarget {
     Software,
     RoutingConfig,
     ModelRuntime,
+    WorkerPool,
     Staged(StagedKind),
 }
 
@@ -44,6 +45,7 @@ impl ProductKind {
             Self::Software => ProductTarget::Software,
             Self::RoutingConfig => ProductTarget::RoutingConfig,
             Self::ModelRuntime => ProductTarget::ModelRuntime,
+            Self::WorkerPool => ProductTarget::WorkerPool,
             Self::PolicyBundle => ProductTarget::Staged(StagedKind::PolicyBundle),
             Self::EvalSuite => ProductTarget::Staged(StagedKind::EvalSuite),
             Self::AgentDefinition => ProductTarget::Staged(StagedKind::AgentDefinition),
@@ -69,6 +71,7 @@ impl ProductKindPolicy {
             ProductTarget::Software => CleanupPolicy::UninstallIfDeclared,
             ProductTarget::RoutingConfig
             | ProductTarget::ModelRuntime
+            | ProductTarget::WorkerPool
             | ProductTarget::Staged(_) => CleanupPolicy::Atomic,
         }
     }
@@ -98,6 +101,7 @@ mod tests {
                 true,
             ),
             (ProductKind::ModelRuntime, ProductTarget::ModelRuntime, true),
+            (ProductKind::WorkerPool, ProductTarget::WorkerPool, true),
             (
                 ProductKind::PolicyBundle,
                 ProductTarget::Staged(StagedKind::PolicyBundle),
