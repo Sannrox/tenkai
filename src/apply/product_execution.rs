@@ -60,6 +60,15 @@ pub(super) async fn activate(
             .map(|_| ())
             .map_err(|error| error.to_string()));
     }
+    if content.manifest.product.kind.policy().target() == ProductTarget::WorkerPool {
+        prepare_fenced_mutation(ctx, lease, content).await?;
+        if let Err(error) = admit_worker_pool(ctx, content, false).await? {
+            return Ok(Err(error));
+        }
+        if software.is_none() && content.manifest.deploy.install.trim().is_empty() {
+            return Ok(Ok(()));
+        }
+    }
     if matches!(
         content.manifest.product.kind.policy().target(),
         ProductTarget::Staged(_)
@@ -185,6 +194,12 @@ pub(super) async fn deactivate(
             .map_err(|error| error.to_string()),
         );
     }
+    if content.manifest.product.kind.policy().target() == ProductTarget::WorkerPool {
+        refresh_environment_lease(ctx, lease).await?;
+        if let Err(error) = admit_worker_pool(ctx, content, true).await? {
+            return Ok(Err(error));
+        }
+    }
     if matches!(
         content.manifest.product.kind.policy().target(),
         ProductTarget::Staged(_)
@@ -272,6 +287,52 @@ async fn software_request(
     ))
 }
 
+async fn admit_worker_pool(
+    ctx: &mut Ctx,
+    content: &ReleaseContent,
+    removing: bool,
+) -> Result<Result<(), String>> {
+    let mut spec = match crate::worker_pool::spec_from_manifest(&content.manifest) {
+        Ok(spec) => spec,
+        Err(error) => return Ok(Err(error.to_string())),
+    };
+    if removing {
+        spec.replicas = 0;
+    }
+    let mut env = crate::environment::environment(ctx, &content.environment).await?;
+    let previous = crate::worker_pool::previous_replicas(&env.properties, &spec.product);
+    let drain_started = crate::worker_pool::drain_started_at(&env.properties, &spec.product);
+    let snapshots = match crate::worker_pool::load_snapshots(&content.workdir.join("worker"), &spec)
+    {
+        Ok(snapshots) => snapshots,
+        Err(error) => return Ok(Err(error.to_string())),
+    };
+    let now = crate::now_millis();
+    let decision =
+        match crate::worker_pool::reconcile(&spec, &snapshots, previous, drain_started, now) {
+            Ok(decision) => decision,
+            Err(error) => return Ok(Err(error.to_string())),
+        };
+    let observed = crate::worker_pool::observation(&spec, &snapshots, &decision);
+    crate::worker_pool::persist_observation(&mut env.properties, &observed);
+    if matches!(decision, crate::worker_pool::WorkerPoolDecision::WaitDrain) {
+        env.properties.insert(
+            format!("worker_pool.{}.drain_started_at", spec.product),
+            drain_started.unwrap_or(now).to_string(),
+        );
+    } else {
+        env.properties
+            .remove(&format!("worker_pool.{}.drain_started_at", spec.product));
+    }
+    ctx.put(env).await?;
+    match decision {
+        crate::worker_pool::WorkerPoolDecision::Apply { .. } => Ok(Ok(())),
+        crate::worker_pool::WorkerPoolDecision::WaitDrain => Ok(Err(observed.detail)),
+        crate::worker_pool::WorkerPoolDecision::Degraded { reason }
+        | crate::worker_pool::WorkerPoolDecision::Deny { reason } => Ok(Err(reason)),
+    }
+}
+
 fn software_phase_error(
     phase: crate::software_executor::SoftwareDeployPhase,
     content: &ReleaseContent,
@@ -299,6 +360,7 @@ mod tests {
             ProductKind::PolicyBundle,
             ProductKind::EvalSuite,
             ProductKind::AgentDefinition,
+            ProductKind::WorkerPool,
         ] {
             assert_eq!(kind.policy().cleanup(), CleanupPolicy::Atomic);
         }
