@@ -790,6 +790,7 @@ install = "true"
                 },
                 software_executor: None,
                 delivery_adapter: None,
+                delivery_fence: None,
             },
         )
         .await
@@ -810,6 +811,7 @@ install = "true"
                 },
                 software_executor: None,
                 delivery_adapter: None,
+                delivery_fence: None,
             },
         )
         .await

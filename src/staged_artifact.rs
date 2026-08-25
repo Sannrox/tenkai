@@ -777,6 +777,7 @@ document = "agent.json"
                 },
                 software_executor: None,
                 delivery_adapter: None,
+                delivery_fence: None,
             },
         )
         .await

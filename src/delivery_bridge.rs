@@ -131,6 +131,9 @@ pub fn selected_delivery_adapter() -> Option<Arc<dyn DeliveryAdapter>> {
         Ok(value) if value.eq_ignore_ascii_case("polling-fake") => {
             Some(Arc::new(PollingAdapter::new(FakeMode::Succeed)))
         }
+        Ok(value) if value.eq_ignore_ascii_case("polling-timeout") => {
+            Some(Arc::new(PollingAdapter::new(FakeMode::Timeout)))
+        }
         Ok(value) if value.eq_ignore_ascii_case("callback-fake") => {
             Some(Arc::new(CallbackAdapter::new(FakeMode::Succeed)))
         }
@@ -239,7 +242,11 @@ async fn admit_before_delegation(
     )?;
     if let Some((approval, trust_roots)) = options.approval {
         delivery_manifest::admit_signed_plan(plan, approval, trust_roots, options.now)?;
-        if !options.skip_gates {
+        let apply_already_admitted_gates =
+            crate::apply::environment_lease_status(ctx, &plan.environment)
+                .await?
+                .is_some();
+        if !options.skip_gates && !apply_already_admitted_gates {
             for step in &plan.steps {
                 let gate = ctx
                     .evaluation_gate_evidence(crate::pb::chisei::GetEvaluationGateEvidenceRequest {
@@ -795,31 +802,154 @@ install = "true"
         let _ = std::fs::remove_dir_all(fixture.root);
     }
 
+    fn apply_opts<'a>(
+        approval: &'a Path,
+        trust: &'a Path,
+        adapter: Arc<dyn DeliveryAdapter>,
+        fence: Option<Arc<dyn crate::reconcile_fence::ReconcileTickFence>>,
+    ) -> crate::apply::ExecutionOptions<'a> {
+        crate::apply::ExecutionOptions {
+            skip_gates: false,
+            emergency_reason: None,
+            authorization: crate::apply::ExecutionAuthorization::Signed {
+                approval,
+                trust_roots: trust,
+            },
+            software_executor: None,
+            delivery_adapter: Some(adapter),
+            delivery_fence: fence,
+        }
+    }
+
     #[tokio::test]
-    async fn apply_path_delegates_to_the_bridge() {
+    async fn apply_path_timeout_is_blocked_and_records_correlation() {
         let mut fixture = signed_upgrade("apply").await;
+        let approval = fixture.approval.clone();
+        let trust = fixture.trust.clone();
+        let plan_id = fixture.plan.id.clone();
         let outcomes = crate::apply::execute_with_options(
             &mut fixture.ctx,
-            &fixture.plan.id,
-            crate::apply::ExecutionOptions {
-                skip_gates: false,
-                emergency_reason: None,
-                authorization: crate::apply::ExecutionAuthorization::Signed {
-                    approval: &fixture.approval,
-                    trust_roots: &fixture.trust,
-                },
-                software_executor: None,
-                delivery_adapter: Some(Arc::new(PollingAdapter::new(FakeMode::Succeed))),
-            },
+            &plan_id,
+            apply_opts(
+                &approval,
+                &trust,
+                Arc::new(PollingAdapter::new(FakeMode::Timeout)),
+                None,
+            ),
         )
         .await
         .unwrap();
         assert!(
-            outcomes
-                .iter()
-                .all(|outcome| outcome.classified_status().unwrap().is_success()),
+            outcomes.iter().all(|outcome| {
+                matches!(
+                    outcome.classified_status().unwrap(),
+                    crate::apply::StepOutcomeStatus::Blocked
+                ) && outcome.detail.contains("non-terminal")
+            }),
             "{outcomes:?}"
         );
+        let stored = plan::load(&mut fixture.ctx, &plan_id).await.unwrap();
+        assert!(
+            matches!(stored.state, PlanState::Computed | PlanState::Running),
+            "{stored:?}"
+        );
+        let env = environment::environment(&mut fixture.ctx, "prod")
+            .await
+            .unwrap();
+        let correlation = env
+            .properties
+            .get("bridge.correlation")
+            .expect("adapter correlation missing");
+        assert!(
+            correlation.contains(&plan_id) && correlation.contains("polling-fake"),
+            "{correlation}"
+        );
         let _ = std::fs::remove_dir_all(fixture.root);
+    }
+
+    #[tokio::test]
+    async fn apply_path_fail_closes_expired_recalled_and_stale_fence() {
+        let mut fixture = signed_upgrade("apply-deny").await;
+        let approval = fixture.approval.clone();
+        let trust = fixture.trust.clone();
+        let plan_id = fixture.plan.id.clone();
+        write_plan_approval(
+            &fixture.plan,
+            &approval,
+            &trust,
+            crate::now_millis().saturating_sub(80_000),
+            1,
+        );
+        let err = crate::apply::execute_with_options(
+            &mut fixture.ctx,
+            &plan_id,
+            apply_opts(
+                &approval,
+                &trust,
+                Arc::new(PollingAdapter::new(FakeMode::Succeed)),
+                None,
+            ),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("expired") || err.contains("not valid"),
+            "{err}"
+        );
+
+        write_plan_approval(
+            &fixture.plan,
+            &approval,
+            &trust,
+            crate::now_millis(),
+            60_000,
+        );
+        let actor = crate::auth_context::test_management_context("apply-recall");
+        crate::catalog::recall(&mut fixture.ctx, &actor, "bridge-app@1.1.0")
+            .await
+            .unwrap();
+        let err = crate::apply::execute_with_options(
+            &mut fixture.ctx,
+            &plan_id,
+            apply_opts(
+                &approval,
+                &trust,
+                Arc::new(PollingAdapter::new(FakeMode::Succeed)),
+                None,
+            ),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("recalled"), "{err}");
+
+        let mut fenced = signed_upgrade("apply-fence").await;
+        let fence = SharedReconcileFence::new().into_arc();
+        fence
+            .try_begin("prod", "holder", crate::now_millis(), 60_000)
+            .unwrap();
+        let fenced_approval = fenced.approval.clone();
+        let fenced_trust = fenced.trust.clone();
+        let fenced_id = fenced.plan.id.clone();
+        let err = crate::apply::execute_with_options(
+            &mut fenced.ctx,
+            &fenced_id,
+            apply_opts(
+                &fenced_approval,
+                &fenced_trust,
+                Arc::new(PollingAdapter::new(FakeMode::Succeed)),
+                Some(fence),
+            ),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("stale fencing") || err.contains("Busy"),
+            "{err}"
+        );
+        let _ = std::fs::remove_dir_all(fixture.root);
+        let _ = std::fs::remove_dir_all(fenced.root);
     }
 }

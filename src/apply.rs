@@ -232,10 +232,13 @@ async fn execute_locked(
             &stored_plan,
             crate::delivery_bridge::BridgeExecution {
                 expected_environment: &env,
-                approval: None,
+                approval: options
+                    .approval
+                    .as_ref()
+                    .map(|(approval, trust)| (approval.as_path(), trust.as_path())),
                 skip_gates,
                 now: crate::now_millis(),
-                fence: None,
+                fence: options.delivery_fence.clone(),
             },
         )
         .await?;
