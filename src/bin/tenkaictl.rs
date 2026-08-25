@@ -1342,7 +1342,8 @@ async fn run(cli: Cli) -> Result<()> {
                 current_version,
                 behind_version,
             };
-            let (plan, report) = fleet_fairness::observe(&mut ctx, &spec, &backup).await?;
+            let (plan, report) =
+                fleet_fairness::observe(&mut ctx, &spec, &backup, &cli.database).await?;
             println!("{}", fleet_workload::format_workload(&plan));
             println!("{}", fleet_fairness::format_report(&report));
         }

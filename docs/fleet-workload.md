@@ -54,5 +54,10 @@ tenkaictl fleet fairness \
   --backup /tmp/tenkai-fairness.db
 ```
 
-Failing environments must not apply successfully or starve healthy work.
-Backup/restore uses Tenkai-owned SQLite only.
+The report counts **behind plan progress** (`AwaitingApproval`/`Applied`), not
+mere tick membership. Failing environments must enter bounded `Deferred`
+backoff, must not apply, and must not starve healthy cohorts. A held fencing
+generation reports `Busy`. Duplicate receipts are idempotent; conflicting
+receipts fail closed. A damaged backup does not open; the live fleet stays
+intact. Rollback of an environment with no previous release fails closed
+without stalling the rest of the fleet.
