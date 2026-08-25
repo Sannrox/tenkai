@@ -42,4 +42,17 @@ tenkaictl fleet measure \
   --behind-version 1.0.0
 ```
 
-Fairness under injected failure is a separate issue (#301).
+Fairness under planted unhealthy/blocked targets (#301):
+
+```bash
+tenkaictl fleet fairness \
+  --seed demo-seed \
+  --product scale-app \
+  --channel stable \
+  --current-version 1.1.0 \
+  --behind-version 1.0.0 \
+  --backup /tmp/tenkai-fairness.db
+```
+
+Failing environments must not apply successfully or starve healthy work.
+Backup/restore uses Tenkai-owned SQLite only.
