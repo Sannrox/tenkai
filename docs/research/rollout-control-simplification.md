@@ -137,3 +137,8 @@ automatic wave execution, or migration now.
 This conclusion does not recommend structural unification, so no Design
 Discussion is required by #189. A future writable-policy proposal would require
 one before implementation.
+
+Amendment (2026-08-24, ADR 0017 / #283): executable waves now persist a durable
+advancement coordinator over existing per-environment plans. That does not
+collapse canary, maintenance, or rollback into the wave, and `wave run` remains
+observe-only.

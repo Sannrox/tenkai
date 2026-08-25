@@ -138,7 +138,7 @@ enum Command {
         #[command(subcommand)]
         command: FleetCommand,
     },
-    /// Ordered multi-environment rollout wave observation.
+    /// Ordered multi-environment rollout waves (observe or execute).
     Wave {
         #[command(subcommand)]
         command: WaveCommand,
@@ -382,13 +382,89 @@ enum FleetCommand {
 
 #[derive(Subcommand)]
 enum WaveCommand {
-    /// Observe an ordered environment cohort (embedded).
+    /// Observe an ordered environment cohort without applying or promoting.
     Run {
         /// Comma-separated environment names in wave order, e.g. `canary,stage,prod`.
         cohort: String,
         /// Continue after failures (default: stop and skip remaining).
         #[arg(long)]
         continue_on_failure: bool,
+    },
+    /// Admit and execute a durable release wave through named cohorts.
+    Execute {
+        /// Durable wave name (content-bound identity key).
+        name: String,
+        #[arg(long)]
+        product: String,
+        #[arg(long)]
+        version: String,
+        #[arg(long)]
+        channel: String,
+        /// Comma-separated environment names in wave order.
+        #[arg(long)]
+        cohort: String,
+        #[arg(long)]
+        continue_on_failure: bool,
+        #[arg(
+            long,
+            requires = "approval_trust_roots",
+            conflicts_with = "allow_unapproved_development"
+        )]
+        approval_dir: Option<PathBuf>,
+        #[arg(
+            long,
+            requires = "approval_dir",
+            conflicts_with = "allow_unapproved_development"
+        )]
+        approval_trust_roots: Option<PathBuf>,
+        #[arg(long, requires = "development_reason")]
+        allow_unapproved_development: bool,
+        #[arg(long, requires = "allow_unapproved_development")]
+        development_reason: Option<String>,
+    },
+    /// Show a durable wave's cohort status.
+    Status { name: String },
+    /// Stop advancing a durable wave without rewriting completed cohorts.
+    Stop { name: String },
+    /// Resume an admitted or awaiting-approval wave.
+    Resume {
+        name: String,
+        #[arg(
+            long,
+            requires = "approval_trust_roots",
+            conflicts_with = "allow_unapproved_development"
+        )]
+        approval_dir: Option<PathBuf>,
+        #[arg(
+            long,
+            requires = "approval_dir",
+            conflicts_with = "allow_unapproved_development"
+        )]
+        approval_trust_roots: Option<PathBuf>,
+        #[arg(long, requires = "development_reason")]
+        allow_unapproved_development: bool,
+        #[arg(long, requires = "allow_unapproved_development")]
+        development_reason: Option<String>,
+    },
+    /// Roll back succeeded cohorts of a durable wave through Tenkai rollback plans.
+    Rollback {
+        name: String,
+        #[arg(
+            long,
+            requires = "approval_trust_roots",
+            conflicts_with = "allow_unapproved_development"
+        )]
+        approval_dir: Option<PathBuf>,
+        #[arg(
+            long,
+            requires = "approval_dir",
+            conflicts_with = "allow_unapproved_development"
+        )]
+        approval_trust_roots: Option<PathBuf>,
+        #[arg(long, requires = "development_reason")]
+        allow_unapproved_development: bool,
+        #[arg(long, requires = "allow_unapproved_development")]
+        development_reason: Option<String>,
     },
 }
 
@@ -1107,26 +1183,125 @@ async fn run(cli: Cli) -> Result<()> {
             )
             .await?;
         }
-        Command::Wave {
-            command:
-                WaveCommand::Run {
-                    cohort,
-                    continue_on_failure,
-                },
-        } => {
-            let environments: Vec<String> = cohort
-                .split(',')
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-                .map(str::to_string)
-                .collect();
-            let spec = wave::WaveSpec::new(environments, !continue_on_failure)?;
-            let report = wave::run_wave_observe(&mut ctx, &spec).await?;
-            println!("{}", wave::format_report(&report));
-            if report.failed_count > 0 {
-                bail!("wave failed for {} environment(s)", report.failed_count);
+        Command::Wave { command } => match command {
+            WaveCommand::Run {
+                cohort,
+                continue_on_failure,
+            } => {
+                let environments: Vec<String> = cohort
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_string)
+                    .collect();
+                let spec = wave::WaveSpec::new(environments, !continue_on_failure)?;
+                let report = wave::run_wave_observe(&mut ctx, &spec).await?;
+                println!("{}", wave::format_report(&report));
+                if report.failed_count > 0 {
+                    bail!("wave failed for {} environment(s)", report.failed_count);
+                }
             }
-        }
+            WaveCommand::Execute {
+                name,
+                product,
+                version,
+                channel,
+                cohort,
+                continue_on_failure,
+                approval_dir,
+                approval_trust_roots,
+                allow_unapproved_development,
+                development_reason,
+            } => {
+                let environments: Vec<String> = cohort
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|env| !env.is_empty())
+                    .map(str::to_string)
+                    .collect();
+                let spec = wave::ExecutableWaveSpec::new(
+                    name,
+                    product,
+                    version,
+                    channel,
+                    environments,
+                    !continue_on_failure,
+                )?;
+                let authorization = wave_authorization(
+                    approval_dir.as_deref(),
+                    approval_trust_roots.as_deref(),
+                    allow_unapproved_development,
+                    development_reason.as_deref(),
+                )?;
+                let record = wave::run_until_blocked(&mut ctx, &spec, authorization).await?;
+                println!("{}", wave::format_wave(&record));
+                if matches!(
+                    record.status,
+                    wave::WaveStatus::Failed | wave::WaveStatus::RecoveryRequired
+                ) {
+                    bail!("wave {} ended in {}", record.name, record.status.as_str());
+                }
+            }
+            WaveCommand::Status { name } => {
+                let record = wave::load_wave(&mut ctx, &name).await?;
+                println!("{}", wave::format_wave(&record));
+            }
+            WaveCommand::Stop { name } => {
+                let record = wave::stop_wave(&mut ctx, &name).await?;
+                println!("{}", wave::format_wave(&record));
+            }
+            WaveCommand::Resume {
+                name,
+                approval_dir,
+                approval_trust_roots,
+                allow_unapproved_development,
+                development_reason,
+            } => {
+                let authorization = wave_authorization(
+                    approval_dir.as_deref(),
+                    approval_trust_roots.as_deref(),
+                    allow_unapproved_development,
+                    development_reason.as_deref(),
+                )?;
+                loop {
+                    let record = wave::advance(&mut ctx, &name, authorization).await?;
+                    if record.status == wave::WaveStatus::AwaitingApproval
+                        || record.status == wave::WaveStatus::Succeeded
+                        || record.status == wave::WaveStatus::Failed
+                        || record.status == wave::WaveStatus::RolledBack
+                        || record.status == wave::WaveStatus::RecoveryRequired
+                    {
+                        println!("{}", wave::format_wave(&record));
+                        if matches!(
+                            record.status,
+                            wave::WaveStatus::Failed | wave::WaveStatus::RecoveryRequired
+                        ) {
+                            bail!("wave {} ended in {}", record.name, record.status.as_str());
+                        }
+                        break;
+                    }
+                }
+            }
+            WaveCommand::Rollback {
+                name,
+                approval_dir,
+                approval_trust_roots,
+                allow_unapproved_development,
+                development_reason,
+            } => {
+                let authorization = wave_authorization(
+                    approval_dir.as_deref(),
+                    approval_trust_roots.as_deref(),
+                    allow_unapproved_development,
+                    development_reason.as_deref(),
+                )?;
+                let record = wave::rollback_wave(&mut ctx, &name, authorization).await?;
+                println!("{}", wave::format_wave(&record));
+                if record.status == wave::WaveStatus::RecoveryRequired {
+                    bail!("wave {} rollback requires recovery", record.name);
+                }
+            }
+        },
         Command::Env { command } => match command {
             EnvCommand::Add { name, description } => {
                 println!("{}", plan::env_add(&mut ctx, &name, &description).await?);
@@ -1724,6 +1899,30 @@ async fn run(cli: Cli) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn wave_authorization<'a>(
+    approval_dir: Option<&'a std::path::Path>,
+    approval_trust_roots: Option<&'a std::path::Path>,
+    allow_unapproved_development: bool,
+    development_reason: Option<&'a str>,
+) -> Result<wave::WaveAuthorization<'a>> {
+    match (
+        approval_dir,
+        approval_trust_roots,
+        allow_unapproved_development,
+    ) {
+        (Some(approval_dir), Some(trust_roots), false) => Ok(wave::WaveAuthorization::Signed {
+            approval_dir,
+            trust_roots,
+        }),
+        (None, None, true) => Ok(wave::WaveAuthorization::LocalDevelopment {
+            reason: development_reason.expect("clap requires a development reason"),
+        }),
+        _ => bail!(
+            "wave execution requires --approval-dir and --approval-trust-roots, or --allow-unapproved-development with --development-reason"
+        ),
+    }
 }
 
 fn print_fleet_status(report: &plan::FleetStatusReport) {

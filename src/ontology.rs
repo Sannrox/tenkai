@@ -27,6 +27,7 @@ pub const KIND_CANARY_ATTEMPT: &str = "tenkai.canary_attempt";
 pub const KIND_CANARY_OUTCOME: &str = "tenkai.canary_outcome";
 pub const KIND_PROMOTION_AUDIT: &str = "tenkai.promotion_audit";
 pub const KIND_PROMOTION_LOCK: &str = "tenkai.promotion_lock";
+pub const KIND_WAVE: &str = "tenkai.wave";
 
 pub const REL_RELEASE_OF: &str = "release_of";
 pub const REL_HAS_RELEASE_VERIFICATION: &str = "has_release_verification";
@@ -75,6 +76,9 @@ pub fn channel_id(product: &str, channel: &str) -> String {
 }
 pub fn env_id(name: &str) -> String {
     format!("tenkai:env:{name}")
+}
+pub fn wave_id(name: &str) -> String {
+    format!("tenkai:wave:{name}")
 }
 pub fn plan_id(env: &str, ts: i64, content_id: &str) -> String {
     format!("tenkai:plan:{env}:{ts}:{content_id}")
@@ -626,6 +630,30 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
             "An exclusive lock serializing policy changes and channel promotion",
             vec![prop("owner", true, "Operation holding the lock")],
         ),
+        object_type(
+            KIND_WAVE,
+            "A durable ordered-cohort advancement record bound to one exact release",
+            vec![
+                prop("name", true, "Operator-provided wave name"),
+                prop(
+                    "identity_digest",
+                    true,
+                    "Digest of the content-bound wave identity",
+                ),
+                prop("product", true, "Product name pinned by this wave"),
+                prop("version", true, "Release version pinned by this wave"),
+                prop("channel", true, "Channel whose head must match the pin"),
+                prop("release_id", true, "Pinned release object id"),
+                prop("release_digest", true, "Pinned release manifest digest"),
+                prop("artifact_digest", true, "Pinned release artifact digest"),
+                prop(
+                    "status",
+                    true,
+                    "admitted|running|awaiting_approval|succeeded|failed|stopped|rolling_back|rolled_back|recovery_required",
+                ),
+                prop("record", true, "Canonical JSON wave record"),
+            ],
+        ),
     ];
 
     let mut registered = Vec::new();
@@ -652,6 +680,17 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
         }
     }
     Ok(registered)
+}
+
+/// Verify once per connected client that an administrator registered wave types.
+pub async fn require_wave_schema(ctx: &mut Ctx) -> Result<()> {
+    let schemas = ctx.schemas().await?;
+    if !schemas.iter().any(|schema| schema.kind == KIND_WAVE) {
+        bail!(
+            "wave schema upgrade required (missing {KIND_WAVE}); ask an administrator to run `tenkaictl init`"
+        );
+    }
+    Ok(())
 }
 
 /// Verify once per connected client that an administrator ran the schema upgrade.

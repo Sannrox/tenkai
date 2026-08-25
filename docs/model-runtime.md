@@ -206,8 +206,9 @@ TENKAI_LLAMA_SERVER=/path/to/llama-server \
 ## Canary promotion evidence (model_runtime)
 
 `model_runtime` uses the **same** canary promotion gate as software products
-(#7). Waves (`tenkaictl wave`) and fleet status only observe posture; they
-never authorize a wider channel promotion.
+(#7). `wave run` and fleet status only observe posture. `wave execute` may
+apply per-environment plans for a pinned release (ADR 0017); waves never
+authorize a wider channel promotion.
 
 Documented path (embedded; FakeInferenceEngine is fine for CI):
 

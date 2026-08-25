@@ -127,7 +127,8 @@ releases** and **signed plan approvals** via `tenkaictl dev init-keys` /
 `dev sign-release` / `dev sign-approval` (or
 `TENKAI_DOGFOOD_MODE=signed-multi-env`). Software canary evidence gates
 (`TENKAI_DOGFOOD_MODE=canary`) use the same canary product rules as
-`model_runtime` (#7 / #108): waves observe; promote fails closed without
+`model_runtime` (#7 / #108): `wave run` observes and `wave execute` applies
+per-environment plans; neither authorizes promotion. Promote fails closed without
 complete cohort outcomes. See the [ops note](docs/local-dogfood-minikube.md).
 
 ## The manifest (`tenkai.toml`)
