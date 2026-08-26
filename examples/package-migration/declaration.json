@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "profile": "tenkai.package_migration.v1",
+  "source": {
+    "product": "pkg",
+    "version": "1.0.0",
+    "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "target": {
+    "product": "pkg",
+    "version": "1.1.0",
+    "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "compatibility": {
+    "version": 1,
+    "status": "compatible",
+    "evidence_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  },
+  "checkpoints": [
+    { "id": "preflight", "class": "reversible" },
+    { "id": "switch", "class": "compensating" }
+  ]
+}

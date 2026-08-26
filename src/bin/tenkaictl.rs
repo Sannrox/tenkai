@@ -13,8 +13,8 @@ use tenkai::auth_context::AuthenticatedRequestContext;
 use tenkai::command_result::{CommandName, CommandOutcome, CommandResultV1, RetryGuidance};
 use tenkai::{
     apply, assertion_verifier, canary, catalog, client, connectivity, dev_sign, fleet_budget,
-    fleet_fairness, fleet_workload, inventory, maintenance, offline_bundle, ontology, plan,
-    reconciler, release_signing, wave,
+    fleet_fairness, fleet_workload, inventory, maintenance, offline_bundle, ontology,
+    package_migration, plan, reconciler, release_signing, wave,
 };
 
 const JWT_VERIFIER_CONFIG_ENV: &str = "TENKAI_JWT_VERIFIER_CONFIG";
@@ -151,6 +151,11 @@ enum Command {
     Upgrade {
         #[command(subcommand)]
         command: UpgradeCommand,
+    },
+    /// Immutable source-to-target package migration plans.
+    Migrate {
+        #[command(subcommand)]
+        command: MigrateCommand,
     },
     /// Show the steps that would converge the environment (dry run).
     Plan {
@@ -589,6 +594,96 @@ enum UpgradeCommand {
     /// Roll back applied environments through Tenkai rollback plans.
     Rollback {
         name: String,
+        #[arg(long, requires = "development_reason")]
+        allow_unapproved_development: bool,
+        #[arg(long, requires = "allow_unapproved_development")]
+        development_reason: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum MigrateCommand {
+    /// Preview admission without persisting a migration record.
+    Preview {
+        name: String,
+        #[arg(long, default_value = "local")]
+        env: String,
+        /// tenkai.package_migration.v1 JSON declaration.
+        #[arg(long)]
+        declaration: PathBuf,
+        /// Content-bound backup receipt required before irreversible checkpoints.
+        #[arg(long)]
+        backup_receipt_digest: Option<String>,
+    },
+    /// Admit, approve, and execute a package migration until it is blocked or terminal.
+    Apply {
+        name: String,
+        #[arg(long, default_value = "local")]
+        env: String,
+        #[arg(long)]
+        declaration: PathBuf,
+        #[arg(long)]
+        backup_receipt_digest: Option<String>,
+        /// Detached tenkai.package-migration-approval.v1 JSON envelope.
+        #[arg(
+            long,
+            requires = "approval_trust_roots",
+            conflicts_with = "allow_unapproved_development"
+        )]
+        approval: Option<PathBuf>,
+        /// Current Ed25519 trust roots for package-migration approvers.
+        #[arg(
+            long,
+            requires = "approval",
+            conflicts_with = "allow_unapproved_development"
+        )]
+        approval_trust_roots: Option<PathBuf>,
+        #[arg(long, requires = "development_reason")]
+        allow_unapproved_development: bool,
+        #[arg(long, requires = "allow_unapproved_development")]
+        development_reason: Option<String>,
+    },
+    /// Show a stored package migration and its checkpoint receipts.
+    Status { name: String },
+    /// Resume an approved migration from the last accepted checkpoint.
+    Resume {
+        name: String,
+        #[arg(long)]
+        expected_generation: Option<u64>,
+        #[arg(
+            long,
+            requires = "approval_trust_roots",
+            conflicts_with = "allow_unapproved_development"
+        )]
+        approval: Option<PathBuf>,
+        #[arg(
+            long,
+            requires = "approval",
+            conflicts_with = "allow_unapproved_development"
+        )]
+        approval_trust_roots: Option<PathBuf>,
+        #[arg(long, requires = "development_reason")]
+        allow_unapproved_development: bool,
+        #[arg(long, requires = "allow_unapproved_development")]
+        development_reason: Option<String>,
+    },
+    /// Roll back reversible or compensating checkpoints; irreversible work stays recovery-required.
+    Rollback {
+        name: String,
+        #[arg(long)]
+        expected_generation: Option<u64>,
+        #[arg(
+            long,
+            requires = "approval_trust_roots",
+            conflicts_with = "allow_unapproved_development"
+        )]
+        approval: Option<PathBuf>,
+        #[arg(
+            long,
+            requires = "approval",
+            conflicts_with = "allow_unapproved_development"
+        )]
+        approval_trust_roots: Option<PathBuf>,
         #[arg(long, requires = "development_reason")]
         allow_unapproved_development: bool,
         #[arg(long, requires = "allow_unapproved_development")]
@@ -1497,6 +1592,145 @@ async fn run(cli: Cli) -> Result<()> {
                 println!("{}", connectivity::format_upgrade(&record));
             }
         },
+        Command::Migrate { command } => match command {
+            MigrateCommand::Preview {
+                name,
+                env,
+                declaration,
+                backup_receipt_digest,
+            } => {
+                let declaration = package_migration::MigrationDeclaration::load(&declaration)?;
+                let record = package_migration::preview(
+                    &mut ctx,
+                    &name,
+                    &env,
+                    declaration,
+                    backup_receipt_digest.as_deref(),
+                )
+                .await?;
+                println!("{}", package_migration::format_migration(&record));
+            }
+            MigrateCommand::Apply {
+                name,
+                env,
+                declaration,
+                backup_receipt_digest,
+                approval,
+                approval_trust_roots,
+                allow_unapproved_development,
+                development_reason,
+            } => {
+                let declaration = package_migration::MigrationDeclaration::load(&declaration)?;
+                let authorization = migration_authorization(
+                    approval.as_deref(),
+                    approval_trust_roots.as_deref(),
+                    allow_unapproved_development,
+                    development_reason.as_deref(),
+                )?;
+                let record = package_migration::run_until_blocked(
+                    &mut ctx,
+                    &name,
+                    &env,
+                    declaration,
+                    backup_receipt_digest.as_deref(),
+                    authorization,
+                )
+                .await?;
+                println!("{}", package_migration::format_migration(&record));
+                if matches!(
+                    record.status,
+                    package_migration::MigrationStatus::Failed
+                        | package_migration::MigrationStatus::RecoveryRequired
+                ) {
+                    bail!(
+                        "package migration {} ended in {}",
+                        record.name,
+                        record.status.as_str()
+                    );
+                }
+            }
+            MigrateCommand::Status { name } => {
+                let record = package_migration::load(&mut ctx, &name).await?;
+                println!("{}", package_migration::format_migration(&record));
+            }
+            MigrateCommand::Resume {
+                name,
+                expected_generation,
+                approval,
+                approval_trust_roots,
+                allow_unapproved_development,
+                development_reason,
+            } => {
+                let authorization = migration_authorization(
+                    approval.as_deref(),
+                    approval_trust_roots.as_deref(),
+                    allow_unapproved_development,
+                    development_reason.as_deref(),
+                )?;
+                let mut last_receipts = 0;
+                loop {
+                    let record = package_migration::resume(
+                        &mut ctx,
+                        &name,
+                        authorization,
+                        expected_generation,
+                    )
+                    .await?;
+                    if matches!(
+                        record.status,
+                        package_migration::MigrationStatus::Succeeded
+                            | package_migration::MigrationStatus::Failed
+                            | package_migration::MigrationStatus::RolledBack
+                            | package_migration::MigrationStatus::RecoveryRequired
+                    ) || record.receipts.len() == last_receipts
+                    {
+                        println!("{}", package_migration::format_migration(&record));
+                        if matches!(
+                            record.status,
+                            package_migration::MigrationStatus::Failed
+                                | package_migration::MigrationStatus::RecoveryRequired
+                        ) {
+                            bail!(
+                                "package migration {} ended in {}",
+                                record.name,
+                                record.status.as_str()
+                            );
+                        }
+                        break;
+                    }
+                    last_receipts = record.receipts.len();
+                }
+            }
+            MigrateCommand::Rollback {
+                name,
+                expected_generation,
+                approval,
+                approval_trust_roots,
+                allow_unapproved_development,
+                development_reason,
+            } => {
+                let authorization = migration_authorization(
+                    approval.as_deref(),
+                    approval_trust_roots.as_deref(),
+                    allow_unapproved_development,
+                    development_reason.as_deref(),
+                )?;
+                let record = package_migration::rollback(
+                    &mut ctx,
+                    &name,
+                    authorization,
+                    expected_generation,
+                )
+                .await?;
+                println!("{}", package_migration::format_migration(&record));
+                if record.status == package_migration::MigrationStatus::RecoveryRequired {
+                    bail!(
+                        "package migration {} rollback requires recovery",
+                        record.name
+                    );
+                }
+            }
+        },
         Command::Wave { command } => match command {
             WaveCommand::Run {
                 cohort,
@@ -2257,6 +2491,30 @@ fn upgrade_authorization<'a>(
             "upgrade execution requires --approval and --approval-trust-roots, or --allow-unapproved-development with --development-reason"
         ),
         _ => unreachable!("clap rejects partial or conflicting authorization modes"),
+    }
+}
+
+fn migration_authorization<'a>(
+    approval: Option<&'a std::path::Path>,
+    approval_trust_roots: Option<&'a std::path::Path>,
+    allow_unapproved_development: bool,
+    development_reason: Option<&'a str>,
+) -> Result<package_migration::MigrationAuthorization<'a>> {
+    match (approval, approval_trust_roots, allow_unapproved_development) {
+        (Some(approval), Some(trust_roots), false) => {
+            Ok(package_migration::MigrationAuthorization::Signed {
+                approval,
+                trust_roots,
+            })
+        }
+        (None, None, true) => Ok(
+            package_migration::MigrationAuthorization::LocalDevelopment {
+                reason: development_reason.expect("clap requires a development reason"),
+            },
+        ),
+        _ => bail!(
+            "package migration requires --approval and --approval-trust-roots, or --allow-unapproved-development with --development-reason"
+        ),
     }
 }
 
@@ -3033,7 +3291,73 @@ mod tests {
             import.command,
             Command::Upgrade {
                 command: UpgradeCommand::ImportReceipt { ref name, ref env, .. }
-            } if name == "fleet-1" && env == "site-c"
+            }             if name == "fleet-1" && env == "site-c"
+        ));
+    }
+
+    #[test]
+    fn parses_package_migration_commands() {
+        let preview = Cli::try_parse_from([
+            "tenkaictl",
+            "migrate",
+            "preview",
+            "cutover",
+            "--declaration",
+            "declaration.json",
+            "--backup-receipt-digest",
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ])
+        .unwrap();
+        assert!(matches!(
+            preview.command,
+            Command::Migrate {
+                command: MigrateCommand::Preview { ref name, .. }
+            } if name == "cutover"
+        ));
+        let apply = Cli::try_parse_from([
+            "tenkaictl",
+            "migrate",
+            "apply",
+            "cutover",
+            "--declaration",
+            "declaration.json",
+            "--allow-unapproved-development",
+            "--development-reason",
+            "drill",
+        ])
+        .unwrap();
+        assert!(matches!(
+            apply.command,
+            Command::Migrate {
+                command: MigrateCommand::Apply {
+                    ref name,
+                    allow_unapproved_development: true,
+                    ..
+                }
+            } if name == "cutover"
+        ));
+        let resume = Cli::try_parse_from([
+            "tenkaictl",
+            "migrate",
+            "resume",
+            "cutover",
+            "--approval",
+            "cutover.approval.json",
+            "--approval-trust-roots",
+            "approvers.toml",
+            "--expected-generation",
+            "1",
+        ])
+        .unwrap();
+        assert!(matches!(
+            resume.command,
+            Command::Migrate {
+                command: MigrateCommand::Resume {
+                    ref name,
+                    expected_generation: Some(1),
+                    ..
+                }
+            } if name == "cutover"
         ));
     }
 
