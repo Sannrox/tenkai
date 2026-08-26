@@ -60,6 +60,9 @@
 //!   behind one private Plan Step execution interface.
 //! - [`connectivity`] coordinates one signed upgrade across connected,
 //!   intermittent, and isolated environments without a second executor.
+//! - [`package_migration`] binds source and target package pins, signed
+//!   compatibility evidence, and classified checkpoints into one immutable
+//!   plan with resume, rollback, and recovery-required state.
 //! - [`fleet`] owns pure fleet posture aggregation, drift comparison, and
 //!   baseline I/O so callers do not re-encode inspect→posture classification.
 //! - [`storage`] and [`tenant_store`] provide operational persistence adapters.
@@ -146,6 +149,7 @@ pub mod metrics;
 pub mod model_runtime;
 pub mod offline_bundle;
 pub mod ontology;
+pub mod package_migration;
 pub mod pb;
 pub mod plan;
 pub mod plan_approval;

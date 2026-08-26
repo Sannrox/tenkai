@@ -29,6 +29,8 @@ pub const KIND_PROMOTION_AUDIT: &str = "tenkai.promotion_audit";
 pub const KIND_PROMOTION_LOCK: &str = "tenkai.promotion_lock";
 pub const KIND_WAVE: &str = "tenkai.wave";
 pub const KIND_CONNECTIVITY_UPGRADE: &str = "tenkai.connectivity_upgrade";
+pub const KIND_PACKAGE_MIGRATION: &str = "tenkai.package_migration";
+pub const KIND_PACKAGE_MIGRATION_LOCK: &str = "tenkai.package_migration_lock";
 
 pub const REL_RELEASE_OF: &str = "release_of";
 pub const REL_HAS_RELEASE_VERIFICATION: &str = "has_release_verification";
@@ -83,6 +85,12 @@ pub fn wave_id(name: &str) -> String {
 }
 pub fn connectivity_upgrade_id(name: &str) -> String {
     format!("tenkai:connectivity-upgrade:{name}")
+}
+pub fn package_migration_id(name: &str) -> String {
+    format!("tenkai:package-migration:{name}")
+}
+pub fn package_migration_lock_id(environment: &str) -> String {
+    format!("tenkai:package-migration-lock:{environment}")
 }
 pub fn plan_id(env: &str, ts: i64, content_id: &str) -> String {
     format!("tenkai:plan:{env}:{ts}:{content_id}")
@@ -675,6 +683,34 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
                 prop("record", true, "Canonical JSON upgrade record"),
             ],
         ),
+        object_type(
+            KIND_PACKAGE_MIGRATION,
+            "A durable package-migration plan with classified checkpoints and recovery",
+            vec![
+                prop("name", true, "Operator-provided migration name"),
+                prop(
+                    "identity_digest",
+                    true,
+                    "Digest of the content-bound migration identity",
+                ),
+                prop("environment", true, "Environment scoped by this migration"),
+                prop("status", true, "Migration lifecycle status"),
+                prop("record", true, "Canonical JSON migration record"),
+            ],
+        ),
+        object_type(
+            KIND_PACKAGE_MIGRATION_LOCK,
+            "An exclusive lock serializing package migration against one environment",
+            vec![
+                prop("environment", true, "Environment held by the lock"),
+                prop("owner", true, "Package migration name holding the lock"),
+                prop(
+                    "allowed_plan_id",
+                    false,
+                    "Plan identifier temporarily admitted to apply while the lock is held",
+                ),
+            ],
+        ),
     ];
 
     let mut registered = Vec::new();
@@ -712,6 +748,23 @@ pub async fn require_connectivity_upgrade_schema(ctx: &mut Ctx) -> Result<()> {
     {
         bail!(
             "connectivity-upgrade schema upgrade required (missing {KIND_CONNECTIVITY_UPGRADE}); ask an administrator to run `tenkaictl init`"
+        );
+    }
+    Ok(())
+}
+
+/// Verify once per connected client that an administrator registered migration types.
+pub async fn require_package_migration_schema(ctx: &mut Ctx) -> Result<()> {
+    let schemas = ctx.schemas().await?;
+    let required = [KIND_PACKAGE_MIGRATION, KIND_PACKAGE_MIGRATION_LOCK];
+    let missing = required
+        .into_iter()
+        .filter(|kind| !schemas.iter().any(|schema| schema.kind == *kind))
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        bail!(
+            "package-migration schema upgrade required (missing {}); ask an administrator to run `tenkaictl init`",
+            missing.join(", ")
         );
     }
     Ok(())

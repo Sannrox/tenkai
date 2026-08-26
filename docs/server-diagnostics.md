@@ -110,6 +110,7 @@ management or runtime tokens in output.
 | `fleet watch` | Delta / alert summary over time (this section) |
 | Reconcile diagnostics (above) | Per-tick apply counters, not posture table |
 | Rollout waves (`tenkaictl wave`) | Ordered cohort observation during a wave |
+| Package migrations (`tenkaictl migrate`) | Source-to-target checkpoint receipts and recovery |
 
 ## Related
 

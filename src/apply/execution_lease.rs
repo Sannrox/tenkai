@@ -130,6 +130,7 @@ async fn claim_environment_with_options(
     automatic_takeover: bool,
 ) -> Result<EnvironmentLease> {
     let now = crate::now_millis();
+    reject_foreign_migration_lock(ctx, environment, owner).await?;
     if let Some(existing) = ctx.get(&legacy_environment_claim_id(environment)).await? {
         let expires_at = existing
             .properties
@@ -268,7 +269,39 @@ async fn claim_environment_with_options(
         let _ = release_environment_lease(ctx, &environment_lease).await;
         return Err(error);
     }
+    if let Err(error) = reject_foreign_migration_lock(ctx, environment, owner).await {
+        let _ = release_environment_lease(ctx, &environment_lease).await;
+        return Err(error);
+    }
     Ok(environment_lease)
+}
+
+async fn reject_foreign_migration_lock(
+    ctx: &mut Ctx,
+    environment: &str,
+    owner: &str,
+) -> Result<()> {
+    let Some(lock) = ctx
+        .get(&crate::ontology::package_migration_lock_id(environment))
+        .await?
+    else {
+        return Ok(());
+    };
+    let lock_owner = lock
+        .properties
+        .get("owner")
+        .map(String::as_str)
+        .unwrap_or_default();
+    let allowed_plan = lock
+        .properties
+        .get("allowed_plan_id")
+        .map(String::as_str)
+        .unwrap_or_default();
+    let migration_owner = format!("package-migration:{lock_owner}");
+    if owner != allowed_plan && owner != migration_owner {
+        bail!("environment {environment} has package migration {lock_owner} in progress");
+    }
+    Ok(())
 }
 
 pub(crate) async fn refresh_environment_lease(

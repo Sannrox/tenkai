@@ -1,0 +1,8 @@
+[product]
+name = "pkg"
+version = "1.0.0"
+description = "Synthetic source package for a governed migration"
+
+[deploy]
+install = "true"
+inputs = ["payload.txt"]

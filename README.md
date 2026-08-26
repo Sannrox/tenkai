@@ -512,6 +512,7 @@ it ([ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md),
 | Change-set closure pin admission | [Change-set pins](docs/change-set-pin.md); [ADR 0018](docs/decisions/0018-change-set-closure-pin.md); #288 |
 | Fixed-replica Shikigami worker-pool lifecycle | [Worker pools](docs/worker-pool.md); [ADR 0011](docs/decisions/0011-shikigami-worker-pool-lifecycle.md); #284 |
 | Connectivity-class upgrades | [Connectivity upgrades](docs/connectivity-upgrades.md); [ADR 0020](docs/decisions/0020-connectivity-class-upgrade.md); #287 |
+| Governed package migrations | [Package migrations](docs/package-migrations.md); [ADR 0024](docs/decisions/0024-package-migration.md); #289 |
 | Runtime capability negotiation at startup | [Runtime capabilities](docs/runtime-capabilities.md) |
 | Multi-replica / HA capability profile (decision) | [ADR 0009](docs/decisions/0009-multi-replica-reconcile-and-ha-profile.md); #109 |
 | AuthStack management HTTP + federation accept path | [Auth context](docs/auth-request-context.md), [federated identity](docs/federated-identity.md); #68, #71 |

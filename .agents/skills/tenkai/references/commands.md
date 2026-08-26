@@ -105,6 +105,27 @@ reconciliation belongs under an operator-managed supervisor. Rollback creates
 and executes the normal pinned-release plan path; non-local rollback can stop
 at approval-required state and return the plan identifier.
 
+## Package migration
+
+```sh
+tenkaictl migrate preview <name> --declaration <declaration.json>
+tenkaictl migrate apply <name> --declaration <declaration.json> \
+  --approval <approval.json> --approval-trust-roots <approvers.toml>
+tenkaictl migrate status <name>
+tenkaictl migrate resume <name> \
+  --approval <approval.json> --approval-trust-roots <approvers.toml>
+tenkaictl migrate rollback <name> \
+  --approval <approval.json> --approval-trust-roots <approvers.toml>
+```
+
+The declaration is `tenkai.package_migration.v1`. Tenkai binds source and
+target Catalog pins, consumed compatibility evidence, and classified
+checkpoints. Compensating checkpoints apply the target pin through existing
+plans. Irreversible checkpoints require `--backup-receipt-digest` at admit.
+Accepted irreversible work records `recovery_required` and never reports
+rollback success. Local-development bypass stays on the built-in `local`
+environment.
+
 ## Machine results
 
 For supported embedded commands, place the global output option before the
