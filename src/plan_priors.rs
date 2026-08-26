@@ -399,6 +399,9 @@ mod tests {
             latest_plan: None,
             terminal_outcomes: Vec::new(),
             execution_note: String::new(),
+            observed_type_digest: None,
+            observed_runtime_digest: None,
+            module_activations: Vec::new(),
         };
         annotate_plan_with_priors(
             &mut plan,
@@ -537,6 +540,9 @@ mod tests {
             latest_plan: None,
             terminal_outcomes: Vec::new(),
             execution_note: String::new(),
+            observed_type_digest: None,
+            observed_runtime_digest: None,
+            module_activations: Vec::new(),
         };
         let config = PriorConfig {
             enabled: true,

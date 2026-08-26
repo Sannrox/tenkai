@@ -21,6 +21,7 @@ pub(crate) enum StagedKind {
     EvalSuite,
     AgentDefinition,
     PromptPackage,
+    WorkshopModule,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +52,7 @@ impl ProductKind {
             Self::EvalSuite => ProductTarget::Staged(StagedKind::EvalSuite),
             Self::AgentDefinition => ProductTarget::Staged(StagedKind::AgentDefinition),
             Self::PromptPackage => ProductTarget::Staged(StagedKind::PromptPackage),
+            Self::WorkshopModule => ProductTarget::Staged(StagedKind::WorkshopModule),
         };
         ProductKindPolicy { target }
     }
@@ -122,6 +124,11 @@ mod tests {
             (
                 ProductKind::PromptPackage,
                 ProductTarget::Staged(StagedKind::PromptPackage),
+                true,
+            ),
+            (
+                ProductKind::WorkshopModule,
+                ProductTarget::Staged(StagedKind::WorkshopModule),
                 true,
             ),
         ];

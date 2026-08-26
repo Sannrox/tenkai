@@ -32,6 +32,9 @@ const MEMBER_KINDS: &[&str] = &[
     "link_type",
     "action_type",
     "control",
+    "workshop_module",
+    "type_revision",
+    "runtime",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

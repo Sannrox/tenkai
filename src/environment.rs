@@ -743,6 +743,15 @@ pub struct EnvironmentInspectReport {
     pub terminal_outcomes: Vec<crate::providers::TerminalOutcomeProjection>,
     /// Execution ownership note: Tenkai never prints runtime bearer tokens.
     pub execution_note: String,
+    /// Observed type digest used for workshop-module compatibility admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_type_digest: Option<String>,
+    /// Observed runtime digest used for workshop-module compatibility admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_runtime_digest: Option<String>,
+    /// Accepted workshop-module activation receipts for this environment.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub module_activations: Vec<crate::workshop_module::ModuleActivationReceipt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -933,6 +942,8 @@ async fn inspect_environment_base(ctx: &mut Ctx, env: &str) -> Result<Environmen
     let overlays = environment_overlays_from_object(&env_obj);
     let lease = crate::apply::inspect_environment_lease(ctx, env).await?;
     let latest_plan = latest_plan_for_environment(ctx, env).await?;
+    let observed = crate::workshop_module::observed_from_object(&env_obj)?;
+    let module_activations = crate::workshop_module::activations_from_object(&env_obj)?;
     Ok(EnvironmentInspectReport {
         name: env_obj.name,
         id: env_obj.id,
@@ -949,6 +960,9 @@ async fn inspect_environment_base(ctx: &mut Ctx, env: &str) -> Result<Environmen
         terminal_outcomes: Vec::new(),
         execution_note: "Apply leases and runtime credentials are distinct; inspect never prints bearer tokens. Server-side runtime-token environments are not executed by the embedded server executor."
             .into(),
+        observed_type_digest: observed.as_ref().map(|value| value.type_digest.clone()),
+        observed_runtime_digest: observed.map(|value| value.runtime_digest),
+        module_activations,
     })
 }
 

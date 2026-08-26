@@ -158,6 +158,9 @@ async fn compute_snapshot_with_policy(
             .get(&format!("deployed.{product}"))
             .cloned();
         let kind = selected.kind;
+        if kind == crate::manifest::ProductKind::WorkshopModule {
+            crate::workshop_module::admit_plan(ctx, env, &env_obj, &release).await?;
+        }
         inputs.push(DesiredStateInput {
             product: product.clone(),
             channel,

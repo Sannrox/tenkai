@@ -40,5 +40,9 @@ Planning, apply, rollback, recall, and recovery use the stored Catalog pin.
 They do not require the change-set service to reconstruct Tenkai state.
 
 Allowed member kinds for v1: `object_type`, `interface_type`,
-`ontology_class`, `ontology_relation`, `link_type`, `action_type`, `control`.
+`ontology_class`, `ontology_relation`, `link_type`, `action_type`, `control`,
+`workshop_module`, `type_revision`, `runtime`.
 Credentials, member documents, and unrestricted external records are excluded.
+
+`workshop_module` releases require a pin. See
+[Workshop module delivery](workshop-modules.md).

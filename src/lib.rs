@@ -72,7 +72,8 @@
 //!   completion validation and ordering, durable Plan and Deployment effects,
 //!   heartbeat renewal, and inventory admission behind one interface.
 //! - [`software_executor`], [`model_runtime`], [`routing`], [`staged_artifact`],
-//!   and [`worker_pool`] adapt typed delivery products to their target runtimes.
+//!   [`workshop_module`], and [`worker_pool`] adapt typed delivery products to
+//!   their target runtimes.
 //!   Software executor hosts select Helm, native Kubernetes, or fake adapters
 //!   and pass them through apply execution options; the private diagnostics
 //!   module hides credential-free stderr capture and sanitization shared by
@@ -173,6 +174,7 @@ pub mod tenant_store;
 mod terminal_outcome;
 pub mod wave;
 pub mod worker_pool;
+pub mod workshop_module;
 
 pub fn now_millis() -> i64 {
     std::time::SystemTime::now()

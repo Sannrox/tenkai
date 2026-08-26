@@ -1,0 +1,29 @@
+{
+  "schema": "tenkai.change_set_publication_evidence.v1",
+  "status": "accepted",
+  "authorized": true,
+  "contract": "tenkai.change_set_pin.v1",
+  "namespace": "workshop",
+  "branch_id": "modules",
+  "proposal_id": "prop-1",
+  "base_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "closure_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "receipt_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "members": [
+    {
+      "kind": "runtime",
+      "id": "runtime-local",
+      "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+    },
+    {
+      "kind": "type_revision",
+      "id": "type-v1",
+      "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+    },
+    {
+      "kind": "workshop_module",
+      "id": "hello-workshop",
+      "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  ]
+}
