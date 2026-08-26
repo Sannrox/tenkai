@@ -1,0 +1,32 @@
+[product]
+name = "hello-workshop"
+version = "1.0.0"
+kind = "workshop_module"
+description = "Synthetic Workshop module delivery fixture"
+
+[module]
+document = "module.json"
+
+[change_set_pin]
+contract = "tenkai.change_set_pin.v1"
+namespace = "workshop"
+branch_id = "modules"
+proposal_id = "prop-1"
+base_digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+closure_digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+receipt_digest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+
+[[change_set_pin.members]]
+kind = "runtime"
+id = "runtime-local"
+digest = "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+
+[[change_set_pin.members]]
+kind = "type_revision"
+id = "type-v1"
+digest = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+
+[[change_set_pin.members]]
+kind = "workshop_module"
+id = "hello-workshop"
+digest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"

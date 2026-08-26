@@ -74,6 +74,21 @@ eval_suite = "prompt-quality"
             br#"{"version":1,"package_id":"ops-prompts","runtime":"local","eval_suite":"prompt-quality","prompts":[{"id":"system","body":"You are a bounded operator assistant."}]}"#
                 .as_slice(),
         ),
+        (
+            ProductKind::WorkshopModule,
+            r#"
+[product]
+name = "hello-workshop"
+version = "1.0.0"
+kind = "workshop_module"
+[module]
+document = "module.json"
+"#,
+            "module.json",
+            "workshop_module",
+            br#"{"version":1,"profile":"tenkai.workshop_module.v1","module_id":"hello-workshop","module_digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","type_compatibility":{"version":1,"digests":["sha256:2222222222222222222222222222222222222222222222222222222222222222"]},"runtime_compatibility":{"version":1,"digests":["sha256:3333333333333333333333333333333333333333333333333333333333333333"]}}"#
+                .as_slice(),
+        ),
     ];
 
     for (kind, raw_manifest, expected_path, namespace, bytes) in fixtures {

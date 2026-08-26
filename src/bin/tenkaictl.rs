@@ -631,6 +631,14 @@ enum EnvCommand {
         #[command(subcommand)]
         command: FactsCommand,
     },
+    /// Record observed type and runtime digests for workshop-module admission.
+    Observe {
+        env: String,
+        #[arg(long)]
+        type_digest: String,
+        #[arg(long)]
+        runtime_digest: String,
+    },
     /// Manage planning constraints (version pins/ranges, required facts).
     Constraints {
         #[command(subcommand)]
@@ -1717,6 +1725,17 @@ async fn run(cli: Cli) -> Result<()> {
                 println!(
                     "{}",
                     connectivity::set_connectivity_class(&mut ctx, &env, class).await?
+                );
+            }
+            EnvCommand::Observe {
+                env,
+                type_digest,
+                runtime_digest,
+            } => {
+                println!(
+                    "{}",
+                    plan::set_observed_compatibility(&mut ctx, &env, &type_digest, &runtime_digest)
+                        .await?
                 );
             }
             EnvCommand::Facts { command } => match command {

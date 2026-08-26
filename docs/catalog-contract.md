@@ -48,6 +48,8 @@ evidence. After admission, Tenkai-owned stored pin evidence is sufficient for
 inspect, promote, plan, apply, rollback, recall, and recovery. See
 [change-set closure pins](change-set-pin.md) and
 [ADR 0018](decisions/0018-change-set-closure-pin.md).
+`workshop_module` releases require this pin and bind the module, type, and
+runtime digests; see [Workshop module delivery](workshop-modules.md).
 
 ## Transport conformance
 

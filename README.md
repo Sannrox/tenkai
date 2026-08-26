@@ -508,7 +508,7 @@ it ([ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md),
 | Durable terminal outcome export to Chisei | [Provider contracts](docs/provider-contracts.md#chisei-terminal-outcome-adapter-197); #197 |
 | Remote HTTP GateProvider (chisei-compatible JSON) | [Provider contracts](docs/provider-contracts.md#remote-gate-http-json-contract-113); #113 |
 | Optional advisory plan priors (default off) | [Plan priors](docs/plan-priors.md); #114 |
-| Staged products: policy_bundle, eval_suite, agent_definition, prompt_package | [Staged products](docs/staged-products.md); #115, #116, #117, #285 |
+| Staged products: policy_bundle, eval_suite, agent_definition, prompt_package, workshop_module | [Staged products](docs/staged-products.md); [Workshop modules](docs/workshop-modules.md); #115, #116, #117, #285, #290 |
 | Change-set closure pin admission | [Change-set pins](docs/change-set-pin.md); [ADR 0018](docs/decisions/0018-change-set-closure-pin.md); #288 |
 | Fixed-replica Shikigami worker-pool lifecycle | [Worker pools](docs/worker-pool.md); [ADR 0011](docs/decisions/0011-shikigami-worker-pool-lifecycle.md); #284 |
 | Connectivity-class upgrades | [Connectivity upgrades](docs/connectivity-upgrades.md); [ADR 0020](docs/decisions/0020-connectivity-class-upgrade.md); #287 |

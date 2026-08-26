@@ -26,12 +26,14 @@ pub use crate::environment::{
     reconcile_deployment, require_environment_fact, set_environment_constraint,
     set_environment_fact, set_environment_overlay, status, subscribe, subscription_state,
 };
+
 pub use crate::fleet::{
     FleetDriftSummary, FleetEnvironmentRow, FleetPostureSnapshot, FleetStatusReport,
     compare_fleet_posture, fleet_posture_snapshot, fleet_status_from_inspects,
     fleet_status_from_rows, is_hard_drift_posture, load_fleet_posture_baseline,
     write_fleet_posture_baseline,
 };
+pub use crate::workshop_module::set_observed_compatibility;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

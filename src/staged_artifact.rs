@@ -1,5 +1,5 @@
 //! Staged JSON product kinds: policy_bundle, eval_suite, agent_definition,
-//! prompt_package.
+//! prompt_package, workshop_module.
 //!
 //! These kinds deliver versioned descriptor documents through Catalog channels
 //! and plan/apply like routing_config. Apply stages content-addressed JSON only;
@@ -27,6 +27,7 @@ impl StagedKind {
             Self::EvalSuite => "eval_suite",
             Self::AgentDefinition => "agent_definition",
             Self::PromptPackage => "prompt_package",
+            Self::WorkshopModule => "workshop_module",
         }
     }
 
@@ -52,6 +53,11 @@ impl StagedKind {
                 .as_ref()
                 .map(|section| section.document.as_str())
                 .context("prompt_package needs [prompt].document"),
+            Self::WorkshopModule => manifest
+                .module
+                .as_ref()
+                .map(|section| section.document.as_str())
+                .context("workshop_module needs [module].document"),
         }
     }
 
@@ -71,6 +77,10 @@ impl StagedKind {
             }
             Self::PromptPackage => {
                 let doc = load_prompt_package(path)?;
+                Ok(serde_json::to_vec_pretty(&doc)?)
+            }
+            Self::WorkshopModule => {
+                let doc = crate::workshop_module::load_document(path)?;
                 Ok(serde_json::to_vec_pretty(&doc)?)
             }
         }
@@ -98,6 +108,7 @@ impl StagedKind {
                     serde_json::from_slice(bytes).context("parsing prompt_package document")?;
                 doc.validate()
             }
+            Self::WorkshopModule => crate::workshop_module::parse_document_bytes(bytes).map(|_| ()),
         }
     }
 

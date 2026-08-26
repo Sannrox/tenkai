@@ -39,6 +39,13 @@ pub(super) async fn admit(
         loaded.manifest.change_set_pin.as_ref(),
         options.change_set_evidence.as_ref(),
     )?;
+    if loaded.manifest.product.kind == crate::manifest::ProductKind::WorkshopModule {
+        crate::workshop_module::admit_publication(
+            &loaded.manifest,
+            &loaded.workdir,
+            admitted_pin.as_ref(),
+        )?;
+    }
     let pin_properties = match &admitted_pin {
         Some(pin) => change_set_pin::stored_properties(pin)?,
         None => HashMap::new(),

@@ -22,3 +22,4 @@
 - [0020 — Connectivity-class upgrade lifecycle](0020-connectivity-class-upgrade.md)
 - [0021 — Portable delivery-manifest profile](0021-portable-delivery-manifest-profile.md)
 - [0022 — External delivery adapter boundary](0022-external-delivery-adapter-boundary.md)
+- [0023 — Workshop module delivery profile](0023-workshop-module-delivery.md)

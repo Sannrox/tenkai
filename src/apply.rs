@@ -346,6 +346,7 @@ mod tests {
                 eval_suite_product: None,
                 agent: None,
                 prompt: None,
+                module: None,
                 change_set_pin: None,
                 worker_pool: None,
                 gate: GateSection::default(),

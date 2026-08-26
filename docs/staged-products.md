@@ -10,6 +10,7 @@ install scripts as the primary path.
 | `eval_suite` | `[eval_suite_product].document` | suite_id + cases | Stage immutable eval contract |
 | `agent_definition` | `[agent].document` | agent_id, runtime, entrypoint | Stage agent descriptor only |
 | `prompt_package` | `[prompt].document` | package_id, runtime, eval_suite, prompt bodies | Stage exact prompt bytes after evaluation gates |
+| `workshop_module` | `[module].document` | module digest plus type/runtime compatibility | Activate one module without changing type or runtime |
 
 Source: `src/staged_artifact.rs`, `src/manifest.rs`. Issues: #115, #116, #117.
 
@@ -24,6 +25,7 @@ schema identities. The evidence and compatibility analysis are recorded in
 | policy_bundle | Act as IdP / live policy engine UI |
 | eval_suite | Run remote eval (see GateProvider / #113) |
 | agent_definition | Schedule agent jobs (orchestration stays out of Tenkai) |
+| workshop_module | Render Workshop modules, migrate types, or change the runtime |
 
 ## Example: policy_bundle
 

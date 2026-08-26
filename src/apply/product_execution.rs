@@ -69,6 +69,23 @@ pub(super) async fn activate(
             return Ok(Ok(()));
         }
     }
+    if content.manifest.product.kind == crate::manifest::ProductKind::WorkshopModule {
+        prepare_fenced_mutation(ctx, lease, content).await?;
+        let state_root = content
+            .routing_state
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        return Ok(crate::workshop_module::activate(
+            ctx,
+            &content.environment,
+            &content.product,
+            &content.manifest,
+            &content.workdir,
+            state_root,
+        )
+        .await
+        .map_err(|error| error.to_string()));
+    }
     if matches!(
         content.manifest.product.kind.policy().target(),
         ProductTarget::Staged(_)
@@ -199,6 +216,21 @@ pub(super) async fn deactivate(
         if let Err(error) = admit_worker_pool(ctx, content, true).await? {
             return Ok(Err(error));
         }
+    }
+    if content.manifest.product.kind == crate::manifest::ProductKind::WorkshopModule {
+        refresh_environment_lease(ctx, lease).await?;
+        let state_root = content
+            .routing_state
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        return Ok(crate::workshop_module::deactivate(
+            ctx,
+            &content.environment,
+            &content.product,
+            state_root,
+        )
+        .await
+        .map_err(|error| error.to_string()));
     }
     if matches!(
         content.manifest.product.kind.policy().target(),
@@ -362,6 +394,7 @@ mod tests {
             ProductKind::AgentDefinition,
             ProductKind::WorkerPool,
             ProductKind::PromptPackage,
+            ProductKind::WorkshopModule,
         ] {
             assert_eq!(kind.policy().cleanup(), CleanupPolicy::Atomic);
         }
