@@ -2556,14 +2556,13 @@ fn print_fleet_status(report: &plan::FleetStatusReport) {
         return;
     }
     println!(
-        "{:<16} {:<10} {:<6} {:<6} {:<6} {:<6} {:<8} {:<10} plan",
+        "{:<16} {:<10} {:<6} {:<6} {:<6} {:<6} {:<8} {:<10}",
         "name", "posture", "subs", "cur", "behind", "miss", "health", "lease"
     );
     for row in &report.environments {
         let lease = if row.lease_held { "held" } else { "-" };
-        let plan = row.latest_plan_state.as_deref().unwrap_or("-");
         println!(
-            "{:<16} {:<10} {:<6} {:<6} {:<6} {:<6} {:<8} {:<10} {plan}",
+            "{:<16} {:<10} {:<6} {:<6} {:<6} {:<6} {:<8} {:<10}",
             row.name,
             row.posture,
             row.subscription_count,

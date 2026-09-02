@@ -799,11 +799,15 @@ pub struct EnvironmentPlanStepSummary {
 
 pub async fn status(ctx: &mut Ctx, env: &str) -> Result<Vec<StatusRow>> {
     let env_obj = environment(ctx, env).await?;
+    status_from_object(ctx, &env_obj).await
+}
+
+async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<StatusRow>> {
     let channels = ctx.linked(&env_obj.id, REL_SUBSCRIBES, "out").await?;
     let mut rows = Vec::new();
     for ch in channels {
         let product = ch.properties.get("product").cloned().unwrap_or_default();
-        let overlay_digest = overlay_digest_for(&env_obj, &product);
+        let overlay_digest = overlay_digest_for(env_obj, &product);
         let applied = env_obj
             .properties
             .get(&format!("applied_config.{product}"))
@@ -834,6 +838,40 @@ pub async fn status(ctx: &mut Ctx, env: &str) -> Result<Vec<StatusRow>> {
     }
     rows.sort_by(|a, b| a.product.cmp(&b.product));
     Ok(rows)
+}
+
+fn subscription_views_from_status(
+    env_obj: &Object,
+    rows: Vec<StatusRow>,
+) -> Vec<EnvironmentSubscriptionView> {
+    rows.into_iter()
+        .map(|row| {
+            let overlay_digest = overlay_digest_for(env_obj, &row.product);
+            let applied_overlay = env_obj
+                .properties
+                .get(&format!("applied_config.{}", row.product))
+                .cloned()
+                .filter(|value| !value.is_empty());
+            let config_stale = overlay_digest != applied_overlay.clone().unwrap_or_default();
+            EnvironmentSubscriptionView {
+                product: row.product.clone(),
+                channel: row.channel,
+                head: row.head.clone(),
+                deployed: row.deployed.clone(),
+                health: row.health.clone(),
+                error: row.error,
+                overlay_digest: (!overlay_digest.is_empty()).then_some(overlay_digest),
+                applied_overlay,
+                state: subscription_state(
+                    row.deployed.as_deref(),
+                    &row.head,
+                    row.health.as_deref(),
+                    config_stale,
+                )
+                .to_string(),
+            }
+        })
+        .collect()
 }
 
 /// List registered environments with compact delivery summaries.
@@ -878,14 +916,41 @@ pub use crate::fleet::{
 /// Summarize delivery posture for every registered environment.
 ///
 /// Complements `list_environments` / `inspect_environment` and server reconcile
-/// diagnostics: this is the operator fleet table (drift, health, lease, plan).
-/// Pure aggregation lives in [`crate::fleet`]; this function only loads inspect
-/// reports from the application context.
+/// diagnostics: this is the operator fleet table (drift, health, lease).
+/// Pure aggregation lives in [`crate::fleet`].
+///
+/// One pass over registered environments: subscription posture from the
+/// environment object and its channel links. Does not inspect each environment
+/// (facts, overlays, modules, or the plan catalog). Plan state belongs on
+/// environment detail, not the fleet table. `latest_plan_state` on fleet rows
+/// is therefore always `None`.
 pub async fn fleet_status(ctx: &mut Ctx) -> Result<FleetStatusReport> {
-    let listed = list_environments(ctx).await?;
-    let mut reports = Vec::with_capacity(listed.len());
-    for entry in listed {
-        reports.push(inspect_environment(ctx, &entry.name).await?);
+    let mut environments = ctx.list_kind(KIND_ENVIRONMENT).await?;
+    environments.sort_by(|left, right| left.name.cmp(&right.name));
+    let mut reports = Vec::with_capacity(environments.len());
+    for env_obj in environments {
+        let rows = status_from_object(ctx, &env_obj).await?;
+        let subscriptions = subscription_views_from_status(&env_obj, rows);
+        let lease = crate::apply::inspect_environment_lease(ctx, &env_obj.name).await?;
+        reports.push(EnvironmentInspectReport {
+            name: env_obj.name,
+            id: env_obj.id,
+            description: env_obj
+                .properties
+                .get("description")
+                .cloned()
+                .unwrap_or_default(),
+            subscriptions,
+            facts: Default::default(),
+            overlays: Default::default(),
+            lease,
+            latest_plan: None,
+            terminal_outcomes: Vec::new(),
+            execution_note: String::new(),
+            observed_type_digest: None,
+            observed_runtime_digest: None,
+            module_activations: Vec::new(),
+        });
     }
     Ok(fleet_status_from_inspects(reports))
 }
@@ -908,36 +973,8 @@ pub async fn inspect_environment_with_outcomes(
 
 async fn inspect_environment_base(ctx: &mut Ctx, env: &str) -> Result<EnvironmentInspectReport> {
     let env_obj = environment(ctx, env).await?;
-    let rows = status(ctx, env).await?;
-    let subscriptions = rows
-        .into_iter()
-        .map(|row| {
-            let overlay_digest = overlay_digest_for(&env_obj, &row.product);
-            let applied_overlay = env_obj
-                .properties
-                .get(&format!("applied_config.{}", row.product))
-                .cloned()
-                .filter(|value| !value.is_empty());
-            let config_stale = overlay_digest != applied_overlay.clone().unwrap_or_default();
-            EnvironmentSubscriptionView {
-                product: row.product.clone(),
-                channel: row.channel,
-                head: row.head.clone(),
-                deployed: row.deployed.clone(),
-                health: row.health.clone(),
-                error: row.error,
-                overlay_digest: (!overlay_digest.is_empty()).then_some(overlay_digest),
-                applied_overlay,
-                state: subscription_state(
-                    row.deployed.as_deref(),
-                    &row.head,
-                    row.health.as_deref(),
-                    config_stale,
-                )
-                .to_string(),
-            }
-        })
-        .collect();
+    let rows = status_from_object(ctx, &env_obj).await?;
+    let subscriptions = subscription_views_from_status(&env_obj, rows);
     let facts = environment_facts_from_object(&env_obj);
     let overlays = environment_overlays_from_object(&env_obj);
     let lease = crate::apply::inspect_environment_lease(ctx, env).await?;
@@ -1531,5 +1568,36 @@ mod tests {
         let mut second = BTreeMap::new();
         second.insert("region".into(), "us".into());
         assert_ne!(overlay_digest(&first), overlay_digest(&second));
+    }
+
+    #[tokio::test]
+    async fn fleet_status_walks_registered_environments_once() {
+        let database = std::env::temp_dir().join(format!(
+            "tenkai-fleet-status-{}-{}.db",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let _ = std::fs::remove_file(&database);
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        env_add(&mut ctx, "prod", "Prod").await.unwrap();
+        env_add(&mut ctx, "stage", "Stage").await.unwrap();
+        let report = fleet_status(&mut ctx).await.unwrap();
+        assert_eq!(report.environment_count, 2);
+        assert_eq!(
+            report
+                .environments
+                .iter()
+                .map(|row| row.name.as_str())
+                .collect::<Vec<_>>(),
+            ["prod", "stage"]
+        );
+        assert!(
+            report
+                .environments
+                .iter()
+                .all(|row| row.posture == "empty" && row.latest_plan_state.is_none())
+        );
+        let _ = std::fs::remove_file(&database);
     }
 }

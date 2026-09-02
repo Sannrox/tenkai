@@ -31,7 +31,8 @@ pub struct FleetEnvironmentRow {
     /// `ok` | `unknown` | `error` | `n/a` (no subscriptions).
     pub health_summary: String,
     pub lease_held: bool,
-    /// Latest plan state when a plan exists.
+    /// Latest plan state when a plan exists. Fleet status leaves this empty;
+    /// `inspect_environment` is the source for plan detail.
     pub latest_plan_state: Option<String>,
     /// Aggregate posture: `empty` | `unhealthy` | `behind` | `current`.
     pub posture: String,
