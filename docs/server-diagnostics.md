@@ -52,7 +52,8 @@ or plan bodies. Not a metrics TSDB; scrape and store externally.
 ## Fleet status (operator table)
 
 Cross-environment delivery posture is **not** the same as tick counters above.
-Use the fleet status report for drift/health/lease/plan at a glance:
+Use the fleet status report for drift/health/lease at a glance. Plan state
+stays on `env inspect`; fleet status does not scan the plan catalog.
 
 ```bash
 # embedded
