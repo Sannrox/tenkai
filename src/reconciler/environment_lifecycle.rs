@@ -29,6 +29,7 @@ pub(super) async fn reconcile(ctx: &mut Ctx, request: Request<'_>) -> Result<Env
     if request.runtime_managed {
         return reconcile_runtime_managed(ctx, request.environment).await;
     }
+    plan::retire_empty_executable_plans(ctx, request.environment).await?;
     if recover_or_detect_active_plan(ctx, request.environment).await? {
         return Ok(EnvironmentStatus::Busy);
     }
@@ -44,6 +45,7 @@ pub(super) async fn reconcile(ctx: &mut Ctx, request: Request<'_>) -> Result<Env
 }
 
 async fn reconcile_runtime_managed(ctx: &mut Ctx, environment: &str) -> Result<EnvironmentStatus> {
+    plan::retire_empty_executable_plans(ctx, environment).await?;
     if let Some(plan) =
         plan::oldest_for_environment(ctx, environment, &[PlanState::Computed, PlanState::Running])
             .await?
