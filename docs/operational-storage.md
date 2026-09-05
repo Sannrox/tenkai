@@ -63,6 +63,14 @@ row and filtering in process. Opening a v1 or v2 embedded database backfills
 the required structures and advances the schema version; empty kind/key or
 environment arguments fail closed (no unscoped fallback).
 
+Status filters, `created_at` order, and `LIMIT` for newest/oldest reads are
+applied in that SQL for the embedded host; remote catalog lookups keep the
+same semantics in process. Zero-step Computed plans are not persisted: a
+no-op reconcile reports Current without writing history or serving an empty
+plan to a runtime agent. Stored empty Computed/Running rows are retired to
+Succeeded (`no-op; environment already current`) on the next reconcile so they
+leave work selection.
+
 ## Tenant isolation adapter
 
 Community SQLite (`SqliteStore`) is tenant-free. Enterprise hosts that require

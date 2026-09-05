@@ -422,6 +422,9 @@ async fn create_with_content(
         prior_warnings: Vec::new(),
         recalled_recovery_reason,
     };
+    if plan.steps.is_empty() {
+        return Ok(plan);
+    }
     // Optional advisory priors (default off). Never hard-block or change steps.
     let mut plan = plan;
     if let Ok(inspect) = inspect_environment(ctx, env).await {
@@ -795,6 +798,13 @@ install = "true"
 
         let idle = create(&mut ctx, "local").await.unwrap();
         assert!(idle.steps.is_empty(), "{idle:?}");
+        assert!(
+            list_for_environment(&mut ctx, "local", None)
+                .await
+                .unwrap()
+                .is_empty(),
+            "zero-step plans must not persist"
+        );
 
         set_environment_overlay(&mut ctx, "local", "api", "region", "eu")
             .await

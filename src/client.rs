@@ -72,6 +72,10 @@ fn canonical_update_request(
     }
 }
 
+fn property_integer(object: &Object, key: &str) -> Option<i64> {
+    object.properties.get(key)?.parse().ok()
+}
+
 type RemoteClient = CoreLoopClient<GrpcTransport>;
 
 #[derive(Clone)]
@@ -645,25 +649,71 @@ impl Ctx {
         key: &str,
         value: &str,
     ) -> Result<Vec<Object>> {
+        self.find_by_property_matching(crate::embedded::PropertyIndexQuery::new(kind, key, value))
+            .await
+    }
+
+    pub async fn find_by_property_matching(
+        &mut self,
+        query: crate::embedded::PropertyIndexQuery<'_>,
+    ) -> Result<Vec<Object>> {
         anyhow::ensure!(
-            !kind.trim().is_empty() && !key.trim().is_empty(),
+            !query.kind.trim().is_empty() && !query.key.trim().is_empty(),
             "find_by_property requires non-empty kind and key"
         );
+        if let Some(filter_key) = query.matching_key {
+            anyhow::ensure!(
+                !filter_key.trim().is_empty(),
+                "find_by_property matching key must be non-empty"
+            );
+        }
+        if let Some(order_key) = query.order_key {
+            anyhow::ensure!(
+                !order_key.trim().is_empty(),
+                "find_by_property order key must be non-empty"
+            );
+        }
         if let Some(store) = self.embedded_store() {
-            return store.find_by_property(kind, key, value);
+            return store.find_by_property_matching(query);
+        }
+        if query.matching_key.is_some() && query.matching_values.is_empty() {
+            return Ok(Vec::new());
         }
         let response: ListObjectsResponse = self
             .remote_unary(
                 "/sekai.SekaiService/FindByProperty",
                 FindByPropertyRequest {
-                    kind: kind.into(),
-                    key: key.into(),
-                    value: value.into(),
+                    kind: query.kind.into(),
+                    key: query.key.into(),
+                    value: query.value.into(),
                 },
                 CallOptions::default(),
             )
             .await?;
-        Ok(response.objects)
+        let mut objects = response.objects;
+        if let Some(filter_key) = query.matching_key {
+            objects.retain(|object| {
+                object
+                    .properties
+                    .get(filter_key)
+                    .is_some_and(|value| query.matching_values.contains(&value.as_str()))
+            });
+        }
+        if let Some(order_key) = query.order_key {
+            objects.sort_by(|left, right| {
+                let order =
+                    property_integer(left, order_key).cmp(&property_integer(right, order_key));
+                if query.descending {
+                    order.reverse()
+                } else {
+                    order
+                }
+            });
+        }
+        if let Some(limit) = query.limit {
+            objects.truncate(limit as usize);
+        }
+        Ok(objects)
     }
 
     pub async fn links(&mut self, object_id: &str, relation: &str) -> Result<Vec<Link>> {

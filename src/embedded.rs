@@ -5,13 +5,43 @@ use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{Context, Result, bail};
 use prost::Message;
-use rusqlite::{Connection, DatabaseName, OptionalExtension, params};
+use rusqlite::{
+    Connection, DatabaseName, OptionalExtension, params, params_from_iter, types::Value,
+};
 
 use crate::pb::graph_action::{ActionResult, ActionTypeDef};
 use crate::pb::sekai::{Decision, Lease, Link, Object, ObjectChange, ObjectType};
 use crate::storage::{ProviderEventRecord, enqueue_provider_event_in};
 
 const SCHEMA_VERSION: u32 = 4;
+
+/// Property-index lookup with optional value filter, integer order, and limit.
+#[derive(Clone, Copy, Debug)]
+pub struct PropertyIndexQuery<'a> {
+    pub kind: &'a str,
+    pub key: &'a str,
+    pub value: &'a str,
+    pub matching_key: Option<&'a str>,
+    pub matching_values: &'a [&'a str],
+    pub order_key: Option<&'a str>,
+    pub descending: bool,
+    pub limit: Option<u32>,
+}
+
+impl<'a> PropertyIndexQuery<'a> {
+    pub fn new(kind: &'a str, key: &'a str, value: &'a str) -> Self {
+        Self {
+            kind,
+            key,
+            value,
+            matching_key: None,
+            matching_values: &[],
+            order_key: None,
+            descending: false,
+            limit: None,
+        }
+    }
+}
 
 pub struct EmbeddedStore {
     connection: Mutex<Connection>,
@@ -450,20 +480,86 @@ impl EmbeddedStore {
     /// Load objects of `kind` with property `key=value` via the property index.
     /// Does not scan the full kind set. Fails closed when kind or key is empty.
     pub fn find_by_property(&self, kind: &str, key: &str, value: &str) -> Result<Vec<Object>> {
+        self.find_by_property_matching(PropertyIndexQuery::new(kind, key, value))
+    }
+
+    /// Property-index lookup with optional status-style filter, integer order, and limit.
+    ///
+    /// `matching_key`/`matching_values` are applied in SQL (`IN`). `order_key` is
+    /// `CAST(value AS INTEGER)` so numeric properties such as `created_at` sort
+    /// by value rather than object id. Empty kind/key/filter/order keys fail closed.
+    /// An empty `matching_values` set with a matching key returns no rows.
+    pub fn find_by_property_matching(&self, query: PropertyIndexQuery<'_>) -> Result<Vec<Object>> {
         anyhow::ensure!(
-            !kind.trim().is_empty() && !key.trim().is_empty(),
+            !query.kind.trim().is_empty() && !query.key.trim().is_empty(),
             "find_by_property requires non-empty kind and key"
         );
+        if let Some(filter_key) = query.matching_key {
+            anyhow::ensure!(
+                !filter_key.trim().is_empty(),
+                "find_by_property matching key must be non-empty"
+            );
+            if query.matching_values.is_empty() {
+                return Ok(Vec::new());
+            }
+        }
+        if let Some(order_key) = query.order_key {
+            anyhow::ensure!(
+                !order_key.trim().is_empty(),
+                "find_by_property order key must be non-empty"
+            );
+        }
+
+        let mut sql = String::from(
+            "SELECT o.payload FROM embedded_objects o
+             INNER JOIN embedded_object_properties p
+               ON p.object_id = o.id AND p.kind = ? AND p.key = ? AND p.value = ?",
+        );
+        let mut bind = vec![
+            Value::Text(query.kind.to_string()),
+            Value::Text(query.key.to_string()),
+            Value::Text(query.value.to_string()),
+        ];
+        if let Some(filter_key) = query.matching_key {
+            sql.push_str(
+                " INNER JOIN embedded_object_properties f
+                    ON f.object_id = o.id AND f.kind = ? AND f.key = ? AND f.value IN (",
+            );
+            bind.push(Value::Text(query.kind.to_string()));
+            bind.push(Value::Text(filter_key.to_string()));
+            for (index, filter_value) in query.matching_values.iter().enumerate() {
+                if index > 0 {
+                    sql.push(',');
+                }
+                sql.push('?');
+                bind.push(Value::Text((*filter_value).to_string()));
+            }
+            sql.push(')');
+        }
+        if let Some(order_key) = query.order_key {
+            sql.push_str(
+                " LEFT JOIN embedded_object_properties ord
+                    ON ord.object_id = o.id AND ord.kind = ? AND ord.key = ?",
+            );
+            bind.push(Value::Text(query.kind.to_string()));
+            bind.push(Value::Text(order_key.to_string()));
+            let direction = if query.descending { "DESC" } else { "ASC" };
+            sql.push_str(" ORDER BY CAST(ord.value AS INTEGER) ");
+            sql.push_str(direction);
+            sql.push_str(", o.id ");
+            sql.push_str(direction);
+        } else {
+            sql.push_str(" ORDER BY o.id");
+        }
+        if let Some(limit) = query.limit {
+            sql.push_str(" LIMIT ?");
+            bind.push(Value::Integer(i64::from(limit)));
+        }
+
         let connection = self.connection()?;
-        let mut statement = connection.prepare(
-            "SELECT o.payload
-             FROM embedded_objects o
-             INNER JOIN embedded_object_properties p ON p.object_id = o.id
-             WHERE p.kind = ?1 AND p.key = ?2 AND p.value = ?3
-             ORDER BY o.id",
-        )?;
+        let mut statement = connection.prepare(&sql)?;
         let payloads = statement
-            .query_map(params![kind, key, value], |row| row.get::<_, Vec<u8>>(0))?
+            .query_map(params_from_iter(bind), |row| row.get::<_, Vec<u8>>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         decode_many(payloads, "object")
     }
@@ -1405,6 +1501,69 @@ mod tests {
                 .unwrap()
                 .len(),
             1
+        );
+    }
+
+    #[test]
+    fn find_by_property_matching_filters_orders_and_limits_in_sql() {
+        let store = EmbeddedStore::open_in_memory().unwrap();
+        for (id, env, status, created_at) in [
+            ("plan-a0", "env_a", "succeeded", "50"),
+            ("plan-a1", "env_a", "computed", "100"),
+            ("plan-a2", "env_a", "running", "200"),
+            ("plan-b1", "env_b", "computed", "10"),
+        ] {
+            store
+                .create(Object {
+                    id: id.into(),
+                    kind: "tenkai.plan".into(),
+                    name: id.into(),
+                    properties: [
+                        ("environment".into(), env.into()),
+                        ("status".into(), status.into()),
+                        ("created_at".into(), created_at.into()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+
+        let executable = store
+            .find_by_property_matching(PropertyIndexQuery {
+                matching_key: Some("status"),
+                matching_values: &["computed", "running"],
+                order_key: Some("created_at"),
+                ..PropertyIndexQuery::new("tenkai.plan", "environment", "env_a")
+            })
+            .unwrap();
+        assert_eq!(
+            executable
+                .iter()
+                .map(|object| object.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["plan-a1", "plan-a2"]
+        );
+        let latest = store
+            .find_by_property_matching(PropertyIndexQuery {
+                order_key: Some("created_at"),
+                descending: true,
+                limit: Some(1),
+                ..PropertyIndexQuery::new("tenkai.plan", "environment", "env_a")
+            })
+            .unwrap();
+        assert_eq!(latest.len(), 1);
+        assert_eq!(latest[0].id, "plan-a2");
+        assert!(
+            store
+                .find_by_property_matching(PropertyIndexQuery {
+                    matching_key: Some("status"),
+                    matching_values: &[],
+                    ..PropertyIndexQuery::new("tenkai.plan", "environment", "env_a")
+                })
+                .unwrap()
+                .is_empty()
         );
     }
 
