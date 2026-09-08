@@ -245,6 +245,9 @@ pub async fn oldest_for_environment(
 }
 
 /// Newest stored plan for `environment`, if any.
+///
+/// Decodes every matching plan before selecting newest so a depressed
+/// `created_at` index cannot hide the true newest behind `LIMIT 1`.
 pub async fn latest_for_environment(ctx: &mut Ctx, environment: &str) -> Result<Option<Plan>> {
     lifecycle::latest_for_environment(ctx, environment).await
 }
@@ -600,6 +603,61 @@ mod tests {
             listed_error.contains("does not match payload"),
             "{listed_error}"
         );
+
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
+    async fn latest_fail_closed_when_true_newest_created_at_index_is_depressed() {
+        let database = std::env::temp_dir().join(format!(
+            "tenkai-plan-newest-depressed-{}-{}.db",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let _ = std::fs::remove_file(&database);
+        let mut ctx = Ctx::embedded(&database).unwrap();
+
+        let older = plan_for("env_a", 100, PlanState::Computed);
+        let newer = plan_for("env_a", 200, PlanState::Running);
+        store(&mut ctx, &older).await.unwrap();
+        store(&mut ctx, &newer).await.unwrap();
+
+        let mut deflated = ctx.get(&newer.id).await.unwrap().unwrap();
+        deflated.properties.insert("created_at".into(), "1".into());
+        ctx.put(deflated).await.unwrap();
+        let deflated_error = latest_for_environment(&mut ctx, "env_a")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            deflated_error.contains("does not match payload"),
+            "{deflated_error}"
+        );
+
+        ctx.put(newer.to_object().unwrap()).await.unwrap();
+        let mut missing = ctx.get(&newer.id).await.unwrap().unwrap();
+        missing.properties.remove("created_at");
+        ctx.put(missing).await.unwrap();
+        let missing_error = latest_for_environment(&mut ctx, "env_a")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            missing_error.contains("no created_at index"),
+            "{missing_error}"
+        );
+
+        ctx.put(newer.to_object().unwrap()).await.unwrap();
+        let mut non_int = ctx.get(&newer.id).await.unwrap().unwrap();
+        non_int
+            .properties
+            .insert("created_at".into(), "later".into());
+        ctx.put(non_int).await.unwrap();
+        let non_int_error = latest_for_environment(&mut ctx, "env_a")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(non_int_error.contains("not an integer"), "{non_int_error}");
 
         let _ = std::fs::remove_file(&database);
     }

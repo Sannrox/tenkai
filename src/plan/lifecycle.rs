@@ -354,8 +354,11 @@ pub(super) async fn latest_for_environment(
     ctx: &mut Ctx,
     environment: &str,
 ) -> Result<Option<Plan>> {
-    let mut plans = load_for_environment(ctx, environment, None, true, Some(1), None).await?;
-    Ok(plans.pop())
+    // Decode every environment plan before selecting newest. LIMIT 1 on the
+    // unvalidated created_at index can return a consistent older row when the
+    // true newest index is depressed, missing, or non-integer.
+    let plans = load_for_environment(ctx, environment, None, true, None, None).await?;
+    Ok(plans.into_iter().next())
 }
 
 /// Retire stored zero-step Computed/Running plans so they leave work selection.
