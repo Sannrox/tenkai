@@ -207,7 +207,7 @@ pub async fn observe(
         bail!("success receipts cleared unhealthy or blocked targets");
     }
 
-    ctx.backup_embedded(backup)?;
+    ctx.backup_embedded(backup).await?;
     let failed_restore_explicit = failed_restore_is_explicit(backup)?;
     let live = fleet_workload::stored_posture_counts(ctx, &plan.seed_digest)
         .await?

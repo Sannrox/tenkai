@@ -3,6 +3,7 @@
 use anyhow::Result;
 use prost::Message;
 use sekai_client::CallOptions;
+use std::sync::Arc;
 
 use super::{RemoteClient, canonical_create_request, canonical_update_request, sdk_error_status};
 use crate::pb::sekai::{
@@ -13,13 +14,17 @@ use crate::pb::sekai::{
 
 pub(super) enum ObjectLifecycle<'a> {
     Remote(&'a RemoteClient),
-    Embedded(&'a crate::embedded::EmbeddedStore),
+    Embedded(Arc<crate::embedded::EmbeddedStore>),
 }
 
 impl ObjectLifecycle<'_> {
     pub(super) async fn get(&self, id: &str) -> Result<Option<Object>> {
         match self {
-            Self::Embedded(store) => store.get(id),
+            Self::Embedded(store) => {
+                let store = Arc::clone(store);
+                let id = id.to_string();
+                super::block_embedded(store, move |store| store.get(&id)).await
+            }
             Self::Remote(client) => {
                 let response: std::result::Result<GetObjectResponse, tonic::Status> = remote_unary(
                     client,
@@ -41,7 +46,10 @@ impl ObjectLifecycle<'_> {
         object: Object,
     ) -> std::result::Result<Object, tonic::Status> {
         match self {
-            Self::Embedded(store) => store.create(object),
+            Self::Embedded(store) => {
+                let store = Arc::clone(store);
+                super::block_embedded_status(store, move |store| store.create(object)).await
+            }
             Self::Remote(client) => {
                 let object_id = object.id.clone();
                 let response: std::result::Result<CreateObjectResponse, tonic::Status> =
@@ -69,7 +77,11 @@ impl ObjectLifecycle<'_> {
 
     pub(super) async fn delete(&self, id: &str) -> Result<()> {
         match self {
-            Self::Embedded(store) => store.delete(id),
+            Self::Embedded(store) => {
+                let store = Arc::clone(store);
+                let id = id.to_string();
+                super::block_embedded(store, move |store| store.delete(&id)).await
+            }
             Self::Remote(client) => {
                 let _: DeleteObjectResponse = remote_unary(
                     client,
@@ -87,7 +99,10 @@ impl ObjectLifecycle<'_> {
 
     pub(super) async fn put(&self, object: Object) -> Result<Object> {
         match self {
-            Self::Embedded(store) => store.put(object),
+            Self::Embedded(store) => {
+                let store = Arc::clone(store);
+                super::block_embedded(store, move |store| store.put(object)).await
+            }
             Self::Remote(client) => {
                 let existing: std::result::Result<GetObjectResponse, tonic::Status> = remote_unary(
                     client,
