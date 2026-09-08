@@ -246,8 +246,9 @@ pub async fn oldest_for_environment(
 
 /// Newest stored plan for `environment`, if any.
 ///
-/// Decodes every matching plan before selecting newest so a depressed
-/// `created_at` index cannot hide the true newest behind `LIMIT 1`.
+/// Checks every matching `created_at` index against a payload peek so a
+/// depressed newest index cannot hide behind `LIMIT 1`. Full Plan decode
+/// runs only for the newest validated row.
 pub async fn latest_for_environment(ctx: &mut Ctx, environment: &str) -> Result<Option<Plan>> {
     lifecycle::latest_for_environment(ctx, environment).await
 }
@@ -658,6 +659,50 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(non_int_error.contains("not an integer"), "{non_int_error}");
+
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
+    async fn latest_selects_newest_without_requiring_full_history_plan_decode() {
+        let database = std::env::temp_dir().join(format!(
+            "tenkai-plan-latest-history-{}-{}.db",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let _ = std::fs::remove_file(&database);
+        let mut ctx = Ctx::embedded(&database).unwrap();
+
+        let mut newest_id = String::new();
+        for (index, created_at) in (1..=16).enumerate() {
+            let state = if index + 1 == 16 {
+                PlanState::Running
+            } else {
+                PlanState::Succeeded
+            };
+            let stored = plan_for("env_a", created_at * 10, state);
+            if index + 1 == 16 {
+                newest_id = stored.id.clone();
+            }
+            store(&mut ctx, &stored).await.unwrap();
+        }
+
+        let latest = latest_for_environment(&mut ctx, "env_a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.id, newest_id);
+        assert_eq!(latest.created_at, 160);
+        assert_eq!(latest.state, PlanState::Running);
+
+        let mut poisoned = ctx.get(&newest_id).await.unwrap().unwrap();
+        poisoned.properties.insert("created_at".into(), "1".into());
+        ctx.put(poisoned).await.unwrap();
+        let error = latest_for_environment(&mut ctx, "env_a")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("does not match payload"), "{error}");
 
         let _ = std::fs::remove_file(&database);
     }

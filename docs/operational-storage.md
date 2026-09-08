@@ -79,10 +79,15 @@ accepted residual ([ADR 0025](decisions/0025-remote-plan-property-query-bounds.m
 it is not silent SQL parity. After decode, the `created_at` index value must
 match `Plan.created_at` as an integer; missing, non-integer, or mismatched
 index values fail closed rather than returning a row chosen only by the
-index. Inspect-latest (`latest_for_environment`) does not apply `LIMIT` until
-every matching row has been decoded, so a depressed newest index cannot hide
-behind a consistent older `LIMIT 1` winner. Oldest executable selection still
-uses `LIMIT 1`. A no-op reconcile does not persist a zero-step
+index. Inspect-latest (`latest_for_environment`) does not apply `LIMIT` on
+the unvalidated `created_at` index: it peeks each matching payload's
+`created_at` (and environment) and fail-closes on missing, non-integer, or
+mismatched index values, then fully decodes only the newest validated row.
+That keeps a depressed newest index from hiding behind a consistent older
+`LIMIT 1` winner without reconstructing every historical Plan. Oldest
+executable selection still uses `LIMIT 1`. Remote inspect-latest still
+transfers every environment-matching object before that peek
+([ADR 0025](decisions/0025-remote-plan-property-query-bounds.md)). A no-op reconcile does not persist a zero-step
 Computed plan: it reports Current without writing history or serving an empty
 plan to a runtime agent. Operator plan creation still persists empty Computed
 plans so durable callers can reload the returned id. Stored empty
