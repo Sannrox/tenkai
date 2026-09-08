@@ -162,6 +162,14 @@ impl Drill {
             .is_file()
     }
 
+    fn forget_ledger(&self, version: &str) {
+        let _ = fs::remove_file(
+            self.target_root()
+                .join("target/ledger")
+                .join(format!("{PRODUCT}@{version}")),
+        );
+    }
+
     fn inspect_env(&self) -> EnvironmentInspectReport {
         let stdout = self.ok(&["env", "inspect", ENV]);
         serde_json::from_str(&stdout).unwrap_or_else(|error| {
@@ -511,6 +519,9 @@ fn signed_stateful_upgrade_survives_executor_loss() {
         format!("unhealthy {unhealthy_plan} restored A and preserved fixture data"),
     ));
 
+    // Unhealthy B already accepted 1.1.0 on the target ledger. Forget that
+    // key so the crash scenario pauses after a new accept, not a no-op replay.
+    drill.forget_ledger(TARGET_VERSION);
     drill.write_control("crash-after-accept", TARGET_VERSION);
     let crash_plan = {
         let stdout = drill.ok(&["plan", "--env", ENV]);
