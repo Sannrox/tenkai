@@ -60,6 +60,10 @@ impl std::fmt::Display for Action {
 
 pub const PLAN_FORMAT_VERSION: u32 = 1;
 
+/// Operator-facing detail for a zero-step Succeeded plan. Inspect uses this
+/// instead of treating empty success as applied delivery.
+pub const NO_OP_STATUS_DETAIL: &str = "no-op; environment already current";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Step {
     pub id: String,
@@ -706,6 +710,29 @@ mod tests {
         assert!(!encoded.contains(&release_digest));
         assert!(!encoded.contains(&artifact_digest));
         assert!(!encoded.contains(&workdir));
+    }
+
+    #[test]
+    fn inspect_distinguishes_noop_succeeded_from_applied_delivery() {
+        let mut noop = example_plan();
+        noop.steps.clear();
+        noop.state = PlanState::Succeeded;
+        noop.status_detail = format!("token=do-not-return {}", "x".repeat(32));
+        let summary = crate::environment::environment_plan_summary(noop);
+        assert_eq!(summary.state, "succeeded");
+        assert_eq!(summary.step_count, 0);
+        assert_eq!(summary.status_detail, NO_OP_STATUS_DETAIL);
+        assert!(!summary.status_detail.contains("do-not-return"));
+        assert!(summary.steps.is_empty());
+
+        let mut applied = example_plan();
+        applied.state = PlanState::Succeeded;
+        applied.status_detail = format!("complete; token=do-not-return {}", "x".repeat(32));
+        let summary = crate::environment::environment_plan_summary(applied);
+        assert_eq!(summary.state, "succeeded");
+        assert_eq!(summary.step_count, 1);
+        assert!(summary.status_detail.is_empty());
+        assert!(!summary.status_detail.contains("do-not-return"));
     }
 
     #[test]

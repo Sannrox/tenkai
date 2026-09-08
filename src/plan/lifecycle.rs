@@ -383,7 +383,7 @@ pub(crate) async fn retire_empty_executable_plans(
         transition(
             ctx,
             &mut plan,
-            Transition::new(PlanState::Succeeded, "no-op; environment already current"),
+            Transition::new(PlanState::Succeeded, NO_OP_STATUS_DETAIL),
             Persistence::Standard,
         )
         .await?;
@@ -583,13 +583,14 @@ mod tests {
         transition(
             &mut ctx,
             &mut plan,
-            Transition::new(PlanState::Succeeded, "no-op; environment already current"),
+            Transition::new(PlanState::Succeeded, NO_OP_STATUS_DETAIL),
             Persistence::Standard,
         )
         .await
         .unwrap();
         let stored = load(&mut ctx, &plan.id).await.unwrap();
         assert_eq!(stored.state, PlanState::Succeeded);
+        assert_eq!(stored.status_detail, NO_OP_STATUS_DETAIL);
         assert!(stored.steps.is_empty());
         let _ = std::fs::remove_file(database);
     }
