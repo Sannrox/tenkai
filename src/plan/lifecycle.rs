@@ -138,6 +138,14 @@ pub(super) fn to_object(plan: &Plan) -> Result<Object> {
             ("content_digest".into(), plan.executable_digest()?),
             ("plan".into(), serde_json::to_string(plan)?),
             ("status".into(), plan.state.to_string()),
+            (
+                "has_steps".into(),
+                if plan.steps.is_empty() {
+                    "false".into()
+                } else {
+                    "true".into()
+                },
+            ),
         ]),
         created: plan.created_at,
         updated: crate::now_millis(),
@@ -220,6 +228,19 @@ pub(super) fn from_object(object: &Object) -> Result<Plan> {
             "plan {} created_at index {indexed_created_at} does not match payload {}",
             object.id,
             plan.created_at
+        );
+    }
+    let expected_has_steps = if plan.steps.is_empty() {
+        "false"
+    } else {
+        "true"
+    };
+    if let Some(indexed_has_steps) = object.properties.get("has_steps")
+        && indexed_has_steps != expected_has_steps
+    {
+        bail!(
+            "plan {} has_steps index {indexed_has_steps} does not match payload steps",
+            object.id
         );
     }
     Ok(plan)
@@ -316,7 +337,7 @@ pub(super) async fn list_for_environment(
     environment: &str,
     statuses: Option<&[PlanState]>,
 ) -> Result<Vec<Plan>> {
-    load_for_environment(ctx, environment, statuses, false, None).await
+    load_for_environment(ctx, environment, statuses, false, None, None).await
 }
 
 pub(super) async fn oldest_for_environment(
@@ -324,19 +345,16 @@ pub(super) async fn oldest_for_environment(
     environment: &str,
     statuses: &[PlanState],
 ) -> Result<Option<Plan>> {
-    Ok(
-        load_for_environment(ctx, environment, Some(statuses), false, None)
-            .await?
-            .into_iter()
-            .find(|plan| !plan.steps.is_empty()),
-    )
+    let mut plans =
+        load_for_environment(ctx, environment, Some(statuses), false, Some(1), Some(true)).await?;
+    Ok(plans.pop())
 }
 
 pub(super) async fn latest_for_environment(
     ctx: &mut Ctx,
     environment: &str,
 ) -> Result<Option<Plan>> {
-    let mut plans = load_for_environment(ctx, environment, None, true, Some(1)).await?;
+    let mut plans = load_for_environment(ctx, environment, None, true, Some(1), None).await?;
     Ok(plans.pop())
 }
 
@@ -346,15 +364,21 @@ pub(crate) async fn retire_empty_executable_plans(
     environment: &str,
 ) -> Result<usize> {
     let mut retired = 0;
-    for mut plan in list_for_environment(
+    for mut plan in load_for_environment(
         ctx,
         environment,
         Some(&[PlanState::Computed, PlanState::Running]),
+        false,
+        None,
+        Some(false),
     )
     .await?
     {
         if !plan.steps.is_empty() {
-            continue;
+            bail!(
+                "plan {} has_steps index selected an executable plan for empty retirement",
+                plan.id
+            );
         }
         transition(
             ctx,
@@ -374,6 +398,7 @@ async fn load_for_environment(
     statuses: Option<&[PlanState]>,
     descending: bool,
     limit: Option<u32>,
+    has_steps: Option<bool>,
 ) -> Result<Vec<Plan>> {
     anyhow::ensure!(
         !environment.trim().is_empty(),
@@ -390,10 +415,17 @@ async fn load_for_environment(
     } else {
         (None, &[][..])
     };
+    let (equals_key, equals_value) = match has_steps {
+        Some(true) => (Some("has_steps"), Some("true")),
+        Some(false) => (Some("has_steps"), Some("false")),
+        None => (None, None),
+    };
     let objects = ctx
         .find_by_property_matching(crate::embedded::PropertyIndexQuery {
             matching_key,
             matching_values,
+            equals_key,
+            equals_value,
             order_key: Some("created_at"),
             descending,
             limit,
@@ -418,6 +450,11 @@ async fn load_for_environment(
                 plan.id,
                 plan.state
             );
+        }
+        if let Some(want_steps) = has_steps
+            && plan.steps.is_empty() == want_steps
+        {
+            continue;
         }
         plans.push(plan);
     }
@@ -587,5 +624,30 @@ mod tests {
         mismatch.properties.insert("created_at".into(), "99".into());
         let error = from_object(&mismatch).unwrap_err().to_string();
         assert!(error.contains("does not match payload"), "{error}");
+    }
+
+    #[test]
+    fn from_object_rejects_has_steps_index_drift() {
+        let empty = plan(10);
+        let object = to_object(&empty).unwrap();
+        assert_eq!(
+            object.properties.get("has_steps").map(String::as_str),
+            Some("false")
+        );
+
+        let mut missing = object.clone();
+        missing.properties.remove("has_steps");
+        assert!(from_object(&missing).unwrap().steps.is_empty());
+
+        let mut mismatch = object.clone();
+        mismatch
+            .properties
+            .insert("has_steps".into(), "true".into());
+        assert!(
+            from_object(&mismatch)
+                .unwrap_err()
+                .to_string()
+                .contains("does not match payload steps")
+        );
     }
 }

@@ -52,16 +52,18 @@ database and its WAL files sequentially. Stop every writer before
 
 ### Embedded object property index
 
-The embedded catalog store (`EmbeddedStore`, schema version **4**) maintains an
+The embedded catalog store (`EmbeddedStore`, schema version **5**) maintains an
 `embedded_object_properties` index for kind+key+value lookups and the
 Tenkai-owned `provider_events` outbox. Provider outbox rows retain an immutable
 observation timestamp for bounded inspection; retry scheduling remains
 separate delivery state. Plan work selection (`pending_work`,
 reconcile admission, orphan recovery, environment plan summary) queries plans
 **by environment** through that index rather than loading every `tenkai.plan`
-row and filtering in process. Opening a v1 or v2 embedded database backfills
+row and filtering in process. Opening a v1–v4 embedded database backfills
 the required structures and advances the schema version; empty kind/key or
-environment arguments fail closed (no unscoped fallback).
+environment arguments fail closed (no unscoped fallback). Plan objects also
+carry a `has_steps` index (`true`/`false`). Opening a v4 database backfills
+that property from the stored plan payload.
 
 Status filters, `created_at` order, and `LIMIT` for newest/oldest reads are
 applied in that SQL for the embedded host; remote catalog lookups keep the
@@ -76,7 +78,9 @@ Computed plan: it reports Current without writing history or serving an empty
 plan to a runtime agent. Operator plan creation still persists empty Computed
 plans so durable callers can reload the returned id. Stored empty
 Computed/Running rows are retired to Succeeded (`no-op; environment already
-current`) on the next reconcile so they leave work selection.
+current`) on the next reconcile so they leave work selection. Oldest
+executable selection and empty-plan retirement filter `has_steps` in the
+property index so those paths do not decode every status-matching payload.
 
 ## Tenant isolation adapter
 

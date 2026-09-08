@@ -76,6 +76,15 @@ fn property_integer(object: &Object, key: &str) -> Option<i64> {
     object.properties.get(key)?.parse().ok()
 }
 
+fn payload_has_steps(object: &Object) -> bool {
+    object
+        .properties
+        .get("plan")
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|plan| plan.get("steps")?.as_array().map(|steps| !steps.is_empty()))
+        .unwrap_or(false)
+}
+
 type RemoteClient = CoreLoopClient<GrpcTransport>;
 
 #[derive(Clone)]
@@ -667,6 +676,18 @@ impl Ctx {
                 "find_by_property matching key must be non-empty"
             );
         }
+        if let Some(equals_key) = query.equals_key {
+            anyhow::ensure!(
+                !equals_key.trim().is_empty(),
+                "find_by_property equals key must be non-empty"
+            );
+            anyhow::ensure!(
+                query
+                    .equals_value
+                    .is_some_and(|value| !value.trim().is_empty()),
+                "find_by_property equals value must be non-empty"
+            );
+        }
         if let Some(order_key) = query.order_key {
             anyhow::ensure!(
                 !order_key.trim().is_empty(),
@@ -697,6 +718,15 @@ impl Ctx {
                     .properties
                     .get(filter_key)
                     .is_some_and(|value| query.matching_values.contains(&value.as_str()))
+            });
+        }
+        if let (Some(equals_key), Some(equals_value)) = (query.equals_key, query.equals_value) {
+            objects.retain(|object| match object.properties.get(equals_key) {
+                Some(value) => value == equals_value,
+                None if equals_key == "has_steps" => {
+                    payload_has_steps(object) == (equals_value == "true")
+                }
+                None => false,
             });
         }
         if let Some(order_key) = query.order_key {

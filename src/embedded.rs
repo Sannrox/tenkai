@@ -13,7 +13,7 @@ use crate::pb::graph_action::{ActionResult, ActionTypeDef};
 use crate::pb::sekai::{Decision, Lease, Link, Object, ObjectChange, ObjectType};
 use crate::storage::{ProviderEventRecord, enqueue_provider_event_in};
 
-const SCHEMA_VERSION: u32 = 4;
+const SCHEMA_VERSION: u32 = 5;
 
 /// Property-index lookup with optional value filter, integer order, and limit.
 #[derive(Clone, Copy, Debug)]
@@ -23,6 +23,8 @@ pub struct PropertyIndexQuery<'a> {
     pub value: &'a str,
     pub matching_key: Option<&'a str>,
     pub matching_values: &'a [&'a str],
+    pub equals_key: Option<&'a str>,
+    pub equals_value: Option<&'a str>,
     pub order_key: Option<&'a str>,
     pub descending: bool,
     pub limit: Option<u32>,
@@ -36,6 +38,8 @@ impl<'a> PropertyIndexQuery<'a> {
             value,
             matching_key: None,
             matching_values: &[],
+            equals_key: None,
+            equals_value: None,
             order_key: None,
             descending: false,
             limit: None,
@@ -503,6 +507,18 @@ impl EmbeddedStore {
                 return Ok(Vec::new());
             }
         }
+        if let Some(equals_key) = query.equals_key {
+            anyhow::ensure!(
+                !equals_key.trim().is_empty(),
+                "find_by_property equals key must be non-empty"
+            );
+            anyhow::ensure!(
+                query
+                    .equals_value
+                    .is_some_and(|value| !value.trim().is_empty()),
+                "find_by_property equals value must be non-empty"
+            );
+        }
         if let Some(order_key) = query.order_key {
             anyhow::ensure!(
                 !order_key.trim().is_empty(),
@@ -535,6 +551,15 @@ impl EmbeddedStore {
                 bind.push(Value::Text((*filter_value).to_string()));
             }
             sql.push(')');
+        }
+        if let (Some(equals_key), Some(equals_value)) = (query.equals_key, query.equals_value) {
+            sql.push_str(
+                " INNER JOIN embedded_object_properties e
+                    ON e.object_id = o.id AND e.kind = ? AND e.key = ? AND e.value = ?",
+            );
+            bind.push(Value::Text(query.kind.to_string()));
+            bind.push(Value::Text(equals_key.to_string()));
+            bind.push(Value::Text(equals_value.to_string()));
         }
         if let Some(order_key) = query.order_key {
             sql.push_str(
@@ -969,10 +994,10 @@ fn migrate(connection: &mut Connection) -> Result<()> {
              );
              CREATE INDEX IF NOT EXISTS provider_events_delivery
                  ON provider_events(delivered_at, next_attempt_at, id);
-             INSERT INTO embedded_metadata(key,value) VALUES('schema_version','4');
+             INSERT INTO embedded_metadata(key,value) VALUES('schema_version','5');
              COMMIT;",
         )?;
-        found = 4;
+        found = 5;
     }
     if found == 1 {
         // Property index for environment-scoped (and general) property queries.
@@ -1042,6 +1067,16 @@ fn migrate(connection: &mut Connection) -> Result<()> {
         tx.commit()?;
         found = 4;
     }
+    if found == 4 {
+        let tx = connection.transaction()?;
+        backfill_plan_has_steps(&tx)?;
+        tx.execute(
+            "UPDATE embedded_metadata SET value=?1 WHERE key='schema_version'",
+            ["5"],
+        )?;
+        tx.commit()?;
+        found = 5;
+    }
     crate::storage::ensure_provider_event_environment_column(connection)
         .map_err(anyhow::Error::from)?;
     debug_assert_eq!(found, SCHEMA_VERSION);
@@ -1060,6 +1095,44 @@ fn replace_object_properties(connection: &Connection, object: &Object) -> Result
              VALUES(?1, ?2, ?3, ?4)",
             params![object.id, object.kind, key, value],
         )?;
+    }
+    Ok(())
+}
+
+fn backfill_plan_has_steps(connection: &Connection) -> Result<()> {
+    let mut statement =
+        connection.prepare("SELECT id, payload FROM embedded_objects WHERE kind=?1 ORDER BY id")?;
+    let rows = statement
+        .query_map([crate::ontology::KIND_PLAN], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (id, payload) in rows {
+        let mut object = Object::decode(payload.as_slice())
+            .with_context(|| format!("decoding embedded plan {id} for has_steps backfill"))?;
+        anyhow::ensure!(
+            object.id == id && object.kind == crate::ontology::KIND_PLAN,
+            "embedded object {id} payload identity does not match row identity"
+        );
+        let has_steps = match object.properties.get("plan") {
+            Some(raw) => {
+                let plan: serde_json::Value = serde_json::from_str(raw)
+                    .with_context(|| format!("parsing stored plan {id} for has_steps backfill"))?;
+                plan.get("steps")
+                    .and_then(|steps| steps.as_array())
+                    .is_some_and(|steps| !steps.is_empty())
+            }
+            None => false,
+        };
+        object.properties.insert(
+            "has_steps".into(),
+            if has_steps { "true" } else { "false" }.into(),
+        );
+        connection.execute(
+            "UPDATE embedded_objects SET payload=?1 WHERE id=?2",
+            params![object.encode_to_vec(), id],
+        )?;
+        replace_object_properties(connection, &object)?;
     }
     Ok(())
 }
@@ -1555,6 +1628,33 @@ mod tests {
             .unwrap();
         assert_eq!(latest.len(), 1);
         assert_eq!(latest[0].id, "plan-a2");
+        store
+            .put({
+                let mut object = store.get("plan-a1").unwrap().unwrap();
+                object.properties.insert("has_steps".into(), "true".into());
+                object
+            })
+            .unwrap();
+        store
+            .put({
+                let mut object = store.get("plan-a2").unwrap().unwrap();
+                object.properties.insert("has_steps".into(), "false".into());
+                object
+            })
+            .unwrap();
+        let with_steps = store
+            .find_by_property_matching(PropertyIndexQuery {
+                matching_key: Some("status"),
+                matching_values: &["computed", "running"],
+                equals_key: Some("has_steps"),
+                equals_value: Some("true"),
+                order_key: Some("created_at"),
+                limit: Some(1),
+                ..PropertyIndexQuery::new("tenkai.plan", "environment", "env_a")
+            })
+            .unwrap();
+        assert_eq!(with_steps.len(), 1);
+        assert_eq!(with_steps[0].id, "plan-a1");
         assert!(
             store
                 .find_by_property_matching(PropertyIndexQuery {
@@ -1633,7 +1733,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "4");
+        assert_eq!(version, "5");
         let store = EmbeddedStore {
             connection: Mutex::new(connection),
             principal: "test".into(),
@@ -1652,6 +1752,9 @@ mod tests {
             .execute_batch(
                 "CREATE TABLE embedded_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
                  INSERT INTO embedded_metadata(key,value) VALUES('schema_version','2');
+                 CREATE TABLE embedded_objects (
+                     id TEXT PRIMARY KEY, kind TEXT NOT NULL, payload BLOB NOT NULL
+                 );
                  CREATE TABLE provider_events (
                      id TEXT NOT NULL, provider_kind TEXT NOT NULL,
                      binding_digest TEXT NOT NULL, payload_json TEXT NOT NULL,
@@ -1682,7 +1785,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "4"
+            "5"
         );
     }
 
@@ -1693,6 +1796,9 @@ mod tests {
             .execute_batch(
                 "CREATE TABLE embedded_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
                  INSERT INTO embedded_metadata(key,value) VALUES('schema_version','3');
+                 CREATE TABLE embedded_objects (
+                     id TEXT PRIMARY KEY, kind TEXT NOT NULL, payload BLOB NOT NULL
+                 );
                  CREATE TABLE provider_events (
                      id TEXT NOT NULL, provider_kind TEXT NOT NULL,
                      binding_digest TEXT NOT NULL, payload_json TEXT NOT NULL,
@@ -1728,8 +1834,117 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "4"
+            "5"
         );
+    }
+
+    #[test]
+    fn migrates_v4_plan_has_steps_from_payload() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", "ON")
+            .unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE embedded_metadata (
+                     key TEXT PRIMARY KEY, value TEXT NOT NULL
+                 );
+                 CREATE TABLE embedded_objects (
+                     id TEXT PRIMARY KEY, kind TEXT NOT NULL, payload BLOB NOT NULL
+                 );
+                 CREATE TABLE embedded_object_properties (
+                     object_id TEXT NOT NULL,
+                     kind TEXT NOT NULL,
+                     key TEXT NOT NULL,
+                     value TEXT NOT NULL,
+                     PRIMARY KEY (object_id, key),
+                     FOREIGN KEY (object_id) REFERENCES embedded_objects(id) ON DELETE CASCADE
+                 );
+                 CREATE TABLE provider_events (
+                     id TEXT NOT NULL, provider_kind TEXT NOT NULL,
+                     binding_digest TEXT NOT NULL, payload_json TEXT NOT NULL,
+                     attempts INTEGER NOT NULL, next_attempt_at INTEGER NOT NULL,
+                     delivered_at INTEGER, last_error TEXT NOT NULL,
+                     claim_token TEXT, claim_until INTEGER,
+                     environment_id TEXT NOT NULL DEFAULT '',
+                     observed_at INTEGER NOT NULL DEFAULT 0,
+                     PRIMARY KEY(provider_kind,id)
+                 );
+                 INSERT INTO embedded_metadata(key,value) VALUES('schema_version','4');",
+            )
+            .unwrap();
+        let with_steps = Object {
+            id: "tenkai:plan:with-steps".into(),
+            kind: "tenkai.plan".into(),
+            name: "with-steps".into(),
+            properties: [
+                ("environment".into(), "prod".into()),
+                ("status".into(), "computed".into()),
+                ("plan".into(), r#"{"steps":[{}]}"#.into()),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let empty = Object {
+            id: "tenkai:plan:empty".into(),
+            kind: "tenkai.plan".into(),
+            name: "empty".into(),
+            properties: [
+                ("environment".into(), "prod".into()),
+                ("status".into(), "computed".into()),
+                ("plan".into(), r#"{"steps":[]}"#.into()),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        for object in [&with_steps, &empty] {
+            connection
+                .execute(
+                    "INSERT INTO embedded_objects(id,kind,payload) VALUES(?1,?2,?3)",
+                    params![object.id, object.kind, object.encode_to_vec()],
+                )
+                .unwrap();
+        }
+        migrate(&mut connection).unwrap();
+        let version: String = connection
+            .query_row(
+                "SELECT value FROM embedded_metadata WHERE key='schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "5");
+        let store = EmbeddedStore {
+            connection: Mutex::new(connection),
+            principal: "test".into(),
+        };
+        let executable = store
+            .find_by_property_matching(PropertyIndexQuery {
+                equals_key: Some("has_steps"),
+                equals_value: Some("true"),
+                ..PropertyIndexQuery::new("tenkai.plan", "environment", "prod")
+            })
+            .unwrap();
+        assert_eq!(executable.len(), 1);
+        assert_eq!(executable[0].id, "tenkai:plan:with-steps");
+        assert_eq!(
+            executable[0]
+                .properties
+                .get("has_steps")
+                .map(String::as_str),
+            Some("true")
+        );
+        let retired = store
+            .find_by_property_matching(PropertyIndexQuery {
+                equals_key: Some("has_steps"),
+                equals_value: Some("false"),
+                ..PropertyIndexQuery::new("tenkai.plan", "environment", "prod")
+            })
+            .unwrap();
+        assert_eq!(retired.len(), 1);
+        assert_eq!(retired[0].id, "tenkai:plan:empty");
     }
 
     #[test]
