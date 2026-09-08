@@ -208,6 +208,20 @@ pub(super) fn from_object(object: &Object) -> Result<Plan> {
     if plan.executable_digest()? != *stored_digest {
         bail!("stored plan {} executable content was mutated", object.id);
     }
+    let indexed_created_at = object
+        .properties
+        .get("created_at")
+        .with_context(|| format!("plan object {} has no created_at index", object.id))?;
+    let indexed_created_at: i64 = indexed_created_at
+        .parse()
+        .with_context(|| format!("plan {} created_at index is not an integer", object.id))?;
+    if indexed_created_at != plan.created_at {
+        bail!(
+            "plan {} created_at index {indexed_created_at} does not match payload {}",
+            object.id,
+            plan.created_at
+        );
+    }
     Ok(plan)
 }
 
@@ -541,5 +555,37 @@ mod tests {
         assert_eq!(stored.state, PlanState::Succeeded);
         assert!(stored.steps.is_empty());
         let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn from_object_rejects_created_at_index_drift() {
+        let plan = plan(10);
+        let object = to_object(&plan).unwrap();
+        assert_eq!(from_object(&object).unwrap().created_at, 10);
+
+        let mut missing = object.clone();
+        missing.properties.remove("created_at");
+        assert!(
+            from_object(&missing)
+                .unwrap_err()
+                .to_string()
+                .contains("no created_at index")
+        );
+
+        let mut non_integer = object.clone();
+        non_integer
+            .properties
+            .insert("created_at".into(), "later".into());
+        assert!(
+            from_object(&non_integer)
+                .unwrap_err()
+                .to_string()
+                .contains("not an integer")
+        );
+
+        let mut mismatch = object.clone();
+        mismatch.properties.insert("created_at".into(), "99".into());
+        let error = from_object(&mismatch).unwrap_err().to_string();
+        assert!(error.contains("does not match payload"), "{error}");
     }
 }
