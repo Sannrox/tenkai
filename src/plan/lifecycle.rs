@@ -261,7 +261,11 @@ async fn validated_plan_object(ctx: &mut Ctx, plan: &Plan) -> Result<Object> {
                     | (PlanState::Running, PlanState::Blocked)
                     | (PlanState::Running, PlanState::Succeeded)
                     | (PlanState::Running, PlanState::Failed)
-            );
+            )
+            || (stored.steps.is_empty()
+                && plan.steps.is_empty()
+                && stored.state == PlanState::Computed
+                && plan.state == PlanState::Succeeded);
         if !valid_transition {
             bail!(
                 "plan {} cannot transition from {} to {}",
@@ -298,12 +302,89 @@ pub(super) async fn list_for_environment(
     environment: &str,
     statuses: Option<&[PlanState]>,
 ) -> Result<Vec<Plan>> {
+    load_for_environment(ctx, environment, statuses, false, None).await
+}
+
+pub(super) async fn oldest_for_environment(
+    ctx: &mut Ctx,
+    environment: &str,
+    statuses: &[PlanState],
+) -> Result<Option<Plan>> {
+    Ok(
+        load_for_environment(ctx, environment, Some(statuses), false, None)
+            .await?
+            .into_iter()
+            .find(|plan| !plan.steps.is_empty()),
+    )
+}
+
+pub(super) async fn latest_for_environment(
+    ctx: &mut Ctx,
+    environment: &str,
+) -> Result<Option<Plan>> {
+    let mut plans = load_for_environment(ctx, environment, None, true, Some(1)).await?;
+    Ok(plans.pop())
+}
+
+/// Retire stored zero-step Computed/Running plans so they leave work selection.
+pub(crate) async fn retire_empty_executable_plans(
+    ctx: &mut Ctx,
+    environment: &str,
+) -> Result<usize> {
+    let mut retired = 0;
+    for mut plan in list_for_environment(
+        ctx,
+        environment,
+        Some(&[PlanState::Computed, PlanState::Running]),
+    )
+    .await?
+    {
+        if !plan.steps.is_empty() {
+            continue;
+        }
+        transition(
+            ctx,
+            &mut plan,
+            Transition::new(PlanState::Succeeded, "no-op; environment already current"),
+            Persistence::Standard,
+        )
+        .await?;
+        retired += 1;
+    }
+    Ok(retired)
+}
+
+async fn load_for_environment(
+    ctx: &mut Ctx,
+    environment: &str,
+    statuses: Option<&[PlanState]>,
+    descending: bool,
+    limit: Option<u32>,
+) -> Result<Vec<Plan>> {
     anyhow::ensure!(
         !environment.trim().is_empty(),
         "environment is required for plan work selection"
     );
+    let status_labels: Vec<String> = statuses
+        .unwrap_or(&[])
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let status_refs: Vec<&str> = status_labels.iter().map(String::as_str).collect();
+    let (matching_key, matching_values) = if statuses.is_some() {
+        (Some("status"), status_refs.as_slice())
+    } else {
+        (None, &[][..])
+    };
     let objects = ctx
-        .find_by_property(KIND_PLAN, "environment", environment)
+        .find_by_property_matching(crate::embedded::PropertyIndexQuery {
+            matching_key,
+            matching_values,
+            order_key: Some("created_at"),
+            descending,
+            limit,
+            ..crate::embedded::PropertyIndexQuery::new(KIND_PLAN, "environment", environment)
+        })
         .await?;
     let mut plans = Vec::with_capacity(objects.len());
     for object in objects {
@@ -318,21 +399,15 @@ pub(super) async fn list_for_environment(
         if let Some(allowed) = statuses
             && !allowed.contains(&plan.state)
         {
-            continue;
+            bail!(
+                "plan {} property index returned status {}, outside the requested filter",
+                plan.id,
+                plan.state
+            );
         }
         plans.push(plan);
     }
-    plans.sort_by_key(|plan| plan.created_at);
     Ok(plans)
-}
-
-pub(super) async fn oldest_for_environment(
-    ctx: &mut Ctx,
-    environment: &str,
-    statuses: &[PlanState],
-) -> Result<Option<Plan>> {
-    let plans = list_for_environment(ctx, environment, Some(statuses)).await?;
-    Ok(plans.into_iter().next())
 }
 
 #[cfg(test)]
@@ -446,6 +521,25 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(audit_error.contains("lifecycle audit fields are immutable"));
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[tokio::test]
+    async fn empty_computed_plan_can_retire_to_succeeded() {
+        let (mut ctx, database) = context("empty-retire");
+        let mut plan = plan(30);
+        store(&mut ctx, &plan).await.unwrap();
+        transition(
+            &mut ctx,
+            &mut plan,
+            Transition::new(PlanState::Succeeded, "no-op; environment already current"),
+            Persistence::Standard,
+        )
+        .await
+        .unwrap();
+        let stored = load(&mut ctx, &plan.id).await.unwrap();
+        assert_eq!(stored.state, PlanState::Succeeded);
+        assert!(stored.steps.is_empty());
         let _ = std::fs::remove_file(database);
     }
 }

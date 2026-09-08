@@ -463,6 +463,38 @@ mod tests {
         }
     }
 
+    fn test_empty_plan(env: &str, created_at: i64, state: PlanState) -> Plan {
+        use crate::ontology::plan_id;
+        use crate::plan::{DesiredStateInput, PLAN_FORMAT_VERSION, Step};
+        use sha2::{Digest as _, Sha256};
+
+        let inputs: Vec<DesiredStateInput> = Vec::new();
+        let steps: Vec<Step> = Vec::new();
+        let content_id = format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&(PLAN_FORMAT_VERSION, env, created_at, &inputs, &steps))
+                    .unwrap()
+            )
+        );
+        let id = plan_id(env, created_at, &content_id);
+        Plan {
+            format_version: PLAN_FORMAT_VERSION,
+            id,
+            content_id,
+            environment: env.into(),
+            created_at,
+            inputs,
+            steps,
+            state,
+            gates_skipped: None,
+            status_detail: String::new(),
+            maintenance_blocked: false,
+            prior_warnings: Vec::new(),
+            recalled_recovery_reason: None,
+        }
+    }
+
     #[tokio::test]
     async fn pending_work_selects_oldest_env_plan_only() {
         let database = std::env::temp_dir().join(format!(
@@ -507,6 +539,76 @@ mod tests {
                 .to_string()
                 .contains("required")
         );
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
+    async fn runtime_noop_reconcile_does_not_persist_empty_plans() {
+        let (database, ctx) = registered_ctx("noop-empty-plans", &["env-a"]).await;
+        let reconciler = Reconciler::new(ctx.clone(), config())
+            .unwrap()
+            .with_runtime_environments(["env-a".into()].into());
+        for _ in 0..3 {
+            let report = reconciler.run_once().await.unwrap();
+            assert_eq!(report.environments.len(), 1);
+            assert_eq!(report.environments[0].status, EnvironmentStatus::Current);
+        }
+        let mut ctx = ctx;
+        assert!(
+            plan::list_for_environment(&mut ctx, "env-a", None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
+    async fn controller_noop_reconcile_does_not_persist_empty_plans() {
+        let (database, ctx) = registered_ctx("controller-noop-empty", &["env-a"]).await;
+        let reconciler = Reconciler::new(ctx.clone(), config()).unwrap();
+        for _ in 0..2 {
+            let report = reconciler.run_once().await.unwrap();
+            assert_eq!(report.environments[0].status, EnvironmentStatus::Current);
+        }
+        let mut ctx = ctx;
+        assert!(
+            plan::list_for_environment(&mut ctx, "env-a", None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
+    async fn pending_work_skips_empty_plans_and_reconcile_retires_them() {
+        let (database, mut ctx) = registered_ctx("retire-empty-plans", &["env-a"]).await;
+        let empty = test_empty_plan("env-a", 10, PlanState::Computed);
+        let work = test_plan("env-a", 20, PlanState::Computed);
+        plan::store(&mut ctx, &empty).await.unwrap();
+        plan::store(&mut ctx, &work).await.unwrap();
+
+        let reconciler = Reconciler::new(ctx.clone(), config())
+            .unwrap()
+            .with_runtime_environments(["env-a".into()].into());
+        let pending = reconciler.pending_work("env-a").await.unwrap().unwrap();
+        assert_eq!(pending.id, work.id);
+
+        let report = reconciler.run_once().await.unwrap();
+        assert!(matches!(
+            &report.environments[0].status,
+            EnvironmentStatus::AwaitingRuntime { plan_id, steps }
+                if plan_id == &work.id && *steps == 1
+        ));
+        let stored_empty = plan::load(&mut ctx, &empty.id).await.unwrap();
+        assert_eq!(stored_empty.state, PlanState::Succeeded);
+        assert_eq!(
+            stored_empty.status_detail,
+            "no-op; environment already current"
+        );
+        let pending = reconciler.pending_work("env-a").await.unwrap().unwrap();
+        assert_eq!(pending.id, work.id);
         let _ = std::fs::remove_file(&database);
     }
 

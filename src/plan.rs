@@ -215,11 +215,11 @@ pub async fn load(ctx: &mut Ctx, id: &str) -> Result<Plan> {
 
 /// Load plans for one environment without scanning the full plan kind set.
 ///
-/// Uses the store property index (`find_by_property` on `environment`). Empty
-/// environment ids fail closed rather than falling back to an unscoped list.
-/// When `statuses` is `Some`, only matching lifecycle states are returned.
-/// Results are ordered by `created_at` ascending (oldest first), matching
-/// reconcile work selection.
+/// Uses the store property index (`environment`, optional `status`, ordered by
+/// `created_at`). Empty environment ids fail closed rather than falling back to
+/// an unscoped list. When `statuses` is `Some`, only matching lifecycle states
+/// are returned. Results are ordered by `created_at` ascending (oldest first),
+/// matching reconcile work selection.
 pub async fn list_for_environment(
     ctx: &mut Ctx,
     environment: &str,
@@ -228,13 +228,27 @@ pub async fn list_for_environment(
     lifecycle::list_for_environment(ctx, environment, statuses).await
 }
 
-/// Oldest plan for `environment` whose status is in `statuses`, or `None`.
+/// Oldest plan with steps for `environment` whose status is in `statuses`.
+///
+/// Zero-step plans are not executable work and are skipped.
 pub async fn oldest_for_environment(
     ctx: &mut Ctx,
     environment: &str,
     statuses: &[PlanState],
 ) -> Result<Option<Plan>> {
     lifecycle::oldest_for_environment(ctx, environment, statuses).await
+}
+
+/// Newest stored plan for `environment`, if any.
+pub async fn latest_for_environment(ctx: &mut Ctx, environment: &str) -> Result<Option<Plan>> {
+    lifecycle::latest_for_environment(ctx, environment).await
+}
+
+pub(crate) async fn retire_empty_executable_plans(
+    ctx: &mut Ctx,
+    environment: &str,
+) -> Result<usize> {
+    lifecycle::retire_empty_executable_plans(ctx, environment).await
 }
 
 pub(crate) use lifecycle::{Persistence, Transition};
@@ -462,6 +476,34 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(oldest.id, env_a_old.id);
+
+        let mut empty = env_a_old.clone();
+        empty.created_at = 1;
+        empty.steps.clear();
+        empty.content_id = content_address(
+            &empty.environment,
+            empty.created_at,
+            &empty.inputs,
+            &empty.steps,
+            empty.recalled_recovery_reason.as_deref(),
+        )
+        .unwrap();
+        empty.id = plan_id(&empty.environment, empty.created_at, &empty.content_id);
+        store(&mut ctx, &empty).await.unwrap();
+        let oldest_with_work = oldest_for_environment(
+            &mut ctx,
+            "env_a",
+            &[PlanState::Computed, PlanState::Running],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(oldest_with_work.id, env_a_old.id);
+        let latest = latest_for_environment(&mut ctx, "env_a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.id, env_a_new.id);
 
         let env_b_only = list_for_environment(
             &mut ctx,

@@ -1372,9 +1372,10 @@ async fn latest_plan_for_environment(
     ctx: &mut Ctx,
     env: &str,
 ) -> Result<Option<EnvironmentPlanSummary>> {
-    // Environment-scoped property query — not a full plan catalog scan.
-    let plans = crate::plan::list_for_environment(ctx, env, None).await?;
-    Ok(plans.into_iter().next_back().map(environment_plan_summary))
+    // Newest row only — not a scan of that environment's plan history.
+    Ok(crate::plan::latest_for_environment(ctx, env)
+        .await?
+        .map(environment_plan_summary))
 }
 
 pub(crate) fn environment_plan_summary(plan: Plan) -> EnvironmentPlanSummary {
