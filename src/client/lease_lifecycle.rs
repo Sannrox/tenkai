@@ -3,6 +3,7 @@
 use anyhow::{Context as _, Result};
 use prost::Message;
 use sekai_client::CallOptions;
+use std::sync::Arc;
 
 use super::{RemoteClient, sdk_error_status};
 use crate::pb::sekai::{
@@ -13,7 +14,7 @@ use crate::pb::sekai::{
 
 pub(super) enum LeaseLifecycle<'a> {
     Remote(&'a RemoteClient),
-    Embedded(&'a crate::embedded::EmbeddedStore),
+    Embedded(Arc<crate::embedded::EmbeddedStore>),
 }
 
 impl LeaseLifecycle<'_> {
@@ -25,7 +26,16 @@ impl LeaseLifecycle<'_> {
         ttl_ms: i64,
     ) -> Result<Lease> {
         match self {
-            Self::Embedded(store) => store.acquire_lease(namespace, key, owner, ttl_ms),
+            Self::Embedded(store) => {
+                let store = Arc::clone(store);
+                let namespace = namespace.to_string();
+                let key = key.to_string();
+                let owner = owner.to_string();
+                super::block_embedded(store, move |store| {
+                    store.acquire_lease(&namespace, &key, &owner, ttl_ms)
+                })
+                .await
+            }
             Self::Remote(client) => {
                 let request_id = uuid::Uuid::new_v4().to_string();
                 let response: AcquireLeaseResponse = remote_unary_with_options(
@@ -48,7 +58,12 @@ impl LeaseLifecycle<'_> {
 
     pub(super) async fn get(&self, namespace: &str, key: &str) -> Result<Option<Lease>> {
         match self {
-            Self::Embedded(store) => store.get_lease(namespace, key),
+            Self::Embedded(store) => {
+                let store = Arc::clone(store);
+                let namespace = namespace.to_string();
+                let key = key.to_string();
+                super::block_embedded(store, move |store| store.get_lease(&namespace, &key)).await
+            }
             Self::Remote(client) => {
                 let response: std::result::Result<GetLeaseResponse, tonic::Status> = remote_unary(
                     client,
@@ -76,7 +91,16 @@ impl LeaseLifecycle<'_> {
         ttl_ms: i64,
     ) -> Result<Lease> {
         match self {
-            Self::Embedded(store) => store.refresh_lease(namespace, key, fencing_token, ttl_ms),
+            Self::Embedded(store) => {
+                let store = Arc::clone(store);
+                let namespace = namespace.to_string();
+                let key = key.to_string();
+                let fencing_token = fencing_token.to_string();
+                super::block_embedded(store, move |store| {
+                    store.refresh_lease(&namespace, &key, &fencing_token, ttl_ms)
+                })
+                .await
+            }
             Self::Remote(client) => {
                 let request_id = uuid::Uuid::new_v4().to_string();
                 let response: RefreshLeaseResponse = remote_unary_with_options(
@@ -106,7 +130,16 @@ impl LeaseLifecycle<'_> {
         fencing_token: &str,
     ) -> Result<Lease> {
         match self {
-            Self::Embedded(store) => store.release_lease(namespace, key, fencing_token),
+            Self::Embedded(store) => {
+                let store = Arc::clone(store);
+                let namespace = namespace.to_string();
+                let key = key.to_string();
+                let fencing_token = fencing_token.to_string();
+                super::block_embedded(store, move |store| {
+                    store.release_lease(&namespace, &key, &fencing_token)
+                })
+                .await
+            }
             Self::Remote(client) => {
                 let request_id = uuid::Uuid::new_v4().to_string();
                 let response: ReleaseLeaseResponse = remote_unary_with_options(
@@ -138,14 +171,24 @@ impl LeaseLifecycle<'_> {
         ttl_ms: i64,
     ) -> Result<Lease> {
         match self {
-            Self::Embedded(store) => store.takeover_lease(
-                namespace,
-                key,
-                owner,
-                expected_fencing_token,
-                expected_expires_at_ms,
-                ttl_ms,
-            ),
+            Self::Embedded(store) => {
+                let store = Arc::clone(store);
+                let namespace = namespace.to_string();
+                let key = key.to_string();
+                let owner = owner.to_string();
+                let expected_fencing_token = expected_fencing_token.to_string();
+                super::block_embedded(store, move |store| {
+                    store.takeover_lease(
+                        &namespace,
+                        &key,
+                        &owner,
+                        &expected_fencing_token,
+                        expected_expires_at_ms,
+                        ttl_ms,
+                    )
+                })
+                .await
+            }
             Self::Remote(client) => {
                 let request_id = uuid::Uuid::new_v4().to_string();
                 let response: TakeoverExpiredLeaseResponse = remote_unary_with_options(

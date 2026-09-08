@@ -50,6 +50,12 @@ open a database whose schema is newer than the binary supports. Use
 database and its WAL files sequentially. Stop every writer before
 `tenkaictl restore <source>`. Restore and integrity checks require no provider.
 
+Async embedded catalog and plan-decode work runs on Tokio's blocking pool
+(`spawn_blocking`), matching server `/readyz` store health checks. A join
+failure is an explicit store or reconcile error; it does not skip persistence
+or report Current. `/readyz` itself remains a bounded health read and does
+not scan plan history.
+
 ### Embedded object property index
 
 The embedded catalog store (`EmbeddedStore`, schema version **5**) maintains an

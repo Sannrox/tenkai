@@ -5,7 +5,7 @@ mod lease_lifecycle;
 mod object_lifecycle;
 mod relation_lifecycle;
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, anyhow};
 use prost::Message;
 use std::path::Path;
 use std::sync::Arc;
@@ -108,21 +108,23 @@ impl Backend {
     fn object_lifecycle(&self) -> object_lifecycle::ObjectLifecycle<'_> {
         match self {
             Self::Remote { client, .. } => object_lifecycle::ObjectLifecycle::Remote(client),
-            Self::Embedded(store) => object_lifecycle::ObjectLifecycle::Embedded(store),
+            Self::Embedded(store) => object_lifecycle::ObjectLifecycle::Embedded(Arc::clone(store)),
         }
     }
 
     fn relation_lifecycle(&self) -> relation_lifecycle::RelationLifecycle<'_> {
         match self {
             Self::Remote { client, .. } => relation_lifecycle::RelationLifecycle::Remote(client),
-            Self::Embedded(store) => relation_lifecycle::RelationLifecycle::Embedded(store),
+            Self::Embedded(store) => {
+                relation_lifecycle::RelationLifecycle::Embedded(Arc::clone(store))
+            }
         }
     }
 
     fn lease_lifecycle(&self) -> lease_lifecycle::LeaseLifecycle<'_> {
         match self {
             Self::Remote { client, .. } => lease_lifecycle::LeaseLifecycle::Remote(client),
-            Self::Embedded(store) => lease_lifecycle::LeaseLifecycle::Embedded(store),
+            Self::Embedded(store) => lease_lifecycle::LeaseLifecycle::Embedded(Arc::clone(store)),
         }
     }
 
@@ -135,9 +137,38 @@ impl Backend {
                 client,
                 action_defs,
             },
-            Self::Embedded(store) => action_lifecycle::ActionLifecycle::Embedded(store),
+            Self::Embedded(store) => action_lifecycle::ActionLifecycle::Embedded(Arc::clone(store)),
         }
     }
+}
+
+async fn block_embedded<T, F>(store: Arc<crate::embedded::EmbeddedStore>, operation: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&crate::embedded::EmbeddedStore) -> Result<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || operation(&store))
+        .await
+        .unwrap_or_else(|error| Err(anyhow!("embedded store blocking task failed: {error}")))
+}
+
+async fn block_embedded_status<T, F>(
+    store: Arc<crate::embedded::EmbeddedStore>,
+    operation: F,
+) -> std::result::Result<T, tonic::Status>
+where
+    T: Send + 'static,
+    F: FnOnce(&crate::embedded::EmbeddedStore) -> std::result::Result<T, tonic::Status>
+        + Send
+        + 'static,
+{
+    tokio::task::spawn_blocking(move || operation(&store))
+        .await
+        .unwrap_or_else(|error| {
+            Err(tonic::Status::unavailable(format!(
+                "embedded store blocking task failed: {error}"
+            )))
+        })
 }
 
 fn sdk_error_status(error: SdkError) -> tonic::Status {
@@ -264,7 +295,7 @@ impl Ctx {
     /// environment. Remote provider mode has no local outbox to inspect; its
     /// authenticated server host supplies the same projection from its local
     /// operational store.
-    pub(crate) fn terminal_outcomes(
+    pub(crate) async fn terminal_outcomes(
         &self,
         environment: &str,
         as_of: i64,
@@ -272,22 +303,28 @@ impl Ctx {
         if !self.outcome_inspection_enabled {
             return Ok(Vec::new());
         }
-        let Some(store) = self.embedded_store() else {
+        let Some(store) = self.embedded_arc() else {
             return Ok(Vec::new());
         };
-        let records = store.list_provider_events(
-            crate::providers::OUTCOME_PROVIDER_KIND,
-            environment,
-            128,
-        )?;
-        crate::providers::project_terminal_outcomes(&records, environment, as_of)
-            .map_err(anyhow::Error::from)
+        let environment = environment.to_string();
+        block_embedded(store, move |store| {
+            let records = store.list_provider_events(
+                crate::providers::OUTCOME_PROVIDER_KIND,
+                &environment,
+                128,
+            )?;
+            crate::providers::project_terminal_outcomes(&records, &environment, as_of)
+                .map_err(anyhow::Error::from)
+        })
+        .await
     }
 
-    pub fn backup_embedded(&self, destination: impl AsRef<Path>) -> Result<()> {
-        self.embedded_store()
-            .context("backup is available only in embedded mode")?
-            .backup(destination)
+    pub async fn backup_embedded(&self, destination: impl AsRef<Path>) -> Result<()> {
+        let store = self
+            .embedded_arc()
+            .context("backup is available only in embedded mode")?;
+        let destination = destination.as_ref().to_path_buf();
+        block_embedded(store, move |store| store.backup(destination)).await
     }
 
     fn remote(&self) -> Result<&RemoteClient> {
@@ -330,9 +367,9 @@ impl Ctx {
         response.is_ok_and(|response| response.types.iter().any(|schema| schema.kind == kind))
     }
 
-    fn embedded_store(&self) -> Option<&crate::embedded::EmbeddedStore> {
+    fn embedded_arc(&self) -> Option<Arc<crate::embedded::EmbeddedStore>> {
         match &self.backend {
-            Backend::Embedded(store) => Some(store),
+            Backend::Embedded(store) => Some(Arc::clone(store)),
             Backend::Remote { .. } => None,
         }
     }
@@ -341,8 +378,8 @@ impl Ctx {
         &mut self,
         schema: ObjectType,
     ) -> std::result::Result<(), tonic::Status> {
-        if let Some(store) = self.embedded_store() {
-            return store.register_schema(schema);
+        if let Some(store) = self.embedded_arc() {
+            return block_embedded_status(store, move |store| store.register_schema(schema)).await;
         }
         let kind = schema.kind.clone();
         let response: std::result::Result<CreateSchemaTypeResponse, tonic::Status> = self
@@ -367,8 +404,8 @@ impl Ctx {
     }
 
     pub(crate) async fn schemas(&mut self) -> Result<Vec<ObjectType>> {
-        if let Some(store) = self.embedded_store() {
-            return store.schemas();
+        if let Some(store) = self.embedded_arc() {
+            return block_embedded(store, |store| store.schemas()).await;
         }
         let response: ListSchemaTypesResponse = self
             .remote_unary(
@@ -503,12 +540,16 @@ impl Ctx {
         if events.is_empty() {
             return self.put(object).await;
         }
-        let Some(store) = self.embedded_store() else {
+        let Some(store) = self.embedded_arc() else {
             anyhow::bail!(
                 "remote application state cannot atomically enqueue Tenkai provider events"
             );
         };
-        store.put_with_provider_events(object, events)
+        let events = events.to_vec();
+        block_embedded(store, move |store| {
+            store.put_with_provider_events(object, &events)
+        })
+        .await
     }
 
     pub(crate) async fn put_objects_with_provider_events(
@@ -516,12 +557,17 @@ impl Ctx {
         objects: &[Object],
         events: &[crate::storage::ProviderEventRecord],
     ) -> Result<()> {
-        let Some(store) = self.embedded_store() else {
+        let Some(store) = self.embedded_arc() else {
             anyhow::bail!(
                 "remote application state cannot atomically update objects and enqueue Tenkai provider events"
             );
         };
-        store.put_objects_with_provider_events(objects, events)
+        let objects = objects.to_vec();
+        let events = events.to_vec();
+        block_embedded(store, move |store| {
+            store.put_objects_with_provider_events(&objects, &events)
+        })
+        .await
     }
 
     pub(crate) async fn guarded_create(
@@ -531,8 +577,14 @@ impl Ctx {
         lease_key: &str,
         fencing_token: &str,
     ) -> Result<Object> {
-        if let Some(store) = self.embedded_store() {
-            return store.guarded_put(object, lease_namespace, lease_key, fencing_token, true);
+        if let Some(store) = self.embedded_arc() {
+            let lease_namespace = lease_namespace.to_string();
+            let lease_key = lease_key.to_string();
+            let fencing_token = fencing_token.to_string();
+            return block_embedded(store, move |store| {
+                store.guarded_put(object, &lease_namespace, &lease_key, &fencing_token, true)
+            })
+            .await;
         }
         let request = canonical_create_request(
             object,
@@ -565,8 +617,14 @@ impl Ctx {
         lease_key: &str,
         fencing_token: &str,
     ) -> Result<Object> {
-        if let Some(store) = self.embedded_store() {
-            return store.guarded_put(object, lease_namespace, lease_key, fencing_token, false);
+        if let Some(store) = self.embedded_arc() {
+            let lease_namespace = lease_namespace.to_string();
+            let lease_key = lease_key.to_string();
+            let fencing_token = fencing_token.to_string();
+            return block_embedded(store, move |store| {
+                store.guarded_put(object, &lease_namespace, &lease_key, &fencing_token, false)
+            })
+            .await;
         }
         let request = canonical_update_request(
             object,
@@ -600,18 +658,26 @@ impl Ctx {
         fencing_token: &str,
         events: &[crate::storage::ProviderEventRecord],
     ) -> Result<()> {
-        let Some(store) = self.embedded_store() else {
+        let Some(store) = self.embedded_arc() else {
             anyhow::bail!(
                 "remote application state cannot atomically update objects and enqueue Tenkai provider events"
             );
         };
-        store.guarded_put_objects_with_provider_events(
-            objects,
-            lease_namespace,
-            lease_key,
-            fencing_token,
-            events,
-        )
+        let objects = objects.to_vec();
+        let lease_namespace = lease_namespace.to_string();
+        let lease_key = lease_key.to_string();
+        let fencing_token = fencing_token.to_string();
+        let events = events.to_vec();
+        block_embedded(store, move |store| {
+            store.guarded_put_objects_with_provider_events(
+                &objects,
+                &lease_namespace,
+                &lease_key,
+                &fencing_token,
+                &events,
+            )
+        })
+        .await
     }
 
     /// Create a link with a deterministic id; already-exists is treated as success.
@@ -694,8 +760,38 @@ impl Ctx {
                 "find_by_property order key must be non-empty"
             );
         }
-        if let Some(store) = self.embedded_store() {
-            return store.find_by_property_matching(query);
+        if let Some(store) = self.embedded_arc() {
+            let kind = query.kind.to_string();
+            let key = query.key.to_string();
+            let value = query.value.to_string();
+            let matching_key = query.matching_key.map(str::to_string);
+            let matching_values = query
+                .matching_values
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect::<Vec<_>>();
+            let equals_key = query.equals_key.map(str::to_string);
+            let equals_value = query.equals_value.map(str::to_string);
+            let order_key = query.order_key.map(str::to_string);
+            let descending = query.descending;
+            let limit = query.limit;
+            return block_embedded(store, move |store| {
+                let matching_refs = matching_values
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>();
+                store.find_by_property_matching(crate::embedded::PropertyIndexQuery {
+                    matching_key: matching_key.as_deref(),
+                    matching_values: &matching_refs,
+                    equals_key: equals_key.as_deref(),
+                    equals_value: equals_value.as_deref(),
+                    order_key: order_key.as_deref(),
+                    descending,
+                    limit,
+                    ..crate::embedded::PropertyIndexQuery::new(&kind, &key, &value)
+                })
+            })
+            .await;
         }
         if query.matching_key.is_some() && query.matching_values.is_empty() {
             return Ok(Vec::new());
@@ -754,8 +850,9 @@ impl Ctx {
     }
 
     pub async fn list_kind(&mut self, kind: &str) -> Result<Vec<Object>> {
-        if let Some(store) = self.embedded_store() {
-            return store.list_kind(kind);
+        if let Some(store) = self.embedded_arc() {
+            let kind = kind.to_string();
+            return block_embedded(store, move |store| store.list_kind(&kind)).await;
         }
         const PAGE_SIZE: i32 = 100;
         let mut objects = Vec::new();
@@ -787,8 +884,9 @@ impl Ctx {
     /// Remote adapters still page `ListObjects` and keep only ids; there is no
     /// cheaper name/id RPC on the vendored protocol.
     pub(crate) async fn list_kind_ids(&mut self, kind: &str) -> Result<Vec<String>> {
-        if let Some(store) = self.embedded_store() {
-            return store.list_kind_ids(kind);
+        if let Some(store) = self.embedded_arc() {
+            let kind = kind.to_string();
+            return block_embedded(store, move |store| store.list_kind_ids(&kind)).await;
         }
         Ok(self
             .list_kind(kind)
@@ -852,8 +950,9 @@ impl Ctx {
     }
 
     pub async fn object_changes(&mut self, object_id: &str) -> Result<Vec<ObjectChange>> {
-        if let Some(store) = self.embedded_store() {
-            return store.changes(object_id);
+        if let Some(store) = self.embedded_arc() {
+            let object_id = object_id.to_string();
+            return block_embedded(store, move |store| store.changes(&object_id)).await;
         }
         let mut offset = 0;
         let mut all = Vec::new();
@@ -952,7 +1051,7 @@ impl Ctx {
 #[cfg(test)]
 mod tests {
     use super::{
-        Backend, Ctx, action_actor_from_changes, canonical_create_request,
+        Backend, Ctx, action_actor_from_changes, block_embedded, canonical_create_request,
         canonical_update_request, lease_precondition, token_transport_is_safe,
     };
     use crate::pb::graph_action::{ActionOp, ActionTypeDef};
@@ -1915,6 +2014,25 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn embedded_blocking_join_failure_is_explicit() {
+        let path =
+            std::env::temp_dir().join(format!("tenkai-block-join-{}.db", uuid::Uuid::new_v4()));
+        let ctx = Ctx::embedded(&path).unwrap();
+        let store = ctx.embedded_arc().unwrap();
+        let error = block_embedded(store, |_| -> super::Result<()> {
+            panic!("forced blocking panic");
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("embedded store blocking task failed"),
+            "{error}"
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]

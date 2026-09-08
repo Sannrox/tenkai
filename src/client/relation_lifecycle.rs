@@ -3,6 +3,7 @@
 use anyhow::Result;
 use prost::Message;
 use sekai_client::CallOptions;
+use std::sync::Arc;
 
 use super::{RemoteClient, sdk_error_status};
 use crate::pb::sekai::{
@@ -13,7 +14,7 @@ use crate::pb::sekai::{
 
 pub(super) enum RelationLifecycle<'a> {
     Remote(&'a RemoteClient),
-    Embedded(&'a crate::embedded::EmbeddedStore),
+    Embedded(Arc<crate::embedded::EmbeddedStore>),
 }
 
 impl RelationLifecycle<'_> {
@@ -26,7 +27,13 @@ impl RelationLifecycle<'_> {
             created: crate::now_millis(),
         };
         match self {
-            Self::Embedded(store) => store.create_link(link, false).map_err(anyhow::Error::from),
+            Self::Embedded(store) => {
+                let store = Arc::clone(store);
+                super::block_embedded(store, move |store| {
+                    store.create_link(link, false).map_err(anyhow::Error::from)
+                })
+                .await
+            }
             Self::Remote(client) => {
                 let link_id = link.id.clone();
                 let from_id = link.from_id.clone();
@@ -62,7 +69,11 @@ impl RelationLifecycle<'_> {
         link: Link,
     ) -> std::result::Result<(), tonic::Status> {
         match self {
-            Self::Embedded(store) => store.create_link(link, true),
+            Self::Embedded(store) => {
+                let store = Arc::clone(store);
+                super::block_embedded_status(store, move |store| store.create_link(link, true))
+                    .await
+            }
             Self::Remote(client) => {
                 let link_id = link.id.clone();
                 let from_id = link.from_id.clone();
@@ -95,7 +106,10 @@ impl RelationLifecycle<'_> {
     pub(super) async fn unlink(&self, from_id: &str, to_id: &str, relation: &str) -> Result<()> {
         let id = format!("{from_id}--{relation}--{to_id}");
         match self {
-            Self::Embedded(store) => store.unlink(&id),
+            Self::Embedded(store) => {
+                let store = Arc::clone(store);
+                super::block_embedded(store, move |store| store.unlink(&id)).await
+            }
             Self::Remote(client) => {
                 let response: std::result::Result<DeleteLinkResponse, tonic::Status> =
                     remote_unary(
@@ -120,7 +134,16 @@ impl RelationLifecycle<'_> {
         direction: &str,
     ) -> Result<Vec<Object>> {
         match self {
-            Self::Embedded(store) => store.linked(object_id, relation, direction),
+            Self::Embedded(store) => {
+                let store = Arc::clone(store);
+                let object_id = object_id.to_string();
+                let relation = relation.to_string();
+                let direction = direction.to_string();
+                super::block_embedded(store, move |store| {
+                    store.linked(&object_id, &relation, &direction)
+                })
+                .await
+            }
             Self::Remote(client) => {
                 let response: GetLinkedObjectsResponse = remote_unary(
                     client,
@@ -139,7 +162,15 @@ impl RelationLifecycle<'_> {
 
     pub(super) async fn links(&self, object_id: &str, relation: &str) -> Result<Vec<Link>> {
         match self {
-            Self::Embedded(store) => store.links(object_id, relation, "out"),
+            Self::Embedded(store) => {
+                let store = Arc::clone(store);
+                let object_id = object_id.to_string();
+                let relation = relation.to_string();
+                super::block_embedded(store, move |store| {
+                    store.links(&object_id, &relation, "out")
+                })
+                .await
+            }
             Self::Remote(client) => {
                 let response: GetLinksResponse = remote_unary(
                     client,

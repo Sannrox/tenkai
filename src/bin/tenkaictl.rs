@@ -2215,7 +2215,7 @@ async fn run(cli: Cli) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&summary)?);
         }
         Command::Backup { destination } => {
-            ctx.backup_embedded(&destination)?;
+            ctx.backup_embedded(&destination).await?;
             println!("backed up embedded state to {}", destination.display());
         }
         Command::Restore { .. } => unreachable!("restore is handled before opening the database"),

@@ -35,7 +35,7 @@ pub(super) enum ActionLifecycle<'a> {
         client: &'a RemoteClient,
         action_defs: &'a RemoteActionDefs,
     },
-    Embedded(&'a crate::embedded::EmbeddedStore),
+    Embedded(Arc<crate::embedded::EmbeddedStore>),
 }
 
 impl ActionLifecycle<'_> {
@@ -44,7 +44,11 @@ impl ActionLifecycle<'_> {
         action: ActionTypeDef,
     ) -> std::result::Result<(), tonic::Status> {
         match self {
-            Self::Embedded(store) => store.register_action(action),
+            Self::Embedded(store) => {
+                let store = Arc::clone(store);
+                super::block_embedded_status(store, move |store| store.register_action(action))
+                    .await
+            }
             Self::Remote {
                 client,
                 action_defs,
@@ -94,7 +98,14 @@ impl ActionLifecycle<'_> {
         dry_run: bool,
     ) -> Result<ActionResult> {
         match self {
-            Self::Embedded(store) => store.execute_action(action, params, dry_run),
+            Self::Embedded(store) => {
+                let store = Arc::clone(store);
+                let action = action.to_string();
+                super::block_embedded(store, move |store| {
+                    store.execute_action(&action, params, dry_run)
+                })
+                .await
+            }
             Self::Remote {
                 client,
                 action_defs,
@@ -191,7 +202,13 @@ impl ActionLifecycle<'_> {
         after: i64,
     ) -> Result<Vec<Decision>> {
         match self {
-            Self::Embedded(store) => store.decisions(actor, action, after),
+            Self::Embedded(store) => {
+                let store = Arc::clone(store);
+                let actor = actor.to_string();
+                let action = action.to_string();
+                super::block_embedded(store, move |store| store.decisions(&actor, &action, after))
+                    .await
+            }
             Self::Remote { client, .. } => {
                 let response: ListDecisionsResponse = remote_unary(
                     client,

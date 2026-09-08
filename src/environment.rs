@@ -967,7 +967,7 @@ pub async fn inspect_environment_with_outcomes(
     env: &str,
 ) -> Result<EnvironmentInspectReport> {
     let mut report = inspect_environment_base(ctx, env).await?;
-    report.terminal_outcomes = ctx.terminal_outcomes(env, crate::now_millis())?;
+    report.terminal_outcomes = ctx.terminal_outcomes(env, crate::now_millis()).await?;
     Ok(report)
 }
 
