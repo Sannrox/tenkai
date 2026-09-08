@@ -65,11 +65,12 @@ environment arguments fail closed (no unscoped fallback).
 
 Status filters, `created_at` order, and `LIMIT` for newest/oldest reads are
 applied in that SQL for the embedded host; remote catalog lookups keep the
-same semantics in process. Zero-step Computed plans are not persisted: a
-no-op reconcile reports Current without writing history or serving an empty
-plan to a runtime agent. Stored empty Computed/Running rows are retired to
-Succeeded (`no-op; environment already current`) on the next reconcile so they
-leave work selection.
+same semantics in process. A no-op reconcile does not persist a zero-step
+Computed plan: it reports Current without writing history or serving an empty
+plan to a runtime agent. Operator plan creation still persists empty Computed
+plans so durable callers can reload the returned id. Stored empty
+Computed/Running rows are retired to Succeeded (`no-op; environment already
+current`) on the next reconcile so they leave work selection.
 
 ## Tenant isolation adapter
 

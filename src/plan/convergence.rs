@@ -359,9 +359,16 @@ pub(super) async fn create(ctx: &mut Ctx, env: &str) -> Result<Plan> {
 }
 
 /// Reconcile planning may emit Restart steps from live observe/health evidence.
+///
+/// Zero-step output is ephemeral: it is not stored, has no priors annotation,
+/// and is not served to a runtime agent. Operator `create` still persists
+/// empty Computed plans so durable callers can reload the returned id.
 pub(super) async fn create_for_reconcile(ctx: &mut Ctx, env: &str) -> Result<Plan> {
     let (inputs, mut steps) =
         compute_snapshot_with_policy(ctx, env, ConvergencePolicy::reconcile()).await?;
+    if steps.is_empty() {
+        return assemble_plan(env, inputs, &mut steps, None);
+    }
     create_with_content(ctx, env, inputs, &mut steps, None).await
 }
 
@@ -385,8 +392,7 @@ pub(super) async fn create_from_steps_with_recovery(
     create_with_content(ctx, env, Vec::new(), &mut steps, Some(reason)).await
 }
 
-async fn create_with_content(
-    ctx: &mut Ctx,
+fn assemble_plan(
     env: &str,
     inputs: Vec<DesiredStateInput>,
     steps: &mut [Step],
@@ -407,7 +413,7 @@ async fn create_with_content(
     for (order, step) in steps.iter_mut().enumerate() {
         step.id = format!("{id}:step:{order}");
     }
-    let plan = Plan {
+    Ok(Plan {
         format_version: PLAN_FORMAT_VERSION,
         id,
         content_id,
@@ -421,12 +427,18 @@ async fn create_with_content(
         maintenance_blocked: false,
         prior_warnings: Vec::new(),
         recalled_recovery_reason,
-    };
-    if plan.steps.is_empty() {
-        return Ok(plan);
-    }
+    })
+}
+
+async fn create_with_content(
+    ctx: &mut Ctx,
+    env: &str,
+    inputs: Vec<DesiredStateInput>,
+    steps: &mut [Step],
+    recalled_recovery_reason: Option<String>,
+) -> Result<Plan> {
+    let mut plan = assemble_plan(env, inputs, steps, recalled_recovery_reason)?;
     // Optional advisory priors (default off). Never hard-block or change steps.
-    let mut plan = plan;
     if let Ok(inspect) = inspect_environment(ctx, env).await {
         let _ = crate::plan_priors::annotate_plan_with_priors(
             &mut plan,
@@ -796,14 +808,14 @@ install = "true"
             .insert("deployed_release.api".into(), release_id("api", "1.0.0"));
         ctx.put(env).await.unwrap();
 
-        let idle = create(&mut ctx, "local").await.unwrap();
+        let idle = create_for_reconcile(&mut ctx, "local").await.unwrap();
         assert!(idle.steps.is_empty(), "{idle:?}");
         assert!(
             list_for_environment(&mut ctx, "local", None)
                 .await
                 .unwrap()
                 .is_empty(),
-            "zero-step plans must not persist"
+            "reconcile zero-step plans must not persist"
         );
 
         set_environment_overlay(&mut ctx, "local", "api", "region", "eu")
@@ -814,6 +826,41 @@ install = "true"
         assert_eq!(plan.steps[0].action, Action::Restart);
         assert_eq!(plan.steps[0].from.as_deref(), Some("1.0.0"));
         assert_eq!(plan.steps[0].to, "1.0.0");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn operator_zero_step_plan_remains_loadable() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-operator-empty-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let database = root.join("tenkai.db");
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        published_software(&mut ctx, &root, "1.0.0").await;
+        let actor = crate::auth_context::test_management_context("operator-empty");
+        crate::catalog::promote(&mut ctx, &actor, "api@1.0.0", "stable")
+            .await
+            .unwrap();
+        env_add(&mut ctx, "local", "fixture").await.unwrap();
+        subscribe(&mut ctx, "local", "api", "stable").await.unwrap();
+        let mut env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        env.properties.insert("deployed.api".into(), "1.0.0".into());
+        env.properties
+            .insert("deployed_release.api".into(), release_id("api", "1.0.0"));
+        ctx.put(env).await.unwrap();
+
+        let stored = create(&mut ctx, "local").await.unwrap();
+        assert!(stored.steps.is_empty(), "{stored:?}");
+        let loaded = load(&mut ctx, &stored.id).await.unwrap();
+        assert_eq!(loaded.id, stored.id);
+        assert_eq!(loaded.state, PlanState::Computed);
+        assert!(loaded.steps.is_empty());
 
         let _ = std::fs::remove_dir_all(&root);
     }
