@@ -24,3 +24,4 @@
 - [0022 — External delivery adapter boundary](0022-external-delivery-adapter-boundary.md)
 - [0023 — Workshop module delivery profile](0023-workshop-module-delivery.md)
 - [0024 — Governed package-migration plan](0024-package-migration.md)
+- [0025 — Remote plan property query bounds](0025-remote-plan-property-query-bounds.md)
