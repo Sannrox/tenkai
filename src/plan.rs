@@ -531,6 +531,74 @@ mod tests {
         let _ = std::fs::remove_file(&database);
     }
 
+    #[tokio::test]
+    async fn latest_and_oldest_fail_closed_on_created_at_index_mismatch() {
+        let database = std::env::temp_dir().join(format!(
+            "tenkai-plan-created-at-{}-{}.db",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let _ = std::fs::remove_file(&database);
+        let mut ctx = Ctx::embedded(&database).unwrap();
+
+        let older = plan_for("env_a", 100, PlanState::Computed);
+        let newer = plan_for("env_a", 200, PlanState::Running);
+        store(&mut ctx, &older).await.unwrap();
+        store(&mut ctx, &newer).await.unwrap();
+
+        let latest = latest_for_environment(&mut ctx, "env_a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.id, newer.id);
+        let oldest = oldest_for_environment(
+            &mut ctx,
+            "env_a",
+            &[PlanState::Computed, PlanState::Running],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(oldest.id, older.id);
+
+        let mut poisoned = ctx.get(&older.id).await.unwrap().unwrap();
+        poisoned
+            .properties
+            .insert("created_at".into(), "9999".into());
+        ctx.put(poisoned).await.unwrap();
+
+        let latest_error = latest_for_environment(&mut ctx, "env_a")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            latest_error.contains("does not match payload"),
+            "{latest_error}"
+        );
+        let oldest_error = oldest_for_environment(
+            &mut ctx,
+            "env_a",
+            &[PlanState::Computed, PlanState::Running],
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            oldest_error.contains("does not match payload"),
+            "{oldest_error}"
+        );
+        let listed_error = list_for_environment(&mut ctx, "env_a", None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            listed_error.contains("does not match payload"),
+            "{listed_error}"
+        );
+
+        let _ = std::fs::remove_file(&database);
+    }
+
     #[test]
     fn lifecycle_changes_do_not_change_executable_digest() {
         let plan = example_plan();
