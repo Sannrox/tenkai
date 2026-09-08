@@ -65,7 +65,10 @@ environment arguments fail closed (no unscoped fallback).
 
 Status filters, `created_at` order, and `LIMIT` for newest/oldest reads are
 applied in that SQL for the embedded host; remote catalog lookups keep the
-same semantics in process. After decode, the `created_at` index value must
+same filter, integer `created_at` order, and limit semantics in process after
+`FindByProperty` transfers matching objects. That remote IO cost is an
+accepted residual ([ADR 0025](decisions/0025-remote-plan-property-query-bounds.md));
+it is not silent SQL parity. After decode, the `created_at` index value must
 match `Plan.created_at` as an integer; missing, non-integer, or mismatched
 index values fail closed rather than returning a row chosen only by the
 index. A no-op reconcile does not persist a zero-step
