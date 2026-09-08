@@ -230,7 +230,8 @@ pub async fn list_for_environment(
 
 /// Oldest plan with steps for `environment` whose status is in `statuses`.
 ///
-/// Zero-step plans are not executable work and are skipped.
+/// Zero-step plans are excluded by the `has_steps` index, not by decoding
+/// every matching payload.
 pub async fn oldest_for_environment(
     ctx: &mut Ctx,
     environment: &str,
@@ -575,17 +576,17 @@ mod tests {
             latest_error.contains("does not match payload"),
             "{latest_error}"
         );
-        let oldest_error = oldest_for_environment(
+        let oldest = oldest_for_environment(
             &mut ctx,
             "env_a",
             &[PlanState::Computed, PlanState::Running],
         )
         .await
-        .unwrap_err()
-        .to_string();
-        assert!(
-            oldest_error.contains("does not match payload"),
-            "{oldest_error}"
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            oldest.id, newer.id,
+            "oldest executable LIMIT 1 skips a poisoned later index row"
         );
         let listed_error = list_for_environment(&mut ctx, "env_a", None)
             .await
@@ -595,6 +596,58 @@ mod tests {
             listed_error.contains("does not match payload"),
             "{listed_error}"
         );
+
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
+    async fn pending_work_and_retirement_filter_has_steps() {
+        let database = std::env::temp_dir().join(format!(
+            "tenkai-plan-has-steps-{}-{}.db",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let _ = std::fs::remove_file(&database);
+        let mut ctx = Ctx::embedded(&database).unwrap();
+
+        let mut empty = plan_for("env_a", 10, PlanState::Computed);
+        empty.steps.clear();
+        empty.content_id = content_address(
+            &empty.environment,
+            empty.created_at,
+            &empty.inputs,
+            &empty.steps,
+            empty.recalled_recovery_reason.as_deref(),
+        )
+        .unwrap();
+        empty.id = plan_id(&empty.environment, empty.created_at, &empty.content_id);
+        let work = plan_for("env_a", 20, PlanState::Computed);
+        store(&mut ctx, &empty).await.unwrap();
+        store(&mut ctx, &work).await.unwrap();
+
+        let oldest = oldest_for_environment(&mut ctx, "env_a", &[PlanState::Computed])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(oldest.id, work.id);
+
+        let retired = retire_empty_executable_plans(&mut ctx, "env_a")
+            .await
+            .unwrap();
+        assert_eq!(retired, 1);
+        assert_eq!(
+            load(&mut ctx, &empty.id).await.unwrap().state,
+            PlanState::Succeeded
+        );
+        assert_eq!(
+            load(&mut ctx, &work.id).await.unwrap().state,
+            PlanState::Computed
+        );
+        let oldest = oldest_for_environment(&mut ctx, "env_a", &[PlanState::Computed])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(oldest.id, work.id);
 
         let _ = std::fs::remove_file(&database);
     }
