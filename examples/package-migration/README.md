@@ -11,7 +11,7 @@ The reference proof is the signed crash-recovery drill. It does not use
 unsigned or unapproved development bypasses:
 
 ```bash
-./scripts/stateful-upgrade-drill.sh
+bash scripts/stateful-upgrade-drill.sh
 ```
 
 See [package migrations](../../docs/package-migrations.md#signed-stateful-upgrade-drill)

@@ -141,7 +141,7 @@ uninstall remain shell commands. Tenkai still owns Catalog, approval, plan,
 apply, rollback, and backup/restore.
 
 ```bash
-./scripts/stateful-upgrade-drill.sh
+bash scripts/stateful-upgrade-drill.sh
 ```
 
 Equivalent Cargo invocation:
