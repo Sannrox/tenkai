@@ -1,10 +1,29 @@
 # Package migration fixture
 
-Synthetic source-to-target software pins. The declaration binds Catalog
-digests and consumed compatibility evidence. It does not include package
-transforms.
+Synthetic source-to-target software pins plus a bounded local fixture target.
+The declaration binds Catalog digests and consumed compatibility evidence. It
+does not include package transforms. The fixture owns synthetic records and
+effect deduplication; Tenkai owns receipts, rollback, and recovery.
+
+## Signed stateful upgrade drill
+
+The reference proof is the signed crash-recovery drill. It does not use
+unsigned or unapproved development bypasses:
 
 ```bash
+bash scripts/stateful-upgrade-drill.sh
+```
+
+See [package migrations](../../docs/package-migrations.md#signed-stateful-upgrade-drill)
+for prerequisites, evidence limits, and the assertion report.
+
+## Local unsigned preview
+
+Unsigned publish remains available only for the built-in `local` environment.
+Set `TMPDIR` so the fixture executor can write its target ledger:
+
+```bash
+export TMPDIR="${TMPDIR:-/tmp}"
 tenkaictl init
 tenkaictl publish examples/package-migration/source/tenkai.toml \
   --allow-unsigned-development

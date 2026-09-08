@@ -108,6 +108,10 @@ mutation. Ordinary apply is rejected while the migration lock is held.
 Duplicate apply of the same identity is idempotent. Changing checkpoints,
 pins, or evidence under the same name is a conflict.
 
+When a compensating checkpoint is waiting for plan approval, `migrate status`
+prints `pending-plan <plan-id>`. Place the signed plan envelope next to the
+migration approval as `<plan-id>.json`.
+
 ## Recovery
 
 - Compatibility, authorization, lease, or fence failure leaves the
@@ -125,3 +129,56 @@ pins, or evidence under the same name is a conflict.
 
 [examples/package-migration](../examples/package-migration/) contains
 synthetic source and target software fixtures plus a declaration template.
+The fixture target (`fixture/target.sh`) keeps a synthetic record, health
+probe, and stable-key ledger outside Tenkai state.
+
+## Signed stateful upgrade drill
+
+Issue: [#334](https://github.com/Sannrox/tenkai/issues/334).
+
+The fixture does not add an executor protocol; install, health, and
+uninstall remain shell commands. Tenkai still owns Catalog, approval, plan,
+apply, rollback, and backup/restore.
+
+```bash
+bash scripts/stateful-upgrade-drill.sh
+```
+
+Equivalent Cargo invocation:
+
+```bash
+cargo test --locked --test stateful_upgrade_drill -- --nocapture
+```
+
+The drill generates ephemeral `tenkaictl dev` keys, publishes signed
+`pkg@1.0.0` and `pkg@1.1.0`, and applies them to a non-`local` environment
+without `--allow-unsigned-development` or `--allow-unapproved-development`.
+It asserts:
+
+- a known fixture record survives a healthy signed upgrade
+- invalid signatures and `incompatible` evidence are rejected before the
+  target changes
+- an unhealthy reversible target restores the source pin, fixture data, and
+  Tenkai recovery record
+- killing the executor after the target accepts a step cannot repeat that
+  step; target readback versus Tenkai receipts decides whether recovery is
+  known or still requires reconciliation
+- a stale `--expected-generation` cannot advance the same migration identity
+- accepted irreversible work stays `recovery_required` and does not roll
+  application data backward
+- restoring Tenkai operational state into an isolated database does not
+  restore or authorize the original target
+
+### Prerequisites
+
+POSIX `sh` and a local Cargo toolchain. No
+cluster, Postgres, or live provider is required. The test sets `TMPDIR`
+under a temporary directory and removes it on exit.
+
+### Evidence limits
+
+The JSON report (`tenkai.stateful-upgrade-drill/v1`) is an assertion
+summary, not a recovery receipt. It does not include credentials, signing
+material, database paths, or application payloads. Target-side
+deduplication is the fixture's ledger, not a Tenkai exactly-once guarantee.
+This drill does not prove product HA or a distributed atomic commit.

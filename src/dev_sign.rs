@@ -23,6 +23,7 @@ use crate::release_signing::{
     ENVELOPE_SCHEMA, Provenance, ReleaseStatement, SignatureEnvelope, TRUST_ROOT_VERSION,
     TrustRoots as ReleaseTrustRoots, key_id, verify_release,
 };
+use crate::signature_verification;
 
 /// Default relative directory for laptop dogfood keys (gitignored recommended).
 pub const DEFAULT_DEV_KEYS_DIR: &str = ".tenkai-dev-keys";
@@ -55,7 +56,7 @@ pub fn init_dev_keys(dir: &Path) -> Result<PathBuf> {
                 "{WARNING}\n\
                  Files:\n\
                  - {RELEASE_KEY_FILE}: Ed25519 seed for release signatures\n\
-                 - {APPROVAL_KEY_FILE}: Ed25519 seed for plan approvals\n\
+                 - {APPROVAL_KEY_FILE}: Ed25519 seed for plan and package-migration approvals\n\
                  Never commit these files. Never pass private keys on argv.\n"
             ),
         )?;
@@ -351,6 +352,71 @@ pub async fn sign_plan_approval(
     })
 }
 
+/// Sign a package-migration approval bound to identity digest and environment.
+pub fn sign_migration_approval(
+    keys_dir: &Path,
+    identity_digest: &str,
+    environment: &str,
+    approval_out: &Path,
+    trust_roots_out: &Path,
+    ttl_secs: i64,
+) -> Result<WrittenPaths> {
+    if ttl_secs <= 0 {
+        bail!("approval ttl_secs must be positive");
+    }
+    let ttl_ms = ttl_secs
+        .checked_mul(1000)
+        .ok_or_else(|| anyhow::anyhow!("approval ttl_secs is too large (overflow)"))?;
+    crate::ontology::validate_identifier("approval environment", environment)?;
+    signature_verification::validate_prefixed_digest("migration identity digest", identity_digest)?;
+    init_dev_keys(keys_dir)?;
+    reject_output_path_collisions(keys_dir, approval_out, trust_roots_out)?;
+    let seed = load_private_seed(&keys_dir.join(APPROVAL_KEY_FILE))?;
+    let signing_key = signing_key_from_seed(&seed);
+    let public = signing_key.verifying_key().to_bytes();
+    let kid = key_id(&public);
+
+    let roots = trust_roots_toml(
+        &kid,
+        "dogfood-migration-approver@localhost",
+        &STANDARD.encode(public),
+    );
+    write_text_owner_only(trust_roots_out, &roots)?;
+
+    let now = crate::now_millis();
+    let expires_at = now
+        .checked_add(ttl_ms)
+        .ok_or_else(|| anyhow::anyhow!("approval expiry overflow; reduce --ttl-secs"))?;
+    let statement = crate::package_migration::MigrationApprovalStatement {
+        identity_digest: identity_digest.to_string(),
+        environment: environment.to_string(),
+        purpose: crate::package_migration::APPROVAL_PURPOSE.into(),
+        issued_at: now,
+        expires_at,
+    };
+    let bytes = crate::package_migration::canonical_approval_bytes(&statement)?;
+    let signature = signing_key.sign(&bytes);
+    let envelope = crate::package_migration::MigrationApprovalEnvelope {
+        schema: crate::package_migration::APPROVAL_SCHEMA.into(),
+        key_id: kid,
+        statement,
+        signature: STANDARD.encode(signature.to_bytes()),
+    };
+    write_text_owner_only(approval_out, &serde_json::to_string_pretty(&envelope)?)?;
+    crate::package_migration::verify_approval_envelope(
+        identity_digest,
+        environment,
+        approval_out,
+        trust_roots_out,
+        now.saturating_add(1),
+    )?;
+
+    Ok(WrittenPaths {
+        trust_roots: trust_roots_out.to_path_buf(),
+        envelope: approval_out.to_path_buf(),
+    })
+}
+
 /// Write text without following symlinks; owner-only mode on Unix (0600).
 ///
 /// Rejects an existing symlink target so a pre-planted `/tmp/...` link cannot
@@ -542,5 +608,44 @@ inputs = ["manifests"]
         let body = fs::read_to_string(&approval).unwrap();
         assert!(body.contains(APPROVAL_SCHEMA));
         assert!(body.contains("stage"));
+    }
+
+    #[test]
+    fn sign_migration_approval_binds_identity_and_environment() {
+        let root = temp_dir("migration-approval");
+        let keys = root.join("keys");
+        init_dev_keys(&keys).unwrap();
+        let approval = root.join("migration.approval.json");
+        let trust = root.join("migration-trust.toml");
+        let identity = format!("sha256:{}", "b".repeat(64));
+        let written =
+            sign_migration_approval(&keys, &identity, "drill", &approval, &trust, 3600).unwrap();
+        assert_eq!(written.envelope, approval);
+        let body = fs::read_to_string(&approval).unwrap();
+        assert!(body.contains(crate::package_migration::APPROVAL_SCHEMA));
+        assert!(body.contains(&identity));
+        assert!(body.contains("drill"));
+        assert!(body.contains(crate::package_migration::APPROVAL_PURPOSE));
+        let envelope: crate::package_migration::MigrationApprovalEnvelope =
+            serde_json::from_str(&body).unwrap();
+        crate::package_migration::canonical_approval_bytes(&envelope.statement).unwrap();
+        crate::package_migration::verify_approval_envelope(
+            &identity,
+            "drill",
+            &approval,
+            &trust,
+            crate::now_millis(),
+        )
+        .unwrap();
+        let err = crate::package_migration::verify_approval_envelope(
+            &format!("sha256:{}", "c".repeat(64)),
+            "drill",
+            &approval,
+            &trust,
+            crate::now_millis(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("different identity"), "{err}");
     }
 }

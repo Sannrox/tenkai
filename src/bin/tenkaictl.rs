@@ -313,6 +313,27 @@ enum DevCommand {
         #[arg(long, default_value_t = 3600)]
         ttl_secs: i64,
     },
+    /// Sign a package-migration approval for migrate --approval (dogfood only).
+    SignMigrationApproval {
+        /// Content-bound migration identity digest from `migrate preview`.
+        #[arg(long)]
+        identity: String,
+        /// Environment bound into the approval statement.
+        #[arg(long)]
+        env: String,
+        /// Keys directory from `dev init-keys`
+        #[arg(long, default_value = dev_sign::DEFAULT_DEV_KEYS_DIR)]
+        keys: PathBuf,
+        /// Output path for package-migration-approval JSON envelope
+        #[arg(long)]
+        approval: PathBuf,
+        /// Output path for approval trust-roots TOML
+        #[arg(long)]
+        trust_roots: PathBuf,
+        /// Approval lifetime in seconds
+        #[arg(long, default_value_t = 3600)]
+        ttl_secs: i64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1222,6 +1243,32 @@ async fn run(cli: Cli) -> Result<()> {
                     "apply with: tenkaictl --database {} apply {} --approval {} --approval-trust-roots {}",
                     cli.database.display(),
                     plan_id,
+                    written.envelope.display(),
+                    written.trust_roots.display()
+                );
+                return Ok(());
+            }
+            DevCommand::SignMigrationApproval {
+                identity,
+                env,
+                keys,
+                approval,
+                trust_roots,
+                ttl_secs,
+            } => {
+                let written = dev_sign::sign_migration_approval(
+                    keys,
+                    identity,
+                    env,
+                    approval,
+                    trust_roots,
+                    *ttl_secs,
+                )?;
+                println!("{}", dev_sign::warning_line());
+                println!("wrote approval   {}", written.envelope.display());
+                println!("wrote trust roots {}", written.trust_roots.display());
+                println!(
+                    "migrate with: tenkaictl migrate apply <name> --env {env} --declaration <file> --approval {} --approval-trust-roots {}",
                     written.envelope.display(),
                     written.trust_roots.display()
                 );
@@ -3357,6 +3404,28 @@ mod tests {
                     ..
                 }
             } if name == "cutover"
+        ));
+        let sign = Cli::try_parse_from([
+            "tenkaictl",
+            "dev",
+            "sign-migration-approval",
+            "--identity",
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "--env",
+            "drill",
+            "--keys",
+            "keys",
+            "--approval",
+            "cutover.approval.json",
+            "--trust-roots",
+            "approvers.toml",
+        ])
+        .unwrap();
+        assert!(matches!(
+            sign.command,
+            Command::Dev {
+                command: DevCommand::SignMigrationApproval { ref env, .. }
+            } if env == "drill"
         ));
     }
 

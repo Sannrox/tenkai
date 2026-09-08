@@ -4,5 +4,7 @@ version = "1.0.0"
 description = "Synthetic source package for a governed migration"
 
 [deploy]
-install = "true"
-inputs = ["payload.txt"]
+install = "sh ./target.sh apply"
+health = "sh ./target.sh health"
+uninstall = "sh ./target.sh remove"
+inputs = ["payload.txt", "target.sh"]

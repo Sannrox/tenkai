@@ -28,7 +28,7 @@ pub const MIGRATION_DOCUMENT_VERSION: u32 = 1;
 pub const COMPATIBILITY_VERSION: u32 = 1;
 pub const APPROVAL_SCHEMA: &str = "tenkai.package-migration-approval.v1";
 const APPROVAL_DOMAIN: &[u8] = b"TENKAI-PACKAGE-MIGRATION-APPROVAL-V1\0";
-const APPROVAL_PURPOSE: &str = "execute_package_migration";
+pub const APPROVAL_PURPOSE: &str = "execute_package_migration";
 const TRUST_ROOT_VERSION: u32 = 1;
 const MIGRATION_EXEC_NAMESPACE: &str = "tenkai.package-migration";
 const MIGRATION_EXEC_TTL_MS: i64 = 2 * 60 * 60 * 1000;
@@ -425,6 +425,12 @@ pub fn format_migration(record: &MigrationRecord) -> String {
     ));
     if let Some(backup) = &record.backup_receipt_digest {
         lines.push(format!("backup {backup}"));
+    }
+    if let Some(plan_id) = &record.pending_plan_id {
+        lines.push(format!("pending-plan {plan_id}"));
+    }
+    if let Some(plan_id) = &record.pending_rollback_plan_id {
+        lines.push(format!("pending-rollback-plan {plan_id}"));
     }
     lines.push(format!(
         "{:<16} {:<14} {:<12} fence",
@@ -895,7 +901,7 @@ enum CheckpointProgress {
     AwaitingPlanApproval { plan_id: String },
 }
 
-fn canonical_approval_bytes(statement: &MigrationApprovalStatement) -> Result<Vec<u8>> {
+pub fn canonical_approval_bytes(statement: &MigrationApprovalStatement) -> Result<Vec<u8>> {
     if statement.purpose != APPROVAL_PURPOSE {
         bail!("package migration approval purpose must be {APPROVAL_PURPOSE}");
     }
@@ -920,12 +926,13 @@ fn canonical_approval_bytes(statement: &MigrationApprovalStatement) -> Result<Ve
     Ok(bytes)
 }
 
-fn verify_signed_approval(
-    record: &MigrationRecord,
+pub fn verify_approval_envelope(
+    identity_digest: &str,
+    environment: &str,
     approval: &Path,
     trust_roots: &Path,
     now: i64,
-) -> Result<String> {
+) -> Result<()> {
     let raw = std::fs::read(approval)
         .with_context(|| format!("reading package migration approval {}", approval.display()))?;
     let envelope: MigrationApprovalEnvelope =
@@ -936,8 +943,8 @@ fn verify_signed_approval(
             envelope.schema
         );
     }
-    if envelope.statement.identity_digest != record.identity_digest
-        || envelope.statement.environment != record.environment
+    if envelope.statement.identity_digest != identity_digest
+        || envelope.statement.environment != environment
     {
         bail!("package migration approval is bound to a different identity or environment");
     }
@@ -987,6 +994,22 @@ fn verify_signed_approval(
         "package migration approval signature",
         &envelope.signature,
         &canonical_approval_bytes(&envelope.statement)?,
+    )?;
+    Ok(())
+}
+
+fn verify_signed_approval(
+    record: &MigrationRecord,
+    approval: &Path,
+    trust_roots: &Path,
+    now: i64,
+) -> Result<String> {
+    verify_approval_envelope(
+        &record.identity_digest,
+        &record.environment,
+        approval,
+        trust_roots,
+        now,
     )?;
     Ok(identity_approval_binding(record))
 }
