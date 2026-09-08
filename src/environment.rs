@@ -1416,6 +1416,7 @@ fn operator_safe_status_detail(plan: &Plan) -> String {
         PlanState::Failed => {
             "plan execution failed; inspect authorized Tenkai audit evidence".into()
         }
+        PlanState::Succeeded if plan.steps.is_empty() => crate::plan::NO_OP_STATUS_DETAIL.into(),
         PlanState::Computed | PlanState::Running | PlanState::Succeeded => String::new(),
     }
 }

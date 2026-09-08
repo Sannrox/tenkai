@@ -84,7 +84,9 @@ Computed plan: it reports Current without writing history or serving an empty
 plan to a runtime agent. Operator plan creation still persists empty Computed
 plans so durable callers can reload the returned id. Stored empty
 Computed/Running rows are retired to Succeeded (`no-op; environment already
-current`) on the next reconcile so they leave work selection. Oldest
+current`) on the next reconcile so they leave work selection. Inspect surfaces
+that no-op detail for zero-step Succeeded plans and keeps Succeeded-with-steps
+as applied delivery (empty inspect detail). Oldest
 executable selection and empty-plan retirement filter `has_steps` in the
 property index so those paths do not decode every status-matching payload.
 
