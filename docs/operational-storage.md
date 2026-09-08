@@ -79,7 +79,10 @@ accepted residual ([ADR 0025](decisions/0025-remote-plan-property-query-bounds.m
 it is not silent SQL parity. After decode, the `created_at` index value must
 match `Plan.created_at` as an integer; missing, non-integer, or mismatched
 index values fail closed rather than returning a row chosen only by the
-index. A no-op reconcile does not persist a zero-step
+index. Inspect-latest (`latest_for_environment`) does not apply `LIMIT` until
+every matching row has been decoded, so a depressed newest index cannot hide
+behind a consistent older `LIMIT 1` winner. Oldest executable selection still
+uses `LIMIT 1`. A no-op reconcile does not persist a zero-step
 Computed plan: it reports Current without writing history or serving an empty
 plan to a runtime agent. Operator plan creation still persists empty Computed
 plans so durable callers can reload the returned id. Stored empty
