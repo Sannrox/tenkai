@@ -95,8 +95,9 @@ Computed/Running rows are retired to Succeeded (`no-op; environment already
 current`) on the next reconcile so they leave work selection. Inspect surfaces
 that no-op detail for zero-step Succeeded plans and keeps Succeeded-with-steps
 as applied delivery (empty inspect detail). Oldest
-executable selection and empty-plan retirement filter `has_steps` in the
-property index so those paths do not decode every status-matching payload.
+executable selection, empty-plan retirement, and controller `select_plan`
+admission filter `has_steps` in the property index so those paths do not
+decode every status-matching payload.
 
 ## Tenant isolation adapter
 

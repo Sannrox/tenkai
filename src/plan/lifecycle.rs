@@ -352,6 +352,14 @@ pub(super) async fn oldest_for_environment(
     Ok(plans.pop())
 }
 
+pub(super) async fn executable_for_environment(
+    ctx: &mut Ctx,
+    environment: &str,
+    statuses: &[PlanState],
+) -> Result<Vec<Plan>> {
+    load_for_environment(ctx, environment, Some(statuses), false, None, Some(true)).await
+}
+
 pub(super) async fn latest_for_environment(
     ctx: &mut Ctx,
     environment: &str,

@@ -244,6 +244,18 @@ pub async fn oldest_for_environment(
     lifecycle::oldest_for_environment(ctx, environment, statuses).await
 }
 
+/// Plans with steps for `environment` whose status is in `statuses`.
+///
+/// Zero-step plans are excluded by the `has_steps` index, not by decoding
+/// every matching payload. Ordered oldest `created_at` first.
+pub(crate) async fn executable_for_environment(
+    ctx: &mut Ctx,
+    environment: &str,
+    statuses: &[PlanState],
+) -> Result<Vec<Plan>> {
+    lifecycle::executable_for_environment(ctx, environment, statuses).await
+}
+
 /// Newest stored plan for `environment`, if any.
 ///
 /// Checks every matching `created_at` index against a payload peek so a
@@ -737,6 +749,16 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(oldest.id, work.id);
+        let executable = executable_for_environment(&mut ctx, "env_a", &[PlanState::Computed])
+            .await
+            .unwrap();
+        assert_eq!(
+            executable
+                .iter()
+                .map(|plan| plan.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![work.id.as_str()]
+        );
 
         let retired = retire_empty_executable_plans(&mut ctx, "env_a")
             .await

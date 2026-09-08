@@ -72,20 +72,30 @@ async fn select_plan(ctx: &mut Ctx, environment: &str, approval_required: bool) 
         return plan::create_for_reconcile(ctx, environment).await;
     }
     for candidate in
-        plan::list_for_environment(ctx, environment, Some(&[PlanState::Computed])).await?
+        plan::executable_for_environment(ctx, environment, &[PlanState::Computed]).await?
     {
-        if !candidate.steps.is_empty()
-            && apply::classify_candidate(ctx, &candidate).await?
-                == apply::CandidateAdmission::Admissible
+        if candidate.steps.is_empty() {
+            bail!(
+                "plan {} has_steps index selected an executable plan without steps",
+                candidate.id
+            );
+        }
+        if apply::classify_candidate(ctx, &candidate).await?
+            == apply::CandidateAdmission::Admissible
         {
             return Ok(candidate);
         }
     }
     for candidate in
-        plan::list_for_environment(ctx, environment, Some(&[PlanState::Blocked])).await?
+        plan::executable_for_environment(ctx, environment, &[PlanState::Blocked]).await?
     {
+        if candidate.steps.is_empty() {
+            bail!(
+                "plan {} has_steps index selected an executable plan without steps",
+                candidate.id
+            );
+        }
         if candidate.maintenance_blocked
-            && !candidate.steps.is_empty()
             && apply::classify_candidate(ctx, &candidate).await?
                 == apply::CandidateAdmission::Admissible
         {
