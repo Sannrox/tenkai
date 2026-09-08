@@ -1,1 +1,2 @@
-target
+VERSION=1.1.0
+FIXTURE_RECORD=fixture-record-1

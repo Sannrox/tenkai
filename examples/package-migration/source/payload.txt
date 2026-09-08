@@ -1,1 +1,2 @@
-source
+VERSION=1.0.0
+FIXTURE_RECORD=fixture-record-1
