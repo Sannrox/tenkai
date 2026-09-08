@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 
+use serde::Deserialize;
+
 use super::*;
 
 pub(crate) struct Transition {
@@ -354,11 +356,28 @@ pub(super) async fn latest_for_environment(
     ctx: &mut Ctx,
     environment: &str,
 ) -> Result<Option<Plan>> {
-    // Decode every environment plan before selecting newest. LIMIT 1 on the
-    // unvalidated created_at index can return a consistent older row when the
-    // true newest index is depressed, missing, or non-integer.
-    let plans = load_for_environment(ctx, environment, None, true, None, None).await?;
-    Ok(plans.into_iter().next())
+    // Visit every environment plan's created_at index and payload peek so a
+    // depressed newest index cannot hide behind LIMIT 1. Full Plan decode
+    // (steps, content digest) runs only for the newest validated row.
+    let objects = plan_objects_for_environment(ctx, environment, None, true, None, None).await?;
+    let mut newest: Option<(i64, Object)> = None;
+    for object in objects {
+        let peek = require_indexed_created_at_matches_payload(&object)?;
+        if peek.environment != environment {
+            bail!(
+                "plan {} property index returned environment {}, expected {environment}",
+                object.id,
+                peek.environment
+            );
+        }
+        if newest
+            .as_ref()
+            .is_none_or(|(best, _)| peek.created_at > *best)
+        {
+            newest = Some((peek.created_at, object));
+        }
+    }
+    newest.map(|(_, object)| from_object(&object)).transpose()
 }
 
 /// Retire stored zero-step Computed/Running plans so they leave work selection.
@@ -395,14 +414,47 @@ pub(crate) async fn retire_empty_executable_plans(
     Ok(retired)
 }
 
-async fn load_for_environment(
+#[derive(Debug, Deserialize)]
+struct PlanPayloadPeek {
+    created_at: i64,
+    environment: String,
+}
+
+fn peek_plan_payload(object: &Object) -> Result<PlanPayloadPeek> {
+    let raw = object
+        .properties
+        .get("plan")
+        .with_context(|| format!("plan object {} has no serialized plan", object.id))?;
+    serde_json::from_str(raw).with_context(|| format!("parsing stored plan identity {}", object.id))
+}
+
+fn require_indexed_created_at_matches_payload(object: &Object) -> Result<PlanPayloadPeek> {
+    let indexed = object
+        .properties
+        .get("created_at")
+        .with_context(|| format!("plan object {} has no created_at index", object.id))?;
+    let indexed: i64 = indexed
+        .parse()
+        .with_context(|| format!("plan {} created_at index is not an integer", object.id))?;
+    let peek = peek_plan_payload(object)?;
+    if indexed != peek.created_at {
+        bail!(
+            "plan {} created_at index {indexed} does not match payload {}",
+            object.id,
+            peek.created_at
+        );
+    }
+    Ok(peek)
+}
+
+async fn plan_objects_for_environment(
     ctx: &mut Ctx,
     environment: &str,
     statuses: Option<&[PlanState]>,
     descending: bool,
     limit: Option<u32>,
     has_steps: Option<bool>,
-) -> Result<Vec<Plan>> {
+) -> Result<Vec<Object>> {
     anyhow::ensure!(
         !environment.trim().is_empty(),
         "environment is required for plan work selection"
@@ -423,18 +475,30 @@ async fn load_for_environment(
         Some(false) => (Some("has_steps"), Some("false")),
         None => (None, None),
     };
-    let objects = ctx
-        .find_by_property_matching(crate::embedded::PropertyIndexQuery {
-            matching_key,
-            matching_values,
-            equals_key,
-            equals_value,
-            order_key: Some("created_at"),
-            descending,
-            limit,
-            ..crate::embedded::PropertyIndexQuery::new(KIND_PLAN, "environment", environment)
-        })
-        .await?;
+    ctx.find_by_property_matching(crate::embedded::PropertyIndexQuery {
+        matching_key,
+        matching_values,
+        equals_key,
+        equals_value,
+        order_key: Some("created_at"),
+        descending,
+        limit,
+        ..crate::embedded::PropertyIndexQuery::new(KIND_PLAN, "environment", environment)
+    })
+    .await
+}
+
+async fn load_for_environment(
+    ctx: &mut Ctx,
+    environment: &str,
+    statuses: Option<&[PlanState]>,
+    descending: bool,
+    limit: Option<u32>,
+    has_steps: Option<bool>,
+) -> Result<Vec<Plan>> {
+    let objects =
+        plan_objects_for_environment(ctx, environment, statuses, descending, limit, has_steps)
+            .await?;
     let mut plans = Vec::with_capacity(objects.len());
     for object in objects {
         let plan = from_object(&object)?;
@@ -628,6 +692,20 @@ mod tests {
         mismatch.properties.insert("created_at".into(), "99".into());
         let error = from_object(&mismatch).unwrap_err().to_string();
         assert!(error.contains("does not match payload"), "{error}");
+
+        let peek_error = require_indexed_created_at_matches_payload(&mismatch)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            peek_error.contains("does not match payload"),
+            "{peek_error}"
+        );
+        assert_eq!(
+            require_indexed_created_at_matches_payload(&object)
+                .unwrap()
+                .created_at,
+            10
+        );
     }
 
     #[test]

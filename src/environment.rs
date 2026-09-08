@@ -1372,8 +1372,8 @@ async fn latest_plan_for_environment(
     ctx: &mut Ctx,
     env: &str,
 ) -> Result<Option<EnvironmentPlanSummary>> {
-    // Newest after decoding every plan for this environment so a depressed
-    // created_at index cannot hide the true newest behind LIMIT 1.
+    // Newest after checking every created_at index against its payload peek
+    // so a depressed index cannot hide the true newest behind LIMIT 1.
     Ok(crate::plan::latest_for_environment(ctx, env)
         .await?
         .map(environment_plan_summary))
