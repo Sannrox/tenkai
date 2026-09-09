@@ -779,6 +779,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn controller_reconcile_fails_closed_on_environment_index_retarget() {
+        let (database, mut ctx) = registered_ctx("reconcile-env-retarget", &["stage"]).await;
+        let work = test_plan("stage", 100, PlanState::Computed);
+        plan::store(&mut ctx, &work).await.unwrap();
+        let mut retargeted = ctx.get(&work.id).await.unwrap().unwrap();
+        retargeted
+            .properties
+            .insert("environment".into(), "other".into());
+        ctx.put(retargeted).await.unwrap();
+
+        let reconciler = Reconciler::new(ctx.clone(), config()).unwrap();
+        let report = reconciler.run_once().await.unwrap();
+        assert!(
+            matches!(
+                &report.environments[0].status,
+                EnvironmentStatus::Failed { error, .. }
+                    if error.contains("environment index other does not match payload stage")
+            ),
+            "{:?}",
+            report.environments[0].status
+        );
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
     async fn controller_reconcile_fails_closed_on_has_steps_index_poison() {
         let (database, mut ctx) = registered_ctx("reconcile-has-steps-poison", &["stage"]).await;
         let work = test_plan("stage", 100, PlanState::Computed);
