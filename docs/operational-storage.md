@@ -90,9 +90,11 @@ Computed plan indexed as terminal) fails closed on inspect-latest and
 before reconcile reports Current; it must not return a stale plan or skip
 work. Embedded hosts peek every stored plan payload environment to detect
 retarget off the requested index. Remote `FindByProperty` still cannot see
-rows whose environment index no longer matches
-([ADR 0025](decisions/0025-remote-plan-property-query-bounds.md)). Identity
-peeks compare `created_at`, `environment`, `status`, and present `has_steps`
+those retargeted rows
+([ADR 0025](decisions/0025-remote-plan-property-query-bounds.md));
+retarget detection uses kind-wide `ListObjects` instead so a payload that
+still names the queried environment cannot omit-succeed into Current.
+Identity peeks compare `created_at`, `environment`, `status`, and present `has_steps`
 without materializing step JSON trees. Reconcile runs that catalog-wide
 index check once per environment tick before empty-plan retirement, Running
 recovery, and admission; those follow-on loaders do not repeat it.

@@ -625,36 +625,44 @@ fn require_indexed_identity(object: &Object) -> Result<PlanPayloadPeek> {
 }
 
 async fn reject_environment_index_retarget(ctx: &mut Ctx, environment: &str) -> Result<()> {
-    let Some(store) = ctx.embedded_arc() else {
-        // Remote FindByProperty cannot see rows retargeted off this
-        // environment index (ADR 0025).
-        return Ok(());
-    };
-    let environment = environment.to_string();
-    crate::client::block_embedded(store, move |store| {
-        for object in store.list_kind(KIND_PLAN)? {
-            let peek = match peek_plan_environment(&object) {
-                Ok(peek) => peek,
-                Err(error) => match object.properties.get("environment") {
-                    Some(indexed) if indexed == &environment => return Err(error),
-                    _ => continue,
-                },
-            };
-            if peek.environment != environment {
-                continue;
-            }
-            match object.properties.get("environment") {
-                Some(indexed) if indexed == &environment => {}
-                Some(indexed) => bail!(
-                    "plan {} environment index {indexed} does not match payload {environment}",
-                    object.id
-                ),
-                None => bail!("plan object {} has no environment index", object.id),
-            }
+    // FindByProperty(environment=…) cannot see rows retargeted off this
+    // index (ADR 0025). Kind-wide list_kind / ListObjects can: peek payload
+    // environment, then fail closed when the index no longer matches.
+    if let Some(store) = ctx.embedded_arc() {
+        let environment = environment.to_string();
+        return crate::client::block_embedded(store, move |store| {
+            reject_retargeted_environment_index(store.list_kind(KIND_PLAN)?, &environment)
+        })
+        .await;
+    }
+    reject_retargeted_environment_index(ctx.list_kind(KIND_PLAN).await?, environment)
+}
+
+fn reject_retargeted_environment_index(
+    objects: impl IntoIterator<Item = Object>,
+    environment: &str,
+) -> Result<()> {
+    for object in objects {
+        let peek = match peek_plan_environment(&object) {
+            Ok(peek) => peek,
+            Err(error) => match object.properties.get("environment") {
+                Some(indexed) if indexed == environment => return Err(error),
+                _ => continue,
+            },
+        };
+        if peek.environment != environment {
+            continue;
         }
-        Ok(())
-    })
-    .await
+        match object.properties.get("environment") {
+            Some(indexed) if indexed == environment => {}
+            Some(indexed) => bail!(
+                "plan {} environment index {indexed} does not match payload {environment}",
+                object.id
+            ),
+            None => bail!("plan object {} has no environment index", object.id),
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -1147,6 +1155,52 @@ mod tests {
             identity_error.contains("does not match payload"),
             "{identity_error}"
         );
+    }
+
+    #[test]
+    fn retarget_scan_fails_closed_when_index_leaves_payload_environment() {
+        let mut retargeted = to_object(&plan(10)).unwrap();
+        retargeted
+            .properties
+            .insert("environment".into(), "other".into());
+        let error = reject_retargeted_environment_index(vec![retargeted], "lifecycle-test")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("environment index other does not match payload lifecycle-test"),
+            "{error}"
+        );
+
+        let mut missing = to_object(&plan(10)).unwrap();
+        missing.properties.remove("environment");
+        let missing_error = reject_retargeted_environment_index(vec![missing], "lifecycle-test")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            missing_error.contains("no environment index"),
+            "{missing_error}"
+        );
+    }
+
+    #[test]
+    fn retarget_scan_skips_unreadable_foreign_plans() {
+        let local = to_object(&plan(10)).unwrap();
+        let mut foreign = to_object(&plan(20)).unwrap();
+        foreign
+            .properties
+            .insert("environment".into(), "other".into());
+        foreign.properties.insert("plan".into(), "not-json".into());
+        reject_retargeted_environment_index(vec![local.clone(), foreign], "lifecycle-test")
+            .unwrap();
+
+        let mut indexed_here = local;
+        indexed_here
+            .properties
+            .insert("plan".into(), "not-json".into());
+        let error = reject_retargeted_environment_index(vec![indexed_here], "lifecycle-test")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("parsing stored plan environment"), "{error}");
     }
 
     #[test]

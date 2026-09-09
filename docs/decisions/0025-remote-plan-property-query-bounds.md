@@ -45,6 +45,9 @@ behavior.
 - Remote reconcile admission must not re-issue that transfer per
   `LIMIT`/`OFFSET` window. Fetch, filter, and sort once, then walk the
   transferred set in memory. SQL paging stays on the embedded host.
+- Environment-index retarget detection does not use `FindByProperty`.
+  Remote hosts kind-list plans with `ListObjects` and peek payload
+  `environment` so a retargeted index cannot omit-succeed into Current.
 - After decode, `created_at` index values must still match the plan payload
   ([#323](https://github.com/Sannrox/tenkai/issues/323)).
 - Operators of the embedded SQLite host keep the SQL-bounded path.
