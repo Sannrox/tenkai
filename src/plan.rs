@@ -304,7 +304,7 @@ pub(crate) async fn load_oldest_for_environment(
 /// Newest stored plan for `environment`, if any.
 ///
 /// Rejects catalog-wide environment-index retarget, then peeks every matching
-/// identity (`created_at`, environment, status, present `has_steps`) so a
+/// identity (`created_at`, environment, status, required `has_steps`) so a
 /// depressed newest index cannot hide behind `LIMIT 1`. Full Plan decode
 /// runs only for the newest validated row.
 pub async fn latest_for_environment(ctx: &mut Ctx, environment: &str) -> Result<Option<Plan>> {
@@ -721,6 +721,50 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(latest.id, newer.id);
+
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
+    async fn latest_and_oldest_fail_closed_on_missing_has_steps_for_stepped_plan() {
+        let database = std::env::temp_dir().join(format!(
+            "tenkai-plan-missing-has-steps-{}-{}.db",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let _ = std::fs::remove_file(&database);
+        let mut ctx = Ctx::embedded(&database).unwrap();
+
+        let work = plan_for("env_a", 100, PlanState::Computed);
+        store(&mut ctx, &work).await.unwrap();
+        let mut missing = ctx.get(&work.id).await.unwrap().unwrap();
+        missing.properties.remove("has_steps");
+        ctx.put(missing).await.unwrap();
+
+        let latest_error = latest_for_environment(&mut ctx, "env_a")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            latest_error.contains("no has_steps index"),
+            "{latest_error}"
+        );
+        let oldest_error = oldest_for_environment(&mut ctx, "env_a", &[PlanState::Computed])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            oldest_error.contains("no has_steps index"),
+            "{oldest_error}"
+        );
+        let listed_error = list_for_environment(&mut ctx, "env_a", None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            listed_error.contains("no has_steps index"),
+            "{listed_error}"
+        );
 
         let _ = std::fs::remove_file(&database);
     }
