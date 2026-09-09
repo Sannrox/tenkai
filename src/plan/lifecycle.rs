@@ -366,26 +366,13 @@ pub(super) async fn latest_for_environment(
 ) -> Result<Option<Plan>> {
     // Visit every environment plan's created_at index and payload peek so a
     // depressed newest index cannot hide behind LIMIT 1. Full Plan decode
-    // (steps, content digest) runs only for the newest validated row.
-    let objects = plan_objects_for_environment(ctx, environment, None, true, None, None).await?;
-    let mut newest: Option<(i64, Object)> = None;
-    for object in objects {
-        let peek = require_indexed_created_at_matches_payload(&object)?;
-        if peek.environment != environment {
-            bail!(
-                "plan {} property index returned environment {}, expected {environment}",
-                object.id,
-                peek.environment
-            );
-        }
-        if newest
-            .as_ref()
-            .is_none_or(|(best, _)| peek.created_at > *best)
-        {
-            newest = Some((peek.created_at, object));
-        }
-    }
-    newest.map(|(_, object)| from_object(&object)).transpose()
+    // (steps, content digest) runs only for the newest validated row, on the
+    // same blocking pool as the catalog query.
+    let owned_environment = environment.to_string();
+    map_environment_plan_objects(ctx, environment, None, true, None, None, move |objects| {
+        newest_plan_from_objects(objects, &owned_environment)
+    })
+    .await
 }
 
 /// Retire stored zero-step Computed/Running plans so they leave work selection.
@@ -455,58 +442,33 @@ fn require_indexed_created_at_matches_payload(object: &Object) -> Result<PlanPay
     Ok(peek)
 }
 
-async fn plan_objects_for_environment(
-    ctx: &mut Ctx,
-    environment: &str,
-    statuses: Option<&[PlanState]>,
-    descending: bool,
-    limit: Option<u32>,
-    has_steps: Option<bool>,
-) -> Result<Vec<Object>> {
-    anyhow::ensure!(
-        !environment.trim().is_empty(),
-        "environment is required for plan work selection"
-    );
-    let status_labels: Vec<String> = statuses
-        .unwrap_or(&[])
-        .iter()
-        .map(ToString::to_string)
-        .collect();
-    let status_refs: Vec<&str> = status_labels.iter().map(String::as_str).collect();
-    let (matching_key, matching_values) = if statuses.is_some() {
-        (Some("status"), status_refs.as_slice())
-    } else {
-        (None, &[][..])
-    };
-    let (equals_key, equals_value) = match has_steps {
-        Some(true) => (Some("has_steps"), Some("true")),
-        Some(false) => (Some("has_steps"), Some("false")),
-        None => (None, None),
-    };
-    ctx.find_by_property_matching(crate::embedded::PropertyIndexQuery {
-        matching_key,
-        matching_values,
-        equals_key,
-        equals_value,
-        order_key: Some("created_at"),
-        descending,
-        limit,
-        ..crate::embedded::PropertyIndexQuery::new(KIND_PLAN, "environment", environment)
-    })
-    .await
+fn newest_plan_from_objects(objects: Vec<Object>, environment: &str) -> Result<Option<Plan>> {
+    let mut newest: Option<(i64, Object)> = None;
+    for object in objects {
+        let peek = require_indexed_created_at_matches_payload(&object)?;
+        if peek.environment != environment {
+            bail!(
+                "plan {} property index returned environment {}, expected {environment}",
+                object.id,
+                peek.environment
+            );
+        }
+        if newest
+            .as_ref()
+            .is_none_or(|(best, _)| peek.created_at > *best)
+        {
+            newest = Some((peek.created_at, object));
+        }
+    }
+    newest.map(|(_, object)| from_object(&object)).transpose()
 }
 
-async fn load_for_environment(
-    ctx: &mut Ctx,
+fn plans_from_objects(
+    objects: Vec<Object>,
     environment: &str,
     statuses: Option<&[PlanState]>,
-    descending: bool,
-    limit: Option<u32>,
     has_steps: Option<bool>,
 ) -> Result<Vec<Plan>> {
-    let objects =
-        plan_objects_for_environment(ctx, environment, statuses, descending, limit, has_steps)
-            .await?;
     let mut plans = Vec::with_capacity(objects.len());
     for object in objects {
         let plan = from_object(&object)?;
@@ -534,6 +496,129 @@ async fn load_for_environment(
         plans.push(plan);
     }
     Ok(plans)
+}
+
+fn environment_plan_index_query<'a>(
+    environment: &'a str,
+    matching_key: Option<&'a str>,
+    matching_values: &'a [&'a str],
+    equals_key: Option<&'a str>,
+    equals_value: Option<&'a str>,
+    descending: bool,
+    limit: Option<u32>,
+) -> crate::embedded::PropertyIndexQuery<'a> {
+    crate::embedded::PropertyIndexQuery {
+        matching_key,
+        matching_values,
+        equals_key,
+        equals_value,
+        order_key: Some("created_at"),
+        descending,
+        limit,
+        ..crate::embedded::PropertyIndexQuery::new(KIND_PLAN, "environment", environment)
+    }
+}
+
+async fn map_environment_plan_objects<T, F>(
+    ctx: &mut Ctx,
+    environment: &str,
+    statuses: Option<&[PlanState]>,
+    descending: bool,
+    limit: Option<u32>,
+    has_steps: Option<bool>,
+    map: F,
+) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce(Vec<Object>) -> Result<T> + Send + 'static,
+{
+    anyhow::ensure!(
+        !environment.trim().is_empty(),
+        "environment is required for plan work selection"
+    );
+    let environment = environment.to_string();
+    let status_labels: Vec<String> = statuses
+        .unwrap_or(&[])
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let filter_statuses = statuses.is_some();
+    let equals_key = has_steps.map(|_| "has_steps");
+    let equals_value = match has_steps {
+        Some(true) => Some("true"),
+        Some(false) => Some("false"),
+        None => None,
+    };
+    if let Some(store) = ctx.embedded_arc() {
+        return crate::client::block_embedded(store, move |store| {
+            let status_refs: Vec<&str> = status_labels.iter().map(String::as_str).collect();
+            let (matching_key, matching_values) = if filter_statuses {
+                (Some("status"), status_refs.as_slice())
+            } else {
+                (None, &[][..])
+            };
+            let objects = store.find_by_property_matching(environment_plan_index_query(
+                &environment,
+                matching_key,
+                matching_values,
+                equals_key,
+                equals_value,
+                descending,
+                limit,
+            ))?;
+            map(objects)
+        })
+        .await;
+    }
+    let status_refs: Vec<&str> = status_labels.iter().map(String::as_str).collect();
+    let (matching_key, matching_values) = if filter_statuses {
+        (Some("status"), status_refs.as_slice())
+    } else {
+        (None, &[][..])
+    };
+    let objects = ctx
+        .find_by_property_matching(environment_plan_index_query(
+            &environment,
+            matching_key,
+            matching_values,
+            equals_key,
+            equals_value,
+            descending,
+            limit,
+        ))
+        .await?;
+    tokio::task::spawn_blocking(move || map(objects))
+        .await
+        .unwrap_or_else(|error| Err(anyhow::anyhow!("plan decode blocking task failed: {error}")))
+}
+
+async fn load_for_environment(
+    ctx: &mut Ctx,
+    environment: &str,
+    statuses: Option<&[PlanState]>,
+    descending: bool,
+    limit: Option<u32>,
+    has_steps: Option<bool>,
+) -> Result<Vec<Plan>> {
+    let owned_environment = environment.to_string();
+    let status_filter = statuses.map(<[PlanState]>::to_vec);
+    map_environment_plan_objects(
+        ctx,
+        environment,
+        statuses,
+        descending,
+        limit,
+        has_steps,
+        move |objects| {
+            plans_from_objects(
+                objects,
+                &owned_environment,
+                status_filter.as_deref(),
+                has_steps,
+            )
+        },
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -739,5 +824,41 @@ mod tests {
                 .to_string()
                 .contains("does not match payload steps")
         );
+    }
+
+    #[test]
+    fn newest_plan_from_objects_decodes_the_newest_validated_row() {
+        let older = to_object(&plan(10)).unwrap();
+        let newer = to_object(&plan(20)).unwrap();
+        let latest = newest_plan_from_objects(vec![older, newer], "lifecycle-test")
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.created_at, 20);
+        let error = newest_plan_from_objects(vec![to_object(&plan(10)).unwrap()], "other")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("expected other"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn environment_plan_decode_join_failure_is_explicit() {
+        let (mut ctx, database) = context("decode-join");
+        let error = map_environment_plan_objects(
+            &mut ctx,
+            "lifecycle-test",
+            None,
+            true,
+            None,
+            None,
+            |_| -> Result<Option<Plan>> { panic!("forced plan decode panic") },
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("embedded store blocking task failed"),
+            "{error}"
+        );
+        let _ = std::fs::remove_file(database);
     }
 }

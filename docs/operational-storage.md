@@ -50,11 +50,15 @@ open a database whose schema is newer than the binary supports. Use
 database and its WAL files sequentially. Stop every writer before
 `tenkaictl restore <source>`. Restore and integrity checks require no provider.
 
-Async embedded catalog and plan-decode work runs on Tokio's blocking pool
-(`spawn_blocking`), matching server `/readyz` store health checks. A join
-failure is an explicit store or reconcile error; it does not skip persistence
-or report Current. `/readyz` itself remains a bounded health read and does
-not scan plan history.
+Async embedded catalog queries and environment plan decode share Tokio's
+blocking pool (`spawn_blocking`), matching server `/readyz` store health
+checks. Embedded hosts run the property-index query and `from_object` in the
+same blocking section so large plan JSON does not pin a Tokio worker after
+SQLite returns. Remote hosts still transfer `FindByProperty` results
+asynchronously, then decode on the blocking pool. A join failure is an
+explicit store or reconcile error; it does not skip persistence or report
+Current. `/readyz` itself remains a bounded health read and does not scan
+plan history. Single-id `load` still decodes after `get` returns.
 
 ### Embedded object property index
 
@@ -83,8 +87,9 @@ index. Inspect-latest (`latest_for_environment`) does not apply `LIMIT` on
 the unvalidated `created_at` index: it peeks each matching payload's
 `created_at` (and environment) and fail-closes on missing, non-integer, or
 mismatched index values, then fully decodes only the newest validated row.
-That keeps a depressed newest index from hiding behind a consistent older
-`LIMIT 1` winner without reconstructing every historical Plan. Oldest
+That peek and newest `from_object` run on the blocking pool with the catalog
+query. That keeps a depressed newest index from hiding behind a consistent
+older `LIMIT 1` winner without reconstructing every historical Plan. Oldest
 executable selection still uses `LIMIT 1`. Remote inspect-latest still
 transfers every environment-matching object before that peek
 ([ADR 0025](decisions/0025-remote-plan-property-query-bounds.md)). A no-op reconcile does not persist a zero-step
