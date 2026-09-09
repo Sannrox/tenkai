@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 
 use crate::apply;
 use crate::client::Ctx;
@@ -73,38 +73,62 @@ async fn select_plan(ctx: &mut Ctx, environment: &str, approval_required: bool) 
     if !approval_required {
         return plan::create_for_reconcile(ctx, environment).await;
     }
-    for candidate in
-        plan::executable_for_environment(ctx, environment, &[PlanState::Computed]).await?
+    if let Some(plan) =
+        first_admissible_executable(ctx, environment, &[PlanState::Computed], false).await?
     {
-        if candidate.steps.is_empty() {
-            bail!(
-                "plan {} has_steps index selected an executable plan without steps",
-                candidate.id
-            );
-        }
-        if apply::classify_candidate(ctx, &candidate).await?
-            == apply::CandidateAdmission::Admissible
-        {
-            return Ok(candidate);
-        }
+        return Ok(plan);
     }
-    for candidate in
-        plan::executable_for_environment(ctx, environment, &[PlanState::Blocked]).await?
+    if let Some(plan) =
+        first_admissible_executable(ctx, environment, &[PlanState::Blocked], true).await?
     {
-        if candidate.steps.is_empty() {
-            bail!(
-                "plan {} has_steps index selected an executable plan without steps",
-                candidate.id
-            );
-        }
-        if candidate.maintenance_blocked
-            && apply::classify_candidate(ctx, &candidate).await?
-                == apply::CandidateAdmission::Admissible
-        {
-            return Ok(candidate);
-        }
+        return Ok(plan);
     }
     plan::create_for_reconcile(ctx, environment).await
+}
+
+async fn first_admissible_executable(
+    ctx: &mut Ctx,
+    environment: &str,
+    statuses: &[PlanState],
+    maintenance_blocked_only: bool,
+) -> Result<Option<Plan>> {
+    let mut offset = 0_u32;
+    loop {
+        let batch = plan::executable_batch_for_environment(
+            ctx,
+            environment,
+            statuses,
+            plan::EXECUTABLE_ADMISSION_BATCH,
+            offset,
+        )
+        .await?;
+        let batch_len = batch.len();
+        if batch_len == 0 {
+            return Ok(None);
+        }
+        for candidate in batch {
+            if candidate.steps.is_empty() {
+                bail!(
+                    "plan {} has_steps index selected an executable plan without steps",
+                    candidate.id
+                );
+            }
+            if maintenance_blocked_only && !candidate.maintenance_blocked {
+                continue;
+            }
+            if apply::classify_candidate(ctx, &candidate).await?
+                == apply::CandidateAdmission::Admissible
+            {
+                return Ok(Some(candidate));
+            }
+        }
+        if batch_len < plan::EXECUTABLE_ADMISSION_BATCH as usize {
+            return Ok(None);
+        }
+        offset = offset
+            .checked_add(plan::EXECUTABLE_ADMISSION_BATCH)
+            .context("executable admission offset overflowed")?;
+    }
 }
 
 async fn execute(
