@@ -83,7 +83,15 @@ accepted residual ([ADR 0025](decisions/0025-remote-plan-property-query-bounds.m
 it is not silent SQL parity. After decode, the `created_at` index value must
 match `Plan.created_at` as an integer; missing, non-integer, or mismatched
 index values fail closed rather than returning a row chosen only by the
-index. Inspect-latest (`latest_for_environment`) does not apply `LIMIT` on
+index. The `environment` index must match `Plan.environment`, and the
+`status` index must match `Plan.state`. Equality-filter poison that would
+omit a payload-matching plan (environment index retarget, or a live
+Computed plan indexed as terminal) fails closed on inspect-latest and
+before reconcile reports Current; it must not return a stale plan or skip
+work. Embedded hosts peek every stored plan payload environment to detect
+retarget off the requested index. Remote `FindByProperty` still cannot see
+rows whose environment index no longer matches
+([ADR 0025](decisions/0025-remote-plan-property-query-bounds.md)). Inspect-latest (`latest_for_environment`) does not apply `LIMIT` on
 the unvalidated `created_at` index: it peeks each matching payload's
 `created_at` (and environment) and fail-closes on missing, non-integer, or
 mismatched index values, then fully decodes only the newest validated row.
