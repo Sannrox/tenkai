@@ -110,7 +110,12 @@ that no-op detail for zero-step Succeeded plans and keeps Succeeded-with-steps
 as applied delivery (empty inspect detail). Oldest
 executable selection, empty-plan retirement, and controller `select_plan`
 admission filter `has_steps` in the property index so those paths do not
-decode every status-matching payload.
+decode every status-matching payload. Controller admission then walks
+executable Computed (then maintenance-blocked Blocked) plans oldest-first
+in bounded batches instead of decoding the full `has_steps=true` set on
+every tick. A short batch proves the index is exhausted; superseded
+candidates do not stop the walk, and a truncated window never reports
+Current without that proof.
 
 ## Tenant isolation adapter
 

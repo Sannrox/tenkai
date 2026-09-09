@@ -350,7 +350,8 @@ pub(super) async fn list_for_environment(
     environment: &str,
     statuses: Option<&[PlanState]>,
 ) -> Result<Vec<Plan>> {
-    load_for_environment(ctx, environment, statuses, false, None, None).await
+    require_environment_indexes_match_payloads(ctx, environment).await?;
+    load_for_environment(ctx, environment, statuses, false, None, None, None).await
 }
 
 pub(super) async fn oldest_for_environment(
@@ -358,17 +359,56 @@ pub(super) async fn oldest_for_environment(
     environment: &str,
     statuses: &[PlanState],
 ) -> Result<Option<Plan>> {
-    let mut plans =
-        load_for_environment(ctx, environment, Some(statuses), false, Some(1), Some(true)).await?;
+    require_environment_indexes_match_payloads(ctx, environment).await?;
+    let mut plans = load_for_environment(
+        ctx,
+        environment,
+        Some(statuses),
+        false,
+        Some(1),
+        None,
+        Some(true),
+    )
+    .await?;
     Ok(plans.pop())
 }
 
+#[cfg(test)]
 pub(super) async fn executable_for_environment(
     ctx: &mut Ctx,
     environment: &str,
     statuses: &[PlanState],
 ) -> Result<Vec<Plan>> {
-    load_for_environment(ctx, environment, Some(statuses), false, None, Some(true)).await
+    require_environment_indexes_match_payloads(ctx, environment).await?;
+    load_for_environment(
+        ctx,
+        environment,
+        Some(statuses),
+        false,
+        None,
+        None,
+        Some(true),
+    )
+    .await
+}
+
+pub(super) async fn executable_batch_for_environment(
+    ctx: &mut Ctx,
+    environment: &str,
+    statuses: &[PlanState],
+    limit: u32,
+    offset: u32,
+) -> Result<Vec<Plan>> {
+    load_for_environment(
+        ctx,
+        environment,
+        Some(statuses),
+        false,
+        Some(limit),
+        Some(offset),
+        Some(true),
+    )
+    .await
 }
 
 pub(super) async fn latest_for_environment(
@@ -381,9 +421,16 @@ pub(super) async fn latest_for_environment(
     // same blocking pool as the catalog query.
     require_environment_indexes_match_payloads(ctx, environment).await?;
     let owned_environment = environment.to_string();
-    map_environment_plan_objects(ctx, environment, None, true, None, None, move |objects| {
-        newest_plan_from_objects(objects, &owned_environment)
-    })
+    map_environment_plan_objects(
+        ctx,
+        environment,
+        None,
+        true,
+        None,
+        None,
+        None,
+        move |objects| newest_plan_from_objects(objects, &owned_environment),
+    )
     .await
 }
 
@@ -395,7 +442,7 @@ pub(super) async fn require_environment_indexes_match_payloads(
 ) -> Result<()> {
     reject_environment_index_retarget(ctx, environment).await?;
     let owned_environment = environment.to_string();
-    map_environment_plan_objects(ctx, environment, None, true, None, None, move |objects| {
+    map_environment_plan_objects(ctx, environment, None, true, None, None, None, move |objects| {
         for object in &objects {
             let peek = require_indexed_identity(object)?;
             if peek.environment != owned_environment {
@@ -416,12 +463,14 @@ pub(crate) async fn retire_empty_executable_plans(
     ctx: &mut Ctx,
     environment: &str,
 ) -> Result<usize> {
+    require_environment_indexes_match_payloads(ctx, environment).await?;
     let mut retired = 0;
     for mut plan in load_for_environment(
         ctx,
         environment,
         Some(&[PlanState::Computed, PlanState::Running]),
         false,
+        None,
         None,
         Some(false),
     )
@@ -624,6 +673,7 @@ fn plans_from_objects(
     Ok(plans)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn environment_plan_index_query<'a>(
     environment: &'a str,
     matching_key: Option<&'a str>,
@@ -632,6 +682,7 @@ fn environment_plan_index_query<'a>(
     equals_value: Option<&'a str>,
     descending: bool,
     limit: Option<u32>,
+    offset: Option<u32>,
 ) -> crate::embedded::PropertyIndexQuery<'a> {
     crate::embedded::PropertyIndexQuery {
         matching_key,
@@ -641,16 +692,19 @@ fn environment_plan_index_query<'a>(
         order_key: Some("created_at"),
         descending,
         limit,
+        offset,
         ..crate::embedded::PropertyIndexQuery::new(KIND_PLAN, "environment", environment)
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn map_environment_plan_objects<T, F>(
     ctx: &mut Ctx,
     environment: &str,
     statuses: Option<&[PlanState]>,
     descending: bool,
     limit: Option<u32>,
+    offset: Option<u32>,
     has_steps: Option<bool>,
     map: F,
 ) -> Result<T>
@@ -691,6 +745,7 @@ where
                 equals_value,
                 descending,
                 limit,
+                offset,
             ))?;
             map(objects)
         })
@@ -711,6 +766,7 @@ where
             equals_value,
             descending,
             limit,
+            offset,
         ))
         .await?;
     tokio::task::spawn_blocking(move || map(objects))
@@ -724,9 +780,9 @@ async fn load_for_environment(
     statuses: Option<&[PlanState]>,
     descending: bool,
     limit: Option<u32>,
+    offset: Option<u32>,
     has_steps: Option<bool>,
 ) -> Result<Vec<Plan>> {
-    require_environment_indexes_match_payloads(ctx, environment).await?;
     let owned_environment = environment.to_string();
     let status_filter = statuses.map(<[PlanState]>::to_vec);
     map_environment_plan_objects(
@@ -735,6 +791,7 @@ async fn load_for_environment(
         statuses,
         descending,
         limit,
+        offset,
         has_steps,
         move |objects| {
             plans_from_objects(
@@ -1003,6 +1060,7 @@ mod tests {
             "lifecycle-test",
             None,
             true,
+            None,
             None,
             None,
             |_| -> Result<Option<Plan>> { panic!("forced plan decode panic") },

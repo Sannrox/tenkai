@@ -778,6 +778,7 @@ impl Ctx {
             let order_key = query.order_key.map(str::to_string);
             let descending = query.descending;
             let limit = query.limit;
+            let offset = query.offset;
             return block_embedded(store, move |store| {
                 let matching_refs = matching_values
                     .iter()
@@ -791,6 +792,7 @@ impl Ctx {
                     order_key: order_key.as_deref(),
                     descending,
                     limit,
+                    offset,
                     ..crate::embedded::PropertyIndexQuery::new(&kind, &key, &value)
                 })
             })
@@ -838,6 +840,18 @@ impl Ctx {
                     order
                 }
             });
+        }
+        if let Some(offset) = query.offset {
+            anyhow::ensure!(
+                query.limit.is_some(),
+                "find_by_property offset requires a limit"
+            );
+            let offset = offset as usize;
+            if offset >= objects.len() {
+                objects.clear();
+            } else {
+                objects.drain(..offset);
+            }
         }
         if let Some(limit) = query.limit {
             objects.truncate(limit as usize);

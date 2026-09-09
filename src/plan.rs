@@ -248,12 +248,25 @@ pub async fn oldest_for_environment(
 ///
 /// Zero-step plans are excluded by the `has_steps` index, not by decoding
 /// every matching payload. Ordered oldest `created_at` first.
+#[cfg(test)]
 pub(crate) async fn executable_for_environment(
     ctx: &mut Ctx,
     environment: &str,
     statuses: &[PlanState],
 ) -> Result<Vec<Plan>> {
     lifecycle::executable_for_environment(ctx, environment, statuses).await
+}
+
+pub(crate) const EXECUTABLE_ADMISSION_BATCH: u32 = 8;
+
+pub(crate) async fn executable_batch_for_environment(
+    ctx: &mut Ctx,
+    environment: &str,
+    statuses: &[PlanState],
+    limit: u32,
+    offset: u32,
+) -> Result<Vec<Plan>> {
+    lifecycle::executable_batch_for_environment(ctx, environment, statuses, limit, offset).await
 }
 
 /// Newest stored plan for `environment`, if any.

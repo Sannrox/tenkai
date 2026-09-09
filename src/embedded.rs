@@ -28,6 +28,7 @@ pub struct PropertyIndexQuery<'a> {
     pub order_key: Option<&'a str>,
     pub descending: bool,
     pub limit: Option<u32>,
+    pub offset: Option<u32>,
 }
 
 impl<'a> PropertyIndexQuery<'a> {
@@ -43,6 +44,7 @@ impl<'a> PropertyIndexQuery<'a> {
             order_key: None,
             descending: false,
             limit: None,
+            offset: None,
         }
     }
 }
@@ -579,6 +581,14 @@ impl EmbeddedStore {
         if let Some(limit) = query.limit {
             sql.push_str(" LIMIT ?");
             bind.push(Value::Integer(i64::from(limit)));
+        }
+        if let Some(offset) = query.offset {
+            anyhow::ensure!(
+                query.limit.is_some(),
+                "find_by_property offset requires a limit"
+            );
+            sql.push_str(" OFFSET ?");
+            bind.push(Value::Integer(i64::from(offset)));
         }
 
         let connection = self.connection()?;
@@ -1655,6 +1665,18 @@ mod tests {
             .unwrap();
         assert_eq!(with_steps.len(), 1);
         assert_eq!(with_steps[0].id, "plan-a1");
+        let second_page = store
+            .find_by_property_matching(PropertyIndexQuery {
+                matching_key: Some("status"),
+                matching_values: &["computed", "running"],
+                order_key: Some("created_at"),
+                limit: Some(1),
+                offset: Some(1),
+                ..PropertyIndexQuery::new("tenkai.plan", "environment", "env_a")
+            })
+            .unwrap();
+        assert_eq!(second_page.len(), 1);
+        assert_eq!(second_page[0].id, "plan-a2");
         assert!(
             store
                 .find_by_property_matching(PropertyIndexQuery {

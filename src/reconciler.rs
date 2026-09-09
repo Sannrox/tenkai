@@ -401,6 +401,16 @@ mod tests {
     }
 
     fn test_plan(env: &str, created_at: i64, state: PlanState) -> Plan {
+        test_upgrade_plan(env, created_at, state, "1.0.0", "2.0.0")
+    }
+
+    fn test_upgrade_plan(
+        env: &str,
+        created_at: i64,
+        state: PlanState,
+        from: &str,
+        to: &str,
+    ) -> Plan {
         use crate::ontology::plan_id;
         use crate::plan::{Action, DesiredStateInput, PLAN_FORMAT_VERSION, ReleasePin, Step};
         use sha2::{Digest as _, Sha256};
@@ -409,25 +419,25 @@ mod tests {
             product: "api".into(),
             channel: "stable".into(),
             channel_id: "tenkai:channel:api/stable".into(),
-            desired_version: "2.0.0".into(),
-            release_id: "tenkai:release:api@2.0.0".into(),
+            desired_version: to.into(),
+            release_id: format!("tenkai:release:api@{to}"),
             release_digest: "target-digest".into(),
             artifact_digest: "target-artifact-digest".into(),
-            deployed_version: Some("1.0.0".into()),
+            deployed_version: Some(from.into()),
         }];
         let mut steps = vec![Step {
             id: String::new(),
             order: 0,
             product: "api".into(),
             action: Action::Upgrade,
-            from: Some("1.0.0".into()),
-            to: "2.0.0".into(),
-            release_id: "tenkai:release:api@2.0.0".into(),
+            from: Some(from.into()),
+            to: to.into(),
+            release_id: format!("tenkai:release:api@{to}"),
             release_digest: "target-digest".into(),
             artifact_digest: "target-artifact-digest".into(),
             workdir: "/srv/api".into(),
             restore: Some(ReleasePin {
-                release_id: "tenkai:release:api@1.0.0".into(),
+                release_id: format!("tenkai:release:api@{from}"),
                 digest: "restore-digest".into(),
                 artifact_digest: "restore-artifact-digest".into(),
                 workdir: "/srv/api".into(),
@@ -618,6 +628,58 @@ mod tests {
         for created_at in 1..=12 {
             let empty = test_empty_plan("stage", created_at, PlanState::Computed);
             plan::store(&mut ctx, &empty).await.unwrap();
+        }
+        let work = test_plan("stage", 100, PlanState::Computed);
+        plan::store(&mut ctx, &work).await.unwrap();
+
+        let mut environment = ctx
+            .get(&crate::ontology::env_id("stage"))
+            .await
+            .unwrap()
+            .unwrap();
+        environment
+            .properties
+            .insert("deployed.api".into(), "1.0.0".into());
+        ctx.put(environment).await.unwrap();
+        ctx.put(crate::pb::sekai::Object {
+            id: "tenkai:channel:api/stable".into(),
+            kind: crate::ontology::KIND_CHANNEL.into(),
+            name: "api/stable".into(),
+            namespace: crate::ontology::NS.into(),
+            external_id: String::new(),
+            properties: std::collections::HashMap::from([
+                ("product".into(), "api".into()),
+                ("channel".into(), "stable".into()),
+                ("current_version".into(), "2.0.0".into()),
+                ("current_release".into(), "tenkai:release:api@2.0.0".into()),
+            ]),
+            created: crate::now_millis(),
+            updated: crate::now_millis(),
+        })
+        .await
+        .unwrap();
+
+        let reconciler = Reconciler::new(ctx.clone(), config()).unwrap();
+        let report = reconciler.run_once().await.unwrap();
+        assert!(
+            matches!(
+                &report.environments[0].status,
+                EnvironmentStatus::AwaitingApproval { plan_id, steps }
+                    if plan_id == &work.id && *steps == 1
+            ),
+            "{:?}",
+            report.environments[0].status
+        );
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
+    async fn controller_select_plan_skips_superseded_batches() {
+        let (database, mut ctx) = registered_ctx("select-plan-batches", &["stage"]).await;
+        for created_at in 1..=12 {
+            let stale =
+                test_upgrade_plan("stage", created_at, PlanState::Computed, "0.9.0", "1.0.0");
+            plan::store(&mut ctx, &stale).await.unwrap();
         }
         let work = test_plan("stage", 100, PlanState::Computed);
         plan::store(&mut ctx, &work).await.unwrap();
