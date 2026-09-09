@@ -142,7 +142,10 @@ impl Backend {
     }
 }
 
-async fn block_embedded<T, F>(store: Arc<crate::embedded::EmbeddedStore>, operation: F) -> Result<T>
+pub(crate) async fn block_embedded<T, F>(
+    store: Arc<crate::embedded::EmbeddedStore>,
+    operation: F,
+) -> Result<T>
 where
     T: Send + 'static,
     F: FnOnce(&crate::embedded::EmbeddedStore) -> Result<T> + Send + 'static,
@@ -367,7 +370,7 @@ impl Ctx {
         response.is_ok_and(|response| response.types.iter().any(|schema| schema.kind == kind))
     }
 
-    fn embedded_arc(&self) -> Option<Arc<crate::embedded::EmbeddedStore>> {
+    pub(crate) fn embedded_arc(&self) -> Option<Arc<crate::embedded::EmbeddedStore>> {
         match &self.backend {
             Backend::Embedded(store) => Some(Arc::clone(store)),
             Backend::Remote { .. } => None,
