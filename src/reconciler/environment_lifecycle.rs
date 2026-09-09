@@ -95,6 +95,22 @@ async fn first_admissible_executable(
     statuses: &[PlanState],
     maintenance_blocked_only: bool,
 ) -> Result<Option<Plan>> {
+    if !ctx.is_embedded() {
+        // Remote FindByProperty transfers every environment-matching object
+        // (ADR 0025). Fetch/filter/sort once, then walk in memory so OFFSET
+        // windows do not re-issue the RPC. SQL LIMIT/OFFSET stays embedded-only.
+        let candidates = plan::load_for_environment(
+            ctx,
+            environment,
+            Some(statuses),
+            false,
+            None,
+            None,
+            Some(true),
+        )
+        .await?;
+        return first_admissible_in(ctx, candidates, maintenance_blocked_only).await;
+    }
     let mut offset = 0_u32;
     loop {
         let batch = plan::executable_batch_for_environment(
@@ -109,21 +125,8 @@ async fn first_admissible_executable(
         if batch_len == 0 {
             return Ok(None);
         }
-        for candidate in batch {
-            if candidate.steps.is_empty() {
-                bail!(
-                    "plan {} has_steps index selected an executable plan without steps",
-                    candidate.id
-                );
-            }
-            if maintenance_blocked_only && !candidate.maintenance_blocked {
-                continue;
-            }
-            if apply::classify_candidate(ctx, &candidate).await?
-                == apply::CandidateAdmission::Admissible
-            {
-                return Ok(Some(candidate));
-            }
+        if let Some(plan) = first_admissible_in(ctx, batch, maintenance_blocked_only).await? {
+            return Ok(Some(plan));
         }
         if batch_len < plan::EXECUTABLE_ADMISSION_BATCH as usize {
             return Ok(None);
@@ -132,6 +135,30 @@ async fn first_admissible_executable(
             .checked_add(plan::EXECUTABLE_ADMISSION_BATCH)
             .context("executable admission offset overflowed")?;
     }
+}
+
+async fn first_admissible_in(
+    ctx: &mut Ctx,
+    candidates: Vec<Plan>,
+    maintenance_blocked_only: bool,
+) -> Result<Option<Plan>> {
+    for candidate in candidates {
+        if candidate.steps.is_empty() {
+            bail!(
+                "plan {} has_steps index selected an executable plan without steps",
+                candidate.id
+            );
+        }
+        if maintenance_blocked_only && !candidate.maintenance_blocked {
+            continue;
+        }
+        if apply::classify_candidate(ctx, &candidate).await?
+            == apply::CandidateAdmission::Admissible
+        {
+            return Ok(Some(candidate));
+        }
+    }
+    Ok(None)
 }
 
 async fn execute(
