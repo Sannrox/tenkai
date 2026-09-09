@@ -91,10 +91,16 @@ before reconcile reports Current; it must not return a stale plan or skip
 work. Embedded hosts peek every stored plan payload environment to detect
 retarget off the requested index. Remote `FindByProperty` still cannot see
 rows whose environment index no longer matches
-([ADR 0025](decisions/0025-remote-plan-property-query-bounds.md)). Inspect-latest (`latest_for_environment`) does not apply `LIMIT` on
+([ADR 0025](decisions/0025-remote-plan-property-query-bounds.md)). Identity
+peeks compare `created_at`, `environment`, `status`, and present `has_steps`
+without materializing step JSON trees. Reconcile runs that catalog-wide
+index check once per environment tick before empty-plan retirement, Running
+recovery, and admission; those follow-on loaders do not repeat it.
+Inspect-latest (`latest_for_environment`) does not apply `LIMIT` on
 the unvalidated `created_at` index: it peeks each matching payload's
-`created_at` (and environment) and fail-closes on missing, non-integer, or
-mismatched index values, then fully decodes only the newest validated row.
+identity and fail-closes on missing, non-integer, or mismatched index
+values, folding that walk into newest-row selection instead of scanning the
+environment twice, then fully decodes only the newest validated row.
 That peek and newest `from_object` run on the blocking pool with the catalog
 query. That keeps a depressed newest index from hiding behind a consistent
 older `LIMIT 1` winner without reconstructing every historical Plan. Oldest

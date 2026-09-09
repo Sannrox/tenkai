@@ -29,6 +29,7 @@ pub(super) async fn reconcile(ctx: &mut Ctx, request: Request<'_>) -> Result<Env
     if request.runtime_managed {
         return reconcile_runtime_managed(ctx, request.environment).await;
     }
+    plan::require_environment_indexes_match_payloads(ctx, request.environment).await?;
     plan::retire_empty_executable_plans(ctx, request.environment).await?;
     if recover_or_detect_active_plan(ctx, request.environment).await? {
         return Ok(EnvironmentStatus::Busy);
@@ -45,11 +46,14 @@ pub(super) async fn reconcile(ctx: &mut Ctx, request: Request<'_>) -> Result<Env
 }
 
 async fn reconcile_runtime_managed(ctx: &mut Ctx, environment: &str) -> Result<EnvironmentStatus> {
-    plan::retire_empty_executable_plans(ctx, environment).await?;
     plan::require_environment_indexes_match_payloads(ctx, environment).await?;
-    if let Some(plan) =
-        plan::oldest_for_environment(ctx, environment, &[PlanState::Computed, PlanState::Running])
-            .await?
+    plan::retire_empty_executable_plans(ctx, environment).await?;
+    if let Some(plan) = plan::load_oldest_for_environment(
+        ctx,
+        environment,
+        &[PlanState::Computed, PlanState::Running],
+    )
+    .await?
     {
         return Ok(awaiting_runtime(plan));
     }
@@ -69,7 +73,6 @@ fn awaiting_runtime(plan: Plan) -> EnvironmentStatus {
 }
 
 async fn select_plan(ctx: &mut Ctx, environment: &str, approval_required: bool) -> Result<Plan> {
-    plan::require_environment_indexes_match_payloads(ctx, environment).await?;
     if !approval_required {
         return plan::create_for_reconcile(ctx, environment).await;
     }
@@ -224,7 +227,16 @@ async fn execute_authorized(
 /// Deterministically terminate Plans orphaned by a stopped controller. An
 /// active generation-fenced lease proves another process still owns the Environment.
 async fn recover_or_detect_active_plan(ctx: &mut Ctx, environment: &str) -> Result<bool> {
-    let running = plan::list_for_environment(ctx, environment, Some(&[PlanState::Running])).await?;
+    let running = plan::load_for_environment(
+        ctx,
+        environment,
+        Some(&[PlanState::Running]),
+        false,
+        None,
+        None,
+        None,
+    )
+    .await?;
     if running.is_empty() {
         return Ok(false);
     }

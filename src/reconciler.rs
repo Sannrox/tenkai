@@ -779,6 +779,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn controller_reconcile_fails_closed_on_has_steps_index_poison() {
+        let (database, mut ctx) = registered_ctx("reconcile-has-steps-poison", &["stage"]).await;
+        let work = test_plan("stage", 100, PlanState::Computed);
+        plan::store(&mut ctx, &work).await.unwrap();
+
+        let mut poisoned = ctx.get(&work.id).await.unwrap().unwrap();
+        poisoned
+            .properties
+            .insert("has_steps".into(), "false".into());
+        ctx.put(poisoned).await.unwrap();
+
+        let reconciler = Reconciler::new(ctx.clone(), config()).unwrap();
+        let report = reconciler.run_once().await.unwrap();
+        assert!(
+            matches!(
+                &report.environments[0].status,
+                EnvironmentStatus::Failed { error, .. }
+                    if error.contains("has_steps index false does not match payload steps")
+            ),
+            "{:?}",
+            report.environments[0].status
+        );
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
+    async fn runtime_reconcile_fails_closed_on_status_index_poison() {
+        let (database, mut ctx) = registered_ctx("runtime-status-poison", &["stage"]).await;
+        let work = test_plan("stage", 100, PlanState::Computed);
+        plan::store(&mut ctx, &work).await.unwrap();
+        let mut poisoned = ctx.get(&work.id).await.unwrap().unwrap();
+        poisoned
+            .properties
+            .insert("status".into(), "succeeded".into());
+        ctx.put(poisoned).await.unwrap();
+
+        let reconciler = Reconciler::new(ctx.clone(), config())
+            .unwrap()
+            .with_runtime_environments(["stage".into()].into());
+        let report = reconciler.run_once().await.unwrap();
+        assert!(
+            matches!(
+                &report.environments[0].status,
+                EnvironmentStatus::Failed { error, .. }
+                    if error.contains("status index succeeded does not match payload computed")
+            ),
+            "{:?}",
+            report.environments[0].status
+        );
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
     async fn bounded_tick_excludes_foreign_work_before_reconcile() {
         let (database, ctx) = registered_ctx("bounded-reconcile", &["env-a", "env-b"]).await;
 
