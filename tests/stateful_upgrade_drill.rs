@@ -331,14 +331,50 @@ fn wait_for(timeout: Duration, mut probe: impl FnMut() -> bool) -> bool {
     probe()
 }
 
+fn process_group_id(pid: u32) -> Option<u32> {
+    let output = Command::new("ps")
+        .args(["-o", "pgid=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .next()
+        .and_then(|value| value.parse().ok())
+}
+
 fn kill_group(child: &std::process::Child) {
     let pid = child.id();
+    if pid <= 1 {
+        return;
+    }
+    // Only signal a process group when this child is its leader. `kill -- -pid`
+    // otherwise targets an unrelated group and can SIGKILL the CI runner.
+    if process_group_id(pid) == Some(pid) {
+        let _ = Command::new("kill")
+            .args(["-s", "KILL", "--", &format!("-{pid}")])
+            .status();
+    }
     let _ = Command::new("kill")
-        .args(["-KILL", &format!("-{pid}")])
+        .args(["-s", "KILL", "--", &pid.to_string()])
         .status();
-    let _ = Command::new("kill")
-        .args(["-KILL", &pid.to_string()])
-        .status();
+}
+
+fn wait_exited(child: &mut std::process::Child, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return;
+            }
+            Err(_) => return,
+        }
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -554,7 +590,7 @@ fn signed_stateful_upgrade_survives_executor_loss() {
     assert!(accepted, "fixture did not accept B before crash");
     let mutations_after_accept = drill.mutation_count();
     kill_group(&child);
-    let _ = child.wait();
+    wait_exited(&mut child, Duration::from_secs(5));
     std::thread::sleep(Duration::from_millis(200));
     drill.clear_control("crash-after-accept");
 
