@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use serde::Deserialize;
+use serde_json::value::RawValue;
 
 use super::*;
 
@@ -360,6 +361,17 @@ pub(super) async fn oldest_for_environment(
     statuses: &[PlanState],
 ) -> Result<Option<Plan>> {
     require_environment_indexes_match_payloads(ctx, environment).await?;
+    load_oldest_for_environment(ctx, environment, statuses).await
+}
+
+/// Oldest stepped plan for `environment` in `statuses` without repeating the
+/// catalog-wide index check. Callers that already ran
+/// `require_environment_indexes_match_payloads` for this tick use this.
+pub(crate) async fn load_oldest_for_environment(
+    ctx: &mut Ctx,
+    environment: &str,
+    statuses: &[PlanState],
+) -> Result<Option<Plan>> {
     let mut plans = load_for_environment(
         ctx,
         environment,
@@ -415,11 +427,12 @@ pub(super) async fn latest_for_environment(
     ctx: &mut Ctx,
     environment: &str,
 ) -> Result<Option<Plan>> {
-    // Visit every environment plan's created_at index and payload peek so a
-    // depressed newest index cannot hide behind LIMIT 1. Full Plan decode
-    // (steps, content digest) runs only for the newest validated row, on the
-    // same blocking pool as the catalog query.
-    require_environment_indexes_match_payloads(ctx, environment).await?;
+    // Catalog-wide retarget detection, then one environment walk: identity
+    // peeks (created_at/environment/status/has_steps) pick the newest
+    // validated row so a depressed newest index cannot hide behind LIMIT 1.
+    // Full Plan decode runs only for that row, on the same blocking pool as
+    // the catalog query.
+    reject_environment_index_retarget(ctx, environment).await?;
     let owned_environment = environment.to_string();
     map_environment_plan_objects(
         ctx,
@@ -459,11 +472,13 @@ pub(super) async fn require_environment_indexes_match_payloads(
 }
 
 /// Retire stored zero-step Computed/Running plans so they leave work selection.
+///
+/// Does not repeat the catalog-wide index check. Reconcile ticks call
+/// `require_environment_indexes_match_payloads` once before retirement.
 pub(crate) async fn retire_empty_executable_plans(
     ctx: &mut Ctx,
     environment: &str,
 ) -> Result<usize> {
-    require_environment_indexes_match_payloads(ctx, environment).await?;
     let mut retired = 0;
     for mut plan in load_for_environment(
         ctx,
@@ -500,7 +515,46 @@ struct PlanPayloadPeek {
     environment: String,
     state: PlanState,
     #[serde(default)]
-    steps: Vec<serde_json::Value>,
+    steps: PeekedSteps,
+}
+
+/// Identity-only step presence: capture raw JSON and test array emptiness
+/// without materializing step `Value` trees.
+#[derive(Debug)]
+struct PeekedSteps {
+    empty: bool,
+}
+
+impl Default for PeekedSteps {
+    fn default() -> Self {
+        Self { empty: true }
+    }
+}
+
+impl PeekedSteps {
+    fn is_empty(&self) -> bool {
+        self.empty
+    }
+}
+
+impl<'de> Deserialize<'de> for PeekedSteps {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = Box::<RawValue>::deserialize(deserializer)?;
+        Ok(Self {
+            empty: json_array_is_empty(raw.get()).map_err(serde::de::Error::custom)?,
+        })
+    }
+}
+
+fn json_array_is_empty(raw: &str) -> Result<bool, &'static str> {
+    let trimmed = raw.trim();
+    let Some(inner) = trimmed
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+    else {
+        return Err("plan steps must be a JSON array");
+    };
+    Ok(inner.trim().is_empty())
 }
 
 fn peek_plan_payload(object: &Object) -> Result<PlanPayloadPeek> {
@@ -774,7 +828,7 @@ where
         .unwrap_or_else(|error| Err(anyhow::anyhow!("plan decode blocking task failed: {error}")))
 }
 
-async fn load_for_environment(
+pub(crate) async fn load_for_environment(
     ctx: &mut Ctx,
     environment: &str,
     statuses: Option<&[PlanState]>,
@@ -1008,6 +1062,63 @@ mod tests {
                 .to_string()
                 .contains("does not match payload steps")
         );
+        assert!(
+            require_indexed_identity(&mismatch)
+                .unwrap_err()
+                .to_string()
+                .contains("does not match payload steps")
+        );
+    }
+
+    #[test]
+    fn identity_peek_does_not_materialize_typed_step_bodies() {
+        let empty = plan(10);
+        let object = to_object(&empty).unwrap();
+        assert!(require_indexed_identity(&object).unwrap().steps.is_empty());
+
+        let mut untyped = object;
+        let mut payload: serde_json::Value =
+            serde_json::from_str(untyped.properties.get("plan").unwrap()).unwrap();
+        payload["steps"] = serde_json::json!([
+            {"opaque": true, "blob": "x".repeat(4096)},
+            {"nested": {"more": [1, 2, 3]}}
+        ]);
+        untyped
+            .properties
+            .insert("plan".into(), payload.to_string());
+        assert!(
+            require_indexed_identity(&untyped)
+                .unwrap_err()
+                .to_string()
+                .contains("does not match payload steps")
+        );
+        untyped.properties.insert("has_steps".into(), "true".into());
+        let peek = require_indexed_identity(&untyped).unwrap();
+        assert!(!peek.steps.is_empty());
+        assert_eq!(peek.environment, "lifecycle-test");
+
+        let mut not_array = untyped;
+        let mut payload: serde_json::Value =
+            serde_json::from_str(not_array.properties.get("plan").unwrap()).unwrap();
+        payload["steps"] = serde_json::json!({"not": "an array"});
+        not_array
+            .properties
+            .insert("plan".into(), payload.to_string());
+        let error = format!("{:#}", require_indexed_identity(&not_array).unwrap_err());
+        assert!(error.contains("plan steps must be a JSON array"), "{error}");
+    }
+
+    #[test]
+    fn identity_peek_treats_whitespace_only_steps_array_as_empty() {
+        let empty = plan(10);
+        let mut object = to_object(&empty).unwrap();
+        let raw = object
+            .properties
+            .get("plan")
+            .unwrap()
+            .replace("\"steps\":[]", "\"steps\":[\n  \n]");
+        object.properties.insert("plan".into(), raw);
+        assert!(require_indexed_identity(&object).unwrap().steps.is_empty());
     }
 
     #[test]

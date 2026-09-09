@@ -269,9 +269,42 @@ pub(crate) async fn executable_batch_for_environment(
     lifecycle::executable_batch_for_environment(ctx, environment, statuses, limit, offset).await
 }
 
+/// Load environment-indexed plans without repeating the catalog-wide index
+/// check. Reconcile ticks call `require_environment_indexes_match_payloads`
+/// once, then use this for retirement, recovery, and admission windows.
+pub(crate) async fn load_for_environment(
+    ctx: &mut Ctx,
+    environment: &str,
+    statuses: Option<&[PlanState]>,
+    descending: bool,
+    limit: Option<u32>,
+    offset: Option<u32>,
+    has_steps: Option<bool>,
+) -> Result<Vec<Plan>> {
+    lifecycle::load_for_environment(
+        ctx,
+        environment,
+        statuses,
+        descending,
+        limit,
+        offset,
+        has_steps,
+    )
+    .await
+}
+
+pub(crate) async fn load_oldest_for_environment(
+    ctx: &mut Ctx,
+    environment: &str,
+    statuses: &[PlanState],
+) -> Result<Option<Plan>> {
+    lifecycle::load_oldest_for_environment(ctx, environment, statuses).await
+}
+
 /// Newest stored plan for `environment`, if any.
 ///
-/// Checks every matching `created_at` index against a payload peek so a
+/// Rejects catalog-wide environment-index retarget, then peeks every matching
+/// identity (`created_at`, environment, status, present `has_steps`) so a
 /// depressed newest index cannot hide behind `LIMIT 1`. Full Plan decode
 /// runs only for the newest validated row.
 pub async fn latest_for_environment(ctx: &mut Ctx, environment: &str) -> Result<Option<Plan>> {
