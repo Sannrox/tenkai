@@ -245,6 +245,17 @@ pub(super) fn from_object(object: &Object) -> Result<Plan> {
             object.id
         );
     }
+    let indexed_environment = object
+        .properties
+        .get("environment")
+        .with_context(|| format!("plan object {} has no environment index", object.id))?;
+    if indexed_environment != &plan.environment {
+        bail!(
+            "plan {} environment index {indexed_environment} does not match payload {}",
+            object.id,
+            plan.environment
+        );
+    }
     Ok(plan)
 }
 
@@ -368,9 +379,34 @@ pub(super) async fn latest_for_environment(
     // depressed newest index cannot hide behind LIMIT 1. Full Plan decode
     // (steps, content digest) runs only for the newest validated row, on the
     // same blocking pool as the catalog query.
+    require_environment_indexes_match_payloads(ctx, environment).await?;
     let owned_environment = environment.to_string();
     map_environment_plan_objects(ctx, environment, None, true, None, None, move |objects| {
         newest_plan_from_objects(objects, &owned_environment)
+    })
+    .await
+}
+
+/// Fail closed when environment/status/`has_steps` indexes disagree with
+/// payloads, including equality-filter omit-success (retargeted environment).
+pub(super) async fn require_environment_indexes_match_payloads(
+    ctx: &mut Ctx,
+    environment: &str,
+) -> Result<()> {
+    reject_environment_index_retarget(ctx, environment).await?;
+    let owned_environment = environment.to_string();
+    map_environment_plan_objects(ctx, environment, None, true, None, None, move |objects| {
+        for object in &objects {
+            let peek = require_indexed_identity(object)?;
+            if peek.environment != owned_environment {
+                bail!(
+                    "plan {} property index returned environment {}, expected {owned_environment}",
+                    object.id,
+                    peek.environment
+                );
+            }
+        }
+        Ok(())
     })
     .await
 }
@@ -413,6 +449,9 @@ pub(crate) async fn retire_empty_executable_plans(
 struct PlanPayloadPeek {
     created_at: i64,
     environment: String,
+    state: PlanState,
+    #[serde(default)]
+    steps: Vec<serde_json::Value>,
 }
 
 fn peek_plan_payload(object: &Object) -> Result<PlanPayloadPeek> {
@@ -442,10 +481,97 @@ fn require_indexed_created_at_matches_payload(object: &Object) -> Result<PlanPay
     Ok(peek)
 }
 
+fn require_indexed_identity(object: &Object) -> Result<PlanPayloadPeek> {
+    let peek = require_indexed_created_at_matches_payload(object)?;
+    let indexed_environment = object
+        .properties
+        .get("environment")
+        .with_context(|| format!("plan object {} has no environment index", object.id))?;
+    if indexed_environment != &peek.environment {
+        bail!(
+            "plan {} environment index {indexed_environment} does not match payload {}",
+            object.id,
+            peek.environment
+        );
+    }
+    let indexed_status = object
+        .properties
+        .get("status")
+        .with_context(|| format!("plan object {} has no lifecycle status", object.id))?;
+    if indexed_status != &peek.state.to_string() {
+        bail!(
+            "plan {} status index {indexed_status} does not match payload {}",
+            object.id,
+            peek.state
+        );
+    }
+    let expected_has_steps = if peek.steps.is_empty() {
+        "false"
+    } else {
+        "true"
+    };
+    if let Some(indexed_has_steps) = object.properties.get("has_steps")
+        && indexed_has_steps != expected_has_steps
+    {
+        bail!(
+            "plan {} has_steps index {indexed_has_steps} does not match payload steps",
+            object.id
+        );
+    }
+    Ok(peek)
+}
+
+async fn reject_environment_index_retarget(ctx: &mut Ctx, environment: &str) -> Result<()> {
+    let Some(store) = ctx.embedded_arc() else {
+        // Remote FindByProperty cannot see rows retargeted off this
+        // environment index (ADR 0025).
+        return Ok(());
+    };
+    let environment = environment.to_string();
+    crate::client::block_embedded(store, move |store| {
+        for object in store.list_kind(KIND_PLAN)? {
+            let peek = match peek_plan_environment(&object) {
+                Ok(peek) => peek,
+                Err(error) => match object.properties.get("environment") {
+                    Some(indexed) if indexed == &environment => return Err(error),
+                    _ => continue,
+                },
+            };
+            if peek.environment != environment {
+                continue;
+            }
+            match object.properties.get("environment") {
+                Some(indexed) if indexed == &environment => {}
+                Some(indexed) => bail!(
+                    "plan {} environment index {indexed} does not match payload {environment}",
+                    object.id
+                ),
+                None => bail!("plan object {} has no environment index", object.id),
+            }
+        }
+        Ok(())
+    })
+    .await
+}
+
+#[derive(Debug, Deserialize)]
+struct PlanEnvironmentPeek {
+    environment: String,
+}
+
+fn peek_plan_environment(object: &Object) -> Result<PlanEnvironmentPeek> {
+    let raw = object
+        .properties
+        .get("plan")
+        .with_context(|| format!("plan object {} has no serialized plan", object.id))?;
+    serde_json::from_str(raw)
+        .with_context(|| format!("parsing stored plan environment {}", object.id))
+}
+
 fn newest_plan_from_objects(objects: Vec<Object>, environment: &str) -> Result<Option<Plan>> {
     let mut newest: Option<(i64, Object)> = None;
     for object in objects {
-        let peek = require_indexed_created_at_matches_payload(&object)?;
+        let peek = require_indexed_identity(&object)?;
         if peek.environment != environment {
             bail!(
                 "plan {} property index returned environment {}, expected {environment}",
@@ -600,6 +726,7 @@ async fn load_for_environment(
     limit: Option<u32>,
     has_steps: Option<bool>,
 ) -> Result<Vec<Plan>> {
+    require_environment_indexes_match_payloads(ctx, environment).await?;
     let owned_environment = environment.to_string();
     let status_filter = statuses.map(<[PlanState]>::to_vec);
     map_environment_plan_objects(
@@ -823,6 +950,34 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("does not match payload steps")
+        );
+    }
+
+    #[test]
+    fn from_object_rejects_environment_index_drift() {
+        let plan = plan(10);
+        let object = to_object(&plan).unwrap();
+        assert_eq!(from_object(&object).unwrap().environment, "lifecycle-test");
+
+        let mut missing = object.clone();
+        missing.properties.remove("environment");
+        assert!(
+            from_object(&missing)
+                .unwrap_err()
+                .to_string()
+                .contains("no environment index")
+        );
+
+        let mut mismatch = object.clone();
+        mismatch
+            .properties
+            .insert("environment".into(), "other".into());
+        let error = from_object(&mismatch).unwrap_err().to_string();
+        assert!(error.contains("does not match payload"), "{error}");
+        let identity_error = require_indexed_identity(&mismatch).unwrap_err().to_string();
+        assert!(
+            identity_error.contains("does not match payload"),
+            "{identity_error}"
         );
     }
 

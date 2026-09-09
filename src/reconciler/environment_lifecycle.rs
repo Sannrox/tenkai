@@ -46,6 +46,7 @@ pub(super) async fn reconcile(ctx: &mut Ctx, request: Request<'_>) -> Result<Env
 
 async fn reconcile_runtime_managed(ctx: &mut Ctx, environment: &str) -> Result<EnvironmentStatus> {
     plan::retire_empty_executable_plans(ctx, environment).await?;
+    plan::require_environment_indexes_match_payloads(ctx, environment).await?;
     if let Some(plan) =
         plan::oldest_for_environment(ctx, environment, &[PlanState::Computed, PlanState::Running])
             .await?
@@ -68,6 +69,7 @@ fn awaiting_runtime(plan: Plan) -> EnvironmentStatus {
 }
 
 async fn select_plan(ctx: &mut Ctx, environment: &str, approval_required: bool) -> Result<Plan> {
+    plan::require_environment_indexes_match_payloads(ctx, environment).await?;
     if !approval_required {
         return plan::create_for_reconcile(ctx, environment).await;
     }

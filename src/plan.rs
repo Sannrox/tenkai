@@ -265,6 +265,13 @@ pub async fn latest_for_environment(ctx: &mut Ctx, environment: &str) -> Result<
     lifecycle::latest_for_environment(ctx, environment).await
 }
 
+pub(crate) async fn require_environment_indexes_match_payloads(
+    ctx: &mut Ctx,
+    environment: &str,
+) -> Result<()> {
+    lifecycle::require_environment_indexes_match_payloads(ctx, environment).await
+}
+
 pub(crate) async fn retire_empty_executable_plans(
     ctx: &mut Ctx,
     environment: &str,
@@ -596,17 +603,17 @@ mod tests {
             latest_error.contains("does not match payload"),
             "{latest_error}"
         );
-        let oldest = oldest_for_environment(
+        let oldest_error = oldest_for_environment(
             &mut ctx,
             "env_a",
             &[PlanState::Computed, PlanState::Running],
         )
         .await
-        .unwrap()
-        .unwrap();
-        assert_eq!(
-            oldest.id, newer.id,
-            "oldest executable LIMIT 1 skips a poisoned later index row"
+        .unwrap_err()
+        .to_string();
+        assert!(
+            oldest_error.contains("does not match payload"),
+            "{oldest_error}"
         );
         let listed_error = list_for_environment(&mut ctx, "env_a", None)
             .await
@@ -615,6 +622,121 @@ mod tests {
         assert!(
             listed_error.contains("does not match payload"),
             "{listed_error}"
+        );
+
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
+    async fn latest_fail_closed_on_environment_index_retarget() {
+        let database = std::env::temp_dir().join(format!(
+            "tenkai-plan-env-retarget-{}-{}.db",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let _ = std::fs::remove_file(&database);
+        let mut ctx = Ctx::embedded(&database).unwrap();
+
+        let older = plan_for("env_a", 100, PlanState::Computed);
+        let newer = plan_for("env_a", 200, PlanState::Running);
+        store(&mut ctx, &older).await.unwrap();
+        store(&mut ctx, &newer).await.unwrap();
+
+        let mut retargeted = ctx.get(&newer.id).await.unwrap().unwrap();
+        retargeted
+            .properties
+            .insert("environment".into(), "other".into());
+        ctx.put(retargeted).await.unwrap();
+
+        let error = latest_for_environment(&mut ctx, "env_a")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("environment index other does not match payload env_a"),
+            "{error}"
+        );
+
+        ctx.put(newer.to_object().unwrap()).await.unwrap();
+        let foreign = plan_for("env_b", 300, PlanState::Computed);
+        store(&mut ctx, &foreign).await.unwrap();
+        let mut foreign_poisoned = ctx.get(&foreign.id).await.unwrap().unwrap();
+        foreign_poisoned
+            .properties
+            .insert("status".into(), "nope".into());
+        ctx.put(foreign_poisoned).await.unwrap();
+        let mut foreign_malformed = ctx.get(&foreign.id).await.unwrap().unwrap();
+        foreign_malformed
+            .properties
+            .insert("plan".into(), "not-json".into());
+        ctx.put(foreign_malformed).await.unwrap();
+        let latest = latest_for_environment(&mut ctx, "env_a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.id, newer.id);
+
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
+    async fn latest_fail_closed_on_status_index_poison() {
+        let database = std::env::temp_dir().join(format!(
+            "tenkai-plan-status-poison-{}-{}.db",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let _ = std::fs::remove_file(&database);
+        let mut ctx = Ctx::embedded(&database).unwrap();
+
+        let older = plan_for("env_a", 100, PlanState::Computed);
+        let newer = plan_for("env_a", 200, PlanState::Computed);
+        store(&mut ctx, &older).await.unwrap();
+        store(&mut ctx, &newer).await.unwrap();
+
+        let mut poisoned = ctx.get(&newer.id).await.unwrap().unwrap();
+        poisoned
+            .properties
+            .insert("status".into(), "succeeded".into());
+        ctx.put(poisoned).await.unwrap();
+
+        let error = latest_for_environment(&mut ctx, "env_a")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("status index succeeded does not match payload computed"),
+            "{error}"
+        );
+
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
+    async fn executable_fail_closed_on_status_index_poison() {
+        let database = std::env::temp_dir().join(format!(
+            "tenkai-plan-exec-status-poison-{}-{}.db",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let _ = std::fs::remove_file(&database);
+        let mut ctx = Ctx::embedded(&database).unwrap();
+
+        let live = plan_for("env_a", 200, PlanState::Computed);
+        store(&mut ctx, &live).await.unwrap();
+        let mut poisoned = ctx.get(&live.id).await.unwrap().unwrap();
+        poisoned
+            .properties
+            .insert("status".into(), "succeeded".into());
+        ctx.put(poisoned).await.unwrap();
+
+        let error = executable_for_environment(&mut ctx, "env_a", &[PlanState::Computed])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("status index succeeded does not match payload computed"),
+            "{error}"
         );
 
         let _ = std::fs::remove_file(&database);

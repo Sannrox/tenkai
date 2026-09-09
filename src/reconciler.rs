@@ -664,6 +664,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn controller_select_plan_fails_closed_on_status_index_poison() {
+        let (database, mut ctx) = registered_ctx("select-plan-status-poison", &["stage"]).await;
+        let work = test_plan("stage", 100, PlanState::Computed);
+        plan::store(&mut ctx, &work).await.unwrap();
+
+        let mut poisoned = ctx.get(&work.id).await.unwrap().unwrap();
+        poisoned
+            .properties
+            .insert("status".into(), "succeeded".into());
+        ctx.put(poisoned).await.unwrap();
+
+        let mut environment = ctx
+            .get(&crate::ontology::env_id("stage"))
+            .await
+            .unwrap()
+            .unwrap();
+        environment
+            .properties
+            .insert("deployed.api".into(), "1.0.0".into());
+        ctx.put(environment).await.unwrap();
+        ctx.put(crate::pb::sekai::Object {
+            id: "tenkai:channel:api/stable".into(),
+            kind: crate::ontology::KIND_CHANNEL.into(),
+            name: "api/stable".into(),
+            namespace: crate::ontology::NS.into(),
+            external_id: String::new(),
+            properties: std::collections::HashMap::from([
+                ("product".into(), "api".into()),
+                ("channel".into(), "stable".into()),
+                ("current_version".into(), "2.0.0".into()),
+                ("current_release".into(), "tenkai:release:api@2.0.0".into()),
+            ]),
+            created: crate::now_millis(),
+            updated: crate::now_millis(),
+        })
+        .await
+        .unwrap();
+
+        let reconciler = Reconciler::new(ctx.clone(), config()).unwrap();
+        let report = reconciler.run_once().await.unwrap();
+        assert!(
+            matches!(
+                &report.environments[0].status,
+                EnvironmentStatus::Failed { error, .. }
+                    if error.contains("status index succeeded does not match payload computed")
+            ),
+            "{:?}",
+            report.environments[0].status
+        );
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
     async fn bounded_tick_excludes_foreign_work_before_reconcile() {
         let (database, ctx) = registered_ctx("bounded-reconcile", &["env-a", "env-b"]).await;
 
