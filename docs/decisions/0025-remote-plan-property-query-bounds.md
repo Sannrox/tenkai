@@ -42,6 +42,9 @@ behavior.
 - Inspect-latest and other limited plan reads on a remote catalog still
   transfer every object matching `kind` + `environment` (or the equivalent
   property pair) before decode.
+- Remote reconcile admission must not re-issue that transfer per
+  `LIMIT`/`OFFSET` window. Fetch, filter, and sort once, then walk the
+  transferred set in memory. SQL paging stays on the embedded host.
 - After decode, `created_at` index values must still match the plan payload
   ([#323](https://github.com/Sannrox/tenkai/issues/323)).
 - Operators of the embedded SQLite host keep the SQL-bounded path.

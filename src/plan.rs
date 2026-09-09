@@ -888,6 +888,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn executable_batch_windows_oldest_first_without_a_full_set_decode() {
+        let database = std::env::temp_dir().join(format!(
+            "tenkai-plan-exec-batch-{}-{}.db",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let _ = std::fs::remove_file(&database);
+        let mut ctx = Ctx::embedded(&database).unwrap();
+
+        let mut ids = Vec::new();
+        for created_at in 1..=12 {
+            let stored = plan_for("env_a", created_at * 10, PlanState::Computed);
+            ids.push(stored.id.clone());
+            store(&mut ctx, &stored).await.unwrap();
+        }
+
+        let first = executable_batch_for_environment(
+            &mut ctx,
+            "env_a",
+            &[PlanState::Computed],
+            EXECUTABLE_ADMISSION_BATCH,
+            0,
+        )
+        .await
+        .unwrap();
+        let second = executable_batch_for_environment(
+            &mut ctx,
+            "env_a",
+            &[PlanState::Computed],
+            EXECUTABLE_ADMISSION_BATCH,
+            EXECUTABLE_ADMISSION_BATCH,
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.len(), EXECUTABLE_ADMISSION_BATCH as usize);
+        assert_eq!(second.len(), 4);
+        assert_eq!(
+            first
+                .iter()
+                .map(|plan| plan.id.as_str())
+                .collect::<Vec<_>>(),
+            ids[..8].iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            second
+                .iter()
+                .map(|plan| plan.id.as_str())
+                .collect::<Vec<_>>(),
+            ids[8..].iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        let all = load_for_environment(
+            &mut ctx,
+            "env_a",
+            Some(&[PlanState::Computed]),
+            false,
+            None,
+            None,
+            Some(true),
+        )
+        .await
+        .unwrap();
+        assert_eq!(all.len(), 12);
+        assert_eq!(all[8].id, second[0].id);
+
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
     async fn pending_work_and_retirement_filter_has_steps() {
         let database = std::env::temp_dir().join(format!(
             "tenkai-plan-has-steps-{}-{}.db",

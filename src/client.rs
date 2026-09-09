@@ -76,6 +76,60 @@ fn property_integer(object: &Object, key: &str) -> Option<i64> {
     object.properties.get(key)?.parse().ok()
 }
 
+/// Apply matching/equals/order/limit after a remote `FindByProperty` transfer.
+///
+/// Vendored `FindByProperty` has no filter, order, or page fields (ADR 0025).
+/// Callers that need multiple OFFSET windows must reuse this transferred set
+/// instead of re-issuing the RPC.
+fn apply_remote_property_index(
+    mut objects: Vec<Object>,
+    query: &crate::embedded::PropertyIndexQuery<'_>,
+) -> Result<Vec<Object>> {
+    if let Some(filter_key) = query.matching_key {
+        objects.retain(|object| {
+            object
+                .properties
+                .get(filter_key)
+                .is_some_and(|value| query.matching_values.contains(&value.as_str()))
+        });
+    }
+    if let (Some(equals_key), Some(equals_value)) = (query.equals_key, query.equals_value) {
+        objects.retain(|object| match object.properties.get(equals_key) {
+            Some(value) => value == equals_value,
+            None if equals_key == "has_steps" => {
+                payload_has_steps(object) == (equals_value == "true")
+            }
+            None => false,
+        });
+    }
+    if let Some(order_key) = query.order_key {
+        objects.sort_by(|left, right| {
+            let order = property_integer(left, order_key).cmp(&property_integer(right, order_key));
+            if query.descending {
+                order.reverse()
+            } else {
+                order
+            }
+        });
+    }
+    if let Some(offset) = query.offset {
+        anyhow::ensure!(
+            query.limit.is_some(),
+            "find_by_property offset requires a limit"
+        );
+        let offset = offset as usize;
+        if offset >= objects.len() {
+            objects.clear();
+        } else {
+            objects.drain(..offset);
+        }
+    }
+    if let Some(limit) = query.limit {
+        objects.truncate(limit as usize);
+    }
+    Ok(objects)
+}
+
 fn payload_has_steps(object: &Object) -> bool {
     object
         .properties
@@ -812,51 +866,7 @@ impl Ctx {
                 CallOptions::default(),
             )
             .await?;
-        let mut objects = response.objects;
-        if let Some(filter_key) = query.matching_key {
-            objects.retain(|object| {
-                object
-                    .properties
-                    .get(filter_key)
-                    .is_some_and(|value| query.matching_values.contains(&value.as_str()))
-            });
-        }
-        if let (Some(equals_key), Some(equals_value)) = (query.equals_key, query.equals_value) {
-            objects.retain(|object| match object.properties.get(equals_key) {
-                Some(value) => value == equals_value,
-                None if equals_key == "has_steps" => {
-                    payload_has_steps(object) == (equals_value == "true")
-                }
-                None => false,
-            });
-        }
-        if let Some(order_key) = query.order_key {
-            objects.sort_by(|left, right| {
-                let order =
-                    property_integer(left, order_key).cmp(&property_integer(right, order_key));
-                if query.descending {
-                    order.reverse()
-                } else {
-                    order
-                }
-            });
-        }
-        if let Some(offset) = query.offset {
-            anyhow::ensure!(
-                query.limit.is_some(),
-                "find_by_property offset requires a limit"
-            );
-            let offset = offset as usize;
-            if offset >= objects.len() {
-                objects.clear();
-            } else {
-                objects.drain(..offset);
-            }
-        }
-        if let Some(limit) = query.limit {
-            objects.truncate(limit as usize);
-        }
-        Ok(objects)
+        apply_remote_property_index(response.objects, &query)
     }
 
     pub async fn links(&mut self, object_id: &str, relation: &str) -> Result<Vec<Link>> {
@@ -2273,6 +2283,79 @@ mod tests {
         let (ctx, server) = remote_ctx(MockSekaiState::default()).await;
         assert_action_lifecycle(ctx).await;
         server.abort();
+    }
+
+    fn indexed_plan_object(id: &str, created_at: i64) -> Object {
+        Object {
+            id: id.into(),
+            kind: crate::ontology::KIND_PLAN.into(),
+            properties: std::collections::HashMap::from([
+                ("environment".into(), "stage".into()),
+                ("status".into(), "computed".into()),
+                ("created_at".into(), created_at.to_string()),
+                ("has_steps".into(), "true".into()),
+            ]),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn remote_property_index_pages_one_transferred_set() {
+        let objects = (1..=16)
+            .map(|created_at| indexed_plan_object(&format!("plan-{created_at}"), created_at))
+            .collect::<Vec<_>>();
+        let matching = ["computed"];
+        let page0 = super::apply_remote_property_index(
+            objects.clone(),
+            &crate::embedded::PropertyIndexQuery {
+                matching_key: Some("status"),
+                matching_values: &matching,
+                equals_key: Some("has_steps"),
+                equals_value: Some("true"),
+                order_key: Some("created_at"),
+                descending: false,
+                limit: Some(8),
+                offset: Some(0),
+                ..crate::embedded::PropertyIndexQuery::new(
+                    crate::ontology::KIND_PLAN,
+                    "environment",
+                    "stage",
+                )
+            },
+        )
+        .unwrap();
+        let page1 = super::apply_remote_property_index(
+            objects,
+            &crate::embedded::PropertyIndexQuery {
+                matching_key: Some("status"),
+                matching_values: &matching,
+                equals_key: Some("has_steps"),
+                equals_value: Some("true"),
+                order_key: Some("created_at"),
+                descending: false,
+                limit: Some(8),
+                offset: Some(8),
+                ..crate::embedded::PropertyIndexQuery::new(
+                    crate::ontology::KIND_PLAN,
+                    "environment",
+                    "stage",
+                )
+            },
+        )
+        .unwrap();
+        let ids = |page: &[Object]| {
+            page.iter()
+                .map(|object| object.id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids(&page0),
+            (1..=8).map(|n| format!("plan-{n}")).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            ids(&page1),
+            (9..=16).map(|n| format!("plan-{n}")).collect::<Vec<_>>()
+        );
     }
 
     #[test]
