@@ -141,12 +141,80 @@ fn payload_has_steps(object: &Object) -> bool {
 
 type RemoteClient = CoreLoopClient<GrpcTransport>;
 
+/// Tick-scoped remote `ListObjects` of `KIND_PLAN` for retarget detection.
+///
+/// Reconcile environments run concurrently and must share one catalog
+/// transfer. Inspect and other one-shot paths leave the cell empty and list
+/// once per call.
+type PlanKindListCell = Arc<OnceCell<Arc<Vec<Object>>>>;
+
+struct PlanKindListTick {
+    cell: std::sync::Mutex<Option<PlanKindListCell>>,
+    fill: tokio::sync::Mutex<()>,
+}
+
+impl Default for PlanKindListTick {
+    fn default() -> Self {
+        Self {
+            cell: std::sync::Mutex::new(None),
+            fill: tokio::sync::Mutex::new(()),
+        }
+    }
+}
+
+impl PlanKindListTick {
+    fn begin(&self) {
+        *self.cell.lock().expect("plan kind-list tick lock") = Some(Arc::new(OnceCell::new()));
+    }
+
+    fn end(&self) {
+        *self.cell.lock().expect("plan kind-list tick lock") = None;
+    }
+
+    fn tick_cell(&self) -> Option<PlanKindListCell> {
+        self.cell.lock().expect("plan kind-list tick lock").clone()
+    }
+
+    #[cfg(test)]
+    async fn get_or_load<F, Fut>(&self, load: F) -> Result<Arc<Vec<Object>>>
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = Result<Vec<Object>>>,
+    {
+        let Some(cell) = self.tick_cell() else {
+            return Ok(Arc::new(load().await?));
+        };
+        if let Some(objects) = cell.get() {
+            return Ok(Arc::clone(objects));
+        }
+        let _fill = self.fill.lock().await;
+        if let Some(objects) = cell.get() {
+            return Ok(Arc::clone(objects));
+        }
+        let objects = Arc::new(load().await?);
+        let _ = cell.set(Arc::clone(&objects));
+        Ok(objects)
+    }
+}
+
+/// Ends a shared Plan kind-list tick when dropped.
+pub(crate) struct PlanRetargetTickGuard {
+    scan: Arc<PlanKindListTick>,
+}
+
+impl Drop for PlanRetargetTickGuard {
+    fn drop(&mut self) {
+        self.scan.end();
+    }
+}
+
 #[derive(Clone)]
 pub struct Ctx {
     backend: Backend,
     canary_schema_preflight: Arc<OnceCell<()>>,
     outcome_export_enabled: bool,
     outcome_inspection_enabled: bool,
+    plan_kind_list: Arc<PlanKindListTick>,
 }
 
 #[derive(Clone)]
@@ -307,6 +375,7 @@ pub async fn connect() -> Result<Ctx> {
         canary_schema_preflight: Arc::new(OnceCell::new()),
         outcome_export_enabled: false,
         outcome_inspection_enabled: false,
+        plan_kind_list: Arc::new(PlanKindListTick::default()),
     })
 }
 
@@ -330,11 +399,49 @@ impl Ctx {
             canary_schema_preflight: Arc::new(OnceCell::new()),
             outcome_export_enabled,
             outcome_inspection_enabled: true,
+            plan_kind_list: Arc::new(PlanKindListTick::default()),
         })
     }
 
     pub fn is_embedded(&self) -> bool {
         matches!(self.backend, Backend::Embedded(_))
+    }
+
+    /// Clone a tick-local context that shares one remote Plan kind-list among
+    /// concurrent environment workers. The original context is unchanged, so
+    /// inspect and other one-shot paths still list once per call.
+    ///
+    /// Dropping the returned guard ends the tick even if the caller is
+    /// cancelled.
+    pub(crate) fn with_shared_plan_retarget_tick(&self) -> (Self, PlanRetargetTickGuard) {
+        let scan = Arc::new(PlanKindListTick::default());
+        if !self.is_embedded() {
+            scan.begin();
+        }
+        let mut ctx = self.clone();
+        ctx.plan_kind_list = Arc::clone(&scan);
+        (ctx, PlanRetargetTickGuard { scan })
+    }
+
+    /// Kind-list plans for environment-index retarget detection.
+    ///
+    /// During a reconcile tick this reuses one `ListObjects` transfer. Outside
+    /// a tick it lists once per call so inspect is not served a stale catalog.
+    pub(crate) async fn list_plans_for_retarget(&mut self) -> Result<Arc<Vec<Object>>> {
+        let Some(cell) = self.plan_kind_list.tick_cell() else {
+            return Ok(Arc::new(self.list_kind(crate::ontology::KIND_PLAN).await?));
+        };
+        if let Some(objects) = cell.get() {
+            return Ok(Arc::clone(objects));
+        }
+        let list = Arc::clone(&self.plan_kind_list);
+        let _fill = list.fill.lock().await;
+        if let Some(objects) = cell.get() {
+            return Ok(Arc::clone(objects));
+        }
+        let objects = Arc::new(self.list_kind(crate::ontology::KIND_PLAN).await?);
+        let _ = cell.set(Arc::clone(&objects));
+        Ok(objects)
     }
 
     pub(crate) fn outcome_export_enabled(&self) -> bool {
@@ -1915,6 +2022,7 @@ mod tests {
                 canary_schema_preflight: Arc::new(OnceCell::new()),
                 outcome_export_enabled: false,
                 outcome_inspection_enabled: false,
+                plan_kind_list: Arc::new(super::PlanKindListTick::default()),
             },
             server,
         )
@@ -2285,6 +2393,40 @@ mod tests {
         server.abort();
     }
 
+    #[test]
+    fn plan_kind_list_tick_is_inactive_outside_begin() {
+        let tick = super::PlanKindListTick::default();
+        assert!(tick.tick_cell().is_none());
+        tick.begin();
+        assert!(tick.tick_cell().is_some());
+        tick.end();
+        assert!(tick.tick_cell().is_none());
+    }
+
+    #[tokio::test]
+    async fn plan_kind_list_tick_loads_once_while_active() {
+        let tick = super::PlanKindListTick::default();
+        tick.begin();
+        let loads = std::sync::atomic::AtomicUsize::new(0);
+        let load = || {
+            loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async {
+                Ok(vec![Object {
+                    id: "plan-1".into(),
+                    ..Default::default()
+                }])
+            }
+        };
+        let first = tick.get_or_load(load).await.unwrap();
+        let second = tick.get_or_load(load).await.unwrap();
+        assert_eq!(loads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(first[0].id, "plan-1");
+        tick.end();
+        let _ = tick.get_or_load(load).await.unwrap();
+        assert_eq!(loads.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
     fn indexed_plan_object(id: &str, created_at: i64) -> Object {
         Object {
             id: id.into(),
@@ -2500,6 +2642,7 @@ mod tests {
             canary_schema_preflight: Arc::new(OnceCell::new()),
             outcome_export_enabled: false,
             outcome_inspection_enabled: false,
+            plan_kind_list: Arc::new(super::PlanKindListTick::default()),
         };
         let object = Object {
             id: "tenkai:object:remote".into(),
@@ -2569,6 +2712,7 @@ mod tests {
             canary_schema_preflight: Arc::new(OnceCell::new()),
             outcome_export_enabled: false,
             outcome_inspection_enabled: false,
+            plan_kind_list: Arc::new(super::PlanKindListTick::default()),
         };
 
         let object = Object {
@@ -2619,6 +2763,7 @@ mod tests {
             canary_schema_preflight: Arc::new(OnceCell::new()),
             outcome_export_enabled: false,
             outcome_inspection_enabled: false,
+            plan_kind_list: Arc::new(super::PlanKindListTick::default()),
         };
         let action = ActionTypeDef {
             name: "tenkai.replace_subscription".into(),

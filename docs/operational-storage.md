@@ -94,6 +94,9 @@ those retargeted rows
 ([ADR 0025](decisions/0025-remote-plan-property-query-bounds.md));
 retarget detection uses kind-wide `ListObjects` instead so a payload that
 still names the queried environment cannot omit-succeed into Current.
+A remote reconcile tick shares that Plan kind-list across concurrent
+environments so retarget reject does not re-transfer the catalog once per
+environment. Inspect and other one-shot paths still list once per call.
 Identity peeks compare `created_at`, `environment`, `status`, and `has_steps`
 (`true` iff the payload has steps; the index must be present) without
 materializing step JSON trees. A stepped plan whose `has_steps` index is

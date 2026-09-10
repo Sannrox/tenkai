@@ -48,6 +48,8 @@ behavior.
 - Environment-index retarget detection does not use `FindByProperty`.
   Remote hosts kind-list plans with `ListObjects` and peek payload
   `environment` so a retargeted index cannot omit-succeed into Current.
+  A reconcile tick shares that kind-list across environments; it does not
+  issue one catalog transfer per environment.
 - After decode, `created_at` index values must still match the plan payload
   ([#323](https://github.com/Sannrox/tenkai/issues/323)).
 - Operators of the embedded SQLite host keep the SQL-bounded path.
