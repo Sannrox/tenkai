@@ -5,7 +5,9 @@ source package, a signed target package, consumed compatibility evidence, and
 ordered checkpoints. Tenkai does not author package contents, classify
 compatibility, or run application transforms.
 
-See [ADR 0024](decisions/0024-package-migration.md).
+See [ADR 0024](decisions/0024-package-migration.md). Remote hosts use the
+same core; the accepted network contract is
+[ADR 0026](decisions/0026-remote-package-migration-parity.md).
 
 ## Declaration
 
@@ -111,6 +113,15 @@ pins, or evidence under the same name is a conflict.
 When a compensating checkpoint is waiting for plan approval, `migrate status`
 prints `pending-plan <plan-id>`. Place the signed plan envelope next to the
 migration approval as `<plan-id>.json`.
+
+## Remote
+
+`tenkaictl --target remote migrate …` is not a v1 management route yet.
+[ADR 0026](decisions/0026-remote-package-migration-parity.md) is the
+accepted contract: additive authenticated preview, apply, status, resume,
+and rollback over the same core. Remote apply, resume, and rollback reject
+`--allow-unapproved-development` and require the signed approval envelope,
+trust roots, and `expected_generation`.
 
 ## Recovery
 
