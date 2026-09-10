@@ -192,7 +192,12 @@ pub(super) async fn run(request: TickRequest<'_>) -> Result<TickReport> {
     // Periodic and requested ticks share this lock so a successful request
     // always represents a complete tick rather than a transient Busy report.
     let _tick = request.tick_lock.lock().await;
-    let mut listing = request.ctx.clone();
+    let (ctx, _retarget_tick) = request.ctx.with_shared_plan_retarget_tick();
+    run_admitted(&request, ctx).await
+}
+
+async fn run_admitted(request: &TickRequest<'_>, ctx: Ctx) -> Result<TickReport> {
+    let mut listing = ctx.clone();
     let names = load_environment_names(
         &mut listing,
         &request.environment_index,
@@ -266,7 +271,7 @@ pub(super) async fn run(request: TickRequest<'_>) -> Result<TickReport> {
                     None
                 };
 
-                let mut ctx = request.ctx.clone();
+                let mut ctx = ctx.clone();
                 let config = request.config.clone();
                 let runtime_managed = request.runtime_environments.contains(&name);
                 let guard = AdmissionGuard {

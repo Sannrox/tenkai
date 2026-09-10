@@ -619,19 +619,21 @@ async fn reject_environment_index_retarget(ctx: &mut Ctx, environment: &str) -> 
     if let Some(store) = ctx.embedded_arc() {
         let environment = environment.to_string();
         return crate::client::block_embedded(store, move |store| {
-            reject_retargeted_environment_index(store.list_kind(KIND_PLAN)?, &environment)
+            let objects = store.list_kind(KIND_PLAN)?;
+            reject_retargeted_environment_index(&objects, &environment)
         })
         .await;
     }
-    reject_retargeted_environment_index(ctx.list_kind(KIND_PLAN).await?, environment)
+    let objects = ctx.list_plans_for_retarget().await?;
+    reject_retargeted_environment_index(objects.as_slice(), environment)
 }
 
-fn reject_retargeted_environment_index(
-    objects: impl IntoIterator<Item = Object>,
+fn reject_retargeted_environment_index<'a>(
+    objects: impl IntoIterator<Item = &'a Object>,
     environment: &str,
 ) -> Result<()> {
     for object in objects {
-        let peek = match peek_plan_environment(&object) {
+        let peek = match peek_plan_environment(object) {
             Ok(peek) => peek,
             Err(error) => match object.properties.get("environment") {
                 Some(indexed) if indexed == environment => return Err(error),
@@ -1175,7 +1177,7 @@ mod tests {
         retargeted
             .properties
             .insert("environment".into(), "other".into());
-        let error = reject_retargeted_environment_index(vec![retargeted], "lifecycle-test")
+        let error = reject_retargeted_environment_index([&retargeted], "lifecycle-test")
             .unwrap_err()
             .to_string();
         assert!(
@@ -1185,7 +1187,7 @@ mod tests {
 
         let mut missing = to_object(&plan(10)).unwrap();
         missing.properties.remove("environment");
-        let missing_error = reject_retargeted_environment_index(vec![missing], "lifecycle-test")
+        let missing_error = reject_retargeted_environment_index([&missing], "lifecycle-test")
             .unwrap_err()
             .to_string();
         assert!(
@@ -1202,17 +1204,33 @@ mod tests {
             .properties
             .insert("environment".into(), "other".into());
         foreign.properties.insert("plan".into(), "not-json".into());
-        reject_retargeted_environment_index(vec![local.clone(), foreign], "lifecycle-test")
-            .unwrap();
+        reject_retargeted_environment_index([&local, &foreign], "lifecycle-test").unwrap();
 
         let mut indexed_here = local;
         indexed_here
             .properties
             .insert("plan".into(), "not-json".into());
-        let error = reject_retargeted_environment_index(vec![indexed_here], "lifecycle-test")
+        let error = reject_retargeted_environment_index([&indexed_here], "lifecycle-test")
             .unwrap_err()
             .to_string();
         assert!(error.contains("parsing stored plan environment"), "{error}");
+    }
+
+    #[test]
+    fn retarget_scan_reuses_one_object_slice_across_environments() {
+        let mut retargeted = to_object(&plan(10)).unwrap();
+        retargeted
+            .properties
+            .insert("environment".into(), "other".into());
+        let objects = [retargeted];
+        let error = reject_retargeted_environment_index(&objects, "lifecycle-test")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("environment index other does not match payload lifecycle-test"),
+            "{error}"
+        );
+        reject_retargeted_environment_index(&objects, "unrelated").unwrap();
     }
 
     #[test]
