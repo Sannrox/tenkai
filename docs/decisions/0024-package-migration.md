@@ -6,6 +6,7 @@
 - Related: [ADR 0017](0017-executable-release-waves.md),
   [ADR 0018](0018-change-set-closure-pin.md),
   [ADR 0021](0021-portable-delivery-manifest-profile.md),
+  [ADR 0026](0026-remote-package-migration-parity.md),
   [Package migrations](../package-migrations.md)
 
 ## Context
@@ -61,6 +62,9 @@ rolls back, or records recovery-required state under the environment fence.
 
 - Operators can preview, approve, execute, resume, and roll back one
   package cutover without inventing a second executor.
+- Remote operator verbs over the same core are specified in
+  [ADR 0026](0026-remote-package-migration-parity.md). This ADR does not
+  define the network contract.
 - `sekai-chisei#690` stays related package-authority research, not the
   migration-plan owner.
 
