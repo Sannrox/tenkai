@@ -120,6 +120,31 @@ pub fn tenant_visible_rpcs() -> &'static [TenantVisibleRpc] {
             surface: TenantVisibleSurface::Management,
         },
         TenantVisibleRpc {
+            id: "management.package_migration_preview",
+            path_template: "POST /v1/migrations/{name}/preview",
+            surface: TenantVisibleSurface::Management,
+        },
+        TenantVisibleRpc {
+            id: "management.package_migration_apply",
+            path_template: "POST /v1/migrations/{name}/apply",
+            surface: TenantVisibleSurface::Management,
+        },
+        TenantVisibleRpc {
+            id: "management.package_migration_status",
+            path_template: "GET /v1/migrations/{name}",
+            surface: TenantVisibleSurface::Management,
+        },
+        TenantVisibleRpc {
+            id: "management.package_migration_resume",
+            path_template: "POST /v1/migrations/{name}/resume",
+            surface: TenantVisibleSurface::Management,
+        },
+        TenantVisibleRpc {
+            id: "management.package_migration_rollback",
+            path_template: "POST /v1/migrations/{name}/rollback",
+            surface: TenantVisibleSurface::Management,
+        },
+        TenantVisibleRpc {
             id: "development.fixture_import",
             path_template: "POST /v1/development/fixtures/import",
             surface: TenantVisibleSurface::Management,
@@ -232,6 +257,11 @@ pub fn http_exposed_tenant_rpc_ids() -> &'static [&'static str] {
     &[
         "management.reconcile",
         "management.fleet_status",
+        "management.package_migration_preview",
+        "management.package_migration_apply",
+        "management.package_migration_status",
+        "management.package_migration_resume",
+        "management.package_migration_rollback",
         "development.fixture_import",
         "development.fixture_reset",
         "runtime.work",

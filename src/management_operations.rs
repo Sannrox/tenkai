@@ -9,6 +9,12 @@ use std::sync::Arc;
 use crate::auth_context::{
     AuthMode, AuthStack, AuthenticatedRequestContext, CredentialMaterial, DeliveryCapability,
 };
+use crate::client::Ctx;
+use crate::package_migration::{
+    self, ApprovalTrustRoots, MigrationAuthorization, PackageMigrationApplyRequest,
+    PackageMigrationMutateRequest, PackageMigrationPreviewRequest, PackageMigrationResult,
+    RemoteApprovalFiles,
+};
 use crate::plan::{EnvironmentInspectReport, EnvironmentListEntry, FleetStatusReport, StatusRow};
 use crate::providers::TerminalOutcomeProjection;
 use crate::reconciler::TickReport;
@@ -59,6 +65,10 @@ pub(crate) enum ManagementError {
     #[error("{0}")]
     NotFound(String),
     #[error("{0}")]
+    BadRequest(String),
+    #[error("{0}")]
+    Conflict(String),
+    #[error("{0}")]
     Unavailable(String),
     #[error("{0}")]
     Internal(String),
@@ -70,6 +80,7 @@ pub(crate) struct ManagementOperations {
     reconciler: Arc<dyn ReconcilePort>,
     store: Arc<dyn OperationalStore>,
     tenant_environments: Option<TenantEnvironmentOperations>,
+    package_migration_trust_roots: Option<ApprovalTrustRoots>,
 }
 
 impl ManagementOperations {
@@ -79,6 +90,7 @@ impl ManagementOperations {
         reconciler: Arc<dyn ReconcilePort>,
         store: Arc<dyn OperationalStore>,
         tenant_store: Option<Arc<dyn TenantOperationalStore>>,
+        package_migration_trust_roots: Option<ApprovalTrustRoots>,
     ) -> Self {
         let tenant_environments = tenant_store.map(|tenant_store| {
             TenantEnvironmentOperations::new(
@@ -94,6 +106,7 @@ impl ManagementOperations {
             reconciler,
             store,
             tenant_environments,
+            package_migration_trust_roots,
         }
     }
 
@@ -259,6 +272,267 @@ impl ManagementOperations {
         }
     }
 
+    pub(crate) async fn preview_package_migration(
+        &self,
+        credential: &CredentialMaterial,
+        name: &str,
+        request: PackageMigrationPreviewRequest,
+    ) -> Result<PackageMigrationResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        package_migration::require_migration_api_version(request.version)
+            .map_err(map_migration_error)?;
+        self.require_environment_visible(&context, &request.environment)
+            .await?;
+        let mut ctx = self.application_ctx()?;
+        let record = package_migration::preview(
+            &mut ctx,
+            name,
+            &request.environment,
+            request.declaration,
+            request.backup_receipt_digest.as_deref(),
+        )
+        .await
+        .map_err(map_migration_error)?;
+        Ok(PackageMigrationResult::from_record(record))
+    }
+
+    pub(crate) async fn apply_package_migration(
+        &self,
+        credential: &CredentialMaterial,
+        name: &str,
+        request: PackageMigrationApplyRequest,
+    ) -> Result<PackageMigrationResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        package_migration::require_migration_api_version(request.version)
+            .map_err(map_migration_error)?;
+        self.require_matching_migration_trust_roots(&request.trust_roots)?;
+        let files = RemoteApprovalFiles::materialize(
+            &request.approval,
+            &request.trust_roots,
+            &request.plan_approvals,
+        )
+        .map_err(map_migration_error)?;
+        let authorization = MigrationAuthorization::Signed {
+            approval: &files.approval,
+            trust_roots: &files.trust_roots,
+        };
+        let mut ctx = self.application_ctx()?;
+        match package_migration::load(&mut ctx, name).await {
+            Ok(stored) => {
+                self.require_environment_visible(&context, &stored.environment)
+                    .await?;
+                if stored.identity_digest
+                    != request
+                        .declaration
+                        .identity_digest(
+                            &request.environment,
+                            request.backup_receipt_digest.as_deref(),
+                        )
+                        .map_err(map_migration_error)?
+                    || stored.environment != request.environment
+                {
+                    return Err(ManagementError::Conflict(format!(
+                        "package migration {name} already exists with a different identity"
+                    )));
+                }
+                package_migration::verify_authorization(&stored, authorization)
+                    .map_err(map_migration_error)?;
+                if stored.fence_generation != request.expected_generation {
+                    return Err(ManagementError::Conflict(format!(
+                        "stale fencing generation {} for package migration {name}; current is {}",
+                        request.expected_generation, stored.fence_generation
+                    )));
+                }
+            }
+            Err(error) => {
+                let mapped = map_migration_error(error);
+                if !matches!(mapped, ManagementError::NotFound(_)) {
+                    return Err(mapped);
+                }
+                self.require_environment_visible(&context, &request.environment)
+                    .await?;
+                let previewed = package_migration::preview(
+                    &mut ctx,
+                    name,
+                    &request.environment,
+                    request.declaration.clone(),
+                    request.backup_receipt_digest.as_deref(),
+                )
+                .await
+                .map_err(map_migration_error)?;
+                package_migration::verify_authorization(&previewed, authorization)
+                    .map_err(map_migration_error)?;
+                if previewed.fence_generation != request.expected_generation {
+                    return Err(ManagementError::Conflict(format!(
+                        "stale fencing generation {} for package migration {name}; current is {}",
+                        request.expected_generation, previewed.fence_generation
+                    )));
+                }
+            }
+        }
+        let actor = context.principal_id();
+        self.audit(actor, "package_migration.apply.requested")?;
+        let record = package_migration::run_until_blocked(
+            &mut ctx,
+            name,
+            &request.environment,
+            request.declaration,
+            request.backup_receipt_digest.as_deref(),
+            authorization,
+            Some(request.expected_generation),
+        )
+        .await
+        .map_err(map_migration_error)?;
+        self.audit(actor, "package_migration.apply.completed")?;
+        Ok(PackageMigrationResult::from_record(record))
+    }
+
+    pub(crate) async fn package_migration_status(
+        &self,
+        credential: &CredentialMaterial,
+        name: &str,
+    ) -> Result<PackageMigrationResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        let mut ctx = self.application_ctx()?;
+        let record = package_migration::load(&mut ctx, name)
+            .await
+            .map_err(map_migration_error)
+            .map_err(|error| self.hide_missing_migration(error))?;
+        self.require_environment_visible(&context, &record.environment)
+            .await?;
+        Ok(PackageMigrationResult::from_record(record))
+    }
+
+    pub(crate) async fn resume_package_migration(
+        &self,
+        credential: &CredentialMaterial,
+        name: &str,
+        request: PackageMigrationMutateRequest,
+    ) -> Result<PackageMigrationResult, ManagementError> {
+        self.mutate_package_migration(credential, name, request, true)
+            .await
+    }
+
+    pub(crate) async fn rollback_package_migration(
+        &self,
+        credential: &CredentialMaterial,
+        name: &str,
+        request: PackageMigrationMutateRequest,
+    ) -> Result<PackageMigrationResult, ManagementError> {
+        self.mutate_package_migration(credential, name, request, false)
+            .await
+    }
+
+    async fn mutate_package_migration(
+        &self,
+        credential: &CredentialMaterial,
+        name: &str,
+        request: PackageMigrationMutateRequest,
+        resume: bool,
+    ) -> Result<PackageMigrationResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        package_migration::require_migration_api_version(request.version)
+            .map_err(map_migration_error)?;
+        self.require_matching_migration_trust_roots(&request.trust_roots)?;
+        let files = RemoteApprovalFiles::materialize(
+            &request.approval,
+            &request.trust_roots,
+            &request.plan_approvals,
+        )
+        .map_err(map_migration_error)?;
+        let authorization = MigrationAuthorization::Signed {
+            approval: &files.approval,
+            trust_roots: &files.trust_roots,
+        };
+        let mut ctx = self.application_ctx()?;
+        let stored = package_migration::load(&mut ctx, name)
+            .await
+            .map_err(map_migration_error)
+            .map_err(|error| self.hide_missing_migration(error))?;
+        self.require_environment_visible(&context, &stored.environment)
+            .await?;
+        let actor = context.principal_id();
+        let op = if resume {
+            "package_migration.resume"
+        } else {
+            "package_migration.rollback"
+        };
+        self.audit(actor, &format!("{op}.requested"))?;
+        let record = if resume {
+            package_migration::resume(
+                &mut ctx,
+                name,
+                authorization,
+                Some(request.expected_generation),
+            )
+            .await
+        } else {
+            package_migration::rollback(
+                &mut ctx,
+                name,
+                authorization,
+                Some(request.expected_generation),
+            )
+            .await
+        }
+        .map_err(map_migration_error)?;
+        self.audit(actor, &format!("{op}.completed"))?;
+        Ok(PackageMigrationResult::from_record(record))
+    }
+
+    fn application_ctx(&self) -> Result<Ctx, ManagementError> {
+        self.reconciler.application_ctx().ok_or_else(|| {
+            ManagementError::Unavailable("package migration is not available on this host".into())
+        })
+    }
+
+    fn require_matching_migration_trust_roots(
+        &self,
+        request_roots: &ApprovalTrustRoots,
+    ) -> Result<(), ManagementError> {
+        let configured = self.package_migration_trust_roots.as_ref().ok_or_else(|| {
+            ManagementError::Forbidden(
+                "package migration trust roots are not configured on this host".into(),
+            )
+        })?;
+        if configured != request_roots {
+            return Err(ManagementError::Forbidden(
+                "package migration trust roots do not match this host".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn hide_missing_migration(&self, error: ManagementError) -> ManagementError {
+        if self.tenant_mode && matches!(error, ManagementError::NotFound(_)) {
+            ManagementError::NotFound(NON_DISCLOSING_DENY.into())
+        } else {
+            error
+        }
+    }
+
+    /// Tenant isolation for migrations uses the environment id, matching
+    /// `GET /v1/environments/{environment}`. Distinct tenant partitions must
+    /// use distinct environment identifiers.
+    async fn require_environment_visible(
+        &self,
+        context: &AuthenticatedRequestContext,
+        environment: &str,
+    ) -> Result<(), ManagementError> {
+        if !self.tenant_mode {
+            return Ok(());
+        }
+        self.tenant_operations()?
+            .inspect(context, environment)
+            .await
+            .map(|_| ())
+            .map_err(map_tenant_error)
+    }
+
     fn tenant_operations(&self) -> Result<&TenantEnvironmentOperations, ManagementError> {
         self.tenant_environments
             .as_ref()
@@ -311,6 +585,35 @@ fn map_environment_error(error: anyhow::Error) -> ManagementError {
 
 fn internal(error: anyhow::Error) -> ManagementError {
     ManagementError::Internal(format!("{error:#}"))
+}
+
+fn map_migration_error(error: anyhow::Error) -> ManagementError {
+    let message = format!("{error:#}");
+    if message.contains("unsupported package migration API version")
+        || message.contains("unknown package migration")
+        || message.contains("invalid package migration")
+        || message.contains("not a safe file name")
+        || message.contains("trust roots must use version")
+    {
+        ManagementError::BadRequest(message)
+    } else if message.contains("is not stored") || message.contains("not registered") {
+        ManagementError::NotFound(message)
+    } else if message.contains("stale fencing generation")
+        || message.contains("already exists with a different identity")
+    {
+        ManagementError::Conflict(message)
+    } else if message.contains("unapproved development")
+        || message.contains("restricted to the built-in local")
+        || message.contains("approval does not match")
+        || message.contains("is not approved")
+        || message.contains("approval is bound")
+        || message.contains("approval expired")
+        || message.contains("signer")
+    {
+        ManagementError::Forbidden(message)
+    } else {
+        ManagementError::Internal(message)
+    }
 }
 
 #[cfg(test)]
@@ -524,6 +827,7 @@ mod tests {
             false,
             Arc::new(FixedReconciler),
             Arc::new(SqliteStore::open_in_memory().unwrap()),
+            None,
             None,
         )
     }

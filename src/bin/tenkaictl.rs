@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use clap::error::ErrorKind;
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -645,6 +645,9 @@ enum MigrateCommand {
         declaration: PathBuf,
         #[arg(long)]
         backup_receipt_digest: Option<String>,
+        /// Current fencing generation; required with --target remote.
+        #[arg(long)]
+        expected_generation: Option<u64>,
         /// Detached tenkai.package-migration-approval.v1 JSON envelope.
         #[arg(
             long,
@@ -1180,6 +1183,10 @@ async fn run(cli: Cli) -> Result<()> {
                 }
                 return Ok(());
             }
+            Command::Migrate { command } => {
+                run_remote_migrate(&client, command).await?;
+                return Ok(());
+            }
             _ => bail!(
                 "this command is not available through the v1 remote API; use --target embedded"
             ),
@@ -1662,6 +1669,7 @@ async fn run(cli: Cli) -> Result<()> {
                 env,
                 declaration,
                 backup_receipt_digest,
+                expected_generation: _,
                 approval,
                 approval_trust_roots,
                 allow_unapproved_development,
@@ -1681,6 +1689,7 @@ async fn run(cli: Cli) -> Result<()> {
                     declaration,
                     backup_receipt_digest.as_deref(),
                     authorization,
+                    None,
                 )
                 .await?;
                 println!("{}", package_migration::format_migration(&record));
@@ -2539,6 +2548,243 @@ fn upgrade_authorization<'a>(
         ),
         _ => unreachable!("clap rejects partial or conflicting authorization modes"),
     }
+}
+
+async fn run_remote_migrate(
+    client: &tenkai::server::RemoteClient,
+    command: MigrateCommand,
+) -> Result<()> {
+    match command {
+        MigrateCommand::Preview {
+            name,
+            env,
+            declaration,
+            backup_receipt_digest,
+        } => {
+            let declaration = package_migration::MigrationDeclaration::load(&declaration)?;
+            let result = client
+                .preview_package_migration(
+                    &name,
+                    &package_migration::PackageMigrationPreviewRequest {
+                        version: package_migration::MIGRATION_API_VERSION,
+                        environment: env,
+                        declaration,
+                        backup_receipt_digest,
+                    },
+                )
+                .await?;
+            println!("{}", package_migration::format_migration(&result.record));
+            Ok(())
+        }
+        MigrateCommand::Apply {
+            name,
+            env,
+            declaration,
+            backup_receipt_digest,
+            expected_generation,
+            approval,
+            approval_trust_roots,
+            allow_unapproved_development,
+            development_reason: _,
+        } => {
+            reject_remote_migration_bypass(allow_unapproved_development)?;
+            let expected_generation = expected_generation.ok_or_else(|| {
+                anyhow::anyhow!("remote package migration apply requires --expected-generation")
+            })?;
+            let (approval, trust_roots, plan_approvals) =
+                load_remote_migration_authorization(approval, approval_trust_roots)?;
+            let declaration = package_migration::MigrationDeclaration::load(&declaration)?;
+            let result = client
+                .apply_package_migration(
+                    &name,
+                    &package_migration::PackageMigrationApplyRequest {
+                        version: package_migration::MIGRATION_API_VERSION,
+                        environment: env,
+                        declaration,
+                        expected_generation,
+                        approval,
+                        trust_roots,
+                        backup_receipt_digest,
+                        plan_approvals,
+                    },
+                )
+                .await?;
+            println!("{}", package_migration::format_migration(&result.record));
+            if matches!(
+                result.record.status,
+                package_migration::MigrationStatus::Failed
+                    | package_migration::MigrationStatus::RecoveryRequired
+            ) {
+                bail!(
+                    "package migration {} ended in {}",
+                    result.record.name,
+                    result.record.status.as_str()
+                );
+            }
+            Ok(())
+        }
+        MigrateCommand::Status { name } => {
+            let result = client.package_migration_status(&name).await?;
+            println!("{}", package_migration::format_migration(&result.record));
+            Ok(())
+        }
+        MigrateCommand::Resume {
+            name,
+            expected_generation,
+            approval,
+            approval_trust_roots,
+            allow_unapproved_development,
+            development_reason: _,
+        } => {
+            reject_remote_migration_bypass(allow_unapproved_development)?;
+            let expected_generation = expected_generation.ok_or_else(|| {
+                anyhow::anyhow!("remote package migration resume requires --expected-generation")
+            })?;
+            let (approval, trust_roots, plan_approvals) =
+                load_remote_migration_authorization(approval, approval_trust_roots)?;
+            let result = client
+                .resume_package_migration(
+                    &name,
+                    &package_migration::PackageMigrationMutateRequest {
+                        version: package_migration::MIGRATION_API_VERSION,
+                        expected_generation,
+                        approval,
+                        trust_roots,
+                        plan_approvals,
+                    },
+                )
+                .await?;
+            println!("{}", package_migration::format_migration(&result.record));
+            if matches!(
+                result.record.status,
+                package_migration::MigrationStatus::Failed
+                    | package_migration::MigrationStatus::RecoveryRequired
+            ) {
+                bail!(
+                    "package migration {} ended in {}",
+                    result.record.name,
+                    result.record.status.as_str()
+                );
+            }
+            Ok(())
+        }
+        MigrateCommand::Rollback {
+            name,
+            expected_generation,
+            approval,
+            approval_trust_roots,
+            allow_unapproved_development,
+            development_reason: _,
+        } => {
+            reject_remote_migration_bypass(allow_unapproved_development)?;
+            let expected_generation = expected_generation.ok_or_else(|| {
+                anyhow::anyhow!("remote package migration rollback requires --expected-generation")
+            })?;
+            let (approval, trust_roots, plan_approvals) =
+                load_remote_migration_authorization(approval, approval_trust_roots)?;
+            let result = client
+                .rollback_package_migration(
+                    &name,
+                    &package_migration::PackageMigrationMutateRequest {
+                        version: package_migration::MIGRATION_API_VERSION,
+                        expected_generation,
+                        approval,
+                        trust_roots,
+                        plan_approvals,
+                    },
+                )
+                .await?;
+            println!("{}", package_migration::format_migration(&result.record));
+            if result.record.status == package_migration::MigrationStatus::RecoveryRequired {
+                bail!(
+                    "package migration {} rollback requires recovery",
+                    result.record.name
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+fn reject_remote_migration_bypass(allow_unapproved_development: bool) -> Result<()> {
+    if allow_unapproved_development {
+        bail!(
+            "the local-development package-migration bypass is available only with --target embedded"
+        );
+    }
+    Ok(())
+}
+
+fn load_remote_migration_authorization(
+    approval: Option<PathBuf>,
+    approval_trust_roots: Option<PathBuf>,
+) -> Result<(
+    package_migration::MigrationApprovalEnvelope,
+    package_migration::ApprovalTrustRoots,
+    std::collections::BTreeMap<String, tenkai::plan_approval::ApprovalEnvelope>,
+)> {
+    let approval = approval.ok_or_else(|| {
+        anyhow::anyhow!("remote package migration requires --approval and --approval-trust-roots")
+    })?;
+    let trust_roots = approval_trust_roots.ok_or_else(|| {
+        anyhow::anyhow!("remote package migration requires --approval and --approval-trust-roots")
+    })?;
+    let raw = std::fs::read(&approval)
+        .with_context(|| format!("reading package migration approval {}", approval.display()))?;
+    let envelope: package_migration::MigrationApprovalEnvelope =
+        serde_json::from_slice(&raw).context("parsing package migration approval envelope")?;
+    let roots = package_migration::load_trust_roots(&trust_roots)?;
+    Ok((envelope, roots, sibling_plan_approvals(&approval)?))
+}
+
+fn approval_parent_dir(approval: &std::path::Path) -> &std::path::Path {
+    approval
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."))
+}
+
+fn sibling_plan_approvals(
+    approval: &std::path::Path,
+) -> Result<std::collections::BTreeMap<String, tenkai::plan_approval::ApprovalEnvelope>> {
+    let mut plan_approvals = std::collections::BTreeMap::new();
+    let dir = approval_parent_dir(approval);
+    let approval_name = approval.file_name();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(plan_approvals),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "reading package migration approval directory {}",
+                    dir.display()
+                )
+            });
+        }
+    };
+    for entry in entries {
+        let path = entry?.path();
+        if path.file_name() == approval_name {
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        let raw = std::fs::read(&path)
+            .with_context(|| format!("reading plan approval {}", path.display()))?;
+        let envelope: tenkai::plan_approval::ApprovalEnvelope = match serde_json::from_slice(&raw) {
+            Ok(envelope) => envelope,
+            Err(_) => continue,
+        };
+        if envelope.schema != tenkai::plan_approval::APPROVAL_SCHEMA {
+            continue;
+        }
+        plan_approvals.insert(stem.to_string(), envelope);
+    }
+    Ok(plan_approvals)
 }
 
 fn migration_authorization<'a>(
@@ -3509,5 +3755,21 @@ mod tests {
                 command: ReleaseCommand::Verify { spec, trust_roots }
             } if spec == "api@1.2.3" && trust_roots == std::path::Path::new("release-trust.toml")
         ));
+    }
+
+    #[test]
+    fn sibling_plan_approvals_read_the_current_directory_for_bare_filenames() {
+        assert_eq!(
+            approval_parent_dir(std::path::Path::new("cutover.approval.json")),
+            std::path::Path::new(".")
+        );
+        assert_eq!(
+            approval_parent_dir(std::path::Path::new("./cutover.approval.json")),
+            std::path::Path::new(".")
+        );
+        assert_eq!(
+            approval_parent_dir(std::path::Path::new("approvals/cutover.approval.json")),
+            std::path::Path::new("approvals")
+        );
     }
 }

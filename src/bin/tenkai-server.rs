@@ -343,6 +343,10 @@ async fn main() -> Result<()> {
                     allowed_principals: development_fixture_principals,
                 },
             ),
+            package_migration_trust_roots: std::env::var_os(
+                "TENKAI_PACKAGE_MIGRATION_APPROVAL_TRUST_ROOTS",
+            )
+            .map(std::path::PathBuf::from),
         },
         reconciler.clone(),
         store.clone(),
