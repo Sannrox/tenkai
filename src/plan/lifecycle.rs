@@ -1,6 +1,7 @@
 //! Immutable Plan encoding, lifecycle transitions, reads, and durable effects.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use serde::Deserialize;
 use serde_json::value::RawValue;
@@ -421,6 +422,7 @@ pub(super) async fn latest_for_environment(
     // Full Plan decode runs only for that row, on the same blocking pool as
     // the catalog query.
     reject_environment_index_retarget(ctx, environment).await?;
+    let snapshot = shared_retarget_snapshot(ctx).await?;
     let owned_environment = environment.to_string();
     map_environment_plan_objects(
         ctx,
@@ -430,7 +432,12 @@ pub(super) async fn latest_for_environment(
         None,
         None,
         None,
-        move |objects| newest_plan_from_objects(objects, &owned_environment),
+        move |objects| {
+            if let Some(snapshot) = snapshot.as_deref() {
+                reject_shared_snapshot_omit(snapshot, &owned_environment, &objects)?;
+            }
+            newest_plan_from_objects(objects, &owned_environment)
+        },
     )
     .await
 }
@@ -442,8 +449,12 @@ pub(super) async fn require_environment_indexes_match_payloads(
     environment: &str,
 ) -> Result<()> {
     reject_environment_index_retarget(ctx, environment).await?;
+    let snapshot = shared_retarget_snapshot(ctx).await?;
     let owned_environment = environment.to_string();
     map_environment_plan_objects(ctx, environment, None, true, None, None, None, move |objects| {
+        if let Some(snapshot) = snapshot.as_deref() {
+            reject_shared_snapshot_omit(snapshot, &owned_environment, &objects)?;
+        }
         for object in &objects {
             let peek = require_indexed_identity(object)?;
             if peek.environment != owned_environment {
@@ -626,6 +637,45 @@ async fn reject_environment_index_retarget(ctx: &mut Ctx, environment: &str) -> 
     }
     let objects = ctx.list_plans_for_retarget().await?;
     reject_retargeted_environment_index(objects.as_slice(), environment)
+}
+
+async fn shared_retarget_snapshot(ctx: &mut Ctx) -> Result<Option<Arc<Vec<Object>>>> {
+    if !ctx.shares_plan_retarget_tick() {
+        return Ok(None);
+    }
+    Ok(Some(ctx.list_plans_for_retarget().await?))
+}
+
+fn reject_shared_snapshot_omit(
+    snapshot: &[Object],
+    environment: &str,
+    indexed: &[Object],
+) -> Result<()> {
+    let indexed_ids = indexed
+        .iter()
+        .map(|object| object.id.as_str())
+        .collect::<HashSet<_>>();
+    for object in snapshot {
+        let peek = match peek_plan_environment(object) {
+            Ok(peek) => peek,
+            Err(_) => continue,
+        };
+        if peek.environment != environment {
+            continue;
+        }
+        match object.properties.get("environment") {
+            Some(indexed_env)
+                if indexed_env == environment && !indexed_ids.contains(object.id.as_str()) =>
+            {
+                bail!(
+                    "plan {} omitted from environment {environment} after shared retarget snapshot; refusing Current",
+                    object.id
+                );
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn reject_retargeted_environment_index<'a>(
@@ -1231,6 +1281,40 @@ mod tests {
             "{error}"
         );
         reject_retargeted_environment_index(&objects, "unrelated").unwrap();
+    }
+
+    #[test]
+    fn shared_snapshot_omit_fails_closed_without_a_second_kind_list() {
+        let matching = to_object(&plan(10)).unwrap();
+        let mut foreign_plan = plan(20);
+        foreign_plan.environment = "other".into();
+        let foreign = to_object(&foreign_plan).unwrap();
+
+        reject_shared_snapshot_omit(
+            &[matching.clone(), foreign.clone()],
+            "lifecycle-test",
+            std::slice::from_ref(&matching),
+        )
+        .unwrap();
+
+        let error =
+            reject_shared_snapshot_omit(&[matching.clone(), foreign], "lifecycle-test", &[])
+                .unwrap_err()
+                .to_string();
+        assert!(
+            error
+                .contains("omitted from environment lifecycle-test after shared retarget snapshot"),
+            "{error}"
+        );
+
+        let mut unreadable = matching;
+        unreadable
+            .properties
+            .insert("plan".into(), "not-json".into());
+        unreadable
+            .properties
+            .insert("environment".into(), "other".into());
+        reject_shared_snapshot_omit(&[unreadable], "lifecycle-test", &[]).unwrap();
     }
 
     #[test]
