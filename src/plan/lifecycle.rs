@@ -233,19 +233,7 @@ pub(super) fn from_object(object: &Object) -> Result<Plan> {
             plan.created_at
         );
     }
-    let expected_has_steps = if plan.steps.is_empty() {
-        "false"
-    } else {
-        "true"
-    };
-    if let Some(indexed_has_steps) = object.properties.get("has_steps")
-        && indexed_has_steps != expected_has_steps
-    {
-        bail!(
-            "plan {} has_steps index {indexed_has_steps} does not match payload steps",
-            object.id
-        );
-    }
+    require_has_steps_index(object, plan.steps.is_empty())?;
     let indexed_environment = object
         .properties
         .get("environment")
@@ -608,20 +596,20 @@ fn require_indexed_identity(object: &Object) -> Result<PlanPayloadPeek> {
             peek.state
         );
     }
-    let expected_has_steps = if peek.steps.is_empty() {
-        "false"
-    } else {
-        "true"
-    };
-    if let Some(indexed_has_steps) = object.properties.get("has_steps")
-        && indexed_has_steps != expected_has_steps
-    {
-        bail!(
-            "plan {} has_steps index {indexed_has_steps} does not match payload steps",
-            object.id
-        );
-    }
+    require_has_steps_index(object, peek.steps.is_empty())?;
     Ok(peek)
+}
+
+fn require_has_steps_index(object: &Object, steps_empty: bool) -> Result<()> {
+    let expected = if steps_empty { "false" } else { "true" };
+    match object.properties.get("has_steps") {
+        Some(indexed) if indexed == expected => Ok(()),
+        Some(indexed) => bail!(
+            "plan {} has_steps index {indexed} does not match payload steps",
+            object.id
+        ),
+        None => bail!("plan object {} has no has_steps index", object.id),
+    }
 }
 
 async fn reject_environment_index_retarget(ctx: &mut Ctx, environment: &str) -> Result<()> {
@@ -1058,7 +1046,17 @@ mod tests {
 
         let mut missing = object.clone();
         missing.properties.remove("has_steps");
-        assert!(from_object(&missing).unwrap().steps.is_empty());
+        let missing_error = from_object(&missing).unwrap_err().to_string();
+        assert!(
+            missing_error.contains("no has_steps index"),
+            "{missing_error}"
+        );
+        assert!(
+            require_indexed_identity(&missing)
+                .unwrap_err()
+                .to_string()
+                .contains("no has_steps index")
+        );
 
         let mut mismatch = object.clone();
         mismatch
@@ -1075,6 +1073,20 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("does not match payload steps")
+        );
+
+        let mut stepped = object;
+        let mut payload: serde_json::Value =
+            serde_json::from_str(stepped.properties.get("plan").unwrap()).unwrap();
+        payload["steps"] = serde_json::json!([{"opaque": true}]);
+        stepped
+            .properties
+            .insert("plan".into(), payload.to_string());
+        stepped.properties.remove("has_steps");
+        let stepped_missing = require_indexed_identity(&stepped).unwrap_err().to_string();
+        assert!(
+            stepped_missing.contains("no has_steps index"),
+            "{stepped_missing}"
         );
     }
 

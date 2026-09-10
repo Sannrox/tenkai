@@ -804,6 +804,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn controller_reconcile_fails_closed_on_missing_has_steps_for_stepped_plan() {
+        let (database, mut ctx) = registered_ctx("reconcile-missing-has-steps", &["stage"]).await;
+        let work = test_plan("stage", 100, PlanState::Computed);
+        plan::store(&mut ctx, &work).await.unwrap();
+        let mut missing = ctx.get(&work.id).await.unwrap().unwrap();
+        missing.properties.remove("has_steps");
+        ctx.put(missing).await.unwrap();
+
+        let reconciler = Reconciler::new(ctx.clone(), config()).unwrap();
+        let report = reconciler.run_once().await.unwrap();
+        assert!(
+            matches!(
+                &report.environments[0].status,
+                EnvironmentStatus::Failed { error, .. }
+                    if error.contains("no has_steps index")
+            ),
+            "{:?}",
+            report.environments[0].status
+        );
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
     async fn controller_reconcile_fails_closed_on_has_steps_index_poison() {
         let (database, mut ctx) = registered_ctx("reconcile-has-steps-poison", &["stage"]).await;
         let work = test_plan("stage", 100, PlanState::Computed);

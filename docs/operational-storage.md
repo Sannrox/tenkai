@@ -94,8 +94,10 @@ those retargeted rows
 ([ADR 0025](decisions/0025-remote-plan-property-query-bounds.md));
 retarget detection uses kind-wide `ListObjects` instead so a payload that
 still names the queried environment cannot omit-succeed into Current.
-Identity peeks compare `created_at`, `environment`, `status`, and present `has_steps`
-without materializing step JSON trees. Reconcile runs that catalog-wide
+Identity peeks compare `created_at`, `environment`, `status`, and `has_steps`
+(`true` iff the payload has steps; the index must be present) without
+materializing step JSON trees. A stepped plan whose `has_steps` index is
+missing cannot omit-succeed into Current. Reconcile runs that catalog-wide
 index check once per environment tick before empty-plan retirement, Running
 recovery, and admission; those follow-on loaders do not repeat it.
 Inspect-latest (`latest_for_environment`) does not apply `LIMIT` on
