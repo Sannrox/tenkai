@@ -49,7 +49,9 @@ behavior.
   Remote hosts kind-list plans with `ListObjects` and peek payload
   `environment` so a retargeted index cannot omit-succeed into Current.
   A reconcile tick shares that kind-list across environments; it does not
-  issue one catalog transfer per environment.
+  issue one catalog transfer per environment. A later `FindByProperty` that
+  omits a plan the shared snapshot still showed as indexed to the current
+  environment fails closed rather than reporting Current.
 - After decode, `created_at` index values must still match the plan payload
   ([#323](https://github.com/Sannrox/tenkai/issues/323)).
 - Operators of the embedded SQLite host keep the SQL-bounded path.

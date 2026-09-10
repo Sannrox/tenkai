@@ -96,7 +96,10 @@ retarget detection uses kind-wide `ListObjects` instead so a payload that
 still names the queried environment cannot omit-succeed into Current.
 A remote reconcile tick shares that Plan kind-list across concurrent
 environments so retarget reject does not re-transfer the catalog once per
-environment. Inspect and other one-shot paths still list once per call.
+environment. If a later environment-scoped `FindByProperty` omits a plan
+that the shared snapshot still showed as indexed to that environment, the
+tick fails closed instead of painting Current. It does not issue a second
+kind-wide list. Inspect and other one-shot paths still list once per call.
 Identity peeks compare `created_at`, `environment`, `status`, and `has_steps`
 (`true` iff the payload has steps; the index must be present) without
 materializing step JSON trees. A stepped plan whose `has_steps` index is

@@ -413,6 +413,10 @@ impl Ctx {
     ///
     /// Dropping the returned guard ends the tick even if the caller is
     /// cancelled.
+    pub(crate) fn shares_plan_retarget_tick(&self) -> bool {
+        self.plan_kind_list.tick_cell().is_some()
+    }
+
     pub(crate) fn with_shared_plan_retarget_tick(&self) -> (Self, PlanRetargetTickGuard) {
         let scan = Arc::new(PlanKindListTick::default());
         if !self.is_embedded() {
@@ -1192,16 +1196,17 @@ mod tests {
     use crate::pb::sekai::{
         AcquireLeaseRequest, AcquireLeaseResponse, ActionInstance, CreateLinkRequest,
         CreateLinkResponse, CreateObjectRequest, CreateObjectResponse, Decision, DeleteLinkRequest,
-        DeleteLinkResponse, DeleteObjectRequest, DeleteObjectResponse,
+        DeleteLinkResponse, DeleteObjectRequest, DeleteObjectResponse, FindByPropertyRequest,
         GetGovernedActionTypeRequest, GetGovernedActionTypeResponse, GetLeaseRequest,
         GetLeaseResponse, GetLinkedObjectsRequest, GetLinkedObjectsResponse, GetLinksRequest,
         GetLinksResponse, GetObjectRequest, GetObjectResponse, GovernedActionType, Lease, Link,
         ListActionPoliciesRequest, ListActionPoliciesResponse, ListDecisionsRequest,
-        ListDecisionsResponse, Object, ObjectChange, PutGovernedActionTypeRequest,
-        PutGovernedActionTypeResponse, RecordDecisionRequest, RecordDecisionResponse,
-        RefreshLeaseRequest, RefreshLeaseResponse, ReleaseLeaseRequest, ReleaseLeaseResponse,
-        SubmitActionInstanceRequest, SubmitActionInstanceResponse, TakeoverExpiredLeaseRequest,
-        TakeoverExpiredLeaseResponse, UpdateObjectRequest, UpdateObjectResponse,
+        ListDecisionsResponse, ListObjectsRequest, ListObjectsResponse, Object, ObjectChange,
+        PutGovernedActionTypeRequest, PutGovernedActionTypeResponse, RecordDecisionRequest,
+        RecordDecisionResponse, RefreshLeaseRequest, RefreshLeaseResponse, ReleaseLeaseRequest,
+        ReleaseLeaseResponse, SubmitActionInstanceRequest, SubmitActionInstanceResponse,
+        TakeoverExpiredLeaseRequest, TakeoverExpiredLeaseResponse, UpdateObjectRequest,
+        UpdateObjectResponse,
     };
     use sekai_client::{ClientConfig, RetryPolicy, SdkErrorCode};
     use std::collections::BTreeMap;
@@ -1330,6 +1335,72 @@ mod tests {
                     })),
                     None => Err(tonic::Status::not_found("object not found")),
                 }
+            })
+        }
+    }
+
+    struct FindByPropertyRpc(MockSekaiState);
+
+    impl tonic::server::UnaryService<FindByPropertyRequest> for FindByPropertyRpc {
+        type Response = ListObjectsResponse;
+        type Future = Pin<
+            Box<dyn Future<Output = Result<tonic::Response<Self::Response>, tonic::Status>> + Send>,
+        >;
+
+        fn call(&mut self, request: tonic::Request<FindByPropertyRequest>) -> Self::Future {
+            let state = self.0.clone();
+            Box::pin(async move {
+                let request = request.into_inner();
+                let objects = state
+                    .objects
+                    .lock()
+                    .unwrap()
+                    .values()
+                    .filter(|object| {
+                        object.kind == request.kind
+                            && object
+                                .properties
+                                .get(&request.key)
+                                .is_some_and(|value| value == &request.value)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let total = objects.len() as i32;
+                Ok(tonic::Response::new(ListObjectsResponse { objects, total }))
+            })
+        }
+    }
+
+    struct ListObjectsRpc(MockSekaiState);
+
+    impl tonic::server::UnaryService<ListObjectsRequest> for ListObjectsRpc {
+        type Response = ListObjectsResponse;
+        type Future = Pin<
+            Box<dyn Future<Output = Result<tonic::Response<Self::Response>, tonic::Status>> + Send>,
+        >;
+
+        fn call(&mut self, request: tonic::Request<ListObjectsRequest>) -> Self::Future {
+            let state = self.0.clone();
+            Box::pin(async move {
+                let filter = request.into_inner().filter.unwrap_or_default();
+                let mut objects = state
+                    .objects
+                    .lock()
+                    .unwrap()
+                    .values()
+                    .filter(|object| filter.kind.is_empty() || object.kind == filter.kind)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                objects.sort_by(|left, right| left.id.cmp(&right.id));
+                let total = objects.len() as i32;
+                let offset = filter.offset.max(0) as usize;
+                let limit = if filter.limit > 0 {
+                    filter.limit as usize
+                } else {
+                    objects.len()
+                };
+                let objects = objects.into_iter().skip(offset).take(limit).collect();
+                Ok(tonic::Response::new(ListObjectsResponse { objects, total }))
             })
         }
     }
@@ -1905,6 +1976,14 @@ mod tests {
                         let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
                         grpc.unary(GetObjectRpc(state), request).await
                     }
+                    "/sekai.SekaiService/FindByProperty" => {
+                        let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
+                        grpc.unary(FindByPropertyRpc(state), request).await
+                    }
+                    "/sekai.SekaiService/ListObjects" => {
+                        let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
+                        grpc.unary(ListObjectsRpc(state), request).await
+                    }
                     "/sekai.SekaiService/UpdateObject" => {
                         let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
                         grpc.unary(UpdateObjectRpc(state), request).await
@@ -2425,6 +2504,69 @@ mod tests {
         tick.end();
         let _ = tick.get_or_load(load).await.unwrap();
         assert_eq!(loads.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    fn mock_plan_object(env: &str, created_at: i64) -> Object {
+        crate::plan::Plan {
+            format_version: crate::plan::PLAN_FORMAT_VERSION,
+            id: format!("tenkai:plan:{env}:{created_at}:fixture"),
+            content_id: format!("sha256:{created_at}"),
+            environment: env.into(),
+            created_at,
+            inputs: Vec::new(),
+            steps: Vec::new(),
+            state: crate::plan::PlanState::Computed,
+            gates_skipped: None,
+            status_detail: String::new(),
+            maintenance_blocked: false,
+            prior_warnings: Vec::new(),
+            recalled_recovery_reason: None,
+        }
+        .to_object()
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn shared_retarget_tick_fails_closed_when_later_env_index_omits_after_snapshot() {
+        let env_a = mock_plan_object("env-a", 10);
+        let env_b = mock_plan_object("env-b", 20);
+        let env_b_id = env_b.id.clone();
+        let state = MockSekaiState::default();
+        state
+            .objects
+            .lock()
+            .unwrap()
+            .insert(env_a.id.clone(), env_a);
+        state
+            .objects
+            .lock()
+            .unwrap()
+            .insert(env_b.id.clone(), env_b);
+        let (ctx, server) = remote_ctx(state.clone()).await;
+        let (mut tick_ctx, _guard) = ctx.with_shared_plan_retarget_tick();
+
+        crate::plan::require_environment_indexes_match_payloads(&mut tick_ctx, "env-a")
+            .await
+            .unwrap();
+
+        {
+            let mut objects = state.objects.lock().unwrap();
+            let mut retargeted = objects.get(&env_b_id).cloned().unwrap();
+            retargeted
+                .properties
+                .insert("environment".into(), "other".into());
+            objects.insert(env_b_id, retargeted);
+        }
+
+        let error = crate::plan::require_environment_indexes_match_payloads(&mut tick_ctx, "env-b")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("omitted from environment env-b after shared retarget snapshot"),
+            "{error}"
+        );
+        server.abort();
     }
 
     fn indexed_plan_object(id: &str, created_at: i64) -> Object {
