@@ -81,6 +81,11 @@ and are not registered.
 | --- | --- | --- |
 | `management.reconcile` | `POST /v1/reconcile` | Require tenant context; resolve tenant envs before bounded work selection |
 | `management.fleet_status` | `GET /v1/fleet/status` | Filter rows to tenant envs |
+| `management.package_migration_preview` | `POST /v1/migrations/{name}/preview` | Require tenant context; non-disclosing deny on cross-tenant env |
+| `management.package_migration_apply` | `POST /v1/migrations/{name}/apply` | Same as preview; mutating verb |
+| `management.package_migration_status` | `GET /v1/migrations/{name}` | Non-disclosing deny when the stored env is not visible |
+| `management.package_migration_resume` | `POST /v1/migrations/{name}/resume` | Same as apply |
+| `management.package_migration_rollback` | `POST /v1/migrations/{name}/rollback` | Same as apply |
 | `environment.list` | `GET /v1/environments` | List only tenant partition ids |
 | `environment.get` | `GET /v1/environments/{env}` | Non-disclosing deny on cross-tenant |
 | `environment.status` | `GET /v1/environments/{env}/status` | Same as get |

@@ -98,6 +98,9 @@ pub trait ReconcilePort: Send + Sync {
         facts: BTreeMap<String, String>,
     ) -> InventoryFuture<'_>;
     fn diagnostics_snapshot(&self) -> ReconcileDiagnostics;
+    fn application_ctx(&self) -> Option<Ctx> {
+        None
+    }
 }
 
 impl ReconcilePort for Reconciler {
@@ -191,6 +194,10 @@ impl ReconcilePort for Reconciler {
 
     fn diagnostics_snapshot(&self) -> ReconcileDiagnostics {
         Reconciler::diagnostics_snapshot(self)
+    }
+
+    fn application_ctx(&self) -> Option<Ctx> {
+        Some(self.ctx_clone())
     }
 }
 

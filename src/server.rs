@@ -9,6 +9,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 use crate::auth_context::{
     AuthHostConfig, AuthStack, AuthenticatedRequestContext, CommunityTokenAuthenticator,
@@ -62,6 +63,10 @@ pub struct ServerConfig {
     pub metrics_enabled: bool,
     /// Explicitly enabled, development-only authenticated fixture surface.
     pub development_fixtures: Option<DevelopmentFixtureConfig>,
+    /// Host-owned package-migration approval trust roots (ADR 0026).
+    /// Remote apply/resume/rollback require this file; request-supplied roots
+    /// must match it and cannot introduce a caller-chosen signer set.
+    pub package_migration_trust_roots: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -87,6 +92,7 @@ impl ServerConfig {
             tenant_store: None,
             metrics_enabled: false,
             development_fixtures: None,
+            package_migration_trust_roots: None,
         }
     }
 
@@ -214,12 +220,17 @@ pub fn router(
         reconciler.clone(),
         store.clone(),
     ));
+    let package_migration_trust_roots = match &config.package_migration_trust_roots {
+        Some(path) => Some(crate::package_migration::load_trust_roots(path)?),
+        None => None,
+    };
     let management = Arc::new(ManagementOperations::new(
         auth,
         config.requirements.tenant_mode,
         reconciler.clone(),
         store.clone(),
         config.tenant_store.clone(),
+        package_migration_trust_roots,
     ));
     let mut router = Router::new()
         .route("/healthz", get(health))
@@ -231,6 +242,20 @@ pub fn router(
         .route(
             "/v1/environments/{environment}/status",
             get(environment_status),
+        )
+        .route(
+            "/v1/migrations/{name}/preview",
+            post(preview_package_migration),
+        )
+        .route("/v1/migrations/{name}/apply", post(apply_package_migration))
+        .route("/v1/migrations/{name}", get(package_migration_status))
+        .route(
+            "/v1/migrations/{name}/resume",
+            post(resume_package_migration),
+        )
+        .route(
+            "/v1/migrations/{name}/rollback",
+            post(rollback_package_migration),
         )
         .route(
             "/v1/runtime/environments/{environment}/work",
@@ -623,6 +648,130 @@ async fn reconcile(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Re
     }
 }
 
+fn parse_migration_json<T: DeserializeOwned>(body: &[u8]) -> Result<T, Box<Response>> {
+    serde_json::from_slice(body).map_err(|error| {
+        Box::new(error_response(
+            StatusCode::BAD_REQUEST,
+            format!("invalid package migration request: {error}"),
+        ))
+    })
+}
+
+async fn preview_package_migration(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match management_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return management_error(error),
+    };
+    let request = match parse_migration_json(&body) {
+        Ok(request) => request,
+        Err(response) => return *response,
+    };
+    match state
+        .management
+        .preview_package_migration(&credential, &name, request)
+        .await
+    {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => management_error(error),
+    }
+}
+
+async fn apply_package_migration(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match management_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return management_error(error),
+    };
+    let request = match parse_migration_json(&body) {
+        Ok(request) => request,
+        Err(response) => return *response,
+    };
+    match state
+        .management
+        .apply_package_migration(&credential, &name, request)
+        .await
+    {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => management_error(error),
+    }
+}
+
+async fn package_migration_status(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match management_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return management_error(error),
+    };
+    match state
+        .management
+        .package_migration_status(&credential, &name)
+        .await
+    {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => management_error(error),
+    }
+}
+
+async fn resume_package_migration(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match management_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return management_error(error),
+    };
+    let request = match parse_migration_json(&body) {
+        Ok(request) => request,
+        Err(response) => return *response,
+    };
+    match state
+        .management
+        .resume_package_migration(&credential, &name, request)
+        .await
+    {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => management_error(error),
+    }
+}
+
+async fn rollback_package_migration(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match management_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return management_error(error),
+    };
+    let request = match parse_migration_json(&body) {
+        Ok(request) => request,
+        Err(response) => return *response,
+    };
+    match state
+        .management
+        .rollback_package_migration(&credential, &name, request)
+        .await
+    {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => management_error(error),
+    }
+}
+
 async fn runtime_work(
     State(state): State<Arc<AppState>>,
     Path(environment): Path<String>,
@@ -743,6 +892,8 @@ fn management_error(error: ManagementError) -> Response {
         ManagementError::Unauthorized(message) => error_response(StatusCode::UNAUTHORIZED, message),
         ManagementError::Forbidden(message) => error_response(StatusCode::FORBIDDEN, message),
         ManagementError::NotFound(message) => error_response(StatusCode::NOT_FOUND, message),
+        ManagementError::BadRequest(message) => error_response(StatusCode::BAD_REQUEST, message),
+        ManagementError::Conflict(message) => error_response(StatusCode::CONFLICT, message),
         ManagementError::Unavailable(message) => {
             error_response(StatusCode::SERVICE_UNAVAILABLE, message)
         }
@@ -823,17 +974,104 @@ impl RemoteClient {
             .await
     }
 
+    pub async fn preview_package_migration(
+        &self,
+        name: &str,
+        request: &crate::package_migration::PackageMigrationPreviewRequest,
+    ) -> anyhow::Result<crate::package_migration::PackageMigrationResult> {
+        self.package_migration_result(
+            reqwest::Method::POST,
+            &format!("/v1/migrations/{name}/preview"),
+            Some(request),
+        )
+        .await
+    }
+
+    pub async fn apply_package_migration(
+        &self,
+        name: &str,
+        request: &crate::package_migration::PackageMigrationApplyRequest,
+    ) -> anyhow::Result<crate::package_migration::PackageMigrationResult> {
+        self.package_migration_result(
+            reqwest::Method::POST,
+            &format!("/v1/migrations/{name}/apply"),
+            Some(request),
+        )
+        .await
+    }
+
+    pub async fn package_migration_status(
+        &self,
+        name: &str,
+    ) -> anyhow::Result<crate::package_migration::PackageMigrationResult> {
+        self.package_migration_result(
+            reqwest::Method::GET,
+            &format!("/v1/migrations/{name}"),
+            None::<&crate::package_migration::PackageMigrationPreviewRequest>,
+        )
+        .await
+    }
+
+    pub async fn resume_package_migration(
+        &self,
+        name: &str,
+        request: &crate::package_migration::PackageMigrationMutateRequest,
+    ) -> anyhow::Result<crate::package_migration::PackageMigrationResult> {
+        self.package_migration_result(
+            reqwest::Method::POST,
+            &format!("/v1/migrations/{name}/resume"),
+            Some(request),
+        )
+        .await
+    }
+
+    pub async fn rollback_package_migration(
+        &self,
+        name: &str,
+        request: &crate::package_migration::PackageMigrationMutateRequest,
+    ) -> anyhow::Result<crate::package_migration::PackageMigrationResult> {
+        self.package_migration_result(
+            reqwest::Method::POST,
+            &format!("/v1/migrations/{name}/rollback"),
+            Some(request),
+        )
+        .await
+    }
+
+    async fn package_migration_result<B: serde::Serialize>(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&B>,
+    ) -> anyhow::Result<crate::package_migration::PackageMigrationResult> {
+        let result: crate::package_migration::PackageMigrationResult =
+            self.request_json_body(method, path, body).await?;
+        crate::package_migration::require_migration_api_version(result.version)?;
+        Ok(result)
+    }
+
     async fn request_json<T: serde::de::DeserializeOwned>(
         &self,
         method: reqwest::Method,
         path: &str,
     ) -> anyhow::Result<T> {
-        let response = self
+        self.request_json_body::<(), T>(method, path, None).await
+    }
+
+    async fn request_json_body<B: serde::Serialize, T: serde::de::DeserializeOwned>(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&B>,
+    ) -> anyhow::Result<T> {
+        let mut request = self
             .http
             .request(method, format!("{}{path}", self.base_url))
-            .bearer_auth(&self.token)
-            .send()
-            .await?;
+            .bearer_auth(&self.token);
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        let response = request.send().await?;
         let status = response.status();
         if !status.is_success() {
             let detail = response.text().await.unwrap_or_default();
@@ -2041,5 +2279,391 @@ mod tests {
         assert!(RemoteClient::new("http://127.0.0.1:8080", "secret").is_ok());
         assert!(RemoteClient::new("http://[::1]:8080", "secret").is_ok());
         assert!(RemoteClient::new("http://tenkai.example.test", "secret").is_err());
+    }
+
+    fn migration_preview_body(environment: &str, version: u32) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "version": version,
+            "environment": environment,
+            "declaration": {
+                "version": 1,
+                "profile": "tenkai.package_migration.v1",
+                "source": {
+                    "product": "pkg",
+                    "version": "1.0.0",
+                    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                "target": {
+                    "product": "pkg",
+                    "version": "1.1.0",
+                    "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                },
+                "compatibility": {
+                    "version": 1,
+                    "status": "compatible",
+                    "evidence_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                },
+                "checkpoints": [{ "id": "preflight", "class": "reversible" }]
+            }
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn package_migration_routes_fail_closed_without_application_ctx() {
+        let (app, _store) = app();
+        let unauthenticated = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/migrations/cutover/preview")
+                    .header("content-type", "application/json")
+                    .body(Body::from(migration_preview_body("local", 1)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+        let unknown_version = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/migrations/cutover/preview")
+                    .header("authorization", "Bearer management-secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(migration_preview_body("local", 99)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unknown_version.status(), StatusCode::BAD_REQUEST);
+        let unknown_body = String::from_utf8(
+            axum::body::to_bytes(unknown_version.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(
+            unknown_body.contains("unsupported package migration API version 99"),
+            "{unknown_body}"
+        );
+
+        let mut bypass =
+            serde_json::from_slice::<serde_json::Value>(&migration_preview_body("local", 1))
+                .unwrap();
+        bypass.as_object_mut().unwrap().insert(
+            "allow_unapproved_development".into(),
+            serde_json::json!(true),
+        );
+        let bypassed = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/migrations/cutover/preview")
+                    .header("authorization", "Bearer management-secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&bypass).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bypassed.status(), StatusCode::BAD_REQUEST);
+        let bypass_body = String::from_utf8(
+            axum::body::to_bytes(bypassed.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(bypass_body.contains("unknown field"), "{bypass_body}");
+        assert!(!bypass_body.contains("management-secret"));
+
+        let unavailable = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/migrations/cutover/preview")
+                    .header("authorization", "Bearer management-secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(migration_preview_body("local", 1)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let apply = app
+            .oneshot(
+                Request::post("/v1/migrations/cutover/apply")
+                    .header("authorization", "Bearer management-secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "version": 1,
+                            "environment": "local",
+                            "expected_generation": 0,
+                            "declaration": serde_json::from_slice::<serde_json::Value>(
+                                &migration_preview_body("local", 1)
+                            ).unwrap()["declaration"],
+                            "approval": {
+                                "schema": "tenkai.package-migration-approval.v1",
+                                "key_id": "k",
+                                "statement": {
+                                    "identity_digest": format!("sha256:{}", "a".repeat(64)),
+                                    "environment": "local",
+                                    "purpose": "execute_package_migration",
+                                    "issued_at": 1,
+                                    "expires_at": 2
+                                },
+                                "signature": "c2ln"
+                            },
+                            "trust_roots": {
+                                "version": 1,
+                                "signers": [{
+                                    "key_id": "k",
+                                    "identity": "approver",
+                                    "public_key": "cA=="
+                                }]
+                            }
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(apply.status(), StatusCode::FORBIDDEN);
+        let apply_body = String::from_utf8(
+            axum::body::to_bytes(apply.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(
+            apply_body.contains("trust roots are not configured"),
+            "{apply_body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn package_migration_preview_matches_embedded_identity() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-migration-http-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let database = root.join("tenkai.db");
+        let mut ctx = crate::client::Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::plan::env_add(&mut ctx, "local", "fixture")
+            .await
+            .unwrap();
+        for (version, body) in [("1.0.0", "one"), ("1.1.0", "two")] {
+            let dir = root.join(version);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("payload.txt"), body).unwrap();
+            std::fs::write(
+                dir.join("tenkai.toml"),
+                format!(
+                    r#"
+[product]
+name = "pkg"
+version = "{version}"
+[deploy]
+install = "true"
+inputs = ["payload.txt"]
+"#
+                ),
+            )
+            .unwrap();
+            crate::catalog::publish(
+                &mut ctx,
+                &dir.join("tenkai.toml"),
+                &crate::catalog::PublishOptions {
+                    signature: None,
+                    trust_roots: None,
+                    allow_unsigned_development: true,
+                    provenance: Vec::new(),
+                    provenance_trust_roots: None,
+                    change_set_evidence: None,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let source = ctx
+            .get(&crate::ontology::release_id("pkg", "1.0.0"))
+            .await
+            .unwrap()
+            .unwrap();
+        let target = ctx
+            .get(&crate::ontology::release_id("pkg", "1.1.0"))
+            .await
+            .unwrap()
+            .unwrap();
+        let pin_digest = |raw: &str| {
+            if raw.starts_with("sha256:") {
+                raw.to_string()
+            } else {
+                format!("sha256:{raw}")
+            }
+        };
+        let declaration = crate::package_migration::MigrationDeclaration {
+            version: 1,
+            profile: crate::package_migration::MIGRATION_PROFILE.into(),
+            source: crate::package_migration::PackagePin {
+                product: "pkg".into(),
+                version: "1.0.0".into(),
+                digest: pin_digest(source.properties.get("digest").unwrap()),
+            },
+            target: crate::package_migration::PackagePin {
+                product: "pkg".into(),
+                version: "1.1.0".into(),
+                digest: pin_digest(target.properties.get("digest").unwrap()),
+            },
+            compatibility: crate::package_migration::CompatibilityEvidence {
+                version: 1,
+                status: crate::package_migration::CompatibilityStatus::Compatible,
+                evidence_digest: format!("sha256:{}", "e".repeat(64)),
+            },
+            checkpoints: vec![crate::package_migration::CheckpointDecl {
+                id: "preflight".into(),
+                class: crate::package_migration::CheckpointClass::Reversible,
+                pre_admission: None,
+            }],
+        };
+        let embedded = crate::package_migration::preview(
+            &mut ctx,
+            "cutover",
+            "local",
+            declaration.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        let reconciler =
+            crate::reconciler::Reconciler::new(ctx.clone(), crate::reconciler::Config::default())
+                .unwrap();
+        let store = Arc::new(crate::storage::SqliteStore::open(&database).unwrap());
+        let app = router(
+            ServerConfig::community("management-secret", HashMap::new()),
+            Arc::new(reconciler),
+            store,
+        )
+        .unwrap();
+        let response = app
+            .oneshot(
+                Request::post("/v1/migrations/cutover/preview")
+                    .header("authorization", "Bearer management-secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(
+                            &crate::package_migration::PackageMigrationPreviewRequest {
+                                version: crate::package_migration::MIGRATION_API_VERSION,
+                                environment: "local".into(),
+                                declaration,
+                                backup_receipt_digest: None,
+                            },
+                        )
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let result: crate::package_migration::PackageMigrationResult =
+            serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            result.version,
+            crate::package_migration::MIGRATION_API_VERSION
+        );
+        assert_eq!(result.record.identity_digest, embedded.identity_digest);
+        assert_eq!(result.record.environment, "local");
+        assert_eq!(
+            result.record.status,
+            crate::package_migration::MigrationStatus::Admitted
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn package_migration_preview_hides_cross_tenant_environment() {
+        use crate::runtime_capabilities::enterprise_auth_capabilities;
+        use crate::storage::EnvironmentRecord;
+        use crate::tenant_store::tenant_memory_store_capabilities;
+
+        let tenant_store = Arc::new(crate::tenant_store::InMemoryTenantOperationalStore::new());
+        let mut config = ServerConfig::community("management-secret", HashMap::new());
+        config.requirements.tenant_mode = true;
+        config.requirements.require_enterprise_authentication = true;
+        config.capabilities = crate::runtime_capabilities::ProvidedCapabilities::assemble(
+            "enterprise-tenant-memory",
+            [
+                tenant_memory_store_capabilities(),
+                enterprise_auth_capabilities(),
+            ],
+        );
+        config.auth_host = AuthHostConfig {
+            required_extension_id: Some("auth.enterprise".into()),
+            expected_contract_version: crate::auth_context::AUTH_CONTEXT_CONTRACT_VERSION,
+            expected_audience: Some("tenkai-server".into()),
+        };
+        config.enterprise_auth = Some(Arc::new(TenantAssertionExtension));
+        config.tenant_store = Some(tenant_store.clone());
+
+        let authority = crate::auth_context::TenantDerivationAuthority::new("auth.enterprise");
+        let ctx_b = TenantAssertionExtension
+            .authenticate(
+                &CredentialMaterial {
+                    request_id: "seed-b".into(),
+                    bearer_token: None,
+                    assertion: Some(
+                        br#"{"tenant":"tenant-b","principal":"user-b","capabilities":["read","management"]}"#
+                            .to_vec(),
+                    ),
+                },
+                &authority,
+            )
+            .unwrap();
+        tenant_store
+            .put_environment_for(
+                &ctx_b,
+                &EnvironmentRecord {
+                    id: "env-b".into(),
+                    revision: 0,
+                    configuration_json: "{}".into(),
+                },
+            )
+            .unwrap();
+
+        let store = Arc::new(crate::storage::SqliteStore::open_in_memory().unwrap());
+        let tenant_app = router(config, Arc::new(FixedReconciler), store).unwrap();
+        let cross = tenant_app
+            .oneshot(
+                Request::post("/v1/migrations/cutover/preview")
+                    .header(
+                        "x-tenkai-assertion",
+                        r#"{"tenant":"tenant-a","principal":"user-a","capabilities":["read","management"]}"#,
+                    )
+                    .header("content-type", "application/json")
+                    .body(Body::from(migration_preview_body("env-b", 1)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cross.status(), StatusCode::NOT_FOUND);
+        let body = String::from_utf8(
+            axum::body::to_bytes(cross.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(body.contains(NON_DISCLOSING_DENY));
+        assert!(!body.contains("tenant-b"));
     }
 }

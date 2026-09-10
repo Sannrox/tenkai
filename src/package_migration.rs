@@ -5,8 +5,8 @@
 //! checkpoints into one immutable plan, then executes, resumes, rolls back,
 //! or records recovery-required state under the environment fence.
 
-use std::collections::{BTreeSet, HashMap};
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -26,6 +26,7 @@ use crate::signature_verification;
 pub const MIGRATION_PROFILE: &str = "tenkai.package_migration.v1";
 pub const MIGRATION_DOCUMENT_VERSION: u32 = 1;
 pub const COMPATIBILITY_VERSION: u32 = 1;
+pub const MIGRATION_API_VERSION: u32 = 1;
 pub const APPROVAL_SCHEMA: &str = "tenkai.package-migration-approval.v1";
 const APPROVAL_DOMAIN: &[u8] = b"TENKAI-PACKAGE-MIGRATION-APPROVAL-V1\0";
 pub const APPROVAL_PURPOSE: &str = "execute_package_migration";
@@ -181,17 +182,170 @@ pub struct MigrationApprovalEnvelope {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ApprovalTrustRoots {
-    version: u32,
-    signers: Vec<ApprovalTrustedSigner>,
+pub struct ApprovalTrustRoots {
+    pub version: u32,
+    pub signers: Vec<ApprovalTrustedSigner>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ApprovalTrustedSigner {
-    key_id: String,
-    identity: String,
-    public_key: String,
+pub struct ApprovalTrustedSigner {
+    pub key_id: String,
+    pub identity: String,
+    pub public_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackageMigrationPreviewRequest {
+    pub version: u32,
+    pub environment: String,
+    pub declaration: MigrationDeclaration,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_receipt_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackageMigrationApplyRequest {
+    pub version: u32,
+    pub environment: String,
+    pub declaration: MigrationDeclaration,
+    pub expected_generation: u64,
+    pub approval: MigrationApprovalEnvelope,
+    pub trust_roots: ApprovalTrustRoots,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_receipt_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub plan_approvals: BTreeMap<String, crate::plan_approval::ApprovalEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackageMigrationMutateRequest {
+    pub version: u32,
+    pub expected_generation: u64,
+    pub approval: MigrationApprovalEnvelope,
+    pub trust_roots: ApprovalTrustRoots,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub plan_approvals: BTreeMap<String, crate::plan_approval::ApprovalEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackageMigrationResult {
+    pub version: u32,
+    pub record: MigrationRecord,
+}
+
+impl PackageMigrationResult {
+    pub fn from_record(record: MigrationRecord) -> Self {
+        Self {
+            version: MIGRATION_API_VERSION,
+            record,
+        }
+    }
+}
+
+pub fn require_migration_api_version(version: u32) -> Result<()> {
+    if version != MIGRATION_API_VERSION {
+        bail!(
+            "unsupported package migration API version {version}; expected {MIGRATION_API_VERSION}"
+        );
+    }
+    Ok(())
+}
+
+pub fn load_trust_roots(path: &Path) -> Result<ApprovalTrustRoots> {
+    let roots_raw = std::fs::read_to_string(path).with_context(|| {
+        format!(
+            "reading package migration approval trust roots {}",
+            path.display()
+        )
+    })?;
+    let roots: ApprovalTrustRoots = toml::from_str(&roots_raw).with_context(|| {
+        format!(
+            "parsing package migration approval trust roots {}",
+            path.display()
+        )
+    })?;
+    if roots.version != TRUST_ROOT_VERSION || roots.signers.is_empty() {
+        bail!(
+            "package migration approval trust roots must use version {TRUST_ROOT_VERSION} and contain at least one signer"
+        );
+    }
+    Ok(roots)
+}
+
+#[derive(Debug)]
+pub struct RemoteApprovalFiles {
+    dir: PathBuf,
+    pub approval: PathBuf,
+    pub trust_roots: PathBuf,
+}
+
+impl Drop for RemoteApprovalFiles {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn validate_plan_approval_filename(plan_id: &str) -> Result<()> {
+    anyhow::ensure!(
+        !plan_id.is_empty(),
+        "package migration plan approval id is empty"
+    );
+    anyhow::ensure!(
+        !plan_id.contains('/')
+            && !plan_id.contains('\\')
+            && !plan_id.contains('\0')
+            && !plan_id.contains(".."),
+        "package migration plan approval id {plan_id} is not a safe file name"
+    );
+    Ok(())
+}
+
+impl RemoteApprovalFiles {
+    pub fn materialize(
+        approval: &MigrationApprovalEnvelope,
+        trust_roots: &ApprovalTrustRoots,
+        plan_approvals: &BTreeMap<String, crate::plan_approval::ApprovalEnvelope>,
+    ) -> Result<Self> {
+        if trust_roots.version != TRUST_ROOT_VERSION || trust_roots.signers.is_empty() {
+            bail!(
+                "package migration approval trust roots must use version {TRUST_ROOT_VERSION} and contain at least one signer"
+            );
+        }
+        for plan_id in plan_approvals.keys() {
+            validate_plan_approval_filename(plan_id)?;
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "tenkai-migration-auth-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).with_context(|| {
+            format!(
+                "creating package migration approval scratch {}",
+                dir.display()
+            )
+        })?;
+        let files = Self {
+            approval: dir.join("approval.json"),
+            trust_roots: dir.join("trust.toml"),
+            dir,
+        };
+        std::fs::write(&files.approval, serde_json::to_vec(approval)?)
+            .with_context(|| format!("writing {}", files.approval.display()))?;
+        std::fs::write(&files.trust_roots, toml::to_string(trust_roots)?)
+            .with_context(|| format!("writing {}", files.trust_roots.display()))?;
+        for (plan_id, envelope) in plan_approvals {
+            let path = files.dir.join(format!("{plan_id}.json"));
+            std::fs::write(&path, serde_json::to_vec(envelope)?)
+                .with_context(|| format!("writing {}", path.display()))?;
+        }
+        Ok(files)
+    }
 }
 
 fn checkpoint_effect(class: CheckpointClass) -> &'static str {
@@ -353,6 +507,7 @@ pub async fn run_until_blocked(
     declaration: MigrationDeclaration,
     backup_receipt_digest: Option<&str>,
     authorization: MigrationAuthorization<'_>,
+    expected_generation: Option<u64>,
 ) -> Result<MigrationRecord> {
     require_package_migration_schema(ctx).await?;
     let existing = ctx.get(&package_migration_id(name)).await?;
@@ -379,8 +534,15 @@ pub async fn run_until_blocked(
         }
     }
     let mut last_receipts = record.receipts.len();
+    let mut fence_checked = false;
     loop {
-        let next = execute(ctx, name, authorization, None).await?;
+        let expected = if fence_checked {
+            None
+        } else {
+            fence_checked = true;
+            expected_generation
+        };
+        let next = execute(ctx, name, authorization, expected).await?;
         if matches!(
             next.status,
             MigrationStatus::Succeeded
@@ -845,6 +1007,14 @@ pub async fn load(ctx: &mut Ctx, name: &str) -> Result<MigrationRecord> {
         bail!("stored package migration name does not match {name}");
     }
     Ok(record)
+}
+
+pub fn verify_authorization(
+    record: &MigrationRecord,
+    authorization: MigrationAuthorization<'_>,
+) -> Result<()> {
+    let _ = approval_digest(record, authorization)?;
+    Ok(())
 }
 
 fn approval_digest(
@@ -2009,5 +2179,66 @@ inputs = ["payload.txt"]
         .to_string();
         assert!(err.contains("built-in local"), "{err}");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remote_api_version_and_unknown_fields_fail_closed() {
+        require_migration_api_version(MIGRATION_API_VERSION).unwrap();
+        let err = require_migration_api_version(99).unwrap_err().to_string();
+        assert!(
+            err.contains("unsupported package migration API version 99"),
+            "{err}"
+        );
+        let err = serde_json::from_str::<PackageMigrationPreviewRequest>(
+            r#"{"version":1,"environment":"local","declaration":{"version":1,"profile":"tenkai.package_migration.v1","source":{"product":"pkg","version":"1.0.0","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"target":{"product":"pkg","version":"1.1.0","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"compatibility":{"version":1,"status":"compatible","evidence_digest":"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},"checkpoints":[{"id":"preflight","class":"reversible"}]},"allow_unapproved_development":true}"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("unknown field"), "{err}");
+        let err = RemoteApprovalFiles::materialize(
+            &MigrationApprovalEnvelope {
+                schema: APPROVAL_SCHEMA.into(),
+                key_id: "k".into(),
+                statement: MigrationApprovalStatement {
+                    identity_digest: digest('a'),
+                    environment: "stage".into(),
+                    purpose: APPROVAL_PURPOSE.into(),
+                    issued_at: 1,
+                    expires_at: 2,
+                },
+                signature: "c2ln".into(),
+            },
+            &ApprovalTrustRoots {
+                version: 1,
+                signers: vec![ApprovalTrustedSigner {
+                    key_id: "k".into(),
+                    identity: "approver".into(),
+                    public_key: "cA==".into(),
+                }],
+            },
+            &BTreeMap::from([(
+                "../escape".into(),
+                crate::plan_approval::ApprovalEnvelope {
+                    schema: crate::plan_approval::APPROVAL_SCHEMA.into(),
+                    key_id: "k".into(),
+                    statement: crate::plan_approval::ApprovalStatement {
+                        plan_digest: digest('p'),
+                        environment: "stage".into(),
+                        purpose: "execute_plan".into(),
+                        skip_gates: false,
+                        issued_at: 1,
+                        expires_at: 2,
+                        policy_provider: "none".into(),
+                        policy_evidence_id: "none".into(),
+                        policy_digest: digest('q'),
+                    },
+                    signature: "c2ln".into(),
+                },
+            )]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("safe file name"), "{err}");
+        validate_plan_approval_filename("tenkai:plan:stage:1:sha256:abc").unwrap();
     }
 }

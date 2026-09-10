@@ -116,12 +116,49 @@ migration approval as `<plan-id>.json`.
 
 ## Remote
 
-`tenkaictl --target remote migrate …` is not a v1 management route yet.
-[ADR 0026](decisions/0026-remote-package-migration-parity.md) is the
-accepted contract: additive authenticated preview, apply, status, resume,
-and rollback over the same core. Remote apply, resume, and rollback reject
-`--allow-unapproved-development` and require the signed approval envelope,
-trust roots, and `expected_generation`.
+Authenticated management API (ADR 0026), sibling to `/v1/reconcile`:
+
+| Verb | Route |
+| --- | --- |
+| preview | `POST /v1/migrations/{name}/preview` |
+| apply | `POST /v1/migrations/{name}/apply` |
+| status | `GET /v1/migrations/{name}` |
+| resume | `POST /v1/migrations/{name}/resume` |
+| rollback | `POST /v1/migrations/{name}/rollback` |
+
+Request and result documents use `version` `1` with `deny_unknown_fields`.
+Unknown version, unknown profile, or an extra field that would change
+admission fails closed. `--allow-unapproved-development` is not a request
+field; remote apply, resume, and rollback require the signed approval
+envelope, `expected_generation`, and trust roots that match the host file
+`TENKAI_PACKAGE_MIGRATION_APPROVAL_TRUST_ROOTS`. Callers cannot introduce a
+signer set.
+
+```bash
+tenkaictl --target remote --server-url http://127.0.0.1:8080 migrate preview cutover \
+  --env stage \
+  --declaration declaration.json \
+  --backup-receipt-digest sha256:…
+
+tenkaictl --target remote --server-url http://127.0.0.1:8080 migrate apply cutover \
+  --env stage \
+  --declaration declaration.json \
+  --backup-receipt-digest sha256:… \
+  --expected-generation 0 \
+  --approval cutover.approval.json \
+  --approval-trust-roots migration-approvers.toml
+
+tenkaictl --target remote --server-url http://127.0.0.1:8080 migrate status cutover
+tenkaictl --target remote --server-url http://127.0.0.1:8080 migrate resume cutover \
+  --expected-generation 1 \
+  --approval cutover.approval.json \
+  --approval-trust-roots migration-approvers.toml
+```
+
+Place compensating plan approvals next to the migration approval as
+`<plan-id>.json`, same as the embedded CLI. The remote adapter sends those
+envelopes in the versioned request; it does not wrap generic apply or
+reconcile routes.
 
 ## Recovery
 
