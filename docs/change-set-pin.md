@@ -46,3 +46,16 @@ Credentials, member documents, and unrestricted external records are excluded.
 
 `workshop_module` releases require a pin. See
 [Workshop module delivery](workshop-modules.md).
+
+## Two-environment drill
+
+Issue: [#360](https://github.com/Sannrox/tenkai/issues/360).
+
+[examples/two-environment-closure](../examples/two-environment-closure/)
+promotes one signed multi-resource pin through two isolated environments
+without republishing member definitions. Rollback restores the Tenkai
+release pin; it does not undo foreign member documents.
+
+```bash
+cargo test --locked --test two_environment_closure_drill -- --nocapture
+```

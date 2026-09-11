@@ -1,0 +1,24 @@
+{
+  "schema": "tenkai.change_set_publication_evidence.v1",
+  "status": "accepted",
+  "authorized": true,
+  "contract": "tenkai.change_set_pin.v1",
+  "namespace": "acme",
+  "branch_id": "types",
+  "proposal_id": "prop-1",
+  "base_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "closure_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "receipt_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "members": [
+    {
+      "kind": "action_type",
+      "id": "widget-create",
+      "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    {
+      "kind": "object_type",
+      "id": "widget",
+      "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    }
+  ]
+}
