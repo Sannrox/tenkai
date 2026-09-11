@@ -433,8 +433,8 @@ pub(super) async fn latest_for_environment(
         None,
         None,
         move |objects| {
-            if let Some(snapshot) = snapshot.as_deref() {
-                reject_shared_snapshot_omit(snapshot, &owned_environment, &objects)?;
+            if let Some(snapshot) = snapshot.as_ref() {
+                reject_shared_snapshot_omit_indexed(snapshot, &owned_environment, &objects)?;
             }
             newest_plan_from_objects(objects, &owned_environment)
         },
@@ -452,8 +452,8 @@ pub(super) async fn require_environment_indexes_match_payloads(
     let snapshot = shared_retarget_snapshot(ctx).await?;
     let owned_environment = environment.to_string();
     map_environment_plan_objects(ctx, environment, None, true, None, None, None, move |objects| {
-        if let Some(snapshot) = snapshot.as_deref() {
-            reject_shared_snapshot_omit(snapshot, &owned_environment, &objects)?;
+        if let Some(snapshot) = snapshot.as_ref() {
+            reject_shared_snapshot_omit_indexed(snapshot, &owned_environment, &objects)?;
         }
         for object in &objects {
             let peek = require_indexed_identity(object)?;
@@ -639,40 +639,69 @@ async fn reject_environment_index_retarget(ctx: &mut Ctx, environment: &str) -> 
     reject_retargeted_environment_index(objects.as_slice(), environment)
 }
 
-async fn shared_retarget_snapshot(ctx: &mut Ctx) -> Result<Option<Arc<Vec<Object>>>> {
+async fn shared_retarget_snapshot(
+    ctx: &mut Ctx,
+) -> Result<Option<Arc<crate::client::PlanKindListSnapshot>>> {
     if !ctx.shares_plan_retarget_tick() {
         return Ok(None);
     }
-    Ok(Some(ctx.list_plans_for_retarget().await?))
+    Ok(Some(ctx.list_plan_kind_snapshot().await?))
 }
 
-fn reject_shared_snapshot_omit(
-    snapshot: &[Object],
-    environment: &str,
-    indexed: &[Object],
-) -> Result<()> {
-    let indexed_ids = indexed
-        .iter()
-        .map(|object| object.id.as_str())
-        .collect::<HashSet<_>>();
+fn omit_index(snapshot: &[Object]) -> HashMap<String, HashSet<String>> {
+    let mut index: HashMap<String, HashSet<String>> = HashMap::new();
     for object in snapshot {
         let peek = match peek_plan_environment(object) {
             Ok(peek) => peek,
             Err(_) => continue,
         };
-        if peek.environment != environment {
-            continue;
-        }
         match object.properties.get("environment") {
-            Some(indexed_env)
-                if indexed_env == environment && !indexed_ids.contains(object.id.as_str()) =>
-            {
-                bail!(
-                    "plan {} omitted from environment {environment} after shared retarget snapshot; refusing Current",
-                    object.id
-                );
+            Some(indexed) if indexed == &peek.environment => {
+                index
+                    .entry(peek.environment)
+                    .or_default()
+                    .insert(object.id.clone());
             }
             _ => {}
+        }
+    }
+    index
+}
+
+fn reject_shared_snapshot_omit_indexed(
+    snapshot: &crate::client::PlanKindListSnapshot,
+    environment: &str,
+    indexed: &[Object],
+) -> Result<()> {
+    reject_omit_from_index(snapshot.omit_ids(omit_index), environment, indexed)
+}
+
+#[cfg(test)]
+fn reject_shared_snapshot_omit(
+    snapshot: &[Object],
+    environment: &str,
+    indexed: &[Object],
+) -> Result<()> {
+    reject_omit_from_index(&omit_index(snapshot), environment, indexed)
+}
+
+fn reject_omit_from_index(
+    index: &HashMap<String, HashSet<String>>,
+    environment: &str,
+    indexed: &[Object],
+) -> Result<()> {
+    let Some(expected) = index.get(environment) else {
+        return Ok(());
+    };
+    let indexed_ids = indexed
+        .iter()
+        .map(|object| object.id.as_str())
+        .collect::<HashSet<_>>();
+    for id in expected {
+        if !indexed_ids.contains(id.as_str()) {
+            bail!(
+                "plan {id} omitted from environment {environment} after shared retarget snapshot; refusing Current"
+            );
         }
     }
     Ok(())

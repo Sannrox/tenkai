@@ -7,8 +7,9 @@ mod relation_lifecycle;
 
 use anyhow::{Context as _, Result, anyhow};
 use prost::Message;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::sync::OnceCell;
 use tonic::Status;
@@ -146,7 +147,29 @@ type RemoteClient = CoreLoopClient<GrpcTransport>;
 /// Reconcile environments run concurrently and must share one catalog
 /// transfer. Inspect and other one-shot paths leave the cell empty and list
 /// once per call.
-type PlanKindListCell = Arc<OnceCell<Arc<Vec<Object>>>>;
+type PlanKindListCell = Arc<OnceCell<Arc<PlanKindListSnapshot>>>;
+
+/// One tick-local Plan kind-list plus a lazily built env→id omit index.
+pub(crate) struct PlanKindListSnapshot {
+    objects: Arc<Vec<Object>>,
+    omit_index: OnceLock<HashMap<String, HashSet<String>>>,
+}
+
+impl PlanKindListSnapshot {
+    fn from_objects(objects: Vec<Object>) -> Arc<Self> {
+        Arc::new(Self {
+            objects: Arc::new(objects),
+            omit_index: OnceLock::new(),
+        })
+    }
+
+    pub(crate) fn omit_ids(
+        &self,
+        build: impl FnOnce(&[Object]) -> HashMap<String, HashSet<String>>,
+    ) -> &HashMap<String, HashSet<String>> {
+        self.omit_index.get_or_init(|| build(&self.objects))
+    }
+}
 
 struct PlanKindListTick {
     cell: std::sync::Mutex<Option<PlanKindListCell>>,
@@ -184,15 +207,16 @@ impl PlanKindListTick {
         let Some(cell) = self.tick_cell() else {
             return Ok(Arc::new(load().await?));
         };
-        if let Some(objects) = cell.get() {
-            return Ok(Arc::clone(objects));
+        if let Some(snapshot) = cell.get() {
+            return Ok(Arc::clone(&snapshot.objects));
         }
         let _fill = self.fill.lock().await;
-        if let Some(objects) = cell.get() {
-            return Ok(Arc::clone(objects));
+        if let Some(snapshot) = cell.get() {
+            return Ok(Arc::clone(&snapshot.objects));
         }
-        let objects = Arc::new(load().await?);
-        let _ = cell.set(Arc::clone(&objects));
+        let snapshot = PlanKindListSnapshot::from_objects(load().await?);
+        let objects = Arc::clone(&snapshot.objects);
+        let _ = cell.set(snapshot);
         Ok(objects)
     }
 }
@@ -432,20 +456,27 @@ impl Ctx {
     /// During a reconcile tick this reuses one `ListObjects` transfer. Outside
     /// a tick it lists once per call so inspect is not served a stale catalog.
     pub(crate) async fn list_plans_for_retarget(&mut self) -> Result<Arc<Vec<Object>>> {
+        Ok(Arc::clone(&self.list_plan_kind_snapshot().await?.objects))
+    }
+
+    pub(crate) async fn list_plan_kind_snapshot(&mut self) -> Result<Arc<PlanKindListSnapshot>> {
         let Some(cell) = self.plan_kind_list.tick_cell() else {
-            return Ok(Arc::new(self.list_kind(crate::ontology::KIND_PLAN).await?));
+            return Ok(PlanKindListSnapshot::from_objects(
+                self.list_kind(crate::ontology::KIND_PLAN).await?,
+            ));
         };
-        if let Some(objects) = cell.get() {
-            return Ok(Arc::clone(objects));
+        if let Some(snapshot) = cell.get() {
+            return Ok(Arc::clone(snapshot));
         }
         let list = Arc::clone(&self.plan_kind_list);
         let _fill = list.fill.lock().await;
-        if let Some(objects) = cell.get() {
-            return Ok(Arc::clone(objects));
+        if let Some(snapshot) = cell.get() {
+            return Ok(Arc::clone(snapshot));
         }
-        let objects = Arc::new(self.list_kind(crate::ontology::KIND_PLAN).await?);
-        let _ = cell.set(Arc::clone(&objects));
-        Ok(objects)
+        let snapshot =
+            PlanKindListSnapshot::from_objects(self.list_kind(crate::ontology::KIND_PLAN).await?);
+        let _ = cell.set(Arc::clone(&snapshot));
+        Ok(snapshot)
     }
 
     pub(crate) fn outcome_export_enabled(&self) -> bool {
