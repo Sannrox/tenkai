@@ -310,11 +310,12 @@ impl ManagementOperations {
         package_migration::require_migration_api_version(request.version)
             .map_err(map_migration_error)?;
         self.require_matching_migration_trust_roots(&request.trust_roots)?;
-        let files = RemoteApprovalFiles::materialize(
-            &request.approval,
-            &request.trust_roots,
-            &request.plan_approvals,
+        let files = RemoteApprovalFiles::materialize_async(
+            request.approval.clone(),
+            request.trust_roots.clone(),
+            request.plan_approvals.clone(),
         )
+        .await
         .map_err(map_migration_error)?;
         let authorization = MigrationAuthorization::Signed {
             approval: &files.approval,
@@ -444,11 +445,12 @@ impl ManagementOperations {
         package_migration::require_migration_api_version(request.version)
             .map_err(map_migration_error)?;
         self.require_matching_migration_trust_roots(&request.trust_roots)?;
-        let files = RemoteApprovalFiles::materialize(
-            &request.approval,
-            &request.trust_roots,
-            &request.plan_approvals,
+        let files = RemoteApprovalFiles::materialize_async(
+            request.approval.clone(),
+            request.trust_roots.clone(),
+            request.plan_approvals.clone(),
         )
+        .await
         .map_err(map_migration_error)?;
         let authorization = MigrationAuthorization::Signed {
             approval: &files.approval,
