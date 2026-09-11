@@ -510,6 +510,7 @@ it ([ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md),
 | Optional advisory plan priors (default off) | [Plan priors](docs/plan-priors.md); #114 |
 | Staged products: policy_bundle, eval_suite, agent_definition, prompt_package, workshop_module | [Staged products](docs/staged-products.md); [Workshop modules](docs/workshop-modules.md); #115, #116, #117, #285, #290 |
 | Change-set closure pin admission | [Change-set pins](docs/change-set-pin.md); [ADR 0018](docs/decisions/0018-change-set-closure-pin.md); #288 |
+| Two-environment immutable closure drill | [Change-set pins](docs/change-set-pin.md#two-environment-drill); `examples/two-environment-closure`; #360 |
 | Fixed-replica Shikigami worker-pool lifecycle | [Worker pools](docs/worker-pool.md); [ADR 0011](docs/decisions/0011-shikigami-worker-pool-lifecycle.md); #284 |
 | Connectivity-class upgrades | [Connectivity upgrades](docs/connectivity-upgrades.md); [ADR 0020](docs/decisions/0020-connectivity-class-upgrade.md); #287 |
 | Governed package migrations | [Package migrations](docs/package-migrations.md); [ADR 0024](docs/decisions/0024-package-migration.md); #289, #334 |

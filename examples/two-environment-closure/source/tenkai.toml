@@ -1,0 +1,8 @@
+[product]
+name = "pkg"
+version = "1.0.0"
+description = "Synthetic baseline for two-environment closure drill"
+
+[deploy]
+install = "true"
+inputs = ["payload.txt"]
