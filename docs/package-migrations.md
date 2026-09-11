@@ -7,7 +7,9 @@ compatibility, or run application transforms.
 
 See [ADR 0024](decisions/0024-package-migration.md). Remote hosts use the
 same core; the accepted network contract is
-[ADR 0026](decisions/0026-remote-package-migration-parity.md).
+[ADR 0026](decisions/0026-remote-package-migration-parity.md). In tenant
+mode the catalog key includes the caller partition, so two partitions may
+reuse the same migration name and environment id without sharing records.
 
 ## Declaration
 
