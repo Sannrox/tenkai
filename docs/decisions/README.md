@@ -26,3 +26,4 @@
 - [0024 — Governed package-migration plan](0024-package-migration.md)
 - [0025 — Remote plan property query bounds](0025-remote-plan-property-query-bounds.md)
 - [0026 — Remote package-migration lifecycle parity](0026-remote-package-migration-parity.md)
+- [0027 — Bounded recovery diagnostic bundle](0027-recovery-diagnostic-bundle.md)

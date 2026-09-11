@@ -160,6 +160,7 @@ pub mod provider_event;
 pub mod providers;
 pub mod reconcile_fence;
 pub mod reconciler;
+pub mod recovery_bundle;
 pub mod release_provenance;
 pub mod release_signing;
 pub mod routing;
