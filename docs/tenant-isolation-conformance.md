@@ -12,7 +12,9 @@ Source of truth: `src/tenant_isolation.rs`. Authenticated request context:
 
 Tenant isolation cannot depend on each endpoint remembering ad-hoc checks.
 Catalog, environment, plan, agent, event, aggregate, and runtime-agent surfaces
-can leak identifiers even when direct object reads are protected. This harness:
+can leak identifiers even when direct object reads are protected. Environment
+names are partition-local: tenant fleet, inspect, and status must not join
+process-global reconciler rows by bare environment id. This harness:
 
 1. Builds two isolated tenants with distinct products, environments, agents,
    plans, deployments, and credentials.
