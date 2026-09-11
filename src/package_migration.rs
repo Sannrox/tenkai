@@ -16,8 +16,8 @@ use crate::apply::{self, ExecutionAuthorization, ExecutionOptions};
 use crate::catalog::{self, CatalogReader as _};
 use crate::client::Ctx;
 use crate::ontology::{
-    KIND_PACKAGE_MIGRATION, KIND_PACKAGE_MIGRATION_LOCK, NS, package_migration_id,
-    package_migration_lock_id, require_package_migration_schema, validate_identifier,
+    KIND_PACKAGE_MIGRATION, KIND_PACKAGE_MIGRATION_LOCK, NS, package_migration_id_in,
+    package_migration_lock_id_in, require_package_migration_schema, validate_identifier,
 };
 use crate::pb::sekai::Object;
 use crate::plan::{self, Action, PlanState, ReleasePin as PlanReleasePin, Step};
@@ -136,6 +136,8 @@ pub struct CheckpointReceipt {
 pub struct MigrationRecord {
     pub name: String,
     pub environment: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition: Option<String>,
     pub identity_digest: String,
     pub declaration: MigrationDeclaration,
     pub approval_digest: String,
@@ -148,6 +150,25 @@ pub struct MigrationRecord {
     pub pending_plan_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_rollback_plan_id: Option<String>,
+}
+
+fn catalog_id(partition: Option<&str>, name: &str) -> String {
+    package_migration_id_in(partition, name)
+}
+
+fn record_catalog_id(record: &MigrationRecord) -> String {
+    catalog_id(record.partition.as_deref(), &record.name)
+}
+
+fn record_lock_id(record: &MigrationRecord) -> String {
+    package_migration_lock_id_in(record.partition.as_deref(), &record.environment)
+}
+
+fn exec_lease_name(partition: Option<&str>, name: &str) -> String {
+    match partition.filter(|value| !value.is_empty()) {
+        Some(partition) => format!("{partition}:{name}"),
+        None => name.to_string(),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -470,6 +491,25 @@ pub async fn preview(
     declaration: MigrationDeclaration,
     backup_receipt_digest: Option<&str>,
 ) -> Result<MigrationRecord> {
+    preview_in(
+        ctx,
+        name,
+        environment,
+        declaration,
+        backup_receipt_digest,
+        None,
+    )
+    .await
+}
+
+pub async fn preview_in(
+    ctx: &mut Ctx,
+    name: &str,
+    environment: &str,
+    declaration: MigrationDeclaration,
+    backup_receipt_digest: Option<&str>,
+    partition: Option<&str>,
+) -> Result<MigrationRecord> {
     admit(
         ctx,
         name,
@@ -477,6 +517,7 @@ pub async fn preview(
         declaration,
         backup_receipt_digest,
         true,
+        partition,
     )
     .await
 }
@@ -488,6 +529,25 @@ pub async fn create(
     declaration: MigrationDeclaration,
     backup_receipt_digest: Option<&str>,
 ) -> Result<MigrationRecord> {
+    create_in(
+        ctx,
+        name,
+        environment,
+        declaration,
+        backup_receipt_digest,
+        None,
+    )
+    .await
+}
+
+pub async fn create_in(
+    ctx: &mut Ctx,
+    name: &str,
+    environment: &str,
+    declaration: MigrationDeclaration,
+    backup_receipt_digest: Option<&str>,
+    partition: Option<&str>,
+) -> Result<MigrationRecord> {
     admit(
         ctx,
         name,
@@ -495,6 +555,7 @@ pub async fn create(
         declaration,
         backup_receipt_digest,
         false,
+        partition,
     )
     .await
 }
@@ -509,17 +570,49 @@ pub async fn run_until_blocked(
     authorization: MigrationAuthorization<'_>,
     expected_generation: Option<u64>,
 ) -> Result<MigrationRecord> {
+    run_until_blocked_in(
+        ctx,
+        name,
+        environment,
+        declaration,
+        backup_receipt_digest,
+        authorization,
+        expected_generation,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run_until_blocked_in(
+    ctx: &mut Ctx,
+    name: &str,
+    environment: &str,
+    declaration: MigrationDeclaration,
+    backup_receipt_digest: Option<&str>,
+    authorization: MigrationAuthorization<'_>,
+    expected_generation: Option<u64>,
+    partition: Option<&str>,
+) -> Result<MigrationRecord> {
     require_package_migration_schema(ctx).await?;
-    let existing = ctx.get(&package_migration_id(name)).await?;
+    let existing = ctx.get(&catalog_id(partition, name)).await?;
     let record = if existing.is_some() {
-        let stored = load(ctx, name).await?;
+        let stored = load_in(ctx, name, partition).await?;
         let expected = declaration.identity_digest(environment, backup_receipt_digest)?;
         if stored.identity_digest != expected || stored.environment != environment {
             bail!("package migration {name} already exists with a different identity");
         }
         stored
     } else {
-        create(ctx, name, environment, declaration, backup_receipt_digest).await?
+        create_in(
+            ctx,
+            name,
+            environment,
+            declaration,
+            backup_receipt_digest,
+            partition,
+        )
+        .await?
     };
     match record.status {
         MigrationStatus::Succeeded
@@ -527,7 +620,7 @@ pub async fn run_until_blocked(
         | MigrationStatus::RolledBack
         | MigrationStatus::RecoveryRequired => return Ok(record),
         MigrationStatus::Admitted if record.approval_digest.is_empty() => {
-            approve(ctx, name, authorization).await?;
+            approve_in(ctx, name, authorization, partition).await?;
         }
         MigrationStatus::Admitted | MigrationStatus::Running => {
             require_approval(&record, authorization)?;
@@ -542,7 +635,7 @@ pub async fn run_until_blocked(
             fence_checked = true;
             expected_generation
         };
-        let next = execute(ctx, name, authorization, expected).await?;
+        let next = execute_in(ctx, name, authorization, expected, partition).await?;
         if matches!(
             next.status,
             MigrationStatus::Succeeded
@@ -633,9 +726,13 @@ async fn admit(
     declaration: MigrationDeclaration,
     backup_receipt_digest: Option<&str>,
     preview_only: bool,
+    partition: Option<&str>,
 ) -> Result<MigrationRecord> {
     validate_identifier("migration name", name)?;
     validate_identifier("environment", environment)?;
+    if let Some(partition) = partition {
+        validate_identifier("migration partition", partition)?;
+    }
     declaration.validate()?;
     if declaration.compatibility.status != CompatibilityStatus::Compatible {
         bail!("package migration compatibility evidence is not compatible");
@@ -675,6 +772,9 @@ async fn admit(
     let record = MigrationRecord {
         name: name.into(),
         environment: environment.into(),
+        partition: partition
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
         identity_digest: declaration.identity_digest(environment, backup.as_deref())?,
         declaration,
         approval_digest: String::new(),
@@ -731,7 +831,16 @@ pub async fn approve(
     name: &str,
     authorization: MigrationAuthorization<'_>,
 ) -> Result<MigrationRecord> {
-    let mut record = load(ctx, name).await?;
+    approve_in(ctx, name, authorization, None).await
+}
+
+async fn approve_in(
+    ctx: &mut Ctx,
+    name: &str,
+    authorization: MigrationAuthorization<'_>,
+    partition: Option<&str>,
+) -> Result<MigrationRecord> {
+    let mut record = load_in(ctx, name, partition).await?;
     if record.status != MigrationStatus::Admitted {
         bail!(
             "package migration {name} is {}, not admitted",
@@ -749,7 +858,25 @@ pub async fn execute(
     authorization: MigrationAuthorization<'_>,
     expected_generation: Option<u64>,
 ) -> Result<MigrationRecord> {
-    step(ctx, name, authorization, expected_generation, false).await
+    execute_in(ctx, name, authorization, expected_generation, None).await
+}
+
+async fn execute_in(
+    ctx: &mut Ctx,
+    name: &str,
+    authorization: MigrationAuthorization<'_>,
+    expected_generation: Option<u64>,
+    partition: Option<&str>,
+) -> Result<MigrationRecord> {
+    step(
+        ctx,
+        name,
+        authorization,
+        expected_generation,
+        false,
+        partition,
+    )
+    .await
 }
 
 pub async fn resume(
@@ -758,7 +885,25 @@ pub async fn resume(
     authorization: MigrationAuthorization<'_>,
     expected_generation: Option<u64>,
 ) -> Result<MigrationRecord> {
-    step(ctx, name, authorization, expected_generation, true).await
+    resume_in(ctx, name, authorization, expected_generation, None).await
+}
+
+pub async fn resume_in(
+    ctx: &mut Ctx,
+    name: &str,
+    authorization: MigrationAuthorization<'_>,
+    expected_generation: Option<u64>,
+    partition: Option<&str>,
+) -> Result<MigrationRecord> {
+    step(
+        ctx,
+        name,
+        authorization,
+        expected_generation,
+        true,
+        partition,
+    )
+    .await
 }
 
 async fn step(
@@ -767,9 +912,10 @@ async fn step(
     authorization: MigrationAuthorization<'_>,
     expected_generation: Option<u64>,
     resume: bool,
+    partition: Option<&str>,
 ) -> Result<MigrationRecord> {
     require_package_migration_schema(ctx).await?;
-    let record = load(ctx, name).await?;
+    let record = load_in(ctx, name, partition).await?;
     require_approval(&record, authorization)?;
     if let Some(expected) = expected_generation
         && expected != record.fence_generation
@@ -779,9 +925,9 @@ async fn step(
             record.fence_generation
         );
     }
-    let exec_lease = acquire_execution_lease(ctx, name).await?;
+    let exec_lease = acquire_execution_lease(ctx, name, partition).await?;
     let result = step_locked(ctx, record, authorization, resume, &exec_lease).await;
-    release_execution_lease(ctx, name, &exec_lease).await;
+    release_execution_lease(ctx, name, partition, &exec_lease).await;
     result
 }
 
@@ -810,13 +956,13 @@ async fn step_locked(
     let Some(checkpoint) = next.cloned() else {
         record.status = MigrationStatus::Succeeded;
         persist(ctx, &record).await?;
-        release_environment_lock(ctx, &record.environment, &record.name).await?;
+        release_environment_lock(ctx, &record).await?;
         return Ok(record);
     };
     if checkpoint.class == CheckpointClass::Irreversible && record.backup_receipt_digest.is_none() {
         record.status = MigrationStatus::Failed;
         persist(ctx, &record).await?;
-        release_environment_lock(ctx, &record.environment, &record.name).await?;
+        release_environment_lock(ctx, &record).await?;
         bail!(
             "irreversible checkpoint {} has no backup receipt; refusing the first effect",
             checkpoint.id
@@ -849,7 +995,7 @@ async fn step_locked(
             }
             persist(ctx, &record).await?;
             if record.status == MigrationStatus::Succeeded {
-                release_environment_lock(ctx, &record.environment, &record.name).await?;
+                release_environment_lock(ctx, &record).await?;
             }
             Ok(record)
         }
@@ -880,7 +1026,7 @@ async fn step_locked(
                     };
                     persist(ctx, &record).await?;
                     if record.status == MigrationStatus::Succeeded {
-                        release_environment_lock(ctx, &record.environment, &record.name).await?;
+                        release_environment_lock(ctx, &record).await?;
                     }
                     return Ok(record);
                 }
@@ -892,7 +1038,7 @@ async fn step_locked(
             }
             record.status = MigrationStatus::Failed;
             persist(ctx, &record).await?;
-            release_environment_lock(ctx, &record.environment, &record.name).await?;
+            release_environment_lock(ctx, &record).await?;
             Err(error)
         }
     }
@@ -904,8 +1050,18 @@ pub async fn rollback(
     authorization: MigrationAuthorization<'_>,
     expected_generation: Option<u64>,
 ) -> Result<MigrationRecord> {
+    rollback_in(ctx, name, authorization, expected_generation, None).await
+}
+
+pub async fn rollback_in(
+    ctx: &mut Ctx,
+    name: &str,
+    authorization: MigrationAuthorization<'_>,
+    expected_generation: Option<u64>,
+    partition: Option<&str>,
+) -> Result<MigrationRecord> {
     require_package_migration_schema(ctx).await?;
-    let record = load(ctx, name).await?;
+    let record = load_in(ctx, name, partition).await?;
     require_approval(&record, authorization)?;
     if let Some(expected) = expected_generation
         && expected != record.fence_generation
@@ -915,9 +1071,9 @@ pub async fn rollback(
             record.fence_generation
         );
     }
-    let exec_lease = acquire_execution_lease(ctx, name).await?;
+    let exec_lease = acquire_execution_lease(ctx, name, partition).await?;
     let result = rollback_locked(ctx, record, authorization, &exec_lease).await;
-    release_execution_lease(ctx, name, &exec_lease).await;
+    release_execution_lease(ctx, name, partition, &exec_lease).await;
     result
 }
 
@@ -933,14 +1089,14 @@ async fn rollback_locked(
     ) {
         record.status = MigrationStatus::RolledBack;
         persist(ctx, &record).await?;
-        release_environment_lock(ctx, &record.environment, &record.name).await?;
+        release_environment_lock(ctx, &record).await?;
         return Ok(record);
     }
     acquire_environment_lock(ctx, &record).await?;
     if let Err(error) = require_rollback_target(ctx, &record).await {
         record.status = MigrationStatus::RecoveryRequired;
         persist(ctx, &record).await?;
-        release_environment_lock(ctx, &record.environment, &record.name).await?;
+        release_environment_lock(ctx, &record).await?;
         return Err(error);
     }
     record.fence_generation += 1;
@@ -948,7 +1104,7 @@ async fn rollback_locked(
         if receipt.class == CheckpointClass::Irreversible && receipt.result == "accepted" {
             record.status = MigrationStatus::RecoveryRequired;
             persist(ctx, &record).await?;
-            release_environment_lock(ctx, &record.environment, &record.name).await?;
+            release_environment_lock(ctx, &record).await?;
             bail!(
                 "package migration {} crossed irreversible checkpoint {}; rollback cannot claim success",
                 record.name,
@@ -963,7 +1119,7 @@ async fn rollback_locked(
         {
             record.status = MigrationStatus::RecoveryRequired;
             persist(ctx, &record).await?;
-            release_environment_lock(ctx, &record.environment, &record.name).await?;
+            release_environment_lock(ctx, &record).await?;
             bail!(
                 "package migration {} cannot compensate checkpoint {}",
                 record.name,
@@ -974,7 +1130,7 @@ async fn rollback_locked(
     if let Err(error) = compensate_accepted(ctx, &mut record, authorization, exec_lease).await {
         record.status = MigrationStatus::RecoveryRequired;
         persist(ctx, &record).await?;
-        release_environment_lock(ctx, &record.environment, &record.name).await?;
+        release_environment_lock(ctx, &record).await?;
         return Err(error);
     }
     for receipt in &mut record.receipts {
@@ -987,15 +1143,26 @@ async fn rollback_locked(
     record.pending_plan_id = None;
     record.pending_rollback_plan_id = None;
     persist(ctx, &record).await?;
-    release_environment_lock(ctx, &record.environment, &record.name).await?;
+    release_environment_lock(ctx, &record).await?;
     Ok(record)
 }
 
 pub async fn load(ctx: &mut Ctx, name: &str) -> Result<MigrationRecord> {
+    load_in(ctx, name, None).await
+}
+
+pub async fn load_in(
+    ctx: &mut Ctx,
+    name: &str,
+    partition: Option<&str>,
+) -> Result<MigrationRecord> {
     validate_identifier("migration name", name)?;
+    if let Some(partition) = partition {
+        validate_identifier("migration partition", partition)?;
+    }
     require_package_migration_schema(ctx).await?;
     let object = ctx
-        .get(&package_migration_id(name))
+        .get(&catalog_id(partition, name))
         .await?
         .with_context(|| format!("package migration {name} is not stored"))?;
     let raw = object
@@ -1005,6 +1172,9 @@ pub async fn load(ctx: &mut Ctx, name: &str) -> Result<MigrationRecord> {
     let record: MigrationRecord = serde_json::from_str(raw)?;
     if record.name != name {
         bail!("stored package migration name does not match {name}");
+    }
+    if record.partition.as_deref() != partition.filter(|value| !value.is_empty()) {
+        bail!("stored package migration partition does not match");
     }
     Ok(record)
 }
@@ -1191,11 +1361,16 @@ fn identity_approval_binding(record: &MigrationRecord) -> String {
     format!("sha256:{:x}", Sha256::digest(output))
 }
 
-async fn acquire_execution_lease(ctx: &mut Ctx, name: &str) -> Result<String> {
+async fn acquire_execution_lease(
+    ctx: &mut Ctx,
+    name: &str,
+    partition: Option<&str>,
+) -> Result<String> {
+    let lease_name = exec_lease_name(partition, name);
     match ctx
         .acquire_lease(
             MIGRATION_EXEC_NAMESPACE,
-            name,
+            &lease_name,
             "execute",
             MIGRATION_EXEC_TTL_MS,
         )
@@ -1213,16 +1388,28 @@ async fn acquire_execution_lease(ctx: &mut Ctx, name: &str) -> Result<String> {
     }
 }
 
-async fn release_execution_lease(ctx: &mut Ctx, name: &str, fencing_token: &str) {
+async fn release_execution_lease(
+    ctx: &mut Ctx,
+    name: &str,
+    partition: Option<&str>,
+    fencing_token: &str,
+) {
+    let lease_name = exec_lease_name(partition, name);
     let _ = ctx
-        .release_lease(MIGRATION_EXEC_NAMESPACE, name, fencing_token)
+        .release_lease(MIGRATION_EXEC_NAMESPACE, &lease_name, fencing_token)
         .await;
 }
 
-async fn refresh_execution_lease(ctx: &mut Ctx, name: &str, fencing_token: &str) -> Result<()> {
+async fn refresh_execution_lease(
+    ctx: &mut Ctx,
+    name: &str,
+    partition: Option<&str>,
+    fencing_token: &str,
+) -> Result<()> {
+    let lease_name = exec_lease_name(partition, name);
     ctx.refresh_lease(
         MIGRATION_EXEC_NAMESPACE,
-        name,
+        &lease_name,
         fencing_token,
         MIGRATION_EXEC_TTL_MS,
     )
@@ -1230,8 +1417,13 @@ async fn refresh_execution_lease(ctx: &mut Ctx, name: &str, fencing_token: &str)
     Ok(())
 }
 
-async fn authorize_plan_on_lock(ctx: &mut Ctx, environment: &str, plan_id: &str) -> Result<()> {
-    let id = package_migration_lock_id(environment);
+async fn authorize_plan_on_lock(
+    ctx: &mut Ctx,
+    record: &MigrationRecord,
+    plan_id: &str,
+) -> Result<()> {
+    let id = record_lock_id(record);
+    let environment = &record.environment;
     let mut object = ctx
         .get(&id)
         .await?
@@ -1244,8 +1436,8 @@ async fn authorize_plan_on_lock(ctx: &mut Ctx, environment: &str, plan_id: &str)
     Ok(())
 }
 
-async fn clear_authorized_plan(ctx: &mut Ctx, environment: &str) -> Result<()> {
-    let id = package_migration_lock_id(environment);
+async fn clear_authorized_plan(ctx: &mut Ctx, record: &MigrationRecord) -> Result<()> {
+    let id = record_lock_id(record);
     let Some(mut object) = ctx.get(&id).await? else {
         return Ok(());
     };
@@ -1258,7 +1450,7 @@ async fn clear_authorized_plan(ctx: &mut Ctx, environment: &str) -> Result<()> {
 async fn acquire_environment_lock(ctx: &mut Ctx, record: &MigrationRecord) -> Result<()> {
     let owner = format!("package-migration:{}", record.name);
     let lease = apply::claim_environment(ctx, &record.environment, &owner).await?;
-    let id = package_migration_lock_id(&record.environment);
+    let id = record_lock_id(record);
     let result = async {
         if let Some(existing) = ctx.get(&id).await? {
             let lock_owner = existing
@@ -1295,12 +1487,12 @@ async fn acquire_environment_lock(ctx: &mut Ctx, record: &MigrationRecord) -> Re
     result
 }
 
-async fn release_environment_lock(ctx: &mut Ctx, environment: &str, owner: &str) -> Result<()> {
-    let id = package_migration_lock_id(environment);
+async fn release_environment_lock(ctx: &mut Ctx, record: &MigrationRecord) -> Result<()> {
+    let id = record_lock_id(record);
     let Some(existing) = ctx.get(&id).await? else {
         return Ok(());
     };
-    if existing.properties.get("owner").map(String::as_str) != Some(owner) {
+    if existing.properties.get("owner").map(String::as_str) != Some(record.name.as_str()) {
         return Ok(());
     }
     ctx.delete(&id).await?;
@@ -1314,7 +1506,7 @@ async fn execute_checkpoint(
     authorization: MigrationAuthorization<'_>,
     exec_lease: &str,
 ) -> Result<CheckpointProgress> {
-    refresh_execution_lease(ctx, &record.name, exec_lease).await?;
+    refresh_execution_lease(ctx, &record.name, record.partition.as_deref(), exec_lease).await?;
     match checkpoint_effect(checkpoint.class) {
         "revalidate" => {
             let owner = format!("package-migration:{}", record.name);
@@ -1393,7 +1585,7 @@ async fn apply_pin(
             plan_id
         }
     };
-    refresh_execution_lease(ctx, &record.name, exec_lease).await?;
+    refresh_execution_lease(ctx, &record.name, record.partition.as_deref(), exec_lease).await?;
     let approval_path;
     let exec = match authorization {
         MigrationAuthorization::LocalDevelopment { reason } => {
@@ -1416,7 +1608,7 @@ async fn apply_pin(
             }
         }
     };
-    authorize_plan_on_lock(ctx, &record.environment, &plan_id).await?;
+    authorize_plan_on_lock(ctx, record, &plan_id).await?;
     let applied = apply::execute_with_options(
         ctx,
         &plan_id,
@@ -1431,8 +1623,8 @@ async fn apply_pin(
         },
     )
     .await;
-    clear_authorized_plan(ctx, &record.environment).await?;
-    refresh_execution_lease(ctx, &record.name, exec_lease).await?;
+    clear_authorized_plan(ctx, record).await?;
+    refresh_execution_lease(ctx, &record.name, record.partition.as_deref(), exec_lease).await?;
     applied?;
     let plan = plan::load(ctx, &plan_id).await?;
     if plan.state != PlanState::Succeeded {
@@ -1574,7 +1766,7 @@ async fn restore_source(
     authorization: MigrationAuthorization<'_>,
     exec_lease: &str,
 ) -> Result<()> {
-    refresh_execution_lease(ctx, &record.name, exec_lease).await?;
+    refresh_execution_lease(ctx, &record.name, record.partition.as_deref(), exec_lease).await?;
     let pin = record.declaration.source.clone();
     let plan_id = match record.pending_rollback_plan_id.clone() {
         Some(id) => id,
@@ -1585,21 +1777,12 @@ async fn restore_source(
             plan_id
         }
     };
-    apply_pin_plan(
-        ctx,
-        &record.name,
-        &record.environment,
-        &plan_id,
-        authorization,
-        exec_lease,
-    )
-    .await
+    apply_pin_plan(ctx, record, &plan_id, authorization, exec_lease).await
 }
 
 async fn apply_pin_plan(
     ctx: &mut Ctx,
-    name: &str,
-    environment: &str,
+    record: &MigrationRecord,
     plan_id: &str,
     authorization: MigrationAuthorization<'_>,
     exec_lease: &str,
@@ -1629,8 +1812,8 @@ async fn apply_pin_plan(
             }
         }
     };
-    refresh_execution_lease(ctx, name, exec_lease).await?;
-    authorize_plan_on_lock(ctx, environment, plan_id).await?;
+    refresh_execution_lease(ctx, &record.name, record.partition.as_deref(), exec_lease).await?;
+    authorize_plan_on_lock(ctx, record, plan_id).await?;
     let applied = apply::execute_with_options(
         ctx,
         plan_id,
@@ -1645,7 +1828,7 @@ async fn apply_pin_plan(
         },
     )
     .await;
-    clear_authorized_plan(ctx, environment).await?;
+    clear_authorized_plan(ctx, record).await?;
     applied?;
     let plan = plan::load(ctx, plan_id).await?;
     if plan.state != PlanState::Succeeded {
@@ -1656,7 +1839,7 @@ async fn apply_pin_plan(
 
 async fn persist_new(ctx: &mut Ctx, record: &MigrationRecord) -> Result<()> {
     require_package_migration_schema(ctx).await?;
-    let id = package_migration_id(&record.name);
+    let id = record_catalog_id(record);
     if let Some(existing) = ctx.get(&id).await? {
         let stored: MigrationRecord = serde_json::from_str(
             existing
@@ -1687,7 +1870,7 @@ async fn persist(ctx: &mut Ctx, record: &MigrationRecord) -> Result<()> {
 
 fn record_object(record: &MigrationRecord, now: i64) -> Result<Object> {
     Ok(Object {
-        id: package_migration_id(&record.name),
+        id: record_catalog_id(record),
         kind: KIND_PACKAGE_MIGRATION.into(),
         name: record.name.clone(),
         namespace: NS.into(),
@@ -2178,6 +2361,59 @@ inputs = ["payload.txt"]
         .unwrap_err()
         .to_string();
         assert!(err.contains("built-in local"), "{err}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn partitions_keep_separate_records_for_the_same_migration_name() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-migration-partition-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::plan::env_add(&mut ctx, "prod", "fixture")
+            .await
+            .unwrap();
+        let declaration = publish_pins(&mut ctx, &root).await;
+        create_in(
+            &mut ctx,
+            "cutover",
+            "prod",
+            declaration.clone(),
+            None,
+            Some("tenant-a"),
+        )
+        .await
+        .unwrap();
+        let missing = load_in(&mut ctx, "cutover", Some("tenant-b"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("is not stored"), "{missing}");
+        assert!(!missing.contains("tenant-a"), "{missing}");
+        create_in(
+            &mut ctx,
+            "cutover",
+            "prod",
+            declaration,
+            None,
+            Some("tenant-b"),
+        )
+        .await
+        .unwrap();
+        let a = load_in(&mut ctx, "cutover", Some("tenant-a"))
+            .await
+            .unwrap();
+        let b = load_in(&mut ctx, "cutover", Some("tenant-b"))
+            .await
+            .unwrap();
+        assert_eq!(a.partition.as_deref(), Some("tenant-a"));
+        assert_eq!(b.partition.as_deref(), Some("tenant-b"));
+        assert_ne!(record_catalog_id(&a), record_catalog_id(&b));
+        let unscoped = load(&mut ctx, "cutover").await.unwrap_err().to_string();
+        assert!(unscoped.contains("is not stored"), "{unscoped}");
         let _ = std::fs::remove_dir_all(root);
     }
 

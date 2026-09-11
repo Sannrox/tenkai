@@ -87,10 +87,22 @@ pub fn connectivity_upgrade_id(name: &str) -> String {
     format!("tenkai:connectivity-upgrade:{name}")
 }
 pub fn package_migration_id(name: &str) -> String {
-    format!("tenkai:package-migration:{name}")
+    package_migration_id_in(None, name)
+}
+pub fn package_migration_id_in(partition: Option<&str>, name: &str) -> String {
+    match partition.filter(|value| !value.is_empty()) {
+        Some(partition) => format!("tenkai:package-migration:{partition}:{name}"),
+        None => format!("tenkai:package-migration:{name}"),
+    }
 }
 pub fn package_migration_lock_id(environment: &str) -> String {
-    format!("tenkai:package-migration-lock:{environment}")
+    package_migration_lock_id_in(None, environment)
+}
+pub fn package_migration_lock_id_in(partition: Option<&str>, environment: &str) -> String {
+    match partition.filter(|value| !value.is_empty()) {
+        Some(partition) => format!("tenkai:package-migration-lock:{partition}:{environment}"),
+        None => format!("tenkai:package-migration-lock:{environment}"),
+    }
 }
 pub fn plan_id(env: &str, ts: i64, content_id: &str) -> String {
     format!("tenkai:plan:{env}:{ts}:{content_id}")

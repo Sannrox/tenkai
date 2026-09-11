@@ -284,13 +284,15 @@ impl ManagementOperations {
             .map_err(map_migration_error)?;
         self.require_environment_visible(&context, &request.environment)
             .await?;
+        let partition = self.migration_partition(&context)?;
         let mut ctx = self.application_ctx()?;
-        let record = package_migration::preview(
+        let record = package_migration::preview_in(
             &mut ctx,
             name,
             &request.environment,
             request.declaration,
             request.backup_receipt_digest.as_deref(),
+            partition,
         )
         .await
         .map_err(map_migration_error)?;
@@ -318,8 +320,9 @@ impl ManagementOperations {
             approval: &files.approval,
             trust_roots: &files.trust_roots,
         };
+        let partition = self.migration_partition(&context)?;
         let mut ctx = self.application_ctx()?;
-        match package_migration::load(&mut ctx, name).await {
+        match package_migration::load_in(&mut ctx, name, partition).await {
             Ok(stored) => {
                 self.require_environment_visible(&context, &stored.environment)
                     .await?;
@@ -353,12 +356,13 @@ impl ManagementOperations {
                 }
                 self.require_environment_visible(&context, &request.environment)
                     .await?;
-                let previewed = package_migration::preview(
+                let previewed = package_migration::preview_in(
                     &mut ctx,
                     name,
                     &request.environment,
                     request.declaration.clone(),
                     request.backup_receipt_digest.as_deref(),
+                    partition,
                 )
                 .await
                 .map_err(map_migration_error)?;
@@ -374,7 +378,7 @@ impl ManagementOperations {
         }
         let actor = context.principal_id();
         self.audit(actor, "package_migration.apply.requested")?;
-        let record = package_migration::run_until_blocked(
+        let record = package_migration::run_until_blocked_in(
             &mut ctx,
             name,
             &request.environment,
@@ -382,6 +386,7 @@ impl ManagementOperations {
             request.backup_receipt_digest.as_deref(),
             authorization,
             Some(request.expected_generation),
+            partition,
         )
         .await
         .map_err(map_migration_error)?;
@@ -396,8 +401,9 @@ impl ManagementOperations {
     ) -> Result<PackageMigrationResult, ManagementError> {
         let context = self.authenticate(credential)?;
         Self::require_capability(&context, DeliveryCapability::Read)?;
+        let partition = self.migration_partition(&context)?;
         let mut ctx = self.application_ctx()?;
-        let record = package_migration::load(&mut ctx, name)
+        let record = package_migration::load_in(&mut ctx, name, partition)
             .await
             .map_err(map_migration_error)
             .map_err(|error| self.hide_missing_migration(error))?;
@@ -448,8 +454,9 @@ impl ManagementOperations {
             approval: &files.approval,
             trust_roots: &files.trust_roots,
         };
+        let partition = self.migration_partition(&context)?;
         let mut ctx = self.application_ctx()?;
-        let stored = package_migration::load(&mut ctx, name)
+        let stored = package_migration::load_in(&mut ctx, name, partition)
             .await
             .map_err(map_migration_error)
             .map_err(|error| self.hide_missing_migration(error))?;
@@ -463,19 +470,21 @@ impl ManagementOperations {
         };
         self.audit(actor, &format!("{op}.requested"))?;
         let record = if resume {
-            package_migration::resume(
+            package_migration::resume_in(
                 &mut ctx,
                 name,
                 authorization,
                 Some(request.expected_generation),
+                partition,
             )
             .await
         } else {
-            package_migration::rollback(
+            package_migration::rollback_in(
                 &mut ctx,
                 name,
                 authorization,
                 Some(request.expected_generation),
+                partition,
             )
             .await
         }
@@ -515,9 +524,21 @@ impl ManagementOperations {
         }
     }
 
-    /// Tenant isolation for migrations uses the environment id, matching
-    /// `GET /v1/environments/{environment}`. Distinct tenant partitions must
-    /// use distinct environment identifiers.
+    fn migration_partition<'a>(
+        &self,
+        context: &'a AuthenticatedRequestContext,
+    ) -> Result<Option<&'a str>, ManagementError> {
+        if !self.tenant_mode {
+            return Ok(None);
+        }
+        let tenant = context
+            .tenant()
+            .ok_or_else(|| ManagementError::Forbidden(NON_DISCLOSING_DENY.into()))?;
+        Ok(Some(tenant.tenant_id()))
+    }
+
+    /// Tenant isolation for migrations uses the caller partition as the catalog
+    /// key. Environment visibility is a second gate and is not a global name.
     async fn require_environment_visible(
         &self,
         context: &AuthenticatedRequestContext,
