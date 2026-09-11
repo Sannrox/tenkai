@@ -75,6 +75,19 @@ enum OutputFormat {
 }
 
 #[derive(Subcommand)]
+enum RecoveryCommand {
+    /// Write a versioned allowlisted diagnostic for one plan.
+    Export {
+        #[arg(long)]
+        env: String,
+        #[arg(long)]
+        plan: String,
+        #[arg(long)]
+        output: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
 enum Command {
     #[command(name = "__executor-guard", hide = true)]
     ExecutorGuard {
@@ -199,6 +212,11 @@ enum Command {
     },
     /// Inspect the embedded control-plane state without distributed diagnostics.
     Inspect,
+    /// Export a bounded, read-only recovery diagnostic (no authority).
+    Recovery {
+        #[command(subcommand)]
+        command: RecoveryCommand,
+    },
     /// Create a transactionally consistent embedded-state backup.
     Backup { destination: PathBuf },
     /// Replace embedded state from a verified backup. The CLI must be the only writer.
@@ -2258,6 +2276,16 @@ async fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
+        Command::Recovery { command } => match command {
+            RecoveryCommand::Export { env, plan, output } => {
+                let bundle = tenkai::recovery_bundle::export(&mut ctx, &env, &plan).await?;
+                tenkai::recovery_bundle::write_verified(&output, &bundle)?;
+                println!(
+                    "wrote recovery diagnostic {} (authority=none)",
+                    output.display()
+                );
+            }
+        },
         Command::Inspect => {
             let summary = serde_json::json!({
                 "mode": "embedded",
