@@ -367,6 +367,20 @@ impl RemoteApprovalFiles {
         }
         Ok(files)
     }
+
+    pub async fn materialize_async(
+        approval: MigrationApprovalEnvelope,
+        trust_roots: ApprovalTrustRoots,
+        plan_approvals: BTreeMap<String, crate::plan_approval::ApprovalEnvelope>,
+    ) -> Result<Self> {
+        tokio::task::spawn_blocking(move || {
+            Self::materialize(&approval, &trust_roots, &plan_approvals)
+        })
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("package migration approval materialize task failed: {error}")
+        })?
+    }
 }
 
 fn checkpoint_effect(class: CheckpointClass) -> &'static str {
@@ -2476,5 +2490,36 @@ inputs = ["payload.txt"]
         .to_string();
         assert!(err.contains("safe file name"), "{err}");
         validate_plan_approval_filename("tenkai:plan:stage:1:sha256:abc").unwrap();
+    }
+
+    #[tokio::test]
+    async fn remote_approval_files_materialize_on_the_blocking_pool() {
+        let files = RemoteApprovalFiles::materialize_async(
+            MigrationApprovalEnvelope {
+                schema: APPROVAL_SCHEMA.into(),
+                key_id: "k".into(),
+                statement: MigrationApprovalStatement {
+                    identity_digest: digest('a'),
+                    environment: "stage".into(),
+                    purpose: APPROVAL_PURPOSE.into(),
+                    issued_at: 1,
+                    expires_at: 2,
+                },
+                signature: "c2ln".into(),
+            },
+            ApprovalTrustRoots {
+                version: 1,
+                signers: vec![ApprovalTrustedSigner {
+                    key_id: "k".into(),
+                    identity: "approver".into(),
+                    public_key: "cA==".into(),
+                }],
+            },
+            BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+        assert!(files.approval.is_file(), "{:?}", files.approval);
+        assert!(files.trust_roots.is_file(), "{:?}", files.trust_roots);
     }
 }
