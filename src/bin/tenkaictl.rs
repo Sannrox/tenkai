@@ -2227,6 +2227,7 @@ async fn run(cli: Cli) -> Result<()> {
                     emergency_reason: emergency_reason.as_deref(),
                     authorization,
                     software_executor: None,
+                    worker_lifecycle: None,
                     delivery_adapter: None,
                     delivery_fence: None,
                 },
@@ -2362,6 +2363,7 @@ async fn run(cli: Cli) -> Result<()> {
                                 .expect("clap requires a development reason"),
                         },
                         software_executor: None,
+                        worker_lifecycle: None,
                         delivery_adapter: None,
                         delivery_fence: None,
                     },
@@ -2425,6 +2427,7 @@ async fn run(cli: Cli) -> Result<()> {
                         },
                         software_executor: tenkai::software_executor::selected_software_executor()
                             .map(std::sync::Arc::from),
+                        worker_lifecycle: None,
                         delivery_adapter: None,
                         delivery_fence: None,
                     },
@@ -3051,12 +3054,15 @@ async fn run_plan(
 ) -> Result<()> {
     let software =
         tenkai::software_executor::selected_software_executor().map(std::sync::Arc::from);
+    let worker_lifecycle =
+        tenkai::worker_pool::selected_worker_lifecycle()?.map(std::sync::Arc::from);
     let delivery = tenkai::delivery_bridge::selected_delivery_adapter();
     let execution = apply::ExecutionOptions {
         skip_gates: execution.skip_gates,
         emergency_reason: execution.emergency_reason,
         authorization: execution.authorization,
         software_executor: software,
+        worker_lifecycle,
         delivery_adapter: delivery,
         delivery_fence: None,
     };

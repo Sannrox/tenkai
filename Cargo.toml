@@ -27,6 +27,10 @@ path = "src/bin/tenkai-runtime.rs"
 name = "tenkai-runtime-guard"
 path = "src/bin/tenkai-runtime-guard.rs"
 
+[[bin]]
+name = "tenkai-worker-lifecycle-fixture"
+path = "src/bin/tenkai-worker-lifecycle-fixture.rs"
+
 [dependencies]
 tonic = { version = "0.14", features = ["tls-webpki-roots", "tls-ring"] }
 tonic-prost = "0.14"

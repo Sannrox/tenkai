@@ -798,6 +798,7 @@ async fn apply_plan(
             authorization,
             software_executor: crate::software_executor::selected_software_executor()
                 .map(std::sync::Arc::from),
+            worker_lifecycle: None,
             delivery_adapter: None,
             delivery_fence: None,
         },

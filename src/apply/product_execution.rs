@@ -26,7 +26,7 @@ pub(super) async fn activate(
     ctx: &mut Ctx,
     lease: &EnvironmentLease,
     content: &ReleaseContent,
-    software: Option<&dyn crate::software_executor::SoftwareExecutor>,
+    adapters: TargetAdapters<'_>,
 ) -> Result<Result<(), String>> {
     if content.manifest.product.kind.policy().target() == ProductTarget::RoutingConfig {
         prepare_fenced_mutation(ctx, lease, content).await?;
@@ -62,12 +62,8 @@ pub(super) async fn activate(
     }
     if content.manifest.product.kind.policy().target() == ProductTarget::WorkerPool {
         prepare_fenced_mutation(ctx, lease, content).await?;
-        if let Err(error) = admit_worker_pool(ctx, content, false).await? {
-            return Ok(Err(error));
-        }
-        if software.is_none() && content.manifest.deploy.install.trim().is_empty() {
-            return Ok(Ok(()));
-        }
+        return admit_worker_pool(ctx, lease, content, adapters.worker_lifecycle, false, false)
+            .await;
     }
     if content.manifest.product.kind == crate::manifest::ProductKind::WorkshopModule {
         prepare_fenced_mutation(ctx, lease, content).await?;
@@ -103,7 +99,7 @@ pub(super) async fn activate(
         )
         .map_err(|error| error.to_string()));
     }
-    if let Some(executor) = software {
+    if let Some(executor) = adapters.software {
         prepare_fenced_mutation(ctx, lease, content).await?;
         let request = software_request(ctx, content).await?;
         let install = executor.apply(&request).map_err(|error| {
@@ -153,9 +149,14 @@ pub(super) async fn restart(
     ctx: &mut Ctx,
     lease: &EnvironmentLease,
     content: &ReleaseContent,
-    software: Option<&dyn crate::software_executor::SoftwareExecutor>,
+    adapters: TargetAdapters<'_>,
 ) -> Result<Result<(), String>> {
-    if let Some(executor) = software {
+    if content.manifest.product.kind.policy().target() == ProductTarget::WorkerPool {
+        prepare_fenced_mutation(ctx, lease, content).await?;
+        return admit_worker_pool(ctx, lease, content, adapters.worker_lifecycle, false, true)
+            .await;
+    }
+    if let Some(executor) = adapters.software {
         prepare_fenced_mutation(ctx, lease, content).await?;
         let request = software_request(ctx, content).await?;
         let bounce = executor.restart(&request).map_err(|error| {
@@ -183,7 +184,7 @@ pub(super) async fn restart(
         };
         return Ok(result);
     }
-    activate(ctx, lease, content, software).await
+    activate(ctx, lease, content, adapters).await
 }
 
 /// Deactivate one release under the current environment fence.
@@ -191,7 +192,7 @@ pub(super) async fn deactivate(
     ctx: &mut Ctx,
     lease: &EnvironmentLease,
     content: &ReleaseContent,
-    software: Option<&dyn crate::software_executor::SoftwareExecutor>,
+    adapters: TargetAdapters<'_>,
 ) -> Result<Result<(), String>> {
     if content.manifest.product.kind.policy().target() == ProductTarget::RoutingConfig {
         refresh_environment_lease(ctx, lease).await?;
@@ -213,9 +214,8 @@ pub(super) async fn deactivate(
     }
     if content.manifest.product.kind.policy().target() == ProductTarget::WorkerPool {
         refresh_environment_lease(ctx, lease).await?;
-        if let Err(error) = admit_worker_pool(ctx, content, true).await? {
-            return Ok(Err(error));
-        }
+        return admit_worker_pool(ctx, lease, content, adapters.worker_lifecycle, true, false)
+            .await;
     }
     if content.manifest.product.kind == crate::manifest::ProductKind::WorkshopModule {
         refresh_environment_lease(ctx, lease).await?;
@@ -248,7 +248,7 @@ pub(super) async fn deactivate(
         )
         .map_err(|error| error.to_string()));
     }
-    if let Some(executor) = software {
+    if let Some(executor) = adapters.software {
         refresh_environment_lease(ctx, lease).await?;
         return Ok(executor
             .remove(&software_request(ctx, content).await?)
@@ -278,7 +278,7 @@ pub(super) async fn cleanup_failed_activation(
     lease: &EnvironmentLease,
     content: &ReleaseContent,
     failure: String,
-    software: Option<&dyn crate::software_executor::SoftwareExecutor>,
+    adapters: TargetAdapters<'_>,
 ) -> Result<(bool, String)> {
     if content.manifest.product.kind.policy().cleanup() == CleanupPolicy::Atomic {
         // Descriptor validation is pre-mutation and local adapters publish
@@ -286,7 +286,7 @@ pub(super) async fn cleanup_failed_activation(
         return Ok((true, failure));
     }
     Ok(match content.manifest.deploy.uninstall.as_deref() {
-        Some(_) => match deactivate(ctx, lease, content, software).await {
+        Some(_) => match deactivate(ctx, lease, content, adapters).await {
             Ok(Ok(())) => (true, format!("{failure}; cleaned up failed install")),
             Ok(Err(cleanup)) => (false, format!("{failure}; cleanup also failed: {cleanup}")),
             Err(error) => (
@@ -321,8 +321,11 @@ async fn software_request(
 
 async fn admit_worker_pool(
     ctx: &mut Ctx,
+    lease: &EnvironmentLease,
     content: &ReleaseContent,
+    worker_lifecycle: Option<&dyn crate::worker_pool::WorkerLifecyclePort>,
     removing: bool,
+    restart: bool,
 ) -> Result<Result<(), String>> {
     let mut spec = match crate::worker_pool::spec_from_manifest(&content.manifest) {
         Ok(spec) => spec,
@@ -331,26 +334,36 @@ async fn admit_worker_pool(
     if removing {
         spec.replicas = 0;
     }
+    let Some(port) = worker_lifecycle else {
+        return Ok(Err(
+            "live worker-lifecycle port required; retained snapshots cannot authorize process change"
+                .into(),
+        ));
+    };
     let mut env = crate::environment::environment(ctx, &content.environment).await?;
     let previous = crate::worker_pool::previous_replicas(&env.properties, &spec.product);
     let drain_started = crate::worker_pool::drain_started_at(&env.properties, &spec.product);
-    let snapshots = match crate::worker_pool::load_snapshots(&content.workdir.join("worker"), &spec)
-    {
-        Ok(snapshots) => snapshots,
-        Err(error) => return Ok(Err(error.to_string())),
-    };
     let now = crate::now_millis();
-    let decision =
-        match crate::worker_pool::reconcile(&spec, &snapshots, previous, drain_started, now) {
-            Ok(decision) => decision,
+    let (decision, observed, next_drain, source) =
+        match crate::worker_pool::admit_live_pool(crate::worker_pool::LivePoolAdmission {
+            spec: &spec,
+            port,
+            environment: &content.environment,
+            expected_generation: lease.generation,
+            previous_replicas: previous,
+            drain_started_at_ms: drain_started,
+            now_ms: now,
+            restart,
+        }) {
+            Ok(result) => result,
             Err(error) => return Ok(Err(error.to_string())),
         };
-    let observed = crate::worker_pool::observation(&spec, &snapshots, &decision);
     crate::worker_pool::persist_observation(&mut env.properties, &observed);
-    if matches!(decision, crate::worker_pool::WorkerPoolDecision::WaitDrain) {
+    crate::worker_pool::persist_observation_source(&mut env.properties, &spec.product, source);
+    if let Some(started) = next_drain {
         env.properties.insert(
             format!("worker_pool.{}.drain_started_at", spec.product),
-            drain_started.unwrap_or(now).to_string(),
+            started.to_string(),
         );
     } else {
         env.properties
