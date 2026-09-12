@@ -27,3 +27,4 @@
 - [0025 — Remote plan property query bounds](0025-remote-plan-property-query-bounds.md)
 - [0026 — Remote package-migration lifecycle parity](0026-remote-package-migration-parity.md)
 - [0027 — Bounded recovery diagnostic bundle](0027-recovery-diagnostic-bundle.md)
+- [0028 — Live worker-lifecycle observation and process lifetime](0028-live-worker-lifecycle-port.md)

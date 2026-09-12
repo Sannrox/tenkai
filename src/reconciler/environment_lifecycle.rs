@@ -217,6 +217,8 @@ async fn execute_authorized(
     authorization: apply::ExecutionAuthorization<'_>,
 ) -> Result<EnvironmentStatus> {
     let software = crate::software_executor::selected_software_executor().map(std::sync::Arc::from);
+    let worker_lifecycle =
+        crate::worker_pool::selected_worker_lifecycle()?.map(std::sync::Arc::from);
     let outcomes = apply::execute_with_options(
         ctx,
         plan_id,
@@ -225,6 +227,7 @@ async fn execute_authorized(
             emergency_reason: None,
             authorization,
             software_executor: software,
+            worker_lifecycle,
             delivery_adapter: crate::delivery_bridge::selected_delivery_adapter(),
             delivery_fence: None,
         },

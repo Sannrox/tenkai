@@ -1632,6 +1632,7 @@ async fn apply_pin(
             authorization: exec,
             software_executor: crate::software_executor::selected_software_executor()
                 .map(std::sync::Arc::from),
+            worker_lifecycle: None,
             delivery_adapter: None,
             delivery_fence: None,
         },
@@ -1837,6 +1838,7 @@ async fn apply_pin_plan(
             authorization: exec,
             software_executor: crate::software_executor::selected_software_executor()
                 .map(std::sync::Arc::from),
+            worker_lifecycle: None,
             delivery_adapter: None,
             delivery_fence: None,
         },
@@ -2023,6 +2025,7 @@ inputs = ["payload.txt"]
                     reason: "seed source package",
                 },
                 software_executor: None,
+                worker_lifecycle: None,
                 delivery_adapter: None,
                 delivery_fence: None,
             },
@@ -2093,6 +2096,7 @@ inputs = ["payload.txt"]
                     reason: "sneak apply during migration",
                 },
                 software_executor: None,
+                worker_lifecycle: None,
                 delivery_adapter: None,
                 delivery_fence: None,
             },

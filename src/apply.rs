@@ -41,6 +41,12 @@ use execution_lease::{claim_execution_environment, run_mutation_command};
 pub use outcome::{Outcome, StepOutcomeStatus};
 use release_content::{ReleaseContent, admit as admit_release, verify_integrity};
 
+#[derive(Clone, Copy)]
+struct TargetAdapters<'a> {
+    software: Option<&'a dyn crate::software_executor::SoftwareExecutor>,
+    worker_lifecycle: Option<&'a dyn crate::worker_pool::WorkerLifecyclePort>,
+}
+
 #[allow(deprecated)]
 pub use execution_attempt::{
     ExecutionAuthorization, ExecutionOptions, execute, execute_with_options,
@@ -279,7 +285,10 @@ async fn execute_locked(
             &env,
             &plan_id,
             &step,
-            options.software_executor,
+            TargetAdapters {
+                software: options.software_executor,
+                worker_lifecycle: options.worker_lifecycle,
+            },
             recalled_recovery,
         )
         .await

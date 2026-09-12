@@ -816,6 +816,7 @@ install = "true"
                 trust_roots: trust,
             },
             software_executor: None,
+            worker_lifecycle: None,
             delivery_adapter: Some(adapter),
             delivery_fence: fence,
         }

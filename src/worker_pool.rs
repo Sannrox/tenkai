@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::manifest::{Manifest, ProductKind, WorkerPoolSection};
 
+mod live;
+pub use live::*;
+
 pub const LIFECYCLE_PROTOCOL: &str = "shikigami.worker_lifecycle";
 pub const LIFECYCLE_SCHEMA_VERSION: u32 = 1;
 pub const INTAKE_PLANE: &str = "plane";
@@ -361,6 +364,33 @@ pub fn ready_snapshot(spec: &WorkerPoolSpec, worker_id: &str) -> WorkerLifecycle
 mod tests {
     use super::*;
 
+    fn admit(
+        spec: &WorkerPoolSpec,
+        port: &FakeWorkerLifecycle,
+        generation: u64,
+        previous: u32,
+        drain_started_at_ms: Option<i64>,
+        now_ms: i64,
+        restart: bool,
+    ) -> (
+        WorkerPoolDecision,
+        WorkerPoolObservation,
+        Option<i64>,
+        LifecycleObservationSource,
+    ) {
+        admit_live_pool(LivePoolAdmission {
+            spec,
+            port,
+            environment: "local",
+            expected_generation: generation,
+            previous_replicas: previous,
+            drain_started_at_ms,
+            now_ms,
+            restart,
+        })
+        .unwrap()
+    }
+
     fn spec(replicas: u32) -> WorkerPoolSpec {
         WorkerPoolSpec {
             product: "edge-workers".into(),
@@ -627,30 +657,8 @@ replicas = 1
             .await
             .unwrap();
 
-        let release = ctx
-            .get(&crate::ontology::release_id("edge-workers", "1.0.0"))
-            .await
-            .unwrap()
-            .unwrap();
-        let snapshot = std::path::PathBuf::from(release.properties.get("workdir").unwrap());
-        let artifact_digest = release.properties.get("artifact_digest").unwrap();
-        let workdir = crate::manifest::execution_workdir(
-            &snapshot,
-            &[],
-            artifact_digest,
-            "local",
-            "edge-workers",
-        )
-        .unwrap();
-        std::fs::create_dir_all(workdir.join("worker")).unwrap();
-        let spec = spec(1);
-        std::fs::write(
-            workdir.join("worker/w1.json"),
-            serde_json::to_vec_pretty(&ready_snapshot(&spec, "w1")).unwrap(),
-        )
-        .unwrap();
-
         let plan = crate::plan::create(&mut ctx, "local").await.unwrap();
+        let port = std::sync::Arc::new(FakeWorkerLifecycle::new());
         crate::apply::execute_with_options(
             &mut ctx,
             &plan.id,
@@ -661,6 +669,7 @@ replicas = 1
                     reason: "worker pool apply",
                 },
                 software_executor: None,
+                worker_lifecycle: Some(port),
                 delivery_adapter: None,
                 delivery_fence: None,
             },
@@ -682,10 +691,407 @@ replicas = 1
                 .map(String::as_str),
             Some("1")
         );
+        assert_eq!(
+            env.properties
+                .get("worker_pool.edge-workers.observation_source")
+                .map(String::as_str),
+            Some("live")
+        );
         let _ = crate::catalog::EmbeddedCatalog::new(&mut ctx)
             .lookup_release("tenkai:release:edge-workers@1.0.0", "local")
             .await
             .unwrap();
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn retained_snapshots_cannot_authorize_replacement() {
+        let desired = spec(1);
+        let retained = retained_observation(ready_snapshot(&desired, "w1"), 1, 10);
+        let err = authorize_observations(&desired, &[retained], 1, 10)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("retained snapshots cannot authorize"), "{err}");
+    }
+
+    #[test]
+    fn stale_fencing_generation_cannot_authorize_replacement() {
+        let desired = spec(1);
+        let live = LiveWorkerObservation {
+            snapshot: ready_snapshot(&desired, "w1"),
+            observed_at_ms: 10,
+            fencing_generation: 3,
+            source: LifecycleObservationSource::Live,
+        };
+        let err = authorize_observations(&desired, &[live], 4, 10)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("stale fencing generation"), "{err}");
+    }
+
+    #[test]
+    fn stale_observation_cannot_authorize_replacement() {
+        let desired = spec(1);
+        let live = LiveWorkerObservation {
+            snapshot: ready_snapshot(&desired, "w1"),
+            observed_at_ms: 0,
+            fencing_generation: 1,
+            source: LifecycleObservationSource::Live,
+        };
+        let err = authorize_observations(&desired, &[live], 1, 60_000)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("stale worker-lifecycle observation"), "{err}");
+    }
+
+    #[test]
+    fn scale_down_drains_only_the_removed_replica() {
+        let desired = spec(1);
+        let port = FakeWorkerLifecycle::new();
+        port.set_observed_at_ms(10);
+        port.seed({
+            let mut busy = ready_snapshot(&desired, "w1");
+            busy.state = "active".into();
+            busy.active_claims = 1;
+            busy
+        });
+        port.seed({
+            let mut busy = ready_snapshot(&desired, "w2");
+            busy.state = "active".into();
+            busy.active_claims = 1;
+            busy
+        });
+        let (decision, _, _, _) = admit(&desired, &port, 1, 2, None, 10, false);
+        assert_eq!(decision, WorkerPoolDecision::WaitDrain);
+        assert_eq!(port.drain_requested(), vec!["w2".to_string()]);
+    }
+
+    #[test]
+    fn live_busy_worker_drains_before_replacement() {
+        let desired = spec(1);
+        let port = FakeWorkerLifecycle::new();
+        port.set_observed_at_ms(10);
+        port.seed({
+            let mut busy = ready_snapshot(&desired, "w1");
+            busy.version = "0.9.0".into();
+            busy.state = "active".into();
+            busy.active_claims = 1;
+            busy
+        });
+        let (decision, observed, drain, source) = admit(&desired, &port, 1, 1, None, 10, false);
+        assert_eq!(decision, WorkerPoolDecision::WaitDrain);
+        assert_eq!(source, LifecycleObservationSource::Live);
+        assert_eq!(drain, Some(10));
+        assert!(observed.detail.contains("waiting for bounded drain"));
+        assert_eq!(port.drain_requested(), vec!["w1".to_string()]);
+    }
+
+    #[test]
+    fn drain_timeout_from_live_port_does_not_acknowledge_work() {
+        let desired = spec(1);
+        let port = FakeWorkerLifecycle::new();
+        port.set_observed_at_ms(5_000);
+        port.seed({
+            let mut busy = ready_snapshot(&desired, "w1");
+            busy.version = "0.9.0".into();
+            busy.state = "active".into();
+            busy.active_claims = 1;
+            busy
+        });
+        let (decision, observed, drain, _) = admit(&desired, &port, 1, 1, Some(0), 5_000, false);
+        match decision {
+            WorkerPoolDecision::Degraded { reason } => {
+                assert!(reason.contains("drain timed out"), "{reason}");
+                assert!(reason.contains("not acknowledged"), "{reason}");
+            }
+            other => panic!("expected degraded, got {other:?}"),
+        }
+        assert!(observed.degraded);
+        assert!(drain.is_none());
+        assert!(port.drain_requested().is_empty());
+    }
+
+    #[test]
+    fn scale_up_starts_missing_replica_while_existing_is_busy() {
+        let desired = spec(2);
+        let port = FakeWorkerLifecycle::new();
+        port.set_observed_at_ms(crate::now_millis());
+        port.seed({
+            let mut busy = ready_snapshot(&desired, "w1");
+            busy.state = "active".into();
+            busy.active_claims = 1;
+            busy
+        });
+        let (decision, observed, _, _) =
+            admit(&desired, &port, 1, 1, None, crate::now_millis(), false);
+        assert_eq!(decision, WorkerPoolDecision::Apply { replicas: 2 });
+        assert_eq!(observed.observed_replicas, 2);
+        let live = port
+            .observe(&WorkerLifecycleScope {
+                product: desired.product.clone(),
+                version: desired.version.clone(),
+                environment: "local".into(),
+                expected_generation: 1,
+                worker_id: None,
+            })
+            .unwrap();
+        assert!(live.iter().any(|item| item.snapshot.worker_id == "w2"));
+    }
+
+    #[test]
+    fn restart_does_not_replace_when_governance_is_unavailable() {
+        let desired = spec(1);
+        let port = FakeWorkerLifecycle::new();
+        port.set_observed_at_ms(crate::now_millis());
+        port.seed({
+            let mut host = ready_snapshot(&desired, "w1");
+            host.governance_ok = false;
+            host.state = "governance_unavailable".into();
+            host.accepting_claims = false;
+            host
+        });
+        let (decision, _, _, _) = admit(&desired, &port, 1, 1, None, crate::now_millis(), true);
+        match decision {
+            WorkerPoolDecision::Degraded { reason } => {
+                assert!(reason.contains("governance"), "{reason}");
+            }
+            other => panic!("expected degraded, got {other:?}"),
+        }
+        assert!(port.drain_requested().is_empty());
+    }
+
+    #[test]
+    fn restart_replaces_converged_replicas() {
+        let desired = spec(1);
+        let port = FakeWorkerLifecycle::new();
+        port.set_observed_at_ms(crate::now_millis());
+        port.seed(ready_snapshot(&desired, "w1"));
+        let (decision, observed, _, _) =
+            admit(&desired, &port, 1, 1, None, crate::now_millis(), true);
+        assert_eq!(decision, WorkerPoolDecision::Apply { replicas: 1 });
+        assert_eq!(observed.state, "healthy");
+        assert_eq!(port.drain_requested(), vec!["w1".to_string()]);
+    }
+
+    #[test]
+    fn live_port_replaces_drained_release_a_with_b() {
+        let previous = spec(1);
+        let desired = WorkerPoolSpec {
+            version: "2.0.0".into(),
+            ..previous.clone()
+        };
+        let port = FakeWorkerLifecycle::new();
+        port.seed(ready_snapshot(&previous, "w1"));
+        let (decision, observed, drain, source) =
+            admit(&desired, &port, 7, 1, None, crate::now_millis(), false);
+        assert_eq!(decision, WorkerPoolDecision::Apply { replicas: 1 });
+        assert_eq!(source, LifecycleObservationSource::Live);
+        assert!(drain.is_none());
+        assert_eq!(observed.state, "healthy");
+        assert!(!observed.degraded);
+        let live = port
+            .observe(&WorkerLifecycleScope {
+                product: desired.product.clone(),
+                version: desired.version.clone(),
+                environment: "local".into(),
+                expected_generation: 7,
+                worker_id: None,
+            })
+            .unwrap();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].snapshot.version, "2.0.0");
+        assert_eq!(live[0].snapshot.worker_id, "w1");
+    }
+
+    #[test]
+    fn governance_degraded_live_pool_does_not_replace() {
+        let previous = spec(1);
+        let desired = WorkerPoolSpec {
+            version: "2.0.0".into(),
+            ..previous.clone()
+        };
+        let port = FakeWorkerLifecycle::new();
+        port.set_observed_at_ms(crate::now_millis());
+        port.seed({
+            let mut host = ready_snapshot(&previous, "w1");
+            host.governance_ok = false;
+            host.state = "governance_unavailable".into();
+            host.accepting_claims = false;
+            host
+        });
+        let (decision, _, _, _) = admit(&desired, &port, 1, 1, None, crate::now_millis(), false);
+        match decision {
+            WorkerPoolDecision::Degraded { reason } => {
+                assert!(reason.contains("governance"), "{reason}");
+            }
+            other => panic!("expected degraded, got {other:?}"),
+        }
+        let live = port
+            .observe(&WorkerLifecycleScope {
+                product: desired.product.clone(),
+                version: desired.version.clone(),
+                environment: "local".into(),
+                expected_generation: 1,
+                worker_id: None,
+            })
+            .unwrap();
+        assert_eq!(live[0].snapshot.version, "1.0.0");
+    }
+
+    #[test]
+    fn governance_outage_after_drain_cannot_authorize_stop() {
+        let previous = spec(1);
+        let desired = WorkerPoolSpec {
+            version: "2.0.0".into(),
+            ..previous.clone()
+        };
+        let port = FakeWorkerLifecycle::new();
+        port.set_observed_at_ms(crate::now_millis());
+        port.set_governance_outage_on_drain(true);
+        port.seed(ready_snapshot(&previous, "w1"));
+        let err = crate::worker_pool::admit_live_pool(crate::worker_pool::LivePoolAdmission {
+            spec: &desired,
+            port: &port,
+            environment: "local",
+            expected_generation: 1,
+            previous_replicas: 1,
+            drain_started_at_ms: None,
+            now_ms: crate::now_millis(),
+            restart: false,
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("governance"), "{err}");
+        let live = port
+            .observe(&WorkerLifecycleScope {
+                product: desired.product.clone(),
+                version: desired.version.clone(),
+                environment: "local".into(),
+                expected_generation: 1,
+                worker_id: None,
+            })
+            .unwrap();
+        assert_eq!(live[0].snapshot.version, "1.0.0");
+        assert_eq!(live[0].snapshot.state, "governance_unavailable");
+    }
+
+    #[tokio::test]
+    async fn wait_drain_blocks_apply_without_restoring() {
+        use crate::catalog::{self, PublishOptions};
+        use crate::client::Ctx;
+
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-worker-wait-drain-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("tenkai.toml"),
+            r#"
+[product]
+name = "edge-workers"
+version = "2.0.0"
+kind = "worker_pool"
+
+[worker_pool]
+intake = "plane"
+replicas = 1
+drain_timeout_ms = 1000
+"#,
+        )
+        .unwrap();
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        catalog::publish(
+            &mut ctx,
+            &root.join("tenkai.toml"),
+            &PublishOptions {
+                allow_unsigned_development: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let actor = crate::auth_context::test_management_context("worker-pool");
+        catalog::promote(&mut ctx, &actor, "edge-workers@2.0.0", "stable")
+            .await
+            .unwrap();
+        crate::plan::env_add(&mut ctx, "local", "fixture")
+            .await
+            .unwrap();
+        crate::plan::subscribe(&mut ctx, "local", "edge-workers", "stable")
+            .await
+            .unwrap();
+        let plan = crate::plan::create(&mut ctx, "local").await.unwrap();
+        let port = std::sync::Arc::new(FakeWorkerLifecycle::new());
+        port.set_observed_at_ms(crate::now_millis());
+        port.seed({
+            let previous = spec(1);
+            let mut busy = ready_snapshot(&previous, "w1");
+            busy.state = "active".into();
+            busy.active_claims = 1;
+            busy
+        });
+        let outcomes = crate::apply::execute_with_options(
+            &mut ctx,
+            &plan.id,
+            crate::apply::ExecutionOptions {
+                skip_gates: false,
+                emergency_reason: None,
+                authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
+                    reason: "worker pool wait drain",
+                },
+                software_executor: None,
+                worker_lifecycle: Some(port.clone()),
+                delivery_adapter: None,
+                delivery_fence: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].status, "blocked");
+        assert!(
+            outcomes[0].detail.contains("waiting for bounded drain"),
+            "{}",
+            outcomes[0].detail
+        );
+        let stored = crate::plan::load(&mut ctx, &plan.id).await.unwrap();
+        assert_eq!(stored.state, crate::plan::PlanState::Blocked);
+        let live = port
+            .observe(&WorkerLifecycleScope {
+                product: "edge-workers".into(),
+                version: "2.0.0".into(),
+                environment: "local".into(),
+                expected_generation: 1,
+                worker_id: None,
+            })
+            .unwrap();
+        assert_eq!(live[0].snapshot.version, "1.0.0");
+        assert_eq!(live[0].snapshot.state, "draining");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lost_fence_from_live_port_rejects_replacement() {
+        let previous = spec(1);
+        let desired = WorkerPoolSpec {
+            version: "2.0.0".into(),
+            ..previous.clone()
+        };
+        let port = FakeWorkerLifecycle::new();
+        port.seed({
+            let mut lost = ready_snapshot(&previous, "w1");
+            lost.state = "fence_lost".into();
+            lost.fencing_ok = false;
+            lost.accepting_claims = false;
+            lost
+        });
+        let (decision, _, _, _) = admit(&desired, &port, 1, 1, None, crate::now_millis(), false);
+        assert!(
+            matches!(decision, WorkerPoolDecision::Deny { ref reason } if reason.contains("fence")),
+            "{decision:?}"
+        );
     }
 }

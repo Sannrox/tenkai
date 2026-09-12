@@ -27,6 +27,8 @@ pub struct ExecutionOptions<'a> {
     pub authorization: ExecutionAuthorization<'a>,
     /// Host-selected software adapter. `None` keeps the shell install path.
     pub software_executor: Option<Arc<dyn crate::software_executor::SoftwareExecutor>>,
+    /// Host-selected live worker-lifecycle port. Required for worker-pool apply.
+    pub worker_lifecycle: Option<Arc<dyn crate::worker_pool::WorkerLifecyclePort>>,
     /// Host-selected external delivery adapter. `None` keeps built-in execution.
     pub delivery_adapter: Option<std::sync::Arc<dyn crate::delivery_bridge::DeliveryAdapter>>,
     /// Optional tick fence for adapter callbacks. `None` skips extra fencing.
@@ -41,6 +43,7 @@ impl std::fmt::Debug for ExecutionOptions<'_> {
             .field("emergency_reason", &self.emergency_reason)
             .field("authorization", &self.authorization)
             .field("software_executor", &self.software_executor.is_some())
+            .field("worker_lifecycle", &self.worker_lifecycle.is_some())
             .field("delivery_adapter", &self.delivery_adapter.is_some())
             .field("delivery_fence", &self.delivery_fence.is_some())
             .finish()
@@ -52,6 +55,7 @@ pub(super) struct AttemptExecutionPolicy<'a> {
     pub skip_gates: bool,
     pub emergency_reason: Option<&'a str>,
     pub software_executor: Option<&'a dyn crate::software_executor::SoftwareExecutor>,
+    pub worker_lifecycle: Option<&'a dyn crate::worker_pool::WorkerLifecyclePort>,
     pub delivery_adapter: Option<std::sync::Arc<dyn crate::delivery_bridge::DeliveryAdapter>>,
     pub delivery_fence: Option<std::sync::Arc<dyn crate::reconcile_fence::ReconcileTickFence>>,
     pub approval: Option<(std::path::PathBuf, std::path::PathBuf)>,
@@ -128,6 +132,7 @@ pub async fn execute_with_options(
     let execution_emergency_reason = emergency_reason.map(str::to_string);
     let skip_gates = options.skip_gates;
     let software_executor = options.software_executor;
+    let worker_lifecycle = options.worker_lifecycle;
     let delivery_adapter = options.delivery_adapter.clone();
     let delivery_fence = options.delivery_fence.clone();
     let approval = match options.authorization {
@@ -147,6 +152,7 @@ pub async fn execute_with_options(
                         skip_gates,
                         emergency_reason: execution_emergency_reason.as_deref(),
                         software_executor: software_executor.as_deref(),
+                        worker_lifecycle: worker_lifecycle.as_deref(),
                         delivery_adapter,
                         delivery_fence,
                         approval,
