@@ -28,3 +28,4 @@
 - [0026 — Remote package-migration lifecycle parity](0026-remote-package-migration-parity.md)
 - [0027 — Bounded recovery diagnostic bundle](0027-recovery-diagnostic-bundle.md)
 - [0028 — Live worker-lifecycle observation and process lifetime](0028-live-worker-lifecycle-port.md)
+- [0029 — Hub and spoke operational store, one port](0029-hub-spoke-operational-store.md)
