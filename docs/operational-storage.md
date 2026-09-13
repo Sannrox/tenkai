@@ -1,10 +1,15 @@
 # Operational storage
 
 Tenkai owns releases, channel heads, environments, plans, leases, receipts,
-rollback recovery state, and durable executable-wave records (ADR 0017). `OperationalStore` is the application boundary for
-that authority. `SqliteStore` is the complete solo-mode adapter; future server
-database adapters must pass the same immutability, lifecycle, idempotency, and
-generation-fencing contract.
+rollback recovery state, and durable executable-wave records (ADR 0017).
+`OperationalStore` is the application boundary for that authority.
+[ADR 0029](decisions/0029-hub-spoke-operational-store.md) selects the host
+topology: hub PostgreSQL only, spoke and embedded `tenkaictl` SQLite only, one
+port, and retirement of the embedded object-graph schema. `SqliteStore` is the
+complete spoke and embedded adapter; the PostgreSQL adapter must pass the same
+immutability, lifecycle, idempotency, and generation-fencing contract. The
+shipped `EmbeddedStore` remains until that follow-up lands; it is not a second
+recovery authority.
 
 The store also owns the provider-event retry queue used for audit and outcome
 projection. The shipped SQLite host path uses this queue for terminal outcomes;

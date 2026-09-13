@@ -521,6 +521,7 @@ it ([ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md),
 | JWT EdDSA enterprise assertion verifier (static keys) | [Auth context](docs/auth-request-context.md#reference-jwt-assertion-verifier-110); #110 |
 | Tenant-isolation harness + in-memory tenant store | [Tenant isolation](docs/tenant-isolation-conformance.md); #37, #69, #70 |
 | Tenant isolation on all HTTP management surfaces | [Tenant isolation HTTP exposure](docs/tenant-isolation-conformance.md#http-exposure-vs-registry-112); #112 |
+| Hub PostgreSQL / spoke-embedded SQLite, one operational port | [Operational storage](docs/operational-storage.md); [ADR 0010](docs/decisions/0010-supported-operating-profiles.md); [ADR 0029](docs/decisions/0029-hub-spoke-operational-store.md); #373 |
 | Optional Postgres multi-tenant hub store (feature `postgres`) | [Postgres tenant store](docs/postgres-tenant-store.md); #111 |
 | tenkai-server tenant mode → Postgres hub store | [Postgres server wiring](docs/postgres-tenant-store.md#tenkai-server-wiring-127); #127 |
 | Postgres hub `shared_replica_state` (single-active writer) | [Shared replica state](docs/postgres-tenant-store.md#shared-replica-state-128); #128 |
