@@ -58,6 +58,9 @@ struct Cli {
     /// Stable output contract for typed adapters. Human output remains the default.
     #[arg(long, value_enum, default_value_t = OutputFormat::Human, global = true)]
     output: OutputFormat,
+    /// Inbound delivery correlation identity for spans and metrics.
+    #[arg(long, env = "TENKAI_OPERATION_ID", global = true)]
+    operation_id: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -1064,6 +1067,14 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    if let Some(operation_id) = cli
+        .operation_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        tenkai::telemetry::bind_process_operation_id(operation_id);
+    }
     if cli.output == OutputFormat::JsonV1 && command_name(&cli.command).is_none() {
         return Err(reported_machine_failure(CommandResultV1::failed(
             CommandName::Invocation,

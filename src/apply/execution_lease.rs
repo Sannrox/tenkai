@@ -119,7 +119,16 @@ pub(super) async fn claim_execution_environment(
     environment: &str,
     owner: &str,
 ) -> Result<EnvironmentLease> {
-    claim_environment_with_options(ctx, environment, owner, EXECUTION_LEASE_MS, true).await
+    let lease =
+        claim_environment_with_options(ctx, environment, owner, EXECUTION_LEASE_MS, true).await?;
+    crate::telemetry::record_metric(
+        crate::telemetry::METRIC_LEASE_ACQUIRED,
+        1.0,
+        &crate::telemetry::DeliveryAttributes::new(crate::telemetry::Operation::Apply)
+            .environment(environment)
+            .fencing_generation(lease.generation),
+    );
+    Ok(lease)
 }
 
 async fn claim_environment_with_options(
@@ -379,6 +388,13 @@ async fn release_environment_lease(ctx: &mut Ctx, lease: &EnvironmentLease) -> R
 pub(crate) async fn release_environment(ctx: &mut Ctx, lease: &EnvironmentLease) -> Result<()> {
     mark_object_environment_claim_released(ctx, lease).await?;
     release_environment_lease(ctx, lease).await?;
+    crate::telemetry::record_metric(
+        crate::telemetry::METRIC_LEASE_RELEASED,
+        1.0,
+        &crate::telemetry::DeliveryAttributes::new(crate::telemetry::Operation::Apply)
+            .environment(&lease.environment)
+            .fencing_generation(lease.generation),
+    );
     Ok(())
 }
 

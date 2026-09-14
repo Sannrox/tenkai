@@ -73,6 +73,9 @@ struct Cli {
     /// Expose unauthenticated `GET /metrics` OpenMetrics on the loopback listener (#137).
     #[arg(long, env = "TENKAI_ENABLE_METRICS", default_value_t = false)]
     enable_metrics: bool,
+    /// Inbound delivery correlation identity for process-wide spans and metrics.
+    #[arg(long, env = "TENKAI_OPERATION_ID")]
+    operation_id: Option<String>,
     /// Enable the authenticated, non-executable local demo fixture surface.
     #[arg(long, default_value_t = false)]
     with_development_fixtures: bool,
@@ -158,6 +161,14 @@ fn compose_enterprise_auth(
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Some(operation_id) = cli
+        .operation_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        tenkai::telemetry::bind_process_operation_id(operation_id);
+    }
     anyhow::ensure!(
         cli.listen.ip().is_loopback(),
         "tenkai-server currently accepts plaintext HTTP only and must bind to loopback; use an authenticated TLS reverse proxy for remote access"

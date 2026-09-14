@@ -343,11 +343,41 @@ pub async fn compute(ctx: &mut Ctx, env: &str) -> Result<Vec<Step>> {
 }
 
 pub async fn create(ctx: &mut Ctx, env: &str) -> Result<Plan> {
-    convergence::create(ctx, env).await
+    let mut span = crate::telemetry::start_span(
+        "tenkai.plan",
+        &crate::telemetry::DeliveryAttributes::new(crate::telemetry::Operation::Plan)
+            .environment(env),
+    );
+    match convergence::create(ctx, env).await {
+        Ok(plan) => {
+            span.set_plan(&plan);
+            span.succeed();
+            Ok(plan)
+        }
+        Err(error) => {
+            span.fail();
+            Err(error)
+        }
+    }
 }
 
 pub async fn create_from_steps(ctx: &mut Ctx, env: &str, steps: Vec<Step>) -> Result<Plan> {
-    convergence::create_from_steps(ctx, env, steps).await
+    let mut span = crate::telemetry::start_span(
+        "tenkai.plan",
+        &crate::telemetry::DeliveryAttributes::new(crate::telemetry::Operation::Plan)
+            .environment(env),
+    );
+    match convergence::create_from_steps(ctx, env, steps).await {
+        Ok(plan) => {
+            span.set_plan(&plan);
+            span.succeed();
+            Ok(plan)
+        }
+        Err(error) => {
+            span.fail();
+            Err(error)
+        }
+    }
 }
 
 pub async fn create_from_steps_with_recovery(
@@ -356,11 +386,40 @@ pub async fn create_from_steps_with_recovery(
     steps: Vec<Step>,
     reason: String,
 ) -> Result<Plan> {
-    convergence::create_from_steps_with_recovery(ctx, env, steps, reason).await
+    let mut span = crate::telemetry::start_span(
+        "tenkai.plan",
+        &crate::telemetry::DeliveryAttributes::new(crate::telemetry::Operation::Plan)
+            .environment(env),
+    );
+    match convergence::create_from_steps_with_recovery(ctx, env, steps, reason).await {
+        Ok(plan) => {
+            span.set_plan(&plan);
+            span.succeed();
+            Ok(plan)
+        }
+        Err(error) => {
+            span.fail();
+            Err(error)
+        }
+    }
 }
 
 pub async fn rollback_step(ctx: &mut Ctx, env: &str, product: &str) -> Result<Step> {
-    convergence::rollback_step(ctx, env, product).await
+    let mut span = crate::telemetry::start_span(
+        "tenkai.rollback",
+        &crate::telemetry::DeliveryAttributes::new(crate::telemetry::Operation::Rollback)
+            .environment(env),
+    );
+    match convergence::rollback_step(ctx, env, product).await {
+        Ok(step) => {
+            span.succeed();
+            Ok(step)
+        }
+        Err(error) => {
+            span.fail();
+            Err(error)
+        }
+    }
 }
 
 pub async fn rollback_step_with_recovery(
@@ -369,7 +428,21 @@ pub async fn rollback_step_with_recovery(
     product: &str,
     recovery: Option<&str>,
 ) -> Result<Step> {
-    convergence::rollback_step_with_recovery(ctx, env, product, recovery).await
+    let mut span = crate::telemetry::start_span(
+        "tenkai.rollback",
+        &crate::telemetry::DeliveryAttributes::new(crate::telemetry::Operation::Rollback)
+            .environment(env),
+    );
+    match convergence::rollback_step_with_recovery(ctx, env, product, recovery).await {
+        Ok(step) => {
+            span.succeed();
+            Ok(step)
+        }
+        Err(error) => {
+            span.fail();
+            Err(error)
+        }
+    }
 }
 
 pub async fn restart_step(ctx: &mut Ctx, env: &str, product: &str) -> Result<Step> {
@@ -377,7 +450,22 @@ pub async fn restart_step(ctx: &mut Ctx, env: &str, product: &str) -> Result<Ste
 }
 
 pub async fn create_for_reconcile(ctx: &mut Ctx, env: &str) -> Result<Plan> {
-    convergence::create_for_reconcile(ctx, env).await
+    let mut span = crate::telemetry::start_span(
+        "tenkai.plan",
+        &crate::telemetry::DeliveryAttributes::new(crate::telemetry::Operation::Plan)
+            .environment(env),
+    );
+    match convergence::create_for_reconcile(ctx, env).await {
+        Ok(plan) => {
+            span.set_plan(&plan);
+            span.succeed();
+            Ok(plan)
+        }
+        Err(error) => {
+            span.fail();
+            Err(error)
+        }
+    }
 }
 
 pub fn model_routing_rollout_rank(kind: crate::manifest::ProductKind, action: Action) -> u8 {

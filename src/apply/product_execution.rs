@@ -115,16 +115,33 @@ pub(super) async fn activate(
         let result = match install {
             Ok(()) => match &content.manifest.deploy.health {
                 Some(command) if !command.is_empty() => {
+                    let mut health = crate::telemetry::start_span(
+                        "tenkai.health",
+                        &health_attrs(lease, content),
+                    );
                     match run_mutation_command(ctx, lease, content, command).await? {
-                        Ok(()) => Ok(()),
-                        Err(error) => Err(software_phase_error(
-                            crate::software_executor::SoftwareDeployPhase::Health,
-                            content,
-                            &error,
-                        )),
+                        Ok(()) => {
+                            health.succeed();
+                            Ok(())
+                        }
+                        Err(error) => {
+                            health.fail();
+                            Err(software_phase_error(
+                                crate::software_executor::SoftwareDeployPhase::Health,
+                                content,
+                                &error,
+                            ))
+                        }
                     }
                 }
-                _ => Ok(()),
+                _ => {
+                    let mut health = crate::telemetry::start_span(
+                        "tenkai.health",
+                        &health_attrs(lease, content),
+                    );
+                    health.succeed();
+                    Ok(())
+                }
             },
             Err(error) => Err(error),
         };
@@ -138,16 +155,42 @@ pub(super) async fn activate(
     let result = match install {
         Ok(()) => match &content.manifest.deploy.health {
             Some(command) if !command.is_empty() => {
-                run_mutation_command(ctx, lease, content, command).await
+                let mut health =
+                    crate::telemetry::start_span("tenkai.health", &health_attrs(lease, content));
+                match run_mutation_command(ctx, lease, content, command).await? {
+                    Ok(()) => {
+                        health.succeed();
+                        Ok(())
+                    }
+                    Err(error) => {
+                        health.fail();
+                        Err(error)
+                    }
+                }
             }
-            _ => Ok(Ok(())),
+            _ => {
+                let mut health =
+                    crate::telemetry::start_span("tenkai.health", &health_attrs(lease, content));
+                health.succeed();
+                Ok(())
+            }
         },
-        error => Ok(error),
-    }?;
+        error => error,
+    };
     match verify_integrity(content) {
         Ok(()) => Ok(result),
         Err(error) => Ok(Err(error.to_string())),
     }
+}
+
+fn health_attrs(
+    lease: &EnvironmentLease,
+    content: &ReleaseContent,
+) -> crate::telemetry::DeliveryAttributes {
+    crate::telemetry::DeliveryAttributes::new(crate::telemetry::Operation::Health)
+        .environment(content.environment.clone())
+        .release_digest(content.artifact_digest.clone())
+        .fencing_generation(lease.generation)
 }
 
 /// Re-apply the current pin without changing the recorded version.

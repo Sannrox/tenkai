@@ -1068,6 +1068,9 @@ impl RemoteClient {
             .http
             .request(method, format!("{}{path}", self.base_url))
             .bearer_auth(&self.token);
+        if let Some(operation_id) = crate::telemetry::current_operation_id() {
+            request = request.header("x-request-id", operation_id);
+        }
         if let Some(body) = body {
             request = request.json(body);
         }
