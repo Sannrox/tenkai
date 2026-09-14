@@ -177,6 +177,9 @@ enum Command {
     Plan {
         #[arg(long, default_value = "local")]
         env: String,
+        /// Current fencing generation; required with --target remote.
+        #[arg(long)]
+        generation: Option<u64>,
     },
     /// Execute a stored plan: gates, install, health probe, auto-rollback.
     Apply {
@@ -207,6 +210,9 @@ enum Command {
         /// Start outside maintenance policy and record this reason with the authenticated principal.
         #[arg(long)]
         emergency_reason: Option<String>,
+        /// Current fencing generation; required with --target remote.
+        #[arg(long)]
+        generation: Option<u64>,
     },
     /// Deployed vs channel head, per subscribed product.
     Status {
@@ -244,6 +250,9 @@ enum Command {
         /// Audited reason for restoring recalled Catalog content.
         #[arg(long, requires = "allow_recalled_recovery")]
         recovery_reason: Option<String>,
+        /// Current fencing generation; required with --target remote.
+        #[arg(long)]
+        generation: Option<u64>,
     },
     /// Bounce the currently deployed release of a product without changing version.
     Restart {
@@ -320,7 +329,14 @@ enum DevCommand {
     },
     /// Sign a plan approval for apply --approval (dogfood only; non-local envs).
     SignApproval {
-        plan_id: String,
+        #[arg(required_unless_present = "plan_digest")]
+        plan_id: Option<String>,
+        /// Content-bound plan digest from remote `plan` when the hub database is not local.
+        #[arg(long, requires = "env")]
+        plan_digest: Option<String>,
+        /// Environment bound into the approval when signing from `--plan-digest`.
+        #[arg(long, requires = "plan_digest")]
+        env: Option<String>,
         /// Keys directory from `dev init-keys`
         #[arg(long, default_value = dev_sign::DEFAULT_DEV_KEYS_DIR)]
         keys: PathBuf,
@@ -401,6 +417,19 @@ enum ReleaseCommand {
 enum ApprovalCommand {
     /// Show signer, policy, scope, expiry, and bypass evidence without credentials.
     Inspect { plan_id: String },
+    /// Record signed approval evidence without executing the plan.
+    Submit {
+        plan_id: String,
+        #[arg(long, default_value = "local")]
+        env: String,
+        #[arg(long)]
+        approval: PathBuf,
+        #[arg(long)]
+        approval_trust_roots: PathBuf,
+        /// Current fencing generation; required with --target remote.
+        #[arg(long)]
+        generation: Option<u64>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1314,6 +1343,118 @@ async fn run(cli: Cli) -> Result<()> {
                 println!("{}", result.message);
                 return Ok(());
             }
+            Command::Plan { env, generation } => {
+                let generation = generation.ok_or_else(|| {
+                    anyhow::anyhow!("--generation is required with --target remote")
+                })?;
+                let result = client.plan_environment(&env, generation).await?;
+                println!("{}", result.message);
+                if let Some(plan_id) = &result.resource {
+                    println!("plan id: {plan_id}");
+                }
+                if let Some(digest) = &result.digest {
+                    println!("plan digest: {digest}");
+                }
+                return Ok(());
+            }
+            Command::Approval {
+                command:
+                    ApprovalCommand::Submit {
+                        plan_id,
+                        env,
+                        approval,
+                        approval_trust_roots,
+                        generation,
+                    },
+            } => {
+                let generation = generation.ok_or_else(|| {
+                    anyhow::anyhow!("--generation is required with --target remote")
+                })?;
+                let request = tenkai::management_lifecycle::load_approve_request(
+                    &env,
+                    generation,
+                    &approval,
+                    &approval_trust_roots,
+                )?;
+                let result = client.approve_plan(&plan_id, &request).await?;
+                println!("{}", result.message);
+                return Ok(());
+            }
+            Command::Apply {
+                plan_id,
+                approval,
+                approval_trust_roots,
+                allow_unapproved_development,
+                development_reason,
+                skip_gates,
+                emergency_reason,
+                generation,
+            } => {
+                if allow_unapproved_development || development_reason.is_some() {
+                    bail!(
+                        "the local-development apply bypass is available only with --target embedded"
+                    );
+                }
+                let generation = generation.ok_or_else(|| {
+                    anyhow::anyhow!("--generation is required with --target remote")
+                })?;
+                let approval = approval.ok_or_else(|| {
+                    anyhow::anyhow!("--approval is required with --target remote")
+                })?;
+                let approval_trust_roots = approval_trust_roots.ok_or_else(|| {
+                    anyhow::anyhow!("--approval-trust-roots is required with --target remote")
+                })?;
+                let env = tenkai::management_lifecycle::plan_environment_from_id(&plan_id)?;
+                let request = tenkai::management_lifecycle::load_apply_request(
+                    env,
+                    generation,
+                    &approval,
+                    &approval_trust_roots,
+                    skip_gates,
+                    emergency_reason,
+                )?;
+                let result = client.apply_plan(&plan_id, &request).await?;
+                println!("{}", result.message);
+                return Ok(());
+            }
+            Command::Rollback {
+                product,
+                env,
+                allow_unapproved_development,
+                development_reason,
+                emergency_reason: _,
+                allow_recalled_recovery,
+                recovery_reason,
+                generation,
+            } => {
+                if allow_unapproved_development || development_reason.is_some() {
+                    bail!(
+                        "the local-development rollback bypass is available only with --target embedded"
+                    );
+                }
+                let generation = generation.ok_or_else(|| {
+                    anyhow::anyhow!("--generation is required with --target remote")
+                })?;
+                let recovery = if allow_recalled_recovery {
+                    Some(
+                        recovery_reason
+                            .ok_or_else(|| anyhow::anyhow!("--recovery-reason is required"))?,
+                    )
+                } else {
+                    None
+                };
+                let result = client
+                    .rollback_environment(&env, &product, generation, recovery)
+                    .await?;
+                println!("{}", result.message);
+                if let Some(plan_id) = &result.resource {
+                    println!("plan id: {plan_id}");
+                }
+                if let Some(digest) = &result.digest {
+                    println!("plan digest: {digest}");
+                }
+                return Ok(());
+            }
             _ => bail!(
                 "this command is not available through the v1 remote API; use --target embedded"
             ),
@@ -1357,30 +1498,50 @@ async fn run(cli: Cli) -> Result<()> {
             }
             DevCommand::SignApproval {
                 plan_id,
+                plan_digest,
+                env,
                 keys,
                 approval,
                 trust_roots,
                 ttl_secs,
             } => {
-                let written = dev_sign::sign_plan_approval(
-                    keys,
-                    &cli.database,
-                    plan_id,
-                    approval,
-                    trust_roots,
-                    *ttl_secs,
-                )
-                .await?;
+                let written = if let (Some(plan_digest), Some(env)) = (plan_digest, env) {
+                    dev_sign::sign_plan_approval_for_digest(
+                        keys,
+                        plan_digest,
+                        env,
+                        approval,
+                        trust_roots,
+                        *ttl_secs,
+                    )?
+                } else {
+                    let plan_id = plan_id.as_deref().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "plan id is required unless --plan-digest and --env are set"
+                        )
+                    })?;
+                    dev_sign::sign_plan_approval(
+                        keys,
+                        &cli.database,
+                        plan_id,
+                        approval,
+                        trust_roots,
+                        *ttl_secs,
+                    )
+                    .await?
+                };
                 println!("{}", dev_sign::warning_line());
                 println!("wrote approval   {}", written.envelope.display());
                 println!("wrote trust roots {}", written.trust_roots.display());
-                println!(
-                    "apply with: tenkaictl --database {} apply {} --approval {} --approval-trust-roots {}",
-                    cli.database.display(),
-                    plan_id,
-                    written.envelope.display(),
-                    written.trust_roots.display()
-                );
+                if let Some(plan_id) = plan_id {
+                    println!(
+                        "apply with: tenkaictl --database {} apply {} --approval {} --approval-trust-roots {}",
+                        cli.database.display(),
+                        plan_id,
+                        written.envelope.display(),
+                        written.trust_roots.display()
+                    );
+                }
                 return Ok(());
             }
             DevCommand::SignMigrationApproval {
@@ -1481,6 +1642,39 @@ async fn run(cli: Cli) -> Result<()> {
             }
         },
         Command::Approval { command } => match command {
+            ApprovalCommand::Submit {
+                plan_id,
+                env,
+                approval,
+                approval_trust_roots,
+                generation: _,
+            } => {
+                let stored = plan::load(&mut ctx, &plan_id).await?;
+                if stored.environment != env {
+                    bail!(
+                        "approval environment {env} does not match plan {}",
+                        stored.environment
+                    );
+                }
+                let evidence = tenkai::plan_approval::verify(
+                    &stored,
+                    &approval,
+                    &approval_trust_roots,
+                    tenkai::now_millis(),
+                    false,
+                )?;
+                tenkai::plan_approval::record(&mut ctx, &evidence).await?;
+                if output == OutputFormat::JsonV1 {
+                    print_machine_result(
+                        &CommandResultV1::succeeded(CommandName::Plan)
+                            .resource("plan", stored.id)
+                            .resource("environment", stored.environment),
+                    )?;
+                } else {
+                    println!("recorded approval for {}", evidence.plan_id);
+                    println!("plan digest: {}", evidence.plan_digest);
+                }
+            }
             ApprovalCommand::Inspect { plan_id } => {
                 let mut evidence = ctx
                     .list_kind(ontology::KIND_PLAN_APPROVAL_VERIFICATION)
@@ -2305,7 +2499,7 @@ async fn run(cli: Cli) -> Result<()> {
                 }
             },
         },
-        Command::Plan { env } => {
+        Command::Plan { env, generation: _ } => {
             if output == OutputFormat::JsonV1 {
                 tenkai::command_result::validate_resource_reference(
                     "plan",
@@ -2339,6 +2533,7 @@ async fn run(cli: Cli) -> Result<()> {
             development_reason,
             skip_gates,
             emergency_reason,
+            generation: _,
         } => {
             let stored = plan::load(&mut ctx, &plan_id).await?;
             if output == OutputFormat::JsonV1 {
@@ -2472,6 +2667,7 @@ async fn run(cli: Cli) -> Result<()> {
             emergency_reason,
             allow_recalled_recovery,
             recovery_reason,
+            generation: _,
         } => {
             if output == OutputFormat::JsonV1 {
                 tenkai::command_result::validate_resource_reference(

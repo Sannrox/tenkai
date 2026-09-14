@@ -11,8 +11,8 @@ use crate::auth_context::{
 };
 use crate::client::Ctx;
 use crate::management_lifecycle::{
-    self, ManagementLifecycleOperation, ManagementLifecycleResult, PromoteRequest, PublishRequest,
-    RecallRequest, SubscribeRequest,
+    self, ApplyRequest, ApproveRequest, ManagementLifecycleOperation, ManagementLifecycleResult,
+    PlanRequest, PromoteRequest, PublishRequest, RecallRequest, RollbackRequest, SubscribeRequest,
 };
 use crate::package_migration::{
     self, ApprovalTrustRoots, MigrationAuthorization, PackageMigrationApplyRequest,
@@ -668,9 +668,255 @@ impl ManagementOperations {
         ))
     }
 
+    pub(crate) async fn plan_environment(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+        request: PlanRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        self.require_community_catalog_host()?;
+        management_lifecycle::admit_plan(
+            &request,
+            environment,
+            context.principal.kind,
+            self.granted_environment(credential),
+        )
+        .map_err(map_lifecycle_error)?;
+        self.require_environment_visible(&context, environment)
+            .await?;
+        self.require_current_generation(environment, request.expected_generation)?;
+        let actor = context.principal_id();
+        self.audit(actor, "plan.requested")?;
+        let mut ctx = self.application_ctx()?;
+        let stored = crate::plan::create(&mut ctx, environment)
+            .await
+            .map_err(map_plan_lifecycle_error)?;
+        self.audit(actor, "plan.completed")?;
+        let digest = format!(
+            "sha256:{}",
+            stored
+                .executable_digest()
+                .map_err(map_plan_lifecycle_error)?
+        );
+        let message = if stored.steps.is_empty() {
+            format!("{environment} is up to date")
+        } else {
+            format!("planned {} step(s) for {environment}", stored.steps.len())
+        };
+        Ok(ManagementLifecycleResult::new(
+            ManagementLifecycleOperation::Plan,
+            message,
+            Some(stored.id),
+        )
+        .with_digest(digest))
+    }
+
+    pub(crate) async fn approve_plan(
+        &self,
+        credential: &CredentialMaterial,
+        plan_id: &str,
+        request: ApproveRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        self.require_community_catalog_host()?;
+        management_lifecycle::admit_approve(
+            &request,
+            plan_id,
+            context.principal.kind,
+            self.granted_environment(credential),
+        )
+        .map_err(map_lifecycle_error)?;
+        self.require_environment_visible(&context, &request.environment)
+            .await?;
+        self.require_current_generation(&request.environment, request.expected_generation)?;
+        let files = management_lifecycle::RemoteApprovalFiles::materialize(
+            &request.approval,
+            &request.trust_roots,
+        )
+        .map_err(map_lifecycle_error)?;
+        let actor = context.principal_id();
+        self.audit(actor, "plan.approve.requested")?;
+        let mut ctx = self.application_ctx()?;
+        let stored = crate::plan::load(&mut ctx, plan_id)
+            .await
+            .map_err(map_plan_lifecycle_error)?;
+        if stored.environment != request.environment {
+            return Err(ManagementError::BadRequest(format!(
+                "approve environment {} does not match plan {}",
+                request.environment, stored.environment
+            )));
+        }
+        let evidence = crate::plan_approval::verify(
+            &stored,
+            &files.approval,
+            &files.trust_roots,
+            crate::now_millis(),
+            false,
+        )
+        .map_err(map_plan_lifecycle_error)?;
+        crate::plan_approval::record(&mut ctx, &evidence)
+            .await
+            .map_err(map_plan_lifecycle_error)?;
+        self.audit(actor, "plan.approve.completed")?;
+        Ok(ManagementLifecycleResult::new(
+            ManagementLifecycleOperation::Approve,
+            format!("recorded approval for {plan_id}"),
+            Some(stored.id),
+        )
+        .with_digest(evidence.plan_digest))
+    }
+
+    pub(crate) async fn apply_plan(
+        &self,
+        credential: &CredentialMaterial,
+        plan_id: &str,
+        request: ApplyRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        self.require_community_catalog_host()?;
+        management_lifecycle::admit_apply(
+            &request,
+            plan_id,
+            context.principal.kind,
+            self.granted_environment(credential),
+        )
+        .map_err(map_lifecycle_error)?;
+        self.require_environment_visible(&context, &request.environment)
+            .await?;
+        self.require_current_generation(&request.environment, request.expected_generation)?;
+        let files = management_lifecycle::RemoteApprovalFiles::materialize(
+            &request.approval,
+            &request.trust_roots,
+        )
+        .map_err(map_lifecycle_error)?;
+        let actor = context.principal_id();
+        self.audit(actor, "plan.apply.requested")?;
+        let mut ctx = self.application_ctx()?;
+        let stored = crate::plan::load(&mut ctx, plan_id)
+            .await
+            .map_err(map_plan_lifecycle_error)?;
+        if stored.environment != request.environment {
+            return Err(ManagementError::BadRequest(format!(
+                "apply environment {} does not match plan {}",
+                request.environment, stored.environment
+            )));
+        }
+        let digest = format!(
+            "sha256:{}",
+            stored
+                .executable_digest()
+                .map_err(map_plan_lifecycle_error)?
+        );
+        let outcomes = crate::apply::execute_with_options(
+            &mut ctx,
+            plan_id,
+            crate::apply::ExecutionOptions {
+                skip_gates: request.skip_gates,
+                emergency_reason: request.emergency_reason.as_deref(),
+                authorization: crate::apply::ExecutionAuthorization::Signed {
+                    approval: &files.approval,
+                    trust_roots: &files.trust_roots,
+                },
+                software_executor: None,
+                worker_lifecycle: None,
+                artifact_registry: None,
+                delivery_adapter: None,
+                delivery_fence: None,
+            },
+        )
+        .await
+        .map_err(map_plan_lifecycle_error)?;
+        self.audit(actor, "plan.apply.completed")?;
+        Ok(ManagementLifecycleResult::new(
+            ManagementLifecycleOperation::Apply,
+            format!("applied {} step(s) for {plan_id}", outcomes.len()),
+            Some(stored.id),
+        )
+        .with_digest(digest))
+    }
+
+    pub(crate) async fn rollback_environment(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+        request: RollbackRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        self.require_community_catalog_host()?;
+        management_lifecycle::admit_rollback(
+            &request,
+            environment,
+            context.principal.kind,
+            self.granted_environment(credential),
+        )
+        .map_err(map_lifecycle_error)?;
+        self.require_environment_visible(&context, environment)
+            .await?;
+        self.require_current_generation(environment, request.expected_generation)?;
+        let actor = context.principal_id();
+        self.audit(actor, "plan.rollback.requested")?;
+        let mut ctx = self.application_ctx()?;
+        let recovery = request.recovery_reason.as_deref();
+        let step = crate::plan::rollback_step_with_recovery(
+            &mut ctx,
+            environment,
+            &request.product,
+            recovery,
+        )
+        .await
+        .map_err(map_plan_lifecycle_error)?;
+        let stored = if let Some(reason) = recovery {
+            crate::plan::create_from_steps_with_recovery(
+                &mut ctx,
+                environment,
+                vec![step],
+                reason.to_string(),
+            )
+            .await
+            .map_err(map_plan_lifecycle_error)?
+        } else {
+            crate::plan::create_from_steps(&mut ctx, environment, vec![step])
+                .await
+                .map_err(map_plan_lifecycle_error)?
+        };
+        self.audit(actor, "plan.rollback.completed")?;
+        let digest = format!(
+            "sha256:{}",
+            stored
+                .executable_digest()
+                .map_err(map_plan_lifecycle_error)?
+        );
+        Ok(ManagementLifecycleResult::new(
+            ManagementLifecycleOperation::Rollback,
+            format!("rollback plan {} requires signed approval", stored.id),
+            Some(stored.id),
+        )
+        .with_digest(digest))
+    }
+
+    fn require_current_generation(
+        &self,
+        environment: &str,
+        expected: u64,
+    ) -> Result<(), ManagementError> {
+        let current = management_lifecycle::environment_fence_generation(
+            self.store
+                .current_lease(environment)
+                .map_err(|error| ManagementError::Unavailable(error.to_string()))?
+                .map(|lease| lease.generation),
+        );
+        management_lifecycle::require_expected_generation(expected, current)
+            .map_err(map_lifecycle_error)
+    }
+
     fn application_ctx(&self) -> Result<Ctx, ManagementError> {
         self.reconciler.application_ctx().ok_or_else(|| {
-            ManagementError::Unavailable("package migration is not available on this host".into())
+            ManagementError::Unavailable("application core is not available on this host".into())
         })
     }
 
@@ -810,6 +1056,37 @@ fn map_catalog_error(error: anyhow::Error) -> ManagementError {
         || message.contains("unsigned")
         || message.contains("conflict")
         || message.contains("immutable")
+    {
+        ManagementError::Conflict(message)
+    } else {
+        ManagementError::BadRequest(message)
+    }
+}
+
+fn map_plan_lifecycle_error(error: anyhow::Error) -> ManagementError {
+    let message = format!("{error:#}");
+    if message.contains("not registered")
+        || message.contains("does not exist")
+        || message.contains("is not stored")
+        || message.contains("unknown plan")
+    {
+        ManagementError::NotFound(message)
+    } else if message.contains("stale fencing generation") {
+        ManagementError::Conflict(message)
+    } else if message.contains("missing approval")
+        || message.contains("unapproved development")
+        || message.contains("restricted to the built-in local")
+        || message.contains("approval is bound")
+        || message.contains("approval expired")
+        || message.contains("approval is not valid")
+        || message.contains("signer")
+        || message.contains("signature")
+        || message.contains("trust")
+    {
+        ManagementError::Forbidden(message)
+    } else if message.contains("only computed or blocked")
+        || message.contains("nothing to roll back")
+        || message.contains("cannot roll back onto recalled")
     {
         ManagementError::Conflict(message)
     } else {

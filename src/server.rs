@@ -308,6 +308,16 @@ pub fn router(
             post(subscribe_environment),
         )
         .route(
+            "/v1/environments/{environment}/plans",
+            post(plan_environment),
+        )
+        .route("/v1/plans/{plan_id}/approve", post(approve_plan))
+        .route("/v1/plans/{plan_id}/apply", post(apply_plan))
+        .route(
+            "/v1/environments/{environment}/rollback",
+            post(rollback_environment),
+        )
+        .route(
             "/v1/runtime/environments/{environment}/work",
             get(runtime_work),
         )
@@ -913,6 +923,102 @@ async fn subscribe_environment(
     }
 }
 
+async fn plan_environment(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match management_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return management_error(error),
+    };
+    let request = match parse_migration_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    match state
+        .management
+        .plan_environment(&credential, &environment, request)
+        .await
+    {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => management_error(error),
+    }
+}
+
+async fn approve_plan(
+    State(state): State<Arc<AppState>>,
+    Path(plan_id): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match management_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return management_error(error),
+    };
+    let request = match parse_migration_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    match state
+        .management
+        .approve_plan(&credential, &plan_id, request)
+        .await
+    {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => management_error(error),
+    }
+}
+
+async fn apply_plan(
+    State(state): State<Arc<AppState>>,
+    Path(plan_id): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match management_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return management_error(error),
+    };
+    let request = match parse_migration_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    match state
+        .management
+        .apply_plan(&credential, &plan_id, request)
+        .await
+    {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => management_error(error),
+    }
+}
+
+async fn rollback_environment(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match management_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return management_error(error),
+    };
+    let request = match parse_migration_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    match state
+        .management
+        .rollback_environment(&credential, &environment, request)
+        .await
+    {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => management_error(error),
+    }
+}
+
 async fn runtime_work(
     State(state): State<Arc<AppState>>,
     Path(environment): Path<String>,
@@ -1042,6 +1148,18 @@ fn management_error(error: ManagementError) -> Response {
             error_response(StatusCode::INTERNAL_SERVER_ERROR, message)
         }
     }
+}
+
+fn encode_plan_path(plan_id: &str) -> String {
+    plan_id
+        .bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => {
+                (byte as char).to_string()
+            }
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
 }
 
 #[derive(Clone)]
@@ -1228,6 +1346,76 @@ impl RemoteClient {
                 environment: environment.to_string(),
                 expected_generation,
                 spec: spec.to_string(),
+            }),
+        )
+        .await
+    }
+
+    pub async fn plan_environment(
+        &self,
+        environment: &str,
+        expected_generation: u64,
+    ) -> anyhow::Result<crate::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!("/v1/environments/{environment}/plans"),
+            Some(&crate::management_lifecycle::PlanRequest {
+                version: crate::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation: crate::management_lifecycle::ManagementLifecycleOperation::Plan
+                    .as_str()
+                    .into(),
+                environment: environment.to_string(),
+                expected_generation,
+            }),
+        )
+        .await
+    }
+
+    pub async fn approve_plan(
+        &self,
+        plan_id: &str,
+        request: &crate::management_lifecycle::ApproveRequest,
+    ) -> anyhow::Result<crate::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!("/v1/plans/{}/approve", encode_plan_path(plan_id)),
+            Some(request),
+        )
+        .await
+    }
+
+    pub async fn apply_plan(
+        &self,
+        plan_id: &str,
+        request: &crate::management_lifecycle::ApplyRequest,
+    ) -> anyhow::Result<crate::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!("/v1/plans/{}/apply", encode_plan_path(plan_id)),
+            Some(request),
+        )
+        .await
+    }
+
+    pub async fn rollback_environment(
+        &self,
+        environment: &str,
+        product: &str,
+        expected_generation: u64,
+        recovery_reason: Option<String>,
+    ) -> anyhow::Result<crate::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!("/v1/environments/{environment}/rollback"),
+            Some(&crate::management_lifecycle::RollbackRequest {
+                version: crate::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation: crate::management_lifecycle::ManagementLifecycleOperation::Rollback
+                    .as_str()
+                    .into(),
+                environment: environment.to_string(),
+                expected_generation,
+                product: product.to_string(),
+                recovery_reason,
             }),
         )
         .await
@@ -2912,6 +3100,13 @@ inputs = ["payload.txt"]
     }
 
     async fn catalog_router(root: &std::path::Path) -> (Router, ServerConfig) {
+        let (app, config, _) = lifecycle_router(root).await;
+        (app, config)
+    }
+
+    async fn lifecycle_router(
+        root: &std::path::Path,
+    ) -> (Router, ServerConfig, Arc<crate::storage::SqliteStore>) {
         let database = root.join("tenkai.db");
         let mut ctx = crate::client::Ctx::embedded(&database).unwrap();
         crate::ontology::register(&mut ctx).await.unwrap();
@@ -2924,6 +3119,15 @@ inputs = ["payload.txt"]
         let reconciler =
             crate::reconciler::Reconciler::new(ctx, crate::reconciler::Config::default()).unwrap();
         let store = Arc::new(crate::storage::SqliteStore::open(&database).unwrap());
+        for name in ["stage", "prod"] {
+            store
+                .put_environment(&crate::storage::EnvironmentRecord {
+                    id: name.into(),
+                    revision: 0,
+                    configuration_json: "{}".into(),
+                })
+                .unwrap();
+        }
         let mut config = ServerConfig::community(
             "management-secret",
             HashMap::from([("runtime-secret".into(), "stage".into())]),
@@ -2931,8 +3135,60 @@ inputs = ["payload.txt"]
         config
             .environment_management_assignments
             .insert("stage-secret".into(), "stage".into());
-        let app = router(config.clone(), Arc::new(reconciler), store).unwrap();
-        (app, config)
+        let app = router(config.clone(), Arc::new(reconciler), store.clone()).unwrap();
+        (app, config, store)
+    }
+
+    fn signed_plan_requests(
+        root: &std::path::Path,
+        label: &str,
+        environment: &str,
+        digest: &str,
+        expected_generation: u64,
+    ) -> (
+        crate::management_lifecycle::ApproveRequest,
+        crate::management_lifecycle::ApplyRequest,
+    ) {
+        let dir = root.join(label);
+        std::fs::create_dir_all(&dir).unwrap();
+        let keys = dir.join("keys");
+        let approval = dir.join("approval.json");
+        let trust_roots = dir.join("trust.toml");
+        crate::dev_sign::sign_plan_approval_for_digest(
+            &keys,
+            digest,
+            environment,
+            &approval,
+            &trust_roots,
+            3600,
+        )
+        .unwrap();
+        (
+            crate::management_lifecycle::load_approve_request(
+                environment,
+                expected_generation,
+                &approval,
+                &trust_roots,
+            )
+            .unwrap(),
+            crate::management_lifecycle::load_apply_request(
+                environment,
+                expected_generation,
+                &approval,
+                &trust_roots,
+                false,
+                None,
+            )
+            .unwrap(),
+        )
+    }
+
+    async fn deployed_version(client: &RemoteClient, environment: &str, product: &str) -> String {
+        let rows = client.environment_status(environment).await.unwrap();
+        rows.into_iter()
+            .find(|row| row.product == product)
+            .and_then(|row| row.deployed)
+            .unwrap_or_else(|| "-".into())
     }
 
     #[tokio::test]
@@ -3152,6 +3408,155 @@ inputs = ["payload.txt"]
             .await
             .unwrap();
         assert_eq!(bypass.status(), StatusCode::BAD_REQUEST);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn remote_plan_apply_rollback_a_to_b_through_a_real_hub() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-remote-plan-apply-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let (app, _config, store) = lifecycle_router(&root).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let base = format!("http://{addr}");
+        let client = RemoteClient::new(&base, "management-secret").unwrap();
+        let stage_client = RemoteClient::new(&base, "stage-secret").unwrap();
+        let first = signed_catalog_fixture(&root, "1.0.0");
+        client.publish_release(&first).await.unwrap();
+        client.promote_release("api@1.0.0", "stable").await.unwrap();
+        client
+            .subscribe_environment("stage", "api=stable", 0)
+            .await
+            .unwrap();
+
+        let plan_a = client.plan_environment("stage", 0).await.unwrap();
+        let plan_a_id = plan_a.resource.clone().expect("plan id");
+        let plan_a_digest = plan_a.digest.clone().expect("plan digest");
+        assert!(plan_a_digest.starts_with("sha256:"));
+        let (approve_a, apply_a) =
+            signed_plan_requests(&root, "approve-a", "stage", &plan_a_digest, 0);
+        let approved = client.approve_plan(&plan_a_id, &approve_a).await.unwrap();
+        assert_eq!(approved.digest.as_deref(), Some(plan_a_digest.as_str()));
+
+        let missing = reqwest::Client::new()
+            .post(format!(
+                "{base}/v1/plans/{}/apply",
+                encode_plan_path(&plan_a_id)
+            ))
+            .bearer_auth("management-secret")
+            .json(&serde_json::json!({
+                "version": 1,
+                "operation": "apply",
+                "environment": "stage",
+                "expected_generation": 0
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
+
+        let bypass = reqwest::Client::new()
+            .post(format!(
+                "{base}/v1/plans/{}/apply",
+                encode_plan_path(&plan_a_id)
+            ))
+            .bearer_auth("management-secret")
+            .json(&serde_json::json!({
+                "version": 1,
+                "operation": "apply",
+                "environment": "stage",
+                "expected_generation": 0,
+                "allow_unapproved_development": true
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bypass.status(), StatusCode::BAD_REQUEST);
+
+        store
+            .acquire_lease("stage", "fence-test", crate::now_millis() + 60_000)
+            .unwrap();
+        let current = store.current_lease("stage").unwrap().unwrap().generation;
+        assert_ne!(current, 0);
+        let stale_err = client
+            .apply_plan(&plan_a_id, &apply_a)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            stale_err.contains("stale fencing generation"),
+            "{stale_err}"
+        );
+
+        let mut apply_a = apply_a;
+        apply_a.expected_generation = current;
+        let applied_a = client.apply_plan(&plan_a_id, &apply_a).await.unwrap();
+        assert_eq!(applied_a.digest.as_deref(), Some(plan_a_digest.as_str()));
+        assert_eq!(deployed_version(&client, "stage", "api").await, "1.0.0");
+
+        let second_root = root.join("v2");
+        std::fs::create_dir_all(&second_root).unwrap();
+        let second = signed_catalog_fixture(&second_root, "1.1.0");
+        client.publish_release(&second).await.unwrap();
+        client.promote_release("api@1.1.0", "stable").await.unwrap();
+        let plan_b = client.plan_environment("stage", current).await.unwrap();
+        let plan_b_id = plan_b.resource.clone().expect("upgrade plan id");
+        let plan_b_digest = plan_b.digest.clone().expect("upgrade digest");
+        let (approve_b, mut apply_b) =
+            signed_plan_requests(&root, "approve-b", "stage", &plan_b_digest, current);
+        client.approve_plan(&plan_b_id, &approve_b).await.unwrap();
+        apply_b.expected_generation = current;
+        client.apply_plan(&plan_b_id, &apply_b).await.unwrap();
+        assert_eq!(deployed_version(&client, "stage", "api").await, "1.1.0");
+
+        let rollback = client
+            .rollback_environment("stage", "api", current, None)
+            .await
+            .unwrap();
+        let rollback_id = rollback.resource.clone().expect("rollback plan id");
+        let rollback_digest = rollback.digest.clone().expect("rollback digest");
+        assert!(rollback.message.contains("requires signed approval"));
+        let (approve_r, mut apply_r) =
+            signed_plan_requests(&root, "approve-r", "stage", &rollback_digest, current);
+        client.approve_plan(&rollback_id, &approve_r).await.unwrap();
+        apply_r.expected_generation = current;
+        client.apply_plan(&rollback_id, &apply_r).await.unwrap();
+        assert_eq!(deployed_version(&client, "stage", "api").await, "1.0.0");
+        assert_eq!(
+            crate::management_lifecycle::plan_environment_from_id(&rollback_id).unwrap(),
+            "stage"
+        );
+
+        let crossed = stage_client
+            .plan_environment("prod", 0)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            crossed.contains("cannot act on another environment"),
+            "{crossed}"
+        );
+
+        let runtime = reqwest::Client::new()
+            .post(format!("{base}/v1/environments/stage/plans"))
+            .bearer_auth("runtime-secret")
+            .json(&serde_json::json!({
+                "version": 1,
+                "operation": "plan",
+                "environment": "stage",
+                "expected_generation": current
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(runtime.status(), StatusCode::FORBIDDEN);
         let _ = std::fs::remove_dir_all(root);
     }
 }
