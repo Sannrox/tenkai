@@ -62,13 +62,30 @@ jobs:
           toolchain: 1.96.1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - uses: helm/kind-action@92086f6be054225fa813e0a4b13787fc9088faab # v1.13.0
-      - name: Exercise server-side apply against kind
+        with:
+          install_only: true
+      - name: Create kind cluster and exercise server-side apply
         run: |
           set -euo pipefail
+          if ! command -v kubectl >/dev/null 2>&1; then
+            tmp="$(mktemp)"
+            for attempt in 1 2 3 4; do
+              if curl -fsSL -o "$tmp" "https://dl.k8s.io/release/v1.32.3/bin/linux/amd64/kubectl"; then
+                break
+              fi
+              if [[ "$attempt" -eq 4 ]]; then
+                echo "failed to download kubectl" >&2
+                exit 1
+              fi
+              sleep $((attempt * 3))
+            done
+            chmod +x "$tmp"
+            sudo mv "$tmp" /usr/local/bin/kubectl
+          fi
+          kind create cluster --name tenkai-ssa --wait 120s
           scoped="$HOME/tenkai-cluster"
           mkdir -p "$scoped"
-          src="${KUBECONFIG:-$HOME/.kube/config}"
-          cp "$src" "$scoped/config"
+          kind get kubeconfig --name tenkai-ssa > "$scoped/config"
           chmod 600 "$scoped/config"
           TENKAI_CLUSTER_CONFIG="$scoped/config" \
             cargo test --locked --test in_process_kubernetes_kind -- --ignored --nocapture --test-threads=1
