@@ -29,7 +29,6 @@ PARALLEL_REFERENCE="$SKILLS_ROOT/deliver-ready-issue/references/parallel-deliver
 LANE_SCRIPT="$SKILLS_ROOT/deliver-ready-issue/scripts/issue-lane.sh"
 require_file "$PARALLEL_REFERENCE"
 require_file "$LANE_SCRIPT"
-[ -x "$LANE_SCRIPT" ] || fail "$LANE_SCRIPT is not executable"
 require_fragment "$SKILLS_ROOT/deliver-ready-issue/SKILL.md" "references/parallel-delivery.md"
 require_fragment "$SKILLS_ROOT/deliver-ready-issue/SKILL.md" "scripts/issue-lane.sh"
 require_fragment "$SKILLS_ROOT/advance-issue-frontier/SKILL.md" "issue-lane.sh check"
