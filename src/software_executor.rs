@@ -4,9 +4,11 @@
 //! `TENKAI_SOFTWARE_EXECUTOR=helm`.
 //!
 //! **Native Kubernetes (#105):** plain multi-doc YAML under `manifests/` via
-//! `kubectl` argv (not Helm). Chosen over an in-process kube client for this
-//! issue to keep zero new crate dependencies and match the external-binary
-//! pattern used for Helm; an in-process client remains a valid follow-on.
+//! `kubectl` argv (not Helm).
+//!
+//! **In-process Kubernetes (#376):** server-side apply with field manager
+//! `tenkai`, bounded rollout wait, and health from workload conditions.
+//! Selected with `TENKAI_SOFTWARE_EXECUTOR=kubernetes-inprocess`.
 //!
 //! Hosts select an adapter through [`selected_software_executor`] (or construct
 //! one directly) and pass it into apply. Community defaults keep the shell
@@ -24,6 +26,7 @@ use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 
 mod diagnostics;
+pub mod in_process_kubernetes;
 
 pub use diagnostics::{
     SoftwareDeployPhase, format_software_phase_error, rollback_channel_note,
@@ -48,6 +51,9 @@ pub struct SoftwareApplyRequest {
     /// Environment-mirror refs admitted for this apply. Origin pull is refused.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_pulls: Vec<crate::oci_artifact::OciArtifactRef>,
+    /// Environment-scoped kubeconfig file path. Never a secret blob or argv flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster_config_path: Option<PathBuf>,
 }
 
 /// Pluggable software apply path. Tenkai never hard-depends on a cluster.
@@ -468,7 +474,7 @@ impl SoftwareExecutor for KubernetesSoftwareExecutor {
     }
 }
 
-fn kubernetes_manifests_dir(workdir: &Path) -> Result<PathBuf> {
+pub(crate) fn kubernetes_manifests_dir(workdir: &Path) -> Result<PathBuf> {
     let dir = workdir.join(KUBERNETES_MANIFESTS_DIR);
     if !dir.is_dir() {
         bail!(
@@ -615,7 +621,7 @@ fn run_kubectl(
 
 /// Select a software executor from host runtime configuration.
 ///
-/// Reads `TENKAI_SOFTWARE_EXECUTOR` (helm / kubernetes / fake). `None` means
+/// Reads `TENKAI_SOFTWARE_EXECUTOR` (helm / kubernetes / kubernetes-inprocess / fake). `None` means
 /// the caller should keep the shell `deploy.install` path. Apply does not
 /// consult this itself; hosts pass the result through `ExecutionOptions`.
 pub fn selected_software_executor() -> Option<Box<dyn SoftwareExecutor>> {
@@ -633,6 +639,9 @@ pub fn selected_software_executor() -> Option<Box<dyn SoftwareExecutor>> {
         Ok(value) if value.eq_ignore_ascii_case("fake") => {
             Some(Box::new(FakeSoftwareExecutor::new()))
         }
+        Ok(value) if value.eq_ignore_ascii_case("kubernetes-inprocess") => Some(Box::new(
+            in_process_kubernetes::selected_in_process_executor(),
+        )),
         _ => None,
     }
 }
@@ -651,7 +660,7 @@ fn request_key(request: &SoftwareApplyRequest) -> String {
     }
 }
 
-fn validate_request(request: &SoftwareApplyRequest) -> Result<()> {
+pub(crate) fn validate_request(request: &SoftwareApplyRequest) -> Result<()> {
     for (label, value) in [
         ("product", request.product.as_str()),
         ("version", request.version.as_str()),
@@ -684,6 +693,7 @@ pub fn request_from_parts(
         overlays: BTreeMap::new(),
         config_digest: String::new(),
         artifact_pulls: Vec::new(),
+        cluster_config_path: None,
     }
 }
 
@@ -875,6 +885,7 @@ mod tests {
             overlays: BTreeMap::new(),
             config_digest: String::new(),
             artifact_pulls: Vec::new(),
+            cluster_config_path: None,
         }
     }
 
@@ -1161,6 +1172,7 @@ data:
             overlays: BTreeMap::new(),
             config_digest: String::new(),
             artifact_pulls: Vec::new(),
+            cluster_config_path: None,
         };
         let executor = KubernetesSoftwareExecutor {
             kubectl_binary: PathBuf::from(binary),

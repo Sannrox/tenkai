@@ -5,6 +5,7 @@
 //! mutation or operator readback rules.
 
 use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -1158,6 +1159,61 @@ pub async fn list_artifact_mirrors(
     ))
 }
 
+/// Record the environment-scoped kubeconfig file path. Never stores credential bytes.
+pub async fn set_cluster_config_path(ctx: &mut Ctx, env: &str, path: &Path) -> Result<String> {
+    validate_identifier("environment", env)?;
+    crate::software_executor::in_process_kubernetes::validate_cluster_config_path(path)?;
+    let canonical = path.canonicalize().with_context(|| {
+        format!(
+            "cluster_config_path {} is not a readable kubeconfig file",
+            path.display()
+        )
+    })?;
+    if !canonical.is_file() {
+        bail!(
+            "cluster_config_path {} is not a readable kubeconfig file",
+            canonical.display()
+        );
+    }
+    let stored = canonical.to_string_lossy().into_owned();
+    crate::software_executor::in_process_kubernetes::validate_cluster_config_path(Path::new(
+        &stored,
+    ))?;
+    let mut env_obj = environment(ctx, env).await?;
+    env_obj.properties.insert(
+        crate::software_executor::in_process_kubernetes::CLUSTER_CONFIG_PATH_PROPERTY.into(),
+        stored.clone(),
+    );
+    env_obj.updated = crate::now_millis();
+    ctx.put(env_obj).await?;
+    Ok(format!("set {env} cluster_config_path {stored}"))
+}
+
+/// Remove the environment-scoped kubeconfig file path.
+pub async fn clear_cluster_config_path(ctx: &mut Ctx, env: &str) -> Result<String> {
+    validate_identifier("environment", env)?;
+    let mut env_obj = environment(ctx, env).await?;
+    if env_obj
+        .properties
+        .remove(crate::software_executor::in_process_kubernetes::CLUSTER_CONFIG_PATH_PROPERTY)
+        .is_none()
+    {
+        bail!("environment {env} has no cluster_config_path");
+    }
+    env_obj.updated = crate::now_millis();
+    ctx.put(env_obj).await?;
+    Ok(format!("cleared {env} cluster_config_path"))
+}
+
+/// Read the stored environment-scoped kubeconfig file path, if any.
+pub async fn cluster_config_path(ctx: &mut Ctx, env: &str) -> Result<Option<PathBuf>> {
+    validate_identifier("environment", env)?;
+    let env_obj = environment(ctx, env).await?;
+    crate::software_executor::in_process_kubernetes::cluster_config_path_from_properties(
+        &env_obj.properties,
+    )
+}
+
 const ENVIRONMENT_OVERLAY_PREFIX: &str = "overlay.";
 
 fn reject_credential_material(label: &str, key: &str, value: &str) -> Result<()> {
@@ -1646,5 +1702,51 @@ mod tests {
                 .all(|row| row.posture == "empty" && row.latest_plan_state.is_none())
         );
         let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
+    async fn cluster_config_path_stores_canonical_file_and_refuses_credential_bytes() {
+        let database = std::env::temp_dir().join(format!(
+            "tenkai-cluster-config-{}-{}.db",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let kubeconfig = std::env::temp_dir().join(format!(
+            "tenkai-cluster-config-{}-{}.kubeconfig",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let _ = std::fs::remove_file(&database);
+        let _ = std::fs::remove_file(&kubeconfig);
+        std::fs::write(&kubeconfig, "apiVersion: v1\nkind: Config\nclusters: []\n").unwrap();
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        env_add(&mut ctx, "lab", "Lab").await.unwrap();
+        let set = set_cluster_config_path(&mut ctx, "lab", &kubeconfig)
+            .await
+            .unwrap();
+        assert!(set.contains("cluster_config_path"), "{set}");
+        let stored = cluster_config_path(&mut ctx, "lab").await.unwrap().unwrap();
+        assert_eq!(stored, kubeconfig.canonicalize().unwrap());
+        assert!(
+            clear_cluster_config_path(&mut ctx, "lab")
+                .await
+                .unwrap()
+                .contains("cleared")
+        );
+        assert!(
+            cluster_config_path(&mut ctx, "lab")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let err =
+            set_cluster_config_path(&mut ctx, "lab", Path::new("-----BEGIN PRIVATE KEY-----"))
+                .await
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("file path"), "{err}");
+        let _ = std::fs::remove_file(&database);
+        let _ = std::fs::remove_file(&kubeconfig);
     }
 }

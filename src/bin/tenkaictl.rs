@@ -791,6 +791,11 @@ enum EnvCommand {
         #[command(subcommand)]
         command: ArtifactMirrorCommand,
     },
+    /// Manage the environment-scoped cluster config file path. Never credential bytes.
+    ClusterConfig {
+        #[command(subcommand)]
+        command: ClusterConfigCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -801,6 +806,16 @@ enum ArtifactMirrorCommand {
     Set { env: String, spec: String },
     /// Clear the mirror for one origin registry.
     Clear { env: String, registry: String },
+}
+
+#[derive(Subcommand)]
+enum ClusterConfigCommand {
+    /// Show the stored kubeconfig file path (never file contents).
+    Show { env: String },
+    /// Set the environment-scoped kubeconfig file path.
+    Set { env: String, path: PathBuf },
+    /// Clear the stored kubeconfig file path.
+    Clear { env: String },
 }
 
 #[derive(Subcommand)]
@@ -2192,6 +2207,23 @@ async fn run(cli: Cli) -> Result<()> {
                     );
                 }
             },
+            EnvCommand::ClusterConfig { command } => match command {
+                ClusterConfigCommand::Show { env } => {
+                    match plan::cluster_config_path(&mut ctx, &env).await? {
+                        Some(path) => println!("{}", path.display()),
+                        None => println!("{env} has no cluster_config_path"),
+                    }
+                }
+                ClusterConfigCommand::Set { env, path } => {
+                    println!(
+                        "{}",
+                        plan::set_cluster_config_path(&mut ctx, &env, &path).await?
+                    );
+                }
+                ClusterConfigCommand::Clear { env } => {
+                    println!("{}", plan::clear_cluster_config_path(&mut ctx, &env).await?);
+                }
+            },
         },
         Command::Plan { env } => {
             if output == OutputFormat::JsonV1 {
@@ -3544,6 +3576,23 @@ mod tests {
             Command::Env {
                 command: EnvCommand::Inspect { ref env }
             } if env == "prod"
+        ));
+        let cluster = Cli::try_parse_from([
+            "tenkaictl",
+            "env",
+            "cluster-config",
+            "set",
+            "lab",
+            "/tmp/lab.kubeconfig",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cluster.command,
+            Command::Env {
+                command: EnvCommand::ClusterConfig {
+                    command: ClusterConfigCommand::Set { ref env, ref path }
+                }
+            } if env == "lab" && path == std::path::Path::new("/tmp/lab.kubeconfig")
         ));
     }
 
