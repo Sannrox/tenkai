@@ -54,6 +54,9 @@ rusqlite = { version = "0.32", features = ["backup", "bundled"] }
 thiserror = "2"
 axum = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+kube = { version = "2.0.1", default-features = false, features = ["client", "rustls-tls"] }
+k8s-openapi = { version = "0.26.1", default-features = false, features = ["latest"] }
+serde_yaml = "0.9"
 sekai-client = { git = "https://github.com/Sannrox/sekai-chisei", rev = "67157d1fa242ac2f133c88243ef23b56f88042e6", version = "0.1.2" }
 # Optional production multi-tenant operational store (hub control plane). Off by default.
 postgres = { version = "0.19", optional = true }

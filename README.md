@@ -107,6 +107,8 @@ The file-based quickstart above uses shell install commands. To exercise the
 # once: brew install minikube && minikube start --driver=docker
 export TENKAI_SOFTWARE_EXECUTOR=kubernetes
 ./scripts/dogfood-minikube.sh
+# In-process server-side apply (#376): kubernetes-inprocess +
+# `tenkaictl env cluster-config set <env> <kubeconfig-file>`
 kubectl -n local get deploy,pods
 
 # Signed multi-env (local + stage) with tenkaictl dev signing:

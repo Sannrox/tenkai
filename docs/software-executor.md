@@ -13,14 +13,13 @@ Source: `src/software_executor.rs`. Apply wiring: `src/apply.rs`.
 | Shell (default) | *(unset)* | `deploy.install` / `uninstall` commands | n/a |
 | **Helm** (#95) | `helm` | Chart root = release workdir | `TENKAI_HELM_BIN` or `helm` |
 | **Native Kubernetes** (#105) | `kubernetes` / `k8s` / `native` | `{workdir}/manifests/**/*.yaml` | `TENKAI_KUBECTL_BIN` or `kubectl` |
+| **In-process Kubernetes** (#376) | `kubernetes-inprocess` | `{workdir}/manifests/**/*.yaml` | in-process client |
 | Fake (tests) | `fake` | in-memory | n/a |
 
-**Helm** is the chart-oriented path. **Native** is for plain multi-doc YAML (no
-Helm release lifecycle). Argo/Flux are out of scope here.
-
-Native uses **kubectl argv** (not an in-process kube client) to keep zero new
-crate dependencies and match the Helm external-binary pattern. An in-process
-client is a valid follow-on if dependency weight is accepted later.
+**Helm** is the chart-oriented path. **Native** is for plain multi-doc YAML via
+`kubectl` argv (no Helm release lifecycle). **In-process** applies the same
+manifest tree with server-side apply and field manager `tenkai`. Argo/Flux are
+out of scope here. Custom-resource operators are refused.
 
 ## Ports
 
@@ -29,12 +28,25 @@ client is a valid follow-on if dependency weight is accepted later.
 | `SoftwareExecutor` | apply / remove / observe / restart |
 | `FakeSoftwareExecutor` | CI without cluster |
 | `HelmSoftwareExecutor` | Helm chart path |
-| `KubernetesSoftwareExecutor` | Native manifests path |
+| `KubernetesSoftwareExecutor` | Native manifests path (`kubectl`) |
+| `InProcessKubernetesExecutor` | Native manifests with server-side apply |
 
 Hosts (`tenkaictl`, the reconciler) select the adapter from
 `TENKAI_SOFTWARE_EXECUTOR` and pass it into apply. Apply does not read that
 env var during activate/deactivate. Helm and kubectl failures capture sanitized
-stderr; kubeconfig is never placed on `SoftwareApplyRequest`.
+stderr. The in-process path waits on workload conditions and fails closed when
+`Available` is not `True`, naming the condition. A foreign field manager is an
+explicit conflict, not a silent overwrite.
+
+Kubeconfig is never placed on CLI argv and is never stored as file bytes in
+SQLite. The in-process path requires an environment-scoped file path:
+
+```bash
+tenkaictl env cluster-config set lab /var/lib/tenkai/lab.kubeconfig
+```
+
+`SoftwareApplyRequest.cluster_config_path` carries that path only. Implicit
+`KUBECONFIG` / in-cluster discovery is refused.
 
 ## Helm enablement
 
@@ -115,7 +127,31 @@ changed since the last apply. `tenkaictl plan` does not probe live targets or
 execute `deploy.health`, but it does emit Restart when Tenkai-owned overlays
 are stale.
 
-### Optional live smoke
+## In-process Kubernetes enablement (#376)
+
+```bash
+export TENKAI_SOFTWARE_EXECUTOR=kubernetes-inprocess
+tenkaictl env cluster-config set lab /var/lib/tenkai/lab.kubeconfig
+tenkaictl reconcile --once
+```
+
+Rules beyond the native workdir contract:
+
+- Field manager is always `tenkai`. Apply never sets `force`.
+- Apply re-reads the signed workdir and the environment-scoped kubeconfig file.
+  Cached cluster objects cannot grant apply authority.
+- Health comes from Deployment / StatefulSet / DaemonSet conditions. A bounded
+  wait refuses to complete when observed state disagrees with the payload.
+- Kind-cluster CI covers A → B → rollback and a failing rollout that names the
+  disagreeing condition. Default `make test` stays cluster-free.
+
+```bash
+# Requires kind + a copied kubeconfig file path; not default CI
+TENKAI_CLUSTER_CONFIG=$HOME/tenkai-cluster/config \
+  cargo test --locked --test in_process_kubernetes_kind -- --ignored --nocapture
+```
+
+### Optional kubectl live smoke
 
 ```bash
 # Requires kubectl + reachable cluster; not default CI
@@ -126,7 +162,8 @@ TENKAI_KUBECTL_BIN=kubectl \
 ## Security
 
 - No kubeconfig or tokens on Tenkai CLI argv for software apply.
-- Never store raw kubeconfig in operational SQLite.
+- Never store raw kubeconfig in operational SQLite. Store only an
+  environment-scoped file path (`tenkaictl env cluster-config`).
 - Scope cluster credentials per environment outside Tenkai.
 - Failures leave the plan step failed; rollback remains Tenkai-authoritative.
 - Label values are sanitized; do not put secrets in label fields.
