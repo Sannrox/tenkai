@@ -39,12 +39,12 @@ later issues must call it before the Catalog, planner, or apply core.
 | `promote` | Catalog-wide | `POST /v1/channels/{channel}/promote` | Implemented (#394) |
 | `recall` | Catalog-wide | `POST /v1/releases/{release}/recall` | Implemented (#394) |
 | `subscribe` | Environment | `POST /v1/environments/{environment}/subscriptions` | Implemented (#394) |
-| `plan` | Environment | `POST /v1/environments/{environment}/plans` | Reserved ([#395](https://github.com/Sannrox/tenkai/issues/395)) |
-| `approve` | Environment | `POST /v1/plans/{plan_id}/approve` | Reserved (#395) |
-| `apply` | Environment | `POST /v1/plans/{plan_id}/apply` | Reserved (#395) |
-| `rollback` | Environment | `POST /v1/environments/{environment}/rollback` | Reserved (#395) |
+| `plan` | Environment | `POST /v1/environments/{environment}/plans` | Implemented ([#395](https://github.com/Sannrox/tenkai/issues/395)) |
+| `approve` | Environment | `POST /v1/plans/{plan_id}/approve` | Implemented (#395) |
+| `apply` | Environment | `POST /v1/plans/{plan_id}/apply` | Implemented (#395) |
+| `rollback` | Environment | `POST /v1/environments/{environment}/rollback` | Implemented (#395) |
 
-`tenkaictl --target remote` publish, promote, `release recall`, and `env subscribe` map onto the implemented routes. Remote publish requires a signature and trust roots; `--allow-unsigned-development` stays embedded-only. Remote subscribe requires `--generation` matching the current environment lease generation, or `0` when no lease is held.
+`tenkaictl --target remote` publish, promote, `release recall`, `env subscribe`, `plan`, `approval submit`, `apply`, and `rollback` map onto the implemented routes. Remote publish requires a signature and trust roots; `--allow-unsigned-development` stays embedded-only. Remote subscribe, plan, approve, apply, and rollback require `--generation` matching the current environment lease generation, or `0` when no lease is held. Remote apply and approval submit require a signed `tenkai.plan-approval.v1` envelope; `--allow-unapproved-development` stays embedded-only. `tenkaictl dev sign-approval --plan-digest --env` signs that envelope without a local hub database. Rollback creates the rollback plan only; the operator approves and applies it with the same evidence as an embedded drill.
 
 Community and spoke hosts serve these routes. Tenant-mode hubs refuse them until a tenant-scoped catalog adapter exists; they do not write a shared catalog.
 

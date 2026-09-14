@@ -11,6 +11,7 @@ use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::auth_context::PrincipalKind;
+use crate::plan_approval::{ApprovalEnvelope, TrustRoots as PlanApprovalTrustRoots};
 use crate::release_signing::{SignatureEnvelope, TrustRoots};
 
 /// Wire and Rust contract version for `tenkai.management-lifecycle.v1`.
@@ -207,6 +208,8 @@ pub struct ManagementLifecycleResult {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
 }
 
 impl ManagementLifecycleResult {
@@ -220,7 +223,13 @@ impl ManagementLifecycleResult {
             operation: operation.as_str().into(),
             message: message.into(),
             resource,
+            digest: None,
         }
+    }
+
+    pub fn with_digest(mut self, digest: impl Into<String>) -> Self {
+        self.digest = Some(digest.into());
+        self
     }
 }
 
@@ -259,6 +268,53 @@ pub struct SubscribeRequest {
     pub spec: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanRequest {
+    pub version: u32,
+    pub operation: String,
+    pub environment: String,
+    pub expected_generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApproveRequest {
+    pub version: u32,
+    pub operation: String,
+    pub environment: String,
+    pub expected_generation: u64,
+    pub approval: ApprovalEnvelope,
+    pub trust_roots: PlanApprovalTrustRoots,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApplyRequest {
+    pub version: u32,
+    pub operation: String,
+    pub environment: String,
+    pub expected_generation: u64,
+    pub approval: ApprovalEnvelope,
+    pub trust_roots: PlanApprovalTrustRoots,
+    #[serde(default)]
+    pub skip_gates: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emergency_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RollbackRequest {
+    pub version: u32,
+    pub operation: String,
+    pub environment: String,
+    pub expected_generation: u64,
+    pub product: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_reason: Option<String>,
+}
+
 #[derive(Debug)]
 pub struct RemotePublishFiles {
     _dir: PathBuf,
@@ -277,9 +333,10 @@ impl RemotePublishFiles {
             bail!("publish manifest must not be empty");
         }
         let dir = std::env::temp_dir().join(format!(
-            "tenkai-remote-publish-{}-{}",
+            "tenkai-remote-publish-{}-{}-{}",
             std::process::id(),
-            crate::now_millis()
+            crate::now_millis(),
+            uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("creating publish staging directory {}", dir.display()))?;
@@ -303,6 +360,51 @@ impl RemotePublishFiles {
 }
 
 impl Drop for RemotePublishFiles {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self._dir);
+    }
+}
+
+#[derive(Debug)]
+pub struct RemoteApprovalFiles {
+    _dir: PathBuf,
+    pub approval: PathBuf,
+    pub trust_roots: PathBuf,
+}
+
+impl RemoteApprovalFiles {
+    pub fn materialize(
+        approval: &ApprovalEnvelope,
+        trust_roots: &PlanApprovalTrustRoots,
+    ) -> Result<Self> {
+        require_approval_files(approval, trust_roots)?;
+        let dir = std::env::temp_dir().join(format!(
+            "tenkai-remote-approval-{}-{}-{}",
+            std::process::id(),
+            crate::now_millis(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("creating approval staging directory {}", dir.display()))?;
+        let approval_path = dir.join("approval.json");
+        let trust_roots_path = dir.join("approval-trust-roots.toml");
+        std::fs::write(&approval_path, serde_json::to_vec(approval)?)
+            .with_context(|| format!("writing staged approval {}", approval_path.display()))?;
+        std::fs::write(&trust_roots_path, toml::to_string(trust_roots)?).with_context(|| {
+            format!(
+                "writing staged approval trust roots {}",
+                trust_roots_path.display()
+            )
+        })?;
+        Ok(Self {
+            _dir: dir,
+            approval: approval_path,
+            trust_roots: trust_roots_path,
+        })
+    }
+}
+
+impl Drop for RemoteApprovalFiles {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self._dir);
     }
@@ -397,6 +499,162 @@ pub fn admit_subscribe(
     Ok(admitted)
 }
 
+pub fn admit_plan(
+    request: &PlanRequest,
+    path_environment: &str,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<AdmittedManagementLifecycle> {
+    require_path_environment("plan", &request.environment, path_environment)?;
+    admit_environment_operation(
+        request.version,
+        &request.operation,
+        &request.environment,
+        request.expected_generation,
+        ManagementLifecycleOperation::Plan,
+        kind,
+        granted_environment,
+    )
+}
+
+pub fn admit_approve(
+    request: &ApproveRequest,
+    path_plan_id: &str,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<AdmittedManagementLifecycle> {
+    require_plan_id(path_plan_id)?;
+    let admitted = admit_environment_operation(
+        request.version,
+        &request.operation,
+        &request.environment,
+        request.expected_generation,
+        ManagementLifecycleOperation::Approve,
+        kind,
+        granted_environment,
+    )?;
+    require_approval_files(&request.approval, &request.trust_roots)?;
+    Ok(admitted)
+}
+
+pub fn admit_apply(
+    request: &ApplyRequest,
+    path_plan_id: &str,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<AdmittedManagementLifecycle> {
+    require_plan_id(path_plan_id)?;
+    if let Some(reason) = request.emergency_reason.as_deref()
+        && reason.trim().is_empty()
+    {
+        bail!("apply emergency_reason must not be empty when set");
+    }
+    let admitted = admit_environment_operation(
+        request.version,
+        &request.operation,
+        &request.environment,
+        request.expected_generation,
+        ManagementLifecycleOperation::Apply,
+        kind,
+        granted_environment,
+    )?;
+    require_approval_files(&request.approval, &request.trust_roots)?;
+    Ok(admitted)
+}
+
+pub fn admit_rollback(
+    request: &RollbackRequest,
+    path_environment: &str,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<AdmittedManagementLifecycle> {
+    require_path_environment("rollback", &request.environment, path_environment)?;
+    if request.product.trim().is_empty() {
+        bail!("rollback requires product");
+    }
+    if let Some(reason) = request.recovery_reason.as_deref()
+        && reason.trim().is_empty()
+    {
+        bail!("rollback recovery_reason must not be empty when set");
+    }
+    admit_environment_operation(
+        request.version,
+        &request.operation,
+        &request.environment,
+        request.expected_generation,
+        ManagementLifecycleOperation::Rollback,
+        kind,
+        granted_environment,
+    )
+}
+
+fn admit_environment_operation(
+    version: u32,
+    operation: &str,
+    environment: &str,
+    expected_generation: u64,
+    expected: ManagementLifecycleOperation,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<AdmittedManagementLifecycle> {
+    let admitted = admit_management_lifecycle(
+        &ManagementLifecycleEnvelope {
+            version,
+            operation: operation.to_string(),
+            environment: Some(environment.to_string()),
+            expected_generation: Some(expected_generation),
+        },
+        kind,
+        granted_environment,
+    )?;
+    require_route_operation(admitted.operation, expected)?;
+    Ok(admitted)
+}
+
+fn require_path_environment(operation: &str, request: &str, path: &str) -> Result<()> {
+    if request != path {
+        bail!("{operation} environment {request} does not match path {path}");
+    }
+    Ok(())
+}
+
+fn require_plan_id(plan_id: &str) -> Result<()> {
+    if plan_id.trim().is_empty() {
+        bail!("management plan routes require a plan id");
+    }
+    Ok(())
+}
+
+fn require_approval_files(
+    approval: &ApprovalEnvelope,
+    trust_roots: &PlanApprovalTrustRoots,
+) -> Result<()> {
+    if approval.schema.trim().is_empty() || approval.signature.trim().is_empty() {
+        bail!("missing approval evidence");
+    }
+    if trust_roots.signers.is_empty() {
+        bail!("missing approval evidence");
+    }
+    Ok(())
+}
+
+pub fn plan_environment_from_id(plan_id: &str) -> Result<&str> {
+    let identity = plan_id
+        .strip_prefix("tenkai:plan:")
+        .ok_or_else(|| anyhow::anyhow!("invalid plan id {plan_id}"))?;
+    let mut parts = identity.split(':');
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(environment), Some(created_at), Some(content_id), None)
+            if !environment.is_empty()
+                && created_at.parse::<i64>().is_ok()
+                && !content_id.is_empty() =>
+        {
+            Ok(environment)
+        }
+        _ => bail!("invalid plan id {plan_id}"),
+    }
+}
+
 fn require_route_operation(
     found: ManagementLifecycleOperation,
     expected: ManagementLifecycleOperation,
@@ -417,7 +675,7 @@ pub fn environment_fence_generation(lease_generation: Option<u64>) -> u64 {
 
 pub fn require_expected_generation(expected: u64, actual: u64) -> Result<()> {
     if expected != actual {
-        bail!("stale fencing generation {expected} cannot subscribe; expected {actual}");
+        bail!("stale fencing generation {expected} cannot complete; expected {actual}");
     }
     Ok(())
 }
@@ -435,6 +693,48 @@ pub fn load_publish_request(
         signature: SignatureEnvelope::load(signature)?,
         trust_roots: TrustRoots::load(trust_roots)?,
     })
+}
+
+pub fn load_approve_request(
+    environment: &str,
+    expected_generation: u64,
+    approval: &Path,
+    trust_roots: &Path,
+) -> Result<ApproveRequest> {
+    Ok(ApproveRequest {
+        version: MANAGEMENT_LIFECYCLE_API_VERSION,
+        operation: ManagementLifecycleOperation::Approve.as_str().into(),
+        environment: environment.to_string(),
+        expected_generation,
+        approval: load_approval_envelope(approval)?,
+        trust_roots: PlanApprovalTrustRoots::load(trust_roots)?,
+    })
+}
+
+pub fn load_apply_request(
+    environment: &str,
+    expected_generation: u64,
+    approval: &Path,
+    trust_roots: &Path,
+    skip_gates: bool,
+    emergency_reason: Option<String>,
+) -> Result<ApplyRequest> {
+    Ok(ApplyRequest {
+        version: MANAGEMENT_LIFECYCLE_API_VERSION,
+        operation: ManagementLifecycleOperation::Apply.as_str().into(),
+        environment: environment.to_string(),
+        expected_generation,
+        approval: load_approval_envelope(approval)?,
+        trust_roots: PlanApprovalTrustRoots::load(trust_roots)?,
+        skip_gates,
+        emergency_reason,
+    })
+}
+
+fn load_approval_envelope(path: &Path) -> Result<ApprovalEnvelope> {
+    let raw =
+        std::fs::read(path).with_context(|| format!("reading plan approval {}", path.display()))?;
+    serde_json::from_slice(&raw).context("parsing plan approval envelope")
 }
 
 #[cfg(test)]
@@ -571,7 +871,44 @@ mod tests {
         assert!(err.contains("does not match path"), "{err}");
         let err = require_expected_generation(2, 3).unwrap_err().to_string();
         assert!(err.contains("stale fencing generation 2"), "{err}");
+        assert!(err.contains("cannot complete"), "{err}");
         assert_eq!(environment_fence_generation(None), 0);
         assert_eq!(environment_fence_generation(Some(4)), 4);
+    }
+
+    #[test]
+    fn plan_apply_and_rollback_admit_and_refuse_bypass() {
+        let plan = PlanRequest {
+            version: 1,
+            operation: "plan".into(),
+            environment: "stage".into(),
+            expected_generation: 0,
+        };
+        admit_plan(&plan, "stage", PrincipalKind::Management, Some("stage")).unwrap();
+        let err = admit_plan(&plan, "prod", PrincipalKind::Management, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not match path"), "{err}");
+
+        let err = serde_json::from_str::<ApplyRequest>(
+            r#"{"version":1,"operation":"apply","environment":"stage","expected_generation":0,"approval":{"schema":"tenkai.plan-approval.v1","key_id":"k","statement":{"plan_digest":"sha256:aa","environment":"stage","purpose":"execute_plan","skip_gates":false,"issued_at":1,"expires_at":2,"policy_provider":"builtin","policy_evidence_id":"d","policy_digest":"sha256:bb"},"signature":"c2ln"},"trust_roots":{"version":1,"signers":[{"key_id":"k","identity":"dev","public_key":"cA=="}]},"allow_unapproved_development":true}"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("unknown field"), "{err}");
+
+        let rollback = RollbackRequest {
+            version: 1,
+            operation: "rollback".into(),
+            environment: "stage".into(),
+            expected_generation: 0,
+            product: "api".into(),
+            recovery_reason: None,
+        };
+        admit_rollback(&rollback, "stage", PrincipalKind::Management, Some("stage")).unwrap();
+        assert_eq!(
+            plan_environment_from_id("tenkai:plan:stage:1:abc").unwrap(),
+            "stage"
+        );
     }
 }

@@ -356,6 +356,68 @@ pub async fn sign_plan_approval(
     })
 }
 
+/// Sign a plan approval bound to a content digest and environment.
+///
+/// Remote operators use this when the plan lives on the hub and only the
+/// returned `digest` is available locally. Cached inspect payloads still
+/// cannot grant execution authority; apply re-verifies the envelope.
+pub fn sign_plan_approval_for_digest(
+    keys_dir: &Path,
+    plan_digest: &str,
+    environment: &str,
+    approval_out: &Path,
+    trust_roots_out: &Path,
+    ttl_secs: i64,
+) -> Result<WrittenPaths> {
+    if ttl_secs <= 0 {
+        bail!("approval ttl_secs must be positive");
+    }
+    let ttl_ms = ttl_secs
+        .checked_mul(1000)
+        .ok_or_else(|| anyhow::anyhow!("approval ttl_secs is too large (overflow)"))?;
+    crate::ontology::validate_identifier("approval environment", environment)?;
+    signature_verification::validate_prefixed_digest("plan digest", plan_digest)?;
+    init_dev_keys(keys_dir)?;
+    reject_output_path_collisions(keys_dir, approval_out, trust_roots_out)?;
+    let seed = load_private_seed(&keys_dir.join(APPROVAL_KEY_FILE))?;
+    let signing_key = signing_key_from_seed(&seed);
+    let public = signing_key.verifying_key().to_bytes();
+    let kid = key_id(&public);
+
+    let roots = trust_roots_toml(&kid, "dogfood-approver@localhost", &STANDARD.encode(public));
+    write_text_owner_only(trust_roots_out, &roots)?;
+
+    let now = crate::now_millis();
+    let expires_at = now
+        .checked_add(ttl_ms)
+        .ok_or_else(|| anyhow::anyhow!("approval expiry overflow; reduce --ttl-secs"))?;
+    let statement = ApprovalStatement {
+        plan_digest: plan_digest.to_string(),
+        environment: environment.to_string(),
+        purpose: "execute_plan".into(),
+        skip_gates: false,
+        issued_at: now,
+        expires_at,
+        policy_provider: "builtin".into(),
+        policy_evidence_id: "dogfood-approve".into(),
+        policy_digest: format!("sha256:{}", "a".repeat(64)),
+    };
+    let bytes = canonical_bytes(&statement)?;
+    let signature = signing_key.sign(&bytes);
+    let envelope = ApprovalEnvelope {
+        schema: APPROVAL_SCHEMA.into(),
+        key_id: kid,
+        statement,
+        signature: STANDARD.encode(signature.to_bytes()),
+    };
+    write_text_owner_only(approval_out, &serde_json::to_string_pretty(&envelope)?)?;
+
+    Ok(WrittenPaths {
+        trust_roots: trust_roots_out.to_path_buf(),
+        envelope: approval_out.to_path_buf(),
+    })
+}
+
 /// Sign a package-migration approval bound to identity digest and environment.
 pub fn sign_migration_approval(
     keys_dir: &Path,
