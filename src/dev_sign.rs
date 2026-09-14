@@ -13,7 +13,7 @@ use base64::engine::general_purpose::STANDARD;
 use ed25519_dalek::{Signer as _, SigningKey};
 
 use crate::client::Ctx;
-use crate::manifest::{self, artifact_digest, digest as manifest_digest};
+use crate::manifest::{self, digest as manifest_digest};
 use crate::plan;
 use crate::plan_approval::{
     APPROVAL_SCHEMA, ApprovalEnvelope, ApprovalStatement, canonical_bytes,
@@ -254,7 +254,11 @@ pub fn sign_release(
     let raw = fs::read_to_string(manifest_path)
         .with_context(|| format!("reading manifest {}", manifest_path.display()))?;
     let m_digest = manifest_digest(&raw);
-    let a_digest = artifact_digest(&loaded.workdir, &loaded.manifest.immutable_inputs())?;
+    let a_digest = manifest::identity_digest(
+        &loaded.workdir,
+        &loaded.manifest.immutable_inputs(),
+        &loaded.manifest.artifacts,
+    )?;
 
     let roots = trust_roots_toml(&kid, "dogfood-release@localhost", &STANDARD.encode(public));
     write_text_owner_only(trust_roots_out, &roots)?;

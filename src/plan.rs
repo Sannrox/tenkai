@@ -19,12 +19,13 @@ pub(crate) use crate::environment::update_runtime_deployments_object;
 pub use crate::environment::{
     ENVIRONMENT_FACT_KEYS, EnvironmentInspectReport, EnvironmentListEntry,
     EnvironmentPlanStepSummary, EnvironmentPlanSummary, EnvironmentSubscriptionView, StatusRow,
-    apply_runtime_inventory_facts, clear_environment_constraint, clear_environment_fact,
-    clear_environment_overlay, env_add, fleet_status, inspect_environment,
-    inspect_environment_with_outcomes, list_environment_constraints, list_environment_facts,
-    list_environment_overlays, list_environments, overlay_digest, product_overlays,
-    reconcile_deployment, require_environment_fact, set_environment_constraint,
-    set_environment_fact, set_environment_overlay, status, subscribe, subscription_state,
+    apply_runtime_inventory_facts, clear_artifact_mirror, clear_environment_constraint,
+    clear_environment_fact, clear_environment_overlay, env_add, fleet_status, inspect_environment,
+    inspect_environment_with_outcomes, list_artifact_mirrors, list_environment_constraints,
+    list_environment_facts, list_environment_overlays, list_environments, overlay_digest,
+    product_overlays, reconcile_deployment, require_environment_fact, set_artifact_mirror,
+    set_environment_constraint, set_environment_fact, set_environment_overlay, status, subscribe,
+    subscription_state,
 };
 
 pub use crate::fleet::{

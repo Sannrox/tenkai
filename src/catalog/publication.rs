@@ -27,8 +27,17 @@ pub(super) async fn admit(
             .map_err(|message| anyhow::anyhow!(message))?;
     }
     let digest = manifest::digest(&loaded.raw);
-    let artifact_digest =
+    crate::oci_artifact::verify_publication(
+        &loaded.manifest.artifacts,
+        options.artifact_registry.as_deref(),
+    )?;
+    let file_digest =
         manifest::artifact_digest(&loaded.workdir, &loaded.manifest.immutable_inputs())?;
+    let artifact_digest = manifest::identity_digest(
+        &loaded.workdir,
+        &loaded.manifest.immutable_inputs(),
+        &loaded.manifest.artifacts,
+    )?;
     let provenance = release_provenance::load_all(
         &options.provenance,
         options.provenance_trust_roots.as_deref(),
@@ -63,7 +72,7 @@ pub(super) async fn admit(
         &loaded.workdir,
         &loaded.manifest.immutable_inputs(),
         &digest,
-        &artifact_digest,
+        &file_digest,
     )?;
 
     let existing_release = if let Some(mut existing) = preexisting_release {
@@ -86,6 +95,7 @@ pub(super) async fn admit(
             existing
                 .properties
                 .insert("artifact_digest".into(), artifact_digest.clone());
+            persist_oci_artifacts(&mut existing.properties, &loaded.manifest.artifacts)?;
             existing
                 .properties
                 .insert("workdir".into(), versioned_workdir.display().to_string());
@@ -106,6 +116,7 @@ pub(super) async fn admit(
             ("manifest".into(), loaded.raw.clone()),
             ("workdir".into(), versioned_workdir.display().to_string()),
         ]);
+        persist_oci_artifacts(&mut properties, &loaded.manifest.artifacts)?;
         properties.extend(provenance_properties.clone());
         properties.extend(pin_properties.clone());
         let release = object(
@@ -144,6 +155,7 @@ pub(super) async fn admit(
                 pinned
                     .properties
                     .insert("artifact_digest".into(), artifact_digest.clone());
+                persist_oci_artifacts(&mut pinned.properties, &loaded.manifest.artifacts)?;
                 pinned
                     .properties
                     .insert("workdir".into(), versioned_workdir.display().to_string());
@@ -184,4 +196,16 @@ pub(super) async fn admit(
             message: format!("published {name}@{version} ({}, {trust})", &digest[..12]),
         })
     }
+}
+
+fn persist_oci_artifacts(
+    properties: &mut HashMap<String, String>,
+    artifacts: &[crate::oci_artifact::OciArtifactRef],
+) -> Result<()> {
+    if artifacts.is_empty() {
+        properties.remove("oci_artifacts");
+        return Ok(());
+    }
+    properties.insert("oci_artifacts".into(), serde_json::to_string(artifacts)?);
+    Ok(())
 }

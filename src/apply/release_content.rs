@@ -18,12 +18,35 @@ pub(super) struct ReleaseContent {
     pub(super) mutation_lock: PathBuf,
     pub(super) routing_state: PathBuf,
     pub(super) model_runtime_state: PathBuf,
+    /// Environment-mirror refs admitted for this apply. Origin pull is refused.
+    pub(super) artifact_pulls: Vec<crate::oci_artifact::OciArtifactRef>,
 }
 
 pub(super) fn verify_integrity(content: &ReleaseContent) -> Result<()> {
-    let actual = manifest::artifact_digest(&content.workdir, &content.manifest.immutable_inputs())?;
+    let actual = manifest::identity_digest(
+        &content.workdir,
+        &content.manifest.immutable_inputs(),
+        &content.manifest.artifacts,
+    )?;
     if actual != content.artifact_digest {
         bail!("immutable deployment inputs changed while executing release");
+    }
+    if !content.manifest.artifacts.is_empty() && content.artifact_pulls.is_empty() {
+        bail!("digest-bound artifacts have no admitted environment-mirror pull");
+    }
+    for (declared, pull) in content
+        .manifest
+        .artifacts
+        .iter()
+        .zip(content.artifact_pulls.iter())
+    {
+        if pull.digest != declared.digest {
+            bail!(
+                "admitted pull digest {} does not match declared {}",
+                pull.digest,
+                declared.digest
+            );
+        }
     }
     Ok(())
 }
@@ -67,9 +90,14 @@ pub(super) async fn admit(
             pin.release_id
         );
     }
-    let actual_artifact_digest = manifest::artifact_digest(
+    let file_digest = manifest::artifact_digest(
         Path::new(&descriptor.content_path),
         &manifest.immutable_inputs(),
+    )?;
+    let actual_artifact_digest = manifest::identity_digest(
+        Path::new(&descriptor.content_path),
+        &manifest.immutable_inputs(),
+        &manifest.artifacts,
     )?;
     if actual_artifact_digest != descriptor.artifact_digest {
         bail!(
@@ -81,7 +109,7 @@ pub(super) async fn admit(
     let workdir = manifest::execution_workdir(
         Path::new(&descriptor.content_path),
         &manifest.immutable_inputs(),
-        &pin.artifact_digest,
+        &file_digest,
         environment,
         product,
     )?;
@@ -102,5 +130,6 @@ pub(super) async fn admit(
         model_runtime_state: runtime_dir
             .join("model_runtime")
             .join(format!("{product}.json")),
+        artifact_pulls: Vec::new(),
     })
 }

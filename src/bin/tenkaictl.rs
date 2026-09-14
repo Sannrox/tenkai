@@ -786,6 +786,21 @@ enum EnvCommand {
         #[command(subcommand)]
         command: OverlayCommand,
     },
+    /// Manage environment-scoped OCI artifact mirrors. Origin pull is refused.
+    ArtifactMirror {
+        #[command(subcommand)]
+        command: ArtifactMirrorCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum ArtifactMirrorCommand {
+    /// List origin registry → mirror host mappings.
+    List { env: String },
+    /// Set one mapping, e.g. `set edge ghcr.io=mirror.internal`.
+    Set { env: String, spec: String },
+    /// Clear the mirror for one origin registry.
+    Clear { env: String, registry: String },
 }
 
 #[derive(Subcommand)]
@@ -1335,6 +1350,7 @@ async fn run(cli: Cli) -> Result<()> {
                 provenance_trust_roots,
                 change_set_evidence: change_set_evidence
                     .map(tenkai::change_set_pin::ChangeSetEvidenceInput::File),
+                artifact_registry: tenkai::oci_artifact::selected_registry().ok().flatten(),
             };
             if output == OutputFormat::JsonV1 {
                 let published = catalog::publish_with_result(&mut ctx, &manifest, &options).await?;
@@ -2149,6 +2165,33 @@ async fn run(cli: Cli) -> Result<()> {
                     );
                 }
             },
+            EnvCommand::ArtifactMirror { command } => match command {
+                ArtifactMirrorCommand::List { env } => {
+                    let mirrors = plan::list_artifact_mirrors(&mut ctx, &env).await?;
+                    if mirrors.is_empty() {
+                        println!("{env} has no artifact mirrors");
+                    } else {
+                        for (registry, mirror) in mirrors {
+                            println!("{registry}={mirror}");
+                        }
+                    }
+                }
+                ArtifactMirrorCommand::Set { env, spec } => {
+                    let Some((registry, mirror)) = spec.split_once('=') else {
+                        bail!("expected <registry>=<mirror>, got {spec:?}");
+                    };
+                    println!(
+                        "{}",
+                        plan::set_artifact_mirror(&mut ctx, &env, registry, mirror).await?
+                    );
+                }
+                ArtifactMirrorCommand::Clear { env, registry } => {
+                    println!(
+                        "{}",
+                        plan::clear_artifact_mirror(&mut ctx, &env, &registry).await?
+                    );
+                }
+            },
         },
         Command::Plan { env } => {
             if output == OutputFormat::JsonV1 {
@@ -2228,6 +2271,7 @@ async fn run(cli: Cli) -> Result<()> {
                     authorization,
                     software_executor: None,
                     worker_lifecycle: None,
+                    artifact_registry: None,
                     delivery_adapter: None,
                     delivery_fence: None,
                 },
@@ -2364,6 +2408,7 @@ async fn run(cli: Cli) -> Result<()> {
                         },
                         software_executor: None,
                         worker_lifecycle: None,
+                        artifact_registry: None,
                         delivery_adapter: None,
                         delivery_fence: None,
                     },
@@ -2428,6 +2473,7 @@ async fn run(cli: Cli) -> Result<()> {
                         software_executor: tenkai::software_executor::selected_software_executor()
                             .map(std::sync::Arc::from),
                         worker_lifecycle: None,
+                        artifact_registry: None,
                         delivery_adapter: None,
                         delivery_fence: None,
                     },
@@ -3063,6 +3109,7 @@ async fn run_plan(
         authorization: execution.authorization,
         software_executor: software,
         worker_lifecycle,
+        artifact_registry: tenkai::oci_artifact::selected_registry()?,
         delivery_adapter: delivery,
         delivery_fence: None,
     };

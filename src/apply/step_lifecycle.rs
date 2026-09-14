@@ -33,13 +33,27 @@ pub(super) async fn execute(
         workdir: step.workdir.clone(),
     };
     let admit_recalled = recalled_recovery && step.action == Action::Rollback;
-    let content = admit_release(ctx, &target, environment, &step.product, admit_recalled).await?;
-    let restore_content = match step.restore.as_ref() {
+    let mut content =
+        admit_release(ctx, &target, environment, &step.product, admit_recalled).await?;
+    let mut restore_content = match step.restore.as_ref() {
         Some(pin) => {
             Some(admit_release(ctx, pin, environment, &step.product, admit_recalled).await?)
         }
         None => None,
     };
+    let env_object = crate::environment::environment(ctx, environment).await?;
+    content.artifact_pulls = crate::oci_artifact::verify_environment_pull(
+        &content.manifest.artifacts,
+        &env_object.properties,
+        adapters.artifact_registry,
+    )?;
+    if let Some(restore) = restore_content.as_mut() {
+        restore.artifact_pulls = crate::oci_artifact::verify_environment_pull(
+            &restore.manifest.artifacts,
+            &env_object.properties,
+            adapters.artifact_registry,
+        )?;
+    }
 
     if step.action == Action::Rollback
         && let Some(outgoing) = restore_content.as_ref()

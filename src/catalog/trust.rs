@@ -410,7 +410,8 @@ pub async fn reverify_release(
     }
     let actual_manifest_digest = manifest::digest(raw_manifest);
     let workdir = Path::new(property(&release.properties, "workdir")?);
-    let actual_artifact_digest = manifest::artifact_digest(workdir, &manifest.immutable_inputs())?;
+    let actual_artifact_digest =
+        manifest::identity_digest(workdir, &manifest.immutable_inputs(), &manifest.artifacts)?;
     let evidence = release_signing::verify_release(
         &envelope,
         &roots,

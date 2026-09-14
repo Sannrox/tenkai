@@ -462,6 +462,7 @@ document = "suite.json"
                 provenance: Vec::new(),
                 provenance_trust_roots: None,
                 change_set_evidence: None,
+                artifact_registry: None,
             },
         )
         .await
@@ -486,6 +487,7 @@ document = "suite.json"
                 provenance: Vec::new(),
                 provenance_trust_roots: None,
                 change_set_evidence: None,
+                artifact_registry: None,
             },
         )
         .await

@@ -47,6 +47,9 @@ pub struct Manifest {
     /// Fixed-replica worker-pool intent for `kind = "worker_pool"`.
     #[serde(default)]
     pub worker_pool: Option<WorkerPoolSection>,
+    /// Digest-bound OCI artifact references. Empty keeps file-only releases.
+    #[serde(default)]
+    pub artifacts: Vec<crate::oci_artifact::OciArtifactRef>,
     #[serde(default)]
     pub gate: GateSection,
 }
@@ -664,6 +667,23 @@ pub fn artifact_digest(root: &Path, inputs: &[String]) -> Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+/// File-input digest plus canonical OCI artifact references.
+pub fn identity_digest(
+    root: &Path,
+    inputs: &[String],
+    artifacts: &[crate::oci_artifact::OciArtifactRef],
+) -> Result<String> {
+    let files = artifact_digest(root, inputs)?;
+    if artifacts.is_empty() {
+        return Ok(files);
+    }
+    crate::oci_artifact::validate_all(artifacts)?;
+    let mut hasher = Sha256::new();
+    hasher.update(files.as_bytes());
+    crate::oci_artifact::bind_identity(&mut hasher, artifacts);
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 fn copy_entry(source: &Path, destination: &Path) -> Result<()> {
     let metadata = std::fs::symlink_metadata(source)?;
     if metadata.file_type().is_symlink() {
@@ -881,6 +901,7 @@ mod tests {
             module: None,
             change_set_pin: None,
             worker_pool: None,
+            artifacts: Vec::new(),
             gate: GateSection::default(),
         };
         assert_eq!(manifest.immutable_inputs(), vec!["routing.json"]);
@@ -942,6 +963,33 @@ max_startup_seconds = 60
         std::fs::write(root.join("deploy.sh"), "echo two\n").unwrap();
         let second = artifact_digest(&root, &inputs).unwrap();
         assert_ne!(first, second);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn identity_digest_binds_empty_artifacts_to_file_digest() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-identity-digest-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("deploy.sh"), "echo one\n").unwrap();
+        let inputs = vec!["deploy.sh".to_string()];
+        let files = artifact_digest(&root, &inputs).unwrap();
+        assert_eq!(identity_digest(&root, &inputs, &[]).unwrap(), files);
+        let first = crate::oci_artifact::OciArtifactRef {
+            registry: "ghcr.io".into(),
+            repository: "edge/app".into(),
+            digest: format!("sha256:{}", "aa".repeat(32)),
+            media_type: "application/vnd.oci.image.manifest.v1+json".into(),
+        };
+        let mut second = first.clone();
+        second.digest = format!("sha256:{}", "bb".repeat(32));
+        let with_first = identity_digest(&root, &inputs, std::slice::from_ref(&first)).unwrap();
+        let with_second = identity_digest(&root, &inputs, std::slice::from_ref(&second)).unwrap();
+        assert_ne!(with_first, files);
+        assert_ne!(with_first, with_second);
         std::fs::remove_dir_all(root).unwrap();
     }
 

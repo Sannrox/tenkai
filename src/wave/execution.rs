@@ -794,6 +794,7 @@ async fn execute_plan(
             software_executor: crate::software_executor::selected_software_executor()
                 .map(std::sync::Arc::from),
             worker_lifecycle: None,
+            artifact_registry: crate::oci_artifact::selected_registry()?,
             delivery_adapter: None,
             delivery_fence: None,
         },

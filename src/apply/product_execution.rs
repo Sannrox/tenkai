@@ -101,6 +101,9 @@ pub(super) async fn activate(
     }
     if let Some(executor) = adapters.software {
         prepare_fenced_mutation(ctx, lease, content).await?;
+        if let Err(detail) = require_artifact_pull_consumer(content, Some(executor)) {
+            return Ok(Err(detail));
+        }
         let request = software_request(ctx, content).await?;
         let install = executor.apply(&request).map_err(|error| {
             software_phase_error(
@@ -126,6 +129,9 @@ pub(super) async fn activate(
             Err(error) => Err(error),
         };
         return Ok(result);
+    }
+    if let Err(detail) = require_artifact_pull_consumer(content, None) {
+        return Ok(Err(detail));
     }
     let install =
         run_mutation_command(ctx, lease, content, &content.manifest.deploy.install).await?;
@@ -158,6 +164,9 @@ pub(super) async fn restart(
     }
     if let Some(executor) = adapters.software {
         prepare_fenced_mutation(ctx, lease, content).await?;
+        if let Err(detail) = require_artifact_pull_consumer(content, Some(executor)) {
+            return Ok(Err(detail));
+        }
         let request = software_request(ctx, content).await?;
         let bounce = executor.restart(&request).map_err(|error| {
             software_phase_error(
@@ -250,6 +259,9 @@ pub(super) async fn deactivate(
     }
     if let Some(executor) = adapters.software {
         refresh_environment_lease(ctx, lease).await?;
+        if let Err(detail) = require_artifact_pull_consumer(content, Some(executor)) {
+            return Ok(Err(detail));
+        }
         return Ok(executor
             .remove(&software_request(ctx, content).await?)
             .map_err(|error| {
@@ -259,6 +271,9 @@ pub(super) async fn deactivate(
                     &error.to_string(),
                 )
             }));
+    }
+    if let Err(detail) = require_artifact_pull_consumer(content, None) {
+        return Ok(Err(detail));
     }
     match content.manifest.deploy.uninstall.as_deref() {
         Some(command) if !command.is_empty() => {
@@ -304,7 +319,7 @@ async fn software_request(
 ) -> Result<crate::software_executor::SoftwareApplyRequest> {
     let env_obj = crate::environment::environment(ctx, &content.environment).await?;
     let overlays = crate::environment::product_overlays(&env_obj, &content.product)?;
-    Ok(crate::software_executor::with_overlays(
+    let mut request = crate::software_executor::with_overlays(
         crate::software_executor::request_from_parts(
             content.product.clone(),
             content.manifest.product.version.clone(),
@@ -316,7 +331,28 @@ async fn software_request(
             ),
         ),
         overlays,
-    ))
+    );
+    request.artifact_pulls = content.artifact_pulls.clone();
+    Ok(request)
+}
+
+fn require_artifact_pull_consumer(
+    content: &ReleaseContent,
+    executor: Option<&dyn crate::software_executor::SoftwareExecutor>,
+) -> Result<(), String> {
+    if content.artifact_pulls.is_empty() {
+        return Ok(());
+    }
+    match executor {
+        Some(executor) if executor.consumes_admitted_artifact_pulls() => Ok(()),
+        Some(_) => Err(
+            "executor does not consume admitted environment-mirror artifact pulls".into(),
+        ),
+        None => Err(
+            "digest-bound artifacts require an executor that consumes admitted environment-mirror pulls"
+                .into(),
+        ),
+    }
 }
 
 async fn admit_worker_pool(

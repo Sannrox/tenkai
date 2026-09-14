@@ -45,6 +45,9 @@ pub struct SoftwareApplyRequest {
     /// Digest of `overlays`. Empty when no overlays are set.
     #[serde(default)]
     pub config_digest: String,
+    /// Environment-mirror refs admitted for this apply. Origin pull is refused.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_pulls: Vec<crate::oci_artifact::OciArtifactRef>,
 }
 
 /// Pluggable software apply path. Tenkai never hard-depends on a cluster.
@@ -55,6 +58,10 @@ pub trait SoftwareExecutor: Send + Sync {
     /// Same-version bounce. Default re-applies the current pin.
     fn restart(&self, request: &SoftwareApplyRequest) -> Result<()> {
         self.apply(request)
+    }
+    /// Whether this adapter deploys from admitted environment-mirror refs.
+    fn consumes_admitted_artifact_pulls(&self) -> bool {
+        false
     }
 }
 
@@ -104,6 +111,10 @@ impl SoftwareExecutor for FakeSoftwareExecutor {
         let key = request_key(request);
         self.applied.lock().expect("fake software mutex").push(key);
         Ok(())
+    }
+
+    fn consumes_admitted_artifact_pulls(&self) -> bool {
+        true
     }
 
     fn remove(&self, request: &SoftwareApplyRequest) -> Result<()> {
@@ -672,6 +683,7 @@ pub fn request_from_parts(
         release_id: release_id.into(),
         overlays: BTreeMap::new(),
         config_digest: String::new(),
+        artifact_pulls: Vec::new(),
     }
 }
 
@@ -862,6 +874,7 @@ mod tests {
             release_id: "tenkai:release:api@1.0.0".into(),
             overlays: BTreeMap::new(),
             config_digest: String::new(),
+            artifact_pulls: Vec::new(),
         }
     }
 
@@ -1147,6 +1160,7 @@ data:
             release_id: "tenkai:release:smoke@0.0.1".into(),
             overlays: BTreeMap::new(),
             config_digest: String::new(),
+            artifact_pulls: Vec::new(),
         };
         let executor = KubernetesSoftwareExecutor {
             kubectl_binary: PathBuf::from(binary),

@@ -733,6 +733,7 @@ document = "agent.json"
             provenance: Vec::new(),
             provenance_trust_roots: None,
             change_set_evidence: None,
+            artifact_registry: None,
         };
         for name in ["policy", "eval", "agent"] {
             crate::catalog::publish(&mut ctx, &root.join(name).join("tenkai.toml"), &options)
@@ -788,6 +789,7 @@ document = "agent.json"
                 },
                 software_executor: None,
                 worker_lifecycle: None,
+                artifact_registry: None,
                 delivery_adapter: None,
                 delivery_fence: None,
             },

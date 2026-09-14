@@ -722,6 +722,7 @@ document = "module.json"
             change_set_evidence: Some(ChangeSetEvidenceInput::Document(Box::new(evidence_for(
                 &section,
             )))),
+            artifact_registry: None,
         }
     }
 
@@ -808,6 +809,7 @@ document = "module.json"
                 },
                 software_executor: None,
                 worker_lifecycle: None,
+                artifact_registry: None,
                 delivery_adapter: None,
                 delivery_fence: None,
             },
@@ -854,6 +856,7 @@ document = "module.json"
                 },
                 software_executor: None,
                 worker_lifecycle: None,
+                artifact_registry: None,
                 delivery_adapter: None,
                 delivery_fence: None,
             },
@@ -885,6 +888,7 @@ document = "module.json"
                 },
                 software_executor: None,
                 worker_lifecycle: None,
+                artifact_registry: None,
                 delivery_adapter: None,
                 delivery_fence: None,
             },
@@ -917,6 +921,7 @@ document = "module.json"
                 },
                 software_executor: None,
                 worker_lifecycle: None,
+                artifact_registry: None,
                 delivery_adapter: None,
                 delivery_fence: None,
             },
@@ -1008,6 +1013,7 @@ document = "module.json"
                 provenance: Vec::new(),
                 provenance_trust_roots: None,
                 change_set_evidence: None,
+                artifact_registry: None,
             },
         )
         .await
@@ -1031,6 +1037,7 @@ document = "module.json"
                 provenance: Vec::new(),
                 provenance_trust_roots: None,
                 change_set_evidence: Some(ChangeSetEvidenceInput::Document(Box::new(unauthorized))),
+                artifact_registry: None,
             },
         )
         .await
@@ -1093,6 +1100,7 @@ document = "module.json"
                 },
                 software_executor: None,
                 worker_lifecycle: None,
+                artifact_registry: None,
                 delivery_adapter: None,
                 delivery_fence: None,
             },
@@ -1122,6 +1130,7 @@ document = "module.json"
                 },
                 software_executor: None,
                 worker_lifecycle: None,
+                artifact_registry: None,
                 delivery_adapter: None,
                 delivery_fence: None,
             },

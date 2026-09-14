@@ -817,6 +817,7 @@ install = "true"
             },
             software_executor: None,
             worker_lifecycle: None,
+            artifact_registry: None,
             delivery_adapter: Some(adapter),
             delivery_fence: fence,
         }
