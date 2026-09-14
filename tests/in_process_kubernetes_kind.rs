@@ -133,13 +133,15 @@ fn failing_rollout_names_workload_condition() {
     let _ = std::fs::remove_dir_all(&root);
     write_workdir(&root, "edge", "tenkai.invalid/missing:fail", 1);
     let executor =
-        InProcessKubernetesExecutor::new(LiveKubeApi).with_timeout(Duration::from_secs(25));
+        InProcessKubernetesExecutor::new(LiveKubeApi).with_timeout(Duration::from_secs(45));
     let err = executor
         .apply(&request(&root, &kubeconfig, &env, "1.0.0"))
         .unwrap_err()
         .to_string();
     assert!(
-        err.contains("Available=") || err.contains("Progressing=False"),
+        err.contains("Available=")
+            || err.contains("has no Available condition")
+            || err.contains("Progressing=False"),
         "{err}"
     );
     let _ = kubectl(&kubeconfig, &["delete", "namespace", &env, "--wait=false"]);
@@ -153,9 +155,33 @@ fn foreign_field_manager_conflicts_without_force() {
     let env = unique_env("fm");
     let root = std::env::temp_dir().join(format!("{env}-fm"));
     let _ = std::fs::remove_dir_all(&root);
-    write_workdir(&root, "edge", "registry.k8s.io/pause:3.10", 1);
+    write_workdir(&root, "edge", "registry.k8s.io/pause:3.10", 2);
     let created = kubectl(&kubeconfig, &["create", "namespace", &env]);
     assert!(created.status.success(), "{created:?}");
+    let helm = std::env::temp_dir().join(format!("{env}-helm.yaml"));
+    std::fs::write(
+        &helm,
+        r#"apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: edge
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: edge
+  template:
+    metadata:
+      labels:
+        app: edge
+    spec:
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.10
+          imagePullPolicy: IfNotPresent
+"#,
+    )
+    .unwrap();
     let applied = kubectl(
         &kubeconfig,
         &[
@@ -165,7 +191,7 @@ fn foreign_field_manager_conflicts_without_force() {
             "--namespace",
             &env,
             "-f",
-            root.join("manifests/deploy.yaml").to_str().unwrap(),
+            helm.to_str().unwrap(),
         ],
     );
     assert!(

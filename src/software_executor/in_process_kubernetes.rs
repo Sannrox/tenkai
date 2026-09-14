@@ -554,13 +554,27 @@ fn disagreeing_condition(observation: &WorkloadObservation) -> Option<String> {
     if !is_workload(&observation.kind) {
         return None;
     }
-    observation.conditions.iter().find_map(|condition| {
-        if condition.type_name == "Available" && condition.status != "True" {
-            Some(format!(
+    let available = observation
+        .conditions
+        .iter()
+        .find(|condition| condition.type_name == "Available");
+    match available {
+        Some(condition) if condition.status == "True" => {}
+        Some(condition) => {
+            return Some(format!(
                 "{} {} condition Available={} reason {}",
                 observation.kind, observation.name, condition.status, condition.reason
-            ))
-        } else if condition.type_name == "Progressing"
+            ));
+        }
+        None => {
+            return Some(format!(
+                "{} {} has no Available condition after server-side apply",
+                observation.kind, observation.name
+            ));
+        }
+    }
+    observation.conditions.iter().find_map(|condition| {
+        if condition.type_name == "Progressing"
             && condition.status == "False"
             && condition.reason != "NewReplicaSetAvailable"
         {
@@ -972,6 +986,31 @@ mod tests {
         assert!(err.contains("server-side apply conflict"), "{err}");
         assert!(err.contains("helm"), "{err}");
         assert!(err.contains("tenkai"), "{err}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn missing_available_condition_is_named_and_fails_closed() {
+        let root = std::env::temp_dir().join(format!("tenkai-ssa-noavail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let kubeconfig = write_deployment(&root, "1.0.0", 1);
+        let api = MemoryClusterApi::new();
+        api.apply_server_side(
+            Path::new("/unused"),
+            "lab",
+            FIELD_MANAGER,
+            &serde_json::json!({"kind":"Deployment","metadata":{"name":"edge","labels":{}}}),
+        )
+        .unwrap();
+        api.set_conditions("lab", "edge", "Deployment", Vec::new());
+        let executor = InProcessKubernetesExecutor::new(&api)
+            .with_timeout(Duration::from_millis(30))
+            .with_poll_interval(Duration::from_millis(10));
+        let err = executor
+            .apply(&request(&root, &kubeconfig, "1.0.0"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("has no Available condition"), "{err}");
         let _ = std::fs::remove_dir_all(root);
     }
 
