@@ -1272,4 +1272,142 @@ media_type = "{}"
         );
         let _ = std::fs::remove_dir_all(root);
     }
+
+    #[tokio::test]
+    async fn offline_bundle_layers_import_then_apply_without_origin() {
+        use crate::offline_bundle::{BundleEnvelope, BundleStatement, import_artifact_layers};
+        use crate::release_signing::{TrustRoots, TrustedSigner};
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        use ed25519_dalek::SigningKey;
+        use sha2::{Digest as _, Sha256};
+
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-oci-offline-apply-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let origin_ref = sample_oci_ref(b"payload-a");
+        write_oci_manifest(&root, "1.0.0", &origin_ref);
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let origin = std::sync::Arc::new(crate::oci_artifact::MemoryArtifactRegistry::new());
+        origin.put(&origin_ref, b"payload-a".to_vec()).unwrap();
+        publish(
+            &mut ctx,
+            &root.join("tenkai.toml"),
+            &PublishOptions {
+                allow_unsigned_development: true,
+                artifact_registry: Some(origin.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let actor = crate::auth_context::test_management_context("oci-offline");
+        crate::catalog::promote(&mut ctx, &actor, "api@1.0.0", "stable")
+            .await
+            .unwrap();
+        crate::plan::env_add(&mut ctx, "local", "fixture")
+            .await
+            .unwrap();
+        crate::plan::subscribe(&mut ctx, "local", "api", "stable")
+            .await
+            .unwrap();
+        crate::environment::set_artifact_mirror(&mut ctx, "local", "ghcr.io", "mirror.internal")
+            .await
+            .unwrap();
+
+        let exporter = SigningKey::from_bytes(&[11; 32]);
+        let mut payloads = std::collections::BTreeMap::new();
+        let plan_bytes = br#"{"plan":"offline-1"}"#.to_vec();
+        let approval_bytes = br#"{"approval":"offline-1"}"#.to_vec();
+        payloads.insert(
+            "plans/offline-1.json".into(),
+            ("application/json".into(), plan_bytes.clone()),
+        );
+        payloads.insert(
+            "approvals/offline-1.json".into(),
+            ("application/json".into(), approval_bytes.clone()),
+        );
+        payloads.insert(
+            "releases/api@1.0.0/payload.bin".into(),
+            ("application/octet-stream".into(), b"release".to_vec()),
+        );
+        crate::offline_bundle::insert_artifact_layers(
+            &mut payloads,
+            std::slice::from_ref(&origin_ref),
+            origin.as_ref(),
+        )
+        .unwrap();
+        let envelope = BundleEnvelope::create(
+            BundleStatement {
+                tenant_id: "tenant-1".into(),
+                environment_id: "airgap-1".into(),
+                plan_id: "offline-1".into(),
+                plan_digest: format!("sha256:{:x}", Sha256::digest(&plan_bytes)),
+                approval_digest: format!("sha256:{:x}", Sha256::digest(&approval_bytes)),
+                release_ids: vec!["api@1.0.0".into()],
+                exporter_identity: "exporter".into(),
+                issued_at_unix_ms: 1_000,
+                expires_at_unix_ms: 10_000,
+                entries: Vec::new(),
+            },
+            payloads,
+            &exporter,
+        )
+        .unwrap();
+        let roots = TrustRoots {
+            version: 1,
+            signers: vec![TrustedSigner {
+                key_id: crate::release_signing::key_id(&exporter.verifying_key().to_bytes()),
+                identity: "exporter".into(),
+                public_key: STANDARD.encode(exporter.verifying_key().to_bytes()),
+            }],
+        };
+        let verified = envelope
+            .verify(&roots, "tenant-1", "airgap-1", 2_000)
+            .unwrap();
+        let mirror = std::sync::Arc::new(crate::oci_artifact::MemoryArtifactRegistry::new());
+        let mut mirrors = std::collections::BTreeMap::new();
+        mirrors.insert("ghcr.io".into(), "mirror.internal".into());
+        import_artifact_layers(&verified, Some(mirror.as_ref()), &mirrors).unwrap();
+        let plan = crate::plan::create(&mut ctx, "local").await.unwrap();
+        let software = std::sync::Arc::new(crate::software_executor::FakeSoftwareExecutor::new());
+        let outcomes = crate::apply::execute_with_options(
+            &mut ctx,
+            &plan.id,
+            crate::apply::ExecutionOptions {
+                skip_gates: false,
+                emergency_reason: None,
+                authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
+                    reason: "offline artifact apply",
+                },
+                software_executor: Some(software),
+                worker_lifecycle: None,
+                artifact_registry: Some(mirror),
+                delivery_adapter: None,
+                delivery_fence: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            outcomes.iter().all(|outcome| {
+                matches!(
+                    outcome.classified_status(),
+                    Ok(crate::apply::StepOutcomeStatus::Succeeded)
+                )
+            }),
+            "{outcomes:?}"
+        );
+        let env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        assert_eq!(
+            env.properties.get("deployed.api").map(String::as_str),
+            Some("1.0.0")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

@@ -13,11 +13,15 @@ use ed25519_dalek::{Signer as _, SigningKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
+use crate::oci_artifact::{self, ArtifactRegistry, OciArtifactRef};
 use crate::release_signing::TrustRoots;
 use crate::runtime_delivery::{RuntimeCompletion, RuntimeStepReceipt};
 
 pub const BUNDLE_SCHEMA: &str = "tenkai.offline-bundle.v1";
 pub const RECEIPT_SCHEMA: &str = "tenkai.offline-receipt.v1";
+pub const LAYER_INSTRUCTION_SCHEMA: &str = "tenkai.offline-artifact-layers.v1";
+pub const LAYER_INSTRUCTION_PATH: &str = "oci-layers/mirrors.json";
+pub const LAYER_INSTRUCTION_MEDIA: &str = "application/vnd.tenkai.offline-artifact-layers.v1+json";
 pub const MAX_ARCHIVE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_ENTRIES: usize = 1024;
@@ -438,6 +442,134 @@ impl VerifiedBundle {
     pub fn entry(&self, path: &str) -> Option<&[u8]> {
         self.entries.get(path).map(Vec::as_slice)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OfflineArtifactLayerManifest {
+    pub schema: String,
+    pub layers: Vec<OfflineArtifactLayer>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OfflineArtifactLayer {
+    pub path: String,
+    pub registry: String,
+    pub repository: String,
+    pub digest: String,
+    pub media_type: String,
+}
+
+/// Fetch digest-bound layers from a live registry and add signed bundle entries.
+/// Identical digests share one payload entry.
+pub fn insert_artifact_layers(
+    payloads: &mut BTreeMap<String, (String, Vec<u8>)>,
+    artifacts: &[OciArtifactRef],
+    registry: &dyn ArtifactRegistry,
+) -> Result<()> {
+    if artifacts.is_empty() {
+        return Ok(());
+    }
+    oci_artifact::validate_all(artifacts)?;
+    let mut layers = Vec::with_capacity(artifacts.len());
+    let mut seen_paths = BTreeSet::new();
+    for artifact in artifacts {
+        let path = artifact.layer_entry_path()?;
+        if seen_paths.insert(path.clone()) {
+            let bytes = registry.fetch(artifact).map_err(|error| {
+                anyhow::anyhow!(
+                    "artifact digest {} is unresolvable for offline export: {error}",
+                    artifact.digest
+                )
+            })?;
+            let actual = format!("sha256:{:x}", Sha256::digest(&bytes));
+            if actual != artifact.digest {
+                bail!(
+                    "artifact digest {} does not match fetched bytes {actual}",
+                    artifact.digest
+                );
+            }
+            payloads.insert(path.clone(), (artifact.media_type.clone(), bytes));
+        }
+        layers.push(OfflineArtifactLayer {
+            path,
+            registry: artifact.registry.clone(),
+            repository: artifact.repository.clone(),
+            digest: artifact.digest.clone(),
+            media_type: artifact.media_type.clone(),
+        });
+    }
+    let manifest = OfflineArtifactLayerManifest {
+        schema: LAYER_INSTRUCTION_SCHEMA.into(),
+        layers,
+    };
+    payloads.insert(
+        LAYER_INSTRUCTION_PATH.into(),
+        (
+            LAYER_INSTRUCTION_MEDIA.into(),
+            serde_json::to_vec(&manifest)?,
+        ),
+    );
+    Ok(())
+}
+
+/// Verify signed layer entries and load them onto the environment mirror.
+/// Missing mirrors refuse origin pull. Replay of matching bytes is a no-op.
+pub fn import_artifact_layers(
+    bundle: &VerifiedBundle,
+    dest: Option<&dyn ArtifactRegistry>,
+    mirrors: &BTreeMap<String, String>,
+) -> Result<Vec<OciArtifactRef>> {
+    let Some(raw) = bundle.entry(LAYER_INSTRUCTION_PATH) else {
+        return Ok(Vec::new());
+    };
+    let Some(dest) = dest else {
+        bail!("TENKAI_OCI_STORE is required to import offline artifact layers");
+    };
+    let manifest: OfflineArtifactLayerManifest =
+        serde_json::from_slice(raw).context("parsing offline artifact layer instructions")?;
+    if manifest.schema != LAYER_INSTRUCTION_SCHEMA {
+        bail!(
+            "unsupported offline artifact layer schema {}",
+            manifest.schema
+        );
+    }
+    let mut pulled = Vec::with_capacity(manifest.layers.len());
+    for layer in &manifest.layers {
+        let reference = OciArtifactRef {
+            registry: layer.registry.clone(),
+            repository: layer.repository.clone(),
+            digest: layer.digest.clone(),
+            media_type: layer.media_type.clone(),
+        };
+        reference.validate()?;
+        if layer.path != reference.layer_entry_path()? {
+            bail!(
+                "offline layer path {} does not match artifact digest {}",
+                layer.path,
+                layer.digest
+            );
+        }
+        let Some(bytes) = bundle.entry(&layer.path) else {
+            bail!(
+                "bundle is missing artifact layer for digest {}",
+                layer.digest
+            );
+        };
+        let actual = format!("sha256:{:x}", Sha256::digest(bytes));
+        if actual != layer.digest {
+            bail!(
+                "artifact digest {} does not match bundle layer {actual}",
+                layer.digest
+            );
+        }
+        let pull = oci_artifact::pull_reference(&reference, mirrors)?;
+        dest.store(&pull, bytes.to_vec())?;
+        dest.verify(&pull)?;
+        pulled.push(pull);
+    }
+    Ok(pulled)
 }
 
 impl ReceiptStatement {
@@ -1018,5 +1150,138 @@ mod tests {
         assert_eq!(BundleEnvelope::load(&path).unwrap(), archive);
         assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn sample_artifact(bytes: &[u8]) -> OciArtifactRef {
+        OciArtifactRef {
+            registry: "ghcr.io".into(),
+            repository: "edge/app".into(),
+            digest: digest(bytes),
+            media_type: "application/vnd.oci.image.manifest.v1+json".into(),
+        }
+    }
+
+    fn layered_bundle(key: &SigningKey, artifact: &OciArtifactRef, bytes: &[u8]) -> BundleEnvelope {
+        let origin = crate::oci_artifact::MemoryArtifactRegistry::new();
+        origin.put(artifact, bytes.to_vec()).unwrap();
+        let mut payloads = BTreeMap::new();
+        let approval = br#"{"approval":"plan-1"}"#.to_vec();
+        payloads.insert(
+            "approvals/plan-1.json".into(),
+            ("application/json".into(), approval.clone()),
+        );
+        let plan = br#"{"plan":"plan-1"}"#.to_vec();
+        payloads.insert(
+            "plans/plan-1.json".into(),
+            ("application/json".into(), plan.clone()),
+        );
+        payloads.insert(
+            "releases/app@1.0.0/payload.bin".into(),
+            (
+                "application/octet-stream".into(),
+                b"immutable payload".to_vec(),
+            ),
+        );
+        insert_artifact_layers(&mut payloads, std::slice::from_ref(artifact), &origin).unwrap();
+        BundleEnvelope::create(
+            BundleStatement {
+                tenant_id: "tenant-1".into(),
+                environment_id: "airgap-1".into(),
+                plan_id: "plan-1".into(),
+                plan_digest: digest(&plan),
+                approval_digest: digest(&approval),
+                release_ids: vec!["app@1.0.0".into()],
+                exporter_identity: "exporter".into(),
+                issued_at_unix_ms: 1_000,
+                expires_at_unix_ms: 10_000,
+                entries: Vec::new(),
+            },
+            payloads,
+            key,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn tampered_layer_fails_import_with_the_digest_named() {
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let artifact = sample_artifact(b"layer-a");
+        let mut archive = layered_bundle(&key, &artifact, b"layer-a");
+        let path = artifact.layer_entry_path().unwrap();
+        let entry = archive
+            .entries
+            .iter_mut()
+            .find(|entry| entry.path == path)
+            .expect("layer entry");
+        entry.content_base64 = STANDARD.encode(b"tampered-layer");
+        for descriptor in &mut archive.statement.entries {
+            if descriptor.path == path {
+                descriptor.digest = digest(b"tampered-layer");
+                descriptor.size = b"tampered-layer".len() as u64;
+            }
+        }
+        archive.signature = STANDARD.encode(
+            key.sign(&archive.statement.canonical_bytes().unwrap())
+                .to_bytes(),
+        );
+        let verified = archive
+            .verify(&roots(&key, "exporter"), "tenant-1", "airgap-1", 2_000)
+            .unwrap();
+        let dest = crate::oci_artifact::MemoryArtifactRegistry::new();
+        let mut mirrors = BTreeMap::new();
+        mirrors.insert("ghcr.io".into(), "mirror.internal".into());
+        let err = import_artifact_layers(&verified, Some(&dest), &mirrors)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(&artifact.digest), "{err}");
+    }
+
+    #[test]
+    fn layer_import_is_idempotent_and_refuses_a_missing_mirror() {
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let artifact = sample_artifact(b"layer-a");
+        let verified = layered_bundle(&key, &artifact, b"layer-a")
+            .verify(&roots(&key, "exporter"), "tenant-1", "airgap-1", 2_000)
+            .unwrap();
+        let dest = crate::oci_artifact::MemoryArtifactRegistry::new();
+        let missing = import_artifact_layers(&verified, Some(&dest), &BTreeMap::new())
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("origin pull is refused"), "{missing}");
+        assert!(missing.contains("ghcr.io"), "{missing}");
+
+        let mut mirrors = BTreeMap::new();
+        mirrors.insert("ghcr.io".into(), "mirror.internal".into());
+        let first = import_artifact_layers(&verified, Some(&dest), &mirrors).unwrap();
+        let replay = import_artifact_layers(&verified, Some(&dest), &mirrors).unwrap();
+        assert_eq!(first, replay);
+        assert_eq!(first[0].digest, artifact.digest);
+        assert_eq!(first[0].registry, "mirror.internal");
+        dest.verify(&first[0]).unwrap();
+    }
+
+    #[test]
+    fn missing_layer_entry_fails_import_with_the_digest_named() {
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let artifact = sample_artifact(b"layer-a");
+        let mut archive = layered_bundle(&key, &artifact, b"layer-a");
+        let path = artifact.layer_entry_path().unwrap();
+        archive.entries.retain(|entry| entry.path != path);
+        archive.statement.entries.retain(|entry| entry.path != path);
+        archive.signature = STANDARD.encode(
+            key.sign(&archive.statement.canonical_bytes().unwrap())
+                .to_bytes(),
+        );
+        let verified = archive
+            .verify(&roots(&key, "exporter"), "tenant-1", "airgap-1", 2_000)
+            .unwrap();
+        let dest = crate::oci_artifact::MemoryArtifactRegistry::new();
+        let mut mirrors = BTreeMap::new();
+        mirrors.insert("ghcr.io".into(), "mirror.internal".into());
+        let err = import_artifact_layers(&verified, Some(&dest), &mirrors)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(&artifact.digest), "{err}");
+        assert!(err.contains("missing"), "{err}");
     }
 }

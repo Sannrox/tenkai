@@ -14,10 +14,22 @@ descriptors by path. Unknown schemas fail closed.
 Bundle verification requires current Ed25519 trust roots, the configured tenant
 and environment identities, and a time inside the signed validity interval.
 Removing an exporter key prevents a not-yet-executed bundle from being trusted.
-The archive may include signed release and plan-approval envelopes and bounded
-provider evidence, but never bearer/session credentials, private keys,
-environment variables, command output, arbitrary logs, or unrelated graph
-data.
+The archive may include signed release and plan-approval envelopes, bounded
+provider evidence, and digest-bound artifact layers, but never bearer/session
+credentials, private keys, environment variables, command output, arbitrary
+logs, or unrelated graph data.
+
+When a release names OCI artifacts, export fetches each digest from a live
+registry and adds signed `oci-layers/<digest>` entries plus
+`oci-layers/mirrors.json` load instructions. Those paths stay inside
+`tenkai.offline-bundle.v1`; the statement schema does not change, so file-only
+bundles remain valid. Identical digests share one payload entry. Import
+verifies every layer against the signed instruction digest, names that digest
+when bytes are missing or wrong, and stores the layer on the environment
+mirror only. Origin pull is refused. A matching replay is a no-op, so an
+interrupted import can resume. `TENKAI_OCI_STORE` is required to import
+layers. A layer larger than the v1 entry limit cannot be bundled; re-export
+after shrinking or splitting the release.
 
 The offline runtime signs `tenkai.offline-receipt.v1` with a key authorized for
 exactly its environment. Receipt import verifies the exact bundle root and

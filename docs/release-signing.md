@@ -58,7 +58,9 @@ digest. The Catalog stores the reference; it is not a second registry.
 Apply pulls those artifacts only from the environment's
 `artifact_mirror.<registry>` host (`tenkaictl env artifact-mirror set`). A
 missing mirror refuses origin pull. Cached files and retained references do
-not grant execution authority. Offline bundle layers are a later contract.
+not grant execution authority. Signed offline bundles may carry the same
+digest-bound layers for air-gapped import; see
+[offline bundles](offline-bundles.md).
 
 Unsigned publication is available only through the conspicuous
 `--allow-unsigned-development` flag. It is intended for local development and

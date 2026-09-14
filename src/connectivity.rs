@@ -500,6 +500,12 @@ pub async fn bind_isolated_bundle(
             existing.bundle_digest
         );
     }
+    let env = crate::environment::environment(ctx, environment).await?;
+    crate::offline_bundle::import_artifact_layers(
+        &verified,
+        crate::oci_artifact::selected_registry()?.as_deref(),
+        &crate::oci_artifact::mirrors_from_properties(&env.properties),
+    )?;
     record.environments[index].isolated = Some(IsolatedEvidence {
         bundle_digest,
         receipt_digest: record.environments[index]
