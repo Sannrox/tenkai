@@ -813,7 +813,10 @@ async fn apply_plan(
     .await?;
     let plan = plan::load(ctx, plan_id).await?;
     if plan.state == PlanState::Failed {
-        bail!("plan {plan_id} failed during connectivity-class apply");
+        bail!(
+            "plan {plan_id} failed during connectivity-class apply: {}",
+            plan.status_detail
+        );
     }
     Ok(())
 }

@@ -54,6 +54,12 @@ tenkaictl fleet fairness \
   --backup /tmp/tenkai-fairness.db
 ```
 
+The offline fifty-spoke drill (`crate::offline_fleet_drill`) exports one signed
+release payload to fifty isolated environments, applies without treating the
+hub as reachable, rolls twenty-five back after injected health failure, and
+checks that hub inspect/fleet posture matches each spoke's local
+`deployed.<product>` evidence. Re-binding the same bundle is a no-op.
+
 The report counts **behind plan progress** (`AwaitingApproval`/`Applied`/
 `AwaitingRuntime`), not mere tick membership. Success receipts bind only to a
 healthy behind plan; they never complete Unhealthy or Blocked restarts.
