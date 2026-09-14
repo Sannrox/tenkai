@@ -447,6 +447,7 @@ control plane can't safely restart its own backend mid-apply.
 | `TENKAI_MANAGEMENT_TOKEN` | unset | Community management bearer for server management requests, remote CLI mode, and embedded `promote` / canary mutations including `canary repair` |
 | `TENKAI_JWT_ASSERTION` | unset | Optional compact JWT for embedded `promote` / canary mutations including `canary repair`; requires `TENKAI_JWT_VERIFIER_CONFIG` |
 | `TENKAI_RUNTIME_TOKENS` | `{}` | Server-only JSON object mapping bearer secrets to one environment each |
+| `TENKAI_ENVIRONMENT_MANAGEMENT_TOKENS` | `{}` | Server-only JSON object mapping environment-scoped management bearers to one environment each; distinct from the fleet management token and runtime tokens |
 | `TENKAI_RUNTIME_ENVIRONMENT` | unset | The one environment assigned to an environment-runtime process |
 | `TENKAI_RUNTIME_TOKEN` | unset | Runtime-only bearer secret; kept out of command-line arguments and executor state |
 | `TENKAI_RUNTIME_EXECUTOR` | unset | Absolute path to the environment executor implementing the idempotency contract |
@@ -502,6 +503,7 @@ it ([ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md),
 | Canary × model_runtime promote E2E | [Model runtime](docs/model-runtime.md#canary-promotion-evidence-model_runtime); #108 |
 | Multi-environment list/inspect | `tenkaictl env list` / `env inspect`; #56 |
 | Authenticated remote status/inspect | `--target remote`; #58 |
+| Remote catalog publish / promote / subscribe / recall | [Management lifecycle](docs/management-lifecycle.md); #394 |
 | Versioned remote management lifecycle contract | [Management lifecycle](docs/management-lifecycle.md); [ADR 0030](docs/decisions/0030-remote-management-lifecycle.md); #393 |
 | Fleet status (embedded and remote) | `tenkaictl fleet status`; [server diagnostics](docs/server-diagnostics.md); #91 |
 | Synthetic thousand-environment workload | `tenkaictl fleet generate`; [fleet workload](docs/fleet-workload.md); #299 |

@@ -749,7 +749,13 @@ enum EnvCommand {
     /// Inspect one environment: subscriptions, deployed versions, lease/fence, latest plan.
     Inspect { env: String },
     /// Subscribe an environment to a product channel, e.g. `subscribe local hello=stable`.
-    Subscribe { env: String, spec: String },
+    Subscribe {
+        env: String,
+        spec: String,
+        /// Current fencing generation; required with --target remote.
+        #[arg(long)]
+        generation: Option<u64>,
+    },
     /// Remove an abandoned apply lease after verifying no apply is running.
     Unlock { env: String },
     /// Record manually reconciled deployment state; omit --deployed after cleanup.
@@ -1244,6 +1250,68 @@ async fn run(cli: Cli) -> Result<()> {
             }
             Command::Migrate { command } => {
                 run_remote_migrate(&client, command).await?;
+                return Ok(());
+            }
+            Command::Publish {
+                manifest,
+                signature,
+                trust_roots,
+                allow_unsigned_development,
+                provenance,
+                provenance_trust_roots,
+                change_set_evidence,
+            } => {
+                if allow_unsigned_development
+                    || !provenance.is_empty()
+                    || provenance_trust_roots.is_some()
+                    || change_set_evidence.is_some()
+                {
+                    bail!(
+                        "the local-development publish bypass and extra publication evidence are available only with --target embedded"
+                    );
+                }
+                let signature = signature.ok_or_else(|| {
+                    anyhow::anyhow!("--signature is required with --target remote")
+                })?;
+                let trust_roots = trust_roots.ok_or_else(|| {
+                    anyhow::anyhow!("--trust-roots is required with --target remote")
+                })?;
+                let request = tenkai::management_lifecycle::load_publish_request(
+                    &manifest,
+                    &signature,
+                    &trust_roots,
+                )?;
+                let result = client.publish_release(&request).await?;
+                println!("{}", result.message);
+                return Ok(());
+            }
+            Command::Promote { spec, channel } => {
+                let result = client.promote_release(&spec, &channel).await?;
+                println!("{}", result.message);
+                return Ok(());
+            }
+            Command::Release {
+                command: ReleaseCommand::Recall { spec },
+            } => {
+                let result = client.recall_release(&spec).await?;
+                println!("{}", result.message);
+                return Ok(());
+            }
+            Command::Env {
+                command:
+                    EnvCommand::Subscribe {
+                        env,
+                        spec,
+                        generation,
+                    },
+            } => {
+                let generation = generation.ok_or_else(|| {
+                    anyhow::anyhow!("--generation is required with --target remote")
+                })?;
+                let result = client
+                    .subscribe_environment(&env, &spec, generation)
+                    .await?;
+                println!("{}", result.message);
                 return Ok(());
             }
             _ => bail!(
@@ -2006,7 +2074,7 @@ async fn run(cli: Cli) -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&report)?);
                 }
             }
-            EnvCommand::Subscribe { env, spec } => {
+            EnvCommand::Subscribe { env, spec, .. } => {
                 let Some((product, channel)) = spec.split_once('=') else {
                     bail!("expected <product>=<channel>, got {spec:?}");
                 };

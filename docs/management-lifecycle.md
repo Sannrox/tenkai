@@ -33,18 +33,20 @@ later issues must call it before the Catalog, planner, or apply core.
 
 ## Operations
 
-| Operation | Scope | Reserved path | Later issue |
+| Operation | Scope | Path | Status |
 | --- | --- | --- | --- |
-| `publish` | Catalog-wide | `POST /v1/releases` | [#394](https://github.com/Sannrox/tenkai/issues/394) |
-| `promote` | Catalog-wide | `POST /v1/channels/{channel}/promote` | #394 |
-| `recall` | Catalog-wide | `POST /v1/releases/{release}/recall` | #394 |
-| `subscribe` | Environment | `POST /v1/environments/{environment}/subscriptions` | #394 |
-| `plan` | Environment | `POST /v1/environments/{environment}/plans` | [#395](https://github.com/Sannrox/tenkai/issues/395) |
-| `approve` | Environment | `POST /v1/plans/{plan_id}/approve` | #395 |
-| `apply` | Environment | `POST /v1/plans/{plan_id}/apply` | #395 |
-| `rollback` | Environment | `POST /v1/environments/{environment}/rollback` | #395 |
+| `publish` | Catalog-wide | `POST /v1/releases` | Implemented ([#394](https://github.com/Sannrox/tenkai/issues/394)) |
+| `promote` | Catalog-wide | `POST /v1/channels/{channel}/promote` | Implemented (#394) |
+| `recall` | Catalog-wide | `POST /v1/releases/{release}/recall` | Implemented (#394) |
+| `subscribe` | Environment | `POST /v1/environments/{environment}/subscriptions` | Implemented (#394) |
+| `plan` | Environment | `POST /v1/environments/{environment}/plans` | Reserved ([#395](https://github.com/Sannrox/tenkai/issues/395)) |
+| `approve` | Environment | `POST /v1/plans/{plan_id}/approve` | Reserved (#395) |
+| `apply` | Environment | `POST /v1/plans/{plan_id}/apply` | Reserved (#395) |
+| `rollback` | Environment | `POST /v1/environments/{environment}/rollback` | Reserved (#395) |
 
-These paths are reserved. This document does not add the routes.
+`tenkaictl --target remote` publish, promote, `release recall`, and `env subscribe` map onto the implemented routes. Remote publish requires a signature and trust roots; `--allow-unsigned-development` stays embedded-only. Remote subscribe requires `--generation` matching the current environment lease generation, or `0` when no lease is held.
+
+Community and spoke hosts serve these routes. Tenant-mode hubs refuse them until a tenant-scoped catalog adapter exists; they do not write a shared catalog.
 
 ## Credentials
 
@@ -55,7 +57,7 @@ Authentication stays on `AuthStack` ([request context](auth-request-context.md))
 | Principal | Grant | Lifecycle effect |
 | --- | --- | --- |
 | Fleet management | No environment binding | May call catalog-wide and environment-bound operations on environments it can see. Tenant-mode hosts still apply the non-disclosing deny. |
-| Environment-scoped management | Exactly one environment | May call environment-bound operations only for that environment. Catalog-wide publish, promote, and recall fail closed. |
+| Environment-scoped management | Exactly one environment (`TENKAI_ENVIRONMENT_MANAGEMENT_TOKENS`) | May call environment-bound operations only for that environment. Catalog-wide publish, promote, and recall fail closed. |
 | Runtime | Exactly one environment | Refused on every management lifecycle operation. Runtime tokens stay on `/v1/runtime/*`. |
 
 Missing approval evidence fails closed. A stale fencing generation cannot

@@ -41,6 +41,8 @@ pub struct ServerConfig {
     pub management_token: String,
     /// Maps a runtime bearer token to its one assigned environment.
     pub runtime_assignments: HashMap<String, String>,
+    /// Maps an environment-scoped management bearer to its one granted environment.
+    pub environment_management_assignments: HashMap<String, String>,
     /// Host capability requirements validated before the router accepts traffic.
     pub requirements: RuntimeRequirements,
     /// Composed capabilities advertised by storage and extensions.
@@ -83,6 +85,7 @@ impl ServerConfig {
         Self {
             management_token: management_token.into(),
             runtime_assignments,
+            environment_management_assignments: HashMap::new(),
             requirements: RuntimeRequirements::community(),
             capabilities: community_sqlite_profile(community_auth_capabilities()),
             auth_host: AuthHostConfig::community(),
@@ -112,6 +115,22 @@ impl ServerConfig {
                 .runtime_assignments
                 .contains_key(&self.management_token),
             "management and runtime credentials must be distinct"
+        );
+        anyhow::ensure!(
+            self.environment_management_assignments
+                .iter()
+                .all(|(token, environment)| !token.is_empty() && !environment.is_empty()),
+            "environment-scoped management tokens and assignments must not be empty"
+        );
+        anyhow::ensure!(
+            !self
+                .environment_management_assignments
+                .contains_key(&self.management_token)
+                && self
+                    .environment_management_assignments
+                    .keys()
+                    .all(|token| !self.runtime_assignments.contains_key(token)),
+            "environment-scoped management credentials must be distinct from fleet management and runtime tokens"
         );
         validate_runtime_capabilities(&self.capabilities, &self.requirements)
             .map_err(|error| anyhow::anyhow!("runtime capability negotiation failed: {error}"))?;
@@ -158,17 +177,40 @@ impl ServerConfig {
     }
 
     fn build_auth_stack(&self) -> anyhow::Result<AuthStack> {
-        let community = CommunityTokenAuthenticator::new(
-            "auth.community",
-            [(
-                self.management_token.clone(),
+        let mut tokens = vec![(
+            self.management_token.clone(),
+            PrincipalIdentity {
+                id: "management".into(),
+                kind: PrincipalKind::Management,
+            },
+        )];
+        tokens.extend(self.environment_management_assignments.iter().map(
+            |(token, environment)| {
+                (
+                    token.clone(),
+                    PrincipalIdentity {
+                        id: format!("management:{environment}"),
+                        kind: PrincipalKind::Management,
+                    },
+                )
+            },
+        ));
+        tokens.extend(self.runtime_assignments.keys().map(|token| {
+            (
+                token.clone(),
                 PrincipalIdentity {
-                    id: "management".into(),
-                    kind: PrincipalKind::Management,
+                    id: format!(
+                        "runtime:{}",
+                        self.runtime_assignments
+                            .get(token)
+                            .expect("runtime assignment exists")
+                    ),
+                    kind: PrincipalKind::Runtime,
                 },
-            )],
-        )
-        .map_err(|error| anyhow::anyhow!("community management authenticator: {error}"))?;
+            )
+        }));
+        let community = CommunityTokenAuthenticator::new("auth.community", tokens)
+            .map_err(|error| anyhow::anyhow!("community management authenticator: {error}"))?;
         let enterprise = self.enterprise_auth.clone().map(|extension| {
             if self.federation.required_enterprise_issuer.is_some() {
                 Arc::new(FederatingAuthExtension::new(
@@ -231,6 +273,7 @@ pub fn router(
         store.clone(),
         config.tenant_store.clone(),
         package_migration_trust_roots,
+        config.environment_management_assignments.clone(),
     ));
     let mut router = Router::new()
         .route("/healthz", get(health))
@@ -256,6 +299,13 @@ pub fn router(
         .route(
             "/v1/migrations/{name}/rollback",
             post(rollback_package_migration),
+        )
+        .route("/v1/releases", post(publish_release))
+        .route("/v1/channels/{channel}/promote", post(promote_release))
+        .route("/v1/releases/{release}/recall", post(recall_release))
+        .route(
+            "/v1/environments/{environment}/subscriptions",
+            post(subscribe_environment),
         )
         .route(
             "/v1/runtime/environments/{environment}/work",
@@ -772,6 +822,97 @@ async fn rollback_package_migration(
     }
 }
 
+async fn publish_release(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match management_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return management_error(error),
+    };
+    let request = match parse_migration_json(&body) {
+        Ok(request) => request,
+        Err(response) => return *response,
+    };
+    match state.management.publish_release(&credential, request).await {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => management_error(error),
+    }
+}
+
+async fn promote_release(
+    State(state): State<Arc<AppState>>,
+    Path(channel): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match management_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return management_error(error),
+    };
+    let request = match parse_migration_json(&body) {
+        Ok(request) => request,
+        Err(response) => return *response,
+    };
+    match state
+        .management
+        .promote_release(&credential, &channel, request)
+        .await
+    {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => management_error(error),
+    }
+}
+
+async fn recall_release(
+    State(state): State<Arc<AppState>>,
+    Path(release): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match management_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return management_error(error),
+    };
+    let request = match parse_migration_json(&body) {
+        Ok(request) => request,
+        Err(response) => return *response,
+    };
+    match state
+        .management
+        .recall_release(&credential, &release, request)
+        .await
+    {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => management_error(error),
+    }
+}
+
+async fn subscribe_environment(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match management_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return management_error(error),
+    };
+    let request = match parse_migration_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    match state
+        .management
+        .subscribe_environment(&credential, &environment, request)
+        .await
+    {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => management_error(error),
+    }
+}
+
 async fn runtime_work(
     State(state): State<Arc<AppState>>,
     Path(environment): Path<String>,
@@ -1023,6 +1164,85 @@ impl RemoteClient {
             Some(request),
         )
         .await
+    }
+
+    pub async fn publish_release(
+        &self,
+        request: &crate::management_lifecycle::PublishRequest,
+    ) -> anyhow::Result<crate::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(reqwest::Method::POST, "/v1/releases", Some(request))
+            .await
+    }
+
+    pub async fn promote_release(
+        &self,
+        spec: &str,
+        channel: &str,
+    ) -> anyhow::Result<crate::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!("/v1/channels/{channel}/promote"),
+            Some(&crate::management_lifecycle::PromoteRequest {
+                version: crate::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation: crate::management_lifecycle::ManagementLifecycleOperation::Promote
+                    .as_str()
+                    .into(),
+                spec: spec.to_string(),
+            }),
+        )
+        .await
+    }
+
+    pub async fn recall_release(
+        &self,
+        spec: &str,
+    ) -> anyhow::Result<crate::management_lifecycle::ManagementLifecycleResult> {
+        let encoded = spec.replace('@', "%40");
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!("/v1/releases/{encoded}/recall"),
+            Some(&crate::management_lifecycle::RecallRequest {
+                version: crate::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation: crate::management_lifecycle::ManagementLifecycleOperation::Recall
+                    .as_str()
+                    .into(),
+            }),
+        )
+        .await
+    }
+
+    pub async fn subscribe_environment(
+        &self,
+        environment: &str,
+        spec: &str,
+        expected_generation: u64,
+    ) -> anyhow::Result<crate::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!("/v1/environments/{environment}/subscriptions"),
+            Some(&crate::management_lifecycle::SubscribeRequest {
+                version: crate::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation: crate::management_lifecycle::ManagementLifecycleOperation::Subscribe
+                    .as_str()
+                    .into(),
+                environment: environment.to_string(),
+                expected_generation,
+                spec: spec.to_string(),
+            }),
+        )
+        .await
+    }
+
+    async fn lifecycle_result<B: serde::Serialize>(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&B>,
+    ) -> anyhow::Result<crate::management_lifecycle::ManagementLifecycleResult> {
+        let result: crate::management_lifecycle::ManagementLifecycleResult =
+            self.request_json_body(method, path, body).await?;
+        crate::management_lifecycle::require_management_lifecycle_api_version(result.version)?;
+        Ok(result)
     }
 
     pub async fn rollback_package_migration(
@@ -2669,5 +2889,269 @@ inputs = ["payload.txt"]
         .unwrap();
         assert!(body.contains(NON_DISCLOSING_DENY));
         assert!(!body.contains("tenant-b"));
+    }
+
+    fn signed_catalog_fixture(
+        root: &std::path::Path,
+        version: &str,
+    ) -> crate::management_lifecycle::PublishRequest {
+        let manifest = root.join("tenkai.toml");
+        std::fs::write(
+            &manifest,
+            format!(
+                "[product]\nname = \"api\"\nversion = \"{version}\"\n\n[deploy]\ninstall = \"true\"\n"
+            ),
+        )
+        .unwrap();
+        let keys = root.join("keys");
+        let signature = root.join("signature.json");
+        let trust_roots = root.join("trust-roots.toml");
+        crate::dev_sign::sign_release(&keys, &manifest, &signature, &trust_roots).unwrap();
+        crate::management_lifecycle::load_publish_request(&manifest, &signature, &trust_roots)
+            .unwrap()
+    }
+
+    async fn catalog_router(root: &std::path::Path) -> (Router, ServerConfig) {
+        let database = root.join("tenkai.db");
+        let mut ctx = crate::client::Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::plan::env_add(&mut ctx, "stage", "fixture")
+            .await
+            .unwrap();
+        crate::plan::env_add(&mut ctx, "prod", "other")
+            .await
+            .unwrap();
+        let reconciler =
+            crate::reconciler::Reconciler::new(ctx, crate::reconciler::Config::default()).unwrap();
+        let store = Arc::new(crate::storage::SqliteStore::open(&database).unwrap());
+        let mut config = ServerConfig::community(
+            "management-secret",
+            HashMap::from([("runtime-secret".into(), "stage".into())]),
+        );
+        config
+            .environment_management_assignments
+            .insert("stage-secret".into(), "stage".into());
+        let app = router(config.clone(), Arc::new(reconciler), store).unwrap();
+        (app, config)
+    }
+
+    #[tokio::test]
+    async fn remote_catalog_lifecycle_publish_promote_subscribe_and_recall() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-remote-catalog-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let (app, _config) = catalog_router(&root).await;
+        let first = signed_catalog_fixture(&root, "1.0.0");
+
+        let published = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/releases")
+                    .header("authorization", "Bearer management-secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&first).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(published.status(), StatusCode::OK,);
+        let replay = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/releases")
+                    .header("authorization", "Bearer management-secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&first).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replay.status(), StatusCode::OK);
+        let replay_body = String::from_utf8(
+            axum::body::to_bytes(replay.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(replay_body.contains("already published"), "{replay_body}");
+
+        let conflict_root = root.join("conflict");
+        std::fs::create_dir_all(&conflict_root).unwrap();
+        std::fs::write(
+            conflict_root.join("tenkai.toml"),
+            "[product]\nname = \"api\"\nversion = \"1.0.0\"\n\n[deploy]\ninstall = \"false\"\n",
+        )
+        .unwrap();
+        let conflict = {
+            let keys = conflict_root.join("keys");
+            let signature = conflict_root.join("signature.json");
+            let trust = conflict_root.join("trust-roots.toml");
+            crate::dev_sign::sign_release(
+                &keys,
+                &conflict_root.join("tenkai.toml"),
+                &signature,
+                &trust,
+            )
+            .unwrap();
+            crate::management_lifecycle::load_publish_request(
+                &conflict_root.join("tenkai.toml"),
+                &signature,
+                &trust,
+            )
+            .unwrap()
+        };
+        let conflicting = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/releases")
+                    .header("authorization", "Bearer management-secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&conflict).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(conflicting.status(), StatusCode::CONFLICT);
+
+        let promoted = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/channels/stable/promote")
+                    .header("authorization", "Bearer management-secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&crate::management_lifecycle::PromoteRequest {
+                            version: 1,
+                            operation: "promote".into(),
+                            spec: "api@1.0.0".into(),
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(promoted.status(), StatusCode::OK);
+
+        let subscribed = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/environments/stage/subscriptions")
+                    .header("authorization", "Bearer management-secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&crate::management_lifecycle::SubscribeRequest {
+                            version: 1,
+                            operation: "subscribe".into(),
+                            environment: "stage".into(),
+                            expected_generation: 0,
+                            spec: "api=stable".into(),
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(subscribed.status(), StatusCode::OK);
+
+        let recalled = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/releases/api@1.0.0/recall")
+                    .header("authorization", "Bearer management-secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&crate::management_lifecycle::RecallRequest {
+                            version: 1,
+                            operation: "recall".into(),
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(recalled.status(), StatusCode::OK);
+
+        let scoped_promote = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/channels/stable/promote")
+                    .header("authorization", "Bearer stage-secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&crate::management_lifecycle::PromoteRequest {
+                            version: 1,
+                            operation: "promote".into(),
+                            spec: "api@1.0.0".into(),
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(scoped_promote.status(), StatusCode::FORBIDDEN);
+
+        let scoped_other = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/environments/prod/subscriptions")
+                    .header("authorization", "Bearer stage-secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&crate::management_lifecycle::SubscribeRequest {
+                            version: 1,
+                            operation: "subscribe".into(),
+                            environment: "prod".into(),
+                            expected_generation: 0,
+                            spec: "api=stable".into(),
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(scoped_other.status(), StatusCode::FORBIDDEN);
+
+        let runtime = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/releases")
+                    .header("authorization", "Bearer runtime-secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&first).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(runtime.status(), StatusCode::FORBIDDEN);
+
+        let bypass = app
+            .oneshot(
+                Request::post("/v1/releases")
+                    .header("authorization", "Bearer management-secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "version": 1,
+                            "operation": "publish",
+                            "manifest": "[product]",
+                            "allow_unsigned_development": true
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bypass.status(), StatusCode::BAD_REQUEST);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -344,6 +344,12 @@ async fn main() -> Result<()> {
         ServerConfig {
             management_token,
             runtime_assignments,
+            environment_management_assignments: std::env::var("TENKAI_ENVIRONMENT_MANAGEMENT_TOKENS")
+                .ok()
+                .map(|value| serde_json::from_str::<std::collections::HashMap<String, String>>(&value))
+                .transpose()
+                .context("TENKAI_ENVIRONMENT_MANAGEMENT_TOKENS must be a JSON object mapping tokens to environments")?
+                .unwrap_or_default(),
             requirements,
             capabilities: capabilities.clone(),
             auth_host: enterprise_auth.auth_host,
