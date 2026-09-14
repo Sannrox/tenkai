@@ -502,6 +502,7 @@ it ([ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md),
 | Canary × model_runtime promote E2E | [Model runtime](docs/model-runtime.md#canary-promotion-evidence-model_runtime); #108 |
 | Multi-environment list/inspect | `tenkaictl env list` / `env inspect`; #56 |
 | Authenticated remote status/inspect | `--target remote`; #58 |
+| Versioned remote management lifecycle contract | [Management lifecycle](docs/management-lifecycle.md); [ADR 0030](docs/decisions/0030-remote-management-lifecycle.md); #393 |
 | Fleet status (embedded and remote) | `tenkaictl fleet status`; [server diagnostics](docs/server-diagnostics.md); #91 |
 | Synthetic thousand-environment workload | `tenkaictl fleet generate`; [fleet workload](docs/fleet-workload.md); #299 |
 | Fleet drift watch (baseline + exit codes) | `tenkaictl fleet watch`; [server diagnostics](docs/server-diagnostics.md#fleet-drift-watch); #107 |

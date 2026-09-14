@@ -2,6 +2,9 @@
 
 The public contract is `proto/tenkai/runtime/v1/runtime.proto`. An environment
 runtime initiates every RPC; the server never pushes work into an environment.
+Operator publish, promote, plan, apply, and rollback are a different surface:
+the authenticated HTTP [management lifecycle](management-lifecycle.md)
+([ADR 0030](decisions/0030-remote-management-lifecycle.md)).
 Transport authentication maps a principal to exactly one `environment_id`, and
 the server rejects any request whose payload identity differs from that scope.
 Each runtime process also presents a fresh instance identity. Authentication
