@@ -6,7 +6,10 @@ an Ed25519 signature over the canonical binary encoding described below, and a
 `sha256:<hex>` key id. The statement binds these fields:
 
 - `manifest_digest`: SHA-256 of the manifest bytes exactly as published.
-- `artifact_digest`: Tenkai's deterministic digest of the declared deploy inputs.
+- `artifact_digest`: Tenkai's deterministic identity digest of the declared
+  deploy inputs plus any digest-bound OCI artifact references. File-only
+  releases keep today's input-tree digest. Naming an artifact by digest
+  changes the signed identity; a tag is never part of that identity.
 - `provenance`: source URL, source revision, builder identity, build time in Unix
   milliseconds, and an optional URL-to-SHA-256 map of source materials.
 
@@ -45,6 +48,17 @@ Publication fails closed unless both `--signature` and `--trust-roots` are
 provided. Tenkai strictly verifies the Ed25519 signature and compares both
 signed digests with the manifest and declared deploy inputs before creating a
 snapshot or modifying the catalog.
+
+When a release names OCI artifacts, each `[[artifacts]]` entry must include
+`registry`, `repository`, `digest`, and `media_type`. Publication verifies the
+declared digest against a live registry adapter (`TENKAI_OCI_STORE` for the
+filesystem adapter). Unresolvable or mismatched bytes fail closed and name the
+digest. The Catalog stores the reference; it is not a second registry.
+
+Apply pulls those artifacts only from the environment's
+`artifact_mirror.<registry>` host (`tenkaictl env artifact-mirror set`). A
+missing mirror refuses origin pull. Cached files and retained references do
+not grant execution authority. Offline bundle layers are a later contract.
 
 Unsigned publication is available only through the conspicuous
 `--allow-unsigned-development` flag. It is intended for local development and

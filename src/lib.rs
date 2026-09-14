@@ -147,6 +147,7 @@ mod management_operations;
 pub mod manifest;
 pub mod metrics;
 pub mod model_runtime;
+pub mod oci_artifact;
 pub mod offline_bundle;
 pub mod ontology;
 pub mod package_migration;

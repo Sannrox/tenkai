@@ -202,7 +202,7 @@ impl PublicationTrust {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct PublishOptions {
     pub signature: Option<PathBuf>,
     pub trust_roots: Option<PathBuf>,
@@ -210,6 +210,26 @@ pub struct PublishOptions {
     pub provenance: Vec<PathBuf>,
     pub provenance_trust_roots: Option<PathBuf>,
     pub change_set_evidence: Option<ChangeSetEvidenceInput>,
+    /// Host-selected registry used to verify digest-bound artifacts at publish.
+    pub artifact_registry: Option<std::sync::Arc<dyn crate::oci_artifact::ArtifactRegistry>>,
+}
+
+impl std::fmt::Debug for PublishOptions {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PublishOptions")
+            .field("signature", &self.signature)
+            .field("trust_roots", &self.trust_roots)
+            .field(
+                "allow_unsigned_development",
+                &self.allow_unsigned_development,
+            )
+            .field("provenance", &self.provenance)
+            .field("provenance_trust_roots", &self.provenance_trust_roots)
+            .field("change_set_evidence", &self.change_set_evidence)
+            .field("artifact_registry", &self.artifact_registry.is_some())
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -467,8 +487,11 @@ fn validate_stored_release_content(
         .get("workdir")
         .filter(|value| !value.is_empty())
         .ok_or_else(|| anyhow::anyhow!("legacy release {} has no stored workdir", release.id))?;
-    let actual_artifact_digest =
-        manifest::artifact_digest(Path::new(workdir), &stored_manifest.immutable_inputs())?;
+    let actual_artifact_digest = manifest::identity_digest(
+        Path::new(workdir),
+        &stored_manifest.immutable_inputs(),
+        &stored_manifest.artifacts,
+    )?;
     if actual_artifact_digest != expected_artifact_digest
         || release
             .properties
@@ -998,6 +1021,255 @@ install = "true"
             .unwrap_err()
             .to_string();
         assert!(err.contains("recalled"), "{err}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn sample_oci_ref(bytes: &[u8]) -> crate::oci_artifact::OciArtifactRef {
+        use sha2::{Digest as _, Sha256};
+        crate::oci_artifact::OciArtifactRef {
+            registry: "ghcr.io".into(),
+            repository: "edge/app".into(),
+            digest: format!("sha256:{:x}", Sha256::digest(bytes)),
+            media_type: "application/vnd.oci.image.manifest.v1+json".into(),
+        }
+    }
+
+    fn write_oci_manifest(
+        root: &Path,
+        version: &str,
+        artifact: &crate::oci_artifact::OciArtifactRef,
+    ) {
+        std::fs::write(
+            root.join("tenkai.toml"),
+            format!(
+                r#"
+[product]
+name = "api"
+version = "{version}"
+
+[deploy]
+install = "true"
+
+[[artifacts]]
+registry = "{}"
+repository = "{}"
+digest = "{}"
+media_type = "{}"
+"#,
+                artifact.registry, artifact.repository, artifact.digest, artifact.media_type
+            ),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn publication_fails_closed_when_artifact_digest_is_unresolvable() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-oci-publish-unresolvable-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let artifact = sample_oci_ref(b"payload-a");
+        write_oci_manifest(&root, "1.0.0", &artifact);
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let registry = std::sync::Arc::new(crate::oci_artifact::MemoryArtifactRegistry::new());
+        let err = publish(
+            &mut ctx,
+            &root.join("tenkai.toml"),
+            &PublishOptions {
+                allow_unsigned_development: true,
+                artifact_registry: Some(registry),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains(&artifact.digest), "{err}");
+        assert!(err.contains("unresolvable"), "{err}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn publication_binds_release_identity_to_declared_artifact_digest() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-oci-publish-identity-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let first = sample_oci_ref(b"payload-a");
+        let second = sample_oci_ref(b"payload-b");
+        write_oci_manifest(&root, "1.0.0", &first);
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let registry = std::sync::Arc::new(crate::oci_artifact::MemoryArtifactRegistry::new());
+        registry.put(&first, b"payload-a".to_vec()).unwrap();
+        registry.put(&second, b"payload-b".to_vec()).unwrap();
+        publish(
+            &mut ctx,
+            &root.join("tenkai.toml"),
+            &PublishOptions {
+                allow_unsigned_development: true,
+                artifact_registry: Some(registry.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let first_release = ctx.get(&release_id("api", "1.0.0")).await.unwrap().unwrap();
+        let first_digest = first_release
+            .properties
+            .get("artifact_digest")
+            .cloned()
+            .unwrap();
+        assert!(
+            first_release
+                .properties
+                .get("oci_artifacts")
+                .is_some_and(|value| value.contains(&first.digest)),
+            "{first_release:?}"
+        );
+        write_oci_manifest(&root, "1.0.1", &second);
+        publish(
+            &mut ctx,
+            &root.join("tenkai.toml"),
+            &PublishOptions {
+                allow_unsigned_development: true,
+                artifact_registry: Some(registry),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let second_digest = ctx
+            .get(&release_id("api", "1.0.1"))
+            .await
+            .unwrap()
+            .unwrap()
+            .properties
+            .get("artifact_digest")
+            .cloned()
+            .unwrap();
+        assert_ne!(first_digest, second_digest);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn apply_pulls_digest_bound_artifacts_from_the_environment_mirror_only() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-oci-apply-mirror-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let origin = sample_oci_ref(b"payload-a");
+        write_oci_manifest(&root, "1.0.0", &origin);
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let registry = std::sync::Arc::new(crate::oci_artifact::MemoryArtifactRegistry::new());
+        registry.put(&origin, b"payload-a".to_vec()).unwrap();
+        publish(
+            &mut ctx,
+            &root.join("tenkai.toml"),
+            &PublishOptions {
+                allow_unsigned_development: true,
+                artifact_registry: Some(registry.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let actor = crate::auth_context::test_management_context("oci-artifacts");
+        crate::catalog::promote(&mut ctx, &actor, "api@1.0.0", "stable")
+            .await
+            .unwrap();
+        crate::plan::env_add(&mut ctx, "local", "fixture")
+            .await
+            .unwrap();
+        crate::plan::subscribe(&mut ctx, "local", "api", "stable")
+            .await
+            .unwrap();
+        let software = std::sync::Arc::new(crate::software_executor::FakeSoftwareExecutor::new());
+        let plan = crate::plan::create(&mut ctx, "local").await.unwrap();
+        let missing_mirror = crate::apply::execute_with_options(
+            &mut ctx,
+            &plan.id,
+            crate::apply::ExecutionOptions {
+                skip_gates: false,
+                emergency_reason: None,
+                authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
+                    reason: "oci artifact apply",
+                },
+                software_executor: Some(software.clone()),
+                worker_lifecycle: None,
+                artifact_registry: Some(registry.clone()),
+                delivery_adapter: None,
+                delivery_fence: None,
+            },
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            missing_mirror.contains("origin pull is refused"),
+            "{missing_mirror}"
+        );
+        assert!(
+            missing_mirror.contains(&origin.digest) || missing_mirror.contains("ghcr.io"),
+            "{missing_mirror}"
+        );
+
+        crate::environment::set_artifact_mirror(&mut ctx, "local", "ghcr.io", "mirror.internal")
+            .await
+            .unwrap();
+        let mirrored = crate::oci_artifact::OciArtifactRef {
+            registry: "mirror.internal".into(),
+            ..origin.clone()
+        };
+        let mirror_only = std::sync::Arc::new(crate::oci_artifact::MemoryArtifactRegistry::new());
+        mirror_only.put(&mirrored, b"payload-a".to_vec()).unwrap();
+        let plan = crate::plan::create(&mut ctx, "local").await.unwrap();
+        assert!(
+            !plan.steps.is_empty(),
+            "expected a deploy step after mirror configuration, got {plan:?}"
+        );
+        let outcomes = crate::apply::execute_with_options(
+            &mut ctx,
+            &plan.id,
+            crate::apply::ExecutionOptions {
+                skip_gates: false,
+                emergency_reason: None,
+                authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
+                    reason: "oci artifact apply",
+                },
+                software_executor: Some(software),
+                worker_lifecycle: None,
+                artifact_registry: Some(mirror_only),
+                delivery_adapter: None,
+                delivery_fence: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            outcomes.iter().all(|outcome| {
+                matches!(
+                    outcome.classified_status(),
+                    Ok(crate::apply::StepOutcomeStatus::Succeeded)
+                )
+            }),
+            "{outcomes:?}"
+        );
+        let env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        assert_eq!(
+            env.properties.get("deployed.api").map(String::as_str),
+            Some("1.0.0")
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

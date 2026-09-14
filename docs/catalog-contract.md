@@ -9,7 +9,10 @@ Its Rust contract version is `CATALOG_CONTRACT_VERSION = 1`.
 - **Publish** accepts a manifest, immutable content descriptors, signature and
   provenance evidence, and an authenticated request identity. A product version
   can acquire one content identity only. Artifact bytes stay in an OCI registry,
-  blob store, or the embedded filesystem content-store adapter.
+  blob store, or the embedded filesystem content-store adapter. When the
+  manifest names `[[artifacts]]`, publication verifies each content digest
+  against a live registry adapter and binds those references into the release
+  identity. A registry is not a second catalog.
 - **Lookup** returns immutable release identity, manifest and artifact digests,
   and an opaque content locator. Missing, malformed, untrusted, or recalled
   releases fail closed.
@@ -71,7 +74,9 @@ and dual-version conformance fixtures.
 ## Cache and failure behavior
 
 Digest-keyed immutable metadata may be cached, but cache hits never authorize a
-publication, promotion, or deployment. Channel heads and recall state require
+publication, promotion, or deployment. Retained OCI references and local cache
+files cannot grant execution authority; apply re-verifies each digest against
+the environment mirror. Channel heads and recall state require
 bounded freshness or revalidation at plan approval and again before execution.
 A stale or partitioned cache fails closed when freshness cannot be proven; it
 must never make mutated or recalled content deployable. Required Catalog or

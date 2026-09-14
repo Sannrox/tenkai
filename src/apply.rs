@@ -19,7 +19,7 @@ use crate::ontology::*;
 use crate::pb::sekai::Object;
 use crate::plan::{self, Action, Plan, PlanState, ReleasePin, Step};
 use crate::routing::RoutingConfigExecutor as _;
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 
 mod execution_admission;
 mod execution_attempt;
@@ -45,6 +45,7 @@ use release_content::{ReleaseContent, admit as admit_release, verify_integrity};
 struct TargetAdapters<'a> {
     software: Option<&'a dyn crate::software_executor::SoftwareExecutor>,
     worker_lifecycle: Option<&'a dyn crate::worker_pool::WorkerLifecyclePort>,
+    artifact_registry: Option<&'a dyn crate::oci_artifact::ArtifactRegistry>,
 }
 
 #[allow(deprecated)]
@@ -192,6 +193,39 @@ async fn cleanup_failed_install(
     })
 }
 
+async fn admit_plan_artifact_pulls(
+    ctx: &mut Ctx,
+    environment: &str,
+    steps: &[Step],
+    registry: Option<&dyn crate::oci_artifact::ArtifactRegistry>,
+) -> Result<()> {
+    let env_object = crate::environment::environment(ctx, environment).await?;
+    let mut seen = std::collections::BTreeSet::new();
+    for step in steps {
+        let restore_id = step.restore.as_ref().map(|pin| pin.release_id.as_str());
+        for release_id in std::iter::once(step.release_id.as_str()).chain(restore_id) {
+            if !seen.insert(release_id.to_string()) {
+                continue;
+            }
+            let Some(release) = ctx.get(release_id).await? else {
+                bail!("release {release_id} is missing during artifact admission");
+            };
+            let raw = release
+                .properties
+                .get("manifest")
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("release {release_id} has no stored manifest"))?;
+            let parsed = manifest::parse_raw(raw)?;
+            crate::oci_artifact::verify_environment_pull(
+                &parsed.artifacts,
+                &env_object.properties,
+                registry,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn record(id: String, kind: &str, name: String, properties: HashMap<String, String>) -> Object {
     let now = crate::now_millis();
     Object {
@@ -229,6 +263,13 @@ async fn execute_locked(
     .await?
     {
         return Ok(outcomes);
+    }
+
+    if let Err(error) =
+        admit_plan_artifact_pulls(ctx, &env, &steps, options.artifact_registry).await
+    {
+        plan_completion::fail(ctx, lease, &mut stored_plan, skip_gates, error.to_string()).await?;
+        return Err(error);
     }
 
     if let Some(adapter) = options.delivery_adapter.clone() {
@@ -288,6 +329,7 @@ async fn execute_locked(
             TargetAdapters {
                 software: options.software_executor,
                 worker_lifecycle: options.worker_lifecycle,
+                artifact_registry: options.artifact_registry,
             },
             recalled_recovery,
         )
@@ -358,6 +400,7 @@ mod tests {
                 module: None,
                 change_set_pin: None,
                 worker_pool: None,
+                artifacts: Vec::new(),
                 gate: GateSection::default(),
             },
             artifact_digest: manifest::artifact_digest(&workdir, &[]).unwrap(),
@@ -367,6 +410,7 @@ mod tests {
             mutation_lock: std::env::temp_dir().join("tenkai-test-mutation.lock"),
             routing_state: std::env::temp_dir().join("tenkai-test-routing-state.json"),
             model_runtime_state: std::env::temp_dir().join("tenkai-test-model-runtime-state.json"),
+            artifact_pulls: Vec::new(),
         }
     }
 

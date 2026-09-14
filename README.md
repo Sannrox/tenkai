@@ -455,6 +455,7 @@ control plane can't safely restart its own backend mid-apply.
 | `TENKAI_OUTCOME_PROVIDER_REGISTRATION` | unset | Required exact attestation of the administrator-registered Sekai producer and `tenkai.terminal_outcome.v1@1.0.0` schema when outcome export is enabled |
 | `TENKAI_DATABASE` | `.tenkai-state/tenkai.db` | Embedded or server-owned operational SQLite database |
 | `TENKAI_LISTEN` | `127.0.0.1:8080` | Server listen address; must remain loopback behind a TLS proxy |
+| `TENKAI_OCI_STORE` | unset | Filesystem adapter root used to verify digest-bound OCI artifact references at publish and apply |
 
 ## Ontology
 
@@ -483,6 +484,7 @@ it ([ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md),
 | Networked server + continuous reconciliation | [Network server](#network-server); #19 |
 | Scoped pull-based environment runtimes + fencing | [Runtime protocol](docs/runtime-protocol-v1.md); #5, #20 |
 | Signed release publication and provenance | [Release signing](docs/release-signing.md) |
+| Digest-bound OCI artifact references + environment mirrors | [Release signing](docs/release-signing.md#publication-policy); [Catalog contract](docs/catalog-contract.md); #375 |
 | Signed plan execution approval | [Plan approval](docs/plan-approval.md) |
 | Portable delivery-manifest profile | [Delivery manifest](docs/delivery-manifest-profile.md); [ADR 0021](docs/decisions/0021-portable-delivery-manifest-profile.md); #291 |
 | External delivery adapters | [ADR 0022](docs/decisions/0022-external-delivery-adapter-boundary.md); #292 |

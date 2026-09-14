@@ -1114,6 +1114,50 @@ pub async fn list_environment_facts(
     Ok(environment_facts_from_object(&env_obj))
 }
 
+/// Record the environment-scoped artifact mirror for one origin registry.
+pub async fn set_artifact_mirror(
+    ctx: &mut Ctx,
+    env: &str,
+    registry: &str,
+    mirror: &str,
+) -> Result<String> {
+    validate_identifier("environment", env)?;
+    crate::oci_artifact::validate_registry_host("artifact registry", registry)?;
+    crate::oci_artifact::validate_registry_host("artifact mirror", mirror)?;
+    let mut env_obj = environment(ctx, env).await?;
+    env_obj.properties.insert(
+        format!("{}{registry}", crate::oci_artifact::MIRROR_PROPERTY_PREFIX),
+        mirror.to_string(),
+    );
+    env_obj.updated = crate::now_millis();
+    ctx.put(env_obj).await?;
+    Ok(format!("set {env} artifact mirror {registry}={mirror}"))
+}
+
+/// Remove one environment-scoped artifact mirror.
+pub async fn clear_artifact_mirror(ctx: &mut Ctx, env: &str, registry: &str) -> Result<String> {
+    validate_identifier("environment", env)?;
+    let mut env_obj = environment(ctx, env).await?;
+    let property = format!("{}{registry}", crate::oci_artifact::MIRROR_PROPERTY_PREFIX);
+    if env_obj.properties.remove(&property).is_none() {
+        bail!("environment {env} has no artifact mirror for {registry}");
+    }
+    env_obj.updated = crate::now_millis();
+    ctx.put(env_obj).await?;
+    Ok(format!("cleared {env} artifact mirror {registry}"))
+}
+
+/// List environment-scoped artifact mirrors as origin registry → mirror host.
+pub async fn list_artifact_mirrors(
+    ctx: &mut Ctx,
+    env: &str,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    let env_obj = environment(ctx, env).await?;
+    Ok(crate::oci_artifact::mirrors_from_properties(
+        &env_obj.properties,
+    ))
+}
+
 const ENVIRONMENT_OVERLAY_PREFIX: &str = "overlay.";
 
 fn reject_credential_material(label: &str, key: &str, value: &str) -> Result<()> {

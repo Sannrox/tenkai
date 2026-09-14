@@ -907,6 +907,7 @@ mod tests {
             module: None,
             change_set_pin: None,
             worker_pool: None,
+            artifacts: Vec::new(),
             gate: GateSection::default(),
         };
         let descriptor = ModelRuntimeDescriptor::from_manifest(&manifest).unwrap();

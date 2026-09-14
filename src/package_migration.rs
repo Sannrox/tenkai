@@ -1633,6 +1633,7 @@ async fn apply_pin(
             software_executor: crate::software_executor::selected_software_executor()
                 .map(std::sync::Arc::from),
             worker_lifecycle: None,
+            artifact_registry: crate::oci_artifact::selected_registry()?,
             delivery_adapter: None,
             delivery_fence: None,
         },
@@ -1839,6 +1840,7 @@ async fn apply_pin_plan(
             software_executor: crate::software_executor::selected_software_executor()
                 .map(std::sync::Arc::from),
             worker_lifecycle: None,
+            artifact_registry: crate::oci_artifact::selected_registry()?,
             delivery_adapter: None,
             delivery_fence: None,
         },
@@ -1986,6 +1988,7 @@ inputs = ["payload.txt"]
                     provenance: Vec::new(),
                     provenance_trust_roots: None,
                     change_set_evidence: None,
+                    artifact_registry: None,
                 },
             )
             .await
@@ -2026,6 +2029,7 @@ inputs = ["payload.txt"]
                 },
                 software_executor: None,
                 worker_lifecycle: None,
+                artifact_registry: None,
                 delivery_adapter: None,
                 delivery_fence: None,
             },
@@ -2097,6 +2101,7 @@ inputs = ["payload.txt"]
                 },
                 software_executor: None,
                 worker_lifecycle: None,
+                artifact_registry: None,
                 delivery_adapter: None,
                 delivery_fence: None,
             },
