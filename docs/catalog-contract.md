@@ -69,7 +69,10 @@ A remote API may add wire-version negotiation, authentication, rate limits, and
 pagination, but must translate into this contract without exposing database rows
 or sekai objects. Compatibility is additive within v1. Removing fields, changing
 digest meaning, or changing failure semantics requires a new contract version
-and dual-version conformance fixtures.
+and dual-version conformance fixtures. Remote publish, promote, subscribe, and
+recall use the [management lifecycle](management-lifecycle.md) header
+([ADR 0030](decisions/0030-remote-management-lifecycle.md)); they do not reuse
+spoke runtime RPCs.
 
 ## Cache and failure behavior
 

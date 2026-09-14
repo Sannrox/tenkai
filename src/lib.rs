@@ -113,6 +113,9 @@
 //!   strict signature checks.
 //! - `terminal_outcome` classifies embedded and runtime execution evidence in
 //!   one pure module before optional provider projection.
+//! - [`management_lifecycle`] admits the versioned remote operator contract
+//!   (`tenkai.management-lifecycle.v1`) before later HTTP routes call Catalog,
+//!   planner, or apply. Spoke runtime RPCs stay a separate surface.
 //! - [`embedded`] and [`server`] host the same application core; transport is not
 //!   a domain seam.
 //!
@@ -143,6 +146,7 @@ pub mod fleet_fairness;
 pub mod fleet_workload;
 pub mod inventory;
 pub mod maintenance;
+pub mod management_lifecycle;
 mod management_operations;
 pub mod manifest;
 pub mod metrics;

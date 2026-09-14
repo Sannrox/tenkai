@@ -75,7 +75,8 @@ identity binary is required.
 
 ### Management HTTP wiring
 
-`tenkai-server` management routes (`/v1/reconcile`, `/v1/environments/*`)
+`tenkai-server` management routes (`/v1/reconcile`, `/v1/environments/*`,
+and the reserved [management lifecycle](management-lifecycle.md) paths)
 authenticate through the composed `AuthStack` in `src/server.rs`:
 
 1. Extract the bearer token (runtime tokens remain on separate routes).
