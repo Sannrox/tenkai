@@ -10,6 +10,10 @@ use crate::auth_context::{
     AuthMode, AuthStack, AuthenticatedRequestContext, CredentialMaterial, DeliveryCapability,
 };
 use crate::client::Ctx;
+use crate::management_lifecycle::{
+    self, ManagementLifecycleOperation, ManagementLifecycleResult, PromoteRequest, PublishRequest,
+    RecallRequest, SubscribeRequest,
+};
 use crate::package_migration::{
     self, ApprovalTrustRoots, MigrationAuthorization, PackageMigrationApplyRequest,
     PackageMigrationMutateRequest, PackageMigrationPreviewRequest, PackageMigrationResult,
@@ -81,6 +85,7 @@ pub(crate) struct ManagementOperations {
     store: Arc<dyn OperationalStore>,
     tenant_environments: Option<TenantEnvironmentOperations>,
     package_migration_trust_roots: Option<ApprovalTrustRoots>,
+    environment_grants: std::collections::HashMap<String, String>,
 }
 
 impl ManagementOperations {
@@ -91,6 +96,7 @@ impl ManagementOperations {
         store: Arc<dyn OperationalStore>,
         tenant_store: Option<Arc<dyn TenantOperationalStore>>,
         package_migration_trust_roots: Option<ApprovalTrustRoots>,
+        environment_grants: std::collections::HashMap<String, String>,
     ) -> Self {
         let tenant_environments = tenant_store.map(|tenant_store| {
             TenantEnvironmentOperations::new(
@@ -107,6 +113,7 @@ impl ManagementOperations {
             store,
             tenant_environments,
             package_migration_trust_roots,
+            environment_grants,
         }
     }
 
@@ -498,6 +505,169 @@ impl ManagementOperations {
         Ok(PackageMigrationResult::from_record(record))
     }
 
+    fn granted_environment(&self, credential: &CredentialMaterial) -> Option<&str> {
+        credential
+            .bearer_token
+            .as_deref()
+            .and_then(|token| self.environment_grants.get(token))
+            .map(String::as_str)
+    }
+
+    fn require_community_catalog_host(&self) -> Result<(), ManagementError> {
+        if self.tenant_mode {
+            return Err(ManagementError::Unavailable(
+                "remote catalog lifecycle is not available in tenant mode".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn publish_release(
+        &self,
+        credential: &CredentialMaterial,
+        request: PublishRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        self.require_community_catalog_host()?;
+        management_lifecycle::admit_publish(
+            &request,
+            context.principal.kind,
+            self.granted_environment(credential),
+        )
+        .map_err(map_lifecycle_error)?;
+        let files = management_lifecycle::RemotePublishFiles::materialize(
+            &request.manifest,
+            &request.signature,
+            &request.trust_roots,
+        )
+        .map_err(map_lifecycle_error)?;
+        let actor = context.principal_id();
+        self.audit(actor, "catalog.publish.requested")?;
+        let mut ctx = self.application_ctx()?;
+        let message = crate::catalog::publish(
+            &mut ctx,
+            &files.manifest,
+            &crate::catalog::PublishOptions {
+                signature: Some(files.signature.clone()),
+                trust_roots: Some(files.trust_roots.clone()),
+                allow_unsigned_development: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(map_catalog_error)?;
+        self.audit(actor, "catalog.publish.completed")?;
+        Ok(ManagementLifecycleResult::new(
+            ManagementLifecycleOperation::Publish,
+            message,
+            None,
+        ))
+    }
+
+    pub(crate) async fn promote_release(
+        &self,
+        credential: &CredentialMaterial,
+        channel: &str,
+        request: PromoteRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        self.require_community_catalog_host()?;
+        management_lifecycle::admit_promote(
+            &request,
+            context.principal.kind,
+            self.granted_environment(credential),
+        )
+        .map_err(map_lifecycle_error)?;
+        let actor = context.principal_id();
+        self.audit(actor, "catalog.promote.requested")?;
+        let mut ctx = self.application_ctx()?;
+        let message = crate::catalog::promote(&mut ctx, &context, &request.spec, channel)
+            .await
+            .map_err(map_catalog_error)?;
+        self.audit(actor, "catalog.promote.completed")?;
+        Ok(ManagementLifecycleResult::new(
+            ManagementLifecycleOperation::Promote,
+            message,
+            Some(request.spec),
+        ))
+    }
+
+    pub(crate) async fn recall_release(
+        &self,
+        credential: &CredentialMaterial,
+        release: &str,
+        request: RecallRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        self.require_community_catalog_host()?;
+        management_lifecycle::admit_recall(
+            &request,
+            context.principal.kind,
+            self.granted_environment(credential),
+        )
+        .map_err(map_lifecycle_error)?;
+        let actor = context.principal_id();
+        self.audit(actor, "catalog.recall.requested")?;
+        let mut ctx = self.application_ctx()?;
+        let message = crate::catalog::recall(&mut ctx, &context, release)
+            .await
+            .map_err(map_catalog_error)?;
+        self.audit(actor, "catalog.recall.completed")?;
+        Ok(ManagementLifecycleResult::new(
+            ManagementLifecycleOperation::Recall,
+            message,
+            Some(release.to_string()),
+        ))
+    }
+
+    pub(crate) async fn subscribe_environment(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+        request: SubscribeRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        self.require_community_catalog_host()?;
+        management_lifecycle::admit_subscribe(
+            &request,
+            environment,
+            context.principal.kind,
+            self.granted_environment(credential),
+        )
+        .map_err(map_lifecycle_error)?;
+        self.require_environment_visible(&context, environment)
+            .await?;
+        let current = management_lifecycle::environment_fence_generation(
+            self.store
+                .current_lease(environment)
+                .map_err(|error| ManagementError::Unavailable(error.to_string()))?
+                .map(|lease| lease.generation),
+        );
+        management_lifecycle::require_expected_generation(request.expected_generation, current)
+            .map_err(map_lifecycle_error)?;
+        let Some((product, channel)) = request.spec.split_once('=') else {
+            return Err(ManagementError::BadRequest(
+                "subscribe requires <product>=<channel>".into(),
+            ));
+        };
+        let actor = context.principal_id();
+        self.audit(actor, "catalog.subscribe.requested")?;
+        let mut ctx = self.application_ctx()?;
+        let message = crate::environment::subscribe(&mut ctx, environment, product, channel)
+            .await
+            .map_err(map_catalog_error)?;
+        self.audit(actor, "catalog.subscribe.completed")?;
+        Ok(ManagementLifecycleResult::new(
+            ManagementLifecycleOperation::Subscribe,
+            message,
+            Some(environment.to_string()),
+        ))
+    }
+
     fn application_ctx(&self) -> Result<Ctx, ManagementError> {
         self.reconciler.application_ctx().ok_or_else(|| {
             ManagementError::Unavailable("package migration is not available on this host".into())
@@ -597,6 +767,53 @@ fn map_tenant_error(error: TenantEnvironmentError) -> ManagementError {
         TenantEnvironmentError::NotFound => ManagementError::NotFound(NON_DISCLOSING_DENY.into()),
         TenantEnvironmentError::Denied(message) => ManagementError::Forbidden(message),
         TenantEnvironmentError::Internal(message) => ManagementError::Internal(message),
+    }
+}
+
+fn map_lifecycle_error(error: anyhow::Error) -> ManagementError {
+    let message = format!("{error:#}");
+    if message.contains("unsupported management lifecycle")
+        || message.contains("unknown management lifecycle")
+        || message.contains("unknown field")
+        || message.contains("not valid on this route")
+        || message.contains("requires")
+        || message.contains("forbids")
+        || message.contains("does not match path")
+        || message.contains("must not be empty")
+    {
+        ManagementError::BadRequest(message)
+    } else if message.contains("runtime credentials")
+        || message.contains("environment-scoped credentials")
+        || message.contains("cannot act on another environment")
+        || message.contains("cannot call catalog-wide")
+    {
+        ManagementError::Forbidden(message)
+    } else if message.contains("stale fencing generation") {
+        ManagementError::Conflict(message)
+    } else {
+        ManagementError::BadRequest(message)
+    }
+}
+
+fn map_catalog_error(error: anyhow::Error) -> ManagementError {
+    let message = format!("{error:#}");
+    if message.contains("already published") {
+        ManagementError::Conflict(message)
+    } else if message.contains("not published")
+        || message.contains("not registered")
+        || message.contains("does not exist")
+    {
+        ManagementError::NotFound(message)
+    } else if message.contains("digest")
+        || message.contains("signature")
+        || message.contains("trust")
+        || message.contains("unsigned")
+        || message.contains("conflict")
+        || message.contains("immutable")
+    {
+        ManagementError::Conflict(message)
+    } else {
+        ManagementError::BadRequest(message)
     }
 }
 
@@ -855,6 +1072,7 @@ mod tests {
             Arc::new(SqliteStore::open_in_memory().unwrap()),
             None,
             None,
+            std::collections::HashMap::new(),
         )
     }
 

@@ -95,6 +95,11 @@ and are not registered.
 | `environment.status` | `GET /v1/environments/{env}/status` | Same as get |
 | `runtime.work` / `complete` / `heartbeat` | `/v1/runtime/environments/{env}/…` | Runtime credential scoped to exactly one environment |
 
+Community catalog lifecycle routes (`POST /v1/releases`, `POST /v1/channels/{channel}/promote`,
+`POST /v1/releases/{release}/recall`, `POST /v1/environments/{environment}/subscriptions`)
+are not tenant HTTP RPCs. Tenant-mode hosts refuse them rather than writing a
+shared catalog.
+
 **Registered but not exposed on HTTP** (harness / in-process enterprise surfaces only; not advertised as public routes):
 
 - `catalog.list_products`, `catalog.get_product`
