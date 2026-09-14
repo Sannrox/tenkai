@@ -23,6 +23,7 @@ use crate::pb::sekai::{
     ListSchemaTypesRequest, ListSchemaTypesResponse, Object, ObjectChange, ObjectType,
     UpdateObjectRequest, UpdateObjectResponse,
 };
+use crate::storage::OperationalStore;
 use sekai_client::{
     CallOptions, ClientConfig, CoreLoopClient, GrpcTransport, RetryPolicy, SdkError, SdkErrorCode,
 };
@@ -247,7 +248,7 @@ enum Backend {
         client: Arc<RemoteClient>,
         action_defs: action_lifecycle::RemoteActionDefs,
     },
-    Embedded(Arc<crate::embedded::EmbeddedStore>),
+    Embedded(Arc<crate::storage::SqliteStore>),
 }
 
 impl Backend {
@@ -289,12 +290,12 @@ impl Backend {
 }
 
 pub(crate) async fn block_embedded<T, F>(
-    store: Arc<crate::embedded::EmbeddedStore>,
+    store: Arc<crate::storage::SqliteStore>,
     operation: F,
 ) -> Result<T>
 where
     T: Send + 'static,
-    F: FnOnce(&crate::embedded::EmbeddedStore) -> Result<T> + Send + 'static,
+    F: FnOnce(&crate::storage::SqliteStore) -> Result<T> + Send + 'static,
 {
     tokio::task::spawn_blocking(move || operation(&store))
         .await
@@ -302,12 +303,12 @@ where
 }
 
 async fn block_embedded_status<T, F>(
-    store: Arc<crate::embedded::EmbeddedStore>,
+    store: Arc<crate::storage::SqliteStore>,
     operation: F,
 ) -> std::result::Result<T, tonic::Status>
 where
     T: Send + 'static,
-    F: FnOnce(&crate::embedded::EmbeddedStore) -> std::result::Result<T, tonic::Status>
+    F: FnOnce(&crate::storage::SqliteStore) -> std::result::Result<T, tonic::Status>
         + Send
         + 'static,
 {
@@ -417,7 +418,7 @@ impl Ctx {
     ) -> Result<Self> {
         let principal = std::env::var("TENKAI_PRINCIPAL").unwrap_or_else(|_| "tenkai".into());
         Ok(Self {
-            backend: Backend::Embedded(Arc::new(crate::embedded::EmbeddedStore::open(
+            backend: Backend::Embedded(Arc::new(crate::storage::SqliteStore::open_embedded(
                 path, principal,
             )?)),
             canary_schema_preflight: Arc::new(OnceCell::new()),
@@ -566,7 +567,7 @@ impl Ctx {
         response.is_ok_and(|response| response.types.iter().any(|schema| schema.kind == kind))
     }
 
-    pub(crate) fn embedded_arc(&self) -> Option<Arc<crate::embedded::EmbeddedStore>> {
+    pub(crate) fn embedded_arc(&self) -> Option<Arc<crate::storage::SqliteStore>> {
         match &self.backend {
             Backend::Embedded(store) => Some(Arc::clone(store)),
             Backend::Remote { .. } => None,

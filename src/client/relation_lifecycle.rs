@@ -14,7 +14,7 @@ use crate::pb::sekai::{
 
 pub(super) enum RelationLifecycle<'a> {
     Remote(&'a RemoteClient),
-    Embedded(Arc<crate::embedded::EmbeddedStore>),
+    Embedded(Arc<crate::storage::SqliteStore>),
 }
 
 impl RelationLifecycle<'_> {

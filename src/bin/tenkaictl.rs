@@ -1252,7 +1252,8 @@ async fn run(cli: Cli) -> Result<()> {
         }
     }
     if let Command::Restore { source } = &cli.command {
-        tenkai::embedded::EmbeddedStore::restore(source, &cli.database)?;
+        tenkai::storage::refuse_postgres_on_embedded()?;
+        tenkai::storage::SqliteStore::restore(source, &cli.database)?;
         println!(
             "restored embedded state from {} to {}",
             source.display(),

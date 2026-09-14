@@ -457,6 +457,7 @@ control plane can't safely restart its own backend mid-apply.
 | `TENKAI_OUTCOME_PROVIDER_TOKEN` | unset | Optional outcome-adapter bearer secret; environment-only and never persisted |
 | `TENKAI_OUTCOME_PROVIDER_REGISTRATION` | unset | Required exact attestation of the administrator-registered Sekai producer and `tenkai.terminal_outcome.v1@1.0.0` schema when outcome export is enabled |
 | `TENKAI_DATABASE` | `.tenkai-state/tenkai.db` | Embedded or server-owned operational SQLite database |
+| `TENKAI_POSTGRES_URL` | unset | Hub tenant-store URL only; embedded `tenkaictl` and spoke `tenkai-server` fail closed when it is set |
 | `TENKAI_LISTEN` | `127.0.0.1:8080` | Server listen address; must remain loopback behind a TLS proxy |
 | `TENKAI_OCI_STORE` | unset | Filesystem adapter root used to verify digest-bound OCI artifact references at publish and apply, and to load signed offline-bundle layers onto an environment mirror |
 | `TENKAI_OTEL_ENDPOINT` | unset | OTLP/HTTP collector root; unset leaves traces and metrics as a no-op ([telemetry](docs/telemetry.md)) |
@@ -464,7 +465,7 @@ control plane can't safely restart its own backend mid-apply.
 
 ## Ontology
 
-Tenkai authoritatively encodes domain objects in its embedded store under
+Tenkai authoritatively encodes domain objects in its operational SQLite store under
 namespace `tenkai`:
 
 `tenkai.product` ← `release_of` — `tenkai.release` ← `promotes` — `tenkai.channel`
