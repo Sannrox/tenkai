@@ -279,7 +279,12 @@ impl Reconciler {
         &self,
         allowed_environments: Option<HashSet<String>>,
     ) -> Result<TickReport> {
-        tick_admission::run(tick_admission::TickRequest {
+        let started = std::time::Instant::now();
+        let mut span = crate::telemetry::start_span(
+            "tenkai.reconcile",
+            &crate::telemetry::DeliveryAttributes::new(crate::telemetry::Operation::Reconcile),
+        );
+        let result = tick_admission::run(tick_admission::TickRequest {
             ctx: self.ctx.clone(),
             config: self.config.clone(),
             state: Arc::clone(&self.state),
@@ -290,7 +295,17 @@ impl Reconciler {
             shared_fence: self.shared_fence.clone(),
             allowed_environments,
         })
-        .await
+        .await;
+        crate::telemetry::record_metric(
+            crate::telemetry::METRIC_RECONCILE_LATENCY_MS,
+            started.elapsed().as_millis() as f64,
+            &crate::telemetry::DeliveryAttributes::new(crate::telemetry::Operation::Reconcile),
+        );
+        match &result {
+            Ok(_) => span.succeed(),
+            Err(_) => span.fail(),
+        }
+        result
     }
 
     /// Return the oldest executable plan visible to this environment in the

@@ -245,14 +245,17 @@ impl ManagementOperations {
         };
         let actor = context.principal_id();
         self.audit(actor, "reconcile.requested")?;
-        let result = if let Some(tenant_operations) = tenant_operations {
-            tenant_operations
-                .reconcile(&context)
-                .await
-                .map_err(map_tenant_error)
-        } else {
-            self.reconciler.reconcile().await.map_err(internal)
-        };
+        let result = crate::telemetry::scope_operation(context.request_id.clone(), async {
+            if let Some(tenant_operations) = tenant_operations {
+                tenant_operations
+                    .reconcile(&context)
+                    .await
+                    .map_err(map_tenant_error)
+            } else {
+                self.reconciler.reconcile().await.map_err(internal)
+            }
+        })
+        .await;
         match result {
             Ok(report) => {
                 let outcome = if report.failures() == 0 {

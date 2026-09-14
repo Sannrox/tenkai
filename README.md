@@ -124,6 +124,7 @@ kubectl -n local get deploy,pods
 | One-shot script | [`scripts/dogfood-minikube.sh`](scripts/dogfood-minikube.sh) (`local`, `signed-multi-env`, or `canary`) |
 | Ops notes (trust, rollback, multi-env, canary) | [`docs/local-dogfood-minikube.md`](docs/local-dogfood-minikube.md) |
 | Native/Helm apply contract | [`docs/software-executor.md`](docs/software-executor.md) |
+| Delivery traces and metrics | [`docs/telemetry.md`](docs/telemetry.md) |
 
 **Trust reminders proven in dogfood:** `--allow-unsigned-development` applies only
 to the built-in `local` environment. A second env (e.g. `stage`) needs **signed
@@ -458,6 +459,8 @@ control plane can't safely restart its own backend mid-apply.
 | `TENKAI_DATABASE` | `.tenkai-state/tenkai.db` | Embedded or server-owned operational SQLite database |
 | `TENKAI_LISTEN` | `127.0.0.1:8080` | Server listen address; must remain loopback behind a TLS proxy |
 | `TENKAI_OCI_STORE` | unset | Filesystem adapter root used to verify digest-bound OCI artifact references at publish and apply, and to load signed offline-bundle layers onto an environment mirror |
+| `TENKAI_OTEL_ENDPOINT` | unset | OTLP/HTTP collector root; unset leaves traces and metrics as a no-op ([telemetry](docs/telemetry.md)) |
+| `TENKAI_OPERATION_ID` | unset | Inbound delivery correlation identity copied onto allowlisted spans (`tenkaictl --operation-id`) |
 
 ## Ontology
 
@@ -538,6 +541,7 @@ it ([ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md),
 | K8s software phase diagnostics (apply/health/restore/remove) | [software executor](docs/software-executor.md); [ops note](docs/local-dogfood-minikube.md#apply--health--restore-diagnostics-150); #150 |
 | Software canary cohort drill on minikube dogfood | [ops note](docs/local-dogfood-minikube.md#software-canary-cohort-drill-154); #154 |
 | Backup/restore drill and server reconcile diagnostics | [operational storage](docs/operational-storage.md); [server diagnostics](docs/server-diagnostics.md); #59, #60 |
+| Delivery OTLP traces and metrics keyed by operation identity | [telemetry](docs/telemetry.md); #380 |
 | Release readiness checklist | [release readiness](docs/release-readiness.md); #72 |
 
 Governance integrations remain optional. Required policy or gate decisions fail

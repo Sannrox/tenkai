@@ -80,6 +80,46 @@ pub async fn execute_with_options(
     plan_id: &str,
     options: ExecutionOptions<'_>,
 ) -> Result<Vec<Outcome>> {
+    let mut apply_span = crate::telemetry::start_span(
+        "tenkai.apply",
+        &crate::telemetry::DeliveryAttributes::new(crate::telemetry::Operation::Apply)
+            .plan_id(plan_id),
+    );
+    match execute_with_options_inner(ctx, plan_id, options, &mut apply_span).await {
+        Ok(outcomes) => {
+            apply_span.succeed();
+            crate::telemetry::record_metric(
+                crate::telemetry::METRIC_APPLY_OUTCOME,
+                1.0,
+                &apply_span_attrs(plan_id, "ok"),
+            );
+            Ok(outcomes)
+        }
+        Err(error) => {
+            apply_span.fail();
+            crate::telemetry::record_metric(
+                crate::telemetry::METRIC_APPLY_OUTCOME,
+                0.0,
+                &apply_span_attrs(plan_id, "error"),
+            );
+            Err(error)
+        }
+    }
+}
+
+fn apply_span_attrs(plan_id: &str, outcome: &str) -> crate::telemetry::DeliveryAttributes {
+    let mut attrs = crate::telemetry::DeliveryAttributes::new(crate::telemetry::Operation::Apply)
+        .plan_id(plan_id);
+    attrs.outcome = Some(outcome.into());
+    attrs
+}
+
+async fn execute_with_options_inner(
+    ctx: &mut Ctx,
+    plan_id: &str,
+    options: ExecutionOptions<'_>,
+    apply_span: &mut crate::telemetry::SpanGuard,
+) -> Result<Vec<Outcome>> {
     let emergency_reason = start_admission::validate_emergency_override(options.emergency_reason)?;
     let mut stored_plan = plan::load(ctx, plan_id).await?;
     if !matches!(stored_plan.state, PlanState::Computed | PlanState::Blocked) {
@@ -109,10 +149,25 @@ pub async fn execute_with_options(
         }
     };
     crate::plan_approval::record(ctx, &approval_evidence).await?;
+    apply_span.set_plan(&stored_plan);
+    let mut rollback_span = stored_plan
+        .steps
+        .iter()
+        .any(|step| step.action == Action::Rollback)
+        .then(|| {
+            crate::telemetry::start_span(
+                "tenkai.rollback",
+                &crate::telemetry::DeliveryAttributes::from_plan(
+                    crate::telemetry::Operation::Rollback,
+                    &stored_plan,
+                ),
+            )
+        });
 
     let environment = stored_plan.environment.clone();
     let owner = stored_plan.id.clone();
     let lease = claim_execution_environment(ctx, &environment, &owner).await?;
+    apply_span.set_fencing_generation(lease.generation);
     if let Err(error) = start_admission::authorize_maintenance(
         ctx,
         &lease,
@@ -183,13 +238,33 @@ pub async fn execute_with_options(
         ))),
     };
     match (released_result, canary_finalization_error) {
-        (Ok(outcomes), None) => Ok(outcomes),
-        (Ok(_), Some(error)) => Err(error.context(format!(
+        (Ok(outcomes), None) => {
+            if let Some(span) = rollback_span.as_mut() {
+                span.succeed();
+            }
+            Ok(outcomes)
+        }
+        (Ok(_), Some(error)) => {
+            if let Some(span) = rollback_span.as_mut() {
+                span.fail();
+            }
+            Err(error.context(format!(
             "apply completed but canary evidence finalization failed; run `tenkaictl canary repair {plan_id}`"
-        ))),
-        (Err(error), None) => Err(error),
-        (Err(error), Some(finalization)) => Err(error.context(format!(
-            "canary evidence finalization also failed: {finalization}"
-        ))),
+        )))
+        }
+        (Err(error), None) => {
+            if let Some(span) = rollback_span.as_mut() {
+                span.fail();
+            }
+            Err(error)
+        }
+        (Err(error), Some(finalization)) => {
+            if let Some(span) = rollback_span.as_mut() {
+                span.fail();
+            }
+            Err(error.context(format!(
+                "canary evidence finalization also failed: {finalization}"
+            )))
+        }
     }
 }
