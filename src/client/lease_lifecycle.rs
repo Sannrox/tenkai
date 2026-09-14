@@ -14,7 +14,7 @@ use crate::pb::sekai::{
 
 pub(super) enum LeaseLifecycle<'a> {
     Remote(&'a RemoteClient),
-    Embedded(Arc<crate::embedded::EmbeddedStore>),
+    Embedded(Arc<crate::storage::SqliteStore>),
 }
 
 impl LeaseLifecycle<'_> {
@@ -32,7 +32,7 @@ impl LeaseLifecycle<'_> {
                 let key = key.to_string();
                 let owner = owner.to_string();
                 super::block_embedded(store, move |store| {
-                    store.acquire_lease(&namespace, &key, &owner, ttl_ms)
+                    store.acquire_namespaced_lease(&namespace, &key, &owner, ttl_ms)
                 })
                 .await
             }
@@ -62,7 +62,10 @@ impl LeaseLifecycle<'_> {
                 let store = Arc::clone(store);
                 let namespace = namespace.to_string();
                 let key = key.to_string();
-                super::block_embedded(store, move |store| store.get_lease(&namespace, &key)).await
+                super::block_embedded(store, move |store| {
+                    store.get_namespaced_lease(&namespace, &key)
+                })
+                .await
             }
             Self::Remote(client) => {
                 let response: std::result::Result<GetLeaseResponse, tonic::Status> = remote_unary(
@@ -97,7 +100,7 @@ impl LeaseLifecycle<'_> {
                 let key = key.to_string();
                 let fencing_token = fencing_token.to_string();
                 super::block_embedded(store, move |store| {
-                    store.refresh_lease(&namespace, &key, &fencing_token, ttl_ms)
+                    store.refresh_namespaced_lease(&namespace, &key, &fencing_token, ttl_ms)
                 })
                 .await
             }
@@ -136,7 +139,7 @@ impl LeaseLifecycle<'_> {
                 let key = key.to_string();
                 let fencing_token = fencing_token.to_string();
                 super::block_embedded(store, move |store| {
-                    store.release_lease(&namespace, &key, &fencing_token)
+                    store.release_namespaced_lease(&namespace, &key, &fencing_token)
                 })
                 .await
             }
@@ -178,7 +181,7 @@ impl LeaseLifecycle<'_> {
                 let owner = owner.to_string();
                 let expected_fencing_token = expected_fencing_token.to_string();
                 super::block_embedded(store, move |store| {
-                    store.takeover_lease(
+                    store.takeover_namespaced_lease(
                         &namespace,
                         &key,
                         &owner,

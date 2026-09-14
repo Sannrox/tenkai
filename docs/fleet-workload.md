@@ -66,7 +66,7 @@ healthy behind plan; they never complete Unhealthy or Blocked restarts.
 Failing environments must enter bounded `Deferred` backoff, must not apply,
 and must not starve healthy cohorts. A held fencing generation reports
 `Busy`. Duplicate receipts are idempotent; conflicting receipts fail closed.
-`tenkaictl restore` (`EmbeddedStore::restore`) of a damaged backup fails
+`tenkaictl restore` (`SqliteStore::restore`) of a damaged backup fails
 closed while the live fleet stays intact. Rollback of a recorded previous
 version that cannot be pinned fails closed without stalling the rest of the
 fleet. Required-provider absence and a runtime timeout stay isolated to the

@@ -35,7 +35,7 @@ pub(super) enum ActionLifecycle<'a> {
         client: &'a RemoteClient,
         action_defs: &'a RemoteActionDefs,
     },
-    Embedded(Arc<crate::embedded::EmbeddedStore>),
+    Embedded(Arc<crate::storage::SqliteStore>),
 }
 
 impl ActionLifecycle<'_> {

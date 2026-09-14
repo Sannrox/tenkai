@@ -222,7 +222,7 @@ pub async fn observe(
     })?;
 
     let recovered = backup.with_extension("recovered.db");
-    crate::embedded::EmbeddedStore::restore(backup, &recovered)?;
+    crate::storage::SqliteStore::restore(backup, &recovered)?;
     let mut restored = Ctx::embedded(&recovered)?;
     crate::ontology::register(&mut restored).await?;
     let backup_environments =
@@ -503,7 +503,7 @@ fn failed_restore_is_explicit(backup: &Path) -> Result<bool> {
     let damaged = backup.with_extension("damaged.db");
     std::fs::write(&damaged, b"not-a-sqlite-database")?;
     let dest = backup.with_extension("failed-restore.db");
-    let failed = crate::embedded::EmbeddedStore::restore(&damaged, &dest).is_err();
+    let failed = crate::storage::SqliteStore::restore(&damaged, &dest).is_err();
     let _ = std::fs::remove_file(&damaged);
     let _ = std::fs::remove_file(&dest);
     if !failed {

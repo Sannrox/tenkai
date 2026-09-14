@@ -194,6 +194,11 @@ async fn main() -> Result<()> {
         "TENKAI_DEVELOPMENT_FIXTURE_PRINCIPALS requires --with-development-fixtures"
     );
 
+    if !cli.tenant_mode {
+        tenkai::storage::refuse_postgres_on_embedded().context(
+            "spoke and community hosts refuse TENKAI_POSTGRES_URL; SQLite is the sole operational store",
+        )?;
+    }
     if let Some(parent) = cli.database.parent()
         && !parent.as_os_str().is_empty()
     {

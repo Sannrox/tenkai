@@ -11,7 +11,9 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: u32 = 10;
+pub const SCHEMA_VERSION: u32 = 11;
+
+mod sqlite_objects;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -451,6 +453,7 @@ pub trait OperationalStore: Send + Sync {
 
 pub struct SqliteStore {
     connection: Mutex<Connection>,
+    principal: String,
 }
 
 impl SqliteStore {
@@ -462,14 +465,42 @@ impl SqliteStore {
         migrate(&mut connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
+            principal: "tenkai".into(),
         })
     }
+
+    /// Open the solo operator store and refuse a second engine on this process.
+    pub fn open_embedded(path: impl AsRef<Path>, principal: impl Into<String>) -> Result<Self> {
+        refuse_postgres_on_embedded()?;
+        let path = path.as_ref();
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                StoreError::AdapterUnavailable(format!(
+                    "creating embedded state directory {}: {error}",
+                    parent.display()
+                ))
+            })?;
+        }
+        let mut connection = Connection::open(path)?;
+        connection.pragma_update(None, "foreign_keys", "ON")?;
+        connection.pragma_update(None, "journal_mode", "WAL")?;
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        migrate(&mut connection)?;
+        Ok(Self {
+            connection: Mutex::new(connection),
+            principal: principal.into(),
+        })
+    }
+
     pub fn open_in_memory() -> Result<Self> {
         let mut connection = Connection::open_in_memory()?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         migrate(&mut connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
+            principal: "tenkai".into(),
         })
     }
 
@@ -512,7 +543,16 @@ impl SqliteStore {
     }
 }
 
-fn migrate(connection: &mut Connection) -> Result<()> {
+pub fn refuse_postgres_on_embedded() -> Result<()> {
+    match std::env::var("TENKAI_POSTGRES_URL") {
+        Ok(value) if !value.trim().is_empty() => Err(StoreError::AdapterUnavailable(
+            "TENKAI_POSTGRES_URL is not valid on embedded or spoke hosts; SQLite is the sole operational store (ADR 0029)".into(),
+        )),
+        _ => Ok(()),
+    }
+}
+
+pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
     let found: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if found > SCHEMA_VERSION {
         return Err(StoreError::UnsupportedSchema {
@@ -779,9 +819,18 @@ fn migrate(connection: &mut Connection) -> Result<()> {
     ensure_provider_event_environment_column(connection)?;
     ensure_provider_event_sequence_table(connection)?;
     let current: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if current < SCHEMA_VERSION {
+    if current < 10 {
         let tx = connection.transaction()?;
         tx.execute_batch("PRAGMA user_version = 10;")?;
+        tx.commit()?;
+    }
+    sqlite_objects::ensure_typed_schema_tables(connection)?;
+    sqlite_objects::ensure_catalog(connection)?;
+    sqlite_objects::import_legacy_graph(connection)?;
+    let current: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if current < SCHEMA_VERSION {
+        let tx = connection.transaction()?;
+        tx.execute_batch("PRAGMA user_version = 11;")?;
         tx.commit()?;
     }
     Ok(())

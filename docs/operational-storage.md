@@ -7,9 +7,11 @@ rollback recovery state, and durable executable-wave records (ADR 0017).
 topology: hub PostgreSQL only, spoke and embedded `tenkaictl` SQLite only, one
 port, and retirement of the embedded object-graph schema. `SqliteStore` is the
 complete spoke and embedded adapter; the PostgreSQL adapter must pass the same
-immutability, lifecycle, idempotency, and generation-fencing contract. The
-shipped `EmbeddedStore` remains until that follow-up lands; it is not a second
-recovery authority.
+immutability, lifecycle, idempotency, and generation-fencing contract.
+`Ctx::embedded` and community `tenkai-server` open only `SqliteStore`.
+Pre-0029 graph files migrate into typed schema 11 rows and drop `embedded_*`
+tables so leftover objects cannot authorize apply. `TENKAI_POSTGRES_URL` is
+invalid on embedded and spoke hosts.
 
 The store also owns the provider-event retry queue used for audit and outcome
 projection. The shipped SQLite host path uses this queue for terminal outcomes;
@@ -17,15 +19,13 @@ audit and planning-event mutations remain unwired. Provider adapters can
 acknowledge delivery, but cannot change or reconstruct operational truth. See
 [provider contracts](provider-contracts.md) for delivery semantics.
 
-When terminal-outcome export is configured, `EmbeddedStore` updates the
-authoritative plan, deployment, or reconciled environment object and inserts
+When terminal-outcome export is configured, `SqliteStore` updates the
+authoritative plan, deployment, or reconciled environment record and inserts
 the `provider_events` row through the same SQLite transaction. A failed insert
 rolls back the object update; a committed object update therefore cannot lose
-its outcome row. The separately opened `SqliteStore` worker claims and
-acknowledges that row through the shared database. PostgreSQL retains the same
-kind-filtered outbox contract, but the current mixed enterprise composition
-cannot claim atomic terminal wiring until PostgreSQL owns the corresponding
-authoritative state under ADR 0010.
+its outcome row. PostgreSQL retains the same kind-filtered outbox contract, but
+the current mixed enterprise composition cannot claim atomic terminal wiring
+until PostgreSQL owns the corresponding authoritative state under ADR 0010.
 
 Server management requests and their terminal outcomes are appended to the
 `audit_events` table. Audit identifiers are immutable and survive server
@@ -67,18 +67,17 @@ plan history. Single-id `load` still decodes after `get` returns.
 
 ### Embedded object property index
 
-The embedded catalog store (`EmbeddedStore`, schema version **5**) maintains an
-`embedded_object_properties` index for kind+key+value lookups and the
-Tenkai-owned `provider_events` outbox. Provider outbox rows retain an immutable
-observation timestamp for bounded inspection; retry scheduling remains
-separate delivery state. Plan work selection (`pending_work`,
-reconcile admission, orphan recovery, environment plan summary) queries plans
-**by environment** through that index rather than loading every `tenkai.plan`
-row and filtering in process. Opening a v1–v4 embedded database backfills
-the required structures and advances the schema version; empty kind/key or
-environment arguments fail closed (no unscoped fallback). Plan objects also
-carry a `has_steps` index (`true`/`false`). Opening a v4 database backfills
-that property from the stored plan payload.
+Embedded planning reads typed `plans` rows (schema version **11**) and a
+`catalog_*` sidecar for non-authority kinds, links, actions, and namespaced
+leases. Provider outbox rows retain an immutable observation timestamp for
+bounded inspection; retry scheduling remains separate delivery state. Plan
+work selection (`pending_work`, reconcile admission, orphan recovery,
+environment plan summary) queries plans **by environment** on the typed table
+rather than loading every `tenkai.plan` row and filtering in process. Opening a
+pre-0029 graph database imports plan and environment objects into typed rows,
+then drops `embedded_*`. Empty kind/key or environment arguments fail closed
+(no unscoped fallback). Plan objects also carry a `has_steps` index
+(`true`/`false`) reconstructed from the typed payload.
 
 Status filters, `created_at` order, and `LIMIT` for newest/oldest reads are
 applied in that SQL for the embedded host; remote catalog lookups keep the

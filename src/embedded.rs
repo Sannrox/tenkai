@@ -1,4 +1,8 @@
-//! In-process persistence used by the single-user embedded host.
+//! v5 object-graph fixture factory used to import pre-0029 embedded databases.
+//!
+//! Operator and spoke hosts open [`crate::storage::SqliteStore`]. This module
+//! remains so migration tests can create schema 5 graph files; leftover
+//! `embedded_*` tables are not apply authority after import.
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
