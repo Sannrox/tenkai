@@ -13,6 +13,7 @@ use sha2::{Digest as _, Sha256};
 
 pub const ARTIFACT_REF_SCHEMA: &str = "tenkai.oci_artifact.v1";
 pub const MIRROR_PROPERTY_PREFIX: &str = "artifact_mirror.";
+pub const LAYER_ENTRY_PREFIX: &str = "oci-layers/";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -63,11 +64,21 @@ impl OciArtifactRef {
             self.registry, self.repository, self.media_type, self.digest
         )
     }
+
+    pub fn layer_entry_path(&self) -> Result<String> {
+        self.validate()?;
+        Ok(format!(
+            "{LAYER_ENTRY_PREFIX}{}",
+            self.digest.replace(':', "-")
+        ))
+    }
 }
 
 /// Verify and pull digest-bound artifacts. Implementors own transport.
 pub trait ArtifactRegistry: Send + Sync {
     fn verify(&self, reference: &OciArtifactRef) -> Result<OciArtifactRef>;
+    fn fetch(&self, reference: &OciArtifactRef) -> Result<Vec<u8>>;
+    fn store(&self, reference: &OciArtifactRef, bytes: Vec<u8>) -> Result<()>;
 }
 
 /// In-memory registry for deterministic tests.
@@ -119,6 +130,19 @@ impl ArtifactRegistry for MemoryArtifactRegistry {
         }
         Ok(reference.clone())
     }
+
+    fn fetch(&self, reference: &OciArtifactRef) -> Result<Vec<u8>> {
+        self.verify(reference)?;
+        let blobs = self.blobs.lock().expect("artifact registry mutex");
+        Ok(blobs
+            .get(&reference.identity_key())
+            .expect("verified artifact missing")
+            .clone())
+    }
+
+    fn store(&self, reference: &OciArtifactRef, bytes: Vec<u8>) -> Result<()> {
+        self.put(reference, bytes)
+    }
 }
 
 /// Directory-backed registry selected by `TENKAI_OCI_STORE`.
@@ -144,6 +168,47 @@ impl FilesystemArtifactRegistry {
             .join(&reference.repository)
             .join(reference.digest.replace(':', "-"))
     }
+
+    pub fn put(&self, reference: &OciArtifactRef, bytes: Vec<u8>) -> Result<()> {
+        reference.validate()?;
+        let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
+        if digest != reference.digest {
+            bail!(
+                "stored artifact digest {digest} does not match declared {}",
+                reference.digest
+            );
+        }
+        let path = self.blob_path(reference);
+        if path.exists() {
+            let existing = std::fs::read(&path)?;
+            let existing_digest = format!("sha256:{:x}", Sha256::digest(&existing));
+            if existing_digest == reference.digest {
+                return Ok(());
+            }
+            bail!(
+                "artifact digest {} already exists with different bytes {existing_digest}",
+                reference.digest
+            );
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_file_name(format!(
+            ".{}.part",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| anyhow::anyhow!("artifact blob path is not UTF-8"))?
+        ));
+        if let Err(error) = std::fs::write(&tmp, &bytes) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(error.into());
+        }
+        if let Err(error) = std::fs::rename(&tmp, &path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(error.into());
+        }
+        Ok(())
+    }
 }
 
 impl ArtifactRegistry for FilesystemArtifactRegistry {
@@ -166,6 +231,15 @@ impl ArtifactRegistry for FilesystemArtifactRegistry {
             );
         }
         Ok(reference.clone())
+    }
+
+    fn fetch(&self, reference: &OciArtifactRef) -> Result<Vec<u8>> {
+        self.verify(reference)?;
+        Ok(std::fs::read(self.blob_path(reference))?)
+    }
+
+    fn store(&self, reference: &OciArtifactRef, bytes: Vec<u8>) -> Result<()> {
+        self.put(reference, bytes)
     }
 }
 
@@ -247,7 +321,7 @@ pub fn verify_publication(
 
 /// Admit environment-scoped pull refs. Tenkai never contacts the origin
 /// registry at apply. Returned refs are the only authorized pull identity;
-/// layer materialization stays with the executor and offline bundles (#377).
+/// layer materialization stays with the executor and signed offline bundles.
 pub fn verify_environment_pull(
     artifacts: &[OciArtifactRef],
     properties: &HashMap<String, String>,
@@ -365,5 +439,34 @@ mod tests {
             .verify(&sample("ghcr.io", b"payload-a"))
             .unwrap_err();
         assert!(err.to_string().contains("unresolvable"));
+    }
+
+    #[test]
+    fn filesystem_store_is_idempotent_and_names_a_conflicting_digest() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-oci-fs-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let registry = FilesystemArtifactRegistry::new(root.clone());
+        let reference = sample("mirror.internal", b"payload-a");
+        registry.put(&reference, b"payload-a".to_vec()).unwrap();
+        registry.put(&reference, b"payload-a".to_vec()).unwrap();
+        registry.verify(&reference).unwrap();
+        let path = root
+            .join("mirror.internal")
+            .join("edge/app")
+            .join(reference.digest.replace(':', "-"));
+        std::fs::write(&path, b"tampered").unwrap();
+        let err = registry
+            .put(&reference, b"payload-a".to_vec())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(&reference.digest), "{err}");
+        let _ = std::fs::remove_dir_all(root);
     }
 }
