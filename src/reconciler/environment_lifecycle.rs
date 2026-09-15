@@ -34,6 +34,12 @@ pub(super) async fn reconcile(ctx: &mut Ctx, request: Request<'_>) -> Result<Env
     if recover_or_detect_active_plan(ctx, request.environment).await? {
         return Ok(EnvironmentStatus::Busy);
     }
+    if crate::preview::teardown_due(ctx, request.environment, crate::now_millis())
+        .await?
+        .is_some()
+    {
+        return Ok(EnvironmentStatus::Current);
+    }
 
     let approval_required = request.policy.unapproved_development_reason.is_none()
         || request.environment != "local"
@@ -56,6 +62,12 @@ async fn reconcile_runtime_managed(ctx: &mut Ctx, environment: &str) -> Result<E
     .await?
     {
         return Ok(awaiting_runtime(plan));
+    }
+    if crate::preview::teardown_due(ctx, environment, crate::now_millis())
+        .await?
+        .is_some()
+    {
+        return Ok(EnvironmentStatus::Current);
     }
     let stored = plan::create_for_reconcile(ctx, environment).await?;
     if stored.steps.is_empty() {

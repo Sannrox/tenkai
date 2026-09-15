@@ -46,6 +46,9 @@ Credentials, member documents, and unrestricted external records are excluded.
 
 `workshop_module` releases require a pin. See
 [Workshop module delivery](workshop-modules.md).
+An unmerged branch pin can provision a
+[preview environment](preview-environments.md) without becoming a channel
+head.
 
 ## Two-environment drill
 

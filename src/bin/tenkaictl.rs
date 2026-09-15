@@ -14,7 +14,7 @@ use tenkai::command_result::{CommandName, CommandOutcome, CommandResultV1, Retry
 use tenkai::{
     apply, assertion_verifier, canary, catalog, client, connectivity, dev_sign, fleet_budget,
     fleet_fairness, fleet_workload, inventory, maintenance, offline_bundle, ontology,
-    package_migration, plan, reconciler, release_signing, wave,
+    package_migration, plan, preview, reconciler, release_signing, wave,
 };
 
 const JWT_VERIFIER_CONFIG_ENV: &str = "TENKAI_JWT_VERIFIER_CONFIG";
@@ -773,6 +773,20 @@ enum EnvCommand {
         #[arg(long, default_value = "")]
         description: String,
     },
+    /// Register a non-promotable preview environment from a branch pin.
+    Preview {
+        name: String,
+        /// Content-addressed `tenkai.branch_pin.v1` document.
+        #[arg(long)]
+        pin: PathBuf,
+        /// RFC 3339 expiry. Teardown never deletes a non-preview environment.
+        #[arg(long)]
+        expires_at: String,
+        #[arg(long, default_value = "")]
+        description: String,
+    },
+    /// Record branch close and tear down a preview environment.
+    ClosePreview { env: String },
     /// List registered environments with compact delivery summaries.
     List,
     /// Inspect one environment: subscriptions, deployed versions, lease/fence, latest plan.
@@ -2233,6 +2247,37 @@ async fn run(cli: Cli) -> Result<()> {
             EnvCommand::Add { name, description } => {
                 println!("{}", plan::env_add(&mut ctx, &name, &description).await?);
             }
+            EnvCommand::Preview {
+                name,
+                pin,
+                expires_at,
+                description,
+            } => {
+                let pin = preview::BranchPin::load_file(&pin)?;
+                let expires_at = parse_preview_expiry(&expires_at)?;
+                println!(
+                    "{}",
+                    preview::provision(
+                        &mut ctx,
+                        &name,
+                        pin,
+                        expires_at,
+                        &description,
+                        tenkai::now_millis(),
+                    )
+                    .await?
+                );
+            }
+            EnvCommand::ClosePreview { env } => {
+                let evidence = preview::close_branch(&mut ctx, &env, tenkai::now_millis()).await?;
+                println!(
+                    "preview environment {} torn down ({}); pin {}; plan digest {}",
+                    evidence.environment,
+                    evidence.reason,
+                    evidence.pin_digest,
+                    evidence.plan_digest
+                );
+            }
             EnvCommand::List => {
                 let entries = plan::list_environments(&mut ctx).await?;
                 if entries.is_empty() {
@@ -3220,6 +3265,12 @@ fn wave_authorization<'a>(
     }
 }
 
+fn parse_preview_expiry(value: &str) -> Result<i64> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(value)
+        .with_context(|| format!("preview expiry {value:?} is not RFC 3339"))?;
+    Ok(parsed.timestamp_millis())
+}
+
 fn print_fleet_status(report: &plan::FleetStatusReport) {
     println!(
         "fleet environments={} current={} behind={} unhealthy={} empty={}",
@@ -3852,6 +3903,30 @@ mod tests {
             Command::Env {
                 command: EnvCommand::Inspect { ref env }
             } if env == "prod"
+        ));
+        let preview = Cli::try_parse_from([
+            "tenkaictl",
+            "env",
+            "preview",
+            "review",
+            "--pin",
+            "pin.json",
+            "--expires-at",
+            "2026-09-16T00:00:00Z",
+        ])
+        .unwrap();
+        assert!(matches!(
+            preview.command,
+            Command::Env {
+                command: EnvCommand::Preview { ref name, ref expires_at, .. }
+            } if name == "review" && expires_at == "2026-09-16T00:00:00Z"
+        ));
+        let close = Cli::try_parse_from(["tenkaictl", "env", "close-preview", "review"]).unwrap();
+        assert!(matches!(
+            close.command,
+            Command::Env {
+                command: EnvCommand::ClosePreview { ref env }
+            } if env == "review"
         ));
         let cluster = Cli::try_parse_from([
             "tenkaictl",

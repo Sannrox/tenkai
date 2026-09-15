@@ -87,6 +87,7 @@ async fn compute_snapshot_with_policy(
     policy: ConvergencePolicy,
 ) -> Result<(Vec<DesiredStateInput>, Vec<Step>)> {
     let env_obj = crate::environment::environment(ctx, env).await?;
+    crate::preview::admit_plan(&env_obj, crate::now_millis())?;
     let channels = ctx.linked(&env_obj.id, REL_SUBSCRIBES, "out").await?;
 
     let mut products = std::collections::HashSet::new();

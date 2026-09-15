@@ -229,6 +229,7 @@ fn partition_local_inspect(name: &str) -> EnvironmentInspectReport {
         observed_type_digest: None,
         observed_runtime_digest: None,
         module_activations: Vec::new(),
+        preview: None,
     }
 }
 
@@ -394,6 +395,7 @@ mod tests {
             observed_type_digest: None,
             observed_runtime_digest: None,
             module_activations: Vec::new(),
+            preview: None,
         }
     }
 

@@ -68,6 +68,10 @@
 //! - [`storage`] and [`tenant_store`] provide operational persistence adapters.
 //! - [`environment`] owns Environment identity, subscriptions, constraints,
 //!   facts, deployment observations, and operator readback behind one interface.
+//! - [`preview`] owns preview-environment admission from a content-addressed
+//!   branch pin, the pin-bound plan digest, channel-promotion refusal, and
+//!   expiry or branch-close teardown evidence. Teardown never deletes a
+//!   non-preview environment.
 //! - [`tenant_environment`] hides authenticated tenant Environment visibility,
 //!   synchronous store adaptation, fixture projections, bounded reconciliation,
 //!   and non-disclosing failures behind one application interface.
@@ -161,6 +165,7 @@ pub mod plan;
 pub mod plan_approval;
 pub mod plan_priors;
 pub mod postgres_tenant;
+pub mod preview;
 mod product_kind;
 pub mod provider_event;
 pub mod providers;
