@@ -402,6 +402,7 @@ mod tests {
             observed_type_digest: None,
             observed_runtime_digest: None,
             module_activations: Vec::new(),
+            preview: None,
         };
         annotate_plan_with_priors(
             &mut plan,
@@ -543,6 +544,7 @@ mod tests {
             observed_type_digest: None,
             observed_runtime_digest: None,
             module_activations: Vec::new(),
+            preview: None,
         };
         let config = PriorConfig {
             enabled: true,

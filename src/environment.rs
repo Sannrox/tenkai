@@ -550,9 +550,10 @@ pub async fn subscribe(ctx: &mut Ctx, env: &str, product: &str, channel: &str) -
     validate_identifier("product", product)?;
     validate_identifier("channel", channel)?;
     let eid = env_id(env);
-    if ctx.get(&eid).await?.is_none() {
+    let Some(existing) = ctx.get(&eid).await? else {
         bail!("environment {env} is not registered (tenkaictl env add {env})");
-    }
+    };
+    crate::preview::refuse_channel_promotion(&existing)?;
     let cid = channel_id(product, channel);
     if ctx.get(&cid).await?.is_none() {
         bail!("channel {product}/{channel} does not exist — promote a release into it first");
@@ -753,6 +754,9 @@ pub struct EnvironmentInspectReport {
     /// Accepted workshop-module activation receipts for this environment.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub module_activations: Vec<crate::workshop_module::ModuleActivationReceipt>,
+    /// Present only for preview environments bound to a branch pin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<crate::preview::PreviewInspect>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -951,6 +955,7 @@ pub async fn fleet_status(ctx: &mut Ctx) -> Result<FleetStatusReport> {
             observed_type_digest: None,
             observed_runtime_digest: None,
             module_activations: Vec::new(),
+            preview: None,
         });
     }
     Ok(fleet_status_from_inspects(reports))
@@ -982,6 +987,7 @@ async fn inspect_environment_base(ctx: &mut Ctx, env: &str) -> Result<Environmen
     let latest_plan = latest_plan_for_environment(ctx, env).await?;
     let observed = crate::workshop_module::observed_from_object(&env_obj)?;
     let module_activations = crate::workshop_module::activations_from_object(&env_obj)?;
+    let preview = crate::preview::inspect_from_object(&env_obj)?;
     Ok(EnvironmentInspectReport {
         name: env_obj.name,
         id: env_obj.id,
@@ -1001,6 +1007,7 @@ async fn inspect_environment_base(ctx: &mut Ctx, env: &str) -> Result<Environmen
         observed_type_digest: observed.as_ref().map(|value| value.type_digest.clone()),
         observed_runtime_digest: observed.map(|value| value.runtime_digest),
         module_activations,
+        preview,
     })
 }
 
