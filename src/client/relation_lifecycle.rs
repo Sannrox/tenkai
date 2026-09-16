@@ -1,11 +1,9 @@
 //! Relation lifecycle semantics across embedded and remote adapters.
 
 use anyhow::Result;
-use prost::Message;
-use sekai_client::CallOptions;
 use std::sync::Arc;
 
-use super::{RemoteClient, sdk_error_status};
+use super::{RemoteClient, remote_unary};
 use crate::pb::sekai::{
     CreateLinkRequest, CreateLinkResponse, DeleteLinkRequest, DeleteLinkResponse,
     GetLinkedObjectsRequest, GetLinkedObjectsResponse, GetLinksRequest, GetLinksResponse, Link,
@@ -205,20 +203,4 @@ async fn remote_link_exists(
     )
     .await;
     response.is_ok_and(|response| response.links.iter().any(|link| link.id == link_id))
-}
-
-async fn remote_unary<Req, Resp>(
-    client: &RemoteClient,
-    path: &str,
-    request: Req,
-) -> std::result::Result<Resp, tonic::Status>
-where
-    Req: Message + Default + Clone + Send + 'static,
-    Resp: Message + Default + Send + 'static,
-{
-    client
-        .raw()
-        .unary(path, request, CallOptions::default())
-        .await
-        .map_err(sdk_error_status)
 }

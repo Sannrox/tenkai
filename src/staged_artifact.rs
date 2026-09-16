@@ -340,40 +340,33 @@ impl PromptPackageDocument {
     }
 }
 
-pub fn load_policy_bundle(path: &Path) -> Result<PolicyBundleDocument> {
+fn load_validated_json<T, F>(path: &Path, kind: &str, validate: F) -> Result<T>
+where
+    T: for<'de> Deserialize<'de>,
+    F: FnOnce(&T) -> Result<()>,
+{
     let bytes =
-        std::fs::read(path).with_context(|| format!("reading policy_bundle {}", path.display()))?;
-    let doc: PolicyBundleDocument = serde_json::from_slice(&bytes)
-        .with_context(|| format!("parsing policy_bundle {}", path.display()))?;
-    doc.validate()?;
+        std::fs::read(path).with_context(|| format!("reading {kind} {}", path.display()))?;
+    let doc: T = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parsing {kind} {}", path.display()))?;
+    validate(&doc)?;
     Ok(doc)
+}
+
+pub fn load_policy_bundle(path: &Path) -> Result<PolicyBundleDocument> {
+    load_validated_json(path, "policy_bundle", PolicyBundleDocument::validate)
 }
 
 pub fn load_eval_suite_document(path: &Path) -> Result<EvalSuiteDocument> {
-    let bytes =
-        std::fs::read(path).with_context(|| format!("reading eval_suite {}", path.display()))?;
-    let doc: EvalSuiteDocument = serde_json::from_slice(&bytes)
-        .with_context(|| format!("parsing eval_suite {}", path.display()))?;
-    doc.validate()?;
-    Ok(doc)
+    load_validated_json(path, "eval_suite", EvalSuiteDocument::validate)
 }
 
 pub fn load_prompt_package(path: &Path) -> Result<PromptPackageDocument> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("reading prompt_package {}", path.display()))?;
-    let doc: PromptPackageDocument = serde_json::from_slice(&bytes)
-        .with_context(|| format!("parsing prompt_package {}", path.display()))?;
-    doc.validate()?;
-    Ok(doc)
+    load_validated_json(path, "prompt_package", PromptPackageDocument::validate)
 }
 
 pub fn load_agent_definition(path: &Path) -> Result<AgentDefinitionDocument> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("reading agent_definition {}", path.display()))?;
-    let doc: AgentDefinitionDocument = serde_json::from_slice(&bytes)
-        .with_context(|| format!("parsing agent_definition {}", path.display()))?;
-    doc.validate()?;
-    Ok(doc)
+    load_validated_json(path, "agent_definition", AgentDefinitionDocument::validate)
 }
 
 pub fn document_digest<T: Serialize>(doc: &T) -> Result<String> {

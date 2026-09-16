@@ -1,6 +1,6 @@
 //! Local hardware inventory probes for environment capability facts.
 //!
-//! Produces values for the admitted [`crate::plan::ENVIRONMENT_FACT_KEYS`] only.
+//! Produces values for the admitted [`crate::environment::ENVIRONMENT_FACT_KEYS`] only.
 //! Never collects secrets or contacts the network. Default CLI path is dry-run;
 //! apply writes through existing `env facts` APIs.
 

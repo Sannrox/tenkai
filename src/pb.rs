@@ -1,4 +1,5 @@
-//! Generated gRPC bindings for the vendored sekai-chisei protos.
+//! Generated gRPC bindings for the vendored sekai-chisei protos and the
+//! Tenkai-owned graph-action and runtime v1 contracts.
 //!
 //! The protos in `proto/vendor/` are copied verbatim from the sekai-chisei
 //! repository at commit `67157d1fa242ac2f133c88243ef23b56f88042e6`; tenkai

@@ -20,9 +20,10 @@
 //!   admission, optional multi-host fencing, concurrency, join, diagnostics,
 //!   and an environment-name index so ticks do not `list_kind` the fleet when
 //!   membership is unchanged; environment_lifecycle remains the per-env worker.
-//! - `canary::attempt_lifecycle` hides Canary policy snapshots, promotion-lock
-//!   coordination, attempt start and finalization ordering, durable outcome
-//!   evidence, and crash repair behind execution and repair interfaces.
+//! - `canary::promotion_lifecycle` hides Canary policy snapshots and
+//!   promotion-lock coordination. `canary::attempt_lifecycle` hides attempt
+//!   start and finalization ordering, durable outcome evidence, and crash
+//!   repair behind execution and repair interfaces.
 //!   Its private evaluation module hides policy-scoped attempt loading,
 //!   pending-attempt admission, terminal failure synthesis, cached
 //!   outcome↔attempt↔plan↔deployment consistency, and cohort evaluation

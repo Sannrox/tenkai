@@ -161,8 +161,14 @@ impl Default for HelmSoftwareExecutor {
     }
 }
 
-impl SoftwareExecutor for HelmSoftwareExecutor {
-    fn apply(&self, request: &SoftwareApplyRequest) -> Result<()> {
+impl HelmSoftwareExecutor {
+    fn helm_upgrade(
+        &self,
+        request: &SoftwareApplyRequest,
+        phase: SoftwareDeployPhase,
+        label: &str,
+        extra_sets: &[String],
+    ) -> Result<()> {
         validate_request(request)?;
         if !request.workdir.is_dir() {
             bail!(
@@ -183,14 +189,28 @@ impl SoftwareExecutor for HelmSoftwareExecutor {
             .arg("--timeout")
             .arg("5m");
         apply_helm_set_flags(&mut command, request);
+        for set in extra_sets {
+            command.arg("--set").arg(set);
+        }
         diagnostics::run_captured_command(
             &mut command,
-            SoftwareDeployPhase::Apply,
-            "upgrade --install",
+            phase,
+            label,
             &request.product,
             &request.environment,
             "helm",
             "set TENKAI_HELM_BIN or install helm",
+        )
+    }
+}
+
+impl SoftwareExecutor for HelmSoftwareExecutor {
+    fn apply(&self, request: &SoftwareApplyRequest) -> Result<()> {
+        self.helm_upgrade(
+            request,
+            SoftwareDeployPhase::Apply,
+            "upgrade --install",
+            &[],
         )
     }
 
@@ -250,38 +270,12 @@ impl SoftwareExecutor for HelmSoftwareExecutor {
     }
 
     fn restart(&self, request: &SoftwareApplyRequest) -> Result<()> {
-        validate_request(request)?;
-        if !request.workdir.is_dir() {
-            bail!(
-                "helm chart workdir does not exist: {}",
-                request.workdir.display()
-            );
-        }
         let nonce = crate::now_millis();
-        let mut command = Command::new(&self.helm_binary);
-        command
-            .arg("upgrade")
-            .arg("--install")
-            .arg(&request.product)
-            .arg(&request.workdir)
-            .arg("--namespace")
-            .arg(&request.environment)
-            .arg("--create-namespace")
-            .arg("--wait")
-            .arg("--timeout")
-            .arg("5m");
-        apply_helm_set_flags(&mut command, request);
-        command
-            .arg("--set")
-            .arg(format!("tenkai.restartNonce={nonce}"));
-        diagnostics::run_captured_command(
-            &mut command,
+        self.helm_upgrade(
+            request,
             SoftwareDeployPhase::Restart,
             "upgrade --install --restart",
-            &request.product,
-            &request.environment,
-            "helm",
-            "set TENKAI_HELM_BIN or install helm",
+            &[format!("tenkai.restartNonce={nonce}")],
         )
     }
 }

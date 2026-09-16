@@ -1,4 +1,7 @@
-//! Environments, subscriptions, and plan computation (desired vs deployed).
+//! Plan encoding and desired-vs-deployed computation.
+//!
+//! Environment identity, subscriptions, inspect, and listing live in
+//! [`crate::environment`] and are re-exported here for existing call sites.
 
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
