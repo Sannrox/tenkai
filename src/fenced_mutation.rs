@@ -35,7 +35,7 @@ pub struct MutationCommand<'a> {
 /// Control-plane credentials (`TENKAI_MANAGEMENT_TOKEN`, `TENKAI_RUNTIME_TOKEN`,
 /// outcome-provider tokens, `SEKAI_AUTH_TOKEN`, and similar) are intentionally
 /// absent. Deploy shells receive only this allowlist plus the explicit Tenkai
-/// fencing/identity variables set by [`configure_deploy_child_env`].
+/// fencing/identity variables set by [`deploy_child_environment`].
 const DEPLOY_CHILD_INHERITED_ENV: &[&str] = &[
     "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TMP", "TEMP", "TZ",
 ];

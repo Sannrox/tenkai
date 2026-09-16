@@ -7,13 +7,11 @@
 //! admission. Missing, disabled, denied, or unauthorized definitions fail closed.
 
 use anyhow::{Context as _, Result, bail};
-use prost::Message;
-use sekai_client::CallOptions;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use super::{RemoteClient, sdk_error_status};
+use super::{RemoteClient, remote_unary};
 use crate::pb::graph_action::{ActionResult, ActionTypeDef};
 use crate::pb::sekai::{
     CreateLinkRequest, CreateLinkResponse, Decision, DeleteLinkRequest, DeleteLinkResponse,
@@ -546,20 +544,4 @@ async fn remote_governed_action_exists(client: &RemoteClient, name: &str) -> boo
     )
     .await;
     response.is_ok_and(|response| response.r#type.is_some())
-}
-
-async fn remote_unary<Req, Resp>(
-    client: &RemoteClient,
-    path: &str,
-    request: Req,
-) -> std::result::Result<Resp, tonic::Status>
-where
-    Req: Message + Default + Clone + Send + 'static,
-    Resp: Message + Default + Send + 'static,
-{
-    client
-        .raw()
-        .unary(path, request, CallOptions::default())
-        .await
-        .map_err(sdk_error_status)
 }

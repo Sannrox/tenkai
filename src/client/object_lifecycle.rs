@@ -1,11 +1,13 @@
 //! Object lifecycle semantics across embedded and remote adapters.
 
 use anyhow::Result;
-use prost::Message;
 use sekai_client::CallOptions;
 use std::sync::Arc;
 
-use super::{RemoteClient, canonical_create_request, canonical_update_request, sdk_error_status};
+use super::{
+    RemoteClient, canonical_create_request, canonical_update_request, remote_unary,
+    remote_unary_with_options,
+};
 use crate::pb::sekai::{
     CreateObjectResponse, DeleteObjectRequest, DeleteObjectResponse, GetObjectRequest,
     GetObjectResponse, ListObjectChangesRequest, ListObjectChangesResponse, Object,
@@ -164,33 +166,4 @@ async fn remote_object_conflict(client: &RemoteClient, id: &str) -> bool {
         }
         Err(_) => false,
     }
-}
-
-async fn remote_unary<Req, Resp>(
-    client: &RemoteClient,
-    path: &str,
-    request: Req,
-) -> std::result::Result<Resp, tonic::Status>
-where
-    Req: Message + Default + Clone + Send + 'static,
-    Resp: Message + Default + Send + 'static,
-{
-    remote_unary_with_options(client, path, request, CallOptions::default()).await
-}
-
-async fn remote_unary_with_options<Req, Resp>(
-    client: &RemoteClient,
-    path: &str,
-    request: Req,
-    options: CallOptions,
-) -> std::result::Result<Resp, tonic::Status>
-where
-    Req: Message + Default + Clone + Send + 'static,
-    Resp: Message + Default + Send + 'static,
-{
-    client
-        .raw()
-        .unary(path, request, options)
-        .await
-        .map_err(sdk_error_status)
 }

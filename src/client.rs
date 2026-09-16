@@ -1,4 +1,5 @@
-//! Connection to a local sekai-chisei server, plus thin object/link helpers.
+//! Embedded and remote `Ctx` facade plus object, relation, lease, and action
+//! lifecycle ports.
 
 mod action_lifecycle;
 mod lease_lifecycle;
@@ -321,6 +322,35 @@ where
         })
 }
 
+async fn remote_unary<Req, Resp>(
+    client: &RemoteClient,
+    path: &str,
+    request: Req,
+) -> std::result::Result<Resp, tonic::Status>
+where
+    Req: Message + Default + Clone + Send + 'static,
+    Resp: Message + Default + Send + 'static,
+{
+    remote_unary_with_options(client, path, request, CallOptions::default()).await
+}
+
+async fn remote_unary_with_options<Req, Resp>(
+    client: &RemoteClient,
+    path: &str,
+    request: Req,
+    options: CallOptions,
+) -> std::result::Result<Resp, tonic::Status>
+where
+    Req: Message + Default + Clone + Send + 'static,
+    Resp: Message + Default + Send + 'static,
+{
+    client
+        .raw()
+        .unary(path, request, options)
+        .await
+        .map_err(sdk_error_status)
+}
+
 fn sdk_error_status(error: SdkError) -> tonic::Status {
     let code = match error.code {
         SdkErrorCode::Cancelled => tonic::Code::Cancelled,
@@ -549,11 +579,7 @@ impl Ctx {
         let client = self
             .remote()
             .map_err(|error| tonic::Status::internal(error.to_string()))?;
-        client
-            .raw()
-            .unary(path, request, options)
-            .await
-            .map_err(sdk_error_status)
+        remote_unary_with_options(client, path, request, options).await
     }
 
     async fn remote_schema_exists(&self, kind: &str) -> bool {

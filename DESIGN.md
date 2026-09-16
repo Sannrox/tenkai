@@ -77,7 +77,7 @@ required to recover a deployment.
 | **Product** | The unit of delivery: a versioned manifest declaring artifacts (OCI images, binaries, bundles), configuration schema, dependencies on other products (semver ranges), required capabilities of the target, and health probes. Intelligence products declare governance artifacts instead of images. |
 | **Release** | An immutable, signed version of a product: artifact digests, SBOM, provenance, changelog. |
 | **Channel** | A named stream per product (`dev`, `canary`, `stable`, `hotfix`). Publishing = pointing a channel at a release. |
-| **Environment** | A managed target: k8s cluster, VM host, edge device, air-gapped enclave. Declares: subscribed channels, maintenance windows, compliance/policy constraints, capability facts (k8s version, GPU, region, data classification), connectivity class (connected / intermittent / disconnected). |
+| **Environment** | A managed target: k8s cluster, VM host, edge device, air-gapped enclave. Declares: subscribed channels, maintenance windows, compliance/policy constraints, capability facts (k8s version, GPU, region, data classification), connectivity class (connected / intermittent / isolated). |
 | **Constraint** | A rule bounding what the planner may do: version pins/ranges, "only releases that passed eval suite E in this environment", "no upgrades outside window W", "products with data_class=restricted never leave region R". |
 | **Plan** | A computed, ordered set of install/upgrade/rollback steps for one environment, satisfying every constraint and the product dependency graph. Immutable once approved; the audit answers "why did this change happen" forever. |
 | **Deployment** | The record of a plan's execution: per-step status, health results, gate results, rollback linkage. |
@@ -122,7 +122,7 @@ gRPC is a transport rather than a domain boundary:
 - **environment runtime** — a small executor scoped to one environment. Pulls plans (never
   pushed — works through NAT/firewalls), applies steps via pluggable
   executors (`kubernetes` first; `compose`/`systemd` later), reports state and
-  health. For disconnected environments the same runtime consumes **signed
+  health. For isolated (air-gapped) environments the same runtime consumes **signed
   bundles** (plan + artifacts) imported out-of-band, and exports signed state
   receipts back.
 - **Shikigami worker-pool lifecycle** — when configured as a delivery product,
@@ -133,8 +133,8 @@ gRPC is a transport rather than a domain boundary:
   acknowledges individual work. The first lifecycle implementation uses fixed
   replicas. Autoscaling requires the versioned worker-host and read-only
   claim-pressure contracts described in ADR 0011.
-- **tenkaictl** — CLI: `publish`, `promote`, `env register`, `env constrain`,
-  `plan show`, `rollback`, `fleet status`.
+- **tenkaictl** — CLI: `publish`, `promote`, `env add`, `env constraints`,
+  `plan`, `rollback`, `fleet status`.
 
 Catalog extraction is deferred until measured scaling or isolation needs,
 versioned remote contracts, consistency, operations, and a reversible migration

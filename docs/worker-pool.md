@@ -30,7 +30,7 @@ tenkaictl publish tenkai.toml --allow-unsigned-development
 tenkaictl promote edge-workers@1.0.0 stable
 tenkaictl env subscribe local edge-workers=stable
 tenkaictl plan --env local
-tenkaictl apply --env local
+tenkaictl apply <plan-id>
 tenkaictl env inspect local
 ```
 

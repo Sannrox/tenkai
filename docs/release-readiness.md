@@ -50,7 +50,7 @@ Run (or confirm CI ran) at the release commit:
 ```bash
 cargo fmt --check
 cargo test --locked
-cargo clippy --all-targets --locked -- -D warnings
+cargo clippy --all-targets --all-features --locked -- -D warnings
 cargo build --all-targets --locked
 ```
 
