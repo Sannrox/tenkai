@@ -35,6 +35,9 @@ enum Rejection {
         product: String,
         channel: String,
     },
+    PreviewClosed {
+        detail: String,
+    },
 }
 
 impl fmt::Display for Rejection {
@@ -60,6 +63,7 @@ impl fmt::Display for Rejection {
                 formatter,
                 "is stale for {product}: channel {channel} no longer selects the approved release"
             ),
+            Self::PreviewClosed { detail } => write!(formatter, "{detail}"),
         }
     }
 }
@@ -81,6 +85,11 @@ async fn inspect(ctx: &mut Ctx, plan: &Plan) -> Result<Result<(), Rejection>> {
     let Some(environment) = ctx.get(&env_id(&plan.environment)).await? else {
         return Ok(Err(Rejection::EnvironmentMissing));
     };
+    if let Err(error) = crate::preview::admit_plan(&environment, crate::now_millis()) {
+        return Ok(Err(Rejection::PreviewClosed {
+            detail: error.to_string(),
+        }));
+    }
     for step in &plan.steps {
         if step.action != Action::Rollback
             && environment
@@ -337,6 +346,66 @@ mod tests {
                 .to_string()
                 .contains("channel stable no longer selects")
         );
+    }
+
+    #[tokio::test]
+    async fn torn_down_preview_is_refused_at_apply_admission() {
+        let mut ctx = context("preview-torn-down");
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let pin = crate::preview::BranchPin {
+            contract: crate::preview::PIN_CONTRACT.into(),
+            namespace: "acme".into(),
+            branch_id: "types".into(),
+            head_revision: "rev-1".into(),
+            pin_digest: format!("sha256:{}", "a".repeat(64)),
+        };
+        crate::preview::provision(
+            &mut ctx,
+            "review",
+            pin,
+            crate::now_millis() + 86_400_000,
+            "",
+            1_000,
+        )
+        .await
+        .unwrap();
+        crate::preview::close_branch(&mut ctx, "review", 2_000)
+            .await
+            .unwrap();
+
+        let leftover = Plan {
+            format_version: PLAN_FORMAT_VERSION,
+            id: "tenkai:plan:review:leftover".into(),
+            content_id: "content".into(),
+            environment: "review".into(),
+            created_at: 1,
+            inputs: Vec::new(),
+            steps: vec![Step {
+                id: "tenkai:plan:review:leftover:step:0".into(),
+                order: 0,
+                product: "api".into(),
+                action: Action::Rollback,
+                from: Some("2.0.0".into()),
+                to: "1.0.0".into(),
+                release_id: "tenkai:release:api@1.0.0".into(),
+                release_digest: "digest".into(),
+                artifact_digest: "artifact".into(),
+                workdir: "/srv/api".into(),
+                restore: None,
+            }],
+            state: PlanState::Computed,
+            gates_skipped: None,
+            status_detail: String::new(),
+            maintenance_blocked: false,
+            prior_warnings: Vec::new(),
+            recalled_recovery_reason: None,
+        };
+        assert_eq!(
+            classify_candidate(&mut ctx, &leftover).await.unwrap(),
+            CandidateAdmission::Superseded
+        );
+        let error = admit(&mut ctx, &leftover).await.unwrap_err().to_string();
+        assert!(error.contains("torn down"), "{error}");
     }
 
     #[tokio::test]

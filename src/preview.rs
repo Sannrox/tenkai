@@ -458,6 +458,23 @@ mod tests {
     use super::*;
     use crate::client::Ctx;
     use crate::ontology::{KIND_CHANNEL, channel_id};
+    use crate::plan::{Action, Step};
+
+    fn rollback_step() -> Step {
+        Step {
+            id: String::new(),
+            order: 0,
+            product: "api".into(),
+            action: Action::Rollback,
+            from: Some("2.0.0".into()),
+            to: "1.0.0".into(),
+            release_id: "tenkai:release:api@1.0.0".into(),
+            release_digest: "digest".into(),
+            artifact_digest: "artifact".into(),
+            workdir: "/srv/api".into(),
+            restore: None,
+        }
+    }
 
     fn sample_pin() -> BranchPin {
         BranchPin {
@@ -696,6 +713,56 @@ mod tests {
                 .await
                 .unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn torn_down_and_expired_previews_refuse_create_from_steps() {
+        let mut ctx = ctx().await;
+        provision(&mut ctx, "review", sample_pin(), 5_000, "", 1_000)
+            .await
+            .unwrap();
+        let expired = crate::plan::create_from_steps(&mut ctx, "review", vec![rollback_step()])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(expired.contains("expired"), "{expired}");
+
+        close_branch(&mut ctx, "review", 2_000).await.unwrap();
+        let torn_down = crate::plan::create_from_steps(&mut ctx, "review", vec![rollback_step()])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(torn_down.contains("torn down"), "{torn_down}");
+        let recovery = crate::plan::create_from_steps_with_recovery(
+            &mut ctx,
+            "review",
+            vec![rollback_step()],
+            "operator rollback".into(),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(recovery.contains("torn down"), "{recovery}");
+    }
+
+    #[tokio::test]
+    async fn active_preview_still_allows_create_from_steps() {
+        let mut ctx = ctx().await;
+        provision(
+            &mut ctx,
+            "review",
+            sample_pin(),
+            crate::now_millis() + 86_400_000,
+            "",
+            1_000,
+        )
+        .await
+        .unwrap();
+        let plan = crate::plan::create_from_steps(&mut ctx, "review", vec![rollback_step()])
+            .await
+            .unwrap();
+        assert_eq!(plan.environment, "review");
+        assert_eq!(plan.steps.len(), 1);
     }
 
     #[tokio::test]

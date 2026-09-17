@@ -384,7 +384,7 @@ pub(super) async fn create_from_steps(
     env: &str,
     mut steps: Vec<Step>,
 ) -> Result<Plan> {
-    crate::environment::environment(ctx, env).await?;
+    admit_preview_environment(ctx, env).await?;
     create_with_content(ctx, env, Vec::new(), &mut steps, None).await
 }
 
@@ -394,8 +394,13 @@ pub(super) async fn create_from_steps_with_recovery(
     mut steps: Vec<Step>,
     reason: String,
 ) -> Result<Plan> {
-    crate::environment::environment(ctx, env).await?;
+    admit_preview_environment(ctx, env).await?;
     create_with_content(ctx, env, Vec::new(), &mut steps, Some(reason)).await
+}
+
+async fn admit_preview_environment(ctx: &mut Ctx, env: &str) -> Result<()> {
+    let env_obj = crate::environment::environment(ctx, env).await?;
+    crate::preview::admit_plan(&env_obj, crate::now_millis())
 }
 
 fn assemble_plan(
