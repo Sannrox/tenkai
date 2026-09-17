@@ -34,6 +34,9 @@ envelopes](docs/release-provenance.md) without accepting subject payloads or
 granting external evidence delivery authority. A release may additionally pin
 one [accepted change-set closure](docs/change-set-pin.md) as a Catalog fact;
 the change-set service remains evidence, not recovery authority.
+A content-addressed branch pin can provision a
+[non-promotable preview environment](docs/preview-environments.md) with a
+pin-bound plan digest and automatic teardown on expiry.
 
 ## Quickstart
 
@@ -533,6 +536,7 @@ it ([ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md),
 | Optional advisory plan priors (default off) | [Plan priors](docs/plan-priors.md); #114 |
 | Staged products: policy_bundle, eval_suite, agent_definition, prompt_package, workshop_module | [Staged products](docs/staged-products.md); [Workshop modules](docs/workshop-modules.md); #115, #116, #117, #285, #290 |
 | Change-set closure pin admission | [Change-set pins](docs/change-set-pin.md); [ADR 0018](docs/decisions/0018-change-set-closure-pin.md); #288 |
+| Preview environments from a branch pin | [Preview environments](docs/preview-environments.md); #379 |
 | Two-environment immutable closure drill | [Change-set pins](docs/change-set-pin.md#two-environment-drill); `examples/two-environment-closure`; #360 |
 | Fixed-replica Shikigami worker-pool lifecycle | [Worker pools](docs/worker-pool.md); [ADR 0011](docs/decisions/0011-shikigami-worker-pool-lifecycle.md); [ADR 0028](docs/decisions/0028-live-worker-lifecycle-port.md); #284 / #336 |
 | Connectivity-class upgrades | [Connectivity upgrades](docs/connectivity-upgrades.md); [ADR 0020](docs/decisions/0020-connectivity-class-upgrade.md); #287 |
