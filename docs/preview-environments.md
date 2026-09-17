@@ -45,10 +45,12 @@ not import member payloads and does not recover from the branch service.
   timestamp on the environment object. Teardown never deletes the object and
   never mutates a non-preview environment, even if preview expiry properties
   are forged onto it.
-- Planning a torn-down or expired preview fails closed. The reconciler tears
-  down expired preview environments after in-flight apply recovery, never
-  while a plan is still Busy or awaiting runtime. Later ticks treat the
-  retained torn-down object as terminal Current and do not re-plan or admit.
+- Planning a torn-down or expired preview fails closed on snapshot planning,
+  explicit `create_from_steps` (rollback/restart), and apply admission of a
+  leftover Computed plan. The reconciler tears down expired preview
+  environments after in-flight apply recovery, never while a plan is still
+  Busy or awaiting runtime. Later ticks treat the retained torn-down object
+  as terminal Current and do not re-plan or admit.
 
 Issue: [#379](https://github.com/Sannrox/tenkai/issues/379).
 Related: [change-set closure pins](change-set-pin.md),
