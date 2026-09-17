@@ -92,7 +92,7 @@ impl std::error::Error for CatalogLookupError {
 
 pub type CatalogLookupResult<T> = std::result::Result<T, CatalogLookupError>;
 
-/// Stable read port used by planning in embedded and future server hosts.
+/// Stable read port used by planning in embedded and server hosts.
 ///
 /// Implementations must provide immutable lookup and fail closed for recalled
 /// content. Remote transports must preserve the typed not-found/recalled

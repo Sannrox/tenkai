@@ -304,7 +304,7 @@ pub struct RuntimeClaim {
     pub completion_json: Option<String>,
 }
 
-/// Transactional authority used by embedded and future server hosts.
+/// Transactional authority used by embedded and server hosts.
 pub trait OperationalStore: Send + Sync {
     fn publish_release(&self, release: &ReleaseRecord) -> Result<()>;
     fn get_release(&self, id: &str) -> Result<Option<ReleaseRecord>>;

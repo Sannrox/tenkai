@@ -4,8 +4,9 @@
 //! multi-tenant recovery can enable this adapter behind Cargo feature `postgres`.
 //!
 //! Model: **schema-per-tenant** inside one Tenkai-owned database (never co-located
-//! with the identity plane). Does **not** claim `shared_replica_state` or
-//! `high_availability` until multi-replica fencing is proven (ADR 0009).
+//! with the identity plane). Claims `shared_replica_state` under the
+//! single-active-writer model. Does **not** claim `high_availability` until
+//! multi-replica fencing is proven (ADR 0009).
 //!
 //! Connection strings come from env/config only — never argv secrets.
 //!

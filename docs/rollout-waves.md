@@ -75,8 +75,8 @@ detail only.
 | `wave execute` | Ordered apply of per-environment Tenkai plans for one pinned release |
 | Canary policy | Gate **channel promotion** on complete cohort evidence |
 
-Waves never authorize a wider channel promotion. Use canary configure /
-promotion after canary envs are healthy. For `model_runtime` products, the same
+Waves never authorize a wider channel promotion. Use `canary designate` /
+`canary policy`, then `promote`, after canary envs are healthy. For `model_runtime` products, the same
 canary evidence rules apply; see [model runtime canary path](model-runtime.md#canary-promotion-evidence-model_runtime).
 
 The responsibility map across channels, canary, waves, maintenance, facts,

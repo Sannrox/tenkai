@@ -5,10 +5,24 @@ use std::collections::HashMap;
 use anyhow::{Context as _, Result, bail};
 
 use crate::client::Ctx;
-use crate::ontology::{KIND_ENVIRONMENT_EXECUTION, env_id};
+use crate::ontology::{KIND_ENVIRONMENT_EXECUTION, NS, env_id};
 use crate::pb::sekai::{Lease, Link, Object};
 
-use super::{ReleaseContent, record};
+use super::ReleaseContent;
+
+fn record(id: String, kind: &str, name: String, properties: HashMap<String, String>) -> Object {
+    let now = crate::now_millis();
+    Object {
+        id,
+        kind: kind.into(),
+        name,
+        namespace: NS.into(),
+        external_id: String::new(),
+        properties,
+        created: now,
+        updated: now,
+    }
+}
 
 fn legacy_environment_claim_id(environment: &str) -> String {
     format!("{}:execution", env_id(environment))

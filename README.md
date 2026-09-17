@@ -217,7 +217,7 @@ The run's `config_ref` must match the content-bound reference shown in the
 blocked-plan detail; it covers the manifest, immutable deploy inputs, and the
 current suite definition, so stale evidence cannot authorize changed content.
 `--skip-gates` is the current v0 break-glass action, and the bypass is recorded
-in the graph like any other apply. Under the standalone architecture, a bypass
+on the Tenkai plan and audit record like any other apply. Under the standalone architecture, a bypass
 must carry separately authorized, auditable override evidence; inability to
 authorize the override fails closed. Migrated plans preserve their original
 bypass evidence and version rather than gaining implicit authorization.
@@ -368,10 +368,12 @@ TENKAI_MANAGEMENT_TOKEN="$TENKAI_MANAGEMENT_TOKEN" \
   reconcile --once
 ```
 
-The server also reconciles continuously. Remote v1 CLI support is intentionally
-limited to requesting a reconciliation tick; unsupported commands fail with an
-explicit instruction to use `--target embedded` instead of silently changing
-execution mode. Runtime work is polled at
+The server also reconciles continuously. Remote v1 CLI support covers
+`reconcile --once`, `fleet status`, `fleet watch`, `env list`, `env inspect`,
+`env subscribe`, `status`, `publish`, `promote`, `release recall`, `plan`,
+`approval submit`, `apply`, `rollback`, and the `migrate` family. Unsupported
+commands fail with an explicit instruction to use `--target embedded` instead
+of silently changing execution mode. Runtime work is polled at
 `GET /v1/runtime/environments/{environment}/work` with the assigned runtime
 bearer token. A returned plan carries a durable, expiring fencing generation;
 the runtime reports one receipt per step to
@@ -466,6 +468,16 @@ control plane can't safely restart its own backend mid-apply.
 | `TENKAI_OCI_STORE` | unset | Filesystem adapter root used to verify digest-bound OCI artifact references at publish and apply, and to load signed offline-bundle layers onto an environment mirror |
 | `TENKAI_OTEL_ENDPOINT` | unset | OTLP/HTTP collector root; unset leaves traces and metrics as a no-op ([telemetry](docs/telemetry.md)) |
 | `TENKAI_OPERATION_ID` | unset | Inbound delivery correlation identity copied onto allowlisted spans (`tenkaictl --operation-id`) |
+| `TENKAI_ENABLE_METRICS` | `false` | Enable the server Prometheus scrape endpoint (`--enable-metrics`) |
+| `TENKAI_INSTANCE_ID` | hostname or generated | Replica identity used for multi-replica fencing |
+| `TENKAI_JWT_VERIFIER_CONFIG` | unset | Path or inline config for enterprise JWT verification |
+| `TENKAI_SOFTWARE_EXECUTOR` | unset | Host software adapter: `helm`, `kubernetes`, or `fake`; unset keeps the shell install path |
+| `TENKAI_HELM_BIN` | `helm` | Helm binary used by the Helm software executor |
+| `TENKAI_KUBECTL_BIN` | `kubectl` | kubectl binary used by the native Kubernetes software executor |
+| `TENKAI_PLAN_APPROVAL_DIR` | unset | Directory of signed plan-approval envelopes |
+| `TENKAI_PLAN_APPROVAL_TRUST_ROOTS` | unset | Trust-root file for plan-approval verification |
+| `TENKAI_RUNTIME_INVENTORY` | enabled | Set `0`/`false`/`off`/`no` to disable runtime inventory reports |
+| `TENKAI_PLAN_PRIORS` | unset | Set `1` to enable advisory planner priors; see [plan priors](docs/plan-priors.md) |
 
 ## Ontology
 

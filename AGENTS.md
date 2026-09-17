@@ -9,14 +9,15 @@ graph projection, governance, evaluation, and learning; Tenkai must remain
 operable and recoverable without it unless an operation's policy explicitly
 requires provider evidence.
 
-Source code lives in `src/`. `src/lib.rs` exports the application core;
-`src/bin/tenkaictl.rs` hosts the embedded and remote CLI;
-`src/bin/tenkai-server.rs` hosts the network service; and
-`src/bin/tenkai-executor-guard.rs` enforces local process fencing. Keep domain
+Source code lives in `src/`. `src/lib.rs` exports the application core.
+Shipped binaries are `tenkaictl` (embedded and remote CLI), `tenkai-server`
+(network service), `tenkai-executor-guard` (local process fencing),
+`tenkai-runtime` and `tenkai-runtime-guard` (pull-only environment runtime),
+and `tenkai-delivery-conformance` (delivery-effect harness). Keep domain
 logic in the library and treat CLI, HTTP, gRPC, SQLite, and provider clients as
 adapters around shared application contracts. Protocol definitions live in
 `proto/`, documentation in `docs/`, examples in `examples/`, and operational
-scripts in `scripts/`.
+scripts in `scripts/`. The Rust toolchain is pinned at 1.96.1.
 
 Read `README.md`, `DESIGN.md`, and
 `docs/decisions/0001-standalone-core-and-service-evolution.md` before changing
@@ -29,8 +30,8 @@ for shaping, delivering, verifying, assessing, documenting, and releasing work.
 - `cargo fmt --check` verifies Rust formatting.
 - `cargo test` runs the unit and integration test suite.
 - `cargo build --all-targets` verifies all binaries and test targets compile.
-- `cargo clippy --all-targets --all-features -- -D warnings` runs strict
-  linting when Clippy is available.
+- `cargo clippy --all-targets --all-features --locked -- -D warnings` runs
+  strict linting when Clippy is available (matches `make validate`).
 - `make test` runs the default test suite.
 - `make validate` runs formatting, lint, shell, and diff checks.
 - `make test-integration` runs all checked-in integration-test targets.

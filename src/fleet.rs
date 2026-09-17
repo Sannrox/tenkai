@@ -1,6 +1,7 @@
 //! Fleet delivery posture: aggregation, drift comparison, and baseline I/O.
 //!
-//! Inspect reports and store-backed listing remain in [`crate::plan`]. This
+//! Inspect reports and store-backed listing remain in [`crate::environment`]
+//! (re-exported from [`crate::plan`]). This
 //! module is the pure posture interface: callers feed inspect rows or fleet
 //! rows and get deterministic aggregates, drift deltas, and baseline files
 //! without learning subscription/lease classification details.

@@ -3,7 +3,6 @@
 //! Every execution writes durable plan and deployment objects so Tenkai can
 //! answer "what ran, when, gated by what, and what happened" after the fact.
 
-use std::collections::HashMap;
 #[cfg(test)]
 use std::path::Path;
 
@@ -15,8 +14,6 @@ use std::process::Stdio;
 use crate::client::Ctx;
 use crate::manifest::{self, Manifest};
 use crate::model_runtime::ModelRuntimeExecutor as _;
-use crate::ontology::*;
-use crate::pb::sekai::Object;
 use crate::plan::{self, Action, Plan, PlanState, ReleasePin, Step};
 use crate::routing::RoutingConfigExecutor as _;
 use anyhow::{Context as _, Result, bail};
@@ -224,20 +221,6 @@ async fn admit_plan_artifact_pulls(
         }
     }
     Ok(())
-}
-
-fn record(id: String, kind: &str, name: String, properties: HashMap<String, String>) -> Object {
-    let now = crate::now_millis();
-    Object {
-        id,
-        kind: kind.into(),
-        name,
-        namespace: NS.into(),
-        external_id: String::new(),
-        properties,
-        created: now,
-        updated: now,
-    }
 }
 
 async fn execute_locked(
