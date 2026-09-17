@@ -589,6 +589,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn torn_down_preview_stays_current_on_later_ticks() {
+        let (database, mut ctx) = temp_ctx("preview-torn-down-residue");
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let pin = crate::preview::BranchPin {
+            contract: crate::preview::PIN_CONTRACT.into(),
+            namespace: "acme".into(),
+            branch_id: "types".into(),
+            head_revision: "rev-1".into(),
+            pin_digest: format!("sha256:{}", "a".repeat(64)),
+        };
+        crate::preview::provision(
+            &mut ctx,
+            "review",
+            pin,
+            crate::now_millis() + 86_400_000,
+            "",
+            1_000,
+        )
+        .await
+        .unwrap();
+        crate::preview::close_branch(&mut ctx, "review", 2_000)
+            .await
+            .unwrap();
+
+        let reconciler = Reconciler::new(ctx.clone(), config()).unwrap();
+        for _ in 0..2 {
+            let report = reconciler.run_once().await.unwrap();
+            assert_eq!(report.environments.len(), 1);
+            assert_eq!(report.environments[0].environment, "review");
+            assert_eq!(report.environments[0].status, EnvironmentStatus::Current);
+            assert_eq!(report.diagnostics().outcome, "ok");
+            assert_eq!(report.failures(), 0);
+        }
+        let mut ctx = ctx;
+        assert!(
+            plan::list_for_environment(&mut ctx, "review", None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
     async fn controller_noop_reconcile_does_not_persist_empty_plans() {
         let (database, ctx) = registered_ctx("controller-noop-empty", &["env-a"]).await;
         let reconciler = Reconciler::new(ctx.clone(), config()).unwrap();
