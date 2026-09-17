@@ -252,6 +252,27 @@ pub async fn teardown_due(ctx: &mut Ctx, env: &str, now: i64) -> Result<Option<T
     ))
 }
 
+/// Preview residue that must stay Current: already torn down, or expiry
+/// teardown just recorded. Non-preview environments are never terminal residue.
+pub async fn is_terminal_residue(ctx: &mut Ctx, env: &str, now: i64) -> Result<bool> {
+    validate_identifier("environment", env)?;
+    let Some(object) = ctx.get(&env_id(env)).await? else {
+        return Ok(false);
+    };
+    if !is_preview(&object) {
+        return Ok(false);
+    }
+    let preview = stored_inspect(&object)?;
+    if preview.status == STATUS_TORN_DOWN {
+        return Ok(true);
+    }
+    if preview.expires_at > now {
+        return Ok(false);
+    }
+    persist_teardown(ctx, object, TEARDOWN_EXPIRED, now).await?;
+    Ok(true)
+}
+
 pub async fn close_branch(ctx: &mut Ctx, env: &str, now: i64) -> Result<TeardownEvidence> {
     validate_identifier("environment", env)?;
     let object = crate::environment::environment(ctx, env).await?;
@@ -664,6 +685,29 @@ mod tests {
         assert_eq!(
             inspect.teardown_reason.as_deref(),
             Some(TEARDOWN_BRANCH_CLOSED)
+        );
+        assert!(
+            is_terminal_residue(&mut ctx, "review", 3_000)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !is_terminal_residue(&mut ctx, "missing", 3_000)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn standard_environment_is_never_terminal_residue() {
+        let mut ctx = ctx().await;
+        crate::environment::env_add(&mut ctx, "local", "this machine")
+            .await
+            .unwrap();
+        assert!(
+            !is_terminal_residue(&mut ctx, "local", 10_000)
+                .await
+                .unwrap()
         );
     }
 

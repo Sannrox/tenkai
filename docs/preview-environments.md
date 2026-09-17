@@ -47,7 +47,8 @@ not import member payloads and does not recover from the branch service.
   are forged onto it.
 - Planning a torn-down or expired preview fails closed. The reconciler tears
   down expired preview environments after in-flight apply recovery, never
-  while a plan is still Busy or awaiting runtime.
+  while a plan is still Busy or awaiting runtime. Later ticks treat the
+  retained torn-down object as terminal Current and do not re-plan or admit.
 
 Issue: [#379](https://github.com/Sannrox/tenkai/issues/379).
 Related: [change-set closure pins](change-set-pin.md),

@@ -34,10 +34,7 @@ pub(super) async fn reconcile(ctx: &mut Ctx, request: Request<'_>) -> Result<Env
     if recover_or_detect_active_plan(ctx, request.environment).await? {
         return Ok(EnvironmentStatus::Busy);
     }
-    if crate::preview::teardown_due(ctx, request.environment, crate::now_millis())
-        .await?
-        .is_some()
-    {
+    if crate::preview::is_terminal_residue(ctx, request.environment, crate::now_millis()).await? {
         return Ok(EnvironmentStatus::Current);
     }
 
@@ -63,10 +60,7 @@ async fn reconcile_runtime_managed(ctx: &mut Ctx, environment: &str) -> Result<E
     {
         return Ok(awaiting_runtime(plan));
     }
-    if crate::preview::teardown_due(ctx, environment, crate::now_millis())
-        .await?
-        .is_some()
-    {
+    if crate::preview::is_terminal_residue(ctx, environment, crate::now_millis()).await? {
         return Ok(EnvironmentStatus::Current);
     }
     let stored = plan::create_for_reconcile(ctx, environment).await?;
