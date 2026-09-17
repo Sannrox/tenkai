@@ -582,10 +582,13 @@ fn signed_stateful_upgrade_survives_executor_loss() {
         use std::os::unix::process::CommandExt as _;
         apply_cmd.process_group(0);
     }
+    let mutations_before_crash = drill.mutation_count();
     let mut child = apply_cmd.spawn().expect("spawn crashing apply");
+    // Accept is mutation plus ledger. Probing only the ledger races the count.
     let accepted = wait_for(Duration::from_secs(20), || {
         drill.ledger_contains(TARGET_VERSION)
             && drill.current_version().as_deref() == Some(TARGET_VERSION)
+            && drill.mutation_count() > mutations_before_crash
     });
     assert!(accepted, "fixture did not accept B before crash");
     let mutations_after_accept = drill.mutation_count();

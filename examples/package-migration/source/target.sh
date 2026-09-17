@@ -74,8 +74,8 @@ apply)
         printf '%s\n' "$record" >"$seed_file"
     fi
     printf '%s\n' "$version" >"$version_file"
-    printf 'accepted\n' >"$key"
     bump_mutations
+    printf 'accepted\n' >"$key"
     if control_matches crash-after-accept "$version"; then
         sleep 30
     fi
