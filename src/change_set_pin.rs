@@ -21,7 +21,7 @@ use crate::signature_verification;
 pub const PIN_CONTRACT: &str = "tenkai.change_set_pin.v1";
 pub const EVIDENCE_SCHEMA: &str = "tenkai.change_set_publication_evidence.v1";
 pub const MAX_MEMBERS: usize = 32;
-pub const MAX_TEXT_BYTES: usize = 256;
+pub const MAX_TEXT_BYTES: usize = crate::ontology::MAX_OPAQUE_IDENTIFIER_BYTES;
 const MAX_EVIDENCE_BYTES: u64 = 16 * 1024;
 
 const MEMBER_KINDS: &[&str] = &[
@@ -450,16 +450,7 @@ fn validate_members(members: &[ChangeSetMember]) -> Result<()> {
 }
 
 fn validate_text(label: &str, value: &str) -> Result<()> {
-    if value.is_empty()
-        || value.len() > MAX_TEXT_BYTES
-        || value.chars().any(char::is_control)
-        || value.contains("://")
-        || value.contains('/')
-        || value.contains('\\')
-    {
-        bail!("{label} is empty, oversized, or not an opaque identifier");
-    }
-    Ok(())
+    crate::ontology::validate_opaque_identifier(label, value)
 }
 
 #[cfg(test)]

@@ -18,7 +18,7 @@ pub const BUILD_ATTESTATION_PROFILE: &str = "example.build-attestation/v1";
 pub const MAX_ENVELOPES: usize = 4;
 const MAX_ENVELOPE_BYTES: u64 = 16 * 1024;
 const MAX_REFERENCES: usize = 8;
-const MAX_TEXT_BYTES: usize = 256;
+const MAX_TEXT_BYTES: usize = crate::ontology::MAX_OPAQUE_IDENTIFIER_BYTES;
 const MAX_FRESHNESS_MS: i64 = 31 * 24 * 60 * 60 * 1_000;
 const MAX_CLOCK_SKEW_MS: i64 = 5 * 60 * 1_000;
 
@@ -95,16 +95,7 @@ fn profile(id: &str) -> Result<Profile> {
 }
 
 fn validate_text(label: &str, value: &str) -> Result<()> {
-    if value.is_empty()
-        || value.len() > MAX_TEXT_BYTES
-        || value.chars().any(char::is_control)
-        || value.contains("://")
-        || value.contains('/')
-        || value.contains('\\')
-    {
-        bail!("{label} is empty, oversized, or not an opaque identifier");
-    }
-    Ok(())
+    crate::ontology::validate_opaque_identifier(label, value)
 }
 
 fn validate_schema_id(label: &str, value: &str) -> Result<()> {
