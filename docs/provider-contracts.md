@@ -194,7 +194,10 @@ evidence are complete.
 
 ## Remote gate HTTP JSON contract (#113)
 
-Reference adapter: `HttpRemoteGateProvider` in `src/providers.rs`.
+Library adapter: `HttpRemoteGateProvider` in `src/providers.rs`. Apply
+admission uses the Chisei `GetEvaluationGateEvidence` projection when policy
+requires provider evidence. No shipped binary constructs this HTTP adapter or
+reads `TENKAI_GATE_URL` / `TENKAI_GATE_TOKEN`.
 
 | Field | Value |
 | --- | --- |
@@ -226,6 +229,6 @@ this endpoint by evaluating the named suite against the bound digests and
 returning its run id as `evidence_id`. Other eval products can use the same
 JSON without vendored protocols.
 
-**Configuration:** endpoint URL + optional bearer (env/file). Community
-ungated products never construct the remote adapter and never open a network
-connection for gates.
+**Configuration:** callers pass an endpoint URL and optional bearer into the
+library constructor. Community ungated products never construct the remote
+adapter and never open a network connection for gates.

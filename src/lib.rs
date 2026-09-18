@@ -82,10 +82,10 @@
 //! - [`software_executor`], [`model_runtime`], [`routing`], [`staged_artifact`],
 //!   [`workshop_module`], and [`worker_pool`] adapt typed delivery products to
 //!   their target runtimes.
-//!   Software executor hosts select Helm, native Kubernetes, or fake adapters
-//!   and pass them through apply execution options; the private diagnostics
-//!   module hides credential-free stderr capture and sanitization shared by
-//!   Helm and kubectl.
+//!   Software executor hosts select Helm, native Kubernetes, in-process
+//!   Kubernetes, or fake adapters and pass them through apply execution
+//!   options; the private diagnostics module hides credential-free stderr
+//!   capture and sanitization shared by Helm and kubectl.
 //! - `product_kind` owns the closed Product-kind policy for manifest target
 //!   classification, staged identity, cleanup semantics, and coordinated
 //!   model/routing rollout rank without introducing a trait seam.
@@ -119,8 +119,8 @@
 //! - `terminal_outcome` classifies embedded and runtime execution evidence in
 //!   one pure module before optional provider projection.
 //! - [`management_lifecycle`] admits the versioned remote operator contract
-//!   (`tenkai.management-lifecycle.v1`) before later HTTP routes call Catalog,
-//!   planner, or apply. Spoke runtime RPCs stay a separate surface.
+//!   (`tenkai.management-lifecycle.v1`) before HTTP adapters call Catalog,
+//!   planner, or apply. Spoke runtime HTTP stays a separate surface.
 //! - [`storage::SqliteStore`] and the `tenkaictl` / `tenkai-server` binaries host
 //!   the same application core; transport is not a domain seam. [`embedded`] is
 //!   the pre-0029 schema-5 graph-fixture factory used to import leftover

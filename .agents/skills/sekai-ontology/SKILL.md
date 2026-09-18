@@ -9,6 +9,9 @@ Use `sekai` when a repository contains a portable ontology database and a
 structural answer should come from its explicit definitions and provenance.
 The command is single-shot and local; it does not require a server or network.
 
+Select the ontology database with `--db <path>` or `SEKAI_DB`. Do not use
+Tenkai's operational SQLite database as a portable ontology database.
+
 - Run `sekai --db <path> --json explain <name>` for the resolved definition,
   superclass closure, related definitions, and provenance of a class.
 - Run `sekai --db <path> --json query <name> --direction <outbound|inbound|both> --depth <0..32>`

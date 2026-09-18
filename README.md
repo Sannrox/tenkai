@@ -376,7 +376,10 @@ commands fail with an explicit instruction to use `--target embedded` instead
 of silently changing execution mode. Runtime work is polled at
 `GET /v1/runtime/environments/{environment}/work` with the assigned runtime
 bearer token. A returned plan carries a durable, expiring fencing generation;
-the runtime reports one receipt per step to
+the runtime renews that claim at
+`POST /v1/runtime/environments/{environment}/heartbeat`, reports inventory at
+`POST /v1/runtime/environments/{environment}/inventory`, and reports one
+receipt per step to
 `POST /v1/runtime/environments/{environment}/complete`. Completion is
 idempotent, updates verified deployed observations, and makes the plan
 terminal. Environments with runtime tokens are never executed by the embedded

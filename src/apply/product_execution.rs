@@ -50,7 +50,7 @@ pub(super) async fn activate(
         prepare_fenced_mutation(ctx, lease, content).await?;
         let descriptor =
             crate::model_runtime::ModelRuntimeDescriptor::from_manifest(&content.manifest)?;
-        // Reference llama.cpp plugin: fake by default; real binary when
+        // ReferenceLlamaCppExecutor: fake by default; real binary when
         // TENKAI_LLAMA_SERVER / TENKAI_USE_REAL_LLAMA is set (see model-runtime.md).
         let executor = crate::model_runtime::ReferenceLlamaCppExecutor::for_operator_host(
             content.model_runtime_state.clone(),

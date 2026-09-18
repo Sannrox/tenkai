@@ -360,9 +360,9 @@ pub trait ModelRuntimeExecutor: Send + Sync {
 /// Local reference executor that stages the validated descriptor and, when a
 /// [`WeightCache`] is configured, fetches and verifies weight digests.
 ///
-/// It does **not** start an inference server. Real `tenkai-executor-*` plugins
-/// implement [`ModelRuntimeExecutor`] and add start/smoke/switch steps after
-/// using the same cache verify path.
+/// It does **not** start an inference server. In-tree executors such as
+/// [`ReferenceLlamaCppExecutor`] implement [`ModelRuntimeExecutor`] and add
+/// start/smoke/switch steps after using the same cache verify path.
 pub struct LocalModelRuntimeExecutor {
     state_path: PathBuf,
     weight_cache: Option<WeightCache>,
@@ -433,7 +433,7 @@ pub struct EngineStartRequest {
     pub product_version: String,
     pub weights_path: Option<PathBuf>,
     pub port: u16,
-    /// Must be loopback for the reference plugin.
+    /// Must be loopback for the reference executor.
     pub bind_host: String,
     pub engine: String,
     pub health_endpoint: String,
@@ -446,12 +446,12 @@ pub struct EngineHandle {
     pub generation_id: String,
     pub port: u16,
     pub bind_host: String,
-    /// Plugin-private marker (pid file path, fake id, …). Never a secret.
+    /// Adapter-private marker (pid file path, fake id, …). Never a secret.
     pub marker: String,
 }
 
 /// Process control port for inference engines. Tenkai core never links a
-/// specific engine binary; plugins implement start/smoke/stop.
+/// specific engine binary; in-tree adapters implement start/smoke/stop.
 pub trait InferenceEngineProcess: Send + Sync {
     fn start_candidate(&self, request: &EngineStartRequest) -> Result<EngineHandle>;
     fn smoke(&self, handle: &EngineHandle, health: &ModelHealthSection) -> Result<()>;
@@ -460,7 +460,7 @@ pub trait InferenceEngineProcess: Send + Sync {
 
 /// Deterministic fake engine for CI. Does not open sockets or spawn processes.
 ///
-/// Rationale for choosing **llama.cpp** as the reference real plugin: it is the
+/// Rationale for choosing **llama.cpp** as the reference real executor: it is the
 /// default `runtime.engine` in model_runtime manifests, exposes a simple HTTP
 /// health surface, and runs on a single machine without a GPU control plane.
 /// This fake implements the same lifecycle contract without requiring the binary.
@@ -483,7 +483,7 @@ impl InferenceEngineProcess for FakeInferenceEngine {
         }
         if request.engine != "llama.cpp" {
             bail!(
-                "reference plugin supports runtime.engine=llama.cpp only, got {}",
+                "reference executor supports runtime.engine=llama.cpp only, got {}",
                 request.engine
             );
         }
