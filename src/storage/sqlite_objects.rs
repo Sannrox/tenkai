@@ -1,4 +1,4 @@
-//! Object/link/lease codec over typed schema 10 records plus a catalog sidecar.
+//! Object/link/lease codec over typed schema 11 records plus a catalog sidecar.
 //!
 //! Plan, environment, release, channel, and apply-lease identities live in
 //! typed tables. Leftover `embedded_*` graph rows are imported once and dropped

@@ -123,15 +123,18 @@ tenkai-server \
 
 ## Health and diagnostics
 
-`/healthz` and `/readyz` include:
+`GET /healthz` returns liveness. `GET /readyz` returns readiness after store
+and required-provider health checks:
 
 ```json
 {
-  "status": "ready",
+  "status": "ok",
   "profile": "community-sqlite",
-  "capabilities": ["operational_store_migration:v1:level6"]
+  "capabilities": ["operational_store_migration:v1:level11"]
 }
 ```
+
+`/readyz` uses the same body with `"status": "ready"` when those checks pass.
 
 Capability diagnostics never include tokens, secrets, or tenant identifiers.
 Until profile selection is implemented, operators must not interpret the

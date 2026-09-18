@@ -462,16 +462,18 @@ impl Ctx {
         matches!(self.backend, Backend::Embedded(_))
     }
 
+    /// Whether this context is already bound to a reconcile-tick Plan kind-list
+    /// cell. Inspect and other one-shot paths stay unbound and list once per call.
+    pub(crate) fn shares_plan_retarget_tick(&self) -> bool {
+        self.plan_kind_list.tick_cell().is_some()
+    }
+
     /// Clone a tick-local context that shares one remote Plan kind-list among
     /// concurrent environment workers. The original context is unchanged, so
     /// inspect and other one-shot paths still list once per call.
     ///
     /// Dropping the returned guard ends the tick even if the caller is
     /// cancelled.
-    pub(crate) fn shares_plan_retarget_tick(&self) -> bool {
-        self.plan_kind_list.tick_cell().is_some()
-    }
-
     pub(crate) fn with_shared_plan_retarget_tick(&self) -> (Self, PlanRetargetTickGuard) {
         let scan = Arc::new(PlanKindListTick::default());
         if !self.is_embedded() {

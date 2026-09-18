@@ -123,8 +123,7 @@ tenkaictl --database .tenkai-dogfood-minikube/tenkai.db apply "$PLAN_ID" \
   --approval-trust-roots .tenkai-dogfood-minikube/artifacts/approval-trust.toml
 ```
 
-Cargo examples `examples/dev_sign_*.rs` are **deprecated stubs**; use
-`tenkaictl dev …`.
+Use `tenkaictl dev …` for dogfood signing.
 
 ## Findings from Mac dogfood (v0.2)
 

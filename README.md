@@ -471,7 +471,7 @@ control plane can't safely restart its own backend mid-apply.
 | `TENKAI_ENABLE_METRICS` | `false` | Enable the server Prometheus scrape endpoint (`--enable-metrics`) |
 | `TENKAI_INSTANCE_ID` | hostname or generated | Replica identity used for multi-replica fencing |
 | `TENKAI_JWT_VERIFIER_CONFIG` | unset | Path or inline config for enterprise JWT verification |
-| `TENKAI_SOFTWARE_EXECUTOR` | unset | Host software adapter: `helm`, `kubernetes`, or `fake`; unset keeps the shell install path |
+| `TENKAI_SOFTWARE_EXECUTOR` | unset | Host software adapter: `helm`, `kubernetes` (`k8s` / `native`), `kubernetes-inprocess`, or `fake`; unset keeps the shell install path |
 | `TENKAI_HELM_BIN` | `helm` | Helm binary used by the Helm software executor |
 | `TENKAI_KUBECTL_BIN` | `kubectl` | kubectl binary used by the native Kubernetes software executor |
 | `TENKAI_PLAN_APPROVAL_DIR` | unset | Directory of signed plan-approval envelopes |
@@ -585,7 +585,7 @@ Postgres hub + multi-replica fencing) are landed on main. Remaining work is
 | Release packaging | [v0.2.0 notes](docs/releases/0.2.0.md) (tagged); next notes when needed |
 | Hub HA product claim | Criteria + automated drills before advertising `high_availability` (fence already shipped #135) |
 | Intelligence loop depth | Fail-closed prior policy; live remote OutcomeProvider history |
-| Executor / model depth | Peer/regional weight caches; additional engines; in-process kube client only if dependency weight is accepted |
+| Executor / model depth | Peer/regional weight caches; additional engines (`kubernetes-inprocess` already shipped) |
 | Enterprise host | JWKS rotation, live IdP drills, tenant-isolated prior stores |
 | Local dogfood | [minikube path](docs/local-dogfood-minikube.md): unsigned + signed multi-env (#152) + **software canary drill** (#154) landed; inventory → `env facts` drill still optional |
 
