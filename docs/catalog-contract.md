@@ -1,7 +1,7 @@
 # Catalog application contract v1
 
 The Catalog is a versioned in-process application boundary shared by the
-embedded CLI and future server host. It is not a separately deployed service.
+embedded CLI and server host. It is not a separately deployed service.
 Its Rust contract version is `CATALOG_CONTRACT_VERSION = 1`.
 
 ## Operations and invariants

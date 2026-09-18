@@ -96,8 +96,7 @@ $BIN --database $DB fleet status
 $BIN --database $DB wave run local,stage
 ```
 
-`tenkaictl dev …` is development-only (not production KMS). Deprecated cargo
-examples `examples/dev_sign_*.rs` are stubs only.
+`tenkaictl dev …` is development-only (not production KMS).
 
 ### Manual software canary (same as `TENKAI_DOGFOOD_MODE=canary`)
 

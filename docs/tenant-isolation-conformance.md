@@ -94,6 +94,8 @@ and are not registered.
 | `environment.get` | `GET /v1/environments/{env}` | Non-disclosing deny on cross-tenant |
 | `environment.status` | `GET /v1/environments/{env}/status` | Same as get |
 | `runtime.work` / `complete` / `heartbeat` | `/v1/runtime/environments/{env}/…` | Runtime credential scoped to exactly one environment |
+| `development.fixture_import` | `POST /v1/development/fixtures/import` | Require tenant context and an allowlisted fixture principal; mounted only when fixtures are enabled |
+| `development.fixture_reset` | `DELETE /v1/development/fixtures/{fixture_id}` | Same as import; non-disclosing deny on cross-tenant |
 
 Community catalog lifecycle routes (`POST /v1/releases`, `POST /v1/channels/{channel}/promote`,
 `POST /v1/releases/{release}/recall`, `POST /v1/environments/{environment}/subscriptions`)
@@ -145,7 +147,10 @@ Rules:
   membership derived by the auth stack — never from caller-selected headers.
 - Cross-tenant environment get/list uses the non-disclosing deny posture.
 - The adapter does **not** share a database with an identity plane (ADR 0005).
-- Production PostgreSQL remains out of scope for this public repository surface.
+- Optional in-tree PostgreSQL (`src/postgres_tenant.rs`, Cargo feature
+  `postgres`) is documented in [postgres-tenant-store.md](postgres-tenant-store.md).
+  Community default remains SQLite; the adapter is not a supported operating
+  profile until ADR 0010 readiness passes.
 
 Run `InMemoryTenantOperationalStore::run_conformance` (or
 `cargo test tenant_store`) to exercise harness coverage plus store-partition

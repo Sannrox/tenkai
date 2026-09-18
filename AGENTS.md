@@ -13,7 +13,8 @@ Source code lives in `src/`. `src/lib.rs` exports the application core.
 Shipped binaries are `tenkaictl` (embedded and remote CLI), `tenkai-server`
 (network service), `tenkai-executor-guard` (local process fencing),
 `tenkai-runtime` and `tenkai-runtime-guard` (pull-only environment runtime),
-and `tenkai-delivery-conformance` (delivery-effect harness). Keep domain
+`tenkai-delivery-conformance` (delivery-effect harness), and
+`tenkai-worker-lifecycle-fixture` (live worker-lifecycle observation host). Keep domain
 logic in the library and treat CLI, HTTP, gRPC, SQLite, and provider clients as
 adapters around shared application contracts. Protocol definitions live in
 `proto/`, documentation in `docs/`, examples in `examples/`, and operational

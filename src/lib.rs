@@ -121,8 +121,10 @@
 //! - [`management_lifecycle`] admits the versioned remote operator contract
 //!   (`tenkai.management-lifecycle.v1`) before later HTTP routes call Catalog,
 //!   planner, or apply. Spoke runtime RPCs stay a separate surface.
-//! - [`embedded`] and [`server`] host the same application core; transport is not
-//!   a domain seam.
+//! - [`storage::SqliteStore`] and the `tenkaictl` / `tenkai-server` binaries host
+//!   the same application core; transport is not a domain seam. [`embedded`] is
+//!   the pre-0029 schema-5 graph-fixture factory used to import leftover
+//!   `embedded_*` rows; it is not a live host.
 //!
 //! See ADR 0001 for the ownership and service-evolution rules.
 
