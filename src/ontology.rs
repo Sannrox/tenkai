@@ -50,6 +50,8 @@ pub const ACTION_CONFIGURE_PRODUCT_MAINTENANCE: &str =
     "tenkai.configure_product_maintenance_windows";
 pub const ACTION_EMERGENCY_OVERRIDE: &str = "tenkai.emergency_maintenance_override";
 
+pub const MAX_OPAQUE_IDENTIFIER_BYTES: usize = 256;
+
 pub fn validate_identifier(label: &str, value: &str) -> Result<()> {
     let mut chars = value.chars();
     if !matches!(chars.next(), Some(first) if first.is_ascii_alphanumeric())
@@ -58,6 +60,19 @@ pub fn validate_identifier(label: &str, value: &str) -> Result<()> {
         bail!(
             "{label} must start with an ASCII letter or digit and contain only letters, digits, '.', '_', '-', or '+'"
         );
+    }
+    Ok(())
+}
+
+pub fn validate_opaque_identifier(label: &str, value: &str) -> Result<()> {
+    if value.is_empty()
+        || value.len() > MAX_OPAQUE_IDENTIFIER_BYTES
+        || value.chars().any(char::is_control)
+        || value.contains("://")
+        || value.contains('/')
+        || value.contains('\\')
+    {
+        bail!("{label} is empty, oversized, or not an opaque identifier");
     }
     Ok(())
 }
@@ -751,46 +766,40 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
     Ok(registered)
 }
 
-/// Verify once per connected client that an administrator registered upgrade types.
-pub async fn require_connectivity_upgrade_schema(ctx: &mut Ctx) -> Result<()> {
+async fn require_schema_kinds(ctx: &mut Ctx, label: &str, kinds: &[&str]) -> Result<()> {
     let schemas = ctx.schemas().await?;
-    if !schemas
+    let missing: Vec<&str> = kinds
         .iter()
-        .any(|schema| schema.kind == KIND_CONNECTIVITY_UPGRADE)
-    {
-        bail!(
-            "connectivity-upgrade schema upgrade required (missing {KIND_CONNECTIVITY_UPGRADE}); ask an administrator to run `tenkaictl init`"
-        );
-    }
-    Ok(())
-}
-
-/// Verify once per connected client that an administrator registered migration types.
-pub async fn require_package_migration_schema(ctx: &mut Ctx) -> Result<()> {
-    let schemas = ctx.schemas().await?;
-    let required = [KIND_PACKAGE_MIGRATION, KIND_PACKAGE_MIGRATION_LOCK];
-    let missing = required
-        .into_iter()
+        .copied()
         .filter(|kind| !schemas.iter().any(|schema| schema.kind == *kind))
-        .collect::<Vec<_>>();
+        .collect();
     if !missing.is_empty() {
         bail!(
-            "package-migration schema upgrade required (missing {}); ask an administrator to run `tenkaictl init`",
+            "{label} schema upgrade required (missing {}); ask an administrator to run `tenkaictl init`",
             missing.join(", ")
         );
     }
     Ok(())
 }
 
+/// Verify once per connected client that an administrator registered upgrade types.
+pub async fn require_connectivity_upgrade_schema(ctx: &mut Ctx) -> Result<()> {
+    require_schema_kinds(ctx, "connectivity-upgrade", &[KIND_CONNECTIVITY_UPGRADE]).await
+}
+
+/// Verify once per connected client that an administrator registered migration types.
+pub async fn require_package_migration_schema(ctx: &mut Ctx) -> Result<()> {
+    require_schema_kinds(
+        ctx,
+        "package-migration",
+        &[KIND_PACKAGE_MIGRATION, KIND_PACKAGE_MIGRATION_LOCK],
+    )
+    .await
+}
+
 /// Verify once per connected client that an administrator registered wave types.
 pub async fn require_wave_schema(ctx: &mut Ctx) -> Result<()> {
-    let schemas = ctx.schemas().await?;
-    if !schemas.iter().any(|schema| schema.kind == KIND_WAVE) {
-        bail!(
-            "wave schema upgrade required (missing {KIND_WAVE}); ask an administrator to run `tenkaictl init`"
-        );
-    }
-    Ok(())
+    require_schema_kinds(ctx, "wave", &[KIND_WAVE]).await
 }
 
 /// Verify once per connected client that an administrator ran the schema upgrade.
@@ -798,27 +807,20 @@ pub async fn require_canary_schema(ctx: &mut Ctx) -> Result<()> {
     let preflight = ctx.canary_schema_preflight();
     preflight
         .get_or_try_init(|| async {
-            let schemas = ctx.schemas().await?;
-            let required = [
-                KIND_CANARY_DESIGNATION,
-                KIND_CANARY_POLICY,
-                KIND_CANARY_POLICY_POINTER,
-                KIND_CANARY_ATTEMPT,
-                KIND_CANARY_OUTCOME,
-                KIND_PROMOTION_AUDIT,
-                KIND_PROMOTION_LOCK,
-            ];
-            let missing = required
-                .into_iter()
-                .filter(|kind| !schemas.iter().any(|schema| schema.kind == *kind))
-                .collect::<Vec<_>>();
-            if !missing.is_empty() {
-                bail!(
-                    "canary schema upgrade required (missing {}); ask an administrator to run `tenkaictl init`",
-                    missing.join(", ")
-                );
-            }
-            Ok::<_, anyhow::Error>(())
+            require_schema_kinds(
+                ctx,
+                "canary",
+                &[
+                    KIND_CANARY_DESIGNATION,
+                    KIND_CANARY_POLICY,
+                    KIND_CANARY_POLICY_POINTER,
+                    KIND_CANARY_ATTEMPT,
+                    KIND_CANARY_OUTCOME,
+                    KIND_PROMOTION_AUDIT,
+                    KIND_PROMOTION_LOCK,
+                ],
+            )
+            .await
         })
         .await?;
     Ok(())
@@ -834,6 +836,23 @@ mod tests {
         assert!(validate_identifier("product", "api@1").is_err());
         assert!(validate_identifier("environment", "prod:eu").is_err());
         assert!(validate_identifier("channel", "stable/eu").is_err());
+    }
+
+    #[test]
+    fn opaque_identifiers_reject_paths_and_controls() {
+        assert!(validate_opaque_identifier("id", "acme").is_ok());
+        assert!(validate_opaque_identifier("id", "").is_err());
+        assert!(validate_opaque_identifier("id", "a".repeat(257).as_str()).is_err());
+        assert!(validate_opaque_identifier("id", "acme/types").is_err());
+        assert!(validate_opaque_identifier("id", "https://example").is_err());
+        assert!(validate_opaque_identifier("id", "acme\\types").is_err());
+        assert!(validate_opaque_identifier("id", "acme\n").is_err());
+        let error = validate_opaque_identifier("change-set pin namespace", "acme/types")
+            .expect_err("path must fail closed");
+        assert_eq!(
+            error.to_string(),
+            "change-set pin namespace is empty, oversized, or not an opaque identifier"
+        );
     }
 
     #[test]
