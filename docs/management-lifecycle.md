@@ -5,9 +5,11 @@ Operator lifecycle verbs share one versioned HTTP contract,
 Transport is not a domain boundary.
 
 The spoke runtime protocol is a different surface. Runtimes still initiate
-every `Negotiate` / `Pull` / `CompleteStep` / `Heartbeat` exchange; see
-[runtime protocol v1](runtime-protocol-v1.md). Do not place management verbs
-on that proto and do not overload `POST /v1/reconcile`.
+every work, complete, heartbeat, and inventory exchange over HTTP JSON; the
+v1 proto `Negotiate` / `Pull` / `CompleteStep` / `Heartbeat` /
+`ReportObservation` messages are a separate typed contract, not the HTTP
+payloads. See [runtime protocol v1](runtime-protocol-v1.md). Do not place
+management verbs on that proto and do not overload `POST /v1/reconcile`.
 
 Package-migration preview, apply, status, resume, and rollback stay on
 `/v1/migrations/*` ([ADR 0026](decisions/0026-remote-package-migration-parity.md)).
@@ -28,8 +30,8 @@ Unknown JSON fields fail closed (`deny_unknown_fields`). A remote body must
 not carry `--allow-unapproved-development` or any other embedded
 local-development bypass.
 
-The Rust admission entry is `tenkai::management_lifecycle`. Routes added by
-later issues must call it before the Catalog, planner, or apply core.
+The Rust admission entry is `tenkai::management_lifecycle`. HTTP adapters
+call it before the Catalog, planner, or apply core.
 
 ## Operations
 

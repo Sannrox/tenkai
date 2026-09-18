@@ -50,6 +50,8 @@ After restore:
 
 ## Automated drill
 
-`cargo test --lib online_backup_restores_complete_embedded_state` (and the
-multi-environment restore drill) prove backup → restore → inspect without
-external services.
+`cargo test --lib embedded_backup_restore_stays_on_typed_schema` proves the
+operator `SqliteStore` backup → restore path on schema 11. The older
+`online_backup_restores_complete_embedded_state` drill still covers the
+pre-0029 graph-fixture factory used only to import leftover `embedded_*`
+rows.

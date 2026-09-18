@@ -40,6 +40,9 @@ export TENKAI_CONFORMANCE_POSTGRES_URL='postgresql://127.0.0.1:5432/tenkai_test'
 cargo run --locked --features postgres --bin tenkai-delivery-conformance
 ```
 
+`tenkai-delivery-conformance` is an autodiscovered Postgres harness under
+`src/bin/`, not a product binary listed in `Cargo.toml`.
+
 The dedicated environment variable is accepted only when the host is
 loopback/localhost, the database name contains `test`, and the URL has no query
 or fragment overrides; connection material is never accepted on the command

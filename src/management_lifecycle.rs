@@ -1,9 +1,8 @@
 //! Versioned remote management-lifecycle contract (ADR 0030).
 //!
 //! Admission for publish, promote, subscribe, plan, approve, apply, rollback,
-//! and recall lives here. HTTP adapters and later route implementations call
-//! this module; they do not invent a second protocol or reuse spoke runtime
-//! RPCs.
+//! and recall lives here. HTTP adapters call this module; they do not invent
+//! a second protocol or reuse spoke runtime HTTP.
 
 use std::path::{Path, PathBuf};
 
