@@ -10,11 +10,16 @@
   [ADR 0010](0010-supported-operating-profiles.md),
   [Operational storage](../operational-storage.md)
 
+> Later record: Context below is the pre-decision world as of 2026-09-13.
+> Live hosts now open [`SqliteStore`](../../src/storage.rs) (typed schema 11).
+> [`EmbeddedStore`](../../src/embedded.rs) remains a schema-5 import fixture.
+> See [operational storage](../operational-storage.md).
+
 ## Context
 
 Three persistence designs coexist in one product:
 
-| Design | Schema | Role today |
+| Design | Schema | Role then |
 | --- | --- | --- |
 | `SqliteStore` (`OperationalStore`) | 10 | Typed releases, channels, environments, plans, leases, receipts, rollback, outbox, audit, runtime claims |
 | `EmbeddedStore` | 5 | Sekai-shaped objects, links, actions, leases, and a property index so embedded planning can speak in "objects" without a live plane |

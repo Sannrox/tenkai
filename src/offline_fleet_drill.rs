@@ -13,7 +13,6 @@ use ed25519_dalek::SigningKey;
 
 use crate::apply::ExecutionAuthorization;
 use crate::auth_context::AuthenticatedRequestContext;
-use crate::catalog::PublishOptions;
 use crate::client::Ctx;
 use crate::connectivity::{self, ConnectivityClass, UpgradeEnvironmentStatus, UpgradeSpec};
 use crate::offline_bundle::BundleEnvelope;
@@ -272,37 +271,7 @@ pub async fn rehearse(
 }
 
 async fn publish_signed(ctx: &mut Ctx, root: &Path, version: &str) -> Result<()> {
-    let dir = root.join(version);
-    std::fs::create_dir_all(&dir)?;
-    std::fs::write(
-        dir.join("tenkai.toml"),
-        format!(
-            r#"
-[product]
-name = "edge-app"
-version = "{version}"
-
-[deploy]
-install = "true"
-"#
-        ),
-    )?;
-    let keys = root.join("keys");
-    let signature = dir.join("release.sig.json");
-    let trust = dir.join("release-trust.toml");
-    crate::dev_sign::sign_release(&keys, &dir.join("tenkai.toml"), &signature, &trust)?;
-    crate::catalog::publish(
-        ctx,
-        &dir.join("tenkai.toml"),
-        &PublishOptions {
-            signature: Some(signature),
-            trust_roots: Some(trust),
-            allow_unsigned_development: false,
-            ..Default::default()
-        },
-    )
-    .await?;
-    Ok(())
+    crate::dev_sign::publish_signed_product(ctx, root, version, "edge-app").await
 }
 
 async fn spoke_versions(ctx: &mut Ctx, spokes: &[String]) -> Result<BTreeMap<String, String>> {

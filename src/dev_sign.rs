@@ -539,6 +539,48 @@ pub fn warning_line() -> &'static str {
     WARNING
 }
 
+/// Write a one-file product, sign it, and publish it. Used by fleet drills.
+pub(crate) async fn publish_signed_product(
+    ctx: &mut crate::client::Ctx,
+    root: &Path,
+    version: &str,
+    product: &str,
+) -> Result<()> {
+    use crate::catalog::{self, PublishOptions};
+
+    let dir = root.join(version);
+    fs::create_dir_all(&dir)?;
+    fs::write(
+        dir.join("tenkai.toml"),
+        format!(
+            r#"
+[product]
+name = "{product}"
+version = "{version}"
+
+[deploy]
+install = "true"
+"#
+        ),
+    )?;
+    let keys = root.join("keys");
+    let signature = dir.join("release.sig.json");
+    let trust = dir.join("release-trust.toml");
+    sign_release(&keys, &dir.join("tenkai.toml"), &signature, &trust)?;
+    catalog::publish(
+        ctx,
+        &dir.join("tenkai.toml"),
+        &PublishOptions {
+            signature: Some(signature),
+            trust_roots: Some(trust),
+            allow_unsigned_development: false,
+            ..Default::default()
+        },
+    )
+    .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

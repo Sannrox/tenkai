@@ -466,7 +466,6 @@ fn completion(plan: &Plan, succeeded: bool) -> RuntimeCompletion {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::PublishOptions;
     use crate::client::Ctx;
     use crate::plan_approval::{
         APPROVAL_SCHEMA, ApprovalEnvelope, ApprovalStatement, canonical_bytes,
@@ -525,38 +524,9 @@ mod tests {
     }
 
     async fn publish_signed(ctx: &mut Ctx, root: &Path, version: &str) {
-        let dir = root.join(version);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("tenkai.toml"),
-            format!(
-                r#"
-[product]
-name = "bridge-app"
-version = "{version}"
-
-[deploy]
-install = "true"
-"#
-            ),
-        )
-        .unwrap();
-        let keys = root.join("keys");
-        let signature = dir.join("release.sig.json");
-        let trust = dir.join("release-trust.toml");
-        crate::dev_sign::sign_release(&keys, &dir.join("tenkai.toml"), &signature, &trust).unwrap();
-        crate::catalog::publish(
-            ctx,
-            &dir.join("tenkai.toml"),
-            &PublishOptions {
-                signature: Some(signature),
-                trust_roots: Some(trust),
-                allow_unsigned_development: false,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
+        crate::dev_sign::publish_signed_product(ctx, root, version, "bridge-app")
+            .await
+            .unwrap();
     }
 
     fn write_plan_approval(plan: &Plan, approval: &Path, trust: &Path, now: i64, ttl: i64) {

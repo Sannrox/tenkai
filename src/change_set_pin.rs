@@ -497,14 +497,9 @@ fn sample_evidence_for(pin: &ChangeSetPinSection) -> ChangeSetPublicationEvidenc
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::catalog::{self, CatalogReader, PublishOptions};
-    use crate::client::Ctx;
-
-    fn pin_toml(section: &ChangeSetPinSection) -> String {
-        let mut body = format!(
-            r#"
+pub(crate) fn render_pin_toml(section: &ChangeSetPinSection) -> String {
+    let mut body = format!(
+        r#"
 [change_set_pin]
 contract = "{}"
 namespace = "{}"
@@ -514,26 +509,36 @@ base_digest = "{}"
 closure_digest = "{}"
 receipt_digest = "{}"
 "#,
-            section.contract,
-            section.namespace,
-            section.branch_id,
-            section.proposal_id,
-            section.base_digest,
-            section.closure_digest,
-            section.receipt_digest,
-        );
-        for member in &section.members {
-            body.push_str(&format!(
-                r#"
+        section.contract,
+        section.namespace,
+        section.branch_id,
+        section.proposal_id,
+        section.base_digest,
+        section.closure_digest,
+        section.receipt_digest,
+    );
+    for member in &section.members {
+        body.push_str(&format!(
+            r#"
 [[change_set_pin.members]]
 kind = "{}"
 id = "{}"
 digest = "{}"
 "#,
-                member.kind, member.id, member.digest
-            ));
-        }
-        body
+            member.kind, member.id, member.digest
+        ));
+    }
+    body
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::{self, CatalogReader, PublishOptions};
+    use crate::client::Ctx;
+
+    fn pin_toml(section: &ChangeSetPinSection) -> String {
+        render_pin_toml(section)
     }
 
     fn write_pinned_manifest(dir: &Path, version: &str, section: &ChangeSetPinSection) {

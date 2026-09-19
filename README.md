@@ -473,7 +473,7 @@ control plane can't safely restart its own backend mid-apply.
 | `TENKAI_OPERATION_ID` | unset | Inbound delivery correlation identity copied onto allowlisted spans (`tenkaictl --operation-id`) |
 | `TENKAI_ENABLE_METRICS` | `false` | Enable the server Prometheus scrape endpoint (`--enable-metrics`) |
 | `TENKAI_INSTANCE_ID` | hostname or generated | Replica identity used for multi-replica fencing |
-| `TENKAI_JWT_VERIFIER_CONFIG` | unset | Path or inline config for enterprise JWT verification |
+| `TENKAI_JWT_VERIFIER_CONFIG` | unset | Filesystem path to a JWT trust TOML file for enterprise JWT verification |
 | `TENKAI_SOFTWARE_EXECUTOR` | unset | Host software adapter: `helm`, `kubernetes` (`k8s` / `native`), `kubernetes-inprocess`, or `fake`; unset keeps the shell install path |
 | `TENKAI_HELM_BIN` | `helm` | Helm binary used by the Helm software executor |
 | `TENKAI_KUBECTL_BIN` | `kubectl` | kubectl binary used by the native Kubernetes software executor |

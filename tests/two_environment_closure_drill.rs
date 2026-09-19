@@ -5,7 +5,8 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+
+mod common;
 
 use tenkai::environment::EnvironmentInspectReport;
 
@@ -18,98 +19,27 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-fn tenkaictl_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_tenkaictl"))
-}
-
-fn executor_guard_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_tenkai-executor-guard"))
-}
-
 struct Drill {
-    root: PathBuf,
-    db: PathBuf,
-    keys: PathBuf,
-    state_dir: PathBuf,
-    release_trust: PathBuf,
-    approval_trust: PathBuf,
-    approvals: PathBuf,
+    cli: common::CliDrill,
 }
 
 impl Drill {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!(
-            "tenkai-two-env-closure-{}-{}",
-            std::process::id(),
-            tenkai::now_millis()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        let keys = root.join("keys");
-        let state_dir = root.join("state");
-        let approvals = root.join("approvals");
-        fs::create_dir_all(&state_dir).unwrap();
-        fs::create_dir_all(&approvals).unwrap();
         Self {
-            db: root.join("tenkai.db"),
-            release_trust: root.join("release-trust.toml"),
-            approval_trust: root.join("approval-trust.toml"),
-            keys,
-            state_dir,
-            approvals,
-            root,
+            cli: common::CliDrill::new(
+                "tenkai-two-env-closure",
+                "two-env-closure-token",
+                &["TENKAI_GATE_URL", "TENKAI_GATE_TOKEN"],
+            ),
         }
     }
 
-    fn command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(tenkaictl_bin());
-        command
-            .arg("--database")
-            .arg(&self.db)
-            .args(args)
-            .env("TENKAI_MANAGEMENT_TOKEN", "two-env-closure-token")
-            .env("TENKAI_STATE_DIR", &self.state_dir)
-            .env("TENKAI_EXECUTOR_GUARD", executor_guard_bin())
-            .env("TMPDIR", &self.root)
-            .env_remove("TENKAI_PLAN_APPROVAL_DIR")
-            .env_remove("TENKAI_PLAN_APPROVAL_TRUST_ROOTS")
-            .env_remove("TENKAI_SOFTWARE_EXECUTOR")
-            .env_remove("TENKAI_HELM_BIN")
-            .env_remove("TENKAI_KUBECTL_BIN")
-            .env_remove("TENKAI_RUNTIME_EXECUTOR")
-            .env_remove("TENKAI_DELIVERY_ADAPTER")
-            .env_remove("TENKAI_GATE_URL")
-            .env_remove("TENKAI_GATE_TOKEN");
-        command
-    }
-
-    fn run(&self, args: &[&str]) -> Output {
-        self.command(args)
-            .output()
-            .unwrap_or_else(|error| panic!("failed to launch tenkaictl {args:?}: {error}"))
-    }
-
     fn ok(&self, args: &[&str]) -> String {
-        let output = self.run(args);
-        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        assert!(
-            output.status.success(),
-            "tenkaictl {args:?} failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
-        );
-        stdout
+        self.cli.ok(args)
     }
 
     fn fail(&self, args: &[&str]) -> String {
-        let output = self.run(args);
-        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        let combined = format!("{stdout}{stderr}");
-        assert!(
-            !output.status.success(),
-            "tenkaictl {args:?} unexpectedly succeeded\n{combined}"
-        );
-        combined
+        self.cli.fail(args)
     }
 
     fn inspect_env(&self, env: &str) -> EnvironmentInspectReport {
@@ -136,17 +66,7 @@ impl Drill {
     }
 
     fn sign_release(&self, manifest: &Path, signature: &Path) {
-        self.ok(&[
-            "dev",
-            "sign-release",
-            manifest.to_str().unwrap(),
-            "--keys",
-            self.keys.to_str().unwrap(),
-            "--signature",
-            signature.to_str().unwrap(),
-            "--trust-roots",
-            self.release_trust.to_str().unwrap(),
-        ]);
+        self.cli.sign_release(manifest, signature);
     }
 
     fn publish_signed(&self, manifest: &Path, signature: &Path, evidence: Option<&Path>) {
@@ -156,7 +76,7 @@ impl Drill {
             "--signature",
             signature.to_str().unwrap(),
             "--trust-roots",
-            self.release_trust.to_str().unwrap(),
+            self.cli.release_trust.to_str().unwrap(),
         ];
         let evidence_s;
         if let Some(path) = evidence {
@@ -168,28 +88,11 @@ impl Drill {
     }
 
     fn sign_plan(&self, plan_id: &str, approval: &Path) {
-        self.ok(&[
-            "dev",
-            "sign-approval",
-            plan_id,
-            "--keys",
-            self.keys.to_str().unwrap(),
-            "--approval",
-            approval.to_str().unwrap(),
-            "--trust-roots",
-            self.approval_trust.to_str().unwrap(),
-        ]);
+        self.cli.sign_plan(plan_id, approval);
     }
 
     fn apply_signed(&self, plan_id: &str, approval: &Path) -> String {
-        self.ok(&[
-            "apply",
-            plan_id,
-            "--approval",
-            approval.to_str().unwrap(),
-            "--approval-trust-roots",
-            self.approval_trust.to_str().unwrap(),
-        ])
+        self.cli.apply_signed(plan_id, approval)
     }
 
     fn apply_fail(&self, plan_id: &str, approval: &Path) -> String {
@@ -199,14 +102,14 @@ impl Drill {
             "--approval",
             approval.to_str().unwrap(),
             "--approval-trust-roots",
-            self.approval_trust.to_str().unwrap(),
+            self.cli.approval_trust.to_str().unwrap(),
         ])
     }
 
     fn plan_and_apply(&self, env: &str) -> String {
         let stdout = self.ok(&["plan", "--env", env]);
-        let plan_id = plan_id_from(&stdout);
-        let approval = self.approvals.join(format!("{plan_id}.json"));
+        let plan_id = common::plan_id_from(&stdout);
+        let approval = self.cli.approvals.join(format!("{plan_id}.json"));
         self.sign_plan(&plan_id, &approval);
         self.apply_signed(&plan_id, &approval);
         plan_id
@@ -215,7 +118,7 @@ impl Drill {
     fn rollback_and_apply(&self, env: &str) {
         let combined = self.fail(&["rollback", PRODUCT, "--env", env]);
         let plan_id = plan_id_from_approval_required(&combined);
-        let approval = self.approvals.join(format!("{plan_id}.json"));
+        let approval = self.cli.approvals.join(format!("{plan_id}.json"));
         self.sign_plan(&plan_id, &approval);
         self.apply_signed(&plan_id, &approval);
     }
@@ -227,7 +130,7 @@ impl Drill {
             "--signature",
             signature.to_str().unwrap(),
             "--trust-roots",
-            self.release_trust.to_str().unwrap(),
+            self.cli.release_trust.to_str().unwrap(),
             "--change-set-evidence",
             evidence.to_str().unwrap(),
         ])
@@ -236,22 +139,6 @@ impl Drill {
     fn promote(&self, version: &str) {
         self.ok(&["promote", &format!("{PRODUCT}@{version}"), "stable"]);
     }
-}
-
-impl Drop for Drill {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.root);
-    }
-}
-
-fn plan_id_from(stdout: &str) -> String {
-    stdout
-        .lines()
-        .find_map(|line| line.strip_prefix("plan id: "))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| panic!("missing plan id in:\n{stdout}"))
-        .to_string()
 }
 
 fn plan_id_from_approval_required(text: &str) -> String {
@@ -290,10 +177,15 @@ fn signed_closure_reaches_two_environments_without_rebuilding_members() {
     for env in ENVS {
         drill.ok(&["env", "add", env, "--description", "two-env closure drill"]);
     }
-    drill.ok(&["dev", "init-keys", "--dir", drill.keys.to_str().unwrap()]);
+    drill.ok(&[
+        "dev",
+        "init-keys",
+        "--dir",
+        drill.cli.keys.to_str().unwrap(),
+    ]);
 
-    let source_sig = drill.root.join("source.sig.json");
-    let target_sig = drill.root.join("target.sig.json");
+    let source_sig = drill.cli.root.join("source.sig.json");
+    let target_sig = drill.cli.root.join("target.sig.json");
     drill.sign_release(&source, &source_sig);
     drill.sign_release(&target, &target_sig);
     drill.publish_signed(&source, &source_sig, None);
@@ -302,7 +194,7 @@ fn signed_closure_reaches_two_environments_without_rebuilding_members() {
         serde_json::from_str(&fs::read_to_string(&evidence).unwrap()).unwrap();
     let mut unaccepted = accepted.clone();
     unaccepted["status"] = serde_json::Value::String("unaccepted".into());
-    let unaccepted_path = drill.root.join("unaccepted-closure.json");
+    let unaccepted_path = drill.cli.root.join("unaccepted-closure.json");
     fs::write(
         &unaccepted_path,
         serde_json::to_vec_pretty(&unaccepted).unwrap(),
@@ -313,7 +205,7 @@ fn signed_closure_reaches_two_environments_without_rebuilding_members() {
 
     let mut missing = accepted.clone();
     missing["members"] = serde_json::Value::Array(Vec::new());
-    let missing_path = drill.root.join("missing-members.json");
+    let missing_path = drill.cli.root.join("missing-members.json");
     fs::write(&missing_path, serde_json::to_vec_pretty(&missing).unwrap()).unwrap();
     let missing_err = drill.fail_publish(&target, &target_sig, &missing_path);
     assert!(
@@ -326,7 +218,7 @@ fn signed_closure_reaches_two_environments_without_rebuilding_members() {
     let mut tampered = accepted.clone();
     tampered["members"][0]["digest"] =
         serde_json::Value::String(format!("sha256:{}", "f".repeat(64)));
-    let tampered_path = drill.root.join("tampered-closure.json");
+    let tampered_path = drill.cli.root.join("tampered-closure.json");
     fs::write(
         &tampered_path,
         serde_json::to_vec_pretty(&tampered).unwrap(),
@@ -376,14 +268,14 @@ fn signed_closure_reaches_two_environments_without_rebuilding_members() {
     let mut completed = Vec::new();
     for env in ENVS {
         let stdout = drill.ok(&["plan", "--env", env]);
-        let plan_id = plan_id_from(&stdout);
-        let approval = drill.approvals.join(format!("{plan_id}.json"));
+        let plan_id = common::plan_id_from(&stdout);
+        let approval = drill.cli.approvals.join(format!("{plan_id}.json"));
         drill.sign_plan(&plan_id, &approval);
         completed.push(plan_id);
     }
     let stale = drill.apply_fail(
         &completed[0],
-        &drill.approvals.join(format!("{}.json", completed[1])),
+        &drill.cli.approvals.join(format!("{}.json", completed[1])),
     );
     assert!(
         stale.contains("approval") || stale.contains("identity") || stale.contains("bound"),
@@ -393,7 +285,7 @@ fn signed_closure_reaches_two_environments_without_rebuilding_members() {
         assert_eq!(drill.deployed(env).as_deref(), Some(SOURCE), "{env}");
     }
     for (env, plan_id) in ENVS.iter().zip(completed.iter()) {
-        let approval = drill.approvals.join(format!("{plan_id}.json"));
+        let approval = drill.cli.approvals.join(format!("{plan_id}.json"));
         drill.apply_signed(plan_id, &approval);
         assert_eq!(drill.deployed(env).as_deref(), Some(TARGET), "{env}");
     }
@@ -404,7 +296,7 @@ fn signed_closure_reaches_two_environments_without_rebuilding_members() {
     );
 
     for plan_id in &completed {
-        let approval = drill.approvals.join(format!("{plan_id}.json"));
+        let approval = drill.cli.approvals.join(format!("{plan_id}.json"));
         let replayed = drill.apply_fail(plan_id, &approval);
         assert!(
             replayed.contains("stale")
