@@ -34,7 +34,7 @@ for shaping, delivering, verifying, assessing, documenting, and releasing work.
 - `cargo clippy --all-targets --all-features --locked -- -D warnings` runs
   strict linting when Clippy is available (matches `make validate`).
 - `make test` runs the default test suite.
-- `make validate` runs formatting, lint, shell, and diff checks.
+- `make validate` runs formatting, lint, shell, diff, and workflow-skill checks.
 - `make test-integration` runs all checked-in integration-test targets.
 - `make update` formats Rust and refreshes build-generated protobuf bindings
   without changing the locked dependency graph.

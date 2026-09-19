@@ -127,11 +127,7 @@ pub(super) async fn admit(
         );
         match ctx.create_once(release).await {
             Ok(_) => {}
-            Err(status)
-                if status.code() == tonic::Code::AlreadyExists
-                    || (status.code() == tonic::Code::Internal
-                        && status.message().contains("UNIQUE")) =>
-            {
+            Err(status) if crate::client::is_unique_conflict(&status) => {
                 let existing = ctx.get(&rid).await?.ok_or_else(|| {
                     anyhow::anyhow!("release {rid} appeared concurrently then vanished")
                 })?;

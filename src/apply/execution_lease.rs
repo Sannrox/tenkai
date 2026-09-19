@@ -258,10 +258,9 @@ async fn claim_environment_with_options(
     match ctx.create_once(available).await {
         Ok(_) => {}
         Err(status)
-            if status.code() == tonic::Code::AlreadyExists
+            if crate::client::is_unique_conflict(&status)
                 || (status.code() == tonic::Code::Internal
-                    && (status.message().contains("UNIQUE")
-                        || status.message().contains("object IDs with audit history"))) => {}
+                    && status.message().contains("object IDs with audit history")) => {}
         Err(status) => {
             let _ = release_environment_lease(ctx, &environment_lease).await;
             return Err(status.into());
@@ -273,9 +272,7 @@ async fn claim_environment_with_options(
             .await
     {
         let _ = release_environment_lease(ctx, &environment_lease).await;
-        if status.code() == tonic::Code::AlreadyExists
-            || (status.code() == tonic::Code::Internal && status.message().contains("UNIQUE"))
-        {
+        if crate::client::is_unique_conflict(&status) {
             bail!("environment {environment} already has an apply in progress");
         }
         return Err(status.into());

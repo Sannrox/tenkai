@@ -1,13 +1,13 @@
 //! tenkaictl — embedded and remote delivery control-plane CLI.
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use clap::error::ErrorKind;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use tenkai::auth_context::AuthenticatedRequestContext;
 use tenkai::command_result::{CommandName, CommandOutcome, CommandResultV1, RetryGuidance};
@@ -19,6 +19,64 @@ use tenkai::{
 
 const JWT_VERIFIER_CONFIG_ENV: &str = "TENKAI_JWT_VERIFIER_CONFIG";
 const JWT_ASSERTION_ENV: &str = "TENKAI_JWT_ASSERTION";
+
+#[derive(Args, Debug)]
+struct ApprovalFileFlags {
+    /// Detached signed-approval JSON envelope.
+    #[arg(
+        long,
+        requires = "approval_trust_roots",
+        conflicts_with = "allow_unapproved_development"
+    )]
+    approval: Option<PathBuf>,
+    /// Current Ed25519 trust roots for approvers.
+    #[arg(
+        long,
+        requires = "approval",
+        conflicts_with = "allow_unapproved_development"
+    )]
+    approval_trust_roots: Option<PathBuf>,
+    /// Explicitly bypass signed approval for the built-in local environment.
+    #[arg(long, requires = "development_reason")]
+    allow_unapproved_development: bool,
+    /// Audited justification for the local-development bypass.
+    #[arg(long, requires = "allow_unapproved_development")]
+    development_reason: Option<String>,
+}
+
+#[derive(Args, Debug)]
+struct ApprovalDirFlags {
+    /// Directory of detached signed-approval JSON envelopes.
+    #[arg(
+        long,
+        requires = "approval_trust_roots",
+        conflicts_with = "allow_unapproved_development"
+    )]
+    approval_dir: Option<PathBuf>,
+    /// Current Ed25519 trust roots for approvers.
+    #[arg(
+        long,
+        requires = "approval_dir",
+        conflicts_with = "allow_unapproved_development"
+    )]
+    approval_trust_roots: Option<PathBuf>,
+    /// Explicitly bypass signed approval for the built-in local environment.
+    #[arg(long, requires = "development_reason")]
+    allow_unapproved_development: bool,
+    /// Audited justification for the local-development bypass.
+    #[arg(long, requires = "allow_unapproved_development")]
+    development_reason: Option<String>,
+}
+
+#[derive(Args, Debug)]
+struct DevelopmentBypassFlags {
+    /// Explicitly bypass signed approval for the built-in local environment.
+    #[arg(long, requires = "development_reason")]
+    allow_unapproved_development: bool,
+    /// Audited justification for the local-development bypass.
+    #[arg(long, requires = "allow_unapproved_development")]
+    development_reason: Option<String>,
+}
 
 fn embedded_management_actor() -> Result<AuthenticatedRequestContext> {
     let token = std::env::var("TENKAI_MANAGEMENT_TOKEN")
@@ -184,26 +242,8 @@ enum Command {
     /// Execute a stored plan: gates, install, health probe, auto-rollback.
     Apply {
         plan_id: String,
-        /// Detached tenkai.plan-approval.v1 JSON envelope.
-        #[arg(
-            long,
-            requires = "approval_trust_roots",
-            conflicts_with = "allow_unapproved_development"
-        )]
-        approval: Option<PathBuf>,
-        /// Current Ed25519 trust roots for plan approvers.
-        #[arg(
-            long,
-            requires = "approval",
-            conflicts_with = "allow_unapproved_development"
-        )]
-        approval_trust_roots: Option<PathBuf>,
-        /// Explicitly bypass signed approval for the built-in local environment.
-        #[arg(long, requires = "development_reason")]
-        allow_unapproved_development: bool,
-        /// Audited justification for the local-development bypass.
-        #[arg(long, requires = "allow_unapproved_development")]
-        development_reason: Option<String>,
+        #[command(flatten)]
+        approval: ApprovalFileFlags,
         /// Bypass eval gates (recorded like any other apply).
         #[arg(long)]
         skip_gates: bool,
@@ -235,12 +275,8 @@ enum Command {
         product: String,
         #[arg(long, default_value = "local")]
         env: String,
-        /// Execute immediately using the explicit local-development bypass.
-        #[arg(long, requires = "development_reason")]
-        allow_unapproved_development: bool,
-        /// Audited justification for the local-development bypass.
-        #[arg(long, requires = "allow_unapproved_development")]
-        development_reason: Option<String>,
+        #[command(flatten)]
+        bypass: DevelopmentBypassFlags,
         /// Start outside maintenance policy and record this reason with the authenticated principal.
         #[arg(long)]
         emergency_reason: Option<String>,
@@ -259,10 +295,8 @@ enum Command {
         product: String,
         #[arg(long, default_value = "local")]
         env: String,
-        #[arg(long, requires = "development_reason")]
-        allow_unapproved_development: bool,
-        #[arg(long, requires = "allow_unapproved_development")]
-        development_reason: Option<String>,
+        #[command(flatten)]
+        bypass: DevelopmentBypassFlags,
         #[arg(long)]
         emergency_reason: Option<String>,
     },
@@ -291,12 +325,8 @@ enum Command {
         /// Bypass eval gates for automatically created executions.
         #[arg(long)]
         skip_gates: bool,
-        /// Explicitly permit automatic execution only for the built-in local environment.
-        #[arg(long, requires = "development_reason")]
-        allow_unapproved_development: bool,
-        /// Audited justification for automatic local-development execution.
-        #[arg(long, requires = "allow_unapproved_development")]
-        development_reason: Option<String>,
+        #[command(flatten)]
+        bypass: DevelopmentBypassFlags,
     },
     /// Development-only signing helpers for laptop dogfood (not production KMS).
     Dev {
@@ -531,22 +561,8 @@ enum WaveCommand {
         cohort: String,
         #[arg(long)]
         continue_on_failure: bool,
-        #[arg(
-            long,
-            requires = "approval_trust_roots",
-            conflicts_with = "allow_unapproved_development"
-        )]
-        approval_dir: Option<PathBuf>,
-        #[arg(
-            long,
-            requires = "approval_dir",
-            conflicts_with = "allow_unapproved_development"
-        )]
-        approval_trust_roots: Option<PathBuf>,
-        #[arg(long, requires = "development_reason")]
-        allow_unapproved_development: bool,
-        #[arg(long, requires = "allow_unapproved_development")]
-        development_reason: Option<String>,
+        #[command(flatten)]
+        approval: ApprovalDirFlags,
     },
     /// Show a durable wave's cohort status.
     Status { name: String },
@@ -555,42 +571,14 @@ enum WaveCommand {
     /// Resume an admitted or awaiting-approval wave.
     Resume {
         name: String,
-        #[arg(
-            long,
-            requires = "approval_trust_roots",
-            conflicts_with = "allow_unapproved_development"
-        )]
-        approval_dir: Option<PathBuf>,
-        #[arg(
-            long,
-            requires = "approval_dir",
-            conflicts_with = "allow_unapproved_development"
-        )]
-        approval_trust_roots: Option<PathBuf>,
-        #[arg(long, requires = "development_reason")]
-        allow_unapproved_development: bool,
-        #[arg(long, requires = "allow_unapproved_development")]
-        development_reason: Option<String>,
+        #[command(flatten)]
+        approval: ApprovalDirFlags,
     },
     /// Roll back succeeded cohorts of a durable wave through Tenkai rollback plans.
     Rollback {
         name: String,
-        #[arg(
-            long,
-            requires = "approval_trust_roots",
-            conflicts_with = "allow_unapproved_development"
-        )]
-        approval_dir: Option<PathBuf>,
-        #[arg(
-            long,
-            requires = "approval_dir",
-            conflicts_with = "allow_unapproved_development"
-        )]
-        approval_trust_roots: Option<PathBuf>,
-        #[arg(long, requires = "development_reason")]
-        allow_unapproved_development: bool,
-        #[arg(long, requires = "allow_unapproved_development")]
-        development_reason: Option<String>,
+        #[command(flatten)]
+        approval: ApprovalDirFlags,
     },
 }
 
@@ -614,24 +602,8 @@ enum UpgradeCommand {
     /// Advance the next pending or interrupted environment.
     Advance {
         name: String,
-        /// Detached tenkai.plan-approval.v1 JSON envelope.
-        #[arg(
-            long,
-            requires = "approval_trust_roots",
-            conflicts_with = "allow_unapproved_development"
-        )]
-        approval: Option<PathBuf>,
-        /// Current Ed25519 trust roots for plan approvers.
-        #[arg(
-            long,
-            requires = "approval",
-            conflicts_with = "allow_unapproved_development"
-        )]
-        approval_trust_roots: Option<PathBuf>,
-        #[arg(long, requires = "development_reason")]
-        allow_unapproved_development: bool,
-        #[arg(long, requires = "allow_unapproved_development")]
-        development_reason: Option<String>,
+        #[command(flatten)]
+        approval: ApprovalFileFlags,
     },
     /// Interrupt an intermittent transfer before verified content.
     Interrupt { name: String, env: String },
@@ -665,10 +637,8 @@ enum UpgradeCommand {
     /// Roll back applied environments through Tenkai rollback plans.
     Rollback {
         name: String,
-        #[arg(long, requires = "development_reason")]
-        allow_unapproved_development: bool,
-        #[arg(long, requires = "allow_unapproved_development")]
-        development_reason: Option<String>,
+        #[command(flatten)]
+        bypass: DevelopmentBypassFlags,
     },
 }
 
@@ -698,24 +668,8 @@ enum MigrateCommand {
         /// Current fencing generation; required with --target remote.
         #[arg(long)]
         expected_generation: Option<u64>,
-        /// Detached tenkai.package-migration-approval.v1 JSON envelope.
-        #[arg(
-            long,
-            requires = "approval_trust_roots",
-            conflicts_with = "allow_unapproved_development"
-        )]
-        approval: Option<PathBuf>,
-        /// Current Ed25519 trust roots for package-migration approvers.
-        #[arg(
-            long,
-            requires = "approval",
-            conflicts_with = "allow_unapproved_development"
-        )]
-        approval_trust_roots: Option<PathBuf>,
-        #[arg(long, requires = "development_reason")]
-        allow_unapproved_development: bool,
-        #[arg(long, requires = "allow_unapproved_development")]
-        development_reason: Option<String>,
+        #[command(flatten)]
+        approval: ApprovalFileFlags,
     },
     /// Show a stored package migration and its checkpoint receipts.
     Status { name: String },
@@ -724,44 +678,16 @@ enum MigrateCommand {
         name: String,
         #[arg(long)]
         expected_generation: Option<u64>,
-        #[arg(
-            long,
-            requires = "approval_trust_roots",
-            conflicts_with = "allow_unapproved_development"
-        )]
-        approval: Option<PathBuf>,
-        #[arg(
-            long,
-            requires = "approval",
-            conflicts_with = "allow_unapproved_development"
-        )]
-        approval_trust_roots: Option<PathBuf>,
-        #[arg(long, requires = "development_reason")]
-        allow_unapproved_development: bool,
-        #[arg(long, requires = "allow_unapproved_development")]
-        development_reason: Option<String>,
+        #[command(flatten)]
+        approval: ApprovalFileFlags,
     },
     /// Roll back reversible or compensating checkpoints; irreversible work stays recovery-required.
     Rollback {
         name: String,
         #[arg(long)]
         expected_generation: Option<u64>,
-        #[arg(
-            long,
-            requires = "approval_trust_roots",
-            conflicts_with = "allow_unapproved_development"
-        )]
-        approval: Option<PathBuf>,
-        #[arg(
-            long,
-            requires = "approval",
-            conflicts_with = "allow_unapproved_development"
-        )]
-        approval_trust_roots: Option<PathBuf>,
-        #[arg(long, requires = "development_reason")]
-        allow_unapproved_development: bool,
-        #[arg(long, requires = "allow_unapproved_development")]
-        development_reason: Option<String>,
+        #[command(flatten)]
+        approval: ApprovalFileFlags,
     },
 }
 
@@ -1172,12 +1098,9 @@ async fn run(cli: Cli) -> Result<()> {
         let client = tenkai::server::RemoteClient::new(server_url, token)?;
         match cli.command {
             Command::Reconcile {
-                once: true,
-                allow_unapproved_development,
-                development_reason,
-                ..
+                once: true, bypass, ..
             } => {
-                if allow_unapproved_development || development_reason.is_some() {
+                if bypass.allow_unapproved_development || bypass.development_reason.is_some() {
                     bail!(
                         "the local-development reconciliation bypass is available only with --target embedded"
                     );
@@ -1397,14 +1320,11 @@ async fn run(cli: Cli) -> Result<()> {
             Command::Apply {
                 plan_id,
                 approval,
-                approval_trust_roots,
-                allow_unapproved_development,
-                development_reason,
                 skip_gates,
                 emergency_reason,
                 generation,
             } => {
-                if allow_unapproved_development || development_reason.is_some() {
+                if approval.allow_unapproved_development || approval.development_reason.is_some() {
                     bail!(
                         "the local-development apply bypass is available only with --target embedded"
                     );
@@ -1412,17 +1332,17 @@ async fn run(cli: Cli) -> Result<()> {
                 let generation = generation.ok_or_else(|| {
                     anyhow::anyhow!("--generation is required with --target remote")
                 })?;
-                let approval = approval.ok_or_else(|| {
+                let approval_path = approval.approval.ok_or_else(|| {
                     anyhow::anyhow!("--approval is required with --target remote")
                 })?;
-                let approval_trust_roots = approval_trust_roots.ok_or_else(|| {
+                let approval_trust_roots = approval.approval_trust_roots.ok_or_else(|| {
                     anyhow::anyhow!("--approval-trust-roots is required with --target remote")
                 })?;
                 let env = tenkai::management_lifecycle::plan_environment_from_id(&plan_id)?;
                 let request = tenkai::management_lifecycle::load_apply_request(
                     env,
                     generation,
-                    &approval,
+                    &approval_path,
                     &approval_trust_roots,
                     skip_gates,
                     emergency_reason,
@@ -1434,14 +1354,13 @@ async fn run(cli: Cli) -> Result<()> {
             Command::Rollback {
                 product,
                 env,
-                allow_unapproved_development,
-                development_reason,
+                bypass,
                 emergency_reason: _,
                 allow_recalled_recovery,
                 recovery_reason,
                 generation,
             } => {
-                if allow_unapproved_development || development_reason.is_some() {
+                if bypass.allow_unapproved_development || bypass.development_reason.is_some() {
                     bail!(
                         "the local-development rollback bypass is available only with --target embedded"
                     );
@@ -1904,18 +1823,13 @@ async fn run(cli: Cli) -> Result<()> {
                 let record = connectivity::load_upgrade(&mut ctx, &name).await?;
                 println!("{}", connectivity::format_upgrade(&record));
             }
-            UpgradeCommand::Advance {
-                name,
-                approval,
-                approval_trust_roots,
-                allow_unapproved_development,
-                development_reason,
-            } => {
-                let authorization = upgrade_authorization(
-                    approval.as_deref(),
-                    approval_trust_roots.as_deref(),
-                    allow_unapproved_development,
-                    development_reason.as_deref(),
+            UpgradeCommand::Advance { name, approval } => {
+                let authorization = execution_authorization(
+                    approval.approval.as_deref(),
+                    approval.approval_trust_roots.as_deref(),
+                    approval.allow_unapproved_development,
+                    approval.development_reason.as_deref(),
+                    "upgrade execution requires --approval and --approval-trust-roots, or --allow-unapproved-development with --development-reason",
                 )?;
                 let record = connectivity::advance(&mut ctx, &name, authorization).await?;
                 println!("{}", connectivity::format_upgrade(&record));
@@ -1962,12 +1876,8 @@ async fn run(cli: Cli) -> Result<()> {
                 .await?;
                 println!("{}", connectivity::format_upgrade(&record));
             }
-            UpgradeCommand::Rollback {
-                name,
-                allow_unapproved_development,
-                development_reason,
-            } => {
-                if !allow_unapproved_development {
+            UpgradeCommand::Rollback { name, bypass } => {
+                if !bypass.allow_unapproved_development {
                     bail!(
                         "upgrade rollback requires --allow-unapproved-development; signed rollback plans are created at apply time and cannot reuse a pre-issued approval envelope"
                     );
@@ -1976,7 +1886,10 @@ async fn run(cli: Cli) -> Result<()> {
                     &mut ctx,
                     &name,
                     apply::ExecutionAuthorization::LocalDevelopment {
-                        reason: development_reason.as_deref().unwrap_or("upgrade rollback"),
+                        reason: bypass
+                            .development_reason
+                            .as_deref()
+                            .unwrap_or("upgrade rollback"),
                     },
                 )
                 .await?;
@@ -2008,16 +1921,13 @@ async fn run(cli: Cli) -> Result<()> {
                 backup_receipt_digest,
                 expected_generation: _,
                 approval,
-                approval_trust_roots,
-                allow_unapproved_development,
-                development_reason,
             } => {
                 let declaration = package_migration::MigrationDeclaration::load(&declaration)?;
                 let authorization = migration_authorization(
-                    approval.as_deref(),
-                    approval_trust_roots.as_deref(),
-                    allow_unapproved_development,
-                    development_reason.as_deref(),
+                    approval.approval.as_deref(),
+                    approval.approval_trust_roots.as_deref(),
+                    approval.allow_unapproved_development,
+                    approval.development_reason.as_deref(),
                 )?;
                 let record = package_migration::run_until_blocked(
                     &mut ctx,
@@ -2050,15 +1960,12 @@ async fn run(cli: Cli) -> Result<()> {
                 name,
                 expected_generation,
                 approval,
-                approval_trust_roots,
-                allow_unapproved_development,
-                development_reason,
             } => {
                 let authorization = migration_authorization(
-                    approval.as_deref(),
-                    approval_trust_roots.as_deref(),
-                    allow_unapproved_development,
-                    development_reason.as_deref(),
+                    approval.approval.as_deref(),
+                    approval.approval_trust_roots.as_deref(),
+                    approval.allow_unapproved_development,
+                    approval.development_reason.as_deref(),
                 )?;
                 let mut last_receipts = 0;
                 loop {
@@ -2098,15 +2005,12 @@ async fn run(cli: Cli) -> Result<()> {
                 name,
                 expected_generation,
                 approval,
-                approval_trust_roots,
-                allow_unapproved_development,
-                development_reason,
             } => {
                 let authorization = migration_authorization(
-                    approval.as_deref(),
-                    approval_trust_roots.as_deref(),
-                    allow_unapproved_development,
-                    development_reason.as_deref(),
+                    approval.approval.as_deref(),
+                    approval.approval_trust_roots.as_deref(),
+                    approval.allow_unapproved_development,
+                    approval.development_reason.as_deref(),
                 )?;
                 let record = package_migration::rollback(
                     &mut ctx,
@@ -2149,10 +2053,7 @@ async fn run(cli: Cli) -> Result<()> {
                 channel,
                 cohort,
                 continue_on_failure,
-                approval_dir,
-                approval_trust_roots,
-                allow_unapproved_development,
-                development_reason,
+                approval,
             } => {
                 let environments: Vec<String> = cohort
                     .split(',')
@@ -2169,10 +2070,10 @@ async fn run(cli: Cli) -> Result<()> {
                     !continue_on_failure,
                 )?;
                 let authorization = wave_authorization(
-                    approval_dir.as_deref(),
-                    approval_trust_roots.as_deref(),
-                    allow_unapproved_development,
-                    development_reason.as_deref(),
+                    approval.approval_dir.as_deref(),
+                    approval.approval_trust_roots.as_deref(),
+                    approval.allow_unapproved_development,
+                    approval.development_reason.as_deref(),
                 )?;
                 let record = wave::run_until_blocked(&mut ctx, &spec, authorization).await?;
                 println!("{}", wave::format_wave(&record));
@@ -2191,18 +2092,12 @@ async fn run(cli: Cli) -> Result<()> {
                 let record = wave::stop_wave(&mut ctx, &name).await?;
                 println!("{}", wave::format_wave(&record));
             }
-            WaveCommand::Resume {
-                name,
-                approval_dir,
-                approval_trust_roots,
-                allow_unapproved_development,
-                development_reason,
-            } => {
+            WaveCommand::Resume { name, approval } => {
                 let authorization = wave_authorization(
-                    approval_dir.as_deref(),
-                    approval_trust_roots.as_deref(),
-                    allow_unapproved_development,
-                    development_reason.as_deref(),
+                    approval.approval_dir.as_deref(),
+                    approval.approval_trust_roots.as_deref(),
+                    approval.allow_unapproved_development,
+                    approval.development_reason.as_deref(),
                 )?;
                 loop {
                     let record = wave::advance(&mut ctx, &name, authorization).await?;
@@ -2223,18 +2118,12 @@ async fn run(cli: Cli) -> Result<()> {
                     }
                 }
             }
-            WaveCommand::Rollback {
-                name,
-                approval_dir,
-                approval_trust_roots,
-                allow_unapproved_development,
-                development_reason,
-            } => {
+            WaveCommand::Rollback { name, approval } => {
                 let authorization = wave_authorization(
-                    approval_dir.as_deref(),
-                    approval_trust_roots.as_deref(),
-                    allow_unapproved_development,
-                    development_reason.as_deref(),
+                    approval.approval_dir.as_deref(),
+                    approval.approval_trust_roots.as_deref(),
+                    approval.allow_unapproved_development,
+                    approval.development_reason.as_deref(),
                 )?;
                 let record = wave::rollback_wave(&mut ctx, &name, authorization).await?;
                 println!("{}", wave::format_wave(&record));
@@ -2573,9 +2462,6 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Apply {
             plan_id,
             approval,
-            approval_trust_roots,
-            allow_unapproved_development,
-            development_reason,
             skip_gates,
             emergency_reason,
             generation: _,
@@ -2593,27 +2479,13 @@ async fn run(cli: Cli) -> Result<()> {
                 println!("applying {} to {}:", stored.id, stored.environment);
                 print_steps(&stored.steps);
             }
-            let authorization = match (
-                approval.as_deref(),
-                approval_trust_roots.as_deref(),
-                allow_unapproved_development,
-            ) {
-                (Some(approval), Some(trust_roots), false) => {
-                    apply::ExecutionAuthorization::Signed {
-                        approval,
-                        trust_roots,
-                    }
-                }
-                (None, None, true) => apply::ExecutionAuthorization::LocalDevelopment {
-                    reason: development_reason
-                        .as_deref()
-                        .expect("clap requires a development reason"),
-                },
-                (None, None, false) => bail!(
-                    "plan execution requires --approval and --approval-trust-roots; local development may explicitly use --allow-unapproved-development with --development-reason"
-                ),
-                _ => unreachable!("clap rejects partial or conflicting authorization modes"),
-            };
+            let authorization = execution_authorization(
+                approval.approval.as_deref(),
+                approval.approval_trust_roots.as_deref(),
+                approval.allow_unapproved_development,
+                approval.development_reason.as_deref(),
+                "plan execution requires --approval and --approval-trust-roots; local development may explicitly use --allow-unapproved-development with --development-reason",
+            )?;
             run_plan(
                 &mut ctx,
                 &plan_id,
@@ -2707,8 +2579,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Rollback {
             product,
             env,
-            allow_unapproved_development,
-            development_reason,
+            bypass,
             emergency_reason,
             allow_recalled_recovery,
             recovery_reason,
@@ -2747,7 +2618,7 @@ async fn run(cli: Cli) -> Result<()> {
                 println!("rolling back in {env}:");
                 print_steps(&stored.steps);
             }
-            if allow_unapproved_development {
+            if bypass.allow_unapproved_development {
                 run_plan(
                     &mut ctx,
                     &stored.id,
@@ -2755,7 +2626,8 @@ async fn run(cli: Cli) -> Result<()> {
                         skip_gates: true,
                         emergency_reason: emergency_reason.as_deref(),
                         authorization: apply::ExecutionAuthorization::LocalDevelopment {
-                            reason: development_reason
+                            reason: bypass
+                                .development_reason
                                 .as_deref()
                                 .expect("clap requires a development reason"),
                         },
@@ -2801,8 +2673,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Restart {
             product,
             env,
-            allow_unapproved_development,
-            development_reason,
+            bypass,
             emergency_reason,
         } => {
             let step = plan::restart_step(&mut ctx, &env, &product).await?;
@@ -2811,7 +2682,7 @@ async fn run(cli: Cli) -> Result<()> {
                 println!("restarting in {env}:");
                 print_steps(&stored.steps);
             }
-            if allow_unapproved_development {
+            if bypass.allow_unapproved_development {
                 run_plan(
                     &mut ctx,
                     &stored.id,
@@ -2819,7 +2690,8 @@ async fn run(cli: Cli) -> Result<()> {
                         skip_gates: true,
                         emergency_reason: emergency_reason.as_deref(),
                         authorization: apply::ExecutionAuthorization::LocalDevelopment {
-                            reason: development_reason
+                            reason: bypass
+                                .development_reason
                                 .as_deref()
                                 .expect("clap requires a development reason"),
                         },
@@ -2917,8 +2789,7 @@ async fn run(cli: Cli) -> Result<()> {
             max_backoff,
             max_concurrency,
             skip_gates,
-            allow_unapproved_development,
-            development_reason,
+            bypass,
         } => {
             let reconciler = reconciler::Reconciler::new(
                 ctx.clone(),
@@ -2927,8 +2798,9 @@ async fn run(cli: Cli) -> Result<()> {
                     max_backoff: Duration::from_secs(max_backoff),
                     max_concurrency,
                     skip_gates,
-                    unapproved_development_reason: allow_unapproved_development.then(|| {
-                        development_reason
+                    unapproved_development_reason: bypass.allow_unapproved_development.then(|| {
+                        bypass
+                            .development_reason
                             .clone()
                             .expect("clap requires a development reason")
                     }),
@@ -2959,25 +2831,44 @@ async fn run(cli: Cli) -> Result<()> {
     Ok(())
 }
 
-fn upgrade_authorization<'a>(
-    approval: Option<&'a std::path::Path>,
-    approval_trust_roots: Option<&'a std::path::Path>,
+fn signed_or_local_development<'a, T>(
+    evidence: Option<&'a Path>,
+    trust_roots: Option<&'a Path>,
     allow_unapproved_development: bool,
     development_reason: Option<&'a str>,
-) -> Result<apply::ExecutionAuthorization<'a>> {
-    match (approval, approval_trust_roots, allow_unapproved_development) {
-        (Some(approval), Some(trust_roots), false) => Ok(apply::ExecutionAuthorization::Signed {
-            approval,
-            trust_roots,
-        }),
-        (None, None, true) => Ok(apply::ExecutionAuthorization::LocalDevelopment {
-            reason: development_reason.expect("clap requires a development reason"),
-        }),
-        (None, None, false) => bail!(
-            "upgrade execution requires --approval and --approval-trust-roots, or --allow-unapproved-development with --development-reason"
-        ),
+    missing: &str,
+    signed: impl FnOnce(&'a Path, &'a Path) -> T,
+    local: impl FnOnce(&'a str) -> T,
+) -> Result<T> {
+    match (evidence, trust_roots, allow_unapproved_development) {
+        (Some(evidence), Some(trust_roots), false) => Ok(signed(evidence, trust_roots)),
+        (None, None, true) => Ok(local(
+            development_reason.expect("clap requires a development reason"),
+        )),
+        (None, None, false) => bail!("{missing}"),
         _ => unreachable!("clap rejects partial or conflicting authorization modes"),
     }
+}
+
+fn execution_authorization<'a>(
+    approval: Option<&'a Path>,
+    approval_trust_roots: Option<&'a Path>,
+    allow_unapproved_development: bool,
+    development_reason: Option<&'a str>,
+    missing: &str,
+) -> Result<apply::ExecutionAuthorization<'a>> {
+    signed_or_local_development(
+        approval,
+        approval_trust_roots,
+        allow_unapproved_development,
+        development_reason,
+        missing,
+        |approval, trust_roots| apply::ExecutionAuthorization::Signed {
+            approval,
+            trust_roots,
+        },
+        |reason| apply::ExecutionAuthorization::LocalDevelopment { reason },
+    )
 }
 
 async fn run_remote_migrate(
@@ -3013,16 +2904,15 @@ async fn run_remote_migrate(
             backup_receipt_digest,
             expected_generation,
             approval,
-            approval_trust_roots,
-            allow_unapproved_development,
-            development_reason: _,
         } => {
-            reject_remote_migration_bypass(allow_unapproved_development)?;
+            reject_remote_migration_bypass(approval.allow_unapproved_development)?;
             let expected_generation = expected_generation.ok_or_else(|| {
                 anyhow::anyhow!("remote package migration apply requires --expected-generation")
             })?;
-            let (approval, trust_roots, plan_approvals) =
-                load_remote_migration_authorization(approval, approval_trust_roots)?;
+            let (approval, trust_roots, plan_approvals) = load_remote_migration_authorization(
+                approval.approval,
+                approval.approval_trust_roots,
+            )?;
             let declaration = package_migration::MigrationDeclaration::load(&declaration)?;
             let result = client
                 .apply_package_migration(
@@ -3062,16 +2952,15 @@ async fn run_remote_migrate(
             name,
             expected_generation,
             approval,
-            approval_trust_roots,
-            allow_unapproved_development,
-            development_reason: _,
         } => {
-            reject_remote_migration_bypass(allow_unapproved_development)?;
+            reject_remote_migration_bypass(approval.allow_unapproved_development)?;
             let expected_generation = expected_generation.ok_or_else(|| {
                 anyhow::anyhow!("remote package migration resume requires --expected-generation")
             })?;
-            let (approval, trust_roots, plan_approvals) =
-                load_remote_migration_authorization(approval, approval_trust_roots)?;
+            let (approval, trust_roots, plan_approvals) = load_remote_migration_authorization(
+                approval.approval,
+                approval.approval_trust_roots,
+            )?;
             let result = client
                 .resume_package_migration(
                     &name,
@@ -3102,16 +2991,15 @@ async fn run_remote_migrate(
             name,
             expected_generation,
             approval,
-            approval_trust_roots,
-            allow_unapproved_development,
-            development_reason: _,
         } => {
-            reject_remote_migration_bypass(allow_unapproved_development)?;
+            reject_remote_migration_bypass(approval.allow_unapproved_development)?;
             let expected_generation = expected_generation.ok_or_else(|| {
                 anyhow::anyhow!("remote package migration rollback requires --expected-generation")
             })?;
-            let (approval, trust_roots, plan_approvals) =
-                load_remote_migration_authorization(approval, approval_trust_roots)?;
+            let (approval, trust_roots, plan_approvals) = load_remote_migration_authorization(
+                approval.approval,
+                approval.approval_trust_roots,
+            )?;
             let result = client
                 .rollback_package_migration(
                     &name,
@@ -3218,51 +3106,43 @@ fn sibling_plan_approvals(
 }
 
 fn migration_authorization<'a>(
-    approval: Option<&'a std::path::Path>,
-    approval_trust_roots: Option<&'a std::path::Path>,
+    approval: Option<&'a Path>,
+    approval_trust_roots: Option<&'a Path>,
     allow_unapproved_development: bool,
     development_reason: Option<&'a str>,
 ) -> Result<package_migration::MigrationAuthorization<'a>> {
-    match (approval, approval_trust_roots, allow_unapproved_development) {
-        (Some(approval), Some(trust_roots), false) => {
-            Ok(package_migration::MigrationAuthorization::Signed {
-                approval,
-                trust_roots,
-            })
-        }
-        (None, None, true) => Ok(
-            package_migration::MigrationAuthorization::LocalDevelopment {
-                reason: development_reason.expect("clap requires a development reason"),
-            },
-        ),
-        _ => bail!(
-            "package migration requires --approval and --approval-trust-roots, or --allow-unapproved-development with --development-reason"
-        ),
-    }
+    signed_or_local_development(
+        approval,
+        approval_trust_roots,
+        allow_unapproved_development,
+        development_reason,
+        "package migration requires --approval and --approval-trust-roots, or --allow-unapproved-development with --development-reason",
+        |approval, trust_roots| package_migration::MigrationAuthorization::Signed {
+            approval,
+            trust_roots,
+        },
+        |reason| package_migration::MigrationAuthorization::LocalDevelopment { reason },
+    )
 }
 
 fn wave_authorization<'a>(
-    approval_dir: Option<&'a std::path::Path>,
-    approval_trust_roots: Option<&'a std::path::Path>,
+    approval_dir: Option<&'a Path>,
+    approval_trust_roots: Option<&'a Path>,
     allow_unapproved_development: bool,
     development_reason: Option<&'a str>,
 ) -> Result<wave::WaveAuthorization<'a>> {
-    match (
+    signed_or_local_development(
         approval_dir,
         approval_trust_roots,
         allow_unapproved_development,
-    ) {
-        (Some(approval_dir), Some(trust_roots), false) => Ok(wave::WaveAuthorization::Signed {
+        development_reason,
+        "wave execution requires --approval-dir and --approval-trust-roots, or --allow-unapproved-development with --development-reason",
+        |approval_dir, trust_roots| wave::WaveAuthorization::Signed {
             approval_dir,
             trust_roots,
-        }),
-        (None, None, true) => Ok(wave::WaveAuthorization::LocalDevelopment {
-            reason: development_reason.expect("clap requires a development reason"),
-        }),
-        _ => bail!(
-            "wave execution requires --approval-dir and --approval-trust-roots, or --allow-unapproved-development with --development-reason"
-        ),
-    }
+        },
+        |reason| wave::WaveAuthorization::LocalDevelopment { reason },
+    )
 }
 
 fn parse_preview_expiry(value: &str) -> Result<i64> {
@@ -4026,7 +3906,7 @@ mod tests {
                     ref approval,
                     ..
                 }
-            } if name == "fleet-1" && approval.as_deref() == Some(std::path::Path::new("site-a.json"))
+            } if name == "fleet-1" && approval.approval.as_deref() == Some(std::path::Path::new("site-a.json"))
         ));
         let bind = Cli::try_parse_from([
             "tenkaictl",
@@ -4104,7 +3984,10 @@ mod tests {
             Command::Migrate {
                 command: MigrateCommand::Apply {
                     ref name,
-                    allow_unapproved_development: true,
+                    approval: ApprovalFileFlags {
+                        allow_unapproved_development: true,
+                        ..
+                    },
                     ..
                 }
             } if name == "cutover"
@@ -4252,5 +4135,78 @@ mod tests {
             approval_parent_dir(std::path::Path::new("approvals/cutover.approval.json")),
             std::path::Path::new("approvals")
         );
+    }
+
+    #[test]
+    fn parses_shared_apply_and_wave_approval_flags() {
+        let apply = Cli::try_parse_from([
+            "tenkaictl",
+            "apply",
+            "tenkai:plan:local:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--approval",
+            "plan.approval.json",
+            "--approval-trust-roots",
+            "approvers.toml",
+        ])
+        .unwrap();
+        let Command::Apply { approval, .. } = apply.command else {
+            panic!("expected apply");
+        };
+        assert_eq!(approval.approval, Some(PathBuf::from("plan.approval.json")));
+        assert_eq!(
+            approval.approval_trust_roots,
+            Some(PathBuf::from("approvers.toml"))
+        );
+        assert!(!approval.allow_unapproved_development);
+
+        let wave = Cli::try_parse_from([
+            "tenkaictl",
+            "wave",
+            "resume",
+            "cutover",
+            "--allow-unapproved-development",
+            "--development-reason",
+            "local drill",
+        ])
+        .unwrap();
+        let Command::Wave {
+            command: WaveCommand::Resume { approval, .. },
+        } = wave.command
+        else {
+            panic!("expected wave resume");
+        };
+        assert!(approval.approval_dir.is_none());
+        assert!(approval.allow_unapproved_development);
+        assert_eq!(approval.development_reason.as_deref(), Some("local drill"));
+    }
+
+    #[test]
+    fn signed_or_local_development_preserves_fail_closed_messages() {
+        let signed = execution_authorization(
+            Some(Path::new("plan.approval.json")),
+            Some(Path::new("approvers.toml")),
+            false,
+            None,
+            "missing",
+        )
+        .unwrap();
+        assert!(matches!(
+            signed,
+            apply::ExecutionAuthorization::Signed { .. }
+        ));
+
+        let local =
+            execution_authorization(None, None, true, Some("local drill"), "missing").unwrap();
+        assert!(matches!(
+            local,
+            apply::ExecutionAuthorization::LocalDevelopment {
+                reason: "local drill"
+            }
+        ));
+
+        let error =
+            execution_authorization(None, None, false, None, "plan execution requires flags")
+                .unwrap_err();
+        assert_eq!(error.to_string(), "plan execution requires flags");
     }
 }

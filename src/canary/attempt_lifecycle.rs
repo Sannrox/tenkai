@@ -249,10 +249,7 @@ async fn persist_attempt(
                 link_attempt_to_policies(ctx, &id, &snapshot.policies).await?;
                 return Ok(Some(id));
             }
-            Err(status)
-                if status.code() == tonic::Code::AlreadyExists
-                    || (status.code() == tonic::Code::Internal
-                        && status.message().contains("UNIQUE")) => {}
+            Err(status) if crate::client::is_unique_conflict(&status) => {}
             Err(status) => return Err(status.into()),
         }
     }
@@ -778,11 +775,7 @@ async fn record_plan_outcomes(
                         persisted_id = Some(id);
                         break;
                     }
-                    Err(status)
-                        if status.code() == tonic::Code::AlreadyExists
-                            || (status.code() == tonic::Code::Internal
-                                && status.message().contains("UNIQUE")) =>
-                    {
+                    Err(status) if crate::client::is_unique_conflict(&status) => {
                         let existing = ctx.get(&id).await?.context("canary outcome disappeared")?;
                         if object_property(&existing, "outcome")? == serialized {
                             persisted_id = Some(id);

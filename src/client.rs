@@ -1246,6 +1246,12 @@ impl Ctx {
     }
 }
 
+/// True when create-once (or register) failed because the identity already exists.
+pub(crate) fn is_unique_conflict(status: &Status) -> bool {
+    status.code() == tonic::Code::AlreadyExists
+        || (status.code() == tonic::Code::Internal && status.message().contains("UNIQUE"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1279,7 +1285,25 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio::sync::OnceCell;
     use tokio_stream::wrappers::TcpListenerStream;
+    use tonic::Status;
     use tonic::transport::Server;
+
+    #[test]
+    fn unique_conflict_treats_already_exists_and_internal_unique_as_the_same() {
+        assert!(super::is_unique_conflict(&Status::already_exists(
+            "object exists"
+        )));
+        assert!(super::is_unique_conflict(&Status::internal(
+            "UNIQUE constraint failed: objects.id"
+        )));
+        assert!(!super::is_unique_conflict(&Status::internal(
+            "object IDs with audit history cannot be reused"
+        )));
+        assert!(!super::is_unique_conflict(&Status::internal(
+            "storage unavailable"
+        )));
+        assert!(!super::is_unique_conflict(&Status::not_found("missing")));
+    }
 
     type CapturedMetadata = (Option<String>, Option<String>);
 

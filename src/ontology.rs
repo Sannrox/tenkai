@@ -745,10 +745,7 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
         let kind = t.kind.clone();
         match ctx.register_schema(t).await {
             Ok(()) => registered.push(kind),
-            Err(status)
-                if status.code() == tonic::Code::AlreadyExists
-                    || (status.code() == tonic::Code::Internal
-                        && status.message().contains("UNIQUE")) => {}
+            Err(status) if crate::client::is_unique_conflict(&status) => {}
             Err(status) => return Err(status.into()),
         }
     }
@@ -756,10 +753,7 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
         let name = action.name.clone();
         match ctx.register_action(action).await {
             Ok(()) => registered.push(name),
-            Err(status) if status.code() == tonic::Code::AlreadyExists => {}
-            Err(status)
-                if status.code() == tonic::Code::Internal
-                    && status.message().contains("UNIQUE") => {}
+            Err(status) if crate::client::is_unique_conflict(&status) => {}
             Err(status) => return Err(status.into()),
         }
     }
