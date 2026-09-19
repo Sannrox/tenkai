@@ -91,10 +91,7 @@ pub(crate) async fn claim_promotion_lock(
     if ctx.get(&lock.id).await?.is_none() {
         match ctx.create_once(object.clone()).await {
             Ok(_) => {}
-            Err(status)
-                if status.code() == tonic::Code::AlreadyExists
-                    || (status.code() == tonic::Code::Internal
-                        && status.message().contains("UNIQUE")) => {}
+            Err(status) if crate::client::is_unique_conflict(&status) => {}
             Err(status) => return Err(status.into()),
         }
     }
@@ -110,11 +107,7 @@ pub(crate) async fn claim_promotion_lock(
             }
             Ok(lock)
         }
-        Err(status)
-            if status.code() == tonic::Code::AlreadyExists
-                || (status.code() == tonic::Code::Internal
-                    && status.message().contains("UNIQUE")) =>
-        {
+        Err(status) if crate::client::is_unique_conflict(&status) => {
             bail!("promotion or policy update already in progress for {product}/{target_channel}")
         }
         Err(status) => Err(status.into()),
@@ -668,10 +661,7 @@ async fn record_promotion_audit(
                     .await?;
                 return Ok(());
             }
-            Err(status)
-                if status.code() == tonic::Code::AlreadyExists
-                    || (status.code() == tonic::Code::Internal
-                        && status.message().contains("UNIQUE")) => {}
+            Err(status) if crate::client::is_unique_conflict(&status) => {}
             Err(status) => return Err(status.into()),
         }
     }

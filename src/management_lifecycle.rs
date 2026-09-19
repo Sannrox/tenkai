@@ -67,7 +67,7 @@ impl ManagementLifecycleOperation {
     }
 }
 
-/// Fail-closed request header shared by later lifecycle routes.
+/// Fail-closed request header shared by lifecycle HTTP routes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManagementLifecycleEnvelope {
@@ -112,7 +112,7 @@ pub fn parse_management_lifecycle_operation(name: &str) -> Result<ManagementLife
 
 /// Refuse runtime principals and environment-scoped credentials that cross
 /// their grant. Fleet management (no environment binding) is admitted here;
-/// tenant visibility is enforced by later host adapters.
+/// tenant visibility is enforced by host adapters.
 pub fn authorize_management_lifecycle_scope(
     kind: PrincipalKind,
     granted_environment: Option<&str>,

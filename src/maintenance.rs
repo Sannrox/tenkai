@@ -650,10 +650,7 @@ pub async fn ensure_configuration(ctx: &mut Ctx, environment: &str) -> Result<()
         };
         match ctx.create_once(object).await {
             Ok(_) => {}
-            Err(status) if status.code() == tonic::Code::AlreadyExists => {}
-            Err(status)
-                if status.code() == tonic::Code::Internal
-                    && status.message().contains("UNIQUE") => {}
+            Err(status) if crate::client::is_unique_conflict(&status) => {}
             Err(status) => return Err(status.into()),
         }
         let existing = ctx
@@ -969,10 +966,7 @@ async fn update_product(
             .await
         {
             Ok(_) => {}
-            Err(status) if status.code() == tonic::Code::AlreadyExists => {}
-            Err(status)
-                if status.code() == tonic::Code::Internal
-                    && status.message().contains("UNIQUE") => {}
+            Err(status) if crate::client::is_unique_conflict(&status) => {}
             Err(status) => return Err(status.into()),
         }
     }

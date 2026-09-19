@@ -94,6 +94,7 @@ and are not registered.
 | `environment.get` | `GET /v1/environments/{env}` | Non-disclosing deny on cross-tenant |
 | `environment.status` | `GET /v1/environments/{env}/status` | Same as get |
 | `runtime.work` / `complete` / `heartbeat` | `/v1/runtime/environments/{env}/…` | Runtime credential scoped to exactly one environment |
+| *(unregistered)* | `POST /v1/runtime/environments/{env}/inventory` | Live runtime HTTP; scoped to the assigned environment. Not in `http_exposed_tenant_rpc_ids()` |
 | `development.fixture_import` | `POST /v1/development/fixtures/import` | Require tenant context and an allowlisted fixture principal; mounted only when fixtures are enabled |
 | `development.fixture_reset` | `DELETE /v1/development/fixtures/{fixture_id}` | Same as import; non-disclosing deny on cross-tenant |
 

@@ -213,11 +213,7 @@ pub async fn provision(
     };
     match ctx.create_once(object).await {
         Ok(_) => {}
-        Err(status)
-            if status.code() == tonic::Code::AlreadyExists
-                || (status.code() == tonic::Code::Internal
-                    && status.message().contains("UNIQUE")) =>
-        {
+        Err(status) if crate::client::is_unique_conflict(&status) => {
             let Some(existing) = ctx.get(&id).await? else {
                 bail!("preview environment {name} disappeared after create conflict");
             };

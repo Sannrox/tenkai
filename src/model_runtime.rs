@@ -1,7 +1,7 @@
 //! Model-runtime product contract and executor port.
 //!
 //! Tenkai governs lifecycle (publish, plan, apply, health, rollback) for
-//! open-weight model deployments. Inference engines remain external plugins
+//! open-weight model deployments. Inference engines remain in-process ports
 //! that download weights, load models, and serve traffic. Multi-GB weight
 //! payloads are never stored in Tenkai operational state—only content-addressed
 //! digests and descriptors.

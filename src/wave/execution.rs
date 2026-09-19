@@ -756,11 +756,7 @@ async fn admit_locked(ctx: &mut Ctx, spec: &ExecutableWaveSpec) -> Result<WaveRe
     };
     match ctx.create_once(wave_object(&record)?).await {
         Ok(_) => Ok(record),
-        Err(status)
-            if status.code() == tonic::Code::AlreadyExists
-                || (status.code() == tonic::Code::Internal
-                    && status.message().contains("UNIQUE")) =>
-        {
+        Err(status) if crate::client::is_unique_conflict(&status) => {
             let loaded = load_wave(ctx, &spec.name).await?;
             if loaded.identity_digest != record.identity_digest {
                 bail!(

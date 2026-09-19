@@ -45,7 +45,6 @@ struct CanaryAttemptSnapshot {
 }
 
 impl ActiveCanaryPolicy {
-    #[allow(dead_code, reason = "used by graph-backed policy loading")]
     pub(crate) fn new(policy: CanaryPolicy, activated_at: i64) -> Result<Self> {
         let policy = policy.canonicalized()?;
         let digest = policy.digest()?;
@@ -217,7 +216,6 @@ impl CanaryOutcome {
 pub struct VerifiedCanaryOutcome(CanaryOutcome);
 
 impl VerifiedCanaryOutcome {
-    #[allow(dead_code, reason = "used by graph-backed outcome loading")]
     pub(crate) fn verify(
         outcome: CanaryOutcome,
         plan: &Plan,
@@ -337,7 +335,6 @@ impl VerifiedCanaryOutcome {
 }
 
 impl CanaryOutcome {
-    #[allow(dead_code, reason = "used by verified plan linkage")]
     fn release_product(&self) -> &str {
         self.release_id
             .strip_prefix("tenkai:release:")
@@ -346,7 +343,6 @@ impl CanaryOutcome {
             .unwrap_or("")
     }
 
-    #[allow(dead_code, reason = "used by verified plan linkage")]
     fn release_version(&self) -> &str {
         self.release_id
             .strip_prefix("tenkai:release:")

@@ -82,10 +82,7 @@ pub async fn env_add(ctx: &mut Ctx, name: &str, description: &str) -> Result<Str
     let object = environment_record(None, name, description, now)?;
     match ctx.create_once(object).await {
         Ok(_) => {}
-        Err(status)
-            if status.code() == tonic::Code::AlreadyExists
-                || (status.code() == tonic::Code::Internal
-                    && status.message().contains("UNIQUE")) => {}
+        Err(status) if crate::client::is_unique_conflict(&status) => {}
         Err(status) => return Err(status.into()),
     }
     crate::maintenance::ensure_configuration(ctx, name).await?;

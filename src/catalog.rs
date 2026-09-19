@@ -407,11 +407,7 @@ async fn backfill_legacy_verification(
     );
     match ctx.create_once(claim.clone()).await {
         Ok(_) => {}
-        Err(status)
-            if status.code() == tonic::Code::AlreadyExists
-                || (status.code() == tonic::Code::Internal
-                    && status.message().contains("UNIQUE")) =>
-        {
+        Err(status) if crate::client::is_unique_conflict(&status) => {
             let existing_claim = ctx.get(&claim_id).await?.ok_or_else(|| {
                 anyhow::anyhow!("release verification claim {claim_id} appeared then vanished")
             })?;
@@ -642,11 +638,7 @@ pub async fn recall(
     );
     let claim = match ctx.create_once(proposed.clone()).await {
         Ok(claim) => claim,
-        Err(status)
-            if status.code() == tonic::Code::AlreadyExists
-                || (status.code() == tonic::Code::Internal
-                    && status.message().contains("UNIQUE")) =>
-        {
+        Err(status) if crate::client::is_unique_conflict(&status) => {
             ctx.get(&claim_id).await?.ok_or_else(|| {
                 anyhow::anyhow!("release recall claim {claim_id} appeared then vanished")
             })?
