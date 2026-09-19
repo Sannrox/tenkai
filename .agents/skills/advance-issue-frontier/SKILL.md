@@ -121,7 +121,9 @@ Return:
 - active issues with their claim signal (Pull Request, claim branch, fresh
   assignment) and remaining lane capacity;
 - stale assignment hints awaiting the maintainer's decision;
-- stale claims found on GitHub or on this machine, for cleanup by their owner;
+- stale claims found on GitHub or locally, for cleanup by their owner
+  (keep hostnames and absolute checkout paths in the session, never on
+  GitHub);
 - still-blocked issues with their unresolved dependencies;
 - anomalous issues and the exact evidence needed to resolve them;
 - recommended candidates in deterministic presentation order, marking which
@@ -140,3 +142,8 @@ If nothing changed, say so without manufacturing work.
 - Do not assign contributors or invent priority, deadlines, or milestones.
 - Do not silently repair dependency text or choose between conflicting sources.
 - Do not exceed the active-lane limit when recommending simultaneous delivery.
+- Never put hostnames, FQDNs, home directories, absolute worktree paths, LAN
+  or employer network names, or other private environment inventory on public
+  Issues, Pull Requests, comments, or commit messages. GitHub-facing lane
+  text may list only claim branch, repo-relative worktree, base SHA, and
+  published SHA.
