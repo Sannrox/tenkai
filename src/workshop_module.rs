@@ -652,37 +652,7 @@ mod tests {
     }
 
     fn pin_toml(section: &ChangeSetPinSection) -> String {
-        let mut body = format!(
-            r#"
-[change_set_pin]
-contract = "{}"
-namespace = "{}"
-branch_id = "{}"
-proposal_id = "{}"
-base_digest = "{}"
-closure_digest = "{}"
-receipt_digest = "{}"
-"#,
-            section.contract,
-            section.namespace,
-            section.branch_id,
-            section.proposal_id,
-            section.base_digest,
-            section.closure_digest,
-            section.receipt_digest,
-        );
-        for member in &section.members {
-            body.push_str(&format!(
-                r#"
-[[change_set_pin.members]]
-kind = "{}"
-id = "{}"
-digest = "{}"
-"#,
-                member.kind, member.id, member.digest
-            ));
-        }
-        body
+        crate::change_set_pin::render_pin_toml(section)
     }
 
     fn write_module_release(dir: &Path, name: &str, version: &str, doc: &WorkshopModuleDocument) {

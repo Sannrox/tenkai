@@ -14,7 +14,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::client::Ctx;
-use crate::ontology::{KIND_ENVIRONMENT, NS, env_id, validate_identifier};
+use crate::ontology::{
+    KIND_ENVIRONMENT, NS, env_id, validate_identifier, validate_opaque_identifier,
+};
 use crate::pb::sekai::Object;
 use crate::signature_verification;
 
@@ -26,7 +28,6 @@ pub const TEARDOWN_EXPIRED: &str = "expired";
 pub const TEARDOWN_BRANCH_CLOSED: &str = "branch_closed";
 
 const MAX_PIN_BYTES: u64 = 16 * 1024;
-const MAX_TEXT_BYTES: usize = 256;
 
 const PROP_KIND: &str = "environment_kind";
 const PROP_PIN: &str = "preview_pin";
@@ -437,16 +438,7 @@ async fn persist_teardown(
 }
 
 fn validate_text(label: &str, value: &str) -> Result<()> {
-    if value.is_empty()
-        || value.len() > MAX_TEXT_BYTES
-        || value.chars().any(char::is_control)
-        || value.contains("://")
-        || value.contains('/')
-        || value.contains('\\')
-    {
-        bail!("{label} is empty, oversized, or not an opaque identifier");
-    }
-    Ok(())
+    validate_opaque_identifier(label, value)
 }
 
 #[cfg(test)]

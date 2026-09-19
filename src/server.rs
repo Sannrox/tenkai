@@ -571,26 +571,35 @@ fn management_credential(headers: &HeaderMap) -> Result<CredentialMaterial, Mana
     })
 }
 
-async fn fleet_status(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    let credential = match management_credential(&headers) {
-        Ok(credential) => credential,
-        Err(error) => return management_error(error),
-    };
-    match state.management.fleet_status(&credential).await {
-        Ok(report) => Json(report).into_response(),
+fn require_management(headers: &HeaderMap) -> Result<CredentialMaterial, Box<Response>> {
+    management_credential(headers).map_err(|error| Box::new(management_error(error)))
+}
+
+fn manage_result<T: Serialize>(result: Result<T, ManagementError>) -> Response {
+    match result {
+        Ok(value) => Json(value).into_response(),
         Err(error) => management_error(error),
     }
 }
 
-async fn list_environments(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    let credential = match management_credential(&headers) {
+fn parse_management_json<T: DeserializeOwned>(body: &[u8]) -> Result<T, Box<Response>> {
+    parse_migration_json(body)
+}
+
+async fn fleet_status(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    let credential = match require_management(&headers) {
         Ok(credential) => credential,
-        Err(error) => return management_error(error),
+        Err(error) => return *error,
     };
-    match state.management.list_environments(&credential).await {
-        Ok(entries) => Json(entries).into_response(),
-        Err(error) => management_error(error),
-    }
+    manage_result(state.management.fleet_status(&credential).await)
+}
+
+async fn list_environments(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    manage_result(state.management.list_environments(&credential).await)
 }
 
 async fn inspect_environment(
@@ -598,18 +607,16 @@ async fn inspect_environment(
     Path(environment): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let credential = match management_credential(&headers) {
+    let credential = match require_management(&headers) {
         Ok(credential) => credential,
-        Err(error) => return management_error(error),
+        Err(error) => return *error,
     };
-    match state
-        .management
-        .inspect_environment(&credential, &environment)
-        .await
-    {
-        Ok(report) => Json(report).into_response(),
-        Err(error) => management_error(error),
-    }
+    manage_result(
+        state
+            .management
+            .inspect_environment(&credential, &environment)
+            .await,
+    )
 }
 
 async fn environment_status(
@@ -617,18 +624,16 @@ async fn environment_status(
     Path(environment): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let credential = match management_credential(&headers) {
+    let credential = match require_management(&headers) {
         Ok(credential) => credential,
-        Err(error) => return management_error(error),
+        Err(error) => return *error,
     };
-    match state
-        .management
-        .environment_status(&credential, &environment)
-        .await
-    {
-        Ok(rows) => Json(rows).into_response(),
-        Err(error) => management_error(error),
-    }
+    manage_result(
+        state
+            .management
+            .environment_status(&credential, &environment)
+            .await,
+    )
 }
 
 fn service_status(status: &'static str, config: &ServerConfig) -> ServiceStatus {
@@ -698,14 +703,11 @@ async fn ready(State(state): State<Arc<AppState>>) -> Response {
 }
 
 async fn reconcile(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    let credential = match management_credential(&headers) {
+    let credential = match require_management(&headers) {
         Ok(credential) => credential,
-        Err(error) => return management_error(error),
+        Err(error) => return *error,
     };
-    match state.management.reconcile(&credential).await {
-        Ok(report) => Json(report).into_response(),
-        Err(error) => management_error(error),
-    }
+    manage_result(state.management.reconcile(&credential).await)
 }
 
 fn parse_migration_json<T: DeserializeOwned>(body: &[u8]) -> Result<T, Box<Response>> {
@@ -723,22 +725,20 @@ async fn preview_package_migration(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    let credential = match management_credential(&headers) {
+    let credential = match require_management(&headers) {
         Ok(credential) => credential,
-        Err(error) => return management_error(error),
+        Err(error) => return *error,
     };
-    let request = match parse_migration_json(&body) {
+    let request = match parse_management_json(&body) {
         Ok(request) => request,
-        Err(response) => return *response,
+        Err(error) => return *error,
     };
-    match state
-        .management
-        .preview_package_migration(&credential, &name, request)
-        .await
-    {
-        Ok(result) => Json(result).into_response(),
-        Err(error) => management_error(error),
-    }
+    manage_result(
+        state
+            .management
+            .preview_package_migration(&credential, &name, request)
+            .await,
+    )
 }
 
 async fn apply_package_migration(
@@ -747,22 +747,20 @@ async fn apply_package_migration(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    let credential = match management_credential(&headers) {
+    let credential = match require_management(&headers) {
         Ok(credential) => credential,
-        Err(error) => return management_error(error),
+        Err(error) => return *error,
     };
-    let request = match parse_migration_json(&body) {
+    let request = match parse_management_json(&body) {
         Ok(request) => request,
-        Err(response) => return *response,
+        Err(error) => return *error,
     };
-    match state
-        .management
-        .apply_package_migration(&credential, &name, request)
-        .await
-    {
-        Ok(result) => Json(result).into_response(),
-        Err(error) => management_error(error),
-    }
+    manage_result(
+        state
+            .management
+            .apply_package_migration(&credential, &name, request)
+            .await,
+    )
 }
 
 async fn package_migration_status(
@@ -770,18 +768,16 @@ async fn package_migration_status(
     Path(name): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let credential = match management_credential(&headers) {
+    let credential = match require_management(&headers) {
         Ok(credential) => credential,
-        Err(error) => return management_error(error),
+        Err(error) => return *error,
     };
-    match state
-        .management
-        .package_migration_status(&credential, &name)
-        .await
-    {
-        Ok(result) => Json(result).into_response(),
-        Err(error) => management_error(error),
-    }
+    manage_result(
+        state
+            .management
+            .package_migration_status(&credential, &name)
+            .await,
+    )
 }
 
 async fn resume_package_migration(
@@ -790,22 +786,20 @@ async fn resume_package_migration(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    let credential = match management_credential(&headers) {
+    let credential = match require_management(&headers) {
         Ok(credential) => credential,
-        Err(error) => return management_error(error),
+        Err(error) => return *error,
     };
-    let request = match parse_migration_json(&body) {
+    let request = match parse_management_json(&body) {
         Ok(request) => request,
-        Err(response) => return *response,
+        Err(error) => return *error,
     };
-    match state
-        .management
-        .resume_package_migration(&credential, &name, request)
-        .await
-    {
-        Ok(result) => Json(result).into_response(),
-        Err(error) => management_error(error),
-    }
+    manage_result(
+        state
+            .management
+            .resume_package_migration(&credential, &name, request)
+            .await,
+    )
 }
 
 async fn rollback_package_migration(
@@ -814,22 +808,20 @@ async fn rollback_package_migration(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    let credential = match management_credential(&headers) {
+    let credential = match require_management(&headers) {
         Ok(credential) => credential,
-        Err(error) => return management_error(error),
+        Err(error) => return *error,
     };
-    let request = match parse_migration_json(&body) {
+    let request = match parse_management_json(&body) {
         Ok(request) => request,
-        Err(response) => return *response,
+        Err(error) => return *error,
     };
-    match state
-        .management
-        .rollback_package_migration(&credential, &name, request)
-        .await
-    {
-        Ok(result) => Json(result).into_response(),
-        Err(error) => management_error(error),
-    }
+    manage_result(
+        state
+            .management
+            .rollback_package_migration(&credential, &name, request)
+            .await,
+    )
 }
 
 async fn publish_release(
@@ -837,18 +829,15 @@ async fn publish_release(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    let credential = match management_credential(&headers) {
+    let credential = match require_management(&headers) {
         Ok(credential) => credential,
-        Err(error) => return management_error(error),
+        Err(error) => return *error,
     };
-    let request = match parse_migration_json(&body) {
+    let request = match parse_management_json(&body) {
         Ok(request) => request,
-        Err(response) => return *response,
+        Err(error) => return *error,
     };
-    match state.management.publish_release(&credential, request).await {
-        Ok(result) => Json(result).into_response(),
-        Err(error) => management_error(error),
-    }
+    manage_result(state.management.publish_release(&credential, request).await)
 }
 
 async fn promote_release(
@@ -857,22 +846,20 @@ async fn promote_release(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    let credential = match management_credential(&headers) {
+    let credential = match require_management(&headers) {
         Ok(credential) => credential,
-        Err(error) => return management_error(error),
+        Err(error) => return *error,
     };
-    let request = match parse_migration_json(&body) {
+    let request = match parse_management_json(&body) {
         Ok(request) => request,
-        Err(response) => return *response,
+        Err(error) => return *error,
     };
-    match state
-        .management
-        .promote_release(&credential, &channel, request)
-        .await
-    {
-        Ok(result) => Json(result).into_response(),
-        Err(error) => management_error(error),
-    }
+    manage_result(
+        state
+            .management
+            .promote_release(&credential, &channel, request)
+            .await,
+    )
 }
 
 async fn recall_release(
@@ -881,22 +868,20 @@ async fn recall_release(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    let credential = match management_credential(&headers) {
+    let credential = match require_management(&headers) {
         Ok(credential) => credential,
-        Err(error) => return management_error(error),
+        Err(error) => return *error,
     };
-    let request = match parse_migration_json(&body) {
+    let request = match parse_management_json(&body) {
         Ok(request) => request,
-        Err(response) => return *response,
+        Err(error) => return *error,
     };
-    match state
-        .management
-        .recall_release(&credential, &release, request)
-        .await
-    {
-        Ok(result) => Json(result).into_response(),
-        Err(error) => management_error(error),
-    }
+    manage_result(
+        state
+            .management
+            .recall_release(&credential, &release, request)
+            .await,
+    )
 }
 
 async fn subscribe_environment(
@@ -905,22 +890,20 @@ async fn subscribe_environment(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    let credential = match management_credential(&headers) {
+    let credential = match require_management(&headers) {
         Ok(credential) => credential,
-        Err(error) => return management_error(error),
+        Err(error) => return *error,
     };
-    let request = match parse_migration_json(&body) {
+    let request = match parse_management_json(&body) {
         Ok(request) => request,
         Err(error) => return *error,
     };
-    match state
-        .management
-        .subscribe_environment(&credential, &environment, request)
-        .await
-    {
-        Ok(result) => Json(result).into_response(),
-        Err(error) => management_error(error),
-    }
+    manage_result(
+        state
+            .management
+            .subscribe_environment(&credential, &environment, request)
+            .await,
+    )
 }
 
 async fn plan_environment(
@@ -929,22 +912,20 @@ async fn plan_environment(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    let credential = match management_credential(&headers) {
+    let credential = match require_management(&headers) {
         Ok(credential) => credential,
-        Err(error) => return management_error(error),
+        Err(error) => return *error,
     };
-    let request = match parse_migration_json(&body) {
+    let request = match parse_management_json(&body) {
         Ok(request) => request,
         Err(error) => return *error,
     };
-    match state
-        .management
-        .plan_environment(&credential, &environment, request)
-        .await
-    {
-        Ok(result) => Json(result).into_response(),
-        Err(error) => management_error(error),
-    }
+    manage_result(
+        state
+            .management
+            .plan_environment(&credential, &environment, request)
+            .await,
+    )
 }
 
 async fn approve_plan(
@@ -953,22 +934,20 @@ async fn approve_plan(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    let credential = match management_credential(&headers) {
+    let credential = match require_management(&headers) {
         Ok(credential) => credential,
-        Err(error) => return management_error(error),
+        Err(error) => return *error,
     };
-    let request = match parse_migration_json(&body) {
+    let request = match parse_management_json(&body) {
         Ok(request) => request,
         Err(error) => return *error,
     };
-    match state
-        .management
-        .approve_plan(&credential, &plan_id, request)
-        .await
-    {
-        Ok(result) => Json(result).into_response(),
-        Err(error) => management_error(error),
-    }
+    manage_result(
+        state
+            .management
+            .approve_plan(&credential, &plan_id, request)
+            .await,
+    )
 }
 
 async fn apply_plan(
@@ -977,22 +956,20 @@ async fn apply_plan(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    let credential = match management_credential(&headers) {
+    let credential = match require_management(&headers) {
         Ok(credential) => credential,
-        Err(error) => return management_error(error),
+        Err(error) => return *error,
     };
-    let request = match parse_migration_json(&body) {
+    let request = match parse_management_json(&body) {
         Ok(request) => request,
         Err(error) => return *error,
     };
-    match state
-        .management
-        .apply_plan(&credential, &plan_id, request)
-        .await
-    {
-        Ok(result) => Json(result).into_response(),
-        Err(error) => management_error(error),
-    }
+    manage_result(
+        state
+            .management
+            .apply_plan(&credential, &plan_id, request)
+            .await,
+    )
 }
 
 async fn rollback_environment(
@@ -1001,22 +978,20 @@ async fn rollback_environment(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    let credential = match management_credential(&headers) {
+    let credential = match require_management(&headers) {
         Ok(credential) => credential,
-        Err(error) => return management_error(error),
+        Err(error) => return *error,
     };
-    let request = match parse_migration_json(&body) {
+    let request = match parse_management_json(&body) {
         Ok(request) => request,
         Err(error) => return *error,
     };
-    match state
-        .management
-        .rollback_environment(&credential, &environment, request)
-        .await
-    {
-        Ok(result) => Json(result).into_response(),
-        Err(error) => management_error(error),
-    }
+    manage_result(
+        state
+            .management
+            .rollback_environment(&credential, &environment, request)
+            .await,
+    )
 }
 
 async fn runtime_work(

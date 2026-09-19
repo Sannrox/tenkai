@@ -5,8 +5,8 @@
 //!
 //! Model: **schema-per-tenant** inside one Tenkai-owned database (never co-located
 //! with the identity plane). Claims `shared_replica_state` under the
-//! single-active-writer model. Does **not** claim `high_availability` until
-//! multi-replica fencing is proven (ADR 0009).
+//! single-active-writer model and durable tick fencing. Does **not** claim
+//! `high_availability` until ADR 0009's remaining HA drills and criteria land.
 //!
 //! Connection strings come from env/config only — never argv secrets.
 //!

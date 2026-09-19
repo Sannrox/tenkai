@@ -6,8 +6,10 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+
+mod common;
 
 use tenkai::environment::EnvironmentInspectReport;
 use tenkai::package_migration::{
@@ -29,96 +31,35 @@ fn tenkaictl_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_tenkaictl"))
 }
 
-fn executor_guard_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_tenkai-executor-guard"))
-}
-
 struct Drill {
-    root: PathBuf,
-    db: PathBuf,
-    keys: PathBuf,
-    state_dir: PathBuf,
-    release_trust: PathBuf,
-    approval_trust: PathBuf,
-    approvals: PathBuf,
+    cli: common::CliDrill,
 }
 
 impl Drill {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!(
-            "tenkai-stateful-drill-{}-{}",
-            std::process::id(),
-            tenkai::now_millis()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        let keys = root.join("keys");
-        let state_dir = root.join("state");
-        let approvals = root.join("approvals");
-        fs::create_dir_all(&state_dir).unwrap();
-        fs::create_dir_all(&approvals).unwrap();
         Self {
-            db: root.join("tenkai.db"),
-            release_trust: root.join("release-trust.toml"),
-            approval_trust: root.join("approval-trust.toml"),
-            keys,
-            state_dir,
-            approvals,
-            root,
+            cli: common::CliDrill::new("tenkai-stateful-drill", "stateful-drill-token", &[]),
         }
     }
 
     fn command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(tenkaictl_bin());
-        command
-            .arg("--database")
-            .arg(&self.db)
-            .args(args)
-            .env("TENKAI_MANAGEMENT_TOKEN", "stateful-drill-token")
-            .env("TENKAI_STATE_DIR", &self.state_dir)
-            .env("TENKAI_EXECUTOR_GUARD", executor_guard_bin())
-            .env("TMPDIR", &self.root)
-            .env_remove("TENKAI_PLAN_APPROVAL_DIR")
-            .env_remove("TENKAI_PLAN_APPROVAL_TRUST_ROOTS")
-            .env_remove("TENKAI_SOFTWARE_EXECUTOR")
-            .env_remove("TENKAI_HELM_BIN")
-            .env_remove("TENKAI_KUBECTL_BIN")
-            .env_remove("TENKAI_RUNTIME_EXECUTOR")
-            .env_remove("TENKAI_DELIVERY_ADAPTER");
-        command
+        self.cli.command(args)
     }
 
-    fn run(&self, args: &[&str]) -> Output {
-        self.command(args)
-            .output()
-            .unwrap_or_else(|error| panic!("failed to launch tenkaictl {args:?}: {error}"))
+    fn run(&self, args: &[&str]) -> std::process::Output {
+        self.cli.run(args)
     }
 
     fn ok(&self, args: &[&str]) -> String {
-        let output = self.run(args);
-        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        assert!(
-            output.status.success(),
-            "tenkaictl {args:?} failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
-        );
-        stdout
+        self.cli.ok(args)
     }
 
     fn fail(&self, args: &[&str]) -> String {
-        let output = self.run(args);
-        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        let combined = format!("{stdout}{stderr}");
-        assert!(
-            !output.status.success(),
-            "tenkaictl {args:?} unexpectedly succeeded\n{combined}"
-        );
-        combined
+        self.cli.fail(args)
     }
 
     fn target_root(&self) -> PathBuf {
-        self.root.join("tenkai-stateful-drill").join(ENV)
+        self.cli.root.join("tenkai-stateful-drill").join(ENV)
     }
 
     fn control_path(&self, name: &str) -> PathBuf {
@@ -186,17 +127,7 @@ impl Drill {
     }
 
     fn sign_release(&self, manifest: &Path, signature: &Path) {
-        self.ok(&[
-            "dev",
-            "sign-release",
-            manifest.to_str().unwrap(),
-            "--keys",
-            self.keys.to_str().unwrap(),
-            "--signature",
-            signature.to_str().unwrap(),
-            "--trust-roots",
-            self.release_trust.to_str().unwrap(),
-        ]);
+        self.cli.sign_release(manifest, signature);
     }
 
     fn publish_signed(&self, manifest: &Path, signature: &Path, version: &str) -> String {
@@ -206,7 +137,7 @@ impl Drill {
             "--signature",
             signature.to_str().unwrap(),
             "--trust-roots",
-            self.release_trust.to_str().unwrap(),
+            self.cli.release_trust.to_str().unwrap(),
         ]);
         let spec = format!("{PRODUCT}@{version}");
         let stdout = self.ok(&["release", "inspect", &spec]);
@@ -229,34 +160,17 @@ impl Drill {
     }
 
     fn sign_plan(&self, plan_id: &str, approval: &Path) {
-        self.ok(&[
-            "dev",
-            "sign-approval",
-            plan_id,
-            "--keys",
-            self.keys.to_str().unwrap(),
-            "--approval",
-            approval.to_str().unwrap(),
-            "--trust-roots",
-            self.approval_trust.to_str().unwrap(),
-        ]);
+        self.cli.sign_plan(plan_id, approval);
     }
 
     fn apply_signed(&self, plan_id: &str, approval: &Path) -> String {
-        self.ok(&[
-            "apply",
-            plan_id,
-            "--approval",
-            approval.to_str().unwrap(),
-            "--approval-trust-roots",
-            self.approval_trust.to_str().unwrap(),
-        ])
+        self.cli.apply_signed(plan_id, approval)
     }
 
     fn plan_and_apply(&self) -> String {
         let stdout = self.ok(&["plan", "--env", ENV]);
-        let plan_id = plan_id_from(&stdout);
-        let approval = self.approvals.join(format!("{plan_id}.json"));
+        let plan_id = common::plan_id_from(&stdout);
+        let approval = self.cli.approvals.join(format!("{plan_id}.json"));
         self.sign_plan(&plan_id, &approval);
         self.apply_signed(&plan_id, &approval);
         plan_id
@@ -265,22 +179,6 @@ impl Drill {
     fn promote(&self, version: &str) {
         self.ok(&["promote", &format!("{PRODUCT}@{version}"), "stable"]);
     }
-}
-
-impl Drop for Drill {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.root);
-    }
-}
-
-fn plan_id_from(stdout: &str) -> String {
-    stdout
-        .lines()
-        .find_map(|line| line.strip_prefix("plan id: "))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| panic!("missing plan id in:\n{stdout}"))
-        .to_string()
 }
 
 fn identity_from(stdout: &str) -> String {
@@ -416,10 +314,15 @@ fn signed_stateful_upgrade_survives_executor_loss() {
 
     drill.ok(&["init"]);
     drill.ok(&["env", "add", ENV, "--description", "stateful upgrade drill"]);
-    drill.ok(&["dev", "init-keys", "--dir", drill.keys.to_str().unwrap()]);
+    drill.ok(&[
+        "dev",
+        "init-keys",
+        "--dir",
+        drill.cli.keys.to_str().unwrap(),
+    ]);
 
-    let source_sig = drill.root.join("source.sig.json");
-    let target_sig = drill.root.join("target.sig.json");
+    let source_sig = drill.cli.root.join("source.sig.json");
+    let target_sig = drill.cli.root.join("target.sig.json");
     drill.sign_release(&source, &source_sig);
     drill.sign_release(&target, &target_sig);
     let source_digest = drill.publish_signed(&source, &source_sig, SOURCE_VERSION);
@@ -429,14 +332,14 @@ fn signed_stateful_upgrade_survives_executor_loss() {
         "verify",
         &format!("{PRODUCT}@{SOURCE_VERSION}"),
         "--trust-roots",
-        drill.release_trust.to_str().unwrap(),
+        drill.cli.release_trust.to_str().unwrap(),
     ]);
     drill.ok(&[
         "release",
         "verify",
         &format!("{PRODUCT}@{TARGET_VERSION}"),
         "--trust-roots",
-        drill.release_trust.to_str().unwrap(),
+        drill.cli.release_trust.to_str().unwrap(),
     ]);
 
     drill.promote(SOURCE_VERSION);
@@ -456,7 +359,7 @@ fn signed_stateful_upgrade_survives_executor_loss() {
         "signed release A installed with fixture seed",
     ));
 
-    let bad_sig = drill.root.join("bad.sig.json");
+    let bad_sig = drill.cli.root.join("bad.sig.json");
     fs::write(&bad_sig, "{\"schema\":\"tenkai.release-signature.v1\"}").unwrap();
     let unsigned = drill.fail(&[
         "publish",
@@ -464,7 +367,7 @@ fn signed_stateful_upgrade_survives_executor_loss() {
         "--signature",
         bad_sig.to_str().unwrap(),
         "--trust-roots",
-        drill.release_trust.to_str().unwrap(),
+        drill.cli.release_trust.to_str().unwrap(),
     ]);
     assert!(
         unsigned.contains("signature")
@@ -498,7 +401,7 @@ fn signed_stateful_upgrade_survives_executor_loss() {
             pre_admission: None,
         }],
     };
-    let incompatible_path = drill.root.join("incompatible.json");
+    let incompatible_path = drill.cli.root.join("incompatible.json");
     fs::write(
         &incompatible_path,
         serde_json::to_vec_pretty(&incompatible).unwrap(),
@@ -526,8 +429,8 @@ fn signed_stateful_upgrade_survives_executor_loss() {
     drill.promote(TARGET_VERSION);
     let unhealthy_plan = {
         let stdout = drill.ok(&["plan", "--env", ENV]);
-        let plan_id = plan_id_from(&stdout);
-        let approval = drill.approvals.join(format!("{plan_id}.json"));
+        let plan_id = common::plan_id_from(&stdout);
+        let approval = drill.cli.approvals.join(format!("{plan_id}.json"));
         drill.sign_plan(&plan_id, &approval);
         let failed = drill.fail(&[
             "apply",
@@ -535,7 +438,7 @@ fn signed_stateful_upgrade_survives_executor_loss() {
             "--approval",
             approval.to_str().unwrap(),
             "--approval-trust-roots",
-            drill.approval_trust.to_str().unwrap(),
+            drill.cli.approval_trust.to_str().unwrap(),
         ]);
         assert!(
             failed.contains("ROLLBACK") || failed.contains("FAILED") || failed.contains("health"),
@@ -561,9 +464,9 @@ fn signed_stateful_upgrade_survives_executor_loss() {
     drill.write_control("crash-after-accept", TARGET_VERSION);
     let crash_plan = {
         let stdout = drill.ok(&["plan", "--env", ENV]);
-        plan_id_from(&stdout)
+        common::plan_id_from(&stdout)
     };
-    let crash_approval = drill.approvals.join(format!("{crash_plan}.json"));
+    let crash_approval = drill.cli.approvals.join(format!("{crash_plan}.json"));
     drill.sign_plan(&crash_plan, &crash_approval);
     let mut apply_cmd = drill.command(&[
         "apply",
@@ -571,7 +474,7 @@ fn signed_stateful_upgrade_survives_executor_loss() {
         "--approval",
         crash_approval.to_str().unwrap(),
         "--approval-trust-roots",
-        drill.approval_trust.to_str().unwrap(),
+        drill.cli.approval_trust.to_str().unwrap(),
     ]);
     apply_cmd
         .stdin(Stdio::null())
@@ -628,7 +531,7 @@ fn signed_stateful_upgrade_survives_executor_loss() {
     let _ = drill.run(&["env", "unlock", ENV]);
     let _ = drill.run(&["reconcile", "--once"]);
     let resume_stdout = drill.ok(&["plan", "--env", ENV]);
-    let resume_plan = plan_id_from(&resume_stdout);
+    let resume_plan = common::plan_id_from(&resume_stdout);
     if resume_plan == crash_plan {
         let retry = drill.fail(&[
             "apply",
@@ -636,7 +539,7 @@ fn signed_stateful_upgrade_survives_executor_loss() {
             "--approval",
             crash_approval.to_str().unwrap(),
             "--approval-trust-roots",
-            drill.approval_trust.to_str().unwrap(),
+            drill.cli.approval_trust.to_str().unwrap(),
         ]);
         assert!(
             retry.contains("only computed or blocked")
@@ -662,7 +565,7 @@ fn signed_stateful_upgrade_survives_executor_loss() {
             TARGET_VERSION,
         ]);
     } else {
-        let approval = drill.approvals.join(format!("{resume_plan}.json"));
+        let approval = drill.cli.approvals.join(format!("{resume_plan}.json"));
         drill.sign_plan(&resume_plan, &approval);
         drill.apply_signed(&resume_plan, &approval);
     }
@@ -716,13 +619,13 @@ fn signed_stateful_upgrade_survives_executor_loss() {
             },
         ],
     };
-    let declaration_path = drill.root.join("cutover.json");
+    let declaration_path = drill.cli.root.join("cutover.json");
     fs::write(
         &declaration_path,
         serde_json::to_vec_pretty(&declaration).unwrap(),
     )
     .unwrap();
-    let backup = drill.root.join("tenkai.backup.db");
+    let backup = drill.cli.root.join("tenkai.backup.db");
     drill.ok(&["backup", backup.to_str().unwrap()]);
     let backup_digest = sha256_file(&backup);
     let preview = drill.ok(&[
@@ -737,8 +640,8 @@ fn signed_stateful_upgrade_survives_executor_loss() {
         &backup_digest,
     ]);
     let identity = identity_from(&preview);
-    let migration_approval = drill.approvals.join("cutover.json");
-    let migration_trust = drill.root.join("migration-trust.toml");
+    let migration_approval = drill.cli.approvals.join("cutover.json");
+    let migration_trust = drill.cli.root.join("migration-trust.toml");
     drill.ok(&[
         "dev",
         "sign-migration-approval",
@@ -747,7 +650,7 @@ fn signed_stateful_upgrade_survives_executor_loss() {
         "--env",
         ENV,
         "--keys",
-        drill.keys.to_str().unwrap(),
+        drill.cli.keys.to_str().unwrap(),
         "--approval",
         migration_approval.to_str().unwrap(),
         "--trust-roots",
@@ -770,7 +673,7 @@ fn signed_stateful_upgrade_survives_executor_loss() {
     ]);
     if last.contains("pending-plan") {
         let pending = pending_plan_from(&last);
-        let plan_approval = drill.approvals.join(format!("{pending}.json"));
+        let plan_approval = drill.cli.approvals.join(format!("{pending}.json"));
         drill.sign_plan(&pending, &plan_approval);
         last = drill.ok(&[
             "migrate",
@@ -802,7 +705,7 @@ fn signed_stateful_upgrade_survives_executor_loss() {
 
     while last.contains("pending-plan") {
         let pending = pending_plan_from(&last);
-        let plan_approval = drill.approvals.join(format!("{pending}.json"));
+        let plan_approval = drill.cli.approvals.join(format!("{pending}.json"));
         if !plan_approval.is_file() {
             drill.sign_plan(&pending, &plan_approval);
         }
@@ -868,14 +771,14 @@ fn signed_stateful_upgrade_survives_executor_loss() {
         "accepted irreversible work stayed recovery_required without rolling application data",
     ));
 
-    let isolated_db = drill.root.join("isolated.db");
+    let isolated_db = drill.cli.root.join("isolated.db");
     let mutations_before_restore = drill.mutation_count();
     let restored = Command::new(tenkaictl_bin())
         .arg("--database")
         .arg(&isolated_db)
         .args(["restore", backup.to_str().unwrap()])
         .env("TENKAI_MANAGEMENT_TOKEN", "stateful-drill-token")
-        .env("TMPDIR", &drill.root)
+        .env("TMPDIR", &drill.cli.root)
         .output()
         .unwrap();
     assert!(
@@ -888,7 +791,7 @@ fn signed_stateful_upgrade_survives_executor_loss() {
         .arg(&isolated_db)
         .args(["inspect"])
         .env("TENKAI_MANAGEMENT_TOKEN", "stateful-drill-token")
-        .env("TMPDIR", &drill.root)
+        .env("TMPDIR", &drill.cli.root)
         .output()
         .unwrap();
     assert!(isolated.status.success());

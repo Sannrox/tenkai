@@ -325,7 +325,6 @@ pub async fn stored_posture_counts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::PublishOptions;
     use crate::client::Ctx;
 
     fn spec(seed: &str) -> WorkloadSpec {
@@ -390,38 +389,9 @@ mod tests {
     }
 
     async fn publish_signed(ctx: &mut Ctx, root: &std::path::Path, version: &str) {
-        let dir = root.join(version);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("tenkai.toml"),
-            format!(
-                r#"
-[product]
-name = "scale-app"
-version = "{version}"
-
-[deploy]
-install = "true"
-"#
-            ),
-        )
-        .unwrap();
-        let keys = root.join("keys");
-        let signature = dir.join("release.sig.json");
-        let trust = dir.join("release-trust.toml");
-        crate::dev_sign::sign_release(&keys, &dir.join("tenkai.toml"), &signature, &trust).unwrap();
-        crate::catalog::publish(
-            ctx,
-            &dir.join("tenkai.toml"),
-            &PublishOptions {
-                signature: Some(signature),
-                trust_roots: Some(trust),
-                allow_unsigned_development: false,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
+        crate::dev_sign::publish_signed_product(ctx, root, version, "scale-app")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
