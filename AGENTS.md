@@ -36,7 +36,8 @@ and advancing the issue frontier).
   strict linting when Clippy is available (matches `make validate`).
 - `make test` runs the default test suite.
 - `make validate` runs every `scripts/validate-*.sh` (format, clippy, shell,
-  diff, make dry-run, workflow-skill parity, rust filenames, and secrets).
+  diff, make dry-run, workflow-skill parity, rust filenames, secrets, and
+  issue-lane capacity).
 - `make test-integration` runs all checked-in integration-test targets.
 - `make update` formats Rust and refreshes build-generated protobuf bindings
   without changing the locked dependency graph.
@@ -247,6 +248,8 @@ Local isolation protects lanes that share a machine; it is not a claim.
 The three-lane limit counts claims visible on GitHub per repository: open
 implementation Pull Requests plus claim branches without one. Assigned or
 planned work with neither is not a running lane.
+`bash .agents/skills/deliver-ready-issue/scripts/issue-lane.sh capacity`
+prints the count; `claim` refuses when remaining capacity is zero.
 
 Parallel lanes must not collide. Collision surfaces in this repository are
 `proto/`, operational persistence, the planner, execution, and catalog versus

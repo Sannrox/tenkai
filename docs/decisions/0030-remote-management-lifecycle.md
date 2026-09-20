@@ -14,6 +14,10 @@
 
 ## Context
 
+> Later record: Context below is the pre-#394/#395 world. Live hosts expose
+> the authenticated management lifecycle routes; see
+> [management lifecycle](../management-lifecycle.md).
+
 Remote operators already inspect environments, request a reconcile tick, and
 run package-migration verbs (ADR 0026). Publishing a release, promoting a
 channel, subscribing an environment, planning, approving, applying, rolling
@@ -31,8 +35,10 @@ operator API would mix runtime fencing with catalog and plan authority.
 Shipping `--allow-unapproved-development` on the wire would give remote
 callers the embedded local-development bypass.
 
-This ADR records the accepted management contract. It does not implement the
-lifecycle routes.
+This ADR recorded the accepted management contract before the lifecycle
+routes existed. Routes, client methods, and CLI remote dispatch later
+landed with [#394](https://github.com/Sannrox/tenkai/issues/394) and
+[#395](https://github.com/Sannrox/tenkai/issues/395).
 
 ## Decision
 

@@ -21,15 +21,15 @@ stalled lane. It is not an orchestration-only role.
    not what this machine has checked out:
 
    ```sh
-   gh pr list --state open --json number,headRefName,isDraft,updatedAt
-   gh api repos/<owner>/<repo>/git/matching-refs/heads/ --paginate --jq '.[].ref'
+   bash .agents/skills/deliver-ready-issue/scripts/issue-lane.sh capacity
    bash .agents/skills/deliver-ready-issue/scripts/issue-lane.sh check <issue>
    ```
 
    New lanes fit within the remaining capacity of the three-lane limit: open
    implementation Pull Requests plus claim branches without one. Do not count
    assigned or planned work as a running lane, and do not start a lane for an
-   Issue whose check says `claimed`.
+   Issue whose check says `claimed`. `capacity` is the count; `claim` refuses
+   when remaining capacity is zero.
 3. Reject candidate pairs that touch the same collision surface: `proto/`,
    operational persistence, the planner, execution, or catalog versus
    environment state. Run such Issues in sequence.
