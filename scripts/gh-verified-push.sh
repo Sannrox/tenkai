@@ -124,6 +124,22 @@ if [ "$branch" = "HEAD" ]; then
   echo "Detached HEAD: pass --branch explicitly." >&2
   exit 1
 fi
+default_branch=$(gh repo view "$repo" --json defaultBranchRef --jq .defaultBranchRef.name)
+if [ "$branch" = "$default_branch" ]; then
+  echo "Refusing to publish onto protected default branch ${default_branch}." >&2
+  exit 1
+fi
+default_tip=$(git ls-remote "https://github.com/${repo}.git" "refs/heads/${default_branch}" 2>/dev/null | awk '{print $1}' || true)
+if [ -n "$default_tip" ] && git cat-file -e "${default_tip}^{commit}" 2>/dev/null; then
+  if git merge-base --is-ancestor "$default_tip" HEAD; then
+    echo "Default branch ${default_branch}@${default_tip:0:7} is an ancestor of HEAD." >&2
+  else
+    echo "Note: ${default_branch}@${default_tip:0:7} is not an ancestor of HEAD." >&2
+    echo "Refresh onto ${default_branch} only for a conflict, a failing gate, an explicit request, or a sibling landing." >&2
+  fi
+elif [ -n "$default_tip" ]; then
+  echo "Note: default branch tip ${default_tip:0:7} is not available locally; skip ancestor report." >&2
+fi
 if [ -z "$message" ]; then
   message=$(git log -1 --format=%s HEAD)
 fi
