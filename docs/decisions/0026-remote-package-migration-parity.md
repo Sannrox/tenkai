@@ -11,6 +11,11 @@
 
 ## Context
 
+> Later record: Context below is the pre-#338 world. Live hosts expose
+> authenticated `POST`/`GET /v1/migrations/{name}*` and
+> `tenkaictl --target remote migrate …`. See
+> [package migrations](../package-migrations.md).
+
 ADR 0024 added profile `tenkai.package_migration.v1` as a Tenkai-owned
 coordinator. The embedded CLI already exposes preview, apply, status, resume,
 and rollback over that core. Remote `tenkaictl --target remote migrate …`
@@ -38,8 +43,9 @@ Issue [#334](https://github.com/Sannrox/tenkai/issues/334) already proves the
 embedded crash-recovery drill. Remote parity must match those identities and
 recovery states, not invent a parallel executor.
 
-This ADR records the accepted remote contract. It does not implement the
-routes.
+This ADR recorded the accepted remote contract before the routes existed.
+Routes, client methods, and CLI remote dispatch later landed with
+[#338](https://github.com/Sannrox/tenkai/issues/338).
 
 ## Decision
 
@@ -84,16 +90,15 @@ Use the authenticated HTTP management API, sibling to `/v1/reconcile` and
 `/v1/environments/*`. Do not place these verbs on the environment runtime
 protocol (`proto/tenkai/runtime/v1`) and do not overload `POST /v1/reconcile`.
 
-Exact paths and field layout land with the #338 implementation in server
-types and [package migrations](../package-migrations.md). They must stay
+Exact paths and field layout landed with [#338](https://github.com/Sannrox/tenkai/issues/338)
+in server types and [package migrations](../package-migrations.md). They must stay
 additive, versioned, and fail-closed as specified here.
 
 ## Consequences
 
-- Implementation of [#338](https://github.com/Sannrox/tenkai/issues/338) is
-  unblocked once this ADR is the named accepted contract. Remaining work is
-  routes, client methods, CLI remote dispatch, and fixture parity tests, not
-  a further design gate.
+- [#338](https://github.com/Sannrox/tenkai/issues/338) landed the named
+  contract: routes, client methods, CLI remote dispatch, and fixture parity
+  tests.
 - Remote operators cannot acquire the embedded local-development bypass.
 - Existing remote v1 routes are unchanged.
 - Request/result schema documentation is maintained next to the

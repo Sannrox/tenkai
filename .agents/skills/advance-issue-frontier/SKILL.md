@@ -32,8 +32,8 @@ issues and pull requests. Do not rely on a stale local backlog export.
    claims in the same pass, then the local isolation on this machine:
 
    ```sh
+   bash .agents/skills/deliver-ready-issue/scripts/issue-lane.sh capacity
    gh pr list --state open --json number,headRefName,isDraft,updatedAt,body
-   gh api repos/<owner>/<repo>/git/matching-refs/heads/ --paginate --jq '.[].ref'
    gh issue list --state open --limit 200 --json number,assignees,updatedAt
    git worktree list --porcelain
    ```
@@ -83,10 +83,12 @@ in the same situation, are stale: report them for cleanup by their owner and
 do not count them as lanes. Because `main` is squash-merged, confirm a landing
 with `gh pr view --json state,mergeCommit`, not `git branch --merged`.
 
-Count live lanes as open implementation Pull Requests plus claim branches
-without one, repository-wide. Recommend no more candidates than the remaining
-capacity of the three-lane limit. Assigned or planned work is not a running
-lane. When several issues are equally ready, order the report by
+Count live lanes with
+`bash .agents/skills/deliver-ready-issue/scripts/issue-lane.sh capacity`:
+open implementation Pull Requests plus claim branches without one,
+repository-wide. Recommend no more candidates than the remaining capacity of
+the three-lane limit. Assigned or planned work is not a running lane. When
+several issues are equally ready, order the report by
 downstream-unblocking depth and then issue number. Call this a deterministic
 presentation order, not project priority.
 

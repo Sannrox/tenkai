@@ -159,7 +159,9 @@ These are intentional product rules, not minikube quirks:
 - Multi-replica `tenkai-server` + Postgres hub HA ([runbook](multi-replica-hub-runbook.md))
 - OpenMetrics scrape on a hub process
 - Remote GateProvider / outcome→priors intelligence loop
-- In-process Kubernetes client (still kubectl argv)
+- This dogfood script still forces `TENKAI_SOFTWARE_EXECUTOR=kubernetes`
+  (`kubectl`); in-process apply is a separate path
+  ([software executor](software-executor.md))
 
 Software canary cohort drill is in scope via `TENKAI_DOGFOOD_MODE=canary` (#154).
 `model_runtime` canary remains documented under
