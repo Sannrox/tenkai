@@ -32,9 +32,12 @@ require_file "$LANE_SCRIPT"
 require_fragment "$SKILLS_ROOT/deliver-ready-issue/SKILL.md" "references/parallel-delivery.md"
 require_fragment "$SKILLS_ROOT/deliver-ready-issue/SKILL.md" "scripts/issue-lane.sh"
 require_fragment "$SKILLS_ROOT/advance-issue-frontier/SKILL.md" "issue-lane.sh check"
+require_fragment "$SKILLS_ROOT/advance-issue-frontier/SKILL.md" "issue-lane.sh capacity"
 require_line "AGENTS.md" "## Parallel delivery lanes"
 require_fragment "$PARALLEL_REFERENCE" "AGENTS.md"
+require_fragment "$PARALLEL_REFERENCE" "issue-lane.sh capacity"
 require_fragment "AGENTS.md" "issue-lane.sh claim"
+require_fragment "AGENTS.md" "issue-lane.sh capacity"
 grep -Fq "/.worktrees/" .gitignore || fail ".gitignore does not ignore the /.worktrees/ lane directory"
 
 printf 'workflow skill parity check passed\n'
