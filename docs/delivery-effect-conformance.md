@@ -24,7 +24,7 @@ commits. It also asserts one durable channel, plan, receipt, and rollback:
 
 ```bash
 export TENKAI_POSTGRES_URL='postgresql://127.0.0.1:5432/tenkai_test'
-cargo test --features postgres \
+cargo test --locked --features postgres \
   live_postgres_delivery_effects_are_idempotent_and_fenced \
   -- --ignored --nocapture
 ```

@@ -80,6 +80,8 @@ validation and update fan out over sorted `validate-*.sh` and `update-*.sh`
 scripts. Live Kubernetes, Llama, and PostgreSQL checks remain explicit and
 documented. Contributor setup and pull-request flow live in
 [CONTRIBUTING.md](CONTRIBUTING.md); agent workflow is [AGENTS.md](AGENTS.md).
+The topic index is [docs/README.md](docs/README.md). The default test suite is
+`cargo test --locked`.
 
 Publish a new version and `apply` again to upgrade. If the health probe of a
 new release fails, the previous release is restored automatically. Use
@@ -124,6 +126,7 @@ kubectl -n local get deploy,pods
 
 | Path | Notes |
 | --- | --- |
+| Topic index | [`docs/README.md`](docs/README.md) |
 | Example product | [`examples/hello-minikube/`](examples/hello-minikube/) |
 | One-shot script | [`scripts/dogfood-minikube.sh`](scripts/dogfood-minikube.sh) (`local`, `signed-multi-env`, or `canary`) |
 | Ops notes (trust, rollback, multi-env, canary) | [`docs/local-dogfood-minikube.md`](docs/local-dogfood-minikube.md) |
@@ -519,6 +522,8 @@ it ([ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md),
 | Same-version restart, recall roll-off, product windows | [ADR 0016](docs/decisions/0016-same-version-remediation.md); `restart`, `release recall`, `product maintenance` |
 | Maintenance windows | CLI `env maintenance` / `product maintenance` |
 | Canary cohort promotion evidence | #7; `src/canary.rs` |
+| Evaluation gate evidence projection | [Evaluation gate evidence](docs/evaluation-gate-evidence.md); [ADR 0013](docs/decisions/0013-evaluation-gate-evidence-projection.md) |
+| Multi-environment rollout waves | [Rollout waves](docs/rollout-waves.md); [ADR 0017](docs/decisions/0017-executable-release-waves.md) |
 | Canary × model_runtime promote E2E | [Model runtime](docs/model-runtime.md#canary-promotion-evidence-model_runtime); #108 |
 | Multi-environment list/inspect | `tenkaictl env list` / `env inspect`; #56 |
 | Authenticated remote status/inspect | `--target remote`; #58 |

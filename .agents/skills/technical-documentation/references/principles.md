@@ -39,7 +39,7 @@ When these rules conflict:
 3. Preserve long-term maintainability third.
 4. Add agent optimization only if it does not reduce human clarity.
 
-For agent-instructions and contributor-governance specifics (AGENTS/aliases/CONTRIBUTING), use `references/agent-and-contributing.md` as the detailed additional source of truth.
+For agent-instructions and contributor-governance specifics (AGENTS/aliases/CONTRIBUTING), use `agent-and-contributing.md` as the detailed additional source of truth.
 
 When a repository-specific overlay exists under `references/` and the task
 targets that repo's docs conventions, layer it on top of these general rules.

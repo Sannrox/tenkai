@@ -13,8 +13,10 @@ Source code lives in `src/`. `src/lib.rs` exports the application core.
 Shipped binaries are `tenkaictl` (embedded and remote CLI), `tenkai-server`
 (network service), `tenkai-executor-guard` (local process fencing),
 `tenkai-runtime` and `tenkai-runtime-guard` (pull-only environment runtime),
-`tenkai-delivery-conformance` (delivery-effect harness), and
-`tenkai-worker-lifecycle-fixture` (live worker-lifecycle observation host). Keep domain
+and `tenkai-worker-lifecycle-fixture` (live worker-lifecycle observation host).
+The Postgres delivery-effect harness is an autodiscovered `src/bin/` target
+behind feature `postgres`, not a packaged product binary; see
+[delivery-effect conformance](docs/delivery-effect-conformance.md). Keep domain
 logic in the library and treat CLI, HTTP, gRPC, SQLite, and provider clients as
 adapters around shared application contracts. Protocol definitions live in
 `proto/`, documentation in `docs/`, examples in `examples/`, and operational
@@ -31,7 +33,7 @@ and advancing the issue frontier).
 
 - `cargo fmt --check` verifies Rust formatting.
 - `cargo test --locked` runs the unit and integration test suite.
-- `cargo build --all-targets` verifies all binaries and test targets compile.
+- `cargo build --all-targets --locked` verifies all binaries and test targets compile.
 - `cargo clippy --all-targets --all-features --locked -- -D warnings` runs
   strict linting when Clippy is available (matches `make validate`).
 - `make test` runs the default test suite.
@@ -103,6 +105,19 @@ provenance in answers, and state when validation fails or the requested fact
 is absent rather than inferring it. Do not use Tenkai's operational SQLite
 database as a portable ontology database.
 
+## Agent boundaries
+
+- **Always** work in a claimed delivery lane (one Issue, one branch, one
+  worktree, one Pull Request). Run the documented Make and Cargo commands.
+  Treat GitHub Issues as planning truth.
+- **Ask first** before claiming an Issue whose assignment is older than six
+  hours with neither branch nor Pull Request, before taking over another
+  lane, and before rewriting protected `main`.
+- **Never** commit secrets, bearer tokens, signing keys, provider credentials,
+  or `.tenkai-state/`. Never put hostnames, home paths, or other private
+  environment inventory on public Issues or Pull Requests. Never split one
+  Issue across lanes or carry a second Issue in one lane.
+
 ## Coding Style & Naming
 
 Follow standard Rust formatting (`scripts/validate-format.sh`). Use
@@ -129,7 +144,7 @@ dependencies in the normal suite; isolate and document service-dependent tests.
 Verification should be proportional to the change. At minimum, format and run
 the narrowest relevant tests. Before delivery, prefer the project-local
 `verify-change` Skill to select and report the appropriate broader checks.
-Before commit or PR, run `autoreview` and fix actionable findings (see
+Before commit or PR, run `make validate` and `autoreview` and fix actionable findings (see
 `deliver-ready-issue`).
 
 ## Commit & Pull Request Guidelines
@@ -250,6 +265,7 @@ implementation Pull Requests plus claim branches without one. Assigned or
 planned work with neither is not a running lane.
 `bash .agents/skills/deliver-ready-issue/scripts/issue-lane.sh capacity`
 prints the count; `claim` refuses when remaining capacity is zero.
+`check` inspects one Issue; `release` removes a finished claim.
 
 Parallel lanes must not collide. Collision surfaces in this repository are
 `proto/`, operational persistence, the planner, execution, and catalog versus

@@ -9,9 +9,10 @@ make test-integration
 make update
 ```
 
-`WHAT=<one test filter> make test` runs one Cargo filter without shell
-evaluation. Live Kubernetes, Llama, and PostgreSQL checks stay opt-in and
-documented.
+`WHAT=<one test filter> make test` (and the same for `make test-integration`)
+runs one Cargo filter without shell evaluation. The default suite is
+`cargo test --locked`. Live Kubernetes, Llama, and PostgreSQL checks stay
+opt-in and documented.
 
 ## Issues and pull requests
 

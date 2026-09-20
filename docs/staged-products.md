@@ -53,7 +53,10 @@ tenkaictl publish path/to/tenkai.toml --allow-unsigned-development
 tenkaictl promote deploy-policy@1.0.0 stable
 tenkaictl env subscribe local deploy-policy=stable
 tenkaictl plan --env local
-# apply stages descriptor under env state; no secrets in documents
+tenkaictl apply <plan-id> \
+  --allow-unapproved-development \
+  --development-reason "local staged product"
+# apply stages the descriptor under env state; no secrets in documents
 ```
 
 ## eval_suite and gates
