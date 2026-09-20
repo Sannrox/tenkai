@@ -1,4 +1,8 @@
-//! The tenkai ontology: schema types and deterministic ids in the sekai graph.
+//! The tenkai ontology: schema kinds and deterministic ids.
+//!
+//! Live plan, environment, release, channel, and lease identities live in
+//! typed SQLite or Postgres rows. This module names those kinds and ids; it
+//! is not the operational store.
 
 use anyhow::{Result, bail};
 

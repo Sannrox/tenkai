@@ -23,7 +23,7 @@ Run the narrowest useful checks first, then expand according to change risk.
    | protocol | generated build, client/example coverage, vendored compatibility review |
    | ontology or state | fresh and upgrade behavior; graph/runtime-state compatibility |
    | configuration or manifest | parsing/default tests, examples, operator documentation |
-   | docs/templates/Skills | syntax, links or commands where practical; Skill validator for Skills |
+   | docs/templates/Skills | syntax, links or commands where practical; `scripts/validate-workflow-skills.sh` |
 
 3. Before ship-level handoff, run the normal repository gates unless the user
    explicitly requested a narrower check:
@@ -31,7 +31,7 @@ Run the narrowest useful checks first, then expand according to change risk.
    ```bash
    cargo fmt --check
    cargo test --locked
-   cargo clippy --all-targets -- -D warnings
+   cargo clippy --all-targets --all-features --locked -- -D warnings
    ```
 
    Run `cargo build --locked` when packaging, feature selection, or binaries

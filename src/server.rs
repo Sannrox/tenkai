@@ -2490,6 +2490,7 @@ mod tests {
         assert!(!http_exposed_tenant_rpc_ids().contains(&"catalog.list_products"));
         assert!(!http_exposed_tenant_rpc_ids().contains(&"plan.list"));
         assert!(!http_exposed_tenant_rpc_ids().contains(&"aggregate.audit_list"));
+        assert!(http_exposed_tenant_rpc_ids().contains(&"runtime.inventory"));
     }
 
     #[test]

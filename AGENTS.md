@@ -23,18 +23,20 @@ scripts in `scripts/`. The Rust toolchain is pinned at 1.96.1.
 Read `README.md`, `DESIGN.md`, and
 `docs/decisions/0001-standalone-core-and-service-evolution.md` before changing
 system boundaries or ownership. GitHub Issues are the planning source of truth.
-Project-specific Skills under `.agents/skills/` define the expected workflows
-for shaping, delivering, verifying, assessing, documenting, and releasing work.
+Project-specific Skills under `.agents/skills/` are the workflow inventory
+(shaping, delivering, verifying, assessing, documenting, releasing, operating,
+and advancing the issue frontier).
 
 ## Build, Test, and Development Commands
 
 - `cargo fmt --check` verifies Rust formatting.
-- `cargo test` runs the unit and integration test suite.
+- `cargo test --locked` runs the unit and integration test suite.
 - `cargo build --all-targets` verifies all binaries and test targets compile.
 - `cargo clippy --all-targets --all-features --locked -- -D warnings` runs
   strict linting when Clippy is available (matches `make validate`).
 - `make test` runs the default test suite.
-- `make validate` runs formatting, lint, shell, diff, and workflow-skill checks.
+- `make validate` runs every `scripts/validate-*.sh` (format, clippy, shell,
+  diff, make dry-run, workflow-skill parity, rust filenames, and secrets).
 - `make test-integration` runs all checked-in integration-test targets.
 - `make update` formats Rust and refreshes build-generated protobuf bindings
   without changing the locked dependency graph.
@@ -102,9 +104,10 @@ database as a portable ontology database.
 
 ## Coding Style & Naming
 
-Follow standard Rust formatting. Use `snake_case` for files, modules,
-functions, and variables; `PascalCase` for types and traits; and
-`SCREAMING_SNAKE_CASE` for constants. Prefer explicit domain types and
+Follow standard Rust formatting (`scripts/validate-format.sh`). Use
+`snake_case` for files (`scripts/validate-rust-filenames.sh`; hyphens only in
+`src/bin/`), modules, functions, and variables; `PascalCase` for types and
+traits; and `SCREAMING_SNAKE_CASE` for constants. Prefer explicit domain types and
 validated state transitions over loosely structured strings or hidden side
 effects. Keep provider-specific behavior behind application ports and keep
 protocol conversion at adapter boundaries.
@@ -213,8 +216,9 @@ branch: the Conventional Commit type in the Issue title, with `bug` mapped to
 `fix`; otherwise the type label (`bug` → `fix`, `enhancement` → `feat`,
 `documentation` → `docs`); otherwise `chore`. Lane branches carry no slug
 because the name is the claim; the Pull Request title carries the description.
-Human topic branches may keep `<type>/<issue>-<slug>` and are detected as
-claims by the same rule, as are legacy `codex/<issue>-<slug>` branches.
+Human topic branches may keep `<type>/<issue>-<slug>`. A claim is any branch
+matching `*/<issue>` or `*/<issue>-*`, including legacy `codex/<issue>` and
+`codex/<issue>-<slug>`.
 
 An Implement-only lane cannot claim and is invisible to other machines. Say so
 in the report, or ask for claim authority before starting.
@@ -278,7 +282,7 @@ session with the maintainer, never on GitHub. The executable lead procedure is
 
 Never commit secrets, bearer tokens, signing keys, provider credentials, local
 SQLite databases, `.tenkai-state/`, deployment payloads, or generated runtime
-state. Bind plaintext development servers to loopback and put authenticated TLS
+state. Path and diff denylists are `scripts/validate-secrets.sh`. Bind plaintext development servers to loopback and put authenticated TLS
 termination in front of remote deployments. Environment runtime credentials
 must be scoped to exactly one environment, and management credentials must not
 be passed on command lines.

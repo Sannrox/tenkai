@@ -104,9 +104,8 @@ pub fn required_isolation_cases() -> &'static [IsolationCase] {
     ]
 }
 
-/// Public tenant-visible RPCs for the current Tenkai server/agent contract plus
-/// the enterprise catalog/plan surfaces that must remain isolated when tenant
-/// mode is enabled.
+/// Isolation matrix for tenant-visible operations: live HTTP routes plus
+/// harness and in-process enterprise catalog/plan surfaces.
 pub fn tenant_visible_rpcs() -> &'static [TenantVisibleRpc] {
     &[
         TenantVisibleRpc {
@@ -167,6 +166,11 @@ pub fn tenant_visible_rpcs() -> &'static [TenantVisibleRpc] {
         TenantVisibleRpc {
             id: "runtime.heartbeat",
             path_template: "POST /v1/runtime/environments/{environment}/heartbeat",
+            surface: TenantVisibleSurface::RuntimeAgent,
+        },
+        TenantVisibleRpc {
+            id: "runtime.inventory",
+            path_template: "POST /v1/runtime/environments/{environment}/inventory",
             surface: TenantVisibleSurface::RuntimeAgent,
         },
         TenantVisibleRpc {
@@ -250,9 +254,9 @@ pub fn tenant_visible_rpcs() -> &'static [TenantVisibleRpc] {
 /// Tenant-visible RPCs that are **live on management HTTP** today and must be
 /// enforced in `src/server.rs` under tenant mode.
 ///
-/// All other entries in [`tenant_visible_rpcs`] remain harness/registry surfaces
-/// for future routes or in-process enterprise adapters; they are not advertised
-/// as public HTTP unless listed here.
+/// All other entries in [`tenant_visible_rpcs`] remain harness or in-process
+/// enterprise surfaces; they are not advertised as public HTTP unless listed
+/// here.
 pub fn http_exposed_tenant_rpc_ids() -> &'static [&'static str] {
     &[
         "management.reconcile",
@@ -267,6 +271,7 @@ pub fn http_exposed_tenant_rpc_ids() -> &'static [&'static str] {
         "runtime.work",
         "runtime.complete",
         "runtime.heartbeat",
+        "runtime.inventory",
         "environment.list",
         "environment.get",
         "environment.status",
@@ -1297,6 +1302,20 @@ mod tests {
         assert_conformance_coverage().unwrap();
         assert!(!tenant_visible_rpcs().is_empty());
         assert_eq!(conformance_case_matrix().len(), tenant_visible_rpcs().len());
+    }
+
+    #[test]
+    fn runtime_inventory_is_registered_and_http_exposed() {
+        let rpc = tenant_visible_rpcs()
+            .iter()
+            .find(|rpc| rpc.id == "runtime.inventory")
+            .expect("runtime.inventory must be in tenant_visible_rpcs");
+        assert_eq!(
+            rpc.path_template,
+            "POST /v1/runtime/environments/{environment}/inventory"
+        );
+        assert_eq!(rpc.surface, TenantVisibleSurface::RuntimeAgent);
+        assert!(http_exposed_tenant_rpc_ids().contains(&"runtime.inventory"));
     }
 
     #[test]

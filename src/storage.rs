@@ -469,7 +469,7 @@ impl SqliteStore {
         })
     }
 
-    /// Open the solo operator store and refuse a second engine on this process.
+    /// Open the solo operator store and refuse `TENKAI_POSTGRES_URL` on this process.
     pub fn open_embedded(path: impl AsRef<Path>, principal: impl Into<String>) -> Result<Self> {
         refuse_postgres_on_embedded()?;
         let path = path.as_ref();

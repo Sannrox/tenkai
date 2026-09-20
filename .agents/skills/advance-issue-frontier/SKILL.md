@@ -19,8 +19,7 @@ Resolve:
 
 - the repository and relevant issue set;
 - whether a merge, closure, or full backlog review triggered the run;
-- the active-lane limit, defaulting to three and accepting a documented limit
-  of two or three;
+- the active-lane limit, defaulting to three (`LANE_LIMIT=3`);
 - the permitted mutation: none, labels, or a documented body fallback.
 
 Read `README.md`, `DESIGN.md`, `AGENTS.md`, repository instructions, and live

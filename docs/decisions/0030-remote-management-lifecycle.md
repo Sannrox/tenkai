@@ -69,16 +69,16 @@ protocol (`proto/tenkai/runtime/v1`) and do not overload `POST /v1/reconcile`.
 
 Reserved paths and the fail-closed request header live in
 [management lifecycle](../management-lifecycle.md) and
-`src/management_lifecycle.rs`. Exact request bodies land with [#394](https://github.com/Sannrox/tenkai/issues/394)
+`src/management_lifecycle.rs`. Exact request bodies landed with [#394](https://github.com/Sannrox/tenkai/issues/394)
 and [#395](https://github.com/Sannrox/tenkai/issues/395).
 
 ## Consequences
 
 - [#393](https://github.com/Sannrox/tenkai/issues/393) is the named contract.
-  Remaining work is routes, client methods, CLI remote dispatch, and the
-  remote A→B→rollback drill, not a further design gate.
-- [#374](https://github.com/Sannrox/tenkai/issues/374) stays the parent
-  tracker until [#395](https://github.com/Sannrox/tenkai/issues/395) lands.
+  Routes, client methods, and CLI remote dispatch landed with [#394](https://github.com/Sannrox/tenkai/issues/394)
+  and [#395](https://github.com/Sannrox/tenkai/issues/395).
+- [#374](https://github.com/Sannrox/tenkai/issues/374) remains the parent
+  tracker for the remote management lifecycle.
 - Existing remote v1 inspect, reconcile, and package-migration routes stay
   unchanged.
 - Remote operators cannot acquire the embedded local-development bypass.
