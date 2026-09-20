@@ -9,7 +9,7 @@ description = "Local-first, constraint-based delivery control plane backed by se
 
 [[bin]]
 name = "tenkaictl"
-path = "src/bin/tenkaictl.rs"
+path = "src/bin/tenkaictl/main.rs"
 
 [[bin]]
 name = "tenkai-executor-guard"
