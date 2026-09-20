@@ -19,16 +19,17 @@ tenkaictl upgrade bind-bundle fleet-1 site-c --bundle site-c.bundle.json --trust
 tenkaictl upgrade import-receipt fleet-1 site-c --receipt site-c.receipt.json --bundle site-c.bundle.json --trust-roots offline-trust.toml
 tenkaictl upgrade advance fleet-1 --approval site-c.json --approval-trust-roots release-trust.toml
 tenkaictl upgrade status fleet-1
-tenkaictl upgrade rollback fleet-1 --allow-unapproved-development --development-reason drill
+tenkaictl upgrade rollback fleet-1 \
+  --approval fleet-1-rollback.json --approval-trust-roots release-trust.toml
 ```
 
 Isolated bind and import call ADR 0003 bundle and receipt verification inside the
 upgrade coordinator. A well-formed digest string is not evidence; unknown
 schemas, bad signatures, scope mismatch, unsuccessful receipts, and conflicting
 receipts fail closed. The bound archive must name this upgrade's plan.
-Upgrade rollback creates a fresh Tenkai rollback plan at apply time, so this
-slice uses `--allow-unapproved-development` on the built-in `local`
-environment rather than a pre-issued approval envelope.
+Upgrade rollback creates a fresh Tenkai rollback plan at apply time, so
+multi-site cohorts use a signed approval envelope. `--allow-unapproved-development`
+stays on the built-in `local` environment only.
 
 Status values are `pending`, `interrupted`, `applied`, `conflicted`,
 `rolled_back`, and `recovery_required`. Duplicate receipts are idempotent;

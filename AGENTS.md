@@ -144,7 +144,7 @@ dependencies in the normal suite; isolate and document service-dependent tests.
 Verification should be proportional to the change. At minimum, format and run
 the narrowest relevant tests. Before delivery, prefer the project-local
 `verify-change` Skill to select and report the appropriate broader checks.
-Before commit or PR, run `autoreview` and fix actionable findings (see
+Before commit or PR, run `make validate` and `autoreview` and fix actionable findings (see
 `deliver-ready-issue`).
 
 ## Commit & Pull Request Guidelines
@@ -265,6 +265,7 @@ implementation Pull Requests plus claim branches without one. Assigned or
 planned work with neither is not a running lane.
 `bash .agents/skills/deliver-ready-issue/scripts/issue-lane.sh capacity`
 prints the count; `claim` refuses when remaining capacity is zero.
+`check` inspects one Issue; `release` removes a finished claim.
 
 Parallel lanes must not collide. Collision surfaces in this repository are
 `proto/`, operational persistence, the planner, execution, and catalog versus

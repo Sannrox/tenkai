@@ -65,6 +65,17 @@ to find a topic. Architecture choices live in
 | Operational storage | [operational-storage.md](operational-storage.md) |
 | Postgres tenant store | [postgres-tenant-store.md](postgres-tenant-store.md) |
 
+## Examples
+
+| Example | Page |
+| --- | --- |
+| Hello minikube | [examples/hello-minikube](../examples/hello-minikube/) |
+| Model-runtime canary | [examples/model-runtime-canary](../examples/model-runtime-canary/) |
+| Model-routing rollout | [examples/model-routing-rollout](../examples/model-routing-rollout/) |
+| Package migration | [examples/package-migration](../examples/package-migration/) |
+| Workshop module | [examples/workshop-module](../examples/workshop-module/) |
+| Two-environment closure | [examples/two-environment-closure](../examples/two-environment-closure/) |
+
 ## History and research
 
 - [Architecture decisions](decisions/README.md)

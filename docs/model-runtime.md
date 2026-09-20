@@ -181,8 +181,12 @@ tenkaictl publish examples/model-runtime-local/tenkai.toml --allow-unsigned-deve
 tenkaictl promote qwen-coder@0.1.0 stable
 tenkaictl env subscribe local qwen-coder=stable   # if not already subscribed
 
-# 2. Plan + apply (weights verify when cache is configured; smoke via HTTP)
-tenkaictl reconcile --once
+# 2. Plan + apply (weights verify when cache is configured; smoke via HTTP).
+#    `reconcile --once` also creates and executes a plan; the explicit path is:
+tenkaictl plan --env local
+tenkaictl apply <plan-id> \
+  --allow-unapproved-development \
+  --development-reason "local model_runtime"
 
 # 3. On smoke failure the previous active generation remains; retry or rollback
 #    with ordinary Tenkai plan/rollback — do not delete *.json.previous by hand.

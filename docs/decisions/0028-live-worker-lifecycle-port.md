@@ -11,6 +11,10 @@
 
 ## Context
 
+> Later record: Context below is the pre-#336 world. Live hosts admit
+> replacement through `WorkerLifecyclePort` with `source = live`. See
+> [worker-pool lifecycle](../worker-pool.md).
+
 ADR 0011 assigns pool desired state, drain, health, rollout, and recovery to
 Tenkai. It assigns individual work admission, claims, leases, fencing of runs,
 and receipts to Sekai Chisei. Shikigami executes Harness runs. Kubernetes,
@@ -101,5 +105,5 @@ it. Adapters differ.
 
 The accepted boundary is grounded in ADR 0001 (one core, two hosts), ADR 0011
 (pool versus work ownership), and the shipped `WorkerLifecycleSnapshot`
-validator. This ADR does not change ontology classes. It records the missing
-live-transport and process-lifetime contract named by #336.
+validator. This ADR does not change ontology classes. The live-transport and
+process-lifetime contract named by #336 later landed with that issue.

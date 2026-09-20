@@ -15,7 +15,11 @@ tenkaictl canary designate local
 tenkaictl publish ../model-runtime-local/tenkai.toml --allow-unsigned-development
 tenkaictl promote qwen-coder@0.1.0 canary
 tenkaictl canary policy qwen-coder@0.1.0 stable --env local
-# plan/apply on local without --skip-gates, then:
+tenkaictl env subscribe local qwen-coder=canary
+tenkaictl plan --env local
+tenkaictl apply <plan-id> \
+  --allow-unapproved-development \
+  --development-reason "local model_runtime canary"
 tenkaictl promote qwen-coder@0.1.0 stable
 ```
 

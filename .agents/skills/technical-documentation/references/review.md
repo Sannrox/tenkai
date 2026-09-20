@@ -22,7 +22,7 @@ Read `principles.md` first, then apply this checklist.
 
 ## 3. Governance surface review
 
-- Use `references/agent-and-contributing.md` as the source of truth for inventory, canonical/alias mapping, and precedence/conflict handling.
+- Use `agent-and-contributing.md` as the source of truth for inventory, canonical/alias mapping, and precedence/conflict handling.
   For AGENTS.md:
 
 - confirm persona intent, scope, and command/tool boundaries are explicit.
