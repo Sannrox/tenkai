@@ -20,8 +20,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::Mutex;
 
-// Path is used by run_kubectl.
-
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 

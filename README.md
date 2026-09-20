@@ -78,7 +78,8 @@ refreshes build-generated protobuf bindings without changing the locked
 dependency graph. The Makefile is a thin façade over `scripts/make-targets/`;
 validation and update fan out over sorted `validate-*.sh` and `update-*.sh`
 scripts. Live Kubernetes, Llama, and PostgreSQL checks remain explicit and
-documented.
+documented. Contributor setup and pull-request flow live in
+[CONTRIBUTING.md](CONTRIBUTING.md); agent workflow is [AGENTS.md](AGENTS.md).
 
 Publish a new version and `apply` again to upgrade. If the health probe of a
 new release fails, the previous release is restored automatically. Use

@@ -76,7 +76,7 @@ and are not registered.
 
 | Set | Meaning |
 | --- | --- |
-| `tenant_visible_rpcs()` | Full isolation matrix (harness + future routes) |
+| `tenant_visible_rpcs()` | Full isolation matrix (live HTTP plus harness / in-process surfaces) |
 | `http_exposed_tenant_rpc_ids()` | Subset that is **live on management/runtime HTTP** and enforced in `src/server.rs` |
 
 **HTTP-enforced today**
@@ -93,8 +93,7 @@ and are not registered.
 | `environment.list` | `GET /v1/environments` | List only tenant partition ids |
 | `environment.get` | `GET /v1/environments/{env}` | Non-disclosing deny on cross-tenant |
 | `environment.status` | `GET /v1/environments/{env}/status` | Same as get |
-| `runtime.work` / `complete` / `heartbeat` | `/v1/runtime/environments/{env}/…` | Runtime credential scoped to exactly one environment |
-| *(unregistered)* | `POST /v1/runtime/environments/{env}/inventory` | Live runtime HTTP; scoped to the assigned environment. Not in `http_exposed_tenant_rpc_ids()` |
+| `runtime.work` / `complete` / `heartbeat` / `inventory` | `/v1/runtime/environments/{env}/…` | Runtime credential scoped to exactly one environment |
 | `development.fixture_import` | `POST /v1/development/fixtures/import` | Require tenant context and an allowlisted fixture principal; mounted only when fixtures are enabled |
 | `development.fixture_reset` | `DELETE /v1/development/fixtures/{fixture_id}` | Same as import; non-disclosing deny on cross-tenant |
 

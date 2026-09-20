@@ -91,8 +91,8 @@ two hosts) and ADR 0010 (one authoritative backend per process).
    as the sole authoritative operational store. It does not open SQLite for
    runtime truth and does not keep a parallel object graph.
 3. **Spoke and embedded `tenkaictl` are SQLite only.** One file, one writer,
-   schema 10 typed records. No PostgreSQL configuration is valid on those
-   hosts.
+   typed records (decided as schema 10; live hosts now use schema 11). No
+   PostgreSQL configuration is valid on those hosts.
 4. **Retire `EmbeddedStore`.** Planning inputs become typed records already
    owned by `OperationalStore`. The sekai-shaped graph remains a remote-plane
    projection and a compatibility codec, not a second embedded schema.
@@ -110,7 +110,7 @@ adapter boundary, and refuse process startup when both engines are configured.
   topology is hub PostgreSQL, spoke/embedded SQLite, one port, no embedded
   object-graph schema.
 - Embedded state migration must copy graph-shaped plans and environments into
-  typed schema 10 rows and retain the original evidence version.
+  typed schema rows (schema 11 today) and retain the original evidence version.
 - The mixed SQLite-plus-PostgreSQL enterprise composition stays test-only until
   removed; it must not become `enterprise-experimental`.
 - Remote protocol listing residuals in ADR 0025 stay at the catalog adapter.

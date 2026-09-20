@@ -205,7 +205,8 @@ ends with something demoable.
   an in-process Catalog boundary, Tenkai-owned plan/step formats, optional sekai
   projection schemas, and an embedded `tenkaictl` host.
 - **Phase 1 — Skeleton (imperative).** Catalog accepts a signed release;
-  `tenkaictl deploy <product> <env>` produces a trivial plan; one local
+  a founding `deploy` sketch (not a live `tenkaictl` command; operators now
+  `publish` / `plan` / `apply`) produces a trivial plan; one local
   environment runtime applies it to a k8s (kind) cluster; Tenkai persists the
   lifecycle and durably projects it to sekai when configured. No channels,
   solver, or gates. *Demo: deploy a container through the embedded application
