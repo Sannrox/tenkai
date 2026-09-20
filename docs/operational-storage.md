@@ -157,7 +157,8 @@ Do not enable tenant mode against community SQLite. Do not co-locate identity
 plane tables with Tenkai operational partitions.
 
 Optional production multi-tenant Postgres for the **control-plane hub** is
-available behind Cargo feature `postgres` (`src/postgres_tenant.rs`). See
+available behind Cargo feature `postgres` (`src/postgres_tenant.rs` and
+`src/postgres_tenant/`). See
 [postgres-tenant-store.md](postgres-tenant-store.md). Community default remains
 SQLite. Multi-replica hub operations:
 [multi-replica-hub-runbook.md](multi-replica-hub-runbook.md).

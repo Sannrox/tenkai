@@ -32,9 +32,10 @@ Run the narrowest useful checks first, then expand according to change risk.
    cargo fmt --check
    cargo test --locked
    cargo clippy --all-targets --all-features --locked -- -D warnings
+   make validate
    ```
 
-   Run `cargo build --locked` when packaging, feature selection, or binaries
+   Run `cargo build --all-targets --locked` when packaging, feature selection, or binaries
    changed independently of tests. Complete when every applicable local gate
    has a result.
 4. Keep service-dependent tests ignored unless prerequisites and credentials

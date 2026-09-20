@@ -126,6 +126,7 @@ mark the Issue unless documented maintainer policy requires it.
    cargo fmt --check
    cargo test --locked
    cargo clippy --all-targets --all-features --locked -- -D warnings
+   make validate
    ```
 
 3. Run `autoreview` before committing. Fix actionable findings and rerun the

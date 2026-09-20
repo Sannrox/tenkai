@@ -58,7 +58,8 @@ Prefer this split:
 Read `../technical-documentation/SKILL.md` first. Apply its principles, build,
 and review guidance throughout the refactor. Read
 `../technical-documentation/references/principles.md` and, for rewrites that
-touch agent/contributor files, `references/agent-and-contributing.md`.
+touch agent/contributor files,
+`../technical-documentation/references/agent-and-contributing.md`.
 
 Inventory the target page and only the related entry points, references, or
 adjacent pages needed for the refactor (README index, ADR links, sister docs).

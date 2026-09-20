@@ -7,6 +7,7 @@ paths, absolute worktree paths, or other private environment details. -->
 
 - [ ] `cargo fmt --check`
 - [ ] `make test`
+- [ ] `make test-integration` (or a focused `--test` filter)
 - [ ] `make validate`
 
 ## Impact

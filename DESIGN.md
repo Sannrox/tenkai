@@ -133,8 +133,9 @@ gRPC is a transport rather than a domain boundary:
   acknowledges individual work. The first lifecycle implementation uses fixed
   replicas. Autoscaling requires the versioned worker-host and read-only
   claim-pressure contracts described in ADR 0011.
-- **tenkaictl** — CLI: `publish`, `promote`, `env add`, `env constraints`,
-  `plan`, `rollback`, `fleet status`.
+- **tenkaictl** — CLI: `publish`, `promote`, `env add`, `env subscribe`,
+  `env constraints`, `plan`, `apply`, `rollback`, `inspect`, `fleet status`.
+  Implementation lives under `src/bin/tenkaictl/`.
 
 Catalog extraction is deferred until measured scaling or isolation needs,
 versioned remote contracts, consistency, operations, and a reversible migration

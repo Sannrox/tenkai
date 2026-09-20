@@ -67,7 +67,7 @@ data:
    for that id (today the matrix assigns the full required set to each RPC).
 3. Extend `TenantIsolationHarness::run_conformance` (or surface methods) so the
    case is actually exercised.
-4. Run `cargo test --lib tenant_isolation`.
+4. Run `cargo test --locked --lib tenant_isolation`.
 
 Unauthenticated health probes (`/healthz`, `/readyz`) are not tenant-visible
 and are not registered.
@@ -77,7 +77,7 @@ and are not registered.
 | Set | Meaning |
 | --- | --- |
 | `tenant_visible_rpcs()` | Full isolation matrix (live HTTP plus harness / in-process surfaces) |
-| `http_exposed_tenant_rpc_ids()` | Subset that is **live on management/runtime HTTP** and enforced in `src/server.rs` |
+| `http_exposed_tenant_rpc_ids()` | Subset that is **live on management/runtime HTTP** and enforced in `src/server.rs` / `src/server/` |
 
 **HTTP-enforced today**
 
@@ -97,8 +97,11 @@ and are not registered.
 | `development.fixture_import` | `POST /v1/development/fixtures/import` | Require tenant context and an allowlisted fixture principal; mounted only when fixtures are enabled |
 | `development.fixture_reset` | `DELETE /v1/development/fixtures/{fixture_id}` | Same as import; non-disclosing deny on cross-tenant |
 
-Community catalog lifecycle routes (`POST /v1/releases`, `POST /v1/channels/{channel}/promote`,
-`POST /v1/releases/{release}/recall`, `POST /v1/environments/{environment}/subscriptions`)
+Community catalog and remote management lifecycle routes (`POST /v1/releases`,
+`POST /v1/channels/{channel}/promote`, `POST /v1/releases/{release}/recall`,
+`POST /v1/environments/{environment}/subscriptions`,
+`POST /v1/environments/{environment}/plans`, `POST /v1/plans/{plan_id}/approve`,
+`POST /v1/plans/{plan_id}/apply`, `POST /v1/environments/{environment}/rollback`)
 are not tenant HTTP RPCs. Tenant-mode hosts refuse them rather than writing a
 shared catalog.
 
@@ -147,13 +150,13 @@ Rules:
   membership derived by the auth stack — never from caller-selected headers.
 - Cross-tenant environment get/list uses the non-disclosing deny posture.
 - The adapter does **not** share a database with an identity plane (ADR 0005).
-- Optional in-tree PostgreSQL (`src/postgres_tenant.rs`, Cargo feature
+- Optional in-tree PostgreSQL (`src/postgres_tenant.rs` / `src/postgres_tenant/`, Cargo feature
   `postgres`) is documented in [postgres-tenant-store.md](postgres-tenant-store.md).
   Community default remains SQLite; the adapter is not a supported operating
   profile until ADR 0010 readiness passes.
 
 Run `InMemoryTenantOperationalStore::run_conformance` (or
-`cargo test tenant_store`) to exercise harness coverage plus store-partition
+`cargo test --locked tenant_store`) to exercise harness coverage plus store-partition
 isolation.
 
 ## Live management HTTP (tenant mode)

@@ -59,7 +59,7 @@ public.tenkai_reconcile_tick_claims
 `tenkai-server` with `--replica-count > 1` calls
 `resolve_reconcile_fence_for_replicas`: when `TENKAI_POSTGRES_URL` is set and the
 binary is built with `--features postgres`, it opens
-[`PostgresReconcileFence`](../src/postgres_tenant.rs) (same URL as the hub
+[`PostgresReconcileFence`](../src/postgres_tenant/fence.rs) (same URL as the hub
 store). Otherwise it falls back to process-shared memory (single machine only).
 
 Claims are hub-wide (not schema-per-tenant). TTL expiry allows takeover with a

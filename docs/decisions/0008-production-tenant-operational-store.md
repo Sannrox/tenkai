@@ -89,7 +89,7 @@ Any production tenant store **must**:
 | Action | Status |
 | --- | --- |
 | Use `InMemoryTenantOperationalStore` for conformance and unit wiring | **Keep** |
-| Production Postgres (or other) | **Optional in-tree** behind feature `postgres` (`src/postgres_tenant.rs`, #111) — not community default |
+| Production Postgres (or other) | **Optional in-tree** behind feature `postgres` (`src/postgres_tenant.rs` / `src/postgres_tenant/`, #111) — not community default |
 | Follow-on | Multi-replica fencing + `shared_replica_state` (ADR 0009); optional out-of-tree commercial packaging remains allowed |
 
 ## Consequences
