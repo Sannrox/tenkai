@@ -8,6 +8,7 @@ mod package_migration_preview;
 mod remote_catalog;
 mod remote_plan;
 mod runtime;
+mod runtime_unknown_fields;
 mod support;
 mod tenant;
 

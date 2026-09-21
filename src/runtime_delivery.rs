@@ -37,6 +37,7 @@ pub type InventoryFuture<'a> =
     Pin<Box<dyn Future<Output = anyhow::Result<Vec<String>>> + Send + 'a>>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeStepReceipt {
     pub step_id: String,
     pub succeeded: bool,
@@ -44,6 +45,7 @@ pub struct RuntimeStepReceipt {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeCompletion {
     pub plan_id: String,
     pub generation: u64,
@@ -384,6 +386,7 @@ pub(crate) async fn validate_runtime_completion(
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeWork {
     pub environment: String,
     pub plan: Option<Plan>,
@@ -391,12 +394,14 @@ pub struct RuntimeWork {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeHeartbeat {
     pub plan_id: String,
     pub generation: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeInventoryReport {
     pub facts: BTreeMap<String, String>,
     #[serde(default = "default_inventory_source")]
