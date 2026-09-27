@@ -303,6 +303,10 @@ async fn main() -> Result<()> {
         .with_context(|| "runtime capability negotiation failed at startup")?;
 
     let ctx = match cli.provider_mode {
+        ProviderMode::Embedded if cli.tenant_mode => {
+            tenkai::client::Ctx::embedded_hub(&cli.database, outcome_provider.is_some())
+                .context("opening embedded application state")?
+        }
         ProviderMode::Embedded => tenkai::client::Ctx::embedded_with_outcome_export(
             &cli.database,
             outcome_provider.is_some(),
