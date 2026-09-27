@@ -1,5 +1,39 @@
 use super::*;
 
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_connect_from_tokio_runtime_does_not_nest_a_runtime() {
+    let error =
+        match super::postgres_imp::Inner::connect("postgres://127.0.0.1:1/tenkai_does_not_exist") {
+            Ok(_) => panic!("unreachable postgres must fail without panicking"),
+            Err(error) => error,
+        };
+    let message = error.to_string();
+    assert!(
+        message.contains("postgres") || message.contains("connection"),
+        "{message}"
+    );
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_connect_from_spawn_blocking_does_not_nest_a_runtime() {
+    let result = tokio::task::spawn_blocking(|| {
+        super::postgres_imp::Inner::connect("postgres://127.0.0.1:1/tenkai_does_not_exist")
+    })
+    .await
+    .expect("blocking task joined");
+    let error = match result {
+        Ok(_) => panic!("unreachable postgres must fail without panicking"),
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(
+        message.contains("postgres") || message.contains("connection"),
+        "{message}"
+    );
+}
+
 #[test]
 fn schema_names_are_safe() {
     assert_eq!(tenant_schema_name("tenant-a").unwrap(), "tenkai_t_tenant_a");

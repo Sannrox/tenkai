@@ -96,11 +96,18 @@ impl Inner {
                 detail: "refusing to clean a non-conformance tenant schema".into(),
             });
         }
-        self.client
-            .lock()
-            .map_err(|_| StoreError::AdapterUnavailable("postgres lock poisoned".into()))?
-            .batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
-            .map_err(pg)
+        without_tokio(|| {
+            let mut guard = self
+                .client
+                .lock()
+                .map_err(|_| StoreError::AdapterUnavailable("postgres lock poisoned".into()))?;
+            let client = guard.as_mut().ok_or_else(|| {
+                StoreError::AdapterUnavailable("postgres client already closed".into())
+            })?;
+            client
+                .batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+                .map_err(pg)
+        })
     }
 
     #[cfg(test)]
