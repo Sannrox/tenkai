@@ -23,11 +23,29 @@ impl Ctx {
         path: impl AsRef<Path>,
         outcome_export_enabled: bool,
     ) -> Result<Self> {
+        Self::embedded_application_state(path, outcome_export_enabled, true)
+    }
+
+    /// Open hub application state. SQLite remains the control plane; a
+    /// process-level `TENKAI_POSTGRES_URL` is the tenant store, not a substitute
+    /// operational database.
+    pub fn embedded_hub(path: impl AsRef<Path>, outcome_export_enabled: bool) -> Result<Self> {
+        Self::embedded_application_state(path, outcome_export_enabled, false)
+    }
+
+    fn embedded_application_state(
+        path: impl AsRef<Path>,
+        outcome_export_enabled: bool,
+        refuse_postgres_url: bool,
+    ) -> Result<Self> {
         let principal = std::env::var("TENKAI_PRINCIPAL").unwrap_or_else(|_| "tenkai".into());
+        let store = if refuse_postgres_url {
+            crate::storage::SqliteStore::open_embedded(path, principal)?
+        } else {
+            crate::storage::SqliteStore::open_control_plane(path, principal)?
+        };
         Ok(Self {
-            backend: Backend::Embedded(Arc::new(crate::storage::SqliteStore::open_embedded(
-                path, principal,
-            )?)),
+            backend: Backend::Embedded(Arc::new(store)),
             canary_schema_preflight: Arc::new(OnceCell::new()),
             outcome_export_enabled,
             outcome_inspection_enabled: true,

@@ -21,6 +21,18 @@ impl SqliteStore {
     /// Open the solo operator store and refuse `TENKAI_POSTGRES_URL` on this process.
     pub fn open_embedded(path: impl AsRef<Path>, principal: impl Into<String>) -> Result<Self> {
         refuse_postgres_on_embedded()?;
+        Self::open_control_plane(path, principal)
+    }
+
+    /// Open SQLite control-plane state for a tenant-mode hub.
+    ///
+    /// Hub processes also set `TENKAI_POSTGRES_URL` for the tenant store. That
+    /// URL is not the control-plane database; refusing it here made
+    /// `tenkai-server --tenant-mode` unstartable.
+    pub fn open_control_plane(
+        path: impl AsRef<Path>,
+        principal: impl Into<String>,
+    ) -> Result<Self> {
         let path = path.as_ref();
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
