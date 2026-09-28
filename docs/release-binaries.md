@@ -62,5 +62,5 @@ GitHub Release for the tag. If the Release does not exist yet, the workflow
 creates it; if it already exists, the workflow attaches or replaces only the
 asset files and does not rewrite notes.
 
-Historical tags before this workflow (`v0.2.0`, `v0.3.0`, `v0.3.1`) have no
-attached hosts. Install those from source.
+Tags `v0.2.0`, `v0.3.0`, and `v0.3.1` predate this workflow and have no
+attached hosts. Install those from source. First attached hosts: `v0.3.2`.
