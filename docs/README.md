@@ -17,6 +17,7 @@ to find a topic. Architecture choices live in
 | Remote management lifecycle | [management-lifecycle.md](management-lifecycle.md) |
 | Multi-replica hub runbook | [multi-replica-hub-runbook.md](multi-replica-hub-runbook.md) |
 | Release readiness | [release-readiness.md](release-readiness.md) |
+| GitHub Release binaries | [release-binaries.md](release-binaries.md) |
 | Telemetry | [telemetry.md](telemetry.md) |
 
 ## Delivery contracts
