@@ -83,6 +83,7 @@ to find a topic. Architecture choices live in
 - [Release 0.2.0 notes](releases/0.2.0.md)
 - [Release 0.3.0 notes](releases/0.3.0.md)
 - [Release 0.3.1 notes](releases/0.3.1.md)
+- [Release 0.3.2 notes](releases/0.3.2.md)
 - [Embedded golden-path usability](research/embedded-golden-path-usability.md)
 - [Rollout-control simplification](research/rollout-control-simplification.md)
 - [Staged-document product kinds](research/staged-document-product-kinds.md)

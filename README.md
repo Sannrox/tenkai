@@ -595,7 +595,7 @@ Postgres hub + multi-replica fencing) are landed on main. Remaining work is
 
 | Track | Intent |
 | --- | --- |
-| Release packaging | [GitHub Release binaries](docs/release-binaries.md); [v0.3.1 notes](docs/releases/0.3.1.md) |
+| Release packaging | [GitHub Release binaries](docs/release-binaries.md); [v0.3.2 notes](docs/releases/0.3.2.md) |
 | Hub HA product claim | Criteria + automated drills before advertising `high_availability` (fence already shipped #135) |
 | Intelligence loop depth | Fail-closed prior policy; live remote OutcomeProvider history |
 | Executor / model depth | Peer/regional weight caches; additional engines (`kubernetes-inprocess` already shipped) |
