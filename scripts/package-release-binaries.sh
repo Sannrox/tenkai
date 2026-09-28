@@ -263,27 +263,27 @@ cmd_self_test() {
   printf 'conformance\n' >"${bin}/tenkai-delivery-conformance"
   chmod 0755 "${bin}/tenkai-delivery-conformance"
 
-  "$0" package --out "$out" --bin-dir "$bin" --platform "$platform"
+  bash "$0" package --out "$out" --bin-dir "$bin" --platform "$platform"
   [[ -f "${out}/$(packaged_name tenkaictl "$platform")" ]] || fail "self-test missing tenkaictl asset"
   [[ ! -e "${out}/tenkai-worker-lifecycle-fixture-${platform}" ]] || fail "self-test packaged fixture host"
   [[ ! -e "${out}/tenkai-delivery-conformance-${platform}" ]] || fail "self-test packaged conformance harness"
 
-  "$0" checksums --out "$out"
+  bash "$0" checksums --out "$out"
   [[ -f "${out}/${CHECKSUMS_NAME}" ]] || fail "self-test missing checksums"
   verify_checksums "$out" >/dev/null
 
   expect_fail "platform ${other} does not match host ${platform}" \
-    "$0" package --out "$out" --bin-dir "$bin" --platform "$other"
+    bash "$0" package --out "$out" --bin-dir "$bin" --platform "$other"
   mkdir -p "${tmp}/empty"
   expect_fail "missing host binary" \
-    "$0" package --out "${tmp}/missing" --bin-dir "${tmp}/empty" --platform "$platform"
+    bash "$0" package --out "${tmp}/missing" --bin-dir "${tmp}/empty" --platform "$platform"
 
   expect_fail "incomplete GitHub Release set" \
-    "$0" checksums --out "$out" --require-complete
+    bash "$0" checksums --out "$out" --require-complete
 
   printf 'junk\n' >"${out}/not-a-host"
   expect_fail "unexpected file in ${out}: not-a-host" \
-    "$0" checksums --out "$out"
+    bash "$0" checksums --out "$out"
   rm -f "${out}/not-a-host"
 
   printf 'tampered\n' >>"${out}/$(packaged_name tenkaictl "$platform")"
