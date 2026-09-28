@@ -62,6 +62,10 @@ export TENKAI_MANAGEMENT_TOKEN='replace-from-secret-store'
 ./target/debug/tenkaictl inspect
 ```
 
+Published tags also attach community hosts. Verify `SHA256SUMS` before running
+them; hub Postgres builds stay `cargo build --features postgres`. See
+[GitHub Release binaries](docs/release-binaries.md).
+
 ## Repository verification
 
 The repository exposes the same deterministic checks to humans and agents:
@@ -591,7 +595,7 @@ Postgres hub + multi-replica fencing) are landed on main. Remaining work is
 
 | Track | Intent |
 | --- | --- |
-| Release packaging | [v0.3.1 notes](docs/releases/0.3.1.md) |
+| Release packaging | [GitHub Release binaries](docs/release-binaries.md); [v0.3.1 notes](docs/releases/0.3.1.md) |
 | Hub HA product claim | Criteria + automated drills before advertising `high_availability` (fence already shipped #135) |
 | Intelligence loop depth | Fail-closed prior policy; live remote OutcomeProvider history |
 | Executor / model depth | Peer/regional weight caches; additional engines (`kubernetes-inprocess` already shipped) |

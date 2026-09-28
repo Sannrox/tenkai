@@ -26,7 +26,8 @@ canonical gate list for versions, contracts, security, and validation commands.
    - ontology, graph-record, runtime-state, and configuration migration impact;
    - environment variables, defaults, examples, and operator documentation;
    - signing, approval, security, recovery, rollback, and operator actions;
-   - `tenkaictl` binary and any container or bundle packaging.
+   - `tenkaictl` binary and GitHub Release community hosts
+     (`docs/release-binaries.md`); any container or bundle packaging.
    Complete when every applicable item is resolved or a named blocker.
 4. Use `verify-change` for the full local gates. Confirm current GitHub CI and
    security checks when access is available. Do not run live-provider tests
@@ -35,8 +36,13 @@ canonical gate list for versions, contracts, security, and validation commands.
 5. Draft concise user-facing release notes. Put upgrade and migration actions
    before internal implementation detail. Credit contributors through GitHub's
    generated notes rather than maintaining a manual ledger.
-6. Report go/no-go. A release is `go` only when required checks pass, no known
-   blocker remains, and rollback/upgrade implications are explicit.
+6. After an authorized tag `vX.Y.Z`, confirm the Release binaries workflow
+   attached the five community hosts for `linux-x86_64` and `darwin-aarch64`
+   plus `SHA256SUMS`. Do not rewrite existing Release notes when only uploading
+   assets. Historical tags before that workflow have no attached hosts.
+7. Report go/no-go. A release is `go` only when required checks pass, no known
+   blocker remains, rollback/upgrade implications are explicit, and the tagged
+   GitHub Release has the checksummed community hosts (or a named blocker).
 
 ## Output
 
