@@ -77,6 +77,13 @@ export TENKAI_POSTGRES_URL='postgres://tenkai:tenkai@127.0.0.1:5432/tenkai'
 Without `--features postgres`, `PostgresTenantConfig::open` fails closed with an
 actionable rebuild message. Community binaries stay SQLite-only.
 
+Each Postgres store connection owns one handle-free worker thread. Connection
+setup, transactions, health checks, and reconcile fencing all run on that
+thread, so the synchronous `postgres` client never starts its runtime inside a
+Tokio runtime. Calls are serialized through a zero-capacity channel, preserving
+the adapter's single-connection serialization without creating a thread for
+each operation.
+
 ## Local Postgres for drills
 
 ```bash

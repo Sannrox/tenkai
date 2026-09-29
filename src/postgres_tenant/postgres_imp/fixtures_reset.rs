@@ -9,8 +9,12 @@ impl Inner {
         actor: &str,
         request_id: &str,
     ) -> Result<crate::development_fixtures::FixtureResetResult> {
-        self.with_schema(schema, |tx| {
-            let lock_key = format!("{schema}:{fixture_id}");
+        let lock_schema = schema.to_owned();
+        let fixture_id = fixture_id.to_owned();
+        let actor = actor.to_owned();
+        let request_id = request_id.to_owned();
+        self.with_schema(schema, move |tx| {
+            let lock_key = format!("{lock_schema}:{fixture_id}");
             tx.query_one(
                 "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
                 &[&lock_key],
@@ -84,7 +88,7 @@ impl Inner {
             Ok(crate::development_fixtures::FixtureResetResult {
                 contract_version:
                     crate::development_fixtures::DEVELOPMENT_FIXTURE_CONTRACT_VERSION,
-                fixture_id: fixture_id.into(),
+                fixture_id,
                 removed,
             })
         })
@@ -95,7 +99,8 @@ impl Inner {
         schema: &str,
         environment_id: &str,
     ) -> Result<Option<crate::development_fixtures::FixtureEnvironmentProjection>> {
-        self.with_schema(schema, |tx| {
+        let environment_id = environment_id.to_owned();
+        self.with_schema(schema, move |tx| {
             let fixture = tx
                 .query_opt(
                     "SELECT fixture_id FROM development_fixture_objects

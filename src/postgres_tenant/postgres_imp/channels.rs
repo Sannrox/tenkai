@@ -3,7 +3,8 @@ use super::{Inner, pg};
 
 impl Inner {
     pub fn promote_channel(&self, schema: &str, channel: &ChannelRecord) -> Result<ChannelRecord> {
-        self.with_schema(schema, |tx| {
+        let channel = channel.clone();
+        self.with_schema(schema, move |tx| {
             if tx
                 .query_one(
                     "SELECT EXISTS(

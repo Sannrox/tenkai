@@ -79,9 +79,11 @@ impl Inner {
                 to: rollback.status,
             });
         }
-        self.with_schema(schema, |tx| {
+        let owner = owner.to_owned();
+        let rollback = rollback.clone();
+        self.with_schema(schema, move |tx| {
             if rollback_in(tx, &rollback.id)?.is_some() {
-                if !rollback_intent_matches(tx, rollback)? {
+                if !rollback_intent_matches(tx, &rollback)? {
                     return Err(StoreError::ImmutableConflict {
                         kind: "rollback",
                         id: rollback.id.clone(),
@@ -93,12 +95,12 @@ impl Inner {
             require_lease(
                 tx,
                 &rollback.environment_id,
-                owner,
+                &owner,
                 rollback.lease_generation,
                 crate::now_millis(),
             )?;
             let lease_gen = rollback.lease_generation as i64;
-            let intent = rollback_intent_digest(rollback);
+            let intent = rollback_intent_digest(&rollback);
             tx.execute(
                 "INSERT INTO rollbacks(
                     id,environment_id,plan_id,lease_generation,intent_digest,
@@ -118,7 +120,7 @@ impl Inner {
                 ],
             )
             .map_err(pg)?;
-            if !rollback_intent_matches(tx, rollback)? {
+            if !rollback_intent_matches(tx, &rollback)? {
                 return Err(StoreError::ImmutableConflict {
                     kind: "rollback",
                     id: rollback.id.clone(),
@@ -139,7 +141,11 @@ impl Inner {
         checkpoint_json: &str,
         detail: &str,
     ) -> Result<RollbackRecord> {
-        self.with_schema(schema, |tx| {
+        let id = id.to_owned();
+        let owner = owner.to_owned();
+        let checkpoint_json = checkpoint_json.to_owned();
+        let detail = detail.to_owned();
+        self.with_schema(schema, move |tx| {
             let environment: String = tx
                 .query_opt(
                     "SELECT environment_id FROM rollbacks WHERE id=$1",
@@ -149,24 +155,24 @@ impl Inner {
                 .map(|row| row.get(0))
                 .ok_or_else(|| StoreError::NotFound {
                     kind: "rollback",
-                    id: id.into(),
+                    id: id.clone(),
                 })?;
             lock_lease(tx, &environment)?;
-            let current = rollback_in(tx, id)?.ok_or_else(|| StoreError::NotFound {
+            let current = rollback_in(tx, &id)?.ok_or_else(|| StoreError::NotFound {
                 kind: "rollback",
-                id: id.into(),
+                id: id.clone(),
             })?;
             require_plan_environment(tx, &current.plan_id, &current.environment_id)?;
             require_lease(
                 tx,
                 &current.environment_id,
-                owner,
+                &owner,
                 generation,
                 crate::now_millis(),
             )?;
             if !current.status.allows(status) {
                 return Err(StoreError::InvalidRollbackTransition {
-                    id: id.into(),
+                    id,
                     from: current.status,
                     to: status,
                 });
@@ -178,15 +184,15 @@ impl Inner {
                 &[&id, &lease_gen, &checkpoint_json, &status.as_str(), &detail],
             )
             .map_err(pg)?;
-            rollback_in(tx, id)?.ok_or_else(|| StoreError::NotFound {
+            rollback_in(tx, &id)?.ok_or_else(|| StoreError::NotFound {
                 kind: "rollback",
-                id: id.into(),
+                id,
             })
         })
     }
 
     pub fn pending_rollbacks(&self, schema: &str) -> Result<Vec<RollbackRecord>> {
-        self.with_schema(schema, |tx| {
+        self.with_schema(schema, move |tx| {
             let rows = tx
                 .query(
                     "SELECT id,environment_id,plan_id,lease_generation,checkpoint_json,status,status_detail

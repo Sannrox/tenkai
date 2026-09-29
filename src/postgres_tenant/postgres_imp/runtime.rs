@@ -17,7 +17,10 @@ impl Inner {
                 detail: "environment, plan, owner, and future expiry are required".into(),
             });
         }
-        self.with_schema(schema, |tx| {
+        let environment = environment.to_owned();
+        let plan_id = plan_id.to_owned();
+        let owner = owner.to_owned();
+        self.with_schema(schema, move |tx| {
             if tx
                 .query_one(
                     "SELECT EXISTS(
@@ -51,14 +54,14 @@ impl Inner {
                     if stored_env != environment {
                         return Err(StoreError::EnvironmentMismatch {
                             kind: "runtime claim",
-                            id: plan_id.into(),
+                            id: plan_id,
                             expected: stored_env,
-                            actual: environment.into(),
+                            actual: environment,
                         });
                     }
                     if stored_owner == owner && completion.is_some() {
                         return Ok(Some(RuntimeClaim {
-                            plan_id: plan_id.into(),
+                            plan_id,
                             environment_id: stored_env,
                             owner: stored_owner,
                             generation: generation as u64,
@@ -76,7 +79,7 @@ impl Inner {
                         )
                         .map_err(pg)?;
                         return Ok(Some(RuntimeClaim {
-                            plan_id: plan_id.into(),
+                            plan_id,
                             environment_id: stored_env,
                             owner: stored_owner,
                             generation: generation as u64,
@@ -101,9 +104,9 @@ impl Inner {
             )
             .map_err(pg)?;
             Ok(Some(RuntimeClaim {
-                plan_id: plan_id.into(),
-                environment_id: environment.into(),
-                owner: owner.into(),
+                plan_id,
+                environment_id: environment,
+                owner,
                 generation,
                 expires_at,
                 completion_json: None,
@@ -126,7 +129,9 @@ impl Inner {
                 detail: "plan, owner, generation, and future expiry are required".into(),
             });
         }
-        self.with_schema(schema, |tx| {
+        let plan_id = plan_id.to_owned();
+        let owner = owner.to_owned();
+        self.with_schema(schema, move |tx| {
             let lease_gen = generation as i64;
             let changed = tx
                 .execute(
@@ -165,7 +170,10 @@ impl Inner {
         generation: u64,
         completion_json: &str,
     ) -> Result<()> {
-        self.with_schema(schema, |tx| {
+        let plan_id = plan_id.to_owned();
+        let owner = owner.to_owned();
+        let completion_json = completion_json.to_owned();
+        self.with_schema(schema, move |tx| {
             let row = tx
                 .query_opt(
                     "SELECT owner,generation,expires_at,completion_json FROM runtime_claims
@@ -175,7 +183,7 @@ impl Inner {
                 .map_err(pg)?
                 .ok_or_else(|| StoreError::NotFound {
                     kind: "runtime claim",
-                    id: plan_id.into(),
+                    id: plan_id.clone(),
                 })?;
             let stored_owner: String = row.get(0);
             let stored_gen: i64 = row.get(1);
@@ -183,14 +191,14 @@ impl Inner {
             let completion: Option<String> = row.get(3);
             if stored_owner != owner {
                 return Err(StoreError::LeaseOwnerMismatch {
-                    environment: plan_id.into(),
+                    environment: plan_id,
                     expected: stored_owner,
-                    actual: owner.into(),
+                    actual: owner,
                 });
             }
             if stored_gen as u64 != generation {
                 return Err(StoreError::StaleLease {
-                    environment: plan_id.into(),
+                    environment: plan_id,
                     expected: generation,
                     actual: stored_gen as u64,
                 });
@@ -199,14 +207,14 @@ impl Inner {
                 if existing != completion_json {
                     return Err(StoreError::ImmutableConflict {
                         kind: "runtime completion",
-                        id: plan_id.into(),
+                        id: plan_id,
                     });
                 }
                 return Ok(());
             }
             if expiry <= crate::now_millis() {
                 return Err(StoreError::LeaseExpired {
-                    environment: plan_id.into(),
+                    environment: plan_id,
                     generation,
                 });
             }

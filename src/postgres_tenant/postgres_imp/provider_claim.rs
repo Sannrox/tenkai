@@ -16,7 +16,8 @@ impl Inner {
                 detail: "claim token must be non-empty and expiry must be in the future".into(),
             });
         }
-        self.with_schema(schema, |tx| {
+        let claim_token = claim_token.to_owned();
+        self.with_schema(schema, move |tx| {
             tx.execute(
                 "UPDATE provider_events SET claim_token=NULL,claim_until=NULL
                  WHERE delivered_at IS NULL AND claim_until <= $1",
@@ -91,7 +92,9 @@ impl Inner {
                 detail: "provider kind, fresh claim token, and future expiry are required".into(),
             });
         }
-        self.with_schema(schema, |tx| {
+        let provider_kind = provider_kind.to_owned();
+        let claim_token = claim_token.to_owned();
+        self.with_schema(schema, move |tx| {
             tx.execute(
                 "UPDATE provider_events SET claim_token=NULL,claim_until=NULL
                  WHERE delivered_at IS NULL AND claim_until <= $1",

@@ -3,7 +3,8 @@ use super::{Inner, lock_lease, pg, require_lease};
 
 impl Inner {
     pub fn create_plan(&self, schema: &str, plan: &PlanRecord) -> Result<()> {
-        self.with_schema(schema, |tx| {
+        let plan = plan.clone();
+        self.with_schema(schema, move |tx| {
             if tx
                 .query_one(
                     "SELECT EXISTS(
@@ -69,7 +70,8 @@ impl Inner {
     }
 
     pub fn get_plan(&self, schema: &str, id: &str) -> Result<Option<PlanRecord>> {
-        self.with_schema(schema, |tx| {
+        let id = id.to_owned();
+        self.with_schema(schema, move |tx| {
             let row = tx
                 .query_opt(
                     "SELECT id,environment_id,format_version,content_digest,plan_json,status,status_detail
@@ -102,7 +104,10 @@ impl Inner {
         status: PlanStatus,
         detail: &str,
     ) -> Result<PlanRecord> {
-        self.with_schema(schema, |tx| {
+        let id = id.to_owned();
+        let owner = owner.to_owned();
+        let detail = detail.to_owned();
+        self.with_schema(schema, move |tx| {
             if tx
                 .query_one(
                     "SELECT EXISTS(
@@ -125,7 +130,7 @@ impl Inner {
                 .map(|row| row.get(0))
                 .ok_or_else(|| StoreError::NotFound {
                     kind: "plan",
-                    id: id.into(),
+                    id: id.clone(),
                 })?;
             lock_lease(tx, &environment)?;
             let current: String = tx
@@ -133,10 +138,10 @@ impl Inner {
                 .map_err(pg)?
                 .get(0);
             let current = PlanStatus::parse(&current)?;
-            require_lease(tx, &environment, owner, generation, crate::now_millis())?;
+            require_lease(tx, &environment, &owner, generation, crate::now_millis())?;
             if !current.allows(status) {
                 return Err(StoreError::InvalidPlanTransition {
-                    id: id.into(),
+                    id,
                     from: current,
                     to: status,
                 });

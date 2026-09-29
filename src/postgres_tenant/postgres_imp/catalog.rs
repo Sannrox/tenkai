@@ -3,7 +3,8 @@ use super::{Inner, pg};
 
 impl Inner {
     pub fn get_environment(&self, schema: &str, id: &str) -> Result<Option<EnvironmentRecord>> {
-        self.with_schema(schema, |tx| {
+        let id = id.to_owned();
+        self.with_schema(schema, move |tx| {
             let row = tx
                 .query_opt(
                     "SELECT id, revision, configuration_json FROM environments WHERE id = $1",
@@ -19,7 +20,7 @@ impl Inner {
     }
 
     pub fn list_environment_ids(&self, schema: &str) -> Result<Vec<String>> {
-        self.with_schema(schema, |tx| {
+        self.with_schema(schema, move |tx| {
             let rows = tx
                 .query("SELECT id FROM environments ORDER BY id ASC", &[])
                 .map_err(pg)?;
@@ -32,7 +33,8 @@ impl Inner {
         schema: &str,
         environment: &EnvironmentRecord,
     ) -> Result<EnvironmentRecord> {
-        self.with_schema(schema, |tx| {
+        let environment = environment.clone();
+        self.with_schema(schema, move |tx| {
             if tx
                 .query_one(
                     "SELECT EXISTS(
@@ -92,7 +94,8 @@ impl Inner {
     }
 
     pub fn publish_release(&self, schema: &str, release: &ReleaseRecord) -> Result<()> {
-        self.with_schema(schema, |tx| {
+        let release = release.clone();
+        self.with_schema(schema, move |tx| {
             tx.execute(
                 "INSERT INTO releases(id,product,version,content_digest,descriptor_json)
                  VALUES($1,$2,$3,$4,$5)
@@ -132,7 +135,8 @@ impl Inner {
     }
 
     pub fn get_release(&self, schema: &str, id: &str) -> Result<Option<ReleaseRecord>> {
-        self.with_schema(schema, |tx| {
+        let id = id.to_owned();
+        self.with_schema(schema, move |tx| {
             let row = tx
                 .query_opt(
                     "SELECT id,product,version,content_digest,descriptor_json FROM releases WHERE id=$1",

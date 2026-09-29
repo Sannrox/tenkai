@@ -14,7 +14,8 @@ impl Inner {
                 detail: "new events must have pristine delivery state".into(),
             });
         }
-        self.with_schema(schema, |tx| {
+        let event = event.clone();
+        self.with_schema(schema, move |tx| {
             let existing = tx
                 .query_opt(
                     "SELECT provider_kind,binding_digest,payload_json FROM provider_events
@@ -83,7 +84,9 @@ impl Inner {
                     .into(),
             });
         }
-        self.with_schema(schema, |tx| {
+        let provider_kind = provider_kind.to_owned();
+        let environment_id = environment_id.to_owned();
+        self.with_schema(schema, move |tx| {
             let limit_i = limit.min(128) as i64;
             let rows = tx
                 .query(

@@ -1,5 +1,6 @@
 use postgres::{Client, Transaction};
-use std::sync::Mutex;
+use std::sync::mpsc::{self, SyncSender};
+use std::thread::{self, JoinHandle};
 
 pub(crate) use crate::storage::{
     AuditRecord, ChannelRecord, EnvironmentRecord, LeaseRecord, OfflineImportRecord,
@@ -9,7 +10,89 @@ pub(crate) use crate::storage::{
 };
 
 pub struct Inner {
-    pub(crate) client: Mutex<Option<Client>>,
+    worker: Worker<Client>,
+}
+
+enum WorkerMessage<C> {
+    Run(Box<dyn FnOnce(&mut C) + Send + 'static>),
+    Stop,
+}
+
+/// Keeps the synchronous client on one handle-free thread and bounds waiting callers.
+struct Worker<C> {
+    sender: SyncSender<WorkerMessage<C>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl<C: Send + 'static> Worker<C> {
+    fn start(initialize: impl FnOnce() -> Result<C> + Send + 'static) -> Result<Self> {
+        let (sender, receiver) = mpsc::sync_channel(0);
+        let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
+        let thread = thread::Builder::new()
+            .name("tenkai-postgres-client".into())
+            .spawn(move || {
+                let mut client = match initialize() {
+                    Ok(client) => {
+                        if ready_sender.send(Ok(())).is_err() {
+                            return;
+                        }
+                        client
+                    }
+                    Err(error) => {
+                        let _ = ready_sender.send(Err(error));
+                        return;
+                    }
+                };
+
+                while let Ok(WorkerMessage::Run(work)) = receiver.recv() {
+                    work(&mut client);
+                }
+            })
+            .map_err(|error| {
+                StoreError::Postgres(format!("failed to start postgres worker: {error}"))
+            })?;
+
+        match ready_receiver.recv() {
+            Ok(Ok(())) => Ok(Self {
+                sender,
+                thread: Some(thread),
+            }),
+            Ok(Err(error)) => {
+                let _ = thread.join();
+                Err(error)
+            }
+            Err(_) => {
+                let _ = thread.join();
+                Err(StoreError::AdapterUnavailable(
+                    "postgres worker exited during startup".into(),
+                ))
+            }
+        }
+    }
+
+    fn run<T: Send + 'static, E: Send + 'static>(
+        &self,
+        work: impl FnOnce(&mut C) -> std::result::Result<T, E> + Send + 'static,
+        worker_failure: E,
+    ) -> std::result::Result<T, E> {
+        let (result_sender, result_receiver) = mpsc::sync_channel(1);
+        let message = WorkerMessage::Run(Box::new(move |client| {
+            let _ = result_sender.send(work(client));
+        }));
+        if self.sender.send(message).is_err() {
+            return Err(worker_failure);
+        }
+        result_receiver.recv().unwrap_or(Err(worker_failure))
+    }
+}
+
+impl<C> Drop for Worker<C> {
+    fn drop(&mut self) {
+        let _ = self.sender.send(WorkerMessage::Stop);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 pub(crate) fn pg(err: postgres::Error) -> StoreError {
@@ -18,31 +101,6 @@ pub(crate) fn pg(err: postgres::Error) -> StoreError {
         .map(|database| format!("{} ({})", database.message(), database.code().code()))
         .unwrap_or_else(|| err.to_string());
     StoreError::Postgres(message)
-}
-
-/// Run blocking `postgres::Client` work off any Tokio worker.
-///
-/// `postgres 0.19`'s synchronous facade builds an inner runtime and `block_on`s
-/// it. `tokio::task::spawn_blocking` still has a `Handle`, so connect/query
-/// from that path panics with "Cannot start a runtime from within a runtime".
-pub(crate) fn without_tokio_err<T: Send, E: Send>(
-    work: impl FnOnce() -> std::result::Result<T, E> + Send,
-    panicked: E,
-) -> std::result::Result<T, E> {
-    if tokio::runtime::Handle::try_current().is_err() {
-        return work();
-    }
-    std::thread::scope(|scope| match scope.spawn(work).join() {
-        Ok(value) => value,
-        Err(_) => Err(panicked),
-    })
-}
-
-pub(crate) fn without_tokio<T: Send>(work: impl FnOnce() -> Result<T> + Send) -> Result<T> {
-    without_tokio_err(
-        work,
-        StoreError::Postgres("postgres worker thread panicked".into()),
-    )
 }
 
 mod catalog;
@@ -65,43 +123,75 @@ pub(crate) use leases::{lock_lease, require_lease, require_plan_environment};
 pub(crate) use schema::migrate_tenant_schema;
 
 impl Inner {
-    pub(crate) fn with_schema<T: Send>(
+    pub(crate) fn with_schema<T: Send + 'static>(
         &self,
         schema: &str,
-        f: impl FnOnce(&mut Transaction<'_>) -> Result<T> + Send,
+        f: impl FnOnce(&mut Transaction<'_>) -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        without_tokio(|| {
-            let mut guard = self.client.lock().map_err(|_| StoreError::Poisoned)?;
-            let client = guard.as_mut().ok_or(StoreError::Poisoned)?;
-            let mut tx = client.transaction().map_err(pg)?;
-            // Identifier is sanitized by tenant_schema_name (alnum + underscore only).
-            tx.batch_execute(&format!("SET LOCAL search_path TO {schema}, public"))
-                .map_err(pg)?;
-            let out = f(&mut tx)?;
-            tx.commit().map_err(pg)?;
-            Ok(out)
-        })
+        let schema = schema.to_owned();
+        self.worker.run(
+            move |client| {
+                let mut tx = client.transaction().map_err(pg)?;
+                // Identifier is sanitized by tenant_schema_name (alnum + underscore only).
+                tx.batch_execute(&format!("SET LOCAL search_path TO {schema}, public"))
+                    .map_err(pg)?;
+                let out = f(&mut tx)?;
+                tx.commit().map_err(pg)?;
+                Ok(out)
+            },
+            StoreError::Postgres("postgres worker thread panicked".into()),
+        )
     }
 }
 
 impl Inner {
     pub fn check_health(&self) -> Result<()> {
-        without_tokio(|| {
-            let mut guard = self.client.lock().map_err(|_| StoreError::Poisoned)?;
-            let client = guard.as_mut().ok_or(StoreError::Poisoned)?;
-            client.query_one("SELECT 1", &[]).map_err(pg)?;
-            Ok(())
-        })
+        self.worker.run(
+            |client| {
+                client.query_one("SELECT 1", &[]).map_err(pg)?;
+                Ok(())
+            },
+            StoreError::Postgres("postgres worker thread panicked".into()),
+        )
     }
 }
 
-impl Drop for Inner {
-    fn drop(&mut self) {
-        let _ = without_tokio(|| {
-            if let Ok(mut guard) = self.client.lock() {
-                drop(guard.take());
-            }
-            Ok(())
-        });
+#[cfg(test)]
+mod tests {
+    use super::Worker;
+    use crate::storage::StoreError;
+    use std::thread;
+
+    #[test]
+    fn worker_reuses_one_handle_free_thread_for_multiple_operations() {
+        let worker = Worker::start(|| {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            Ok::<_, StoreError>(thread::current().id())
+        })
+        .unwrap();
+        let caller = thread::current().id();
+        let worker_thread = worker
+            .run(
+                |owner| {
+                    assert_eq!(*owner, thread::current().id());
+                    assert!(tokio::runtime::Handle::try_current().is_err());
+                    Ok::<_, StoreError>(thread::current().id())
+                },
+                StoreError::Poisoned,
+            )
+            .unwrap();
+        let later_worker_thread = worker
+            .run(
+                |owner| {
+                    assert_eq!(*owner, thread::current().id());
+                    assert!(tokio::runtime::Handle::try_current().is_err());
+                    Ok::<_, StoreError>(thread::current().id())
+                },
+                StoreError::Poisoned,
+            )
+            .unwrap();
+
+        assert_ne!(worker_thread, caller);
+        assert_eq!(later_worker_thread, worker_thread);
     }
 }

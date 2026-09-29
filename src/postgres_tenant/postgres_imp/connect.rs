@@ -1,16 +1,17 @@
 use super::*;
 use super::{Inner, migrate_tenant_schema, pg};
 use postgres::{Client, NoTls};
-use std::sync::Mutex;
 
 impl Inner {
     pub fn connect(url: &str) -> Result<Self> {
         let url = url.to_string();
-        without_tokio(move || connect_blocking(&url))
+        Ok(Self {
+            worker: Worker::start(move || connect_client(&url))?,
+        })
     }
 }
 
-fn connect_blocking(url: &str) -> Result<Inner> {
+fn connect_client(url: &str) -> Result<Client> {
     let mut client = Client::connect(url, NoTls).map_err(pg)?;
     // PostgreSQL's IF NOT EXISTS DDL can still race in the system
     // catalogs when several replicas initialize a fresh database at
@@ -86,31 +87,31 @@ fn connect_blocking(url: &str) -> Result<Inner> {
             &[],
         )
         .map_err(pg)?;
-    Ok(Inner {
-        client: Mutex::new(Some(client)),
-    })
+    Ok(client)
 }
 
 impl Inner {
     pub fn ensure_tenant_schema(&self, schema: &str) -> Result<()> {
-        without_tokio(|| {
-            let mut guard = self.client.lock().map_err(|_| StoreError::Poisoned)?;
-            let client = guard.as_mut().ok_or(StoreError::Poisoned)?;
-            let mut tx = client.transaction().map_err(pg)?;
-            tx.query_one(
-                "SELECT pg_advisory_xact_lock(
-                hashtextextended('tenkai_tenant_schema:' || $1, 0)
-             )",
-                &[&schema],
-            )
-            .map_err(pg)?;
-            tx.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {schema}"))
+        let schema = schema.to_owned();
+        self.worker.run(
+            move |client| {
+                let mut tx = client.transaction().map_err(pg)?;
+                tx.query_one(
+                    "SELECT pg_advisory_xact_lock(
+                    hashtextextended('tenkai_tenant_schema:' || $1, 0)
+                 )",
+                    &[&schema],
+                )
                 .map_err(pg)?;
-            tx.batch_execute(&format!("SET LOCAL search_path TO {schema}, public"))
-                .map_err(pg)?;
-            migrate_tenant_schema(&mut tx)?;
-            tx.commit().map_err(pg)?;
-            Ok(())
-        })
+                tx.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {schema}"))
+                    .map_err(pg)?;
+                tx.batch_execute(&format!("SET LOCAL search_path TO {schema}, public"))
+                    .map_err(pg)?;
+                migrate_tenant_schema(&mut tx)?;
+                tx.commit().map_err(pg)?;
+                Ok(())
+            },
+            StoreError::Postgres("postgres worker thread panicked".into()),
+        )
     }
 }
