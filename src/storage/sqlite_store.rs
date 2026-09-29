@@ -103,36 +103,29 @@ impl SqliteStore {
         Ok(ids)
     }
 
+    /// Non-retired environment ids in stable order, served by `environments_active`.
+    pub fn list_active_environment_ids(&self) -> Result<Vec<String>> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare("SELECT id FROM environments WHERE retired_at IS NULL ORDER BY id ASC")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Active catalog environment ids. A legacy name-keyed row is also hidden
+    /// when its `tenkai:env:<name>` catalog row is retired.
     pub(crate) fn list_active_catalog_environment_ids(&self) -> Result<Vec<String>> {
         let connection = self.connection()?;
-        let mut statement =
-            connection.prepare("SELECT id,configuration_json FROM environments ORDER BY id ASC")?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let retired = rows
-            .iter()
-            .filter_map(|(id, configuration)| {
-                crate::environment::retirement_from_configuration_json(configuration)
-                    .map(|_| id.clone())
-            })
-            .collect::<std::collections::HashSet<_>>();
-        Ok(rows
-            .into_iter()
-            .filter_map(|(id, configuration)| {
-                if crate::environment::retirement_from_configuration_json(&configuration).is_some()
-                {
-                    return None;
-                }
-                if !id.starts_with("tenkai:env:") && retired.contains(&crate::ontology::env_id(&id))
-                {
-                    return None;
-                }
-                Some(id)
-            })
-            .collect())
+        let mut statement = connection.prepare(
+            "SELECT e.id FROM environments e
+             WHERE e.retired_at IS NULL
+               AND (e.id GLOB 'tenkai:env:*' OR NOT EXISTS (
+                    SELECT 1 FROM environments r
+                    WHERE r.id = 'tenkai:env:' || e.id AND r.retired_at IS NOT NULL))
+             ORDER BY e.id ASC",
+        )?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 }
 

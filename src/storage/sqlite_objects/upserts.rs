@@ -89,9 +89,16 @@ pub(super) fn upsert_environment_in(tx: &Transaction<'_>, object: &Object) -> Re
     }
     let next = revision.map(|value| value + 1).unwrap_or(1);
     tx.execute(
-        "INSERT INTO environments(id,revision,configuration_json) VALUES(?1,?2,?3)
-         ON CONFLICT(id) DO UPDATE SET revision=excluded.revision, configuration_json=excluded.configuration_json",
-        params![object.id, next, encode_object(object)],
+        "INSERT INTO environments(id,revision,configuration_json,retired_at) VALUES(?1,?2,?3,?4)
+         ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,
+           configuration_json=excluded.configuration_json, retired_at=excluded.retired_at",
+        params![
+            object.id,
+            next,
+            encode_object(object),
+            crate::environment::retirement_from_object(object)
+                .map(|retirement| retirement.retired_at)
+        ],
     )?;
     upsert_catalog_in(tx, object)?;
     Ok(())

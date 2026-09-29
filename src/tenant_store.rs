@@ -55,6 +55,12 @@ pub trait TenantOperationalStore: Send + Sync {
         context: &AuthenticatedRequestContext,
     ) -> std::result::Result<Vec<String>, IsolationError>;
 
+    /// Non-retired environment ids in one store query (#457).
+    fn list_active_environment_ids_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+    ) -> std::result::Result<Vec<String>, IsolationError>;
+
     fn current_lease_for(
         &self,
         context: &AuthenticatedRequestContext,
@@ -227,6 +233,17 @@ impl InMemoryTenantOperationalStore {
             .map_err(|error| IsolationError::Contract(error.to_string()))
     }
 
+    pub fn list_active_environment_ids_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+    ) -> std::result::Result<Vec<String>, IsolationError> {
+        let partition = self.partition_for(context)?;
+        partition
+            .store
+            .list_active_environment_ids()
+            .map_err(|error| IsolationError::Contract(error.to_string()))
+    }
+
     pub fn current_lease_for(
         &self,
         context: &AuthenticatedRequestContext,
@@ -357,6 +374,13 @@ impl TenantOperationalStore for InMemoryTenantOperationalStore {
         context: &AuthenticatedRequestContext,
     ) -> std::result::Result<Vec<String>, IsolationError> {
         InMemoryTenantOperationalStore::list_environment_ids_for(self, context)
+    }
+
+    fn list_active_environment_ids_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+    ) -> std::result::Result<Vec<String>, IsolationError> {
+        InMemoryTenantOperationalStore::list_active_environment_ids_for(self, context)
     }
 
     fn current_lease_for(

@@ -48,6 +48,13 @@ impl TenantOperationalStore for PostgresTenantOperationalStore {
         PostgresTenantOperationalStore::list_environment_ids_for(self, context)
     }
 
+    fn list_active_environment_ids_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+    ) -> std::result::Result<Vec<String>, IsolationError> {
+        PostgresTenantOperationalStore::list_active_environment_ids_for(self, context)
+    }
+
     fn current_lease_for(
         &self,
         context: &AuthenticatedRequestContext,

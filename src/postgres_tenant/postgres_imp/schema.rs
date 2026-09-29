@@ -16,7 +16,8 @@ pub(crate) fn migrate_tenant_schema(tx: &mut Transaction<'_>) -> Result<()> {
             UNIQUE(product, name)
         );
         CREATE TABLE IF NOT EXISTS environments (
-            id TEXT PRIMARY KEY, revision BIGINT NOT NULL, configuration_json TEXT NOT NULL
+            id TEXT PRIMARY KEY, revision BIGINT NOT NULL, configuration_json TEXT NOT NULL,
+            retired_at BIGINT
         );
         CREATE TABLE IF NOT EXISTS plans (
             id TEXT PRIMARY KEY,
@@ -136,6 +137,7 @@ pub(crate) fn migrate_tenant_schema(tx: &mut Transaction<'_>) -> Result<()> {
         ",
     )
     .map_err(pg)?;
+    migrate_environment_retirement(tx)?;
     let legacy_events = tx
         .query(
             "SELECT provider_kind,id,payload_json FROM provider_events
@@ -179,5 +181,48 @@ pub(crate) fn migrate_tenant_schema(tx: &mut Transaction<'_>) -> Result<()> {
         )
         .map_err(pg)?;
     }
+    Ok(())
+}
+
+/// Schema 12 (#457): project retirement out of `configuration_json` into an
+/// indexed `retired_at` column so active listings filter in SQL. Rows from
+/// older schemas are backfilled once with the parser every write path uses.
+fn migrate_environment_retirement(tx: &mut Transaction<'_>) -> Result<()> {
+    let has_column: bool = tx
+        .query_one(
+            "SELECT EXISTS(
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'environments'
+                  AND column_name = 'retired_at'
+             )",
+            &[],
+        )
+        .map_err(pg)?
+        .get(0);
+    if !has_column {
+        tx.batch_execute("ALTER TABLE environments ADD COLUMN retired_at BIGINT")
+            .map_err(pg)?;
+        let rows = tx
+            .query("SELECT id, configuration_json FROM environments", &[])
+            .map_err(pg)?;
+        for row in rows {
+            let id: String = row.get(0);
+            if let Some(retirement) =
+                crate::environment::retirement_from_configuration_json(&row.get::<_, String>(1))
+            {
+                tx.execute(
+                    "UPDATE environments SET retired_at = $1 WHERE id = $2",
+                    &[&retirement.retired_at, &id],
+                )
+                .map_err(pg)?;
+            }
+        }
+    }
+    tx.batch_execute(
+        "CREATE INDEX IF NOT EXISTS environments_active
+         ON environments(id) WHERE retired_at IS NULL",
+    )
+    .map_err(pg)?;
     Ok(())
 }

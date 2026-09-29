@@ -122,3 +122,54 @@ fn provider_event_inspection_uses_immutable_observation_time() {
     assert_eq!(selected.len(), 1);
     assert_eq!(selected[0].id, new_event.id);
 }
+
+#[test]
+fn schema_eleven_backfills_environment_retirement_column() {
+    let path = std::env::temp_dir().join(format!(
+        "tenkai-457-retirement-{}-{}.db",
+        std::process::id(),
+        crate::now_millis()
+    ));
+    {
+        let mut connection = Connection::open(&path).unwrap();
+        migrate(&mut connection).unwrap();
+        connection
+            .execute_batch(
+                "DROP INDEX environments_active;
+                 ALTER TABLE environments DROP COLUMN retired_at;
+                 PRAGMA user_version = 11;",
+            )
+            .unwrap();
+        let retired_properties = r#"{"properties":{"tenkai.retirement.reason":"decommissioned","tenkai.retirement.actor":"ops","tenkai.retirement.at":"7"}}"#;
+        let retired_tenant =
+            r#"{"_tenkai_retirement":{"reason":"decommissioned","actor":"ops","retired_at":9}}"#;
+        for (id, configuration) in [
+            ("active", "{}"),
+            ("gone", "{}"),
+            ("tenkai:env:gone", retired_properties),
+            ("tenant-retired", retired_tenant),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO environments(id,revision,configuration_json) VALUES(?1,1,?2)",
+                    rusqlite::params![id, configuration],
+                )
+                .unwrap();
+        }
+    }
+
+    let store = SqliteStore::open(&path).unwrap();
+    assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+    assert_eq!(
+        store.list_active_catalog_environment_ids().unwrap(),
+        vec!["active"],
+        "retired rows and the legacy alias of a retired catalog row stay hidden"
+    );
+    assert_eq!(
+        store.list_active_environment_ids().unwrap(),
+        vec!["active", "gone"],
+        "tenant listing filters on the row's own retirement"
+    );
+    drop(store);
+    let _ = std::fs::remove_file(path);
+}

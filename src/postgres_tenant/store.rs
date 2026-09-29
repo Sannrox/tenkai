@@ -136,6 +136,16 @@ impl PostgresTenantOperationalStore {
             .map_err(|error| IsolationError::Contract(error.to_string()))
     }
 
+    pub fn list_active_environment_ids_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+    ) -> std::result::Result<Vec<String>, IsolationError> {
+        let partition = self.partition_for(context)?;
+        partition
+            .list_active_environment_ids()
+            .map_err(|error| IsolationError::Contract(error.to_string()))
+    }
+
     pub fn current_lease_for(
         &self,
         context: &AuthenticatedRequestContext,

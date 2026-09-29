@@ -183,3 +183,5 @@ mod live_fence;
 mod live_fixture;
 #[cfg(feature = "postgres")]
 mod live_isolation;
+#[cfg(feature = "postgres")]
+mod live_retirement;

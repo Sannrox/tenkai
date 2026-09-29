@@ -81,6 +81,19 @@ impl PostgresTenantPartition {
         }
     }
 
+    pub fn list_active_environment_ids(&self) -> Result<Vec<String>> {
+        #[cfg(feature = "postgres")]
+        {
+            self.inner.list_active_environment_ids(&self.schema)
+        }
+        #[cfg(not(feature = "postgres"))]
+        {
+            Err(StoreError::AdapterUnavailable(
+                "postgres feature disabled".into(),
+            ))
+        }
+    }
+
     pub fn import_development_fixture(
         &self,
         fixture: &crate::development_fixtures::PreparedDevelopmentFixture,

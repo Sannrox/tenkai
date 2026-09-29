@@ -28,6 +28,19 @@ impl Inner {
         })
     }
 
+    /// Non-retired environment ids in stable order, served by `environments_active`.
+    pub fn list_active_environment_ids(&self, schema: &str) -> Result<Vec<String>> {
+        self.with_schema(schema, move |tx| {
+            let rows = tx
+                .query(
+                    "SELECT id FROM environments WHERE retired_at IS NULL ORDER BY id ASC",
+                    &[],
+                )
+                .map_err(pg)?;
+            Ok(rows.into_iter().map(|row| row.get(0)).collect())
+        })
+    }
+
     pub fn put_environment(
         &self,
         schema: &str,
@@ -121,10 +134,20 @@ impl Inner {
             };
             let next_i = next as i64;
             tx.execute(
-                "INSERT INTO environments(id,revision,configuration_json) VALUES($1,$2,$3)
+                "INSERT INTO environments(id,revision,configuration_json,retired_at)
+                 VALUES($1,$2,$3,$4)
                  ON CONFLICT(id) DO UPDATE SET revision=EXCLUDED.revision,
-                   configuration_json=EXCLUDED.configuration_json",
-                &[&environment.id, &next_i, &environment.configuration_json],
+                   configuration_json=EXCLUDED.configuration_json,
+                   retired_at=EXCLUDED.retired_at",
+                &[
+                    &environment.id,
+                    &next_i,
+                    &environment.configuration_json,
+                    &crate::environment::retirement_from_configuration_json(
+                        &environment.configuration_json,
+                    )
+                    .map(|retirement| retirement.retired_at),
+                ],
             )
             .map_err(pg)?;
             Ok(EnvironmentRecord {
