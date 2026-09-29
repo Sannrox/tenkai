@@ -1,70 +1,79 @@
 # tenkai
 
-`tenkai` (展開, "deployment / unfolding") is a local-first, constraint-based
-delivery control plane with optional governance, evaluation, and graph
-integration through [sekai-chisei](https://github.com/Sannrox/sekai-chisei).
+Tenkai (展開, "deployment") is a delivery control plane for software you ship
+into many environments you do not fully control: customer VPCs, on-prem sites,
+edge hosts, and air-gapped networks. You **publish** immutable releases,
+**promote** them into channels, and **subscribe** environments to channels.
+Tenkai computes the plan that converges each environment, executes it behind
+health probes, and rolls back automatically on failure. Model routing configs
+and other intelligence artifacts ship through the same path as services.
 
-You don't script deployments. You **publish** immutable releases, **promote**
-them into channels, and **subscribe** environments to channels. `tenkaictl`
-computes the plan that converges an environment on its channels, executes it,
-health-probes it, and rolls back automatically on failure. Optional governance
-providers can add evaluation gates; Tenkai remains the operational owner.
+It is for teams that deliver one product to a fleet of heterogeneous or
+disconnected environments and need per-environment channels, gates,
+maintenance windows, signed releases, approvals, and an audit trail.
 
-The default **embedded mode** runs the application core, SQLite store, Catalog,
-and executor through one `tenkaictl` binary. It opens no network connection and
-requires no database or provider service. Embedded and server operation share
-the same application core. The
-durable boundary and service-evolution rules are recorded in
-[ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md); see
-[DESIGN.md](DESIGN.md) for the roadmap.
-The versioned Catalog application port, transport conformance requirements,
-cache rules, and failure semantics are documented in
-[the Catalog contract](docs/catalog-contract.md).
-Authenticated local integration demos may opt into the disabled-by-default
-[development fixture contract](docs/development-fixtures.md); it creates only
-tenant-scoped, non-executable projections and is not a production mutation API.
-Disconnected environments use bounded self-verifying archives and signed,
-replay-safe receipts documented in
-[the offline bundle contract](docs/offline-bundles.md).
-Typed local adapters can request the bounded
-[machine-readable command result contract](docs/command-results.md) with
-`--output json-v1`.
-Publication can also retain [registered immutable provenance
-envelopes](docs/release-provenance.md) without accepting subject payloads or
-granting external evidence delivery authority. A release may additionally pin
-one [accepted change-set closure](docs/change-set-pin.md) as a Catalog fact;
-the change-set service remains evidence, not recovery authority.
-A content-addressed branch pin can provision a
-[non-promotable preview environment](docs/preview-environments.md) with a
-pin-bound plan digest and automatic teardown on expiry.
+**Why not Flux, Argo CD, or a deploy script?** GitOps tools sync a git repo
+into a connected cluster you own; a deploy script pushes whatever it is told
+to. Tenkai keeps a catalog of immutable releases and lets each environment's
+own constraints decide what it runs and when, including environments that are
+only reachable by [offline bundle](docs/offline-bundles.md). The full
+rationale is in [DESIGN.md](DESIGN.md).
 
-## Quickstart
+## Try it in five minutes
+
+Embedded mode is one `tenkaictl` binary with a local SQLite store: no server,
+database, or network service. The example product only writes a file.
 
 ```bash
-cargo build --bin tenkaictl
+git clone https://github.com/Sannrox/tenkai && cd tenkai
 
-# initialize .tenkai-state/tenkai.db and create the local environment
-./target/debug/tenkaictl init
+# download the latest community host and check it against SHA256SUMS
+platform=darwin-aarch64   # or linux-x86_64
+base=https://github.com/Sannrox/tenkai/releases/latest/download
+curl -fsSL -O "$base/SHA256SUMS" -O "$base/tenkaictl-$platform"
+grep " tenkaictl-$platform\$" SHA256SUMS | shasum -a 256 -c -
+chmod 0755 "tenkaictl-$platform" && mv "tenkaictl-$platform" tenkaictl
+
+# initialize .tenkai-state/tenkai.db and the built-in local environment
+./tenkaictl init
 
 # publish an immutable release and promote it to a channel
 export TENKAI_MANAGEMENT_TOKEN='replace-from-secret-store'
-./target/debug/tenkaictl publish examples/hello-local/tenkai.toml \
-  --allow-unsigned-development
-./target/debug/tenkaictl promote hello-local@0.1.0 stable
+./tenkaictl publish examples/hello-local/tenkai.toml --allow-unsigned-development
+./tenkaictl promote hello-local@0.1.0 stable
 
 # subscribe this machine and converge
-./target/debug/tenkaictl env subscribe local hello-local=stable
-./target/debug/tenkaictl plan --env local
-./target/debug/tenkaictl apply <plan-id-from-previous-command> \
+./tenkaictl env subscribe local hello-local=stable
+./tenkaictl plan --env local
+./tenkaictl apply <plan-id-from-previous-command> \
   --allow-unapproved-development \
   --development-reason "local quickstart"
-./target/debug/tenkaictl status
-./target/debug/tenkaictl inspect
+./tenkaictl status
 ```
 
-Published tags also attach community hosts. Verify `SHA256SUMS` before running
-them; hub Postgres builds stay `cargo build --features postgres`. See
-[GitHub Release binaries](docs/release-binaries.md).
+`--allow-unsigned-development` and `--allow-unapproved-development` are
+development bypasses for the built-in `local` environment only. Every other
+environment fails closed without [signed releases](docs/release-signing.md)
+and [signed plan approvals](docs/plan-approval.md).
+
+To verify build provenance with GitHub attestations, see
+[GitHub Release binaries](docs/release-binaries.md). To build from source
+instead, run `cargo build --bin tenkaictl` and use `./target/debug/tenkaictl`.
+Hub Postgres hosts are source-built with `--features postgres`.
+
+## Contracts and reference
+
+| Topic | Document |
+| --- | --- |
+| Architecture boundary and service evolution | [ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md) |
+| Catalog port, transport, cache, failure semantics | [Catalog contract](docs/catalog-contract.md) |
+| Disconnected environments | [Offline bundles](docs/offline-bundles.md) |
+| Machine-readable results (`--output json-v1`) | [Command results](docs/command-results.md) |
+| Release provenance envelopes | [Release provenance](docs/release-provenance.md) |
+| Change-set pins | [Change-set pin](docs/change-set-pin.md) |
+| Non-promotable preview environments | [Preview environments](docs/preview-environments.md) |
+| Authenticated integration demos | [Development fixtures](docs/development-fixtures.md) |
+| Every operator topic | [docs/README.md](docs/README.md) |
 
 ## Repository verification
 
@@ -109,7 +118,7 @@ automatically: stop the old controller and its children, then use
 
 ## Local dogfood (minikube, no remote server)
 
-The file-based quickstart above uses shell install commands. To exercise the
+The five-minute path above uses shell install commands. To exercise the
 **Kubernetes software executor** entirely on a laptop (embedded SQLite, no
 `tenkai-server`, no cloud):
 
