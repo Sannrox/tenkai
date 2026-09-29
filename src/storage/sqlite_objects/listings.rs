@@ -20,6 +20,11 @@ impl SqliteStore {
     }
 
     pub fn list_kind_ids(&self, kind: &str) -> AnyResult<Vec<String>> {
+        if kind == KIND_ENVIRONMENT {
+            return self
+                .list_active_catalog_environment_ids()
+                .map_err(Into::into);
+        }
         Ok(self
             .list_kind(kind)?
             .into_iter()
@@ -76,7 +81,9 @@ impl SqliteStore {
     }
 
     pub(super) fn list_environments(&self) -> AnyResult<Vec<Object>> {
-        let ids = self.list_environment_ids().map_err(anyhow::Error::from)?;
+        let ids = self
+            .list_active_catalog_environment_ids()
+            .map_err(anyhow::Error::from)?;
         ids.into_iter()
             .filter_map(|id| self.get_environment(&id).ok().flatten())
             .map(|record| environment_record_to_object(&record))

@@ -17,6 +17,7 @@ impl SqliteStore {
         }
         let mut connection = self.connection()?;
         let tx = connection.transaction()?;
+        ensure_environment_active_in(&tx, environment, "runtime work claims")?;
         if tx.query_row(
             "SELECT EXISTS(
                 SELECT 1 FROM development_fixture_objects

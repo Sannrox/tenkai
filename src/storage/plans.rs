@@ -4,6 +4,7 @@ impl SqliteStore {
     pub(super) fn create_plan_sqlite(&self, plan: &PlanRecord) -> Result<()> {
         let mut connection = self.connection()?;
         let tx = connection.transaction()?;
+        ensure_environment_active_in(&tx, &plan.environment_id, "new plans")?;
         if tx.query_row(
             "SELECT EXISTS(
                 SELECT 1 FROM development_fixture_objects
@@ -121,6 +122,7 @@ impl SqliteStore {
         }
         let mut connection = self.connection()?;
         let tx = connection.transaction()?;
+        ensure_environment_active_in(&tx, environment, "new apply leases")?;
         if tx.query_row(
             "SELECT EXISTS(
                 SELECT 1 FROM development_fixture_objects

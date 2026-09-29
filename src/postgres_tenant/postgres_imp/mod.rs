@@ -103,6 +103,47 @@ pub(crate) fn pg(err: postgres::Error) -> StoreError {
     StoreError::Postgres(message)
 }
 
+pub(crate) fn ensure_environment_active(
+    tx: &mut Transaction<'_>,
+    environment: &str,
+    operation: &str,
+) -> Result<()> {
+    let id = if environment.starts_with("tenkai:env:") {
+        environment.to_owned()
+    } else {
+        crate::ontology::env_id(environment)
+    };
+    let configuration = tx
+        .query_opt(
+            "SELECT configuration_json FROM environments WHERE id=$1",
+            &[&id],
+        )
+        .map_err(pg)?
+        .map(|row| row.get::<_, String>(0));
+    let configuration = match configuration {
+        Some(configuration) => Some(configuration),
+        None if id != environment => tx
+            .query_opt(
+                "SELECT configuration_json FROM environments WHERE id=$1",
+                &[&environment],
+            )
+            .map_err(pg)?
+            .map(|row| row.get::<_, String>(0)),
+        None => None,
+    };
+    if configuration
+        .as_deref()
+        .and_then(crate::environment::retirement_from_configuration_json)
+        .is_some()
+    {
+        return Err(StoreError::InvalidData {
+            kind: "environment",
+            detail: format!("retired environment {environment} cannot accept {operation}"),
+        });
+    }
+    Ok(())
+}
+
 mod catalog;
 mod channels;
 mod connect;

@@ -458,6 +458,7 @@ mod tests {
             observed_type_digest: None,
             observed_runtime_digest: None,
             module_activations: Vec::new(),
+            retirement: None,
             preview: None,
         };
         let behind = EnvironmentInspectReport {
@@ -490,6 +491,7 @@ mod tests {
             observed_type_digest: None,
             observed_runtime_digest: None,
             module_activations: Vec::new(),
+            retirement: None,
             preview: None,
         };
         let unhealthy = EnvironmentInspectReport {
@@ -522,6 +524,7 @@ mod tests {
             observed_type_digest: None,
             observed_runtime_digest: None,
             module_activations: Vec::new(),
+            retirement: None,
             preview: None,
         };
         let empty = EnvironmentInspectReport {
@@ -544,6 +547,7 @@ mod tests {
             observed_type_digest: None,
             observed_runtime_digest: None,
             module_activations: Vec::new(),
+            retirement: None,
             preview: None,
         };
         let report = fleet_status_from_inspects(vec![behind, empty, unhealthy, current]);
@@ -602,6 +606,7 @@ mod tests {
             observed_type_digest: None,
             observed_runtime_digest: None,
             module_activations: Vec::new(),
+            retirement: None,
             preview: None,
         };
         let report = fleet_status_from_inspects(vec![stale]);

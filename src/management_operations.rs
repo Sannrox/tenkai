@@ -216,6 +216,67 @@ impl ManagementOperations {
         Ok(report)
     }
 
+    pub(crate) async fn retire_environment(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+        request: crate::management_lifecycle::RetireEnvironmentRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        management_lifecycle::admit_retire_environment(
+            &request,
+            environment,
+            context.principal.kind,
+            self.granted_environment(credential),
+        )
+        .map_err(map_lifecycle_error)?;
+        self.require_environment_visible(&context, environment)
+            .await?;
+        let actor = context.principal_id();
+        self.audit(actor, "environment.retire.requested")?;
+        let result = if self.tenant_mode {
+            let retirement = self
+                .tenant_operations()?
+                .retire(&context, environment, &request.reason, actor)
+                .await
+                .map_err(map_tenant_error)?;
+            ManagementLifecycleResult::new(
+                ManagementLifecycleOperation::Retire,
+                format!(
+                    "environment {environment} retired at {} by {}: {}",
+                    retirement.retired_at, retirement.actor, retirement.reason
+                ),
+                Some(environment.to_owned()),
+            )
+        } else {
+            let mut ctx = self.application_ctx()?;
+            if !ctx.is_embedded() {
+                return Err(ManagementError::Conflict(
+                    "environment retirement requires a Tenkai-owned operational store; remote provider mode cannot atomically retire environments".into(),
+                ));
+            }
+            let retirement = crate::environment::retire_environment(
+                &mut ctx,
+                environment,
+                &request.reason,
+                actor,
+            )
+            .await
+            .map_err(map_environment_error)?;
+            ManagementLifecycleResult::new(
+                ManagementLifecycleOperation::Retire,
+                format!(
+                    "environment {environment} retired at {} by {}: {}",
+                    retirement.retired_at, retirement.actor, retirement.reason
+                ),
+                Some(environment.to_owned()),
+            )
+        };
+        self.audit(actor, "environment.retire.completed")?;
+        Ok(result)
+    }
+
     pub(crate) async fn environment_status(
         &self,
         credential: &CredentialMaterial,
@@ -1011,6 +1072,7 @@ fn map_tenant_error(error: TenantEnvironmentError) -> ManagementError {
             ManagementError::Unavailable("tenant store unavailable".into())
         }
         TenantEnvironmentError::NotFound => ManagementError::NotFound(NON_DISCLOSING_DENY.into()),
+        TenantEnvironmentError::Conflict(message) => ManagementError::Conflict(message),
         TenantEnvironmentError::Denied(message) => ManagementError::Forbidden(message),
         TenantEnvironmentError::Internal(message) => ManagementError::Internal(message),
     }
@@ -1098,6 +1160,11 @@ fn map_environment_error(error: anyhow::Error) -> ManagementError {
     let message = format!("{error:#}");
     if message.contains("not registered") {
         ManagementError::NotFound(message)
+    } else if message.contains("apply in progress")
+        || message.contains("active delivery work")
+        || message.contains("retired environment")
+    {
+        ManagementError::Conflict(message)
     } else {
         ManagementError::Internal(message)
     }
@@ -1245,6 +1312,7 @@ mod tests {
                     observed_type_digest: None,
                     observed_runtime_digest: None,
                     module_activations: Vec::new(),
+                    retirement: None,
                     preview: None,
                 })
             })

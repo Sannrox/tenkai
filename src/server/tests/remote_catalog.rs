@@ -220,3 +220,103 @@ async fn remote_catalog_lifecycle_publish_promote_subscribe_and_recall() {
     assert_eq!(bypass.status(), StatusCode::BAD_REQUEST);
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[tokio::test]
+async fn remote_environment_retirement_hides_listing_and_stops_runtime_polling() {
+    let root = std::env::temp_dir().join(format!(
+        "tenkai-remote-environment-retirement-{}-{}",
+        std::process::id(),
+        crate::now_millis()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let (app, _) = catalog_router(&root).await;
+    let request = crate::management_lifecycle::RetireEnvironmentRequest {
+        version: 1,
+        operation: "retire".into(),
+        reason: "service ended".into(),
+    };
+    let retire = || {
+        Request::post("/v1/environments/stage/retire")
+            .header("authorization", "Bearer management-secret")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&request).unwrap()))
+            .unwrap()
+    };
+    let first = app.clone().oneshot(retire()).await.unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let first_body = axum::body::to_bytes(first.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let repeat = app.clone().oneshot(retire()).await.unwrap();
+    assert_eq!(repeat.status(), StatusCode::OK);
+    let repeat_body = axum::body::to_bytes(repeat.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(first_body, repeat_body);
+
+    let list = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/environments")
+                .header("authorization", "Bearer management-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list.status(), StatusCode::OK);
+    let list_body = String::from_utf8(
+        axum::body::to_bytes(list.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!list_body.contains("stage"), "{list_body}");
+    assert!(list_body.contains("prod"), "{list_body}");
+
+    let inspect = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/environments/stage")
+                .header("authorization", "Bearer management-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(inspect.status(), StatusCode::OK);
+    let inspect_body = String::from_utf8(
+        axum::body::to_bytes(inspect.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(inspect_body.contains("service ended"), "{inspect_body}");
+    assert!(
+        inspect_body.contains("\"actor\":\"management\""),
+        "{inspect_body}"
+    );
+
+    let runtime = app
+        .oneshot(
+            Request::get("/v1/runtime/environments/stage/work")
+                .header("authorization", "Bearer runtime-secret")
+                .header("x-tenkai-runtime-instance", "runtime-test")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(runtime.status(), StatusCode::OK);
+    let runtime_body = String::from_utf8(
+        axum::body::to_bytes(runtime.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(runtime_body.contains("\"plan\":null"), "{runtime_body}");
+    assert!(runtime_body.contains("\"claim\":null"), "{runtime_body}");
+}

@@ -35,13 +35,58 @@ pub(super) fn upsert_object_in(
 }
 
 pub(super) fn upsert_environment_in(tx: &Transaction<'_>, object: &Object) -> Result<()> {
-    let revision: Option<u64> = tx
+    let existing: Option<(u64, String)> = tx
         .query_row(
-            "SELECT revision FROM environments WHERE id=?1",
+            "SELECT revision,configuration_json FROM environments WHERE id=?1",
             [&object.id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
+    let revision = existing.as_ref().map(|(revision, _)| *revision);
+    let was_retired = existing
+        .as_ref()
+        .and_then(|(_, configuration)| {
+            crate::environment::retirement_from_configuration_json(configuration)
+        })
+        .is_some();
+    if was_retired {
+        return Err(StoreError::InvalidData {
+            kind: "environment",
+            detail: format!(
+                "environment {} is retired and cannot be updated",
+                object.name
+            ),
+        });
+    }
+    if crate::environment::is_retired_object(object) {
+        let active_runtime_claim: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runtime_claims
+             WHERE environment_id=?1 AND expires_at>?2 AND completion_json IS NULL)",
+            params![object.name, crate::now_millis()],
+            |row| row.get(0),
+        )?;
+        let apply_lease = tx
+            .query_row(
+                "SELECT payload FROM catalog_leases WHERE namespace=?1 AND lease_key=?2",
+                params![crate::apply::ENVIRONMENT_LEASE_NAMESPACE, object.name],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?;
+        let apply_lease = decode_lease(apply_lease).map_err(|error| StoreError::InvalidData {
+            kind: "environment",
+            detail: format!("cannot inspect apply lease while retiring: {error}"),
+        })?;
+        if active_runtime_claim
+            || apply_lease.is_some_and(|lease| {
+                lease.status == "active" && lease.expires_at_ms > crate::now_millis()
+            })
+        {
+            return Err(StoreError::InvalidData {
+                kind: "environment",
+                detail: format!("environment {} has active delivery work", object.name),
+            });
+        }
+    }
     let next = revision.map(|value| value + 1).unwrap_or(1);
     tx.execute(
         "INSERT INTO environments(id,revision,configuration_json) VALUES(?1,?2,?3)
@@ -161,6 +206,14 @@ pub(super) fn upsert_plan_in(tx: &Transaction<'_>, object: &Object) -> Result<()
         return Ok(());
     };
     let environment_id = env_id(&plan.environment);
+    let plan_exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM plans WHERE id=?1)",
+        [&object.id],
+        |row| row.get(0),
+    )?;
+    if !plan_exists {
+        crate::storage::ensure_environment_active_in(tx, &plan.environment, "new plans")?;
+    }
     if tx
         .query_row(
             "SELECT 1 FROM environments WHERE id=?1",

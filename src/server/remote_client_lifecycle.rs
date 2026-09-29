@@ -2,6 +2,25 @@ use super::remote_client::RemoteClient;
 use super::runtime::encode_plan_path;
 
 impl RemoteClient {
+    pub async fn retire_environment(
+        &self,
+        environment: &str,
+        reason: &str,
+    ) -> anyhow::Result<crate::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!("/v1/environments/{environment}/retire"),
+            Some(&crate::management_lifecycle::RetireEnvironmentRequest {
+                version: crate::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation: crate::management_lifecycle::ManagementLifecycleOperation::Retire
+                    .as_str()
+                    .into(),
+                reason: reason.to_string(),
+            }),
+        )
+        .await
+    }
+
     pub async fn preview_package_migration(
         &self,
         name: &str,

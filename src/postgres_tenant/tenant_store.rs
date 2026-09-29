@@ -48,6 +48,14 @@ impl TenantOperationalStore for PostgresTenantOperationalStore {
         PostgresTenantOperationalStore::list_environment_ids_for(self, context)
     }
 
+    fn current_lease_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        environment: &str,
+    ) -> std::result::Result<Option<crate::storage::LeaseRecord>, IsolationError> {
+        PostgresTenantOperationalStore::current_lease_for(self, context, environment)
+    }
+
     fn import_development_fixture_for(
         &self,
         context: &AuthenticatedRequestContext,

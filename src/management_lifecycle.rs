@@ -31,6 +31,7 @@ pub enum ManagementLifecycleOperation {
     Apply,
     Rollback,
     Recall,
+    Retire,
 }
 
 impl ManagementLifecycleOperation {
@@ -44,6 +45,7 @@ impl ManagementLifecycleOperation {
             Self::Apply => "apply",
             Self::Rollback => "rollback",
             Self::Recall => "recall",
+            Self::Retire => "retire",
         }
     }
 
@@ -106,6 +108,7 @@ pub fn parse_management_lifecycle_operation(name: &str) -> Result<ManagementLife
         "apply" => Ok(ManagementLifecycleOperation::Apply),
         "rollback" => Ok(ManagementLifecycleOperation::Rollback),
         "recall" => Ok(ManagementLifecycleOperation::Recall),
+        "retire" => Ok(ManagementLifecycleOperation::Retire),
         other => bail!("unknown management lifecycle operation {other:?}"),
     }
 }
@@ -265,6 +268,14 @@ pub struct SubscribeRequest {
     pub environment: String,
     pub expected_generation: u64,
     pub spec: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetireEnvironmentRequest {
+    pub version: u32,
+    pub operation: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -496,6 +507,27 @@ pub fn admit_subscribe(
         bail!("subscribe requires <product>=<channel>");
     }
     Ok(admitted)
+}
+
+pub fn admit_retire_environment(
+    request: &RetireEnvironmentRequest,
+    environment: &str,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<()> {
+    require_management_lifecycle_api_version(request.version)?;
+    let operation = parse_management_lifecycle_operation(&request.operation)?;
+    require_route_operation(operation, ManagementLifecycleOperation::Retire)?;
+    if environment.trim().is_empty() {
+        bail!("environment retirement requires an environment");
+    }
+    if request.reason.trim().is_empty() {
+        bail!("retirement reason must not be empty");
+    }
+    if request.reason.trim().len() > 1024 {
+        bail!("retirement reason exceeds 1024 bytes");
+    }
+    authorize_management_lifecycle_scope(kind, granted_environment, operation, Some(environment))
 }
 
 pub fn admit_plan(

@@ -17,7 +17,7 @@ use super::inspect::{
 };
 use super::lifecycle::{
     apply_plan, approve_plan, plan_environment, promote_release, publish_release, recall_release,
-    rollback_environment, subscribe_environment,
+    retire_environment, rollback_environment, subscribe_environment,
 };
 use super::package_migration::{
     apply_package_migration, package_migration_status, preview_package_migration,
@@ -104,6 +104,10 @@ pub fn router(
         .route(
             "/v1/environments/{environment}/subscriptions",
             post(subscribe_environment),
+        )
+        .route(
+            "/v1/environments/{environment}/retire",
+            post(retire_environment),
         )
         .route(
             "/v1/environments/{environment}/plans",

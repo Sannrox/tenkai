@@ -349,6 +349,12 @@ pub(super) async fn oldest_for_environment(
     environment: &str,
     statuses: &[PlanState],
 ) -> Result<Option<Plan>> {
+    if crate::environment::environment_retirement(ctx, environment)
+        .await?
+        .is_some()
+    {
+        return Ok(None);
+    }
     require_environment_indexes_match_payloads(ctx, environment).await?;
     load_oldest_for_environment(ctx, environment, statuses).await
 }

@@ -37,6 +37,155 @@ pub(crate) struct DeploymentObservation<'a> {
     pub transition: DeploymentTransition,
 }
 
+/// Durable evidence explaining why an environment is no longer operational.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvironmentRetirement {
+    pub reason: String,
+    pub actor: String,
+    pub retired_at: i64,
+}
+
+const RETIREMENT_REASON: &str = "tenkai.retirement.reason";
+const RETIREMENT_ACTOR: &str = "tenkai.retirement.actor";
+const RETIREMENT_AT: &str = "tenkai.retirement.at";
+pub(crate) const TENANT_RETIREMENT_KEY: &str = "_tenkai_retirement";
+
+fn retirement_from_properties(
+    properties: &HashMap<String, String>,
+) -> Option<EnvironmentRetirement> {
+    Some(EnvironmentRetirement {
+        reason: properties.get(RETIREMENT_REASON)?.clone(),
+        actor: properties.get(RETIREMENT_ACTOR)?.clone(),
+        retired_at: properties.get(RETIREMENT_AT)?.parse().ok()?,
+    })
+}
+
+pub(crate) fn retirement_from_configuration_json(
+    configuration_json: &str,
+) -> Option<EnvironmentRetirement> {
+    let value: serde_json::Value = serde_json::from_str(configuration_json).ok()?;
+    if let Some(properties) = value
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+    {
+        let retirement = (|| {
+            Some(EnvironmentRetirement {
+                reason: properties.get(RETIREMENT_REASON)?.as_str()?.to_owned(),
+                actor: properties.get(RETIREMENT_ACTOR)?.as_str()?.to_owned(),
+                retired_at: properties.get(RETIREMENT_AT)?.as_str()?.parse().ok()?,
+            })
+        })();
+        if retirement.is_some() {
+            return retirement;
+        }
+    }
+    serde_json::from_value(value.get(TENANT_RETIREMENT_KEY)?.clone()).ok()
+}
+
+pub(crate) fn with_tenant_retirement(
+    configuration_json: &str,
+    retirement: &EnvironmentRetirement,
+) -> Result<String> {
+    let mut value = serde_json::from_str::<serde_json::Value>(configuration_json)
+        .unwrap_or_else(|_| serde_json::json!({ "configuration": configuration_json }));
+    if !value.is_object() {
+        value = serde_json::json!({ "configuration": value });
+    }
+    value.as_object_mut().expect("object value").insert(
+        TENANT_RETIREMENT_KEY.into(),
+        serde_json::to_value(retirement)?,
+    );
+    Ok(serde_json::to_string(&value)?)
+}
+
+pub(crate) fn retirement_from_object(object: &Object) -> Option<EnvironmentRetirement> {
+    retirement_from_properties(&object.properties)
+}
+
+pub(crate) fn is_retired_object(object: &Object) -> bool {
+    retirement_from_object(object).is_some()
+}
+
+/// Return the registered environment only while it remains operational.
+pub(crate) async fn active_environment(ctx: &mut Ctx, name: &str) -> Result<Object> {
+    let object = environment(ctx, name).await?;
+    if retirement_from_object(&object).is_some() {
+        bail!("environment {name} is retired and cannot accept new delivery work");
+    }
+    Ok(object)
+}
+
+pub(crate) async fn environment_retirement(
+    ctx: &mut Ctx,
+    name: &str,
+) -> Result<Option<EnvironmentRetirement>> {
+    let object = match ctx.get(&env_id(name)).await? {
+        Some(object) if object.kind == KIND_ENVIRONMENT => object,
+        _ => return Ok(None),
+    };
+    Ok(retirement_from_object(&object))
+}
+
+/// Persist operator retirement evidence. A held apply lease must be released
+/// with the existing unlock path before the terminal lifecycle transition.
+pub async fn retire_environment(
+    ctx: &mut Ctx,
+    name: &str,
+    reason: &str,
+    actor: &str,
+) -> Result<EnvironmentRetirement> {
+    anyhow::ensure!(
+        ctx.is_embedded(),
+        "retirement through a remote catalog must use the authenticated management route"
+    );
+    validate_identifier("environment", name)?;
+    let reason = reason.trim();
+    anyhow::ensure!(!reason.is_empty(), "retirement reason must not be empty");
+    anyhow::ensure!(reason.len() <= 1024, "retirement reason exceeds 1024 bytes");
+    anyhow::ensure!(
+        !actor.trim().is_empty(),
+        "retirement actor must not be empty"
+    );
+    let mut object = environment(ctx, name).await?;
+    if let Some(retirement) = retirement_from_object(&object) {
+        return Ok(retirement);
+    }
+
+    if crate::apply::inspect_environment_lease(ctx, name)
+        .await?
+        .held
+    {
+        bail!(
+            "environment {name} has an apply in progress; run `tenkaictl env unlock {name}` after verifying it is safe"
+        );
+    }
+    let retirement = EnvironmentRetirement {
+        reason: reason.to_owned(),
+        actor: actor.to_owned(),
+        retired_at: crate::now_millis(),
+    };
+    object
+        .properties
+        .insert(RETIREMENT_REASON.into(), retirement.reason.clone());
+    object
+        .properties
+        .insert(RETIREMENT_ACTOR.into(), retirement.actor.clone());
+    object
+        .properties
+        .insert(RETIREMENT_AT.into(), retirement.retired_at.to_string());
+    object.updated = retirement.retired_at;
+    match ctx.put(object).await {
+        Ok(_) => Ok(retirement),
+        Err(error) => match environment_retirement(ctx, name).await {
+            Ok(Some(retirement)) => Ok(retirement),
+            Ok(None) => Err(error),
+            Err(read_error) => Err(error.context(format!(
+                "reloading retirement evidence also failed: {read_error:#}"
+            ))),
+        },
+    }
+}
+
 pub(crate) fn environment_record(
     existing: Option<Object>,
     name: &str,
@@ -75,6 +224,11 @@ pub async fn env_add(ctx: &mut Ctx, name: &str, description: &str) -> Result<Str
     if let Some(existing) = ctx.get(&id).await? {
         if existing.kind != KIND_ENVIRONMENT {
             bail!("object {id} is {}, not {KIND_ENVIRONMENT}", existing.kind);
+        }
+        if retirement_from_object(&existing).is_some() {
+            bail!(
+                "environment {name} is retired; registering it again requires a new environment name"
+            );
         }
         crate::maintenance::ensure_configuration(ctx, name).await?;
         return Ok(format!("environment {name} already registered"));
@@ -547,9 +701,7 @@ pub async fn subscribe(ctx: &mut Ctx, env: &str, product: &str, channel: &str) -
     validate_identifier("product", product)?;
     validate_identifier("channel", channel)?;
     let eid = env_id(env);
-    let Some(existing) = ctx.get(&eid).await? else {
-        bail!("environment {env} is not registered (tenkaictl env add {env})");
-    };
+    let existing = active_environment(ctx, env).await?;
     crate::preview::refuse_channel_promotion(&existing)?;
     let cid = channel_id(product, channel);
     if ctx.get(&cid).await?.is_none() {
@@ -754,6 +906,9 @@ pub struct EnvironmentInspectReport {
     /// Present only for preview environments bound to a branch pin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<crate::preview::PreviewInspect>,
+    /// Present after this environment has been retired from operational use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retirement: Option<EnvironmentRetirement>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -882,6 +1037,9 @@ pub async fn list_environments(ctx: &mut Ctx) -> Result<Vec<EnvironmentListEntry
     environments.sort_by(|left, right| left.name.cmp(&right.name));
     let mut entries = Vec::with_capacity(environments.len());
     for env_obj in environments {
+        if retirement_from_object(&env_obj).is_some() {
+            continue;
+        }
         let name = env_obj.name.clone();
         let channels = ctx.linked(&env_obj.id, REL_SUBSCRIBES, "out").await?;
         let deployed_product_count = env_obj
@@ -931,9 +1089,13 @@ pub async fn fleet_status(ctx: &mut Ctx) -> Result<FleetStatusReport> {
     environments.sort_by(|left, right| left.name.cmp(&right.name));
     let mut reports = Vec::with_capacity(environments.len());
     for env_obj in environments {
+        if retirement_from_object(&env_obj).is_some() {
+            continue;
+        }
         let rows = status_from_object(ctx, &env_obj).await?;
         let subscriptions = subscription_views_from_status(&env_obj, rows);
         let lease = crate::apply::inspect_environment_lease(ctx, &env_obj.name).await?;
+        let retirement = retirement_from_object(&env_obj);
         reports.push(EnvironmentInspectReport {
             name: env_obj.name,
             id: env_obj.id,
@@ -953,6 +1115,7 @@ pub async fn fleet_status(ctx: &mut Ctx) -> Result<FleetStatusReport> {
             observed_runtime_digest: None,
             module_activations: Vec::new(),
             preview: None,
+            retirement,
         });
     }
     Ok(fleet_status_from_inspects(reports))
@@ -985,6 +1148,7 @@ async fn inspect_environment_base(ctx: &mut Ctx, env: &str) -> Result<Environmen
     let observed = crate::workshop_module::observed_from_object(&env_obj)?;
     let module_activations = crate::workshop_module::activations_from_object(&env_obj)?;
     let preview = crate::preview::inspect_from_object(&env_obj)?;
+    let retirement = retirement_from_object(&env_obj);
     Ok(EnvironmentInspectReport {
         name: env_obj.name,
         id: env_obj.id,
@@ -1005,6 +1169,7 @@ async fn inspect_environment_base(ctx: &mut Ctx, env: &str) -> Result<Environmen
         observed_runtime_digest: observed.map(|value| value.runtime_digest),
         module_activations,
         preview,
+        retirement,
     })
 }
 
@@ -1704,6 +1869,134 @@ mod tests {
                 .environments
                 .iter()
                 .all(|row| row.posture == "empty" && row.latest_plan_state.is_none())
+        );
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
+    async fn retirement_is_idempotent_hides_fleet_and_blocks_new_delivery() {
+        let database = std::env::temp_dir().join(format!(
+            "tenkai-environment-retirement-{}-{}.db",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let _ = std::fs::remove_file(&database);
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        env_add(&mut ctx, "prod", "Prod").await.unwrap();
+        let stale_environment = environment(&mut ctx, "prod").await.unwrap();
+        let historical_plan = crate::plan::create(&mut ctx, "prod").await.unwrap();
+        let mut late_plan = historical_plan.clone();
+        late_plan.id.push_str(":late");
+
+        ctx.acquire_lease(
+            crate::apply::ENVIRONMENT_LEASE_NAMESPACE,
+            "prod",
+            "controller",
+            1,
+        )
+        .await
+        .unwrap();
+        let lease = crate::apply::inspect_environment_lease(&mut ctx, "prod")
+            .await
+            .unwrap();
+        assert!(lease.held, "{lease:?}");
+        let held = retire_environment(&mut ctx, "prod", "service ended", "operator")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(held.contains("apply in progress"), "{held}");
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        crate::apply::unlock_environment(&mut ctx, "prod")
+            .await
+            .unwrap();
+
+        let retirement = retire_environment(&mut ctx, "prod", "service ended", "operator")
+            .await
+            .unwrap();
+        assert_eq!(
+            retire_environment(&mut ctx, "prod", "different reason", "another-operator")
+                .await
+                .unwrap(),
+            retirement
+        );
+        assert_eq!(
+            inspect_environment(&mut ctx, "prod")
+                .await
+                .unwrap()
+                .retirement,
+            Some(retirement.clone())
+        );
+        assert!(
+            ctx.put(stale_environment)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("retired")
+        );
+        ctx.put(historical_plan.to_object().unwrap()).await.unwrap();
+        assert!(
+            ctx.put(late_plan.to_object().unwrap())
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("retired")
+        );
+        assert_eq!(
+            inspect_environment(&mut ctx, "prod")
+                .await
+                .unwrap()
+                .retirement,
+            Some(retirement.clone())
+        );
+        assert!(list_environments(&mut ctx).await.unwrap().is_empty());
+        assert_eq!(fleet_status(&mut ctx).await.unwrap().environment_count, 0);
+        assert!(
+            crate::plan::create(&mut ctx, "prod")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("retired")
+        );
+        assert!(
+            crate::plan::create_from_steps(&mut ctx, "prod", Vec::new())
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("retired")
+        );
+        assert!(
+            subscribe(&mut ctx, "prod", "api", "stable")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("retired")
+        );
+        let lease_error =
+            match crate::apply::claim_environment(&mut ctx, "prod", "controller").await {
+                Ok(_) => panic!("retired environment accepted a new apply lease"),
+                Err(error) => error.to_string(),
+            };
+        assert!(lease_error.contains("retired"), "{lease_error}");
+        let store = crate::storage::SqliteStore::open(&database).unwrap();
+        assert!(
+            crate::storage::OperationalStore::claim_runtime_plan(
+                &store,
+                "prod",
+                "plan-1",
+                "runtime",
+                crate::now_millis() + 60_000,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("retired")
+        );
+        assert!(
+            env_add(&mut ctx, "prod", "Prod")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("retired")
         );
         let _ = std::fs::remove_file(&database);
     }

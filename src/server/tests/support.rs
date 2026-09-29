@@ -103,6 +103,7 @@ impl ReconcilePort for FixedReconciler {
                 observed_type_digest: None,
                 observed_runtime_digest: None,
                 module_activations: Vec::new(),
+                retirement: None,
                 preview: None,
             })
         })

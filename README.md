@@ -241,6 +241,7 @@ permissions.
 tenkaictl env add prod --description production
 tenkaictl env list
 tenkaictl env inspect prod
+tenkaictl env retire prod --reason "service ended"
 tenkaictl env facts set prod architecture=arm64
 tenkaictl env facts set prod memory_gib=32
 tenkaictl env facts list prod
@@ -254,8 +255,12 @@ tenkaictl env maintenance set prod weekday \
 tenkaictl env maintenance list prod
 ```
 
-`env list` shows every registered environment with subscription and lease
-summary. `env inspect <name>` prints JSON for subscriptions, deployed versions,
+`env list` shows active environments with subscription and lease summary.
+Retired environments leave the list and fleet status while `env inspect <name>`
+continues to show their history and retirement reason, actor, and timestamp.
+Retirement refuses an active apply lease; first verify the apply has stopped and
+use `tenkaictl env unlock <name>`. Repeating retirement preserves the original
+evidence. `env inspect <name>` also prints subscriptions, deployed versions,
 lease/fencing state, and the latest plan. Latest-plan inspection includes
 sanitized lifecycle detail and at most 256 ordered step summaries; executable
 digests, work directories, payloads, and bearer tokens are not returned.

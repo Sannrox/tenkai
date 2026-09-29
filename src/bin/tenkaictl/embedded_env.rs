@@ -78,6 +78,16 @@ pub(crate) async fn run(
                 println!("{}", serde_json::to_string_pretty(&report)?);
             }
         }
+        EnvCommand::Retire { env, reason } => {
+            let actor =
+                std::env::var("TENKAI_PRINCIPAL").unwrap_or_else(|_| "local-operator".into());
+            let retirement =
+                tenkai::environment::retire_environment(ctx, &env, &reason, &actor).await?;
+            println!(
+                "environment {env} retired at {} by {}: {}",
+                retirement.retired_at, retirement.actor, retirement.reason
+            );
+        }
         EnvCommand::Subscribe { env, spec, .. } => {
             let Some((product, channel)) = spec.split_once('=') else {
                 bail!("expected <product>=<channel>, got {spec:?}");

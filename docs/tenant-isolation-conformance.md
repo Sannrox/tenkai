@@ -93,6 +93,7 @@ and are not registered.
 | `environment.list` | `GET /v1/environments` | List only tenant partition ids |
 | `environment.get` | `GET /v1/environments/{env}` | Non-disclosing deny on cross-tenant |
 | `environment.status` | `GET /v1/environments/{env}/status` | Same as get |
+| `environment.retire` | `POST /v1/environments/{env}/retire` | Require management capability and tenant visibility; preserve tenant retirement evidence |
 | `runtime.work` / `complete` / `heartbeat` / `inventory` | `/v1/runtime/environments/{env}/…` | Runtime credential scoped to exactly one environment |
 | `development.fixture_import` | `POST /v1/development/fixtures/import` | Require tenant context and an allowlisted fixture principal; mounted only when fixtures are enabled |
 | `development.fixture_reset` | `DELETE /v1/development/fixtures/{fixture_id}` | Same as import; non-disclosing deny on cross-tenant |
@@ -103,7 +104,8 @@ Community catalog and remote management lifecycle routes (`POST /v1/releases`,
 `POST /v1/environments/{environment}/plans`, `POST /v1/plans/{plan_id}/approve`,
 `POST /v1/plans/{plan_id}/apply`, `POST /v1/environments/{environment}/rollback`)
 are not tenant HTTP RPCs. Tenant-mode hosts refuse them rather than writing a
-shared catalog.
+shared catalog. The environment retirement route uses the isolated tenant
+operational registry and is supported in tenant mode.
 
 **Registered but not exposed on HTTP** (harness / in-process enterprise surfaces only; not advertised as public routes):
 
@@ -169,6 +171,7 @@ When `ServerConfig.requirements.tenant_mode` is true and a
 | `GET /v1/environments` | Lists only the authenticated tenant's environments |
 | `GET /v1/environments/{environment}` | Cross-tenant ids → non-disclosing `resource not found` |
 | `GET /v1/environments/{environment}/status` | Same non-disclosing deny |
+| `POST /v1/environments/{environment}/retire` | Authenticated tenant management capability; retirement is isolated to that tenant |
 
 Community tenant-free hosts leave `tenant_mode` false and `tenant_store` unset.
 Startup fails closed if tenant mode is requested without store + capability.
