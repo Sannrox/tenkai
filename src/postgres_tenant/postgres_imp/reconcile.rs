@@ -1,13 +1,7 @@
-use super::{Inner, without_tokio_err};
+use super::Inner;
 
 fn fence_store(message: impl Into<String>) -> crate::reconcile_fence::FenceError {
     crate::reconcile_fence::FenceError::Store(message.into())
-}
-
-fn fence_without_tokio<T: Send>(
-    work: impl FnOnce() -> std::result::Result<T, crate::reconcile_fence::FenceError> + Send,
-) -> std::result::Result<T, crate::reconcile_fence::FenceError> {
-    without_tokio_err(work, fence_store("postgres worker thread panicked"))
 }
 
 impl Inner {
@@ -29,77 +23,77 @@ impl Inner {
             return Err(FenceError::InvalidExpiry);
         }
         let expires_at = now.saturating_add(ttl_ms);
-        fence_without_tokio(|| {
-            let mut guard = self
-                .client
-                .lock()
-                .map_err(|_| fence_store("postgres client mutex poisoned"))?;
-            let client = guard
-                .as_mut()
-                .ok_or_else(|| fence_store("postgres client already closed"))?;
-            let mut tx = client
-                .transaction()
-                .map_err(|e| fence_store(e.to_string()))?;
-            let row = tx
-                .query_opt(
-                    "SELECT owner, generation, expires_at
+        let environment = environment.to_owned();
+        let owner = owner.to_owned();
+        self.worker.run(
+            move |client| {
+                let mut tx = client
+                    .transaction()
+                    .map_err(|error| fence_store(error.to_string()))?;
+                let row = tx
+                    .query_opt(
+                        "SELECT owner, generation, expires_at
                  FROM tenkai_reconcile_tick_claims
                  WHERE environment = $1
                  FOR UPDATE",
-                    &[&environment],
-                )
-                .map_err(|e| fence_store(e.to_string()))?;
-            let admission = match row {
-                Some(row) => {
-                    let claim_owner: String = row.get(0);
-                    let generation: i64 = row.get(1);
-                    let claim_expires: i64 = row.get(2);
-                    if claim_expires > now && claim_owner != owner {
-                        FenceAdmission::Busy { owner: claim_owner }
-                    } else if claim_expires > now && claim_owner == owner {
-                        tx.execute(
-                            "UPDATE tenkai_reconcile_tick_claims
+                        &[&environment],
+                    )
+                    .map_err(|error| fence_store(error.to_string()))?;
+                let admission = match row {
+                    Some(row) => {
+                        let claim_owner: String = row.get(0);
+                        let generation: i64 = row.get(1);
+                        let claim_expires: i64 = row.get(2);
+                        if claim_expires > now && claim_owner != owner {
+                            FenceAdmission::Busy { owner: claim_owner }
+                        } else if claim_expires > now && claim_owner == owner {
+                            tx.execute(
+                                "UPDATE tenkai_reconcile_tick_claims
                          SET expires_at = $1
                          WHERE environment = $2",
-                            &[&expires_at, &environment],
-                        )
-                        .map_err(|e| fence_store(e.to_string()))?;
-                        FenceAdmission::Started {
-                            generation: generation as u64,
-                        }
-                    } else {
-                        let next_gen = (generation as u64).saturating_add(1);
-                        tx.execute(
-                            "UPDATE tenkai_reconcile_tick_claims
+                                &[&expires_at, &environment],
+                            )
+                            .map_err(|error| fence_store(error.to_string()))?;
+                            FenceAdmission::Started {
+                                generation: generation as u64,
+                            }
+                        } else {
+                            let next_gen = (generation as u64).saturating_add(1);
+                            tx.execute(
+                                "UPDATE tenkai_reconcile_tick_claims
                          SET owner = $1, generation = $2, expires_at = $3
                          WHERE environment = $4",
-                            &[&owner, &(next_gen as i64), &expires_at, &environment],
-                        )
-                        .map_err(|e| fence_store(e.to_string()))?;
-                        FenceAdmission::Started {
-                            generation: next_gen,
+                                &[&owner, &(next_gen as i64), &expires_at, &environment],
+                            )
+                            .map_err(|error| fence_store(error.to_string()))?;
+                            FenceAdmission::Started {
+                                generation: next_gen,
+                            }
                         }
                     }
-                }
-                None => {
-                    tx.execute(
-                        "INSERT INTO tenkai_reconcile_tick_claims
+                    None => {
+                        tx.execute(
+                            "INSERT INTO tenkai_reconcile_tick_claims
                      (environment, owner, generation, expires_at)
                      VALUES ($1, $2, 1, $3)",
-                        &[&environment, &owner, &expires_at],
-                    )
-                    .map_err(|e| fence_store(e.to_string()))?;
-                    FenceAdmission::Started { generation: 1 }
+                            &[&environment, &owner, &expires_at],
+                        )
+                        .map_err(|error| fence_store(error.to_string()))?;
+                        FenceAdmission::Started { generation: 1 }
+                    }
+                };
+                if matches!(admission, FenceAdmission::Busy { .. }) {
+                    // No write; still commit to end the FOR UPDATE transaction cleanly.
+                    tx.commit()
+                        .map_err(|error| fence_store(error.to_string()))?;
+                    return Ok(admission);
                 }
-            };
-            if matches!(admission, FenceAdmission::Busy { .. }) {
-                // No write; still commit to end the FOR UPDATE transaction cleanly.
-                tx.commit().map_err(|e| fence_store(e.to_string()))?;
-                return Ok(admission);
-            }
-            tx.commit().map_err(|e| fence_store(e.to_string()))?;
-            Ok(admission)
-        })
+                tx.commit()
+                    .map_err(|error| fence_store(error.to_string()))?;
+                Ok(admission)
+            },
+            fence_store("postgres worker thread panicked"),
+        )
     }
 
     pub fn release_reconcile_claim(
@@ -109,42 +103,41 @@ impl Inner {
         generation: u64,
         now: i64,
     ) -> std::result::Result<(), crate::reconcile_fence::FenceError> {
-        fence_without_tokio(|| {
-            let mut guard = self
-                .client
-                .lock()
-                .map_err(|_| fence_store("postgres client mutex poisoned"))?;
-            let client = guard
-                .as_mut()
-                .ok_or_else(|| fence_store("postgres client already closed"))?;
-            let mut tx = client
-                .transaction()
-                .map_err(|e| fence_store(e.to_string()))?;
-            let row = tx
-                .query_opt(
-                    "SELECT owner, generation, expires_at
+        let environment = environment.to_owned();
+        let owner = owner.to_owned();
+        self.worker.run(
+            move |client| {
+                let mut tx = client
+                    .transaction()
+                    .map_err(|error| fence_store(error.to_string()))?;
+                let row = tx
+                    .query_opt(
+                        "SELECT owner, generation, expires_at
                  FROM tenkai_reconcile_tick_claims
                  WHERE environment = $1
                  FOR UPDATE",
-                    &[&environment],
-                )
-                .map_err(|e| fence_store(e.to_string()))?;
-            if let Some(row) = row {
-                let claim_owner: String = row.get(0);
-                let claim_gen: i64 = row.get(1);
-                if claim_owner == owner && claim_gen as u64 == generation {
-                    tx.execute(
-                        "UPDATE tenkai_reconcile_tick_claims
+                        &[&environment],
+                    )
+                    .map_err(|error| fence_store(error.to_string()))?;
+                if let Some(row) = row {
+                    let claim_owner: String = row.get(0);
+                    let claim_gen: i64 = row.get(1);
+                    if claim_owner == owner && claim_gen as u64 == generation {
+                        tx.execute(
+                            "UPDATE tenkai_reconcile_tick_claims
                      SET expires_at = LEAST(expires_at, $1)
                      WHERE environment = $2",
-                        &[&now, &environment],
-                    )
-                    .map_err(|e| fence_store(e.to_string()))?;
+                            &[&now, &environment],
+                        )
+                        .map_err(|error| fence_store(error.to_string()))?;
+                    }
+                    // Stale release must not steal another host's claim.
                 }
-                // Stale release must not steal another host's claim.
-            }
-            tx.commit().map_err(|e| fence_store(e.to_string()))?;
-            Ok(())
-        })
+                tx.commit()
+                    .map_err(|error| fence_store(error.to_string()))?;
+                Ok(())
+            },
+            fence_store("postgres worker thread panicked"),
+        )
     }
 }

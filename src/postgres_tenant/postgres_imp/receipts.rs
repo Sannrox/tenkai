@@ -3,7 +3,9 @@ use super::{Inner, pg, require_lease, require_plan_environment};
 
 impl Inner {
     pub fn record_receipt(&self, schema: &str, owner: &str, receipt: &ReceiptRecord) -> Result<()> {
-        self.with_schema(schema, |tx| {
+        let owner = owner.to_owned();
+        let receipt = receipt.clone();
+        self.with_schema(schema, move |tx| {
             let existing = tx
                 .query_opt(
                     "SELECT environment_id,plan_id,step_id,lease_generation,payload_json
@@ -34,7 +36,7 @@ impl Inner {
             require_lease(
                 tx,
                 &receipt.environment_id,
-                owner,
+                &owner,
                 receipt.lease_generation,
                 crate::now_millis(),
             )?;
@@ -76,7 +78,8 @@ impl Inner {
     }
 
     pub fn get_receipt(&self, schema: &str, id: &str) -> Result<Option<ReceiptRecord>> {
-        self.with_schema(schema, |tx| {
+        let id = id.to_owned();
+        self.with_schema(schema, move |tx| {
             let row = tx
                 .query_opt(
                     "SELECT id,environment_id,plan_id,step_id,lease_generation,payload_json
@@ -101,7 +104,9 @@ impl Inner {
         receipt: &OfflineImportRecord,
         steps: &[OfflineStepImportRecord],
     ) -> Result<()> {
-        self.with_schema(schema, |tx| {
+        let receipt = receipt.clone();
+        let steps = steps.to_vec();
+        self.with_schema(schema, move |tx| {
             let existing = tx
                 .query_opt(
                     "SELECT environment_id,plan_id,receipt_json FROM offline_imports
@@ -163,7 +168,8 @@ impl Inner {
         schema: &str,
         bundle_digest: &str,
     ) -> Result<Option<OfflineImportRecord>> {
-        self.with_schema(schema, |tx| {
+        let bundle_digest = bundle_digest.to_owned();
+        self.with_schema(schema, move |tx| {
             let row = tx
                 .query_opt(
                     "SELECT bundle_digest,environment_id,plan_id,receipt_json

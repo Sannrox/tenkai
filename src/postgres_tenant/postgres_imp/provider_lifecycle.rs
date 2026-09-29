@@ -9,7 +9,10 @@ impl Inner {
         id: &str,
         claim_token: &str,
     ) -> Result<i64> {
-        self.with_schema(schema, |tx| {
+        let provider_kind = provider_kind.to_owned();
+        let id = id.to_owned();
+        let claim_token = claim_token.to_owned();
+        self.with_schema(schema, move |tx| {
             let claimed: bool = tx
                 .query_one(
                     "SELECT EXISTS(
@@ -24,7 +27,7 @@ impl Inner {
             if !claimed {
                 return Err(StoreError::NotFound {
                     kind: "claimed provider event",
-                    id: id.into(),
+                    id,
                 });
             }
             tx.execute(
@@ -59,7 +62,11 @@ impl Inner {
         claim_token: &str,
         payload_json: &str,
     ) -> Result<()> {
-        self.with_schema(schema, |tx| {
+        let provider_kind = provider_kind.to_owned();
+        let id = id.to_owned();
+        let claim_token = claim_token.to_owned();
+        let payload_json = payload_json.to_owned();
+        self.with_schema(schema, move |tx| {
             let changed = tx
                 .execute(
                     "UPDATE provider_events SET payload_json=$4
@@ -70,7 +77,7 @@ impl Inner {
             if changed == 0 {
                 return Err(StoreError::NotFound {
                     kind: "claimed provider event",
-                    id: id.into(),
+                    id,
                 });
             }
             Ok(())
@@ -86,7 +93,11 @@ impl Inner {
         next_attempt_at: i64,
         error: &str,
     ) -> Result<()> {
-        self.with_schema(schema, |tx| {
+        let provider_kind = provider_kind.to_owned();
+        let id = id.to_owned();
+        let claim_token = claim_token.to_owned();
+        let error = error.to_owned();
+        self.with_schema(schema, move |tx| {
             let changed = tx
                 .execute(
                     "UPDATE provider_events SET attempts=attempts+1,next_attempt_at=$4,last_error=$5,
@@ -98,7 +109,7 @@ impl Inner {
             if changed == 0 {
                 return Err(StoreError::NotFound {
                     kind: "pending provider event",
-                    id: id.into(),
+                    id,
                 });
             }
             Ok(())
@@ -113,7 +124,10 @@ impl Inner {
         claim_token: &str,
         delivered_at: i64,
     ) -> Result<()> {
-        self.with_schema(schema, |tx| {
+        let provider_kind = provider_kind.to_owned();
+        let id = id.to_owned();
+        let claim_token = claim_token.to_owned();
+        self.with_schema(schema, move |tx| {
             let changed = tx
                 .execute(
                     "UPDATE provider_events SET delivered_at=$4,last_error='',claim_token=NULL,claim_until=NULL
@@ -124,7 +138,7 @@ impl Inner {
             if changed == 0 {
                 return Err(StoreError::NotFound {
                     kind: "provider event",
-                    id: id.into(),
+                    id,
                 });
             }
             Ok(())
@@ -142,7 +156,8 @@ impl Inner {
                 detail: "id, principal, operation, and outcome must be non-empty".into(),
             });
         }
-        self.with_schema(schema, |tx| {
+        let event = event.clone();
+        self.with_schema(schema, move |tx| {
             tx.execute(
                 "INSERT INTO audit_events(id,occurred_at,principal,operation,resource,outcome)
                  VALUES($1,$2,$3,$4,$5,$6)",
@@ -161,7 +176,7 @@ impl Inner {
     }
 
     pub fn audit_events(&self, schema: &str) -> Result<Vec<AuditRecord>> {
-        self.with_schema(schema, |tx| {
+        self.with_schema(schema, move |tx| {
             let rows = tx
                 .query(
                     "SELECT id,occurred_at,principal,operation,resource,outcome

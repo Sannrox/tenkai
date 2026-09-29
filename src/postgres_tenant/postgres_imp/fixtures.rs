@@ -110,8 +110,12 @@ impl Inner {
         actor: &str,
         request_id: &str,
     ) -> Result<crate::development_fixtures::FixtureMap> {
-        self.with_schema(schema, |tx| {
-            let lock_key = format!("{schema}:{}", fixture.map.fixture_id);
+        let lock_schema = schema.to_owned();
+        let fixture = fixture.clone();
+        let actor = actor.to_owned();
+        let request_id = request_id.to_owned();
+        self.with_schema(schema, move |tx| {
+            let lock_key = format!("{lock_schema}:{}", fixture.map.fixture_id);
             tx.query_one(
                 "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
                 &[&lock_key],
@@ -133,7 +137,7 @@ impl Inner {
             if existing != 0 {
                 if existing as usize != expected
                     || persisted_digest.as_deref() != Some(&fixture.map.fixture_digest)
-                    || !postgres_fixture_matches(tx, fixture)?
+                    || !postgres_fixture_matches(tx, &fixture)?
                 {
                     return Err(StoreError::ImmutableConflict {
                         kind: "development_fixture",

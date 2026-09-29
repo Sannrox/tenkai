@@ -17,8 +17,10 @@ impl Inner {
                 generation: 0,
             });
         }
-        self.with_schema(schema, |tx| {
-            lock_lease(tx, environment)?;
+        let environment = environment.to_owned();
+        let owner = owner.to_owned();
+        self.with_schema(schema, move |tx| {
+            lock_lease(tx, &environment)?;
             if tx
                 .query_one(
                     "SELECT EXISTS(
@@ -35,11 +37,11 @@ impl Inner {
                     detail: "fixture environments are non-executable".into(),
                 });
             }
-            let current = lease_in(tx, environment)?;
+            let current = lease_in(tx, &environment)?;
             let generation = match current {
                 Some(current) if current.expires_at > now && current.owner != owner => {
                     return Err(StoreError::LeaseHeld {
-                        environment: environment.into(),
+                        environment,
                         owner: current.owner,
                         expires_at: current.expires_at,
                     });
@@ -58,8 +60,8 @@ impl Inner {
             )
             .map_err(pg)?;
             Ok(LeaseRecord {
-                environment_id: environment.into(),
-                owner: owner.into(),
+                environment_id: environment,
+                owner,
                 generation,
                 expires_at,
             })
@@ -67,7 +69,8 @@ impl Inner {
     }
 
     pub fn current_lease(&self, schema: &str, environment: &str) -> Result<Option<LeaseRecord>> {
-        self.with_schema(schema, |tx| lease_in(tx, environment))
+        let environment = environment.to_owned();
+        self.with_schema(schema, move |tx| lease_in(tx, &environment))
     }
 
     pub(crate) fn expire_lease_for_conformance(
@@ -75,7 +78,8 @@ impl Inner {
         schema: &str,
         environment: &str,
     ) -> Result<()> {
-        self.with_schema(schema, |tx| {
+        let environment = environment.to_owned();
+        self.with_schema(schema, move |tx| {
             tx.execute(
                 "UPDATE leases SET expires_at = 0 WHERE environment_id = $1",
                 &[&environment],
@@ -96,18 +100,15 @@ impl Inner {
                 detail: "refusing to clean a non-conformance tenant schema".into(),
             });
         }
-        without_tokio(|| {
-            let mut guard = self
-                .client
-                .lock()
-                .map_err(|_| StoreError::AdapterUnavailable("postgres lock poisoned".into()))?;
-            let client = guard.as_mut().ok_or_else(|| {
-                StoreError::AdapterUnavailable("postgres client already closed".into())
-            })?;
-            client
-                .batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
-                .map_err(pg)
-        })
+        let schema = schema.to_owned();
+        self.worker.run(
+            move |client| {
+                client
+                    .batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+                    .map_err(pg)
+            },
+            StoreError::AdapterUnavailable("postgres worker is unavailable".into()),
+        )
     }
 
     #[cfg(test)]
@@ -120,7 +121,7 @@ impl Inner {
         &self,
         schema: &str,
     ) -> Result<(i64, i64, i64, i64)> {
-        self.with_schema(schema, |tx| {
+        self.with_schema(schema, move |tx| {
             let row = tx
                 .query_one(
                     "SELECT
