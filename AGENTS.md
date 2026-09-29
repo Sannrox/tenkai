@@ -56,7 +56,7 @@ run one explicit Cargo test filter without shell evaluation.
 - `cargo run --bin tenkai-server -- --database .tenkai-state/tenkai.db` starts
   the loopback development server when the required tokens are configured.
 
-Use the quickstart in `README.md` for an end-to-end local deployment. Never
+Use "Try it in five minutes" in `README.md` for an end-to-end local deployment. Never
 weaken signing, approval, authentication, or provider requirements merely to
 make a development command pass; use the documented development-only flags and
 recorded reasons.
