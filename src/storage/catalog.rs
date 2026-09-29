@@ -200,9 +200,18 @@ impl SqliteStore {
             }
         };
         tx.execute(
-            "INSERT INTO environments(id,revision,configuration_json) VALUES(?1,?2,?3)
-             ON CONFLICT(id) DO UPDATE SET revision=excluded.revision, configuration_json=excluded.configuration_json",
-            params![environment.id, next, environment.configuration_json],
+            "INSERT INTO environments(id,revision,configuration_json,retired_at) VALUES(?1,?2,?3,?4)
+             ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,
+               configuration_json=excluded.configuration_json, retired_at=excluded.retired_at",
+            params![
+                environment.id,
+                next,
+                environment.configuration_json,
+                crate::environment::retirement_from_configuration_json(
+                    &environment.configuration_json
+                )
+                .map(|retirement| retirement.retired_at)
+            ],
         )?;
         tx.commit()?;
         Ok(EnvironmentRecord {

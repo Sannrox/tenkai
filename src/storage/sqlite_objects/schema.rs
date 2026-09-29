@@ -13,7 +13,8 @@ pub(in crate::storage) fn ensure_typed_schema_tables(connection: &Connection) ->
              UNIQUE(product, name)
          );
          CREATE TABLE IF NOT EXISTS environments (
-             id TEXT PRIMARY KEY, revision INTEGER NOT NULL, configuration_json TEXT NOT NULL
+             id TEXT PRIMARY KEY, revision INTEGER NOT NULL, configuration_json TEXT NOT NULL,
+             retired_at INTEGER
          );
          CREATE TABLE IF NOT EXISTS plans (
              id TEXT PRIMARY KEY,
@@ -83,6 +84,43 @@ pub(in crate::storage) fn ensure_typed_schema_tables(connection: &Connection) ->
          CREATE INDEX IF NOT EXISTS development_fixture_objects_fixture
              ON development_fixture_objects(fixture_id, object_kind);",
     )?;
+    Ok(())
+}
+
+/// Schema 12 (#457): project retirement out of `configuration_json` into an
+/// indexed `retired_at` column so active listings filter in SQL. Older rows are
+/// backfilled once with the same parser every write path uses.
+pub(in crate::storage) fn ensure_environment_retirement_column(
+    connection: &mut Connection,
+) -> Result<()> {
+    let tx = connection.transaction()?;
+    let has_column = tx
+        .prepare("SELECT 1 FROM pragma_table_info('environments') WHERE name='retired_at'")?
+        .exists([])?;
+    if !has_column {
+        tx.execute("ALTER TABLE environments ADD COLUMN retired_at INTEGER", [])?;
+        let rows = tx
+            .prepare("SELECT id, configuration_json FROM environments")?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (id, configuration_json) in rows {
+            if let Some(retirement) =
+                crate::environment::retirement_from_configuration_json(&configuration_json)
+            {
+                tx.execute(
+                    "UPDATE environments SET retired_at=?1 WHERE id=?2",
+                    params![retirement.retired_at, id],
+                )?;
+            }
+        }
+    }
+    tx.execute(
+        "CREATE INDEX IF NOT EXISTS environments_active ON environments(id) WHERE retired_at IS NULL",
+        [],
+    )?;
+    tx.commit()?;
     Ok(())
 }
 

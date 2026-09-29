@@ -9,7 +9,7 @@ port, and retirement of the embedded object-graph schema. `SqliteStore` is the
 complete spoke and embedded adapter; the PostgreSQL adapter must pass the same
 immutability, lifecycle, idempotency, and generation-fencing contract.
 `Ctx::embedded` and community `tenkai-server` open only `SqliteStore`.
-Pre-0029 graph files migrate into typed schema 11 rows and drop `embedded_*`
+Pre-0029 graph files migrate into typed schema 12 rows and drop `embedded_*`
 tables so leftover objects cannot authorize apply. `TENKAI_POSTGRES_URL` is
 invalid on embedded and spoke hosts.
 
@@ -67,7 +67,7 @@ plan history. Single-id `load` still decodes after `get` returns.
 
 ### Embedded object property index
 
-Embedded planning reads typed `plans` rows (schema version **11**) and a
+Embedded planning reads typed `plans` rows (schema version **12**) and a
 `catalog_*` sidecar for non-authority kinds, links, actions, and namespaced
 leases. Provider outbox rows retain an immutable observation timestamp for
 bounded inspection; retry scheduling remains separate delivery state. Plan
@@ -78,6 +78,13 @@ pre-0029 graph database imports plan and environment objects into typed rows,
 then drops `embedded_*`. Empty kind/key or environment arguments fail closed
 (no unscoped fallback). Plan objects also carry a `has_steps` index
 (`true`/`false`) reconstructed from the typed payload.
+
+Environment rows carry an indexed `retired_at` column (schema 12, SQLite and
+tenant PostgreSQL) written in the same statement as `configuration_json` from
+the retirement evidence it contains, and backfilled once from older rows.
+Active environment listings (embedded catalog ids, tenant list/fleet/reconcile
+admission) filter `retired_at IS NULL` in one query and never decode
+configuration blobs. The blob stays the retirement evidence record.
 
 Status filters, `created_at` order, and `LIMIT` for newest/oldest reads are
 applied in that SQL for the embedded host; remote catalog lookups keep the

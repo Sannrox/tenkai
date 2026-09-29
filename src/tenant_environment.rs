@@ -67,7 +67,7 @@ impl TenantEnvironmentOperations {
         let store = self.store.clone();
         let context = context.clone();
         run_store(move || {
-            let ids = active_environment_ids(store.as_ref(), &context)?;
+            let ids = store.list_active_environment_ids_for(&context)?;
             let mut entries = Vec::with_capacity(ids.len());
             for name in ids {
                 match store.development_fixture_environment_for(&context, &name)? {
@@ -94,7 +94,7 @@ impl TenantEnvironmentOperations {
         let store = self.store.clone();
         let context = context.clone();
         let mut rows = run_store(move || {
-            let allowed = active_environment_ids(store.as_ref(), &context)?;
+            let allowed = store.list_active_environment_ids_for(&context)?;
             let mut rows = Vec::with_capacity(allowed.len());
             for id in allowed {
                 match store.development_fixture_environment_for(&context, &id)? {
@@ -145,7 +145,7 @@ impl TenantEnvironmentOperations {
         let store = self.store.clone();
         let context = context.clone();
         let environments =
-            run_store(move || active_environment_ids(store.as_ref(), &context)).await?;
+            run_store(move || store.list_active_environment_ids_for(&context)).await?;
         self.view
             .reconcile_bounded(environments)
             .await
@@ -262,30 +262,6 @@ impl TenantEnvironmentOperations {
         })
         .await
     }
-}
-
-fn active_environment_ids(
-    store: &dyn TenantOperationalStore,
-    context: &AuthenticatedRequestContext,
-) -> Result<Vec<String>, IsolationError> {
-    store
-        .list_environment_ids_for(context)?
-        .into_iter()
-        .filter_map(
-            |environment| match store.get_environment_for(context, &environment) {
-                Ok(record)
-                    if crate::environment::retirement_from_configuration_json(
-                        &record.configuration_json,
-                    )
-                    .is_none() =>
-                {
-                    Some(Ok(environment))
-                }
-                Ok(_) => None,
-                Err(error) => Some(Err(error)),
-            },
-        )
-        .collect()
 }
 
 async fn run_store<T, F>(operation: F) -> Result<T, TenantEnvironmentError>

@@ -22,7 +22,8 @@ pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
                 UNIQUE(product, name)
              );
              CREATE TABLE environments (
-                id TEXT PRIMARY KEY, revision INTEGER NOT NULL, configuration_json TEXT NOT NULL
+                id TEXT PRIMARY KEY, revision INTEGER NOT NULL, configuration_json TEXT NOT NULL,
+                retired_at INTEGER
              );
              CREATE TABLE plans (
                 id TEXT PRIMARY KEY,
@@ -273,12 +274,13 @@ pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
         tx.commit()?;
     }
     sqlite_objects::ensure_typed_schema_tables(connection)?;
+    sqlite_objects::ensure_environment_retirement_column(connection)?;
     sqlite_objects::ensure_catalog(connection)?;
     sqlite_objects::import_legacy_graph(connection)?;
     let current: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if current < SCHEMA_VERSION {
         let tx = connection.transaction()?;
-        tx.execute_batch("PRAGMA user_version = 11;")?;
+        tx.execute_batch("PRAGMA user_version = 12;")?;
         tx.commit()?;
     }
     Ok(())

@@ -49,7 +49,7 @@ fn leftover_graph_cannot_authorize_apply_after_migration() {
     drop(graph);
 
     let store = SqliteStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 11);
+    assert_eq!(store.schema_version().unwrap(), 12);
     assert!(!store.leftover_graph_tables().unwrap());
     let record = store.get_plan(&plan.id).unwrap().expect("typed plan");
     assert_eq!(record.content_digest, plan.executable_digest().unwrap());
@@ -112,7 +112,7 @@ fn embedded_backup_restore_stays_on_typed_schema() {
     drop(store);
     SqliteStore::restore(&backup, &restored).unwrap();
     let restored_store = SqliteStore::open_embedded(&restored, "tenkai").unwrap();
-    assert_eq!(restored_store.schema_version().unwrap(), 11);
+    assert_eq!(restored_store.schema_version().unwrap(), 12);
     assert!(!restored_store.leftover_graph_tables().unwrap());
     assert!(restored_store.get_plan(&plan.id).unwrap().is_some());
     let _ = std::fs::remove_dir_all(root);
