@@ -77,6 +77,21 @@ export TENKAI_POSTGRES_URL='postgres://tenkai:tenkai@127.0.0.1:5432/tenkai'
 Without `--features postgres`, `PostgresTenantConfig::open` fails closed with an
 actionable rebuild message. Community binaries stay SQLite-only.
 
+### Transport security
+
+Tenant data and store credentials leave the host only over verified TLS:
+
+| URL hosts | Result |
+| --- | --- |
+| Every host (and `hostaddr`) is loopback or a unix socket | The URL's `sslmode` applies; `sslmode=disable` is allowed |
+| Any other host, `sslmode` unset, `prefer`, or `require` | TLS is required |
+| Any other host, `sslmode=disable` | Connect fails closed before dialing |
+
+Server certificates are always verified against the Mozilla roots plus the
+platform trust store. Point `SSL_CERT_FILE` or `SSL_CERT_DIR` at a private CA
+bundle (for example a managed database provider's CA) to trust it. There is no
+option that skips verification.
+
 Each Postgres store connection owns one handle-free worker thread. Connection
 setup, transactions, health checks, and reconcile fencing all run on that
 thread, so the synchronous `postgres` client never starts its runtime inside a
