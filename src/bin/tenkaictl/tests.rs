@@ -139,6 +139,21 @@ fn parses_env_list_and_inspect() {
             command: EnvCommand::Inspect { ref env }
         } if env == "prod"
     ));
+    let retire = Cli::try_parse_from([
+        "tenkaictl",
+        "env",
+        "retire",
+        "prod",
+        "--reason",
+        "service ended",
+    ])
+    .unwrap();
+    assert!(matches!(
+        retire.command,
+        Command::Env {
+            command: EnvCommand::Retire { ref env, ref reason }
+        } if env == "prod" && reason == "service ended"
+    ));
     let preview = Cli::try_parse_from([
         "tenkaictl",
         "env",

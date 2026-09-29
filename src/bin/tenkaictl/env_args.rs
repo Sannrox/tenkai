@@ -28,6 +28,12 @@ pub(crate) enum EnvCommand {
     List,
     /// Inspect one environment: subscriptions, deployed versions, lease/fence, latest plan.
     Inspect { env: String },
+    /// Retire an environment after its active apply has been unlocked.
+    Retire {
+        env: String,
+        #[arg(long)]
+        reason: String,
+    },
     /// Subscribe an environment to a product channel, e.g. `subscribe local hello=stable`.
     Subscribe {
         env: String,

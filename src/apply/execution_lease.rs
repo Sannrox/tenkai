@@ -153,6 +153,12 @@ async fn claim_environment_with_options(
     automatic_takeover: bool,
 ) -> Result<EnvironmentLease> {
     let now = crate::now_millis();
+    if crate::environment::environment_retirement(ctx, environment)
+        .await?
+        .is_some()
+    {
+        anyhow::bail!("retired environment {environment} cannot accept new apply leases");
+    }
     reject_foreign_migration_lock(ctx, environment, owner).await?;
     if let Some(existing) = ctx.get(&legacy_environment_claim_id(environment)).await? {
         let expires_at = existing

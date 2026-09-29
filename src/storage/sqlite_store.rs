@@ -102,6 +102,38 @@ impl SqliteStore {
         }
         Ok(ids)
     }
+
+    pub(crate) fn list_active_catalog_environment_ids(&self) -> Result<Vec<String>> {
+        let connection = self.connection()?;
+        let mut statement =
+            connection.prepare("SELECT id,configuration_json FROM environments ORDER BY id ASC")?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let retired = rows
+            .iter()
+            .filter_map(|(id, configuration)| {
+                crate::environment::retirement_from_configuration_json(configuration)
+                    .map(|_| id.clone())
+            })
+            .collect::<std::collections::HashSet<_>>();
+        Ok(rows
+            .into_iter()
+            .filter_map(|(id, configuration)| {
+                if crate::environment::retirement_from_configuration_json(&configuration).is_some()
+                {
+                    return None;
+                }
+                if !id.starts_with("tenkai:env:") && retired.contains(&crate::ontology::env_id(&id))
+                {
+                    return None;
+                }
+                Some(id)
+            })
+            .collect())
+    }
 }
 
 pub fn refuse_postgres_on_embedded() -> Result<()> {

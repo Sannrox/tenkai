@@ -65,6 +65,13 @@ pub(crate) async fn run(client: &tenkai::server::RemoteClient, command: Command)
             println!("{}", result.message);
             Ok(())
         }
+        Command::Env {
+            command: EnvCommand::Retire { env, reason },
+        } => {
+            let result = client.retire_environment(&env, &reason).await?;
+            println!("{}", result.message);
+            Ok(())
+        }
         Command::Plan { env, generation } => {
             let generation = generation
                 .ok_or_else(|| anyhow::anyhow!("--generation is required with --target remote"))?;

@@ -5,6 +5,8 @@ impl Inner {
     pub fn create_plan(&self, schema: &str, plan: &PlanRecord) -> Result<()> {
         let plan = plan.clone();
         self.with_schema(schema, move |tx| {
+            lock_lease(tx, &plan.environment_id)?;
+            ensure_environment_active(tx, &plan.environment_id, "new plans")?;
             if tx
                 .query_one(
                     "SELECT EXISTS(

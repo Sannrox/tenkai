@@ -58,7 +58,9 @@ impl EnvironmentIndex {
         self.by_name.clear();
         self.by_id.clear();
         for object in objects {
-            self.upsert(object);
+            if !crate::environment::is_retired_object(&object) {
+                self.upsert(object);
+            }
         }
         self.initialized = true;
     }
@@ -365,7 +367,10 @@ async fn resolve_allowed_environments(
         let Some(object) = catalog_get(ctx, &env_id(name)).await? else {
             continue;
         };
-        if object.kind == KIND_ENVIRONMENT && allowed.contains(&object.name) {
+        if object.kind == KIND_ENVIRONMENT
+            && allowed.contains(&object.name)
+            && !crate::environment::is_retired_object(&object)
+        {
             names.push(object.name);
         }
     }
@@ -389,6 +394,13 @@ async fn refresh_environment_index(
         return Ok(index.sorted_names());
     }
 
+    if !ctx.is_embedded() {
+        let objects = catalog_list_kind(ctx, KIND_ENVIRONMENT).await?;
+        let mut index = index.lock().expect("reconciler environment index lock");
+        index.replace_from_objects(objects);
+        return Ok(index.sorted_names());
+    }
+
     let listed_ids = catalog_list_kind_ids(ctx, KIND_ENVIRONMENT).await?;
     let (appeared, disappeared) = index
         .lock()
@@ -397,7 +409,12 @@ async fn refresh_environment_index(
     let mut loaded = Vec::new();
     for id in appeared {
         match catalog_get(ctx, &id).await? {
-            Some(object) if object.kind == KIND_ENVIRONMENT => loaded.push(object),
+            Some(object)
+                if object.kind == KIND_ENVIRONMENT
+                    && !crate::environment::is_retired_object(&object) =>
+            {
+                loaded.push(object)
+            }
             _ => {}
         }
     }

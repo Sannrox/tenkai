@@ -35,6 +35,7 @@ impl Inner {
     ) -> Result<EnvironmentRecord> {
         let environment = environment.clone();
         self.with_schema(schema, move |tx| {
+            lock_lease(tx, &environment.id)?;
             if tx
                 .query_one(
                     "SELECT EXISTS(
@@ -51,13 +52,53 @@ impl Inner {
                     detail: "fixture environments are immutable".into(),
                 });
             }
-            let revision: Option<i64> = tx
+            let existing = tx
                 .query_opt(
-                    "SELECT revision FROM environments WHERE id = $1",
+                    "SELECT revision,configuration_json FROM environments WHERE id = $1",
                     &[&environment.id],
                 )
-                .map_err(pg)?
-                .map(|row| row.get(0));
+                .map_err(pg)?;
+            if existing.as_ref().is_some_and(|row| {
+                crate::environment::retirement_from_configuration_json(&row.get::<_, String>(1))
+                    .is_some()
+            }) {
+                return Err(StoreError::InvalidData {
+                    kind: "environment",
+                    detail: format!(
+                        "environment {} is retired; registering it again requires a new environment name",
+                        environment.id
+                    ),
+                });
+            }
+            if crate::environment::retirement_from_configuration_json(
+                &environment.configuration_json,
+            )
+            .is_some()
+            {
+                let active_claim: bool = tx
+                    .query_one(
+                        "SELECT EXISTS(SELECT 1 FROM runtime_claims
+                         WHERE environment_id=$1 AND expires_at>$2 AND completion_json IS NULL)",
+                        &[&environment.id, &crate::now_millis()],
+                    )
+                    .map_err(pg)?
+                    .get(0);
+                let active_lease: bool = tx
+                    .query_one(
+                        "SELECT EXISTS(SELECT 1 FROM leases
+                         WHERE environment_id=$1 AND expires_at>$2)",
+                        &[&environment.id, &crate::now_millis()],
+                    )
+                    .map_err(pg)?
+                    .get(0);
+                if active_claim || active_lease {
+                    return Err(StoreError::InvalidData {
+                        kind: "environment",
+                        detail: format!("environment {} has active delivery work", environment.id),
+                    });
+                }
+            }
+            let revision: Option<i64> = existing.map(|row| row.get(0));
             let next = match revision {
                 Some(revision) if revision as u64 == environment.revision => revision as u64 + 1,
                 Some(revision) => {

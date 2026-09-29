@@ -39,6 +39,8 @@ pub enum TenantEnvironmentError {
     #[error("tenant environment not found")]
     NotFound,
     #[error("{0}")]
+    Conflict(String),
+    #[error("{0}")]
     Denied(String),
     #[error("{0}")]
     Internal(String),
@@ -65,7 +67,7 @@ impl TenantEnvironmentOperations {
         let store = self.store.clone();
         let context = context.clone();
         run_store(move || {
-            let ids = store.list_environment_ids_for(&context)?;
+            let ids = active_environment_ids(store.as_ref(), &context)?;
             let mut entries = Vec::with_capacity(ids.len());
             for name in ids {
                 match store.development_fixture_environment_for(&context, &name)? {
@@ -92,7 +94,7 @@ impl TenantEnvironmentOperations {
         let store = self.store.clone();
         let context = context.clone();
         let mut rows = run_store(move || {
-            let allowed = store.list_environment_ids_for(&context)?;
+            let allowed = active_environment_ids(store.as_ref(), &context)?;
             let mut rows = Vec::with_capacity(allowed.len());
             for id in allowed {
                 match store.development_fixture_environment_for(&context, &id)? {
@@ -112,11 +114,16 @@ impl TenantEnvironmentOperations {
         context: &AuthenticatedRequestContext,
         environment: &str,
     ) -> Result<EnvironmentInspectReport, TenantEnvironmentError> {
+        let retirement = self.retirement(context, environment).await?;
         let fixture = self.visible_fixture(context, environment).await?;
         if let Some(projection) = fixture {
-            return Ok(projection.inspect_report());
+            let mut report = projection.inspect_report();
+            report.retirement = retirement;
+            return Ok(report);
         }
-        Ok(partition_local_inspect(environment))
+        let mut report = partition_local_inspect(environment);
+        report.retirement = retirement;
+        Ok(report)
     }
 
     pub async fn status(
@@ -137,11 +144,105 @@ impl TenantEnvironmentOperations {
     ) -> Result<TickReport, TenantEnvironmentError> {
         let store = self.store.clone();
         let context = context.clone();
-        let environments = run_store(move || store.list_environment_ids_for(&context)).await?;
+        let environments =
+            run_store(move || active_environment_ids(store.as_ref(), &context)).await?;
         self.view
             .reconcile_bounded(environments)
             .await
             .map_err(internal)
+    }
+
+    pub async fn retire(
+        &self,
+        context: &AuthenticatedRequestContext,
+        environment: &str,
+        reason: &str,
+        actor: &str,
+    ) -> Result<crate::environment::EnvironmentRetirement, TenantEnvironmentError> {
+        if reason.trim().is_empty() {
+            return Err(TenantEnvironmentError::Denied(
+                "retirement reason must not be empty".into(),
+            ));
+        }
+        if reason.trim().len() > 1024 {
+            return Err(TenantEnvironmentError::Denied(
+                "retirement reason exceeds 1024 bytes".into(),
+            ));
+        }
+        let store = self.store.clone();
+        let context = context.clone();
+        let environment = environment.to_owned();
+        let reason = reason.trim().to_owned();
+        let actor = actor.to_owned();
+        let result = run_store(move || {
+            let mut record = store.get_environment_for(&context, &environment)?;
+            if let Some(retirement) =
+                crate::environment::retirement_from_configuration_json(&record.configuration_json)
+            {
+                return Ok(retirement);
+            }
+            if store
+                .development_fixture_environment_for(&context, &environment)?
+                .is_some()
+            {
+                return Err(IsolationError::Contract(
+                    "development fixture environments are immutable".into(),
+                ));
+            }
+            if store
+                .current_lease_for(&context, &environment)?
+                .is_some_and(|lease| lease.expires_at > crate::now_millis())
+            {
+                return Err(IsolationError::Contract(format!(
+                    "environment {environment} has an apply in progress; unlock it before retiring"
+                )));
+            }
+            let retirement = crate::environment::EnvironmentRetirement {
+                reason,
+                actor,
+                retired_at: crate::now_millis(),
+            };
+            record.configuration_json =
+                crate::environment::with_tenant_retirement(&record.configuration_json, &retirement)
+                    .map_err(|error| IsolationError::Contract(error.to_string()))?;
+            match store.put_environment_for(&context, &record) {
+                Ok(_) => Ok(retirement),
+                Err(error) => match store.get_environment_for(&context, &environment) {
+                    Ok(current) => crate::environment::retirement_from_configuration_json(
+                        &current.configuration_json,
+                    )
+                    .ok_or(error),
+                    Err(_) => Err(error),
+                },
+            }
+        })
+        .await;
+        result.map_err(|error| match error {
+            TenantEnvironmentError::Internal(message)
+                if message.contains("apply in progress")
+                    || message.contains("active delivery work") =>
+            {
+                TenantEnvironmentError::Conflict(message)
+            }
+            error => error,
+        })
+    }
+
+    async fn retirement(
+        &self,
+        context: &AuthenticatedRequestContext,
+        environment: &str,
+    ) -> Result<Option<crate::environment::EnvironmentRetirement>, TenantEnvironmentError> {
+        let store = self.store.clone();
+        let context = context.clone();
+        let environment = environment.to_owned();
+        run_store(move || {
+            let record = store.get_environment_for(&context, &environment)?;
+            Ok(crate::environment::retirement_from_configuration_json(
+                &record.configuration_json,
+            ))
+        })
+        .await
     }
 
     async fn visible_fixture(
@@ -161,6 +262,30 @@ impl TenantEnvironmentOperations {
         })
         .await
     }
+}
+
+fn active_environment_ids(
+    store: &dyn TenantOperationalStore,
+    context: &AuthenticatedRequestContext,
+) -> Result<Vec<String>, IsolationError> {
+    store
+        .list_environment_ids_for(context)?
+        .into_iter()
+        .filter_map(
+            |environment| match store.get_environment_for(context, &environment) {
+                Ok(record)
+                    if crate::environment::retirement_from_configuration_json(
+                        &record.configuration_json,
+                    )
+                    .is_none() =>
+                {
+                    Some(Ok(environment))
+                }
+                Ok(_) => None,
+                Err(error) => Some(Err(error)),
+            },
+        )
+        .collect()
 }
 
 async fn run_store<T, F>(operation: F) -> Result<T, TenantEnvironmentError>
@@ -230,6 +355,7 @@ fn partition_local_inspect(name: &str) -> EnvironmentInspectReport {
         observed_runtime_digest: None,
         module_activations: Vec::new(),
         preview: None,
+        retirement: None,
     }
 }
 
@@ -342,6 +468,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retirement_is_tenant_scoped_and_keeps_inspection_evidence() {
+        let store = Arc::new(InMemoryTenantOperationalStore::new());
+        let tenant_a = context("tenant-a");
+        let tenant_b = context("tenant-b");
+        for (context, environment) in [(&tenant_a, "prod"), (&tenant_b, "prod")] {
+            store
+                .put_environment_for(
+                    context,
+                    &EnvironmentRecord {
+                        id: environment.into(),
+                        revision: 0,
+                        configuration_json: "{}".into(),
+                    },
+                )
+                .unwrap();
+        }
+        let view = Arc::new(View::default());
+        let operations = TenantEnvironmentOperations::new(store.clone(), view.clone());
+        let retirement = operations
+            .retire(&tenant_a, "prod", "service ended", "principal-tenant-a")
+            .await
+            .unwrap();
+        assert_eq!(
+            operations
+                .retire(&tenant_a, "prod", "ignored", "another-principal")
+                .await
+                .unwrap(),
+            retirement
+        );
+        assert!(operations.list(&tenant_a).await.unwrap().is_empty());
+        assert_eq!(
+            operations
+                .fleet_status(&tenant_a)
+                .await
+                .unwrap()
+                .environment_count,
+            0
+        );
+        assert!(
+            operations
+                .reconcile(&tenant_a)
+                .await
+                .unwrap()
+                .environments
+                .is_empty()
+        );
+        assert_eq!(
+            operations
+                .inspect(&tenant_a, "prod")
+                .await
+                .unwrap()
+                .retirement,
+            Some(retirement.clone())
+        );
+        assert_eq!(operations.list(&tenant_b).await.unwrap().len(), 1);
+        assert_eq!(
+            operations
+                .inspect(&tenant_b, "prod")
+                .await
+                .unwrap()
+                .retirement,
+            None
+        );
+        let mut updated = store.get_environment_for(&tenant_a, "prod").unwrap();
+        updated.configuration_json = "{}".into();
+        assert!(store.put_environment_for(&tenant_a, &updated).is_err());
+        let partition = store.partition_for(&tenant_a).unwrap();
+        assert!(
+            crate::storage::OperationalStore::claim_runtime_plan(
+                &partition,
+                "prod",
+                "plan-1",
+                "runtime",
+                crate::now_millis() + 60_000,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("retired")
+        );
+        assert!(view.reconciled.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn inspection_rejects_foreign_environment_before_shared_view() {
         let store = Arc::new(InMemoryTenantOperationalStore::new());
         let tenant_a = context("tenant-a");
@@ -395,6 +604,7 @@ mod tests {
             observed_type_digest: None,
             observed_runtime_digest: None,
             module_activations: Vec::new(),
+            retirement: None,
             preview: None,
         }
     }

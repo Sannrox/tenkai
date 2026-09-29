@@ -108,6 +108,19 @@ impl PostgresTenantOperationalStore {
         environment: &EnvironmentRecord,
     ) -> std::result::Result<EnvironmentRecord, IsolationError> {
         let partition = self.partition_for(context)?;
+        if partition
+            .get_environment(&environment.id)
+            .map_err(|error| IsolationError::Contract(error.to_string()))?
+            .is_some_and(|stored| {
+                crate::environment::retirement_from_configuration_json(&stored.configuration_json)
+                    .is_some()
+            })
+        {
+            return Err(IsolationError::Contract(format!(
+                "environment {} is retired; registering it again requires a new environment name",
+                environment.id
+            )));
+        }
         partition
             .put_environment_record(environment)
             .map_err(|error| IsolationError::Contract(error.to_string()))
@@ -121,6 +134,28 @@ impl PostgresTenantOperationalStore {
         partition
             .list_environment_ids()
             .map_err(|error| IsolationError::Contract(error.to_string()))
+    }
+
+    pub fn current_lease_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        environment: &str,
+    ) -> std::result::Result<Option<crate::storage::LeaseRecord>, IsolationError> {
+        let partition = self.partition_for(context)?;
+        #[cfg(feature = "postgres")]
+        {
+            use crate::storage::OperationalStore as _;
+            partition
+                .current_lease(environment)
+                .map_err(|error| IsolationError::Contract(error.to_string()))
+        }
+        #[cfg(not(feature = "postgres"))]
+        {
+            let _ = (partition, environment);
+            Err(IsolationError::Contract(
+                "postgres feature is disabled".into(),
+            ))
+        }
     }
 
     pub fn import_development_fixture_for(

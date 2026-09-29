@@ -12,6 +12,9 @@ impl SqliteStore {
         let now = crate::now_millis();
         let mut connection = self.connection()?;
         let tx = connection.transaction()?;
+        if namespace == crate::apply::ENVIRONMENT_LEASE_NAMESPACE {
+            crate::storage::ensure_environment_active_in(&tx, key, "new apply leases")?;
+        }
         let current: Option<Lease> = decode_lease(
             tx.query_row(
                 "SELECT payload FROM catalog_leases WHERE namespace=?1 AND lease_key=?2",

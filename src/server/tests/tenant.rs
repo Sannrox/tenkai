@@ -208,6 +208,105 @@ async fn tenant_mode_management_apis_isolate_environments() {
     assert!(!reconcile_body.contains("tenant-b"));
     assert!(!reconcile_body.contains("management-secret"));
 
+    let retirement = tenant_app
+        .clone()
+        .oneshot(
+            Request::post("/v1/environments/env-a/retire")
+                .header(
+                    "x-tenkai-assertion",
+                    r#"{"tenant":"tenant-a","principal":"user-a","capabilities":["read","management"]}"#,
+                )
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&crate::management_lifecycle::RetireEnvironmentRequest {
+                        version: 1,
+                        operation: "retire".into(),
+                        reason: "service ended".into(),
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(retirement.status(), StatusCode::OK);
+
+    let retired_list = tenant_app
+        .clone()
+        .oneshot(
+            Request::get("/v1/environments")
+                .header(
+                    "x-tenkai-assertion",
+                    r#"{"tenant":"tenant-a","principal":"user-a","capabilities":["read","management"]}"#,
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(retired_list.status(), StatusCode::OK);
+    let retired_list_body = String::from_utf8(
+        axum::body::to_bytes(retired_list.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!retired_list_body.contains("env-a"), "{retired_list_body}");
+
+    let retired_inspect = tenant_app
+        .clone()
+        .oneshot(
+            Request::get("/v1/environments/env-a")
+                .header(
+                    "x-tenkai-assertion",
+                    r#"{"tenant":"tenant-a","principal":"user-a","capabilities":["read","management"]}"#,
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(retired_inspect.status(), StatusCode::OK);
+    let retired_inspect_body = String::from_utf8(
+        axum::body::to_bytes(retired_inspect.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        retired_inspect_body.contains("service ended"),
+        "{retired_inspect_body}"
+    );
+    assert!(
+        retired_inspect_body.contains("user-a"),
+        "{retired_inspect_body}"
+    );
+
+    let retired_reconcile = tenant_app
+        .clone()
+        .oneshot(
+            Request::post("/v1/reconcile")
+                .header(
+                    "x-tenkai-assertion",
+                    r#"{"tenant":"tenant-a","principal":"user-a","capabilities":["read","management"]}"#,
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(retired_reconcile.status(), StatusCode::OK);
+    let retired_reconcile_body = String::from_utf8(
+        axum::body::to_bytes(retired_reconcile.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert_eq!(retired_reconcile_body, "{\"environments\":[]}");
+
     // Community profile still starts without tenant mode.
     let (community_app, _) = app();
     let health = community_app

@@ -138,13 +138,47 @@ impl SqliteStore {
                 detail: "fixture environments are immutable".into(),
             });
         }
-        let revision: Option<u64> = tx
+        let existing: Option<(u64, String)> = tx
             .query_row(
-                "SELECT revision FROM environments WHERE id=?1",
+                "SELECT revision,configuration_json FROM environments WHERE id=?1",
                 [&environment.id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
+        if existing.as_ref().is_some_and(|(_, configuration)| {
+            crate::environment::retirement_from_configuration_json(configuration).is_some()
+        }) {
+            return Err(StoreError::InvalidData {
+                kind: "environment",
+                detail: format!(
+                    "environment {} is retired; registering it again requires a new environment name",
+                    environment.id
+                ),
+            });
+        }
+        if crate::environment::retirement_from_configuration_json(&environment.configuration_json)
+            .is_some()
+        {
+            let now = crate::now_millis();
+            let active_claim: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM runtime_claims
+                 WHERE environment_id=?1 AND expires_at>?2 AND completion_json IS NULL)",
+                params![environment.id, now],
+                |row| row.get(0),
+            )?;
+            let active_apply: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM leases WHERE environment_id=?1 AND expires_at>?2)",
+                params![environment.id, now],
+                |row| row.get(0),
+            )?;
+            if active_claim || active_apply {
+                return Err(StoreError::InvalidData {
+                    kind: "environment",
+                    detail: format!("environment {} has active delivery work", environment.id),
+                });
+            }
+        }
+        let revision = existing.map(|(revision, _)| revision);
         let next = match revision {
             Some(revision) if revision == environment.revision => revision + 1,
             Some(revision) => {

@@ -21,6 +21,8 @@ impl Inner {
         let plan_id = plan_id.to_owned();
         let owner = owner.to_owned();
         self.with_schema(schema, move |tx| {
+            lock_lease(tx, &environment)?;
+            ensure_environment_active(tx, &environment, "runtime work claims")?;
             if tx
                 .query_one(
                     "SELECT EXISTS(

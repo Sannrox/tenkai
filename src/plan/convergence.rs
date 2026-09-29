@@ -86,7 +86,7 @@ async fn compute_snapshot_with_policy(
     env: &str,
     policy: ConvergencePolicy,
 ) -> Result<(Vec<DesiredStateInput>, Vec<Step>)> {
-    let env_obj = crate::environment::environment(ctx, env).await?;
+    let env_obj = crate::environment::active_environment(ctx, env).await?;
     crate::preview::admit_plan(&env_obj, crate::now_millis())?;
     let channels = ctx.linked(&env_obj.id, REL_SUBSCRIBES, "out").await?;
 
@@ -399,7 +399,7 @@ pub(super) async fn create_from_steps_with_recovery(
 }
 
 async fn admit_preview_environment(ctx: &mut Ctx, env: &str) -> Result<()> {
-    let env_obj = crate::environment::environment(ctx, env).await?;
+    let env_obj = crate::environment::active_environment(ctx, env).await?;
     crate::preview::admit_plan(&env_obj, crate::now_millis())
 }
 

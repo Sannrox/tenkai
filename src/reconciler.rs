@@ -959,6 +959,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retired_environment_leaves_the_cached_reconcile_frontier() {
+        let (database, mut ctx) = registered_ctx("retired-reconcile-frontier", &["stage"]).await;
+        let reconciler = Reconciler::new(ctx.clone(), config()).unwrap();
+        assert_eq!(reconciler.run_once().await.unwrap().environments.len(), 1);
+
+        crate::environment::retire_environment(&mut ctx, "stage", "service ended", "operator")
+            .await
+            .unwrap();
+
+        assert!(reconciler.run_once().await.unwrap().environments.is_empty());
+        assert!(reconciler.pending_work("stage").await.unwrap().is_none());
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
     async fn unbounded_tick_does_not_list_kind_when_membership_is_unchanged() {
         let names: Vec<String> = (0..8).map(|i| format!("env-{i}")).collect();
         let env_refs: Vec<&str> = names.iter().map(String::as_str).collect();

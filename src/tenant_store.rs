@@ -55,6 +55,12 @@ pub trait TenantOperationalStore: Send + Sync {
         context: &AuthenticatedRequestContext,
     ) -> std::result::Result<Vec<String>, IsolationError>;
 
+    fn current_lease_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        environment: &str,
+    ) -> std::result::Result<Option<LeaseRecord>, IsolationError>;
+
     fn import_development_fixture_for(
         &self,
         context: &AuthenticatedRequestContext,
@@ -190,6 +196,20 @@ impl InMemoryTenantOperationalStore {
         environment: &EnvironmentRecord,
     ) -> std::result::Result<EnvironmentRecord, IsolationError> {
         let partition = self.partition_for(context)?;
+        if partition
+            .store
+            .get_environment(&environment.id)
+            .map_err(|error| IsolationError::Contract(error.to_string()))?
+            .is_some_and(|stored| {
+                crate::environment::retirement_from_configuration_json(&stored.configuration_json)
+                    .is_some()
+            })
+        {
+            return Err(IsolationError::Contract(format!(
+                "environment {} is retired; registering it again requires a new environment name",
+                environment.id
+            )));
+        }
         partition
             .store
             .put_environment(environment)
@@ -204,6 +224,17 @@ impl InMemoryTenantOperationalStore {
         partition
             .store
             .list_environment_ids()
+            .map_err(|error| IsolationError::Contract(error.to_string()))
+    }
+
+    pub fn current_lease_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        environment: &str,
+    ) -> std::result::Result<Option<LeaseRecord>, IsolationError> {
+        self.partition_for(context)?
+            .store
+            .current_lease(environment)
             .map_err(|error| IsolationError::Contract(error.to_string()))
     }
 
@@ -326,6 +357,14 @@ impl TenantOperationalStore for InMemoryTenantOperationalStore {
         context: &AuthenticatedRequestContext,
     ) -> std::result::Result<Vec<String>, IsolationError> {
         InMemoryTenantOperationalStore::list_environment_ids_for(self, context)
+    }
+
+    fn current_lease_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        environment: &str,
+    ) -> std::result::Result<Option<LeaseRecord>, IsolationError> {
+        InMemoryTenantOperationalStore::current_lease_for(self, context, environment)
     }
 
     fn import_development_fixture_for(
