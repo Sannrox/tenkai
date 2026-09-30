@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-09-30
+- Amended: 2026-09-30 ([#469](https://github.com/Sannrox/tenkai/issues/469)), decision 5 and follow-ups
 - Issue: [#458](https://github.com/Sannrox/tenkai/issues/458)
 - Owner: Tenkai maintainers
 - Related: [ADR 0001](0001-standalone-core-and-service-evolution.md),
@@ -54,15 +55,19 @@ plain binaries and targets air-gapped sites, so the second style fits.
    waves, and recorded bypasses. Per-node rollout progress, "migrations
    reversible", and cross-environment health evidence have no general contract
    and are not shown until one is accepted.
-5. **Delegated sign-in, server-side authorization.** A deployment's
-   identity-aware proxy or OIDC login supplies a short-lived, audience-bound
-   assertion checked by the existing verifier (ADR 0004, ADR 0006). The
-   community fallback exchanges the management bearer once for a short-lived
-   `HttpOnly`, `SameSite=Strict` session, on loopback only, with CSRF
-   protection; the bearer never reaches browser storage. Tenkai stores no
-   passwords and knows no identity-provider product. The server decides every
-   authorization; the console may only hide actions. Signing keys never enter
-   the browser, and signed releases and approvals are not weakened.
+5. **OIDC sign-in, server-side authorization.** Tenkai verifies OIDC access
+   tokens as a resource server (issuer, audience, JWKS-rotated RS256/ES256
+   keys) and maps a configured group or role claim to Tenkai grants
+   ([#468](https://github.com/Sannrox/tenkai/issues/468)). The console signs
+   in with Authorization Code + PKCE as a public client and sends the token as
+   `Authorization: Bearer`, held in memory only. There are no cookies,
+   server sessions, or CSRF tokens; header authentication cannot be forged
+   cross-site. Hosts without OIDC accept a pasted bearer token, also held in
+   memory. An identity-aware proxy that injects the header uses the same
+   verifier. Tenkai runs no login flow, stores no passwords, and holds no
+   client secrets. The server decides every authorization; the console may
+   only hide actions. Signing keys never enter the browser, and signed
+   releases and approvals are not weakened.
 
 ## Consequences
 
@@ -70,9 +75,13 @@ plain binaries and targets air-gapped sites, so the second style fits.
   API plus the startup contract check.
 - Release binaries grow by the bundle size. Source builds without `ui` are
   unchanged.
-- New surfaces to secure: static serving (#463) and browser sessions (#464).
-- The console needs read routes that do not exist yet: the promotion matrix
-  (#465) and a plan with its gate evidence (#466).
+- New surfaces to secure: static serving (#463) and the OIDC trust path
+  (#468).
+- Existing reads cover the first screens: the environment list and
+  per-environment inspect give every matrix cell and the latest plan's diff,
+  state, and detail. Dedicated matrix and plan-gate reads (#465, #466) were
+  closed as unneeded and return only if measured load time or a picked mock
+  requires them.
 - Console work (scaffold and release, matrix home, plan panel, settings) is
   planned in the console repository, each screen starting from mocks.
 
@@ -91,10 +100,9 @@ plain binaries and targets air-gapped sites, so the second style fits.
 ## Follow-ups
 
 - [#463](https://github.com/Sannrox/tenkai/issues/463) serve the pinned bundle under `/ui` behind `ui`
-- [#464](https://github.com/Sannrox/tenkai/issues/464) browser sign-in
-- [#465](https://github.com/Sannrox/tenkai/issues/465) promotion matrix read API
-- [#466](https://github.com/Sannrox/tenkai/issues/466) plan read with gate evidence
+- [#468](https://github.com/Sannrox/tenkai/issues/468) accept OIDC access tokens with claim-to-grant mapping
 - [tenkai-console#1](https://github.com/Sannrox/tenkai-console/issues/1) scaffold and checksummed release
 - [tenkai-console#2](https://github.com/Sannrox/tenkai-console/issues/2) promotion matrix home
 - [tenkai-console#3](https://github.com/Sannrox/tenkai-console/issues/3) plan panel
 - [tenkai-console#4](https://github.com/Sannrox/tenkai-console/issues/4) settings surfaces
+- [tenkai-console#5](https://github.com/Sannrox/tenkai-console/issues/5) OIDC sign-in
