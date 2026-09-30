@@ -17,6 +17,11 @@ async fn health_and_ready_advertise_capability_names() {
         let body = String::from_utf8(bytes.to_vec()).unwrap();
         assert!(body.contains("community-sqlite"));
         assert!(body.contains("operational_store_migration"));
+        let status: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            status["contracts"],
+            serde_json::json!(["tenkai.http.v1", "tenkai.management-lifecycle.v1"])
+        );
         assert!(!body.contains("management-secret"));
         assert!(!body.contains("runtime-secret"));
         assert!(!body.contains("tenant-a"));

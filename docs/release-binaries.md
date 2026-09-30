@@ -23,7 +23,9 @@ Source `cargo build` remains valid. Hub Postgres hosts are not attached.
 | `tenkai-executor-guard` | Local executor process fence |
 
 Platforms: `linux-x86_64`, `darwin-aarch64`. Asset names are
-`<binary>-<platform>`. The release also attaches `SHA256SUMS`.
+`<binary>-<platform>`. The release also attaches `SHA256SUMS` and
+`tenkai-http-v1.schema.json`, the HTTP API contract clients generate types
+from (see `api/` in the repository).
 The fixture and Postgres conformance harness stay source-built.
 
 ## Verify and install
@@ -67,8 +69,8 @@ Spoke and embedded CLI continue to refuse `TENKAI_POSTGRES_URL`.
 
 Tag `v[0-9]+.[0-9]+.[0-9]+` starts `.github/workflows/release-binaries.yml`.
 That workflow builds the five hosts, names them with
-`scripts/package-release-binaries.sh`, writes `SHA256SUMS`, and attests all
-eleven files before the upload job runs. The upload job checks that the live
+`scripts/package-release-binaries.sh`, adds the HTTP API contract, writes
+`SHA256SUMS`, and attests all twelve files before the upload job runs. The upload job checks that the live
 tag resolves to the triggering commit. If the Release does not exist yet, the
 workflow creates it; if it already exists, the workflow attaches or replaces
 only the asset files and does not rewrite notes. A tag mismatch fails closed

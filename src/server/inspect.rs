@@ -71,6 +71,7 @@ fn service_status(status: &'static str, config: &ServerConfig) -> ServiceStatus 
         status,
         profile: config.capabilities.profile.clone(),
         capabilities: config.capabilities.diagnostic_names(),
+        contracts: super::contract::SERVED_CONTRACTS.to_vec(),
     }
 }
 

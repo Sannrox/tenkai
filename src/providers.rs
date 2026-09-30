@@ -237,7 +237,7 @@ impl TerminalOutcomePayload {
 /// outcome and its optional-provider delivery state. The projection contains
 /// identities and digests only; the original event payload and retry error are
 /// never returned to an operator or integration client.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TerminalOutcomeProjection {
     pub event_id: String,
     pub schema: String,

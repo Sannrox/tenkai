@@ -38,7 +38,7 @@ pub(crate) struct DeploymentObservation<'a> {
 }
 
 /// Durable evidence explaining why an environment is no longer operational.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EnvironmentRetirement {
     pub reason: String,
     pub actor: String,
@@ -828,7 +828,7 @@ pub async fn list_environment_constraints(
     Ok(out)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct StatusRow {
     pub product: String,
     pub channel: String,
@@ -858,7 +858,7 @@ pub fn subscription_state(
 }
 
 /// Summary row for fleet listing (no credentials).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EnvironmentListEntry {
     pub name: String,
     pub id: String,
@@ -875,7 +875,7 @@ pub const ENVIRONMENT_FACT_KEYS: &[&str] =
 const ENVIRONMENT_FACT_PREFIX: &str = "fact.";
 
 /// Detailed inspect report for one environment (no credentials).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EnvironmentInspectReport {
     pub name: String,
     pub id: String,
@@ -911,7 +911,7 @@ pub struct EnvironmentInspectReport {
     pub retirement: Option<EnvironmentRetirement>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EnvironmentSubscriptionView {
     pub product: String,
     pub channel: String,
@@ -926,7 +926,7 @@ pub struct EnvironmentSubscriptionView {
     pub state: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EnvironmentPlanSummary {
     pub id: String,
     pub state: String,
@@ -943,7 +943,7 @@ pub struct EnvironmentPlanSummary {
     pub steps_truncated: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EnvironmentPlanStepSummary {
     pub id: String,
     pub order: u32,

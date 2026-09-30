@@ -34,14 +34,16 @@ pub(super) struct AppState {
     pub(super) runtime_delivery: Arc<RuntimeDeliveryOperations>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub(super) struct ServiceStatus {
     pub(super) status: &'static str,
     pub(super) profile: String,
     pub(super) capabilities: Vec<String>,
+    /// API contract ids this server serves, for client compatibility checks.
+    pub(super) contracts: Vec<&'static str>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub(super) struct ErrorBody {
     pub(super) error: String,
 }

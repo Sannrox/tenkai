@@ -9,13 +9,16 @@
 #
 # Hosts: tenkaictl, tenkai-server, tenkai-executor-guard, tenkai-runtime,
 # tenkai-runtime-guard. Platforms: linux-x86_64, darwin-aarch64.
-# These files are GitHub Release packaging, not Catalog artifacts.
+# The HTTP API contract (api/tenkai-http-v1.schema.json) is attached and
+# checksummed with them. These files are GitHub Release packaging, not
+# Catalog artifacts.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOSTS=(tenkaictl tenkai-server tenkai-executor-guard tenkai-runtime tenkai-runtime-guard)
 PLATFORMS=(linux-x86_64 darwin-aarch64)
 CHECKSUMS_NAME=SHA256SUMS
+CONTRACT_ASSETS=(tenkai-http-v1.schema.json)
 
 usage() {
   sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
@@ -53,7 +56,12 @@ packaged_name() {
 }
 
 is_packaged_name() {
-  local name="$1" host platform
+  local name="$1" host platform asset
+  for asset in "${CONTRACT_ASSETS[@]}"; do
+    if [[ "$name" == "$asset" ]]; then
+      return 0
+    fi
+  done
   for host in "${HOSTS[@]}"; do
     for platform in "${PLATFORMS[@]}"; do
       if [[ "$name" == "$(packaged_name "$host" "$platform")" ]]; then
@@ -66,6 +74,7 @@ is_packaged_name() {
 
 complete_names() {
   local host platform
+  printf '%s\n' "${CONTRACT_ASSETS[@]}"
   for host in "${HOSTS[@]}"; do
     for platform in "${PLATFORMS[@]}"; do
       packaged_name "$host" "$platform"
@@ -280,6 +289,10 @@ cmd_self_test() {
 
   expect_fail "incomplete GitHub Release set" \
     bash "$0" checksums --out "$out" --require-complete
+
+  printf '{}\n' >"${out}/${CONTRACT_ASSETS[0]}"
+  bash "$0" checksums --out "$out"
+  grep -Fq "  ${CONTRACT_ASSETS[0]}" "${out}/${CHECKSUMS_NAME}" || fail "self-test contract not checksummed"
 
   printf 'junk\n' >"${out}/not-a-host"
   expect_fail "unexpected file in ${out}: not-a-host" \

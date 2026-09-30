@@ -1,0 +1,2151 @@
+{
+  "$defs": {
+    "ApplyRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "approval": {
+          "$ref": "#/$defs/ApprovalEnvelope"
+        },
+        "emergency_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "environment": {
+          "type": "string"
+        },
+        "expected_generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "skip_gates": {
+          "default": false,
+          "type": "boolean"
+        },
+        "trust_roots": {
+          "$ref": "#/$defs/PlanApprovalTrustRoots"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "environment",
+        "expected_generation",
+        "approval",
+        "trust_roots"
+      ],
+      "type": "object"
+    },
+    "ApprovalEnvelope": {
+      "additionalProperties": false,
+      "properties": {
+        "key_id": {
+          "type": "string"
+        },
+        "schema": {
+          "type": "string"
+        },
+        "signature": {
+          "type": "string"
+        },
+        "statement": {
+          "$ref": "#/$defs/ApprovalStatement"
+        }
+      },
+      "required": [
+        "schema",
+        "key_id",
+        "statement",
+        "signature"
+      ],
+      "type": "object"
+    },
+    "ApprovalStatement": {
+      "additionalProperties": false,
+      "properties": {
+        "environment": {
+          "type": "string"
+        },
+        "expires_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "issued_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "plan_digest": {
+          "type": "string"
+        },
+        "policy_digest": {
+          "type": "string"
+        },
+        "policy_evidence_id": {
+          "type": "string"
+        },
+        "policy_provider": {
+          "type": "string"
+        },
+        "purpose": {
+          "type": "string"
+        },
+        "skip_gates": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "plan_digest",
+        "environment",
+        "purpose",
+        "skip_gates",
+        "issued_at",
+        "expires_at",
+        "policy_provider",
+        "policy_evidence_id",
+        "policy_digest"
+      ],
+      "type": "object"
+    },
+    "ApprovalTrustRoots": {
+      "additionalProperties": false,
+      "properties": {
+        "signers": {
+          "items": {
+            "$ref": "#/$defs/ApprovalTrustedSigner"
+          },
+          "type": "array"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "signers"
+      ],
+      "type": "object"
+    },
+    "ApprovalTrustedSigner": {
+      "additionalProperties": false,
+      "properties": {
+        "identity": {
+          "type": "string"
+        },
+        "key_id": {
+          "type": "string"
+        },
+        "public_key": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key_id",
+        "identity",
+        "public_key"
+      ],
+      "type": "object"
+    },
+    "ApproveRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "approval": {
+          "$ref": "#/$defs/ApprovalEnvelope"
+        },
+        "environment": {
+          "type": "string"
+        },
+        "expected_generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "trust_roots": {
+          "$ref": "#/$defs/PlanApprovalTrustRoots"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "environment",
+        "expected_generation",
+        "approval",
+        "trust_roots"
+      ],
+      "type": "object"
+    },
+    "CheckpointClass": {
+      "enum": [
+        "reversible",
+        "compensating",
+        "irreversible"
+      ],
+      "type": "string"
+    },
+    "CheckpointDecl": {
+      "additionalProperties": false,
+      "properties": {
+        "class": {
+          "$ref": "#/$defs/CheckpointClass"
+        },
+        "id": {
+          "type": "string"
+        },
+        "pre_admission": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "class"
+      ],
+      "type": "object"
+    },
+    "CheckpointReceipt": {
+      "additionalProperties": false,
+      "properties": {
+        "checkpoint_id": {
+          "type": "string"
+        },
+        "class": {
+          "$ref": "#/$defs/CheckpointClass"
+        },
+        "effect": {
+          "type": "string"
+        },
+        "fence_generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "plan_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "result": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "checkpoint_id",
+        "class",
+        "effect",
+        "result",
+        "fence_generation"
+      ],
+      "type": "object"
+    },
+    "CompatibilityEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_digest": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/CompatibilityStatus"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "status",
+        "evidence_digest"
+      ],
+      "type": "object"
+    },
+    "CompatibilityStatus": {
+      "enum": [
+        "compatible",
+        "incompatible"
+      ],
+      "type": "string"
+    },
+    "EnvironmentInspectReport": {
+      "description": "Detailed inspect report for one environment (no credentials).",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "execution_note": {
+          "description": "Execution ownership note: Tenkai never prints runtime bearer tokens.",
+          "type": "string"
+        },
+        "facts": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "id": {
+          "type": "string"
+        },
+        "latest_plan": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvironmentPlanSummary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Most recent plan for this environment by `created_at`, if any."
+        },
+        "lease": {
+          "$ref": "#/$defs/EnvironmentLeaseInspect"
+        },
+        "module_activations": {
+          "description": "Accepted workshop-module activation receipts for this environment.",
+          "items": {
+            "$ref": "#/$defs/ModuleActivationReceipt"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "observed_runtime_digest": {
+          "description": "Observed runtime digest used for workshop-module compatibility admission.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "observed_type_digest": {
+          "description": "Observed type digest used for workshop-module compatibility admission.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "overlays": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Non-secret product overlays as `product.key=value`.",
+          "type": "object"
+        },
+        "preview": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PreviewInspect"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Present only for preview environments bound to a branch pin."
+        },
+        "retirement": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvironmentRetirement"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Present after this environment has been retired from operational use."
+        },
+        "subscriptions": {
+          "items": {
+            "$ref": "#/$defs/EnvironmentSubscriptionView"
+          },
+          "type": "array"
+        },
+        "terminal_outcomes": {
+          "default": [],
+          "description": "Bounded terminal-outcome identities and outbox delivery state. Event\npayloads and retry errors are intentionally excluded.",
+          "items": {
+            "$ref": "#/$defs/TerminalOutcomeProjection"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "id",
+        "description",
+        "subscriptions",
+        "facts",
+        "lease",
+        "execution_note"
+      ],
+      "type": "object"
+    },
+    "EnvironmentLeaseInspect": {
+      "description": "Operator-facing lease/fence summary. Never includes credentials.",
+      "properties": {
+        "expires_at_ms": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "held": {
+          "description": "Whether an active apply/execution lease is held.",
+          "type": "boolean"
+        },
+        "owner": {
+          "description": "Lease owner identity (controller id), never a bearer token.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "held",
+        "status"
+      ],
+      "type": "object"
+    },
+    "EnvironmentListEntry": {
+      "description": "Summary row for fleet listing (no credentials).",
+      "properties": {
+        "deployed_product_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "description": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "lease_held": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "subscription_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "id",
+        "description",
+        "subscription_count",
+        "deployed_product_count",
+        "lease_held"
+      ],
+      "type": "object"
+    },
+    "EnvironmentPlanStepSummary": {
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "from": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "order": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "product": {
+          "type": "string"
+        },
+        "release_id": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "order",
+        "product",
+        "action",
+        "to",
+        "release_id"
+      ],
+      "type": "object"
+    },
+    "EnvironmentPlanSummary": {
+      "properties": {
+        "created_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "status_detail": {
+          "default": "",
+          "description": "Bounded operator-facing lifecycle detail; never contains executable payloads.",
+          "type": "string"
+        },
+        "step_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "steps": {
+          "default": [],
+          "description": "Ordered, bounded summaries of executable steps.",
+          "items": {
+            "$ref": "#/$defs/EnvironmentPlanStepSummary"
+          },
+          "type": "array"
+        },
+        "steps_truncated": {
+          "default": false,
+          "description": "True when `step_count` exceeds the number of returned summaries.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "state",
+        "created_at",
+        "step_count"
+      ],
+      "type": "object"
+    },
+    "EnvironmentResult": {
+      "properties": {
+        "environment": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/EnvironmentStatus"
+        }
+      },
+      "required": [
+        "environment",
+        "status"
+      ],
+      "type": "object"
+    },
+    "EnvironmentRetirement": {
+      "description": "Durable evidence explaining why an environment is no longer operational.",
+      "properties": {
+        "actor": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "retired_at": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "reason",
+        "actor",
+        "retired_at"
+      ],
+      "type": "object"
+    },
+    "EnvironmentStatus": {
+      "oneOf": [
+        {
+          "properties": {
+            "state": {
+              "const": "current",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "plan_id": {
+              "type": "string"
+            },
+            "state": {
+              "const": "applied",
+              "type": "string"
+            },
+            "steps": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "state",
+            "plan_id",
+            "steps"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "plan_id": {
+              "type": "string"
+            },
+            "state": {
+              "const": "awaiting_runtime",
+              "type": "string"
+            },
+            "steps": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "state",
+            "plan_id",
+            "steps"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "plan_id": {
+              "type": "string"
+            },
+            "state": {
+              "const": "awaiting_approval",
+              "type": "string"
+            },
+            "steps": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "state",
+            "plan_id",
+            "steps"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "error": {
+              "type": "string"
+            },
+            "state": {
+              "const": "failed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "error"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "retry_at": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "state": {
+              "const": "deferred",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "retry_at"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "busy",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "EnvironmentSubscriptionView": {
+      "properties": {
+        "applied_overlay": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "channel": {
+          "type": "string"
+        },
+        "deployed": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "head": {
+          "type": "string"
+        },
+        "health": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "overlay_digest": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "product": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "product",
+        "channel",
+        "head",
+        "state"
+      ],
+      "type": "object"
+    },
+    "ErrorBody": {
+      "properties": {
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "error"
+      ],
+      "type": "object"
+    },
+    "FleetEnvironmentRow": {
+      "description": "One environment's row in a fleet posture table (no credentials).",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "health_summary": {
+          "description": "`ok` | `unknown` | `error` | `n/a` (no subscriptions).",
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "latest_plan_state": {
+          "description": "Latest plan state when a plan exists. Fleet status leaves this empty;\n`inspect_environment` is the source for plan detail.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lease_held": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "posture": {
+          "description": "Aggregate posture: `empty` | `unhealthy` | `behind` | `current`.",
+          "type": "string"
+        },
+        "products_behind": {
+          "description": "Subscribed products with a deployment that is not the channel head.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "products_current": {
+          "description": "Subscribed products whose deployed version matches channel head.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "products_missing": {
+          "description": "Subscribed products with no deployed version.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "subscription_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unhealthy": {
+          "description": "True when any subscription has health `unknown` or a non-empty error.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "id",
+        "description",
+        "subscription_count",
+        "products_current",
+        "products_behind",
+        "products_missing",
+        "unhealthy",
+        "health_summary",
+        "lease_held",
+        "posture"
+      ],
+      "type": "object"
+    },
+    "FleetStatusReport": {
+      "description": "Fleet-wide delivery posture (no credentials).",
+      "properties": {
+        "environment_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "environments": {
+          "items": {
+            "$ref": "#/$defs/FleetEnvironmentRow"
+          },
+          "type": "array"
+        },
+        "environments_behind": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "environments_current": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "environments_empty": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "environments_unhealthy": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "environments",
+        "environment_count",
+        "environments_current",
+        "environments_behind",
+        "environments_unhealthy",
+        "environments_empty"
+      ],
+      "type": "object"
+    },
+    "ManagementLifecycleResult": {
+      "additionalProperties": false,
+      "description": "Versioned result shared by catalog lifecycle routes.",
+      "properties": {
+        "digest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "resource": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "message"
+      ],
+      "type": "object"
+    },
+    "MigrationApprovalEnvelope": {
+      "additionalProperties": false,
+      "properties": {
+        "key_id": {
+          "type": "string"
+        },
+        "schema": {
+          "type": "string"
+        },
+        "signature": {
+          "type": "string"
+        },
+        "statement": {
+          "$ref": "#/$defs/MigrationApprovalStatement"
+        }
+      },
+      "required": [
+        "schema",
+        "key_id",
+        "statement",
+        "signature"
+      ],
+      "type": "object"
+    },
+    "MigrationApprovalStatement": {
+      "additionalProperties": false,
+      "properties": {
+        "environment": {
+          "type": "string"
+        },
+        "expires_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "identity_digest": {
+          "type": "string"
+        },
+        "issued_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "purpose": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "identity_digest",
+        "environment",
+        "purpose",
+        "issued_at",
+        "expires_at"
+      ],
+      "type": "object"
+    },
+    "MigrationDeclaration": {
+      "additionalProperties": false,
+      "properties": {
+        "checkpoints": {
+          "items": {
+            "$ref": "#/$defs/CheckpointDecl"
+          },
+          "type": "array"
+        },
+        "compatibility": {
+          "$ref": "#/$defs/CompatibilityEvidence"
+        },
+        "profile": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/PackagePin"
+        },
+        "target": {
+          "$ref": "#/$defs/PackagePin"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "profile",
+        "source",
+        "target",
+        "compatibility",
+        "checkpoints"
+      ],
+      "type": "object"
+    },
+    "MigrationRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "approval_digest": {
+          "type": "string"
+        },
+        "backup_receipt_digest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "declaration": {
+          "$ref": "#/$defs/MigrationDeclaration"
+        },
+        "environment": {
+          "type": "string"
+        },
+        "fence_generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "identity_digest": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "partition": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pending_plan_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pending_rollback_plan_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "receipts": {
+          "items": {
+            "$ref": "#/$defs/CheckpointReceipt"
+          },
+          "type": "array"
+        },
+        "status": {
+          "$ref": "#/$defs/MigrationStatus"
+        }
+      },
+      "required": [
+        "name",
+        "environment",
+        "identity_digest",
+        "declaration",
+        "approval_digest",
+        "fence_generation",
+        "status",
+        "receipts"
+      ],
+      "type": "object"
+    },
+    "MigrationStatus": {
+      "enum": [
+        "admitted",
+        "running",
+        "succeeded",
+        "failed",
+        "rolled_back",
+        "recovery_required"
+      ],
+      "type": "string"
+    },
+    "ModuleActivationReceipt": {
+      "additionalProperties": false,
+      "properties": {
+        "closure_digest": {
+          "type": "string"
+        },
+        "environment": {
+          "type": "string"
+        },
+        "module_digest": {
+          "type": "string"
+        },
+        "module_id": {
+          "type": "string"
+        },
+        "pin_digest": {
+          "type": "string"
+        },
+        "product": {
+          "type": "string"
+        },
+        "receipt_digest": {
+          "type": "string"
+        },
+        "release": {
+          "type": "string"
+        },
+        "runtime_digest": {
+          "type": "string"
+        },
+        "schema": {
+          "type": "string"
+        },
+        "type_digest": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema",
+        "environment",
+        "product",
+        "release",
+        "module_id",
+        "module_digest",
+        "type_digest",
+        "runtime_digest",
+        "closure_digest",
+        "pin_digest",
+        "receipt_digest"
+      ],
+      "type": "object"
+    },
+    "OidcClientDiscovery": {
+      "description": "Unauthenticated `GET /v1/auth/oidc` body: what a browser needs to start\nAuthorization Code + PKCE. Public values only.",
+      "properties": {
+        "audience": {
+          "type": "string"
+        },
+        "client_id": {
+          "type": "string"
+        },
+        "issuer": {
+          "type": "string"
+        },
+        "scopes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "issuer",
+        "audience",
+        "client_id",
+        "scopes"
+      ],
+      "type": "object"
+    },
+    "PackageMigrationApplyRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "approval": {
+          "$ref": "#/$defs/MigrationApprovalEnvelope"
+        },
+        "backup_receipt_digest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "declaration": {
+          "$ref": "#/$defs/MigrationDeclaration"
+        },
+        "environment": {
+          "type": "string"
+        },
+        "expected_generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "plan_approvals": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ApprovalEnvelope"
+          },
+          "type": "object"
+        },
+        "trust_roots": {
+          "$ref": "#/$defs/ApprovalTrustRoots"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "environment",
+        "declaration",
+        "expected_generation",
+        "approval",
+        "trust_roots"
+      ],
+      "type": "object"
+    },
+    "PackageMigrationMutateRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "approval": {
+          "$ref": "#/$defs/MigrationApprovalEnvelope"
+        },
+        "expected_generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "plan_approvals": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ApprovalEnvelope"
+          },
+          "type": "object"
+        },
+        "trust_roots": {
+          "$ref": "#/$defs/ApprovalTrustRoots"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "expected_generation",
+        "approval",
+        "trust_roots"
+      ],
+      "type": "object"
+    },
+    "PackageMigrationPreviewRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "backup_receipt_digest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "declaration": {
+          "$ref": "#/$defs/MigrationDeclaration"
+        },
+        "environment": {
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "environment",
+        "declaration"
+      ],
+      "type": "object"
+    },
+    "PackageMigrationResult": {
+      "additionalProperties": false,
+      "properties": {
+        "record": {
+          "$ref": "#/$defs/MigrationRecord"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "record"
+      ],
+      "type": "object"
+    },
+    "PackagePin": {
+      "additionalProperties": false,
+      "properties": {
+        "digest": {
+          "type": "string"
+        },
+        "product": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "product",
+        "version",
+        "digest"
+      ],
+      "type": "object"
+    },
+    "PlanApprovalTrustRoots": {
+      "additionalProperties": false,
+      "properties": {
+        "signers": {
+          "items": {
+            "$ref": "#/$defs/PlanApprovalTrustedSigner"
+          },
+          "type": "array"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "signers"
+      ],
+      "type": "object"
+    },
+    "PlanApprovalTrustedSigner": {
+      "additionalProperties": false,
+      "properties": {
+        "identity": {
+          "type": "string"
+        },
+        "key_id": {
+          "type": "string"
+        },
+        "public_key": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key_id",
+        "identity",
+        "public_key"
+      ],
+      "type": "object"
+    },
+    "PlanRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "environment": {
+          "type": "string"
+        },
+        "expected_generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "environment",
+        "expected_generation"
+      ],
+      "type": "object"
+    },
+    "PreviewInspect": {
+      "properties": {
+        "expires_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "pin_digest": {
+          "type": "string"
+        },
+        "plan_digest": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "teardown_at": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "teardown_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "pin_digest",
+        "plan_digest",
+        "expires_at",
+        "status"
+      ],
+      "type": "object"
+    },
+    "PromoteRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "operation": {
+          "type": "string"
+        },
+        "spec": {
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "spec"
+      ],
+      "type": "object"
+    },
+    "Provenance": {
+      "additionalProperties": false,
+      "properties": {
+        "builder": {
+          "type": "string"
+        },
+        "built_at_unix_ms": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "materials": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "source_uri": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_uri",
+        "revision",
+        "builder",
+        "built_at_unix_ms"
+      ],
+      "type": "object"
+    },
+    "PublishRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "manifest": {
+          "type": "string"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "signature": {
+          "$ref": "#/$defs/SignatureEnvelope"
+        },
+        "trust_roots": {
+          "$ref": "#/$defs/ReleaseTrustRoots"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "manifest",
+        "signature",
+        "trust_roots"
+      ],
+      "type": "object"
+    },
+    "RecallRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "operation": {
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation"
+      ],
+      "type": "object"
+    },
+    "ReleaseStatement": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_digest": {
+          "type": "string"
+        },
+        "manifest_digest": {
+          "type": "string"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        }
+      },
+      "required": [
+        "manifest_digest",
+        "artifact_digest",
+        "provenance"
+      ],
+      "type": "object"
+    },
+    "ReleaseTrustRoots": {
+      "additionalProperties": false,
+      "properties": {
+        "signers": {
+          "items": {
+            "$ref": "#/$defs/ReleaseTrustedSigner"
+          },
+          "type": "array"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "signers"
+      ],
+      "type": "object"
+    },
+    "ReleaseTrustedSigner": {
+      "additionalProperties": false,
+      "properties": {
+        "identity": {
+          "type": "string"
+        },
+        "key_id": {
+          "type": "string"
+        },
+        "public_key": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key_id",
+        "identity",
+        "public_key"
+      ],
+      "type": "object"
+    },
+    "RetireEnvironmentRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "operation": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "RollbackRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "environment": {
+          "type": "string"
+        },
+        "expected_generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "product": {
+          "type": "string"
+        },
+        "recovery_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "environment",
+        "expected_generation",
+        "product"
+      ],
+      "type": "object"
+    },
+    "ServiceStatus": {
+      "properties": {
+        "capabilities": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "contracts": {
+          "description": "API contract ids this server serves, for client compatibility checks.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "profile": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "profile",
+        "capabilities",
+        "contracts"
+      ],
+      "type": "object"
+    },
+    "SignatureEnvelope": {
+      "additionalProperties": false,
+      "properties": {
+        "key_id": {
+          "type": "string"
+        },
+        "schema": {
+          "type": "string"
+        },
+        "signature": {
+          "type": "string"
+        },
+        "statement": {
+          "$ref": "#/$defs/ReleaseStatement"
+        }
+      },
+      "required": [
+        "schema",
+        "key_id",
+        "statement",
+        "signature"
+      ],
+      "type": "object"
+    },
+    "StatusRow": {
+      "properties": {
+        "channel": {
+          "type": "string"
+        },
+        "deployed": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "head": {
+          "type": "string"
+        },
+        "health": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "overlay_stale": {
+          "default": false,
+          "type": "boolean"
+        },
+        "product": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "product",
+        "channel",
+        "head"
+      ],
+      "type": "object"
+    },
+    "SubscribeRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "environment": {
+          "type": "string"
+        },
+        "expected_generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "spec": {
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "environment",
+        "expected_generation",
+        "spec"
+      ],
+      "type": "object"
+    },
+    "TerminalOutcomeProjection": {
+      "description": "Bounded, authenticated read projection of one Tenkai-owned terminal\noutcome and its optional-provider delivery state. The projection contains\nidentities and digests only; the original event payload and retry error are\nnever returned to an operator or integration client.",
+      "properties": {
+        "attempts": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "binding_digest": {
+          "type": "string"
+        },
+        "claim_until": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "configuration_digest": {
+          "type": "string"
+        },
+        "configuration_id": {
+          "type": "string"
+        },
+        "delivered_at": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "delivery_lag_ms": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "delivery_state": {
+          "type": "string"
+        },
+        "deployment_id": {
+          "type": "string"
+        },
+        "environment_id": {
+          "type": "string"
+        },
+        "event_id": {
+          "type": "string"
+        },
+        "next_attempt_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "observed_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "plan_digest": {
+          "type": "string"
+        },
+        "plan_id": {
+          "type": "string"
+        },
+        "product": {
+          "type": "string"
+        },
+        "release_digest": {
+          "type": "string"
+        },
+        "release_id": {
+          "type": "string"
+        },
+        "schema": {
+          "type": "string"
+        },
+        "terminal_state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "event_id",
+        "schema",
+        "deployment_id",
+        "plan_id",
+        "release_id",
+        "product",
+        "environment_id",
+        "configuration_id",
+        "terminal_state",
+        "observed_at",
+        "binding_digest",
+        "release_digest",
+        "plan_digest",
+        "configuration_digest",
+        "delivery_state",
+        "attempts",
+        "next_attempt_at",
+        "delivery_lag_ms"
+      ],
+      "type": "object"
+    },
+    "TickReport": {
+      "properties": {
+        "environments": {
+          "items": {
+            "$ref": "#/$defs/EnvironmentResult"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "environments"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "tenkai.http.v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Routes, required delivery capability, and request/response schemas. Non-2xx responses carry `error`.",
+  "error": {
+    "$ref": "#/$defs/ErrorBody"
+  },
+  "routes": [
+    {
+      "auth": "none",
+      "method": "GET",
+      "path": "/healthz",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/ServiceStatus"
+      }
+    },
+    {
+      "auth": "none",
+      "method": "GET",
+      "path": "/readyz",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/ServiceStatus"
+      }
+    },
+    {
+      "auth": "none",
+      "method": "GET",
+      "path": "/v1/auth/oidc",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/OidcClientDiscovery"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/reconcile",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/TickReport"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/fleet/status",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/FleetStatusReport"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/environments",
+      "request": null,
+      "response": {
+        "items": {
+          "$ref": "#/$defs/EnvironmentListEntry"
+        },
+        "type": "array"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/environments/{environment}",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/EnvironmentInspectReport"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/environments/{environment}/status",
+      "request": null,
+      "response": {
+        "items": {
+          "$ref": "#/$defs/StatusRow"
+        },
+        "type": "array"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/environments/{environment}/subscriptions",
+      "request": {
+        "$ref": "#/$defs/SubscribeRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/environments/{environment}/retire",
+      "request": {
+        "$ref": "#/$defs/RetireEnvironmentRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/environments/{environment}/plans",
+      "request": {
+        "$ref": "#/$defs/PlanRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/environments/{environment}/rollback",
+      "request": {
+        "$ref": "#/$defs/RollbackRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/plans/{plan_id}/approve",
+      "request": {
+        "$ref": "#/$defs/ApproveRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/plans/{plan_id}/apply",
+      "request": {
+        "$ref": "#/$defs/ApplyRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/releases",
+      "request": {
+        "$ref": "#/$defs/PublishRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/releases/{release}/recall",
+      "request": {
+        "$ref": "#/$defs/RecallRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/channels/{channel}/promote",
+      "request": {
+        "$ref": "#/$defs/PromoteRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/migrations/{name}",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/PackageMigrationResult"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "POST",
+      "path": "/v1/migrations/{name}/preview",
+      "request": {
+        "$ref": "#/$defs/PackageMigrationPreviewRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/PackageMigrationResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/migrations/{name}/apply",
+      "request": {
+        "$ref": "#/$defs/PackageMigrationApplyRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/PackageMigrationResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/migrations/{name}/resume",
+      "request": {
+        "$ref": "#/$defs/PackageMigrationMutateRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/PackageMigrationResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/migrations/{name}/rollback",
+      "request": {
+        "$ref": "#/$defs/PackageMigrationMutateRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/PackageMigrationResult"
+      }
+    }
+  ],
+  "title": "Tenkai HTTP API"
+}

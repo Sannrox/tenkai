@@ -76,7 +76,7 @@ pub struct OidcPublicClient {
 
 /// Unauthenticated `GET /v1/auth/oidc` body: what a browser needs to start
 /// Authorization Code + PKCE. Public values only.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct OidcClientDiscovery {
     pub issuer: String,
     pub audience: String,

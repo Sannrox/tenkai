@@ -420,7 +420,9 @@ pub(crate) struct EnvironmentLeaseStatus {
 }
 
 /// Operator-facing lease/fence summary. Never includes credentials.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct EnvironmentLeaseInspect {
     /// Whether an active apply/execution lease is held.
     pub held: bool,

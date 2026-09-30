@@ -64,9 +64,11 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: Add HTTP API contract
+        run: cp api/tenkai-http-v1.schema.json dist/
       - name: Checksums
         run: bash scripts/package-release-binaries.sh checksums --out dist --require-complete
-      - name: Attest binaries and checksums
+      - name: Attest binaries, API contract, and checksums
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-path: dist/*

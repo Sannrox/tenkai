@@ -202,7 +202,7 @@ pub fn parse_management_lifecycle_json(
 }
 
 /// Versioned result shared by catalog lifecycle routes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ManagementLifecycleResult {
     pub version: u32,
@@ -235,7 +235,7 @@ impl ManagementLifecycleResult {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PublishRequest {
     pub version: u32,
@@ -245,7 +245,7 @@ pub struct PublishRequest {
     pub trust_roots: TrustRoots,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PromoteRequest {
     pub version: u32,
@@ -253,14 +253,14 @@ pub struct PromoteRequest {
     pub spec: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RecallRequest {
     pub version: u32,
     pub operation: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SubscribeRequest {
     pub version: u32,
@@ -270,7 +270,7 @@ pub struct SubscribeRequest {
     pub spec: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RetireEnvironmentRequest {
     pub version: u32,
@@ -278,7 +278,7 @@ pub struct RetireEnvironmentRequest {
     pub reason: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PlanRequest {
     pub version: u32,
@@ -287,7 +287,7 @@ pub struct PlanRequest {
     pub expected_generation: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ApproveRequest {
     pub version: u32,
@@ -298,7 +298,7 @@ pub struct ApproveRequest {
     pub trust_roots: PlanApprovalTrustRoots,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ApplyRequest {
     pub version: u32,
@@ -313,7 +313,7 @@ pub struct ApplyRequest {
     pub emergency_reason: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RollbackRequest {
     pub version: u32,

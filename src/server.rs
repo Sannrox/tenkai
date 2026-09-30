@@ -2,6 +2,7 @@
 
 mod auth;
 mod config;
+pub mod contract;
 mod inspect;
 mod lifecycle;
 mod package_migration;

@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::plan::EnvironmentInspectReport;
 
 /// One environment's row in a fleet posture table (no credentials).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FleetEnvironmentRow {
     pub name: String,
     pub id: String,
@@ -40,7 +40,7 @@ pub struct FleetEnvironmentRow {
 }
 
 /// Fleet-wide delivery posture (no credentials).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FleetStatusReport {
     pub environments: Vec<FleetEnvironmentRow>,
     pub environment_count: usize,

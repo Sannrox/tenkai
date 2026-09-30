@@ -18,7 +18,7 @@ pub(super) const TRUST_ROOT_VERSION: u32 = 1;
 pub(super) const MIGRATION_EXEC_NAMESPACE: &str = "tenkai.package-migration";
 pub(super) const MIGRATION_EXEC_TTL_MS: i64 = 2 * 60 * 60 * 1000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckpointClass {
     Reversible,
@@ -36,14 +36,14 @@ impl CheckpointClass {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CompatibilityStatus {
     Compatible,
     Incompatible,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MigrationStatus {
     Admitted,
@@ -67,7 +67,7 @@ impl MigrationStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PackagePin {
     pub product: String,
@@ -75,7 +75,7 @@ pub struct PackagePin {
     pub digest: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CheckpointDecl {
     pub id: String,
@@ -84,7 +84,7 @@ pub struct CheckpointDecl {
     pub pre_admission: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CompatibilityEvidence {
     pub version: u32,
@@ -92,7 +92,7 @@ pub struct CompatibilityEvidence {
     pub evidence_digest: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MigrationDeclaration {
     pub version: u32,
@@ -103,7 +103,7 @@ pub struct MigrationDeclaration {
     pub checkpoints: Vec<CheckpointDecl>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CheckpointReceipt {
     pub checkpoint_id: String,
@@ -115,7 +115,7 @@ pub struct CheckpointReceipt {
     pub plan_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MigrationRecord {
     pub name: String,
@@ -166,7 +166,7 @@ pub enum MigrationAuthorization<'a> {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MigrationApprovalStatement {
     pub identity_digest: String,
@@ -176,7 +176,7 @@ pub struct MigrationApprovalStatement {
     pub expires_at: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MigrationApprovalEnvelope {
     pub schema: String,
@@ -185,14 +185,14 @@ pub struct MigrationApprovalEnvelope {
     pub signature: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ApprovalTrustRoots {
     pub version: u32,
     pub signers: Vec<ApprovalTrustedSigner>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ApprovalTrustedSigner {
     pub key_id: String,
@@ -200,7 +200,7 @@ pub struct ApprovalTrustedSigner {
     pub public_key: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PackageMigrationPreviewRequest {
     pub version: u32,
@@ -210,7 +210,7 @@ pub struct PackageMigrationPreviewRequest {
     pub backup_receipt_digest: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PackageMigrationApplyRequest {
     pub version: u32,
@@ -225,7 +225,7 @@ pub struct PackageMigrationApplyRequest {
     pub plan_approvals: BTreeMap<String, crate::plan_approval::ApprovalEnvelope>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PackageMigrationMutateRequest {
     pub version: u32,
@@ -236,7 +236,7 @@ pub struct PackageMigrationMutateRequest {
     pub plan_approvals: BTreeMap<String, crate::plan_approval::ApprovalEnvelope>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PackageMigrationResult {
     pub version: u32,

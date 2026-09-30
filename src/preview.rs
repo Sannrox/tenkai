@@ -48,7 +48,7 @@ pub struct BranchPin {
     pub pin_digest: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PreviewInspect {
     pub pin_digest: String,
     pub plan_digest: String,

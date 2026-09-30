@@ -81,6 +81,19 @@ window.
 Existing `/v1/reconcile`, `/v1/environments`, `/v1/fleet/status`, and
 `/v1/migrations/*` routes are unchanged.
 
+## Machine-readable contract
+
+`api/tenkai-http-v1.schema.json` (contract id `tenkai.http.v1`) lists every
+public route with its method, path, required capability (`none`, `read`, or
+`management`), and JSON Schema request and response types. It is generated
+from the handlers' serde types; `make update` regenerates it and
+`make validate` fails when it is stale. Each release attaches it next to the
+binaries, covered by `SHA256SUMS` and the attestation. `/healthz` lists the
+contract ids a server serves in `contracts`, so clients can refuse an older
+server before calling anything else. Additive changes keep `v1`; a breaking
+change needs a new id. The pull runtime keeps its own contract in
+[runtime protocol](runtime-protocol-v1.md).
+
 ## See also
 
 - [ADR 0030](decisions/0030-remote-management-lifecycle.md)
