@@ -310,7 +310,7 @@ fn validate_claims(
     })
 }
 
-fn parse_delivery_capabilities(
+pub(crate) fn parse_delivery_capabilities(
     values: &[String],
 ) -> Result<std::collections::BTreeSet<DeliveryCapability>, AuthError> {
     let mut capabilities = std::collections::BTreeSet::new();
@@ -358,7 +358,7 @@ fn decode_public_key(encoded: &str) -> Result<VerifyingKey, AuthError> {
         .map_err(|error| AuthError::InvalidCredential(error.to_string()))
 }
 
-fn b64url_decode(input: &str) -> Result<Vec<u8>, AuthError> {
+pub(crate) fn b64url_decode(input: &str) -> Result<Vec<u8>, AuthError> {
     base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(input)
         .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(input))

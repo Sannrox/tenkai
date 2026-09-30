@@ -12,8 +12,8 @@ use crate::tenant_store::TenantOperationalStore;
 use super::auth::{import_development_fixture, reset_development_fixture};
 use super::config::ServerConfig;
 use super::inspect::{
-    environment_status, fleet_status, health, inspect_environment, list_environments, openmetrics,
-    ready, reconcile,
+    environment_status, fleet_status, health, inspect_environment, list_environments, oidc_client,
+    openmetrics, ready, reconcile,
 };
 use super::lifecycle::{
     apply_plan, approve_plan, plan_environment, promote_release, publish_release, recall_release,
@@ -76,6 +76,7 @@ pub fn router(
     let mut router = Router::new()
         .route("/healthz", get(health))
         .route("/readyz", get(ready))
+        .route("/v1/auth/oidc", get(oidc_client))
         .route("/v1/reconcile", post(reconcile))
         .route("/v1/fleet/status", get(fleet_status))
         .route("/v1/environments", get(list_environments))

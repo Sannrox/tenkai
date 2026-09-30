@@ -218,6 +218,63 @@ restarts the server. Configuration errors identify the file and validation
 problem but do not print file contents, assertions, tokens, private keys, or
 customer data.
 
+### OIDC access tokens (#468)
+
+`tenkai-server` can instead verify OIDC access tokens from the deployment's
+identity provider ([ADR 0031](decisions/0031-web-console.md)). Tenkai is a
+resource server only: it runs no login flow, stores no passwords, and holds no
+client secrets. Set `TENKAI_OIDC_CONFIG` to a TOML file; it is mutually
+exclusive with `TENKAI_JWT_VERIFIER_CONFIG`.
+
+```toml
+issuer = "https://idp.example.com/realms/ops"   # exact `iss`; https except loopback
+audience = "tenkai"                             # must appear in `aud` (string or array)
+# algorithms = ["RS256", "ES256"]               # default; `none` and HS* are never accepted
+# jwks_uri = "https://idp.example.com/..."      # skip discovery
+# jwks_file = "/etc/tenkai/jwks.json"           # air-gapped: static keys, no network
+# clock_skew_secs = 60
+# jwks_refresh_secs = 600
+
+[client]                     # optional; served at GET /v1/auth/oidc for the console
+client_id = "tenkai-console" # public client (Authorization Code + PKCE)
+scopes = ["openid", "groups"]
+
+[grants]
+claim = "groups"             # string or array claim holding group/role values
+# tenant_claim = "tenant"    # required on tenant-mode hubs
+
+[[grants.rules]]
+value = "tenkai-admins"
+capabilities = ["read", "management"]
+
+[[grants.rules]]
+value = "prod-operators"
+capabilities = ["management"]
+environment = "prod"         # confine management to one environment
+```
+
+Behavior:
+
+- Clients send the access token as `Authorization: Bearer`. A compact-JWS
+  bearer is offered to the extension; configured community tokens still take
+  precedence.
+- Without `jwks_uri` or `jwks_file`, the server reads
+  `<issuer>/.well-known/openid-configuration` once at startup and requires its
+  `issuer` to match exactly. Startup fails closed when no usable signing key
+  loads.
+- Keys refresh in a background thread every `jwks_refresh_secs`, and when a
+  token names an unknown `kid` (at most once per 30 seconds). That token is
+  refused; a refresh failure keeps the previous keys. Request authentication
+  never performs network I/O.
+- Grants come only from `grants.rules`. A token matching no rule authenticates
+  but has no delivery capability. Rules with `environment` bind management to
+  that environment exactly like an environment-scoped management token, unless
+  another rule already grants fleet management. Rules for more than one
+  environment are refused.
+- The principal is `<sub>@<iss>` in audit records.
+- `GET /v1/auth/oidc` is unauthenticated and returns only `issuer`,
+  `audience`, `client_id`, and `scopes`; it is 404 when no `[client]` is set.
+
 ## Lifecycle and version compatibility
 
 | Stage | Behavior |

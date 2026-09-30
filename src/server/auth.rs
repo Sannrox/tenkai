@@ -208,11 +208,19 @@ fn management_credential(headers: &HeaderMap) -> Result<CredentialMaterial, Mana
         ));
     }
     let bearer_token = bearer(headers).map(str::to_string);
+    // A compact-JWS bearer (for example an OIDC access token) is also offered
+    // to the enterprise extension; configured community tokens still win.
     let assertion = headers
         .get("x-tenkai-assertion")
         .and_then(|value| value.to_str().ok())
         .map(|raw| raw.as_bytes().to_vec())
-        .filter(|bytes| !bytes.is_empty());
+        .filter(|bytes| !bytes.is_empty())
+        .or_else(|| {
+            bearer_token
+                .as_deref()
+                .filter(|token| is_compact_jws(token))
+                .map(|token| token.as_bytes().to_vec())
+        });
     if bearer_token.is_none() && assertion.is_none() {
         return Err(ManagementError::Unauthorized("missing bearer token".into()));
     }
@@ -228,6 +236,22 @@ fn management_credential(headers: &HeaderMap) -> Result<CredentialMaterial, Mana
         bearer_token,
         assertion,
     })
+}
+
+fn is_compact_jws(token: &str) -> bool {
+    let mut parts = token.split('.');
+    let segment_ok = |part: Option<&str>| {
+        part.is_some_and(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        })
+    };
+    segment_ok(parts.next())
+        && segment_ok(parts.next())
+        && segment_ok(parts.next())
+        && parts.next().is_none()
 }
 
 pub(super) fn require_management(headers: &HeaderMap) -> Result<CredentialMaterial, Box<Response>> {

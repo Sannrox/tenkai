@@ -153,6 +153,10 @@ pub struct AuthenticatedRequestContext {
     /// Delivery-domain capabilities. Absent/empty means no management API use.
     #[serde(default)]
     delivery_capabilities: BTreeSet<DeliveryCapability>,
+    /// Environment this principal's management is confined to, set only by a
+    /// verifying authenticator (for example an OIDC group rule).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    environment_binding: Option<String>,
 }
 
 impl AuthenticatedRequestContext {
@@ -170,6 +174,10 @@ impl AuthenticatedRequestContext {
 
     pub fn delivery_capabilities(&self) -> &BTreeSet<DeliveryCapability> {
         &self.delivery_capabilities
+    }
+
+    pub fn environment_binding(&self) -> Option<&str> {
+        self.environment_binding.as_deref()
     }
 
     pub fn has_delivery_capability(&self, required: DeliveryCapability) -> bool {
@@ -257,6 +265,7 @@ pub struct AuthenticatedRequestContextBuilder {
     authenticator_id: String,
     tenant: Option<TenantContext>,
     delivery_capabilities: BTreeSet<DeliveryCapability>,
+    environment_binding: Option<String>,
 }
 
 impl AuthenticatedRequestContextBuilder {
@@ -272,6 +281,7 @@ impl AuthenticatedRequestContextBuilder {
             authenticator_id: authenticator_id.into(),
             tenant: None,
             delivery_capabilities,
+            environment_binding: None,
         }
     }
 
@@ -307,6 +317,12 @@ impl AuthenticatedRequestContextBuilder {
         self
     }
 
+    /// Confine management to one environment, like an environment-scoped token.
+    pub fn with_environment_binding(mut self, environment: impl Into<String>) -> Self {
+        self.environment_binding = Some(environment.into());
+        self
+    }
+
     pub fn build(self) -> Result<AuthenticatedRequestContext, AuthError> {
         let context = AuthenticatedRequestContext {
             contract_version: AUTH_CONTEXT_CONTRACT_VERSION,
@@ -315,6 +331,7 @@ impl AuthenticatedRequestContextBuilder {
             tenant: self.tenant,
             authenticator_id: self.authenticator_id,
             delivery_capabilities: self.delivery_capabilities,
+            environment_binding: self.environment_binding,
         };
         context.validate()?;
         Ok(context)

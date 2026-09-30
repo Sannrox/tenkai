@@ -228,7 +228,7 @@ impl ManagementOperations {
             &request,
             environment,
             context.principal.kind,
-            self.granted_environment(credential),
+            self.granted_environment(credential, &context),
         )
         .map_err(map_lifecycle_error)?;
         self.require_environment_visible(&context, environment)
@@ -566,12 +566,19 @@ impl ManagementOperations {
         Ok(PackageMigrationResult::from_record(record))
     }
 
-    fn granted_environment(&self, credential: &CredentialMaterial) -> Option<&str> {
+    /// Environment a credential's management is confined to: a configured
+    /// environment-scoped token, or a binding set by a verifying authenticator.
+    fn granted_environment<'a>(
+        &'a self,
+        credential: &CredentialMaterial,
+        context: &'a AuthenticatedRequestContext,
+    ) -> Option<&'a str> {
         credential
             .bearer_token
             .as_deref()
             .and_then(|token| self.environment_grants.get(token))
             .map(String::as_str)
+            .or_else(|| context.environment_binding())
     }
 
     fn require_community_catalog_host(&self) -> Result<(), ManagementError> {
@@ -594,7 +601,7 @@ impl ManagementOperations {
         management_lifecycle::admit_publish(
             &request,
             context.principal.kind,
-            self.granted_environment(credential),
+            self.granted_environment(credential, &context),
         )
         .map_err(map_lifecycle_error)?;
         let files = management_lifecycle::RemotePublishFiles::materialize(
@@ -638,7 +645,7 @@ impl ManagementOperations {
         management_lifecycle::admit_promote(
             &request,
             context.principal.kind,
-            self.granted_environment(credential),
+            self.granted_environment(credential, &context),
         )
         .map_err(map_lifecycle_error)?;
         let actor = context.principal_id();
@@ -667,7 +674,7 @@ impl ManagementOperations {
         management_lifecycle::admit_recall(
             &request,
             context.principal.kind,
-            self.granted_environment(credential),
+            self.granted_environment(credential, &context),
         )
         .map_err(map_lifecycle_error)?;
         let actor = context.principal_id();
@@ -697,7 +704,7 @@ impl ManagementOperations {
             &request,
             environment,
             context.principal.kind,
-            self.granted_environment(credential),
+            self.granted_environment(credential, &context),
         )
         .map_err(map_lifecycle_error)?;
         self.require_environment_visible(&context, environment)
@@ -742,7 +749,7 @@ impl ManagementOperations {
             &request,
             environment,
             context.principal.kind,
-            self.granted_environment(credential),
+            self.granted_environment(credential, &context),
         )
         .map_err(map_lifecycle_error)?;
         self.require_environment_visible(&context, environment)
@@ -787,7 +794,7 @@ impl ManagementOperations {
             &request,
             plan_id,
             context.principal.kind,
-            self.granted_environment(credential),
+            self.granted_environment(credential, &context),
         )
         .map_err(map_lifecycle_error)?;
         self.require_environment_visible(&context, &request.environment)
@@ -843,7 +850,7 @@ impl ManagementOperations {
             &request,
             plan_id,
             context.principal.kind,
-            self.granted_environment(credential),
+            self.granted_environment(credential, &context),
         )
         .map_err(map_lifecycle_error)?;
         self.require_environment_visible(&context, &request.environment)
@@ -913,7 +920,7 @@ impl ManagementOperations {
             &request,
             environment,
             context.principal.kind,
-            self.granted_environment(credential),
+            self.granted_environment(credential, &context),
         )
         .map_err(map_lifecycle_error)?;
         self.require_environment_visible(&context, environment)

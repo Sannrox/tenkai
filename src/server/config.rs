@@ -28,6 +28,8 @@ pub struct ServerConfig {
     /// Optional enterprise auth extension. Required when `auth_host` demands one
     /// or when `requirements.require_enterprise_authentication` is set.
     pub enterprise_auth: Option<Arc<dyn EnterpriseAuthExtension>>,
+    /// Public OIDC client settings served at `GET /v1/auth/oidc` (#468).
+    pub oidc_client: Option<crate::oidc_verifier::OidcClientDiscovery>,
     /// Federation accept rules (issuer/audience/replay). Community hosts leave
     /// the enterprise issuer unset so federation is not required.
     pub federation: FederationConfig,
@@ -66,6 +68,7 @@ impl ServerConfig {
             capabilities: community_sqlite_profile(community_auth_capabilities()),
             auth_host: AuthHostConfig::community(),
             enterprise_auth: None,
+            oidc_client: None,
             federation: FederationConfig::community(),
             identity_directory: Arc::new(IdentityDirectory::new()),
             tenant_store: None,

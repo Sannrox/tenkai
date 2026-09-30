@@ -161,6 +161,7 @@ pub mod model_runtime;
 pub mod oci_artifact;
 pub mod offline_bundle;
 pub mod offline_fleet_drill;
+pub mod oidc_verifier;
 pub mod ontology;
 pub mod package_migration;
 pub mod pb;

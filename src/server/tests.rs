@@ -3,6 +3,7 @@ mod config;
 mod fixtures;
 mod health;
 mod lifecycle_support;
+mod oidc;
 mod package_migration_closed;
 mod package_migration_preview;
 mod remote_catalog;

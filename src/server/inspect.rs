@@ -97,6 +97,15 @@ pub(super) async fn health(State(state): State<Arc<AppState>>) -> Json<ServiceSt
     Json(service_status("ok", &state.config))
 }
 
+/// Unauthenticated OIDC client discovery for browsers (#468). 404 when the
+/// host has no OIDC public client configured.
+pub(super) async fn oidc_client(State(state): State<Arc<AppState>>) -> Response {
+    match &state.config.oidc_client {
+        Some(client) => Json(client).into_response(),
+        None => error_response(StatusCode::NOT_FOUND, "OIDC is not configured"),
+    }
+}
+
 pub(super) async fn ready(State(state): State<Arc<AppState>>) -> Response {
     let operational_store = state.store.clone();
     match tokio::task::spawn_blocking(move || operational_store.check_health()).await {
