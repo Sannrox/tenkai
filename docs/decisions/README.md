@@ -30,3 +30,4 @@
 - [0028 — Live worker-lifecycle observation and process lifetime](0028-live-worker-lifecycle-port.md)
 - [0029 — Hub and spoke operational store, one port](0029-hub-spoke-operational-store.md)
 - [0030 — Versioned remote management lifecycle](0030-remote-management-lifecycle.md)
+- [0031 — Web console as a separate, pinned client](0031-web-console.md)
