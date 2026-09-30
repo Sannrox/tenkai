@@ -14,7 +14,7 @@ pub const ENVELOPE_SCHEMA: &str = "tenkai.release-signature.v1";
 pub const TRUST_ROOT_VERSION: u32 = 1;
 pub const SIGNATURE_ALGORITHM: &str = "ed25519";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SignatureEnvelope {
     pub schema: String,
@@ -23,7 +23,7 @@ pub struct SignatureEnvelope {
     pub signature: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReleaseStatement {
     pub manifest_digest: String,
@@ -31,7 +31,7 @@ pub struct ReleaseStatement {
     pub provenance: Provenance,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Provenance {
     pub source_uri: String,
@@ -42,15 +42,17 @@ pub struct Provenance {
     pub materials: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(rename = "ReleaseTrustRoots")]
 pub struct TrustRoots {
     pub version: u32,
     pub signers: Vec<TrustedSigner>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(rename = "ReleaseTrustedSigner")]
 pub struct TrustedSigner {
     pub key_id: String,
     pub identity: String,

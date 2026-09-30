@@ -52,7 +52,7 @@ impl Default for Config {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "state")]
 pub enum EnvironmentStatus {
     Current,
@@ -64,13 +64,13 @@ pub enum EnvironmentStatus {
     Busy,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EnvironmentResult {
     pub environment: String,
     pub status: EnvironmentStatus,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TickReport {
     pub environments: Vec<EnvironmentResult>,
 }

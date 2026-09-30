@@ -16,7 +16,7 @@ const APPROVAL_DOMAIN: &[u8] = b"TENKAI-PLAN-APPROVAL-V1\0";
 const TRUST_ROOT_VERSION: u32 = 1;
 const PURPOSE: &str = "execute_plan";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ApprovalStatement {
     pub plan_digest: String,
@@ -30,7 +30,7 @@ pub struct ApprovalStatement {
     pub policy_digest: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ApprovalEnvelope {
     pub schema: String,
@@ -39,15 +39,17 @@ pub struct ApprovalEnvelope {
     pub signature: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(rename = "PlanApprovalTrustRoots")]
 pub struct TrustRoots {
     pub version: u32,
     pub signers: Vec<TrustedSigner>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(rename = "PlanApprovalTrustedSigner")]
 pub struct TrustedSigner {
     pub key_id: String,
     pub identity: String,

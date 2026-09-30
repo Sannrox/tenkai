@@ -55,7 +55,7 @@ pub struct ObservedCompatibility {
     pub runtime_digest: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ModuleActivationReceipt {
     pub schema: String,
