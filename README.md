@@ -496,6 +496,7 @@ control plane can't safely restart its own backend mid-apply.
 | `TENKAI_ENABLE_METRICS` | `false` | Enable the server Prometheus scrape endpoint (`--enable-metrics`) |
 | `TENKAI_INSTANCE_ID` | hostname or generated | Replica identity used for multi-replica fencing |
 | `TENKAI_JWT_VERIFIER_CONFIG` | unset | Filesystem path to a JWT trust TOML file for enterprise JWT verification |
+| `TENKAI_OIDC_CONFIG` | unset | Filesystem path to an OIDC trust TOML file; the server verifies OIDC access tokens sent as `Authorization: Bearer` and maps groups to grants ([auth doc](docs/auth-request-context.md)). Mutually exclusive with `TENKAI_JWT_VERIFIER_CONFIG` |
 | `TENKAI_SOFTWARE_EXECUTOR` | unset | Host software adapter: `helm`, `kubernetes` (`k8s` / `native`), `kubernetes-inprocess`, or `fake`; unset keeps the shell install path |
 | `TENKAI_HELM_BIN` | `helm` | Helm binary used by the Helm software executor |
 | `TENKAI_KUBECTL_BIN` | `kubectl` | kubectl binary used by the native Kubernetes software executor |

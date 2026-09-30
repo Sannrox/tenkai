@@ -43,6 +43,8 @@ toml = "0.8"
 sha2 = "0.10"
 base64 = "0.22"
 ed25519-dalek = "2"
+# RS256/ES256 verification for OIDC access tokens (#468); already in the tree via rustls.
+ring = "0.17"
 semver = "1"
 anyhow = "1"
 libc = "0.2"

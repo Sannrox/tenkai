@@ -2433,6 +2433,7 @@ dependencies = [
  "prost",
  "protoc-bin-vendored",
  "reqwest",
+ "ring",
  "rusqlite",
  "rustls",
  "rustls-native-certs",
