@@ -888,6 +888,13 @@ pub struct EnvironmentInspectReport {
     pub lease: crate::apply::EnvironmentLeaseInspect,
     /// Most recent plan for this environment by `created_at`, if any.
     pub latest_plan: Option<EnvironmentPlanSummary>,
+    /// Maintenance windows and their eligibility at inspect time. Absent for
+    /// projections that do not read Tenkai-owned environment configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintenance: Option<EnvironmentMaintenanceInspect>,
+    /// Environment constraints (`version_pin`, `version_range`, `require_fact`).
+    #[serde(default)]
+    pub constraints: Vec<EnvironmentConstraint>,
     /// Bounded terminal-outcome identities and outbox delivery state. Event
     /// payloads and retry errors are intentionally excluded.
     #[serde(default)]
@@ -909,6 +916,53 @@ pub struct EnvironmentInspectReport {
     /// Present after this environment has been retired from operational use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retirement: Option<EnvironmentRetirement>,
+}
+
+/// Read-only view of the environment's own maintenance schedule, evaluated
+/// with the same rules as apply admission. Product maintenance windows
+/// (`tenkaictl product maintenance`) are not included and may further
+/// restrict when a plan touching that product can apply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct EnvironmentMaintenanceInspect {
+    /// `unrestricted` (no environment windows), `open`, `closed`, or
+    /// `invalid`. Invalid configuration blocks apply until it is corrected.
+    pub eligibility: String,
+    /// When `open`: end of the current window, in Unix milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_until_ms: Option<i64>,
+    /// When `closed`: next opening of any window, in Unix milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_opens_at_ms: Option<i64>,
+    /// When `invalid`: why the configuration cannot be evaluated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    pub windows: Vec<EnvironmentMaintenanceWindow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct EnvironmentMaintenanceWindow {
+    pub identity: String,
+    /// IANA timezone of `start`.
+    pub timezone: String,
+    /// ISO weekday numbers: Monday is 1 and Sunday is 7.
+    pub weekdays: Vec<u32>,
+    /// Local wall-clock start in HH:MM form.
+    pub start: String,
+    pub duration_minutes: u32,
+    /// Next start of this window strictly after inspect time, in Unix
+    /// milliseconds; absent when the window cannot be evaluated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_opens_at_ms: Option<i64>,
+}
+
+/// One environment constraint, as set by `tenkaictl env constraints set`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct EnvironmentConstraint {
+    /// `version_pin`, `version_range`, or `require_fact`.
+    pub kind: String,
+    /// Product for version constraints; fact key for `require_fact`.
+    pub name: String,
+    pub value: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -1114,6 +1168,8 @@ pub async fn fleet_status(ctx: &mut Ctx) -> Result<FleetStatusReport> {
             overlays: Default::default(),
             lease,
             latest_plan: None,
+            maintenance: None,
+            constraints: Vec::new(),
             terminal_outcomes: Vec::new(),
             execution_note: String::new(),
             observed_type_digest: None,
@@ -1154,6 +1210,10 @@ async fn inspect_environment_base(ctx: &mut Ctx, env: &str) -> Result<Environmen
     let module_activations = crate::workshop_module::activations_from_object(&env_obj)?;
     let preview = crate::preview::inspect_from_object(&env_obj)?;
     let retirement = retirement_from_object(&env_obj);
+    let constraints = environment_constraints_from_object(&env_obj);
+    let now = chrono::DateTime::from_timestamp_millis(crate::now_millis())
+        .context("current time is outside the supported maintenance-window range")?;
+    let maintenance = maintenance_inspect(crate::maintenance::list(ctx, env).await, now);
     Ok(EnvironmentInspectReport {
         name: env_obj.name,
         id: env_obj.id,
@@ -1167,6 +1227,8 @@ async fn inspect_environment_base(ctx: &mut Ctx, env: &str) -> Result<Environmen
         overlays,
         lease,
         latest_plan,
+        maintenance: Some(maintenance),
+        constraints,
         terminal_outcomes: Vec::new(),
         execution_note: "Apply leases and runtime credentials are distinct; inspect never prints bearer tokens. Server-side runtime-token environments are not executed by the embedded server executor."
             .into(),
@@ -1176,6 +1238,76 @@ async fn inspect_environment_base(ctx: &mut Ctx, env: &str) -> Result<Environmen
         preview,
         retirement,
     })
+}
+
+fn environment_constraints_from_object(env_obj: &Object) -> Vec<EnvironmentConstraint> {
+    let mut constraints = env_obj
+        .properties
+        .iter()
+        .filter_map(|(key, value)| {
+            let (kind, name) = key.strip_prefix("constraint.")?.split_once('.')?;
+            Some(EnvironmentConstraint {
+                kind: kind.to_string(),
+                name: name.to_string(),
+                value: value.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    constraints.sort_by(|left, right| (&left.kind, &left.name).cmp(&(&right.kind, &right.name)));
+    constraints
+}
+
+/// Project maintenance configuration for inspect. A configuration that cannot
+/// be read is reported as `invalid`, matching apply admission, rather than
+/// failing the whole inspect report.
+pub(crate) fn maintenance_inspect(
+    windows: Result<Vec<crate::maintenance::Window>>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> EnvironmentMaintenanceInspect {
+    use crate::maintenance::{Eligibility, evaluate};
+
+    let windows = match windows {
+        Ok(windows) => windows,
+        Err(error) => {
+            return EnvironmentMaintenanceInspect {
+                eligibility: "invalid".into(),
+                open_until_ms: None,
+                next_opens_at_ms: None,
+                detail: Some(format!(
+                    "maintenance window configuration is invalid: {error}"
+                )),
+                windows: Vec::new(),
+            };
+        }
+    };
+    let (eligibility, open_until_ms, next_opens_at_ms, detail) = match evaluate(&windows, now) {
+        _ if windows.is_empty() => ("unrestricted", None, None, None),
+        Eligibility::Open { closes_at, .. } => ("open", Some(closes_at), None, None),
+        Eligibility::Closed { next_opens_at } => ("closed", None, next_opens_at, None),
+        Eligibility::Invalid { detail } => ("invalid", None, None, Some(detail)),
+    };
+    let windows = windows
+        .into_iter()
+        .map(|window| {
+            let next_opens_at_ms = crate::maintenance::next_start_after(&window, now)
+                .map(|start| start.timestamp_millis());
+            EnvironmentMaintenanceWindow {
+                identity: window.identity,
+                timezone: window.timezone,
+                weekdays: window.weekdays,
+                start: window.start,
+                duration_minutes: window.duration_minutes,
+                next_opens_at_ms,
+            }
+        })
+        .collect();
+    EnvironmentMaintenanceInspect {
+        eligibility: eligibility.into(),
+        open_until_ms,
+        next_opens_at_ms,
+        detail,
+        windows,
+    }
 }
 
 fn environment_facts_from_object(env_obj: &Object) -> std::collections::BTreeMap<String, String> {
@@ -1702,6 +1834,75 @@ fn operator_safe_status_detail(plan: &Plan) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maintenance_inspect_reports_eligibility_and_next_openings() {
+        use chrono::TimeZone as _;
+
+        let window =
+            crate::maintenance::Window::new("weekly", "UTC", vec![1], "02:00", 60).unwrap();
+        // Monday 2026-10-05 02:30 UTC: inside the window.
+        let inside = chrono::Utc.with_ymd_and_hms(2026, 10, 5, 2, 30, 0).unwrap();
+        let next_monday = chrono::Utc.with_ymd_and_hms(2026, 10, 12, 2, 0, 0).unwrap();
+        let open = maintenance_inspect(Ok(vec![window.clone()]), inside);
+        assert_eq!(open.eligibility, "open");
+        assert_eq!(
+            open.open_until_ms,
+            Some(
+                chrono::Utc
+                    .with_ymd_and_hms(2026, 10, 5, 3, 0, 0)
+                    .unwrap()
+                    .timestamp_millis()
+            )
+        );
+        assert_eq!(
+            open.windows[0].next_opens_at_ms,
+            Some(next_monday.timestamp_millis())
+        );
+
+        // Tuesday: closed until next Monday.
+        let tuesday = chrono::Utc.with_ymd_and_hms(2026, 10, 6, 12, 0, 0).unwrap();
+        let closed = maintenance_inspect(Ok(vec![window]), tuesday);
+        assert_eq!(closed.eligibility, "closed");
+        assert_eq!(
+            closed.next_opens_at_ms,
+            Some(next_monday.timestamp_millis())
+        );
+        assert_eq!(
+            closed.windows[0].next_opens_at_ms,
+            Some(next_monday.timestamp_millis())
+        );
+
+        // Occurrences that overlap still report the next start.
+        let long = crate::maintenance::Window::new(
+            "long",
+            "UTC",
+            vec![1, 2, 3, 4, 5, 6, 7],
+            "00:00",
+            1500,
+        )
+        .unwrap();
+        let overlapping = maintenance_inspect(Ok(vec![long]), tuesday);
+        assert_eq!(overlapping.eligibility, "open");
+        assert_eq!(
+            overlapping.windows[0].next_opens_at_ms,
+            Some(
+                chrono::Utc
+                    .with_ymd_and_hms(2026, 10, 7, 0, 0, 0)
+                    .unwrap()
+                    .timestamp_millis()
+            )
+        );
+
+        let unrestricted = maintenance_inspect(Ok(Vec::new()), tuesday);
+        assert_eq!(unrestricted.eligibility, "unrestricted");
+        assert!(unrestricted.windows.is_empty());
+
+        let invalid =
+            maintenance_inspect(Err(anyhow::anyhow!("configuration is missing")), tuesday);
+        assert_eq!(invalid.eligibility, "invalid");
+        assert!(invalid.detail.unwrap().contains("configuration is missing"));
+    }
 
     fn environment_object() -> Object {
         Object {

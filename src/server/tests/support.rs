@@ -98,6 +98,8 @@ impl ReconcilePort for FixedReconciler {
                     status: "absent".into(),
                 },
                 latest_plan: None,
+                maintenance: None,
+                constraints: Vec::new(),
                 terminal_outcomes: Vec::new(),
                 execution_note: "fixture".into(),
                 observed_type_digest: None,

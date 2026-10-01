@@ -1246,6 +1246,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inspect_reports_maintenance_windows_and_constraints() {
+        let database = std::env::temp_dir().join(format!(
+            "tenkai-env-rules-{}-{}.db",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let _ = std::fs::remove_file(&database);
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        env_add(&mut ctx, "prod", "production").await.unwrap();
+
+        let empty = inspect_environment(&mut ctx, "prod").await.unwrap();
+        let maintenance = empty.maintenance.expect("maintenance projection");
+        assert_eq!(maintenance.eligibility, "unrestricted");
+        assert!(maintenance.windows.is_empty());
+        assert!(empty.constraints.is_empty());
+
+        let window = crate::maintenance::Window::new(
+            "nightly",
+            "Europe/Berlin",
+            vec![1, 2, 3, 4, 5, 6, 7],
+            "02:00",
+            60,
+        )
+        .unwrap();
+        crate::maintenance::set(&mut ctx, "prod", window)
+            .await
+            .unwrap();
+        crate::environment::set_environment_constraint(
+            &mut ctx,
+            "prod",
+            "version_range",
+            "api",
+            "1.0.0..2.0.0",
+        )
+        .await
+        .unwrap();
+        crate::environment::set_environment_constraint(
+            &mut ctx,
+            "prod",
+            "require_fact",
+            "architecture",
+            "arm64",
+        )
+        .await
+        .unwrap();
+
+        let report = inspect_environment(&mut ctx, "prod").await.unwrap();
+        let maintenance = report.maintenance.expect("maintenance projection");
+        assert!(
+            maintenance.eligibility == "open" || maintenance.eligibility == "closed",
+            "{maintenance:?}"
+        );
+        assert_eq!(maintenance.windows.len(), 1);
+        let nightly = &maintenance.windows[0];
+        assert_eq!(nightly.identity, "nightly");
+        assert_eq!(nightly.timezone, "Europe/Berlin");
+        assert_eq!(nightly.weekdays, vec![1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(nightly.start, "02:00");
+        assert_eq!(nightly.duration_minutes, 60);
+        assert!(nightly.next_opens_at_ms.unwrap() > crate::now_millis());
+        assert_eq!(
+            report.constraints,
+            vec![
+                crate::environment::EnvironmentConstraint {
+                    kind: "require_fact".into(),
+                    name: "architecture".into(),
+                    value: "arm64".into(),
+                },
+                crate::environment::EnvironmentConstraint {
+                    kind: "version_range".into(),
+                    name: "api".into(),
+                    value: "1.0.0..2.0.0".into(),
+                },
+            ]
+        );
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
     async fn list_and_inspect_cover_multiple_environments() {
         let database = std::env::temp_dir().join(format!(
             "tenkai-env-list-{}-{}.db",
