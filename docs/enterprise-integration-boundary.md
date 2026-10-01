@@ -4,8 +4,11 @@ This document summarizes the public Tenkai-side boundary for enterprise
 composition. The durable decision is
 [ADR 0005](decisions/0005-enterprise-integration-boundary.md).
 
-It does **not** implement identity providers, tenant lifecycle, billing, or a
-console, and it does not name a specific commercial product.
+It does **not** implement identity providers, tenant lifecycle, or billing,
+and it does not name a specific commercial product. The standards-based OIDC
+access-token verifier and the web console are public; see
+[authenticated request context](auth-request-context.md#oidc-access-tokens-468)
+and [ADR 0031](decisions/0031-web-console.md).
 
 ## Roles
 
@@ -35,10 +38,11 @@ deployment objects.
 
 **Public (this repo):** application core, ADR 0001–0005 contracts, auth context
 port, capability negotiation, isolation harness, community SQLite, versioned
-protocols.
+protocols, and the standards-based OIDC access-token verifier. The web console
+is public in its own repository (ADR 0031).
 
-**Private (optional separate repository):** concrete IdP adapters, tenant
-admin, console, billing, managed multi-tenant store adapters, host wiring that
+**Private (optional separate repository):** vendor-specific IdP adapters, tenant
+admin, billing, managed multi-tenant store adapters, host wiring that
 loads enterprise extensions.
 
 Private code depends on public contracts only. Public Tenkai must not depend on

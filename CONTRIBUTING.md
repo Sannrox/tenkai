@@ -12,7 +12,8 @@ make update
 `WHAT=<one test filter> make test` (and the same for `make test-integration`)
 runs one Cargo filter without shell evaluation. The default suite is
 `cargo test --locked`. Live Kubernetes, Llama, and PostgreSQL checks stay
-opt-in and documented.
+opt-in for `make test` and are documented; CI additionally runs the kind
+in-process Kubernetes test on pull requests, pushes to `main`, and weekly.
 
 ## Issues and pull requests
 

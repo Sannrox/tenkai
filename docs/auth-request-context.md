@@ -3,8 +3,10 @@
 Tenkai authenticates transports and authorizes delivery-domain use cases. This
 document defines the backend-neutral request-context contract used by community
 hosts and by enterprise compositions that verify short-lived, audience-bound
-assertions. It does not implement OIDC, tenant lifecycle, billing, or a
-console.
+assertions. It also documents the optional OIDC access-token verifier that
+`tenkai-server` uses as a resource server for the web console
+([ADR 0031](decisions/0031-web-console.md)). Tenkai does not run an identity
+provider, a login flow, tenant lifecycle, or billing.
 
 Source of truth for types and startup composition: `src/auth_context.rs`.
 Architecture decision: [ADR 0004](decisions/0004-authenticated-request-context.md).
