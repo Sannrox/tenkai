@@ -79,9 +79,21 @@ pub fn deploy_child_environment(
     product: &str,
     fencing_generation: Option<u64>,
 ) -> BTreeMap<OsString, OsString> {
+    deploy_child_environment_from(environment, product, fencing_generation, |key| {
+        std::env::var_os(key)
+    })
+}
+
+/// [`deploy_child_environment`] with an explicit parent-environment lookup.
+fn deploy_child_environment_from(
+    environment: &str,
+    product: &str,
+    fencing_generation: Option<u64>,
+    parent: impl Fn(&str) -> Option<OsString>,
+) -> BTreeMap<OsString, OsString> {
     let mut env = BTreeMap::new();
     for key in DEPLOY_CHILD_INHERITED_ENV {
-        if let Some(value) = std::env::var_os(key) {
+        if let Some(value) = parent(key) {
             env.insert(OsString::from(*key), value);
         }
     }
@@ -303,14 +315,10 @@ mod tests {
             ("TENKAI_POSTGRES_URL", "postgres://secret"),
             ("PATH", "/usr/bin:/bin"),
         ];
-        let mut previous = Vec::new();
-        for (key, value) in keys {
-            previous.push((key, std::env::var_os(key)));
-            // SAFETY: test-only, single-threaded env mutation around one assertion.
-            unsafe { std::env::set_var(key, value) };
-        }
-
-        let env = deploy_child_environment("lab", "app", Some(7));
+        let parent: BTreeMap<&str, &str> = keys.into_iter().collect();
+        let env = deploy_child_environment_from("lab", "app", Some(7), |key| {
+            parent.get(key).map(OsString::from)
+        });
         let env_keys: Vec<String> = env
             .keys()
             .map(|key| key.to_string_lossy().into_owned())
@@ -351,13 +359,6 @@ mod tests {
             }),
             "unexpected deploy child keys: {env_keys:?}"
         );
-
-        for (key, value) in previous {
-            match value {
-                Some(value) => unsafe { std::env::set_var(key, value) },
-                None => unsafe { std::env::remove_var(key) },
-            }
-        }
     }
 
     #[tokio::test]
@@ -374,30 +375,17 @@ mod tests {
             out.to_string_lossy().replace('\'', "'\\''")
         );
 
-        let previous = [
-            (
-                "TENKAI_MANAGEMENT_TOKEN",
-                std::env::var_os("TENKAI_MANAGEMENT_TOKEN"),
-            ),
-            (
-                "TENKAI_RUNTIME_TOKEN",
-                std::env::var_os("TENKAI_RUNTIME_TOKEN"),
-            ),
-            ("SEKAI_AUTH_TOKEN", std::env::var_os("SEKAI_AUTH_TOKEN")),
-            (
-                "TENKAI_OUTCOME_PROVIDER_TOKEN",
-                std::env::var_os("TENKAI_OUTCOME_PROVIDER_TOKEN"),
-            ),
-        ];
-        unsafe {
-            std::env::set_var("TENKAI_MANAGEMENT_TOKEN", "mgmt-should-not-leak");
-            std::env::set_var("TENKAI_RUNTIME_TOKEN", "runtime-should-not-leak");
-            std::env::set_var("SEKAI_AUTH_TOKEN", "sekai-should-not-leak");
-            std::env::set_var("TENKAI_OUTCOME_PROVIDER_TOKEN", "outcome-should-not-leak");
-        }
-
+        // Secrets are placed on the command rather than the test process, so
+        // parallel tests never observe them; env_clear must drop both.
         let mut child = tokio::process::Command::new("sh");
-        child.arg("-c").arg(&script).current_dir(&dir);
+        child
+            .arg("-c")
+            .arg(&script)
+            .current_dir(&dir)
+            .env("TENKAI_MANAGEMENT_TOKEN", "mgmt-should-not-leak")
+            .env("TENKAI_RUNTIME_TOKEN", "runtime-should-not-leak")
+            .env("SEKAI_AUTH_TOKEN", "sekai-should-not-leak")
+            .env("TENKAI_OUTCOME_PROVIDER_TOKEN", "outcome-should-not-leak");
         configure_deploy_child_env(&mut child, "lab", "app", Some(3));
         let status = child.status().await.unwrap();
         assert!(status.success());
@@ -421,13 +409,6 @@ mod tests {
         assert!(dumped.contains("TENKAI_ENVIRONMENT=lab"));
         assert!(dumped.contains("TENKAI_PRODUCT=app"));
         assert!(dumped.contains("TENKAI_FENCING_GENERATION=3"));
-
-        for (key, value) in previous {
-            match value {
-                Some(value) => unsafe { std::env::set_var(key, value) },
-                None => unsafe { std::env::remove_var(key) },
-            }
-        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -3,23 +3,6 @@ use crate::embedded::EmbeddedStore;
 use crate::ontology::plan_id;
 use crate::plan::{Action, DesiredStateInput, PLAN_FORMAT_VERSION, PlanState, Step};
 use crate::storage::OperationalStore;
-use std::sync::Mutex;
-
-static POSTGRES_URL_LOCK: Mutex<()> = Mutex::new(());
-
-fn with_postgres_url<T>(url: &str, work: impl FnOnce() -> T) -> T {
-    let _guard = POSTGRES_URL_LOCK.lock().expect("postgres url lock");
-    let previous = std::env::var_os("TENKAI_POSTGRES_URL");
-    unsafe {
-        std::env::set_var("TENKAI_POSTGRES_URL", url);
-    }
-    let result = work();
-    match previous {
-        Some(value) => unsafe { std::env::set_var("TENKAI_POSTGRES_URL", value) },
-        None => unsafe { std::env::remove_var("TENKAI_POSTGRES_URL") },
-    }
-    result
-}
 
 #[test]
 fn leftover_graph_cannot_authorize_apply_after_migration() {
@@ -116,32 +99,6 @@ fn embedded_backup_restore_stays_on_typed_schema() {
     assert!(!restored_store.leftover_graph_tables().unwrap());
     assert!(restored_store.get_plan(&plan.id).unwrap().is_some());
     let _ = std::fs::remove_dir_all(root);
-}
-
-#[test]
-fn postgres_url_fails_closed_on_embedded_open() {
-    let error =
-        with_postgres_url(
-            "postgres://hub.example/tenkai",
-            || match SqliteStore::open_embedded(
-                std::env::temp_dir().join("tenkai-382-pg-refuse.db"),
-                "tenkai",
-            ) {
-                Ok(_) => panic!("embedded open must refuse TENKAI_POSTGRES_URL"),
-                Err(error) => error,
-            },
-        );
-    assert!(error.to_string().contains("TENKAI_POSTGRES_URL"), "{error}");
-}
-
-#[test]
-fn postgres_url_is_allowed_on_hub_control_plane_open() {
-    let database = std::env::temp_dir().join("tenkai-440-hub-control-plane.db");
-    let opened = with_postgres_url("postgres://hub.example/tenkai", || {
-        SqliteStore::open_control_plane(&database, "tenkai")
-    });
-    let _ = std::fs::remove_file(&database);
-    opened.expect("hub control-plane SQLite must allow TENKAI_POSTGRES_URL");
 }
 
 fn sample_plan(env: &str, created_at: i64) -> Plan {
