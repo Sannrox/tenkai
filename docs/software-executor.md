@@ -146,7 +146,7 @@ Rules beyond the native workdir contract:
   disagreeing condition. Default `make test` stays cluster-free.
 
 ```bash
-# Requires kind + a copied kubeconfig file path; not default CI
+# Requires kind + a copied kubeconfig file path; CI's kind job runs this, `make test` does not
 TENKAI_CLUSTER_CONFIG=$HOME/tenkai-cluster/config \
   cargo test --locked --test in_process_kubernetes_kind -- --ignored --nocapture
 ```

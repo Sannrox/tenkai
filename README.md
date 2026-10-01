@@ -86,9 +86,9 @@ make test-integration
 make update
 ```
 
-The four targets are explicit local commands. `make update` formats Rust and
-refreshes build-generated protobuf bindings without changing the locked
-dependency graph. The Makefile is a thin façade over `scripts/make-targets/`;
+The four targets are explicit local commands. `make update` formats Rust,
+refreshes build-generated protobuf bindings, and regenerates the HTTP API
+contract in `api/`, without changing the locked dependency graph. The Makefile is a thin façade over `scripts/make-targets/`;
 validation and update fan out over sorted `validate-*.sh` and `update-*.sh`
 scripts. Live Kubernetes, Llama, and PostgreSQL checks remain explicit and
 documented. Contributor setup and pull-request flow live in
@@ -110,7 +110,9 @@ Environment execution uses short-lived, generation-fenced Tenkai leases. An
 expired lease is taken over atomically; a paused older controller cannot
 refresh or release the replacement generation and revalidates ownership before
 each deployment step. A local supervisor holds the process fence while mutation
-commands receive `TENKAI_FENCING_GENERATION`; controller death closes its
+commands receive `TENKAI_FENCING_GENERATION` (every deploy command also
+receives `TENKAI_ENVIRONMENT`, `TENKAI_PRODUCT`, and a per-environment
+`COMPOSE_PROJECT_NAME`, never control-plane secrets); controller death closes its
 control pipe, terminates the complete command group, and releases the fence
 before replacement work starts. Legacy object-only leases are never taken over
 automatically: stop the old controller and its children, then use
@@ -377,7 +379,9 @@ The server accepts plaintext HTTP only on loopback. Put a TLS reverse proxy in
 front of it for remote access; never pass tokens on a command line. By default
 the server opens the same in-process state backend as `tenkaictl` and requires
 no provider service. `--provider-mode remote` is explicit and never inherits
-embedded development permissions.
+embedded development permissions. The server reconciles every
+`--reconcile-interval` seconds (default 10) and works on at most
+`--max-concurrency` environments at once (default 8).
 
 ```sh
 export TENKAI_MANAGEMENT_TOKEN='replace-from-secret-store'
@@ -451,7 +455,10 @@ gh api "repos/Sannrox/sekai-chisei/contents/deploy/tenkai.toml?ref=v0.2.0" \
 rm -f "$release_signature"
 tenkaictl promote sekai-chisei@0.2.0 stable
 tenkaictl plan --env local
-tenkaictl apply <plan-id>
+# Apply needs a signed approval of that exact plan; see docs/plan-approval.md.
+tenkaictl apply <plan-id> \
+  --approval approval.json \
+  --approval-trust-roots /etc/tenkai/plan-approvers.toml
 ```
 
 A new tag on GitHub becomes: publish → promote → `apply`, with the same
@@ -494,7 +501,7 @@ control plane can't safely restart its own backend mid-apply.
 | `TENKAI_OTEL_ENDPOINT` | unset | OTLP/HTTP collector root; unset leaves traces and metrics as a no-op ([telemetry](docs/telemetry.md)) |
 | `TENKAI_OPERATION_ID` | unset | Inbound delivery correlation identity copied onto allowlisted spans (`tenkaictl --operation-id`) |
 | `TENKAI_ENABLE_METRICS` | `false` | Enable the server Prometheus scrape endpoint (`--enable-metrics`) |
-| `TENKAI_INSTANCE_ID` | hostname or generated | Replica identity used for multi-replica fencing |
+| `TENKAI_INSTANCE_ID` | random UUID per process | Replica identity used for multi-replica fencing; the server records it as `tenkai-server-<value>` |
 | `TENKAI_JWT_VERIFIER_CONFIG` | unset | Filesystem path to a JWT trust TOML file for enterprise JWT verification |
 | `TENKAI_OIDC_CONFIG` | unset | Filesystem path to an OIDC trust TOML file; the server verifies OIDC access tokens sent as `Authorization: Bearer` and maps groups to grants ([auth doc](docs/auth-request-context.md)). Mutually exclusive with `TENKAI_JWT_VERIFIER_CONFIG` |
 | `TENKAI_SOFTWARE_EXECUTOR` | unset | Host software adapter: `helm`, `kubernetes` (`k8s` / `native`), `kubernetes-inprocess`, or `fake`; unset keeps the shell install path |
@@ -559,8 +566,9 @@ it ([ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md),
 | Reference llama.cpp engine plugin (fake for CI) | [Model runtime](docs/model-runtime.md); #64 |
 | Self-verifying offline bundles | [Offline bundles](docs/offline-bundles.md); [ADR 0003](docs/decisions/0003-canonical-offline-delivery-archives.md) |
 | Optional governance/intelligence provider ports | [Provider contracts](docs/provider-contracts.md) |
+| OIDC access tokens with group-to-grant mapping, for the web console | [Auth request context](docs/auth-request-context.md#oidc-access-tokens-468); [ADR 0031](docs/decisions/0031-web-console.md); #468 |
 | Durable terminal outcome export to Chisei | [Provider contracts](docs/provider-contracts.md#chisei-terminal-outcome-adapter-197); #197 |
-| Remote HTTP GateProvider (chisei-compatible JSON) | [Provider contracts](docs/provider-contracts.md#remote-gate-http-json-contract-113); #113 |
+| Remote HTTP GateProvider library adapter (chisei-compatible JSON; not wired into shipped binaries) | [Provider contracts](docs/provider-contracts.md#remote-gate-http-json-contract-113); #113 |
 | Optional advisory plan priors (default off) | [Plan priors](docs/plan-priors.md); #114 |
 | Staged products: policy_bundle, eval_suite, agent_definition, prompt_package, workshop_module | [Staged products](docs/staged-products.md); [Workshop modules](docs/workshop-modules.md); #115, #116, #117, #285, #290 |
 | Change-set closure pin admission | [Change-set pins](docs/change-set-pin.md); [ADR 0018](docs/decisions/0018-change-set-closure-pin.md); #288 |
@@ -603,7 +611,7 @@ network connection.
 
 ### Deferred (next-era product work)
 
-Tracked in open GitHub Issues. The architecture program (ADRs 0001–0009) and
+Shaped into GitHub Issues as work starts. The architecture program (ADRs 0001–0009) and
 the Phase 5 first cut (fleet status/watch/waves, software executors, optional
 Postgres hub + multi-replica fencing) are landed on main. Remaining work is
 **depth**, not re-litigating operational ownership:
@@ -614,7 +622,8 @@ Postgres hub + multi-replica fencing) are landed on main. Remaining work is
 | Hub HA product claim | Criteria + automated drills before advertising `high_availability` (fence already shipped #135) |
 | Intelligence loop depth | Fail-closed prior policy; live remote OutcomeProvider history |
 | Executor / model depth | Peer/regional weight caches; additional engines (`kubernetes-inprocess` already shipped) |
-| Enterprise host | JWKS rotation, live IdP drills, tenant-isolated prior stores |
+| Enterprise host | Live IdP drills, tenant-isolated prior stores (OIDC JWKS discovery and key rotation shipped in #468) |
+| Web console | Serve the pinned [tenkai-console](https://github.com/Sannrox/tenkai-console) bundle at `/ui/` behind a `ui` feature (#463); see [ADR 0031](docs/decisions/0031-web-console.md) |
 | Local dogfood | [minikube path](docs/local-dogfood-minikube.md): unsigned + signed multi-env (#152) + **software canary drill** (#154) landed; inventory → `env facts` drill still optional |
 
 Explicit non-priorities until measured need: Catalog service extraction
