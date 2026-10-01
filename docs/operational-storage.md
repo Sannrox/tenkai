@@ -148,6 +148,18 @@ admission still transfers every environment-matching object
 filters and sorts that set once in process and walks it in memory so
 `OFFSET` windows do not re-issue `FindByProperty`.
 
+## Domain objects
+
+Tenkai authoritatively encodes domain objects in its operational SQLite store under
+namespace `tenkai`:
+
+`tenkai.product` ← `release_of` — `tenkai.release` ← `promotes` — `tenkai.channel`
+← `subscribes` — `tenkai.environment`; each apply writes a `tenkai.plan` and
+per-step `tenkai.deployment` records linked to the release, environment, and
+plan. Current state lives on the environment object (`deployed.<product>`).
+Server mode uses the same domain contracts and may project events to optional
+providers without transferring operational authority.
+
 ## Tenant isolation adapter
 
 Community SQLite (`SqliteStore`) is tenant-free. Enterprise hosts that require
