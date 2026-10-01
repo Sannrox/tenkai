@@ -235,7 +235,7 @@ async fn execute_authorized(
             software_executor: software,
             worker_lifecycle,
             artifact_registry: crate::oci_artifact::selected_registry()?,
-            delivery_adapter: crate::delivery_bridge::selected_delivery_adapter(),
+            delivery_adapter: None,
             delivery_fence: None,
         },
     )
