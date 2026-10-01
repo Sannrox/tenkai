@@ -15,6 +15,7 @@ issuer = "{ISSUER}"
 audience = "tenkai"
 [client]
 client_id = "tenkai-console"
+display_name = "Example Org"
 scopes = ["openid", "groups"]
 [grants]
 claim = "groups"
@@ -94,6 +95,15 @@ async fn discovery_serves_public_client_settings_only_when_configured() {
     assert_eq!(body["issuer"], ISSUER);
     assert_eq!(body["client_id"], "tenkai-console");
     assert_eq!(body["scopes"], serde_json::json!(["openid", "groups"]));
+    assert_eq!(body["display_name"], "Example Org");
+
+    let mut unnamed = oidc_config();
+    unnamed.client.as_mut().unwrap().display_name = None;
+    let discovery = serde_json::to_value(OidcClientDiscovery::from_config(&unnamed)).unwrap();
+    assert!(
+        discovery.get("display_name").is_none(),
+        "unset display_name is omitted: {discovery}"
+    );
 
     let (community, _) = app();
     let (code, _) = status(

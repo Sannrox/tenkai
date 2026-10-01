@@ -70,6 +70,10 @@ pub struct OidcConfig {
 #[serde(deny_unknown_fields)]
 pub struct OidcPublicClient {
     pub client_id: String,
+    /// Organisation name a sign-in page shows; clients fall back to the
+    /// issuer host when unset.
+    #[serde(default)]
+    pub display_name: Option<String>,
     #[serde(default = "default_scopes")]
     pub scopes: Vec<String>,
 }
@@ -82,6 +86,8 @@ pub struct OidcClientDiscovery {
     pub audience: String,
     pub client_id: String,
     pub scopes: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
 }
 
 impl OidcClientDiscovery {
@@ -92,6 +98,7 @@ impl OidcClientDiscovery {
             audience: config.audience.clone(),
             client_id: client.client_id.clone(),
             scopes: client.scopes.clone(),
+            display_name: client.display_name.clone(),
         })
     }
 }
@@ -187,10 +194,17 @@ impl OidcConfig {
         if !(60..=86_400).contains(&self.jwks_refresh_secs) {
             return invalid("OIDC jwks_refresh_secs must be between 60 and 86400");
         }
-        if let Some(client) = &self.client
-            && client.client_id.trim().is_empty()
-        {
-            return invalid("OIDC client_id must not be empty");
+        if let Some(client) = &self.client {
+            if client.client_id.trim().is_empty() {
+                return invalid("OIDC client_id must not be empty");
+            }
+            if client
+                .display_name
+                .as_ref()
+                .is_some_and(|name| name.trim().is_empty())
+            {
+                return invalid("OIDC client display_name must not be empty when set");
+            }
         }
         if self.grants.claim.trim().is_empty() {
             return invalid("OIDC grants.claim must not be empty");
