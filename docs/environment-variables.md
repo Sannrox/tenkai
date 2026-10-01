@@ -83,8 +83,8 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | `TENKAI_LLAMA_SERVER`, `TENKAI_USE_REAL_LLAMA` | [Model runtime](model-runtime.md) |
 | `TENKAI_DEVELOPMENT_FIXTURE_PRINCIPALS` (server refuses to start when set without `--with-development-fixtures`) | [Development fixtures](development-fixtures.md) |
 
-`TENKAI_DELIVERY_ADAPTER` and the `TENKAI_WORKER_*` variables are internal test
-and worker-lifecycle plumbing, not operator settings.
+The `TENKAI_WORKER_*` variables are internal worker-lifecycle plumbing, not
+operator settings.
 
 ## Set by Tenkai for deploy commands
 

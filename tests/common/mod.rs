@@ -60,8 +60,7 @@ impl CliDrill {
             .env_remove("TENKAI_SOFTWARE_EXECUTOR")
             .env_remove("TENKAI_HELM_BIN")
             .env_remove("TENKAI_KUBECTL_BIN")
-            .env_remove("TENKAI_RUNTIME_EXECUTOR")
-            .env_remove("TENKAI_DELIVERY_ADAPTER");
+            .env_remove("TENKAI_RUNTIME_EXECUTOR");
         for key in self.extra_env_remove {
             command.env_remove(key);
         }
