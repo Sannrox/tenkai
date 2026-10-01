@@ -38,11 +38,12 @@ and advancing the issue frontier).
   strict linting when Clippy is available (matches `make validate`).
 - `make test` runs the default test suite.
 - `make validate` runs every `scripts/validate-*.sh` (format, clippy, shell,
-  diff, make dry-run, workflow-skill parity, rust filenames, secrets, and
-  issue-lane capacity).
+  diff, make dry-run, workflow-skill parity, rust filenames, secrets,
+  issue-lane capacity, HTTP API contract, and release packaging).
 - `make test-integration` runs all checked-in integration-test targets.
-- `make update` formats Rust and refreshes build-generated protobuf bindings
-  without changing the locked dependency graph.
+- `make update` formats Rust, refreshes build-generated protobuf bindings, and
+  regenerates the HTTP API contract in `api/`, without changing the locked
+  dependency graph.
 
 The Makefile is a thin façade over `scripts/make-targets/`. Validation and
 update fan out over sorted `scripts/validate-*.sh` and `scripts/update-*.sh`
