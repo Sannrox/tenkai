@@ -126,21 +126,6 @@ impl DeliveryAdapter for CallbackAdapter {
     }
 }
 
-pub fn selected_delivery_adapter() -> Option<Arc<dyn DeliveryAdapter>> {
-    match std::env::var("TENKAI_DELIVERY_ADAPTER") {
-        Ok(value) if value.eq_ignore_ascii_case("polling-fake") => {
-            Some(Arc::new(PollingAdapter::new(FakeMode::Succeed)))
-        }
-        Ok(value) if value.eq_ignore_ascii_case("polling-timeout") => {
-            Some(Arc::new(PollingAdapter::new(FakeMode::Timeout)))
-        }
-        Ok(value) if value.eq_ignore_ascii_case("callback-fake") => {
-            Some(Arc::new(CallbackAdapter::new(FakeMode::Succeed)))
-        }
-        _ => None,
-    }
-}
-
 #[derive(Clone)]
 pub struct BridgeExecution<'a> {
     pub expected_environment: &'a str,

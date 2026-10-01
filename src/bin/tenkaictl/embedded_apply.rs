@@ -175,7 +175,6 @@ pub(crate) async fn run_plan(
         tenkai::software_executor::selected_software_executor().map(std::sync::Arc::from);
     let worker_lifecycle =
         tenkai::worker_pool::selected_worker_lifecycle()?.map(std::sync::Arc::from);
-    let delivery = tenkai::delivery_bridge::selected_delivery_adapter();
     let execution = apply::ExecutionOptions {
         skip_gates: execution.skip_gates,
         emergency_reason: execution.emergency_reason,
@@ -183,7 +182,7 @@ pub(crate) async fn run_plan(
         software_executor: software,
         worker_lifecycle,
         artifact_registry: tenkai::oci_artifact::selected_registry()?,
-        delivery_adapter: delivery,
+        delivery_adapter: None,
         delivery_fence: None,
     };
     let outcomes = apply::execute_with_options(ctx, plan_id, execution).await?;
