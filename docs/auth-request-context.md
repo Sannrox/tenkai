@@ -237,6 +237,7 @@ audience = "tenkai"                             # must appear in `aud` (string o
 
 [client]                     # optional; served at GET /v1/auth/oidc for the console
 client_id = "tenkai-console" # public client (Authorization Code + PKCE)
+# display_name = "Example Org" # sign-in label; clients fall back to the issuer host
 scopes = ["openid", "groups"]
 
 [grants]
@@ -273,7 +274,8 @@ Behavior:
   environment are refused.
 - The principal is `<sub>@<iss>` in audit records.
 - `GET /v1/auth/oidc` is unauthenticated and returns only `issuer`,
-  `audience`, `client_id`, and `scopes`; it is 404 when no `[client]` is set.
+  `audience`, `client_id`, `scopes`, and `display_name` when set; it is 404
+  when no `[client]` is set.
 
 ## Lifecycle and version compatibility
 

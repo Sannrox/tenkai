@@ -367,6 +367,16 @@ fn config_validation_fails_closed() {
     let mut no_rules = config("");
     no_rules.grants.rules.clear();
     assert!(no_rules.validate().is_err());
+    let named = config("[client]\nclient_id = \"tenkai-console\"\ndisplay_name = \"Example Org\"");
+    assert!(named.validate().is_ok());
+    assert_eq!(
+        named.client.unwrap().display_name.as_deref(),
+        Some("Example Org")
+    );
+    for name in ["\"\"", "\"  \""] {
+        let extra = format!("[client]\nclient_id = \"tenkai-console\"\ndisplay_name = {name}");
+        assert!(config(&extra).validate().is_err(), "{extra} must fail");
+    }
     assert!(toml::from_str::<OidcConfig>("issuer = \"x\"\naudience = \"y\"\nclient_secret = \"s\"\n[grants]\nclaim = \"g\"\nrules = []").is_err());
 }
 

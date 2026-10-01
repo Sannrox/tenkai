@@ -1173,6 +1173,12 @@
         "client_id": {
           "type": "string"
         },
+        "display_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "issuer": {
           "type": "string"
         },
