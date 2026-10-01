@@ -27,6 +27,10 @@ will be split over time. Contributor and agent workflow live in
 | Task | Page |
 | --- | --- |
 | Install and verify release binaries | [release-binaries.md](release-binaries.md) |
+| Run reconciliation, `tenkai-server`, and environment runtimes | [run-tenkai-server.md](run-tenkai-server.md) |
+| Manage environments and maintenance windows | [manage-environments.md](manage-environments.md) |
+| Upgrade, roll back, and recover a product | [upgrade-and-rollback.md](upgrade-and-rollback.md) |
+| Deploy releases from GitHub | [deploy-from-github.md](deploy-from-github.md) |
 | Back up and restore embedded state | [backup-restore.md](backup-restore.md) |
 | Diagnose a server and watch fleet drift | [server-diagnostics.md](server-diagnostics.md) |
 | Observe and execute rollout waves | [rollout-waves.md](rollout-waves.md) |
@@ -48,10 +52,16 @@ will be split over time. Contributor and agent workflow live in
 
 ## Reference
 
+| Topic | Page |
+| --- | --- |
+| Environment variables | [environment-variables.md](environment-variables.md) |
+| Capabilities and roadmap | [capabilities.md](capabilities.md) |
+
 ### Products and executors
 
 | Topic | Page |
 | --- | --- |
+| The manifest (`tenkai.toml`) and product kinds | [manifest.md](manifest.md) |
 | Software executors (Helm, Kubernetes) | [software-executor.md](software-executor.md) |
 | `model_runtime` products | [model-runtime.md](model-runtime.md) |
 | Policy, eval-suite, and agent products | [staged-products.md](staged-products.md) |
