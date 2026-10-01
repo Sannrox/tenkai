@@ -30,7 +30,7 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | `TENKAI_LISTEN` | `127.0.0.1:8080` | Server listen address; must remain loopback behind a TLS proxy |
 | `TENKAI_RUNTIME_TOKENS` | `{}` | JSON object mapping bearer secrets to one environment each |
 | `TENKAI_ENVIRONMENT_MANAGEMENT_TOKENS` | `{}` | JSON object mapping environment-scoped management bearers to one environment each; distinct from the fleet management token and runtime tokens |
-| `TENKAI_OIDC_CONFIG` | unset | Filesystem path to an OIDC trust TOML file; the server verifies OIDC access tokens sent as `Authorization: Bearer` and maps groups to grants ([auth doc](auth-request-context.md)). Mutually exclusive with `TENKAI_JWT_VERIFIER_CONFIG` |
+| `TENKAI_OIDC_CONFIG` | unset | Filesystem path to an OIDC trust TOML file; the server verifies OIDC access tokens sent as `Authorization: Bearer` and maps groups to grants ([configure server authentication](configure-server-authentication.md#oidc-access-tokens-468)). Mutually exclusive with `TENKAI_JWT_VERIFIER_CONFIG` |
 | `TENKAI_POSTGRES_URL` | unset | Hub tenant-store URL only; embedded `tenkaictl` and spoke `tenkai-server` fail closed when it is set. Non-loopback hosts require verified TLS |
 | `TENKAI_INSTANCE_ID` | random UUID per process | Replica identity used for multi-replica fencing; the server records it as `tenkai-server-<value>` |
 | `TENKAI_ENABLE_METRICS` | `false` | Enable the Prometheus scrape endpoint (`--enable-metrics`) |

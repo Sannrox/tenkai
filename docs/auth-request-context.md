@@ -8,6 +8,9 @@ assertions. It also documents the optional OIDC access-token verifier that
 ([ADR 0031](decisions/0031-web-console.md)). Tenkai does not run an identity
 provider, a login flow, tenant lifecycle, or billing.
 
+To configure a server rather than integrate with this contract, see
+[configure server authentication](configure-server-authentication.md).
+
 Source of truth for types and startup composition: `src/auth_context.rs`.
 Architecture decision: [ADR 0004](decisions/0004-authenticated-request-context.md).
 Product composition boundary:
@@ -187,97 +190,11 @@ Ed25519 keys; live network JWKS/IdP is optional and not default CI.
 
 Community bearer-token mode is unchanged when no extension is loaded.
 
-### `tenkai-server` enterprise JWT configuration
+### Configure the server
 
-The shipped server enables the reference extension only when
-`TENKAI_JWT_VERIFIER_CONFIG` names a readable, valid trust file in the format
-above:
-
-```sh
-export TENKAI_JWT_VERIFIER_CONFIG=/etc/tenkai/aldunis-jwt-trust.toml
-tenkai-server --with-enterprise-auth --require-enterprise-auth
-```
-
-The file contains public Ed25519 verification keys only. Do not put assertion
-tokens or private signing keys in it. The server loads and validates the file
-before binding its listener, attaches `JwtEnterpriseAuthExtension`, and
-advertises `enterprise_authentication` only after that succeeds.
-`--with-enterprise-auth` and `--require-enterprise-auth` both fail startup with
-an actionable configuration error when the env path is absent or unusable;
-neither flag creates a capability-only claim.
-
-Aldunis assertions must use the exact `audience` configured in the trust file.
-Issuer, audience, signature, expiry, principal, and optional tenant claims are
-verified for every request. Tenant-mode compositions require a verified tenant
-claim and reject caller-selected tenant metadata.
-
-Trust roots are a startup snapshot. For key rotation, publish a trust file that
-temporarily contains both the old and new public keys, restart every server
-replica, switch Aldunis signing to the new key, then remove the old key and
-restart again after all assertions signed by it have expired. An invalid
-rotation fails before listen; rollback restores the previous trust file and
-restarts the server. Configuration errors identify the file and validation
-problem but do not print file contents, assertions, tokens, private keys, or
-customer data.
-
-### OIDC access tokens (#468)
-
-`tenkai-server` can instead verify OIDC access tokens from the deployment's
-identity provider ([ADR 0031](decisions/0031-web-console.md)). Tenkai is a
-resource server only: it runs no login flow, stores no passwords, and holds no
-client secrets. Set `TENKAI_OIDC_CONFIG` to a TOML file; it is mutually
-exclusive with `TENKAI_JWT_VERIFIER_CONFIG`.
-
-```toml
-issuer = "https://idp.example.com/realms/ops"   # exact `iss`; https except loopback
-audience = "tenkai"                             # must appear in `aud` (string or array)
-# algorithms = ["RS256", "ES256"]               # default; `none` and HS* are never accepted
-# jwks_uri = "https://idp.example.com/..."      # skip discovery
-# jwks_file = "/etc/tenkai/jwks.json"           # air-gapped: static keys, no network
-# clock_skew_secs = 60
-# jwks_refresh_secs = 600
-
-[client]                     # optional; served at GET /v1/auth/oidc for the console
-client_id = "tenkai-console" # public client (Authorization Code + PKCE)
-# display_name = "Example Org" # sign-in label; clients fall back to the issuer host
-scopes = ["openid", "groups"]
-
-[grants]
-claim = "groups"             # string or array claim holding group/role values
-# tenant_claim = "tenant"    # required on tenant-mode hubs
-
-[[grants.rules]]
-value = "tenkai-admins"
-capabilities = ["read", "management"]
-
-[[grants.rules]]
-value = "prod-operators"
-capabilities = ["management"]
-environment = "prod"         # confine management to one environment
-```
-
-Behavior:
-
-- Clients send the access token as `Authorization: Bearer`. A compact-JWS
-  bearer is offered to the extension; configured community tokens still take
-  precedence.
-- Without `jwks_uri` or `jwks_file`, the server reads
-  `<issuer>/.well-known/openid-configuration` once at startup and requires its
-  `issuer` to match exactly. Startup fails closed when no usable signing key
-  loads.
-- Keys refresh in a background thread every `jwks_refresh_secs`, and when a
-  token names an unknown `kid` (at most once per 30 seconds). That token is
-  refused; a refresh failure keeps the previous keys. Request authentication
-  never performs network I/O.
-- Grants come only from `grants.rules`. A token matching no rule authenticates
-  but has no delivery capability. Rules with `environment` bind management to
-  that environment exactly like an environment-scoped management token, unless
-  another rule already grants fleet management. Rules for more than one
-  environment are refused.
-- The principal is `<sub>@<iss>` in audit records.
-- `GET /v1/auth/oidc` is unauthenticated and returns only `issuer`,
-  `audience`, `client_id`, `scopes`, and `display_name` when set; it is 404
-  when no `[client]` is set.
+Configuring `tenkai-server` for enterprise JWT assertions, including key
+rotation, and for OIDC access tokens is a how-to:
+[configure server authentication](configure-server-authentication.md).
 
 ## Lifecycle and version compatibility
 

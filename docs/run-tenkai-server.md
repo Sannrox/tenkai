@@ -51,9 +51,9 @@ TENKAI_MANAGEMENT_TOKEN="$TENKAI_MANAGEMENT_TOKEN" \
   reconcile --once
 ```
 
-To sign people in with an identity provider instead of shared bearer tokens,
-set `TENKAI_OIDC_CONFIG`; see
-[OIDC access tokens](auth-request-context.md#oidc-access-tokens-468).
+To authenticate with enterprise JWT assertions or with an identity provider
+(OIDC) instead of shared bearer tokens, see
+[configure server authentication](configure-server-authentication.md).
 
 ### Remote CLI
 
