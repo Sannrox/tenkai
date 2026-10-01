@@ -35,6 +35,14 @@ async fn remote_plan_apply_rollback_a_to_b_through_a_real_hub() {
     let (approve_a, apply_a) = signed_plan_requests(&root, "approve-a", "stage", &plan_a_digest, 0);
     let approved = client.approve_plan(&plan_a_id, &approve_a).await.unwrap();
     assert_eq!(approved.digest.as_deref(), Some(plan_a_digest.as_str()));
+    let inspected = client.inspect_environment("stage").await.unwrap();
+    let latest = inspected.latest_plan.expect("latest plan");
+    assert_eq!(latest.id, plan_a_id);
+    assert_eq!(
+        latest.digest.as_deref(),
+        Some(plan_a_digest.as_str()),
+        "inspect reports the digest the plan route returned and the approval bound"
+    );
 
     let missing = reqwest::Client::new()
         .post(format!(

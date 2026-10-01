@@ -199,6 +199,7 @@ impl FixtureEnvironmentProjection {
                     state: plan.status.as_str().into(),
                     created_at: 0,
                     step_count: 0,
+                    digest: None,
                     status_detail: "blocked development fixture; execution is disabled".into(),
                     steps: Vec::new(),
                     steps_truncated: false,
