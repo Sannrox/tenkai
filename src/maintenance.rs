@@ -160,6 +160,25 @@ fn occurrence(window: &Window, date: NaiveDate) -> Result<Occurrence, String> {
     }
 }
 
+/// Start of the window's first occurrence strictly after `after`, looking
+/// eight days ahead. `None` when the window is invalid or its next occurrence
+/// cannot be resolved in its timezone (apply fails closed on such a rule).
+pub fn next_start_after(window: &Window, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    window.validate().ok()?;
+    let tz = window.timezone.parse::<Tz>().ok()?;
+    let local_date = after.with_timezone(&tz).date_naive();
+    for offset in -1_i64..=8 {
+        let date = local_date.checked_add_signed(Duration::days(offset))?;
+        match occurrence(window, date) {
+            Ok(Occurrence::Valid { start, .. }) if start > after => return Some(start),
+            Ok(Occurrence::Invalid { sort_at, .. }) if sort_at > after => return None,
+            Ok(_) => {}
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
 /// Evaluate all configured windows at an exact UTC instant.
 ///
 /// An empty set means unrestricted execution. Any invalid rule fails closed.

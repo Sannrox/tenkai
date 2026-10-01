@@ -288,9 +288,39 @@
       ],
       "type": "string"
     },
+    "EnvironmentConstraint": {
+      "description": "One environment constraint, as set by `tenkaictl env constraints set`.",
+      "properties": {
+        "kind": {
+          "description": "`version_pin`, `version_range`, or `require_fact`.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Product for version constraints; fact key for `require_fact`.",
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "name",
+        "value"
+      ],
+      "type": "object"
+    },
     "EnvironmentInspectReport": {
       "description": "Detailed inspect report for one environment (no credentials).",
       "properties": {
+        "constraints": {
+          "default": [],
+          "description": "Environment constraints (`version_pin`, `version_range`, `require_fact`).",
+          "items": {
+            "$ref": "#/$defs/EnvironmentConstraint"
+          },
+          "type": "array"
+        },
         "description": {
           "type": "string"
         },
@@ -320,6 +350,17 @@
         },
         "lease": {
           "$ref": "#/$defs/EnvironmentLeaseInspect"
+        },
+        "maintenance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvironmentMaintenanceInspect"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Maintenance windows and their eligibility at inspect time. Absent for\nprojections that do not read Tenkai-owned environment configuration."
         },
         "module_activations": {
           "description": "Accepted workshop-module activation receipts for this environment.",
@@ -473,6 +514,94 @@
         "subscription_count",
         "deployed_product_count",
         "lease_held"
+      ],
+      "type": "object"
+    },
+    "EnvironmentMaintenanceInspect": {
+      "description": "Read-only view of the environment's own maintenance schedule, evaluated\nwith the same rules as apply admission. Product maintenance windows\n(`tenkaictl product maintenance`) are not included and may further\nrestrict when a plan touching that product can apply.",
+      "properties": {
+        "detail": {
+          "description": "When `invalid`: why the configuration cannot be evaluated.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "eligibility": {
+          "description": "`unrestricted` (no environment windows), `open`, `closed`, or\n`invalid`. Invalid configuration blocks apply until it is corrected.",
+          "type": "string"
+        },
+        "next_opens_at_ms": {
+          "description": "When `closed`: next opening of any window, in Unix milliseconds.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "open_until_ms": {
+          "description": "When `open`: end of the current window, in Unix milliseconds.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "windows": {
+          "items": {
+            "$ref": "#/$defs/EnvironmentMaintenanceWindow"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "eligibility",
+        "windows"
+      ],
+      "type": "object"
+    },
+    "EnvironmentMaintenanceWindow": {
+      "properties": {
+        "duration_minutes": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "identity": {
+          "type": "string"
+        },
+        "next_opens_at_ms": {
+          "description": "Next start of this window strictly after inspect time, in Unix\nmilliseconds; absent when the window cannot be evaluated.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "start": {
+          "description": "Local wall-clock start in HH:MM form.",
+          "type": "string"
+        },
+        "timezone": {
+          "description": "IANA timezone of `start`.",
+          "type": "string"
+        },
+        "weekdays": {
+          "description": "ISO weekday numbers: Monday is 1 and Sunday is 7.",
+          "items": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "identity",
+        "timezone",
+        "weekdays",
+        "start",
+        "duration_minutes"
       ],
       "type": "object"
     },
