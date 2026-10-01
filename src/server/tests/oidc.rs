@@ -163,4 +163,18 @@ async fn environment_bound_tokens_cannot_manage_other_environments() {
     .await;
     assert_eq!(code, StatusCode::FORBIDDEN, "{body}");
     assert!(body.contains("another environment"), "{body}");
+
+    let (code, body) = status(
+        &app,
+        Request::post("/v1/reconcile")
+            .header(
+                "authorization",
+                format!("Bearer {}", token(&signer, &["prod-operators"])),
+            )
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(code, StatusCode::FORBIDDEN, "{body}");
+    assert!(body.contains("fleet-wide reconcile"), "{body}");
 }
