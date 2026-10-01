@@ -1192,8 +1192,11 @@ mod tests {
         let release_digest = plan.steps[0].release_digest.clone();
         let artifact_digest = plan.steps[0].artifact_digest.clone();
         let workdir = plan.steps[0].workdir.clone();
+        let digest = format!("sha256:{}", plan.executable_digest().unwrap());
 
-        let summary = crate::environment::environment_plan_summary(plan);
+        let summary = crate::environment::environment_plan_summary(plan).unwrap();
+
+        assert_eq!(summary.digest.as_deref(), Some(digest.as_str()));
 
         assert_eq!(summary.state, "blocked");
         assert_eq!(
@@ -1216,7 +1219,7 @@ mod tests {
         noop.steps.clear();
         noop.state = PlanState::Succeeded;
         noop.status_detail = format!("token=do-not-return {}", "x".repeat(32));
-        let summary = crate::environment::environment_plan_summary(noop);
+        let summary = crate::environment::environment_plan_summary(noop).unwrap();
         assert_eq!(summary.state, "succeeded");
         assert_eq!(summary.step_count, 0);
         assert_eq!(summary.status_detail, NO_OP_STATUS_DETAIL);
@@ -1226,7 +1229,7 @@ mod tests {
         let mut applied = example_plan();
         applied.state = PlanState::Succeeded;
         applied.status_detail = format!("complete; token=do-not-return {}", "x".repeat(32));
-        let summary = crate::environment::environment_plan_summary(applied);
+        let summary = crate::environment::environment_plan_summary(applied).unwrap();
         assert_eq!(summary.state, "succeeded");
         assert_eq!(summary.step_count, 1);
         assert!(summary.status_detail.is_empty());

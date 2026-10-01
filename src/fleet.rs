@@ -449,6 +449,7 @@ mod tests {
                 state: "succeeded".into(),
                 created_at: 1,
                 step_count: 1,
+                digest: None,
                 status_detail: String::new(),
                 steps: Vec::new(),
                 steps_truncated: false,

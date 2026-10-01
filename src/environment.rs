@@ -932,6 +932,11 @@ pub struct EnvironmentPlanSummary {
     pub state: String,
     pub created_at: i64,
     pub step_count: usize,
+    /// `sha256:` digest of the versioned executable-plan encoding, the value
+    /// the plan route returns and approvals bind to. Absent for projections
+    /// without an executable plan, such as development fixtures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
     /// Bounded operator-facing lifecycle detail; never contains executable payloads.
     #[serde(default)]
     pub status_detail: String,
@@ -1643,13 +1648,15 @@ async fn latest_plan_for_environment(
 ) -> Result<Option<EnvironmentPlanSummary>> {
     // Newest after checking every created_at index against its payload peek
     // so a depressed index cannot hide the true newest behind LIMIT 1.
-    Ok(crate::plan::latest_for_environment(ctx, env)
+    crate::plan::latest_for_environment(ctx, env)
         .await?
-        .map(environment_plan_summary))
+        .map(environment_plan_summary)
+        .transpose()
 }
 
-pub(crate) fn environment_plan_summary(plan: Plan) -> EnvironmentPlanSummary {
+pub(crate) fn environment_plan_summary(plan: Plan) -> Result<EnvironmentPlanSummary> {
     const MAX_PLAN_STEP_SUMMARIES: usize = 256;
+    let digest = format!("sha256:{}", plan.executable_digest()?);
     let step_count = plan.steps.len();
     let status_detail = operator_safe_status_detail(&plan);
     let steps = plan
@@ -1666,15 +1673,16 @@ pub(crate) fn environment_plan_summary(plan: Plan) -> EnvironmentPlanSummary {
             release_id: step.release_id,
         })
         .collect::<Vec<_>>();
-    EnvironmentPlanSummary {
+    Ok(EnvironmentPlanSummary {
         id: plan.id,
         state: plan.state.to_string(),
         created_at: plan.created_at,
         step_count,
+        digest: Some(digest),
         status_detail,
         steps_truncated: steps.len() < step_count,
         steps,
-    }
+    })
 }
 
 fn operator_safe_status_detail(plan: &Plan) -> String {

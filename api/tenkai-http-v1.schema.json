@@ -521,6 +521,13 @@
           "format": "int64",
           "type": "integer"
         },
+        "digest": {
+          "description": "`sha256:` digest of the versioned executable-plan encoding, the value\nthe plan route returns and approvals bind to. Absent for projections\nwithout an executable plan, such as development fixtures.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "id": {
           "type": "string"
         },
