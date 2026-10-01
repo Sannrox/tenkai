@@ -42,7 +42,7 @@ it ([ADR 0001](decisions/0001-standalone-core-and-service-evolution.md),
 | Reference llama.cpp engine plugin (fake for CI) | [Model runtime](model-runtime.md); #64 |
 | Self-verifying offline bundles | [Offline bundles](offline-bundles.md); [ADR 0003](decisions/0003-canonical-offline-delivery-archives.md) |
 | Optional governance/intelligence provider ports | [Provider contracts](provider-contracts.md) |
-| OIDC access tokens with group-to-grant mapping, for the web console | [Auth request context](auth-request-context.md#oidc-access-tokens-468); [ADR 0031](decisions/0031-web-console.md); #468 |
+| OIDC access tokens with group-to-grant mapping, for the web console | [Configure server authentication](configure-server-authentication.md#oidc-access-tokens-468); [ADR 0031](decisions/0031-web-console.md); #468 |
 | Durable terminal outcome export to Chisei | [Provider contracts](provider-contracts.md#chisei-terminal-outcome-adapter-197); #197 |
 | Remote HTTP GateProvider library adapter (chisei-compatible JSON; not wired into shipped binaries) | [Provider contracts](provider-contracts.md#remote-gate-http-json-contract-113); #113 |
 | Optional advisory plan priors (default off) | [Plan priors](plan-priors.md); #114 |

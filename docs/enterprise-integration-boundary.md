@@ -7,7 +7,7 @@ composition. The durable decision is
 It does **not** implement identity providers, tenant lifecycle, or billing,
 and it does not name a specific commercial product. The standards-based OIDC
 access-token verifier and the web console are public; see
-[authenticated request context](auth-request-context.md#oidc-access-tokens-468)
+[configure server authentication](configure-server-authentication.md#oidc-access-tokens-468)
 and [ADR 0031](decisions/0031-web-console.md).
 
 ## Roles

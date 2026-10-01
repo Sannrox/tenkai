@@ -28,6 +28,7 @@ will be split over time. Contributor and agent workflow live in
 | --- | --- |
 | Install and verify release binaries | [release-binaries.md](release-binaries.md) |
 | Run reconciliation, `tenkai-server`, and environment runtimes | [run-tenkai-server.md](run-tenkai-server.md) |
+| Configure server authentication (bearer tokens, enterprise JWT, OIDC) | [configure-server-authentication.md](configure-server-authentication.md) |
 | Manage environments and maintenance windows | [manage-environments.md](manage-environments.md) |
 | Upgrade, roll back, and recover a product | [upgrade-and-rollback.md](upgrade-and-rollback.md) |
 | Deploy releases from GitHub | [deploy-from-github.md](deploy-from-github.md) |
@@ -94,7 +95,7 @@ will be split over time. Contributor and agent workflow live in
 | Release signing | [release-signing.md](release-signing.md) |
 | Release provenance | [release-provenance.md](release-provenance.md) |
 | Plan approval | [plan-approval.md](plan-approval.md) |
-| Authenticated request context, JWT, and OIDC | [auth-request-context.md](auth-request-context.md) |
+| Authenticated request context contract | [auth-request-context.md](auth-request-context.md) |
 | Federated identity | [federated-identity.md](federated-identity.md) |
 
 ### Storage and conformance
