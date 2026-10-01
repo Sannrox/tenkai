@@ -303,6 +303,7 @@ impl ManagementOperations {
     ) -> Result<TickReport, ManagementError> {
         let context = self.authenticate(credential)?;
         Self::require_capability(&context, DeliveryCapability::Management)?;
+        self.require_environment_grant(credential, &context, None, "reconcile")?;
         let tenant_operations = if self.tenant_mode {
             if context.tenant().is_none() {
                 return Err(ManagementError::Forbidden("unauthenticated".into()));
@@ -378,6 +379,12 @@ impl ManagementOperations {
     ) -> Result<PackageMigrationResult, ManagementError> {
         let context = self.authenticate(credential)?;
         Self::require_capability(&context, DeliveryCapability::Management)?;
+        self.require_environment_grant(
+            credential,
+            &context,
+            Some(&request.environment),
+            "package migration apply",
+        )?;
         package_migration::require_migration_api_version(request.version)
             .map_err(map_migration_error)?;
         self.require_matching_migration_trust_roots(&request.trust_roots)?;
@@ -515,6 +522,20 @@ impl ManagementOperations {
         Self::require_capability(&context, DeliveryCapability::Management)?;
         package_migration::require_migration_api_version(request.version)
             .map_err(map_migration_error)?;
+        let partition = self.migration_partition(&context)?;
+        let mut ctx = self.application_ctx()?;
+        let stored = package_migration::load_in(&mut ctx, name, partition)
+            .await
+            .map_err(map_migration_error)
+            .map_err(|error| self.hide_missing_migration(error))?;
+        self.require_environment_visible(&context, &stored.environment)
+            .await?;
+        self.require_environment_grant(
+            credential,
+            &context,
+            Some(&stored.environment),
+            "package migration mutate",
+        )?;
         self.require_matching_migration_trust_roots(&request.trust_roots)?;
         let files = RemoteApprovalFiles::materialize_async(
             request.approval.clone(),
@@ -527,14 +548,6 @@ impl ManagementOperations {
             approval: &files.approval,
             trust_roots: &files.trust_roots,
         };
-        let partition = self.migration_partition(&context)?;
-        let mut ctx = self.application_ctx()?;
-        let stored = package_migration::load_in(&mut ctx, name, partition)
-            .await
-            .map_err(map_migration_error)
-            .map_err(|error| self.hide_missing_migration(error))?;
-        self.require_environment_visible(&context, &stored.environment)
-            .await?;
         let actor = context.principal_id();
         let op = if resume {
             "package_migration.resume"
@@ -579,6 +592,27 @@ impl ManagementOperations {
             .and_then(|token| self.environment_grants.get(token))
             .map(String::as_str)
             .or_else(|| context.environment_binding())
+    }
+
+    /// Confine an environment-bound credential to its environment: refuse
+    /// fleet-wide operations (`environment` is `None`) and other environments.
+    fn require_environment_grant(
+        &self,
+        credential: &CredentialMaterial,
+        context: &AuthenticatedRequestContext,
+        environment: Option<&str>,
+        operation: &str,
+    ) -> Result<(), ManagementError> {
+        match (self.granted_environment(credential, context), environment) {
+            (None, _) => Ok(()),
+            (Some(granted), Some(requested)) if granted == requested => Ok(()),
+            (Some(_), Some(_)) => Err(ManagementError::Forbidden(
+                "environment-scoped credentials cannot act on another environment".into(),
+            )),
+            (Some(_), None) => Err(ManagementError::Forbidden(format!(
+                "environment-scoped credentials cannot call fleet-wide {operation}"
+            ))),
+        }
     }
 
     fn require_community_catalog_host(&self) -> Result<(), ManagementError> {

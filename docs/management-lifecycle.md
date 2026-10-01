@@ -60,7 +60,7 @@ Authentication stays on `AuthStack` ([request context](auth-request-context.md))
 | Principal | Grant | Lifecycle effect |
 | --- | --- | --- |
 | Fleet management | No environment binding | May call catalog-wide and environment-bound operations on environments it can see. Tenant-mode hosts still apply the non-disclosing deny. |
-| Environment-scoped management | Exactly one environment (`TENKAI_ENVIRONMENT_MANAGEMENT_TOKENS`) | May call environment-bound operations only for that environment. Catalog-wide publish, promote, and recall fail closed. |
+| Environment-scoped management | Exactly one environment (`TENKAI_ENVIRONMENT_MANAGEMENT_TOKENS`) | May call environment-bound operations, including package migration apply, resume, and rollback, only for that environment. Catalog-wide publish, promote, and recall and fleet-wide reconcile fail closed. |
 | Runtime | Exactly one environment | Refused on every management lifecycle operation. Runtime tokens stay on `/v1/runtime/*`. |
 
 Missing approval evidence fails closed. A stale fencing generation cannot

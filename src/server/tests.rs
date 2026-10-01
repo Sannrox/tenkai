@@ -6,6 +6,7 @@ mod lifecycle_support;
 mod oidc;
 mod package_migration_closed;
 mod package_migration_preview;
+mod package_migration_scope;
 mod remote_catalog;
 mod remote_plan;
 mod runtime;

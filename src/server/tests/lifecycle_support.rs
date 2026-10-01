@@ -142,3 +142,108 @@ pub(super) async fn deployed_version(
         .and_then(|row| row.deployed)
         .unwrap_or_else(|| "-".into())
 }
+
+/// Embedded store with environment `local`, published `pkg` 1.0.0 and 1.1.0,
+/// and a migration declaration between the two releases.
+pub(super) struct MigrationFixture {
+    pub root: std::path::PathBuf,
+    pub database: std::path::PathBuf,
+    pub ctx: crate::client::Ctx,
+    pub declaration: crate::package_migration::MigrationDeclaration,
+}
+
+pub(super) async fn migration_fixture(label: &str) -> MigrationFixture {
+    let root = std::env::temp_dir().join(format!(
+        "tenkai-migration-{label}-{}-{}",
+        std::process::id(),
+        crate::now_millis()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let database = root.join("tenkai.db");
+    let mut ctx = crate::client::Ctx::embedded(&database).unwrap();
+    crate::ontology::register(&mut ctx).await.unwrap();
+    crate::plan::env_add(&mut ctx, "local", "fixture")
+        .await
+        .unwrap();
+    for (version, body) in [("1.0.0", "one"), ("1.1.0", "two")] {
+        let dir = root.join(version);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("payload.txt"), body).unwrap();
+        std::fs::write(
+            dir.join("tenkai.toml"),
+            format!(
+                r#"
+[product]
+name = "pkg"
+version = "{version}"
+[deploy]
+install = "true"
+inputs = ["payload.txt"]
+"#
+            ),
+        )
+        .unwrap();
+        crate::catalog::publish(
+            &mut ctx,
+            &dir.join("tenkai.toml"),
+            &crate::catalog::PublishOptions {
+                signature: None,
+                trust_roots: None,
+                allow_unsigned_development: true,
+                provenance: Vec::new(),
+                provenance_trust_roots: None,
+                change_set_evidence: None,
+                artifact_registry: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let source = ctx
+        .get(&crate::ontology::release_id("pkg", "1.0.0"))
+        .await
+        .unwrap()
+        .unwrap();
+    let target = ctx
+        .get(&crate::ontology::release_id("pkg", "1.1.0"))
+        .await
+        .unwrap()
+        .unwrap();
+    let pin_digest = |raw: &str| {
+        if raw.starts_with("sha256:") {
+            raw.to_string()
+        } else {
+            format!("sha256:{raw}")
+        }
+    };
+    let declaration = crate::package_migration::MigrationDeclaration {
+        version: 1,
+        profile: crate::package_migration::MIGRATION_PROFILE.into(),
+        source: crate::package_migration::PackagePin {
+            product: "pkg".into(),
+            version: "1.0.0".into(),
+            digest: pin_digest(source.properties.get("digest").unwrap()),
+        },
+        target: crate::package_migration::PackagePin {
+            product: "pkg".into(),
+            version: "1.1.0".into(),
+            digest: pin_digest(target.properties.get("digest").unwrap()),
+        },
+        compatibility: crate::package_migration::CompatibilityEvidence {
+            version: 1,
+            status: crate::package_migration::CompatibilityStatus::Compatible,
+            evidence_digest: format!("sha256:{}", "e".repeat(64)),
+        },
+        checkpoints: vec![crate::package_migration::CheckpointDecl {
+            id: "preflight".into(),
+            class: crate::package_migration::CheckpointClass::Reversible,
+            pre_admission: None,
+        }],
+    };
+    MigrationFixture {
+        root,
+        database,
+        ctx,
+        declaration,
+    }
+}
