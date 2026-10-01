@@ -116,7 +116,8 @@ will be split over time. Contributor and agent workflow live in
 
 | Topic | Page |
 | --- | --- |
-| Founding design and architecture | [DESIGN.md](../DESIGN.md) |
+| Architecture | [DESIGN.md](../DESIGN.md) |
+| Design history (founding plan and what was decided since) | [design-history.md](design-history.md) |
 | Architecture decisions (ADRs) | [decisions/README.md](decisions/README.md) |
 | Operational storage and recovery authority | [operational-storage.md](operational-storage.md) |
 | Reconcile tick fencing | [reconcile-tick-fencing.md](reconcile-tick-fencing.md) |

@@ -1,8 +1,9 @@
-# tenkai — a constraint-based deployment control plane on sekai-chisei
+# Tenkai architecture
 
-> Founding design document, v0.1 (2026-07-08). Working name: **tenkai** (展開,
-> "deployment / unfolding") — sibling to sekai (world) and chisei (intelligence).
-> Rename freely; the name is used as a placeholder throughout.
+Tenkai (展開, "deployment / unfolding") is a constraint-based delivery control
+plane. This page explains how it is built and why. Accepted decisions are the
+[architecture decision records](docs/decisions/README.md); founding-era
+planning is kept in [design history](docs/design-history.md).
 
 ## Purpose
 
@@ -25,15 +26,13 @@ environment's own eval gates pass, on that environment's own channel policy."
 tenkai treats a model migration and a service upgrade as the same governed
 operation.
 
-In the accepted target architecture, `sekai-chisei` provides optional graph
-projection, governance, evaluation, and learning while Tenkai is the operational
-system of record ([ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md)).
-**Current main implements Tenkai-owned operational storage** (embedded SQLite /
-`OperationalStore`); sekai is not the recovery path. Historical prototype notes
-in this document that still mention sekai-backed operational objects describe
-pre-ADR-0001 v0 and should be read as background, not as live authority.
-chisei evidence is required, and failure is closed, only when an environment
-policy or approved plan makes that evidence part of the operation's contract.
+Tenkai is the operational system of record. It owns releases, channels,
+environments, plans, execution, rollback, and recovery, and stays operable and
+recoverable without any optional provider. `sekai-chisei` can supply graph
+projection, governance, evaluation, and learning; its evidence is required, and
+failure is closed, only when an environment policy or approved plan makes that
+evidence part of the operation's contract
+([ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md)).
 
 ## Why this product
 
@@ -61,16 +60,17 @@ policy or approved plan makes that evidence part of the operation's contract.
 - Not a git replacement: desired state lives in the Tenkai Catalog and
   environment constraints, with optional audit projection to sekai; git can
   feed the Catalog.
-- Not multi-tenant SaaS in v1: single-org control plane first.
+- Not a hosted multi-tenant service: community profiles are tenant-free, and
+  tenant isolation is an experimental enterprise profile
+  ([ADR 0010](docs/decisions/0010-supported-operating-profiles.md)).
 
-## Core concepts (the ontology)
+## Core concepts
 
-These are Tenkai domain types. **Authoritative operational encoding** lives in
-Tenkai-owned persistence (ADR 0001; see also the README Ontology section for the
-embedded `tenkai` namespace objects). An optional sekai graph projection may
-still represent lineage (release → artifacts → SBOM; deployment → plan → release
-→ publisher) for audit, policy, and learning via `Traverse`, but it is not
-required to recover a deployment.
+These are Tenkai domain types, persisted in Tenkai's own operational store (see
+[domain objects](docs/operational-storage.md#domain-objects)). An optional sekai
+graph projection may also represent lineage (release → artifacts → SBOM;
+deployment → plan → release → publisher) for audit, policy, and learning, but it
+is never needed to recover a deployment.
 
 | Concept | What it is |
 | --- | --- |
@@ -85,69 +85,74 @@ required to recover a deployment.
 ## Architecture
 
 ```
-                    ┌──────────────────────────────┐
- publishers ──────▶│  Catalog (in-process)          │
- (CI, humans)      │  releases, channels, signing  │
-                    └──────────────┬───────────────┘
-                                   │
-                    ┌──────────────▼───────────────┐        ┌─────────────────┐
-                    │  Tenkai application core      │◀──────▶│  sekai-chisei    │
-                    │  reconciler + constraint     │  gRPC  │  graph, audit,   │
-                    │  solver + gate orchestration │        │  policy, evals,  │
-                    └──────────────┬───────────────┘        │  budget, actions │
-                                   │ plans (pull)           └─────────────────┘
-             ┌─────────────────────┼─────────────────────┐
-             ▼                     ▼                     ▼ (signed bundle
-      ┌─────────────┐       ┌─────────────┐       ┌─────────────┐  export/import)
-      │ env runtime  │       │ env runtime  │       │ env runtime  │
-      │ env: prod-eu │       │ env: edge-7  │       │ env: airgap  │
-      └─────────────┘       └─────────────┘       └─────────────┘
+ publishers (CI, humans)          operators: tenkaictl, web console
+          │ publish / promote               │ HTTP management API
+          ▼                                 ▼
+ ┌────────────────────────────────────────────────────┐     ┌──────────────────┐
+ │ Tenkai application core                            │     │ sekai-chisei     │
+ │ Catalog · planner/reconciler · gates · approvals   │┄┄┄┄▶│ (optional)       │
+ │ operational store (SQLite; Postgres hub)           │     │ projection, gate │
+ │ hosted by: tenkaictl (embedded) or tenkai-server   │     │ evidence, policy,│
+ └───────────┬───────────────────────┬────────────────┘     │ outcome learning │
+             │ executes in-process   │ plans pulled        └──────────────────┘
+             ▼                       ▼
+     local executors          tenkai-runtime (one per environment)
+     (shell, Helm,            ── or signed offline bundles for
+      Kubernetes)                isolated environments
 ```
 
-One Rust application core supports an embedded CLI host and a networked server
-host. Application contracts, transactions, and recovery semantics are shared;
-gRPC is a transport rather than a domain boundary:
+One Rust application core runs in two hosts with the same contracts,
+transactions, and recovery semantics; transport is not a domain boundary:
 
-- **Catalog** — initially an in-process application boundary. Accepts release publications
-  (manifest + digests + signature), manages channels, serves artifact metadata
-  (artifacts themselves live in OCI registries / blob stores; the catalog
-  stores references and digests). Verifies signatures on publish (sigstore-
-  style keyless or org keys).
-- **Planner/reconciler** — the heart of the application core. A loop per environment:
-  observe desired state (channel heads + constraints) vs reported state,
-  compute a plan (dependency/version solving — start with a simple topological
-  + semver solver, not full SAT), run pre-gates, emit the plan for the
-  environment runtime, watch execution, run post-gates, trigger rollback plans
-  on failure.
-- **environment runtime** — a small executor scoped to one environment. Pulls plans (never
-  pushed — works through NAT/firewalls), applies steps via pluggable
-  executors (`kubernetes` first; `compose`/`systemd` later), reports state and
-  health. For isolated (air-gapped) environments the same runtime consumes **signed
-  bundles** (plan + artifacts) imported out-of-band, and exports signed state
-  receipts back.
-- **Shikigami worker-pool lifecycle** — when configured as a delivery product,
-  Tenkai can bind an immutable release to an environment-scoped pool and
-  reconcile its capacity, rollout, drain, health, and recovery through the
-  environment executor. The Shikigami serve host pulls admitted work, claims it
-  through its plane intake, and executes it; Tenkai never selects or
-  acknowledges individual work. The first lifecycle implementation uses fixed
-  replicas. Autoscaling requires the versioned worker-host and read-only
-  claim-pressure contracts described in ADR 0011.
-- **tenkaictl** — CLI: `publish`, `promote`, `env add`, `env subscribe`,
-  `env constraints`, `plan`, `apply`, `rollback`, `inspect`, `fleet status`.
-  Implementation lives under `src/bin/tenkaictl/`.
+- **`tenkaictl`** is the embedded host and CLI. With no server it runs the whole
+  core against a local SQLite store, and with `--target remote` it calls a
+  server instead (see [run tenkai-server](docs/run-tenkai-server.md)).
+- **`tenkai-server`** hosts the same core over HTTP: a versioned management API
+  ([management lifecycle](docs/management-lifecycle.md)), continuous
+  reconciliation, health probes, and scoped runtime endpoints. It verifies
+  bearer, JWT, or OIDC credentials
+  ([authenticated request context](docs/auth-request-context.md)).
+- **Catalog** is an in-process application boundary. It accepts release
+  publications (manifest, digests, signature), manages channels, and stores
+  references to payloads that live in OCI registries or blob stores. Signatures
+  are verified on publish ([release signing](docs/release-signing.md)).
+  Extraction into a service is deferred until ADR 0001's criteria are met.
+- **Planner and reconciler** is the heart of the core. Per environment it
+  compares channel heads and constraints with reported state, computes a plan
+  (semver ranges and topological ordering, not a full SAT solver), checks
+  gates, maintenance windows, and approvals, executes under a generation-fenced
+  lease, probes health, and rolls back on failure.
+- **Executors** apply plan steps. Manifests run shell commands by default;
+  in-tree Helm, native `kubectl`, and in-process server-side-apply executors
+  handle Kubernetes ([software executors](docs/software-executor.md)).
+- **`tenkai-runtime`** is a pull-only process scoped to one environment. It
+  pulls plans (never pushed, so it works through NAT and firewalls), runs a
+  local executor under the claim's fencing generation, and reports receipts
+  ([runtime protocol v1](docs/runtime-protocol-v1.md)). Isolated environments
+  instead import signed [offline bundles](docs/offline-bundles.md) and export
+  receipts.
+- **Shikigami worker-pool lifecycle**: when configured as a delivery product,
+  Tenkai binds an immutable release to an environment-scoped pool and
+  reconciles its capacity, rollout, drain, health, and recovery. The Shikigami
+  serve host pulls and executes admitted work; Tenkai never selects or
+  acknowledges individual work
+  ([ADR 0011](docs/decisions/0011-shikigami-worker-pool-lifecycle.md),
+  [worker pools](docs/worker-pool.md)).
+- **Web console** is a separate client of the public HTTP API, with no
+  privileged access ([ADR 0031](docs/decisions/0031-web-console.md)).
 
-Catalog extraction is deferred until measured scaling or isolation needs,
-versioned remote contracts, consistency, operations, and a reversible migration
-are all demonstrated. Full criteria and provider failure rules are in ADR 0001.
+Operating profiles (`local`, `fleet`, `enterprise-experimental`) fix which
+store, processes, and authentication a deployment uses
+([ADR 0010](docs/decisions/0010-supported-operating-profiles.md)).
 
-### What sekai-chisei can provide (the connection)
+### Optional sekai-chisei integrations
 
-These optional capabilities exist on sekai-chisei's gRPC surface. A capability
-becomes required for an operation when policy or an approved plan requires its
+These capabilities exist on sekai-chisei's gRPC surface. A capability becomes
+required for an operation when policy or an approved plan requires its
 evidence; that operation then fails closed if the provider is unavailable or
 invalid. Optional failures remain visible and durably retryable. Recovery never
-depends on these integrations:
+depends on these integrations. Which ones Tenkai wires today is in
+[provider contracts](docs/provider-contracts.md).
 
 | tenkai need | sekai-chisei API |
 | --- | --- |
@@ -175,87 +180,3 @@ depends on these integrations:
   signatures + approval evidence. sekai projection data may be included as
   optional metadata but is never verification or recovery material. Receipt
   import targets the same Tenkai application contract as connected execution.
-
-## Integration prerequisites
-
-1. **Tenkai operational persistence.** In the target architecture, the embedded
-   host needs durable local storage; horizontally scaled server hosts
-   additionally need transactional fencing and coordination. After authority
-   cutover, neither mode uses sekai as its recovery store.
-2. **Stable public gRPC surface.** For optional sekai-chisei integrations,
-   version the protos (or vendor them with a compatibility policy).
-3. **Schema-type registration for the tenkai ontology** — already supported via
-   `CreateSchemaType`; needs only a reserved namespace convention.
-4. **Scoped principals** — the Tenkai server and each environment runtime use
-   distinct identities with least-privilege grants.
-
-## Phasing
-
-The phase narrative below captures the product evolution. Active,
-dependency-aware work is maintained in GitHub Issues. The standalone-core,
-server/runtime, offline-bundle, and enterprise-composition **architecture**
-phases are largely landed on main (see ADRs 0001–0007 and the README Status
-table). Remaining work is product depth (multi-env ops tooling, planner
-constraints, model executors, enterprise host wiring)—not re-litigating
-operational ownership.
-
-Historical note: early phases began as a walking skeleton; every phase still
-ends with something demoable.
-
-- **Phase 0 — Contracts.** Establish transport-independent application ports,
-  an in-process Catalog boundary, Tenkai-owned plan/step formats, optional sekai
-  projection schemas, and an embedded `tenkaictl` host.
-- **Phase 1 — Skeleton (imperative).** Catalog accepts a signed release;
-  a founding `deploy` sketch (not a live `tenkaictl` command; operators now
-  `publish` / `plan` / `apply`) produces a trivial plan; one local
-  environment runtime applies it to a k8s (kind) cluster; Tenkai persists the
-  lifecycle and durably projects it to sekai when configured. No channels,
-  solver, or gates. *Demo: deploy a container through the embedded application
-  core and recover from Tenkai-owned state.*
-- **Phase 2 — Declarative core.** Channels, environment subscriptions,
-  constraints, the reconciler loop, semver dependency solving, drift
-  detection. *Demo: promote to `stable`; three environments converge on their
-  own schedules; a version-pinned environment correctly refuses.*
-- **Phase 3 — Gates & rollback.** Pre/post gates via chisei eval runs and
-  health probes; automatic rollback plans; maintenance windows; canary
-  (deploy to canary-channel envs, gate fleet-wide promotion on their
-  outcomes). *Demo: a bad release auto-rolls-back and blocks fleet promotion.*
-- **Phase 4 — Intelligence artifacts.** Product type for governance bundles:
-  model routing configs, policies, eval suites, agent definitions. Applying =
-  writing through sekai-chisei APIs instead of a cluster. *Demo: a new model
-  version rolls out eval-gated across environments — the Plan 16 model-
-  sovereignty story, delivered.*
-- **Phase 5 — Fleet & disconnection.** Add a server host and versioned remote
-  environment-runtime transport around the same application ports, scale-out
-  reconciliation, fleet dashboards (`fleet status`, rollout waves), signed
-  bundle export/import for air-gapped environments, and optional outcome
-  pattern-mining fed back into planning priors.
-
-## Risks
-
-- **Scope: fighting Argo/Flux.** Mitigation: never compete on "sync my repo to
-  my cluster." The wedge is fleet + constraints + gates + intelligence
-  artifacts. For a single connected cluster, tenkai may even *delegate* to
-  Argo as an executor rather than replace it.
-- **Constraint solver complexity.** Full dependency SAT is a tarpit. Start
-  with semver ranges + topological ordering; add solver sophistication only
-  when a real constraint demands it.
-- **Runtime blast radius.** The environment runtime is the most privileged component.
-  Mitigations: pull-only, plan signatures, scoped credentials, governed-action
-  approval for destructive steps, per-environment isolation.
-- **Integration coupling.** Governance and learning features may depend on
-  sekai-chisei, but Tenkai execution and recovery do not. Required governed
-  decisions fail closed; optional projections expose degraded status and retry.
-- **Solo-scale.** This is a platform product. The phasing is designed so that
-  Phases 1–3 alone are a useful single-team tool ("eval-gated deploys with a
-  real audit graph") even if the fleet vision takes longer.
-
-## Open questions
-
-- Plan/step format: custom proto vs embedding an existing spec (e.g. OCI
-  artifact + KRM-style objects) — decide in Phase 0.
-- Executor strategy: native k8s client vs shelling to helm vs delegating to
-  Argo as a backend executor.
-- Which measured scaling, availability, or ownership signal will first justify
-  extracting Catalog under ADR 0001's criteria?
-- Naming: tenkai vs something else in the sekai/chisei family.
