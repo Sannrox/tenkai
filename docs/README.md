@@ -17,6 +17,7 @@ will be split over time. Contributor and agent workflow live in
 
 | Tutorial | What you do |
 | --- | --- |
+| [Sign in to the web console with Keycloak](console-sign-in-with-keycloak.md) | Connect a local Keycloak, sign in to `/ui/` with OIDC, and see your grants |
 | [Local minikube dogfood](local-dogfood-minikube.md) | Deliver to a laptop Kubernetes cluster, then repeat with signed multi-environment releases and a software canary |
 | [Hello minikube example](../examples/hello-minikube/) | The scripts and manual steps behind the minikube path |
 

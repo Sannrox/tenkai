@@ -65,9 +65,10 @@ console works at `/ui/` and under a proxy sub-path (`/<prefix>/ui/`) because
 the redirect and every console URL are relative. For nested console routes,
 such as the OIDC callback `/ui/auth/callback`, the server adds a relative
 `<base href>` (for example `../`) to `index.html` so those relative URLs still
-resolve to `/ui/`; it changes nothing else in the bundle. It signs in with OIDC when
-`TENKAI_OIDC_CONFIG` has a `[client]` section, and otherwise asks for a bearer
-token, which it keeps in memory for the tab.
+resolve to `/ui/`; it changes nothing else in the bundle. It signs in with OIDC
+when `TENKAI_OIDC_CONFIG` has a `[client]` section (walkthrough:
+[sign in with Keycloak](console-sign-in-with-keycloak.md)), and otherwise asks
+for a bearer token, which it keeps in memory for the tab.
 
 Console responses carry a strict Content-Security-Policy (`default-src
 'self'`, no inline or evaluated script, no framing). When OIDC is configured,
