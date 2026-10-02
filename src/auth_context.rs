@@ -204,7 +204,7 @@ impl AuthenticatedRequestContext {
         if self.has_delivery_capability(required) {
             Ok(())
         } else {
-            Err(AuthError::Unauthorized(
+            Err(AuthError::Forbidden(
                 "insufficient delivery capability".into(),
             ))
         }
@@ -682,8 +682,13 @@ impl CredentialAuthenticator for CommunityTokenAuthenticator {
 pub enum AuthError {
     #[error("invalid credential: {0}")]
     InvalidCredential(String),
+    /// The credential was rejected (unknown, expired, untrusted, bad signature).
     #[error("unauthorized: {0}")]
     Unauthorized(String),
+    /// The credential is valid but may not be used here (grant conflict,
+    /// missing tenant, suspended tenant, missing capability).
+    #[error("forbidden: {0}")]
+    Forbidden(String),
     #[error("incompatible auth contract version {found}, expected {expected}")]
     IncompatibleContract { found: u32, expected: u32 },
 }
@@ -1009,7 +1014,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(
             error,
-            AuthError::Unauthorized(ref message) if message.contains("insufficient delivery capability")
+            AuthError::Forbidden(ref message) if message.contains("insufficient delivery capability")
         ));
         test_management_context("cap-allow")
             .require_delivery_capability(DeliveryCapability::Management)

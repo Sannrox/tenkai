@@ -736,9 +736,9 @@ impl OidcAuthExtension {
                 (fleet, Some(environment.to_string()))
             }
             _ => {
-                return unauthorized(
-                    "OIDC grants confine management to more than one environment; grant fleet management or one environment",
-                );
+                return Err(AuthError::Forbidden(
+                    "OIDC grants confine management to more than one environment; grant fleet management or one environment".into(),
+                ));
             }
         };
 
@@ -811,7 +811,7 @@ impl EnterpriseAuthExtension for OidcAuthExtension {
         match (grants.tenant, self.require_tenant) {
             (Some(tenant), _) => builder = builder.with_tenant(&tenant, authority)?,
             (None, true) => {
-                return Err(AuthError::Unauthorized(
+                return Err(AuthError::Forbidden(
                     "OIDC token is missing the required tenant claim".into(),
                 ));
             }

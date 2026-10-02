@@ -127,7 +127,20 @@ fn runtime_delivery_error(error: RuntimeDeliveryError) -> Response {
 
 pub(super) fn management_error(error: ManagementError) -> Response {
     match error {
-        ManagementError::Unauthorized(message) => error_response(StatusCode::UNAUTHORIZED, message),
+        ManagementError::Unauthorized(message) => {
+            // RFC 6750 §3: name the scheme, and flag a presented token as invalid.
+            let challenge = if message == crate::management_operations::MISSING_CREDENTIAL {
+                "Bearer"
+            } else {
+                "Bearer error=\"invalid_token\""
+            };
+            let mut response = error_response(StatusCode::UNAUTHORIZED, message);
+            response.headers_mut().insert(
+                axum::http::header::WWW_AUTHENTICATE,
+                axum::http::HeaderValue::from_static(challenge),
+            );
+            response
+        }
         ManagementError::Forbidden(message) => error_response(StatusCode::FORBIDDEN, message),
         ManagementError::NotFound(message) => error_response(StatusCode::NOT_FOUND, message),
         ManagementError::BadRequest(message) => error_response(StatusCode::BAD_REQUEST, message),

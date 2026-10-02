@@ -108,6 +108,13 @@ Behavior:
 
 - For a worked example with Keycloak, including the identity-provider side,
   see [sign in to the web console with Keycloak](console-sign-in-with-keycloak.md).
+- A missing, unknown, expired, or otherwise rejected credential gets **401**
+  with `WWW-Authenticate: Bearer` (`error="invalid_token"` when a token was
+  sent), so clients ask for new credentials. A valid credential that may not
+  be used (no matching grant, grants for more than one environment, a missing
+  required tenant claim, or a missing capability or environment scope) gets
+  **403**. Response bodies do not
+  say which check failed.
 - Clients send the access token as `Authorization: Bearer`. A compact-JWS
   bearer is offered to the extension; configured community tokens still take
   precedence.

@@ -159,4 +159,5 @@ while the tab is open. Reloading the page signs in again.
 | Keycloak: `Invalid parameter: redirect_uri` | Redirect URI is not `<console URL>/ui/auth/callback` exactly |
 | Browser console: CORS error on the token request | Console origin missing from the client's Web origins |
 | Browser console: request blocked by Content-Security-Policy | Token endpoint on another origin; add it to `connect_origins` |
-| Console says "Signed in, no access" | The server refused the token or no grant rule matched (both return 403). Check in order: the access token's `aud` contains `tenkai` (audience mapper); the user is in the group; the `groups` scope is a default scope of the client; full group path is off (the claim must say `tenkai-admins`, not `/tenkai-admins`) |
+| Console returns to sign-in with "Session expired" right after login | The server rejected the token (401): usually the access token's `aud` lacks `tenkai`; add the audience mapper. Also check the issuer matches exactly |
+| Console says "Signed in, no access" | The token is valid but grants nothing usable (403), for example groups that map to more than one environment, or no matching rule: the user is not in the group, the `groups` scope is not a default scope of the client, or full group path is on (the claim must say `tenkai-admins`, not `/tenkai-admins`) |
