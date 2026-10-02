@@ -77,8 +77,8 @@ What each part does, in the Keycloak admin console's terms (`Clients` →
 | --- | --- | --- |
 | Client authentication | Off | Public client; the browser cannot keep a secret |
 | Standard flow / PKCE method | On / `S256` | Authorization Code with PKCE |
-| Valid redirect URIs | `<console URL>/auth/callback` | Where Keycloak returns after login |
-| Valid post logout redirect URIs | `<console URL>/` | Where sign-out returns |
+| Valid redirect URIs | `<console URL>/ui/auth/callback` | Where Keycloak returns after login |
+| Valid post logout redirect URIs | `<console URL>/ui/` | Where sign-out returns |
 | Web origins | The console's origin | The browser calls Keycloak's discovery and token endpoints directly (CORS) |
 | Audience mapper | `tenkai` in the access token | Tenkai rejects tokens whose `aud` lacks its audience |
 | Group membership mapper | claim `groups`, full group path off | Grants match plain names such as `tenkai-admins`, not `/tenkai-admins` |
@@ -156,7 +156,7 @@ while the tab is open. Reloading the page signs in again.
 | --- | --- |
 | Server exits: `OIDC issuer must use https` | Non-loopback `http` issuer; use `https` |
 | Server exits while loading keys, or issuer mismatch | `issuer` differs from the discovery document; set `KC_HOSTNAME` and copy the issuer exactly |
-| Keycloak: `Invalid parameter: redirect_uri` | Redirect URI is not `<console URL>/auth/callback` exactly |
+| Keycloak: `Invalid parameter: redirect_uri` | Redirect URI is not `<console URL>/ui/auth/callback` exactly |
 | Browser console: CORS error on the token request | Console origin missing from the client's Web origins |
 | Browser console: request blocked by Content-Security-Policy | Token endpoint on another origin; add it to `connect_origins` |
 | Console says "Signed in, no access" | The server refused the token or no grant rule matched (both return 403). Check in order: the access token's `aud` contains `tenkai` (audience mapper); the user is in the group; the `groups` scope is a default scope of the client; full group path is off (the claim must say `tenkai-admins`, not `/tenkai-admins`) |
