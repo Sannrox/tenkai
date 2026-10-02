@@ -17,7 +17,7 @@ Source `cargo build` remains valid. Hub Postgres hosts are not attached.
 | Binary | Role |
 | --- | --- |
 | `tenkaictl` | Embedded CLI and remote management client |
-| `tenkai-server` | Network control-plane host |
+| `tenkai-server` | Network control-plane host; serves the pinned web console at `/ui/` |
 | `tenkai-runtime` | Pull-only environment runtime |
 | `tenkai-runtime-guard` | Runtime process fence |
 | `tenkai-executor-guard` | Local executor process fence |
@@ -56,8 +56,9 @@ every listed file is present.
 
 ## Hub Postgres
 
-Community assets are default-feature SQLite hosts. Tenant-mode hub binaries
-still require:
+Community assets are SQLite hosts built with feature `ui`, which embeds the
+web console ([run tenkai-server](run-tenkai-server.md#open-the-web-console)).
+Tenant-mode hub binaries still require:
 
 ```bash
 cargo build --release --locked --features postgres --bin tenkai-server

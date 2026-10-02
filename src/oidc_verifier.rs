@@ -76,6 +76,11 @@ pub struct OidcPublicClient {
     pub display_name: Option<String>,
     #[serde(default = "default_scopes")]
     pub scopes: Vec<String>,
+    /// Origins besides the issuer that the browser calls during sign-in, for
+    /// example a token endpoint on another host. Added to the console's
+    /// Content-Security-Policy `connect-src`; never served to clients.
+    #[serde(default)]
+    pub connect_origins: Vec<String>,
 }
 
 /// Unauthenticated `GET /v1/auth/oidc` body: what a browser needs to start
@@ -88,6 +93,9 @@ pub struct OidcClientDiscovery {
     pub scopes: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// Host-side only: browser `connect-src` origins (issuer first).
+    #[serde(skip)]
+    pub connect_origins: Vec<String>,
 }
 
 impl OidcClientDiscovery {
@@ -99,6 +107,11 @@ impl OidcClientDiscovery {
             client_id: client.client_id.clone(),
             scopes: client.scopes.clone(),
             display_name: client.display_name.clone(),
+            connect_origins: std::iter::once(config.issuer.as_str())
+                .chain(client.connect_origins.iter().map(String::as_str))
+                .filter_map(|url| url::Url::parse(url).ok())
+                .map(|url| url.origin().ascii_serialization())
+                .collect(),
         })
     }
 }
@@ -204,6 +217,18 @@ impl OidcConfig {
                 .is_some_and(|name| name.trim().is_empty())
             {
                 return invalid("OIDC client display_name must not be empty when set");
+            }
+            for origin in &client.connect_origins {
+                let url = require_secure_url(origin, "OIDC client connect_origins entry")?;
+                if url.path() != "/"
+                    || url.query().is_some()
+                    || url.fragment().is_some()
+                    || !url.username().is_empty()
+                {
+                    return invalid(
+                        "OIDC client connect_origins entries must be origins like https://login.example.com",
+                    );
+                }
             }
         }
         if self.grants.claim.trim().is_empty() {

@@ -394,3 +394,35 @@ fn jwks_skips_unusable_keys() {
     assert!(keys.get("sym").is_none() && keys.get("enc").is_none());
     assert!(KeySet::from_jwks_json(r#"{"keys":[]}"#).is_err());
 }
+
+#[test]
+fn console_connect_origins_start_with_the_issuer_and_stay_private() {
+    let plain = config("[client]\nclient_id = \"tenkai-console\"");
+    plain.validate().unwrap();
+    let discovery = OidcClientDiscovery::from_config(&plain).unwrap();
+    assert_eq!(discovery.connect_origins, ["https://idp.example.test"]);
+
+    let split = config(
+        "[client]\nclient_id = \"tenkai-console\"\nconnect_origins = [\"https://token.example.net\"]",
+    );
+    split.validate().unwrap();
+    let discovery = OidcClientDiscovery::from_config(&split).unwrap();
+    assert_eq!(
+        discovery.connect_origins,
+        ["https://idp.example.test", "https://token.example.net"]
+    );
+    let body = serde_json::to_value(&discovery).unwrap();
+    assert!(body.get("connect_origins").is_none(), "{body}");
+
+    for origin in [
+        "http://token.example.net",
+        "https://token.example.net/oauth2/token",
+        "https://token.example.net?x=1",
+        "https://user@token.example.net",
+        "not a url",
+    ] {
+        let extra =
+            format!("[client]\nclient_id = \"tenkai-console\"\nconnect_origins = [\"{origin}\"]");
+        assert!(config(&extra).validate().is_err(), "{origin}");
+    }
+}

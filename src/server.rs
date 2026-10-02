@@ -12,6 +12,7 @@ mod router;
 mod runtime;
 #[cfg(test)]
 mod tests;
+pub mod ui;
 
 pub use crate::runtime_delivery::{
     CompletionFuture, FleetStatusFuture, HealthFuture, InspectEnvFuture, InventoryFuture,
