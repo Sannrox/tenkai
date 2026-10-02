@@ -86,6 +86,12 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 The `TENKAI_WORKER_*` variables are internal worker-lifecycle plumbing, not
 operator settings.
 
+## Build time
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `TENKAI_UI_BUNDLE` | unset | With `cargo build --features ui`, path to a local copy of the pinned console zip; skips the download but still enforces the checksum in `ui/console.pin` ([open the web console](run-tenkai-server.md#open-the-web-console)) |
+
 ## Set by Tenkai for deploy commands
 
 Manifest `install`, `health`, and `uninstall` commands run with a cleared

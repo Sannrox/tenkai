@@ -55,6 +55,37 @@ To authenticate with enterprise JWT assertions or with an identity provider
 (OIDC) instead of shared bearer tokens, see
 [configure server authentication](configure-server-authentication.md).
 
+### Open the web console
+
+Release binaries of `tenkai-server` embed the
+[web console](https://github.com/Sannrox/tenkai-console) and serve it at `/ui/`
+on the API's origin; `GET /` redirects there. Open
+`http://127.0.0.1:8080/ui/`, or the matching URL behind your TLS proxy. The
+console works at `/ui/` and under a proxy sub-path (`/<prefix>/ui/`) because
+the redirect and every console URL are relative. It signs in with OIDC when
+`TENKAI_OIDC_CONFIG` has a `[client]` section, and otherwise asks for a bearer
+token, which it keeps in memory for the tab.
+
+Console responses carry a strict Content-Security-Policy (`default-src
+'self'`, no inline or evaluated script, no framing). When OIDC is configured,
+`connect-src` also allows the issuer's origin, because the browser calls the
+identity provider's discovery and token endpoints directly. Providers whose
+token endpoint is on another origin need it in `[client] connect_origins`
+([OIDC access tokens](configure-server-authentication.md#oidc-access-tokens-468)).
+
+The bundle is a pinned console release built in with
+Cargo feature `ui` ([ADR 0031](decisions/0031-web-console.md)):
+
+```sh
+cargo build --release --locked --features ui --bin tenkai-server
+```
+
+The build downloads the release named in `ui/console.pin` and fails unless its
+SHA-256 matches. Offline builders set `TENKAI_UI_BUNDLE` to a downloaded copy of
+that zip; the checksum is still enforced. Builds without `ui` serve no console
+and need no network. For console development, `--ui-dir <path>` serves a local
+console build (a directory with `index.html`) instead of the embedded one.
+
 ### Remote CLI
 
 Remote v1 CLI support covers `reconcile --once`, `fleet status`, `fleet watch`,

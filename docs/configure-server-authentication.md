@@ -88,6 +88,7 @@ audience = "tenkai"                             # must appear in `aud` (string o
 client_id = "tenkai-console" # public client (Authorization Code + PKCE)
 # display_name = "Example Org" # sign-in label; clients fall back to the issuer host
 scopes = ["openid", "groups"]
+# connect_origins = ["https://login.example.net"] # token endpoint on another origin
 
 [grants]
 claim = "groups"             # string or array claim holding group/role values
@@ -125,3 +126,7 @@ Behavior:
 - `GET /v1/auth/oidc` is unauthenticated and returns only `issuer`,
   `audience`, `client_id`, `scopes`, and `display_name` when set; it is 404
   when no `[client]` is set.
+- The console's Content-Security-Policy allows the browser to call the issuer's
+  origin. If the provider's token endpoint is on another origin, list it in
+  `[client] connect_origins` (https, or http on loopback, and no path); it is never served
+  to clients.

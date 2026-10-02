@@ -30,7 +30,7 @@ jobs:
           toolchain: 1.96.1
       - name: Build community hosts
         run: |
-          cargo build --release --locked \
+          cargo build --release --locked --features ui \
             --bin tenkaictl \
             --bin tenkai-server \
             --bin tenkai-executor-guard \

@@ -42,6 +42,7 @@ it ([ADR 0001](decisions/0001-standalone-core-and-service-evolution.md),
 | Reference llama.cpp engine plugin (fake for CI) | [Model runtime](model-runtime.md); #64 |
 | Self-verifying offline bundles | [Offline bundles](offline-bundles.md); [ADR 0003](decisions/0003-canonical-offline-delivery-archives.md) |
 | Optional governance/intelligence provider ports | [Provider contracts](provider-contracts.md) |
+| Web console served at `/ui/` from a pinned, checksum-verified release (feature `ui`, on in release binaries) | [Open the web console](run-tenkai-server.md#open-the-web-console); [ADR 0031](decisions/0031-web-console.md); #463 |
 | OIDC access tokens with group-to-grant mapping, for the web console | [Configure server authentication](configure-server-authentication.md#oidc-access-tokens-468); [ADR 0031](decisions/0031-web-console.md); #468 |
 | Durable terminal outcome export to Chisei | [Provider contracts](provider-contracts.md#chisei-terminal-outcome-adapter-197); #197 |
 | Remote HTTP GateProvider library adapter (chisei-compatible JSON; not wired into shipped binaries) | [Provider contracts](provider-contracts.md#remote-gate-http-json-contract-113); #113 |
@@ -99,7 +100,6 @@ Postgres hub + multi-replica fencing) are landed on main. Remaining work is
 | Intelligence loop depth | Fail-closed prior policy; live remote OutcomeProvider history |
 | Executor / model depth | Peer/regional weight caches; additional engines (`kubernetes-inprocess` already shipped) |
 | Enterprise host | Live IdP drills, tenant-isolated prior stores (OIDC JWKS discovery and key rotation shipped in #468) |
-| Web console | Serve the pinned [tenkai-console](https://github.com/Sannrox/tenkai-console) bundle at `/ui/` behind a `ui` feature (#463); see [ADR 0031](decisions/0031-web-console.md) |
 | Local dogfood | [minikube path](local-dogfood-minikube.md): unsigned + signed multi-env (#152) + **software canary drill** (#154) landed; inventory → `env facts` drill still optional |
 
 Explicit non-priorities until measured need: Catalog service extraction

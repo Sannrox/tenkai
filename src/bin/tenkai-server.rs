@@ -95,6 +95,10 @@ struct Cli {
     /// Namespace admitted by the configured Chisei telemetry-writer policy.
     #[arg(long, env = "TENKAI_OUTCOME_NAMESPACE")]
     outcome_namespace: Option<String>,
+    /// Development only: serve a local console build at /ui/ instead of the
+    /// bundle embedded by feature `ui`.
+    #[arg(long)]
+    ui_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -409,6 +413,11 @@ async fn main() -> Result<()> {
         reconciler = reconciler.with_shared_fence(fence);
     }
     let reconciler = Arc::new(reconciler);
+    let ui_connect_origins = enterprise_auth
+        .oidc_client
+        .as_ref()
+        .map(|client| client.connect_origins.clone())
+        .unwrap_or_default();
     let app = router(
         ServerConfig {
             management_token,
@@ -443,6 +452,26 @@ async fn main() -> Result<()> {
         reconciler.clone(),
         store.clone(),
     )?;
+    let ui_source = match &cli.ui_dir {
+        Some(dir) => {
+            anyhow::ensure!(
+                dir.join("index.html").is_file(),
+                "--ui-dir {} has no index.html",
+                dir.display()
+            );
+            Some(tenkai::server::ui::UiSource::Directory(dir.clone()))
+        }
+        None => tenkai::server::ui::UiSource::embedded(),
+    };
+    let ui_description = match (&ui_source, &cli.ui_dir) {
+        (None, _) => None,
+        (Some(_), Some(dir)) => Some(format!("dir:{}", dir.display())),
+        (Some(_), None) => tenkai::server::ui::UiSource::embedded_tag().map(str::to_owned),
+    };
+    let app = match ui_source {
+        Some(source) => tenkai::server::ui::mount(app, source, &ui_connect_origins)?,
+        None => app,
+    };
     let listener = tokio::net::TcpListener::bind(cli.listen).await?;
     println!(
         "tenkai-server listening on {} profile={} capabilities={}",
@@ -450,6 +479,9 @@ async fn main() -> Result<()> {
         capabilities.profile,
         capabilities.diagnostic_names().join(",")
     );
+    if let Some(console) = ui_description {
+        println!("tenkai-server console at /ui/ source={console}");
+    }
 
     let interval = Duration::from_secs(cli.reconcile_interval);
     anyhow::ensure!(

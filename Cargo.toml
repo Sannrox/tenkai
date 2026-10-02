@@ -73,6 +73,9 @@ webpki-roots = { version = "1", optional = true }
 
 [features]
 default = []
+# Embed the pinned web console and serve it at /ui/ (ADR 0031).
+# Enable with: cargo build --features ui
+ui = ["dep:reqwest", "dep:zip"]
 # Enable with: cargo build --features postgres
 postgres = [
     "dep:postgres",
@@ -85,6 +88,9 @@ postgres = [
 [build-dependencies]
 tonic-prost-build = "0.14"
 protoc-bin-vendored = "3"
+sha2 = "0.10"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"], optional = true }
+zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
