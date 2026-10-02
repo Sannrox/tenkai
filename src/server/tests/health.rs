@@ -86,7 +86,11 @@ async fn management_env_list_requires_auth_and_returns_rows() {
         )
         .await
         .unwrap();
-    assert_eq!(bad.status(), StatusCode::FORBIDDEN);
+    assert_eq!(bad.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        bad.headers()["www-authenticate"],
+        "Bearer error=\"invalid_token\""
+    );
 
     let allowed = app
         .oneshot(

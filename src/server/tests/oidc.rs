@@ -26,6 +26,10 @@ capabilities = ["read"]
 value = "prod-operators"
 capabilities = ["read", "management"]
 environment = "prod"
+[[grants.rules]]
+value = "stage-operators"
+capabilities = ["management"]
+environment = "stage"
 "#
     ))
     .unwrap()
@@ -130,10 +134,7 @@ async fn bearer_access_tokens_authorize_reads_by_group() {
 
     let forged = token(&Signer::new("k1"), &["viewers"]);
     let (code, _) = status(&app, get("/v1/fleet/status", &forged)).await;
-    assert!(
-        code == StatusCode::FORBIDDEN || code == StatusCode::UNAUTHORIZED,
-        "{code}"
-    );
+    assert_eq!(code, StatusCode::UNAUTHORIZED);
 
     let (code, _) = status(&app, get("/v1/fleet/status", "management-secret")).await;
     assert_eq!(code, StatusCode::OK, "community tokens keep working");
@@ -177,4 +178,96 @@ async fn environment_bound_tokens_cannot_manage_other_environments() {
     .await;
     assert_eq!(code, StatusCode::FORBIDDEN, "{body}");
     assert!(body.contains("fleet-wide reconcile"), "{body}");
+}
+
+/// Rejected tokens are 401 with an RFC 6750 challenge so clients ask the user
+/// to sign in again; a valid token without a matching grant stays 403.
+#[tokio::test]
+async fn rejected_tokens_are_401_and_missing_grants_are_403() {
+    let signer = Signer::new("k1");
+    let app = oidc_app(&signer);
+    let now = crate::assertion_verifier::now_unix_secs();
+    let signed = |signer: &Signer, claims: serde_json::Value| {
+        String::from_utf8(signer.sign(&claims)).unwrap()
+    };
+    let claims = |overrides: serde_json::Value| {
+        let mut claims = serde_json::json!({
+            "iss": ISSUER, "sub": "user-1", "aud": "tenkai",
+            "exp": now + 300, "groups": ["viewers"],
+        });
+        for (key, value) in overrides.as_object().unwrap() {
+            claims[key] = value.clone();
+        }
+        claims
+    };
+    for (case, bearer) in [
+        (
+            "expired",
+            signed(&signer, claims(serde_json::json!({"exp": now - 600}))),
+        ),
+        (
+            "not yet valid",
+            signed(&signer, claims(serde_json::json!({"nbf": now + 600}))),
+        ),
+        (
+            "wrong issuer",
+            signed(
+                &signer,
+                claims(serde_json::json!({"iss": "https://other.example/realms/ops"})),
+            ),
+        ),
+        (
+            "wrong audience",
+            signed(&signer, claims(serde_json::json!({"aud": "account"}))),
+        ),
+        (
+            "unknown key",
+            signed(&Signer::new("k2"), claims(serde_json::json!({}))),
+        ),
+        (
+            "unknown community token",
+            "not-a-configured-token".to_string(),
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(get("/v1/fleet/status", &bearer))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{case}");
+        assert_eq!(
+            response.headers()["www-authenticate"],
+            "Bearer error=\"invalid_token\"",
+            "{case}"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            body.as_ref(),
+            br#"{"error":"invalid management credential"}"#,
+            "{case}: body must not disclose which check failed"
+        );
+    }
+
+    let response = app
+        .clone()
+        .oneshot(get("/v1/fleet/status", &token(&signer, &["strangers"])))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(response.headers().get("www-authenticate").is_none());
+
+    // Valid token, but its groups confine management to two environments:
+    // a grant conflict the user cannot fix by signing in again.
+    let response = app
+        .clone()
+        .oneshot(get(
+            "/v1/fleet/status",
+            &token(&signer, &["prod-operators", "stage-operators"]),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(response.headers().get("www-authenticate").is_none());
 }

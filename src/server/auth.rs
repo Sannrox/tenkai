@@ -222,7 +222,9 @@ fn management_credential(headers: &HeaderMap) -> Result<CredentialMaterial, Mana
                 .map(|token| token.as_bytes().to_vec())
         });
     if bearer_token.is_none() && assertion.is_none() {
-        return Err(ManagementError::Unauthorized("missing bearer token".into()));
+        return Err(ManagementError::Unauthorized(
+            crate::management_operations::MISSING_CREDENTIAL.into(),
+        ));
     }
     let request_id = headers
         .get("x-request-id")

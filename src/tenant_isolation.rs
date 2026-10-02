@@ -529,7 +529,7 @@ impl EnterpriseAuthExtension for HarnessEnterpriseAuth {
             }
             "expired" => return Err(AuthError::Unauthorized("assertion expired".into())),
             "suspended" => {
-                return Err(AuthError::Unauthorized("tenant suspended".into()));
+                return Err(AuthError::Forbidden("tenant suspended".into()));
             }
             "revoked" => {
                 return Err(AuthError::Unauthorized("credential revoked".into()));
@@ -546,7 +546,7 @@ impl EnterpriseAuthExtension for HarnessEnterpriseAuth {
             .expect("suspend mutex")
             .contains(&assertion.tenant_id)
         {
-            return Err(AuthError::Unauthorized("tenant suspended".into()));
+            return Err(AuthError::Forbidden("tenant suspended".into()));
         }
         if self
             .revoked_principals
@@ -559,7 +559,7 @@ impl EnterpriseAuthExtension for HarnessEnterpriseAuth {
         if assertion.tenant_id != self.fixture.tenant_a.tenant_id
             && assertion.tenant_id != self.fixture.tenant_b.tenant_id
         {
-            return Err(AuthError::Unauthorized("unknown tenant".into()));
+            return Err(AuthError::Forbidden("unknown tenant".into()));
         }
         AuthenticatedRequestContextBuilder::new(
             credential.request_id.clone(),

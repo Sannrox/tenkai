@@ -60,6 +60,11 @@ impl TenantEnvironmentView for ReconcileTenantEnvironmentView {
     }
 }
 
+/// Non-disclosing body for every rejected management credential.
+pub(crate) const INVALID_CREDENTIAL: &str = "invalid management credential";
+/// Body when no bearer token or assertion was sent.
+pub(crate) const MISSING_CREDENTIAL: &str = "missing bearer token";
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ManagementError {
     #[error("{0}")]
@@ -130,12 +135,20 @@ impl ManagementOperations {
                 }
                 Ok(context)
             }
-            Err(crate::auth_context::AuthError::Unauthorized(_)) => Err(
-                ManagementError::Forbidden("invalid management credential".into()),
-            ),
-            Err(crate::auth_context::AuthError::InvalidCredential(_)) => Err(
-                ManagementError::Unauthorized("invalid management credential".into()),
-            ),
+            // A rejected credential (unknown, expired, wrong issuer or audience,
+            // bad signature) is an authentication failure: 401, so clients
+            // prompt for new credentials. A valid credential the authenticator
+            // refuses to admit (grant conflict, tenant) stays 403, like a
+            // missing capability; signing in again would not help.
+            Err(crate::auth_context::AuthError::Unauthorized(_)) => {
+                Err(ManagementError::Unauthorized(INVALID_CREDENTIAL.into()))
+            }
+            Err(crate::auth_context::AuthError::InvalidCredential(_)) => {
+                Err(ManagementError::Unauthorized(INVALID_CREDENTIAL.into()))
+            }
+            Err(crate::auth_context::AuthError::Forbidden(_)) => {
+                Err(ManagementError::Forbidden(INVALID_CREDENTIAL.into()))
+            }
             Err(error) => {
                 eprintln!("management authentication failed: {error}");
                 Err(ManagementError::Forbidden(
