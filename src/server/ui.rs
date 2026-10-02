@@ -154,7 +154,41 @@ async fn serve(State(state): State<Arc<UiState>>, uri: Uri) -> Response {
             "no-cache"
         }),
     );
+    let body = if name == "index.html" {
+        with_relative_base(body, requested)
+    } else {
+        body
+    };
     (StatusCode::OK, headers, body).into_response()
+}
+
+/// The bundle uses relative URLs (`./assets/…`) so it works under any proxy
+/// sub-path. A nested route such as `auth/callback` would resolve them against
+/// `/ui/auth/`, so the app shell gets a `<base href>` that climbs back to the
+/// console root by request depth. It never names the external prefix, and only
+/// `index.html` is changed; a bundle that declares its own `<base>` is left alone.
+fn with_relative_base(html: Vec<u8>, requested: &str) -> Vec<u8> {
+    let depth = requested.matches('/').count();
+    if depth == 0 {
+        return html;
+    }
+    let Ok(text) = std::str::from_utf8(&html) else {
+        return html;
+    };
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("<base") {
+        return html;
+    }
+    let Some(head) = lower.find("<head>") else {
+        return html;
+    };
+    let insert_at = head + "<head>".len();
+    let base = format!("<base href=\"{}\">", "../".repeat(depth));
+    let mut out = String::with_capacity(text.len() + base.len());
+    out.push_str(&text[..insert_at]);
+    out.push_str(&base);
+    out.push_str(&text[insert_at..]);
+    out.into_bytes()
 }
 
 /// Only plain relative names (no `..`, root, or prefix) may reach a source.
@@ -202,7 +236,7 @@ mod tests {
         std::fs::create_dir_all(root.join("assets")).unwrap();
         std::fs::write(
             root.join("index.html"),
-            "<!doctype html><title>Tenkai</title>",
+            "<!doctype html><html><head><title>Tenkai</title><script type=\"module\" src=\"./assets/index-abc.js\"></script></head></html>",
         )
         .unwrap();
         std::fs::write(root.join("assets/index-abc.js"), "export {}").unwrap();
@@ -321,6 +355,61 @@ mod tests {
                 .is_none()
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    async fn body(response: Response) -> String {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn nested_routes_get_a_depth_relative_base_so_assets_resolve() {
+        let root = console_dir();
+        let app = app(&root);
+        for (path, base) in [
+            ("/ui/", None),
+            ("/ui/releases", None),
+            ("/ui/auth/callback", Some("../")),
+            ("/ui/environments/prod/plan", Some("../../")),
+            ("/ui/environments/prod/", Some("../../")),
+        ] {
+            let html = body(call(&app, Method::GET, path).await).await;
+            match base {
+                None => assert!(!html.contains("<base"), "{path}: {html}"),
+                Some(base) => {
+                    assert!(
+                        html.starts_with(&format!(
+                            "<!doctype html><html><head><base href=\"{base}\"><title>"
+                        )),
+                        "{path}: {html}"
+                    );
+                    // Resolve the script like a browser: page URL, then base, then src.
+                    let page = url::Url::parse("https://tenkai.example/proxy")
+                        .unwrap()
+                        .join(&format!("proxy{path}"))
+                        .unwrap();
+                    let script = page
+                        .join(base)
+                        .unwrap()
+                        .join("./assets/index-abc.js")
+                        .unwrap();
+                    assert_eq!(script.path(), "/proxy/ui/assets/index-abc.js", "{path}");
+                }
+            }
+        }
+        let asset = body(call(&app, Method::GET, "/ui/assets/index-abc.js").await).await;
+        assert_eq!(asset, "export {}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn existing_base_or_missing_head_is_left_alone() {
+        let declared = b"<html><head><base href=\"/x/\"></head></html>".to_vec();
+        assert_eq!(with_relative_base(declared.clone(), "a/b"), declared);
+        let headless = b"<html><body></body></html>".to_vec();
+        assert_eq!(with_relative_base(headless.clone(), "a/b"), headless);
     }
 
     #[cfg(feature = "ui")]
