@@ -62,7 +62,10 @@ Release binaries of `tenkai-server` embed the
 on the API's origin; `GET /` redirects there. Open
 `http://127.0.0.1:8080/ui/`, or the matching URL behind your TLS proxy. The
 console works at `/ui/` and under a proxy sub-path (`/<prefix>/ui/`) because
-the redirect and every console URL are relative. It signs in with OIDC when
+the redirect and every console URL are relative. For nested console routes,
+such as the OIDC callback `/ui/auth/callback`, the server adds a relative
+`<base href>` (for example `../`) to `index.html` so those relative URLs still
+resolve to `/ui/`; it changes nothing else in the bundle. It signs in with OIDC when
 `TENKAI_OIDC_CONFIG` has a `[client]` section, and otherwise asks for a bearer
 token, which it keeps in memory for the tab.
 
