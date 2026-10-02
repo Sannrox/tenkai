@@ -106,6 +106,8 @@ environment = "prod"         # confine management to one environment
 
 Behavior:
 
+- For a worked example with Keycloak, including the identity-provider side,
+  see [sign in to the web console with Keycloak](console-sign-in-with-keycloak.md).
 - Clients send the access token as `Authorization: Bearer`. A compact-JWS
   bearer is offered to the extension; configured community tokens still take
   precedence.
