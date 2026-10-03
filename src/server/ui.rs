@@ -5,10 +5,12 @@
 //! feature `ui` embed the pinned, checksum-verified release; `--ui-dir` serves a
 //! local build instead for console development.
 
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use axum::Router;
+use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Redirect, Response};
@@ -52,26 +54,46 @@ impl UiSource {
             None
         }
     }
+}
 
-    fn read(&self, name: &str) -> Option<Vec<u8>> {
+/// Console files resolved once at mount. Embedded names map to static bytes,
+/// so a hit is one hash lookup and the body is served without copying.
+enum Files {
+    Embedded(HashMap<&'static str, Bytes>),
+    Directory(PathBuf),
+}
+
+impl Files {
+    fn new(source: UiSource) -> Self {
+        match source {
+            UiSource::Embedded(files) => Self::Embedded(
+                files
+                    .iter()
+                    .map(|(name, bytes)| (*name, Bytes::from_static(bytes)))
+                    .collect(),
+            ),
+            UiSource::Directory(root) => Self::Directory(root),
+        }
+    }
+
+    fn read(&self, name: &str) -> Option<Bytes> {
         match self {
-            Self::Embedded(files) => files
-                .iter()
-                .find(|(file, _)| *file == name)
-                .map(|(_, bytes)| bytes.to_vec()),
+            Self::Embedded(files) => files.get(name).cloned(),
             Self::Directory(root) => {
                 if !is_plain_relative(name) {
                     return None;
                 }
                 let path = root.join(name);
-                path.is_file().then(|| std::fs::read(path).ok()).flatten()
+                path.is_file()
+                    .then(|| std::fs::read(path).ok().map(Bytes::from))
+                    .flatten()
             }
         }
     }
 }
 
 struct UiState {
-    source: UiSource,
+    files: Files,
     csp: HeaderValue,
 }
 
@@ -84,7 +106,7 @@ pub fn mount(
     connect_origins: &[String],
 ) -> anyhow::Result<Router> {
     let state = Arc::new(UiState {
-        source,
+        files: Files::new(source),
         csp: HeaderValue::from_str(&content_security_policy(connect_origins))?,
     });
     let ui = Router::new()
@@ -132,12 +154,12 @@ async fn serve(State(state): State<Arc<UiState>>, uri: Uri) -> Response {
     if !requested.is_empty() && !is_plain_relative(requested) {
         return (StatusCode::NOT_FOUND, headers).into_response();
     }
-    let (name, body) = match state.source.read(requested) {
+    let (name, body) = match state.files.read(requested) {
         Some(body) => (requested, body),
         None if is_asset_path(requested) => {
             return (StatusCode::NOT_FOUND, headers).into_response();
         }
-        None => match state.source.read("index.html") {
+        None => match state.files.read("index.html") {
             Some(body) => ("index.html", body),
             None => return (StatusCode::NOT_FOUND, headers).into_response(),
         },
@@ -167,7 +189,7 @@ async fn serve(State(state): State<Arc<UiState>>, uri: Uri) -> Response {
 /// `/ui/auth/`, so the app shell gets a `<base href>` that climbs back to the
 /// console root by request depth. It never names the external prefix, and only
 /// `index.html` is changed; a bundle that declares its own `<base>` is left alone.
-fn with_relative_base(html: Vec<u8>, requested: &str) -> Vec<u8> {
+fn with_relative_base(html: Bytes, requested: &str) -> Bytes {
     let depth = requested.matches('/').count();
     if depth == 0 {
         return html;
@@ -188,7 +210,7 @@ fn with_relative_base(html: Vec<u8>, requested: &str) -> Vec<u8> {
     out.push_str(&text[..insert_at]);
     out.push_str(&base);
     out.push_str(&text[insert_at..]);
-    out.into_bytes()
+    Bytes::from(out)
 }
 
 /// Only plain relative names (no `..`, root, or prefix) may reach a source.
@@ -406,17 +428,58 @@ mod tests {
 
     #[test]
     fn existing_base_or_missing_head_is_left_alone() {
-        let declared = b"<html><head><base href=\"/x/\"></head></html>".to_vec();
+        let declared = Bytes::from_static(b"<html><head><base href=\"/x/\"></head></html>");
         assert_eq!(with_relative_base(declared.clone(), "a/b"), declared);
-        let headless = b"<html><body></body></html>".to_vec();
+        let headless = Bytes::from_static(b"<html><body></body></html>");
         assert_eq!(with_relative_base(headless.clone(), "a/b"), headless);
+    }
+
+    const EMBEDDED: &[(&str, &[u8])] = &[
+        (
+            "index.html",
+            b"<!doctype html><html><head><title>Tenkai</title></head></html>",
+        ),
+        ("assets/index-abc.js", b"export {}"),
+    ];
+
+    #[test]
+    fn embedded_reads_borrow_the_static_bundle_without_copying() {
+        let files = Files::new(UiSource::Embedded(EMBEDDED));
+        for (name, bytes) in EMBEDDED {
+            for _ in 0..2 {
+                let read = files.read(name).unwrap();
+                assert_eq!(read.as_ptr(), bytes.as_ptr(), "{name}");
+                assert_eq!(read.len(), bytes.len(), "{name}");
+            }
+        }
+        assert!(files.read("assets/missing.js").is_none());
+    }
+
+    #[tokio::test]
+    async fn embedded_source_serves_assets_index_and_spa_fallback() {
+        let app = mount(Router::new(), UiSource::Embedded(EMBEDDED), &[]).unwrap();
+        let asset = call(&app, Method::GET, "/ui/assets/index-abc.js").await;
+        assert_eq!(asset.status(), StatusCode::OK);
+        assert_eq!(body(asset).await, "export {}");
+        for path in ["/ui/", "/ui/releases"] {
+            let response = call(&app, Method::GET, path).await;
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert_eq!(
+                body(response).await,
+                std::str::from_utf8(EMBEDDED[0].1).unwrap()
+            );
+        }
+        let nested = body(call(&app, Method::GET, "/ui/auth/callback").await).await;
+        assert!(nested.contains("<head><base href=\"../\">"), "{nested}");
+        let missing = call(&app, Method::GET, "/ui/assets/missing.js").await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
     }
 
     #[cfg(feature = "ui")]
     #[test]
     fn embedded_bundle_has_an_index() {
         let source = UiSource::embedded().expect("feature ui embeds the console");
-        assert!(source.read("index.html").is_some());
+        assert!(Files::new(source).read("index.html").is_some());
         assert!(UiSource::embedded_tag().unwrap().starts_with('v'));
     }
 }
