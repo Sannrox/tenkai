@@ -90,8 +90,10 @@ from the handlers' serde types; `make update` regenerates it and
 `make validate` fails when it is stale. Each release attaches it next to the
 binaries, covered by `SHA256SUMS` and the attestation. `/healthz` lists the
 contract ids a server serves in `contracts`, so clients can refuse an older
-server before calling anything else. Additive changes keep `v1`; a breaking
-change needs a new id. The pull runtime keeps its own contract in
+server before calling anything else. A response property outside `required`
+whose schema does not admit `null` is omitted when unset, never sent as
+`null`; request properties may be `null` or omitted. Additive changes keep
+`v1`; a breaking change needs a new id. The pull runtime keeps its own contract in
 [runtime protocol](runtime-protocol-v1.md).
 
 ## See also

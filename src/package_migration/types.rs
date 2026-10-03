@@ -112,6 +112,7 @@ pub struct CheckpointReceipt {
     pub result: String,
     pub fence_generation: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::server::contract::omitted_when_none)]
     pub plan_id: Option<String>,
 }
 
@@ -121,6 +122,7 @@ pub struct MigrationRecord {
     pub name: String,
     pub environment: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::server::contract::omitted_when_none)]
     pub partition: Option<String>,
     pub identity_digest: String,
     pub declaration: MigrationDeclaration,
@@ -129,10 +131,13 @@ pub struct MigrationRecord {
     pub status: MigrationStatus,
     pub receipts: Vec<CheckpointReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::server::contract::omitted_when_none)]
     pub backup_receipt_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::server::contract::omitted_when_none)]
     pub pending_plan_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::server::contract::omitted_when_none)]
     pub pending_rollback_plan_id: Option<String>,
 }
 
