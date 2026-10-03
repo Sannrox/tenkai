@@ -1,24 +1,5 @@
 use super::*;
 
-pub(super) fn import_objects_in(tx: &Transaction<'_>, objects: &[Object]) -> Result<()> {
-    let mut ordered = objects.to_vec();
-    ordered.sort_by_key(|object| authority_rank(&object.kind));
-    for object in &ordered {
-        upsert_object_in(tx, object, "tenkai")?;
-    }
-    Ok(())
-}
-
-pub(super) fn authority_rank(kind: &str) -> u8 {
-    match kind {
-        KIND_ENVIRONMENT => 0,
-        KIND_RELEASE => 1,
-        KIND_CHANNEL => 2,
-        KIND_PLAN => 3,
-        _ => 4,
-    }
-}
-
 pub(super) fn upsert_object_in(
     tx: &Transaction<'_>,
     object: &Object,
