@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use axum::Router;
 use axum::body::Bytes;
@@ -92,8 +92,45 @@ impl Files {
     }
 }
 
+/// Request depths whose rewritten app shell is kept. Deeper routes are rare
+/// and rebuilt per request, so the cache stays bounded whatever paths arrive.
+const CACHED_DEPTHS: usize = 8;
+
+/// The embedded app shell. Where `<base>` goes is found once at mount, and
+/// each rewritten depth is built on first use and then shared.
+struct Shell {
+    html: Bytes,
+    insert_at: Option<usize>,
+    by_depth: [OnceLock<Bytes>; CACHED_DEPTHS],
+}
+
+impl Shell {
+    fn new(html: Bytes) -> Self {
+        Self {
+            insert_at: base_insert_offset(&html),
+            html,
+            by_depth: Default::default(),
+        }
+    }
+
+    fn for_request(&self, requested: &str) -> Bytes {
+        let depth = requested.matches('/').count();
+        let Some(at) = self.insert_at.filter(|_| depth > 0) else {
+            return self.html.clone();
+        };
+        match self.by_depth.get(depth - 1) {
+            Some(slot) => slot
+                .get_or_init(|| insert_base(&self.html, at, depth))
+                .clone(),
+            None => insert_base(&self.html, at, depth),
+        }
+    }
+}
+
 struct UiState {
     files: Files,
+    /// Present for the embedded bundle; a `--ui-dir` index may change on disk.
+    shell: Option<Shell>,
     csp: HeaderValue,
 }
 
@@ -105,8 +142,14 @@ pub fn mount(
     source: UiSource,
     connect_origins: &[String],
 ) -> anyhow::Result<Router> {
+    let files = Files::new(source);
+    let shell = match files {
+        Files::Embedded(_) => files.read("index.html").map(Shell::new),
+        Files::Directory(_) => None,
+    };
     let state = Arc::new(UiState {
-        files: Files::new(source),
+        files,
+        shell,
         csp: HeaderValue::from_str(&content_security_policy(connect_origins))?,
     });
     let ui = Router::new()
@@ -177,7 +220,10 @@ async fn serve(State(state): State<Arc<UiState>>, uri: Uri) -> Response {
         }),
     );
     let body = if name == "index.html" {
-        with_relative_base(body, requested)
+        match &state.shell {
+            Some(shell) => shell.for_request(requested),
+            None => with_relative_base(body, requested),
+        }
     } else {
         body
     };
@@ -191,25 +237,35 @@ async fn serve(State(state): State<Arc<UiState>>, uri: Uri) -> Response {
 /// `index.html` is changed; a bundle that declares its own `<base>` is left alone.
 fn with_relative_base(html: Bytes, requested: &str) -> Bytes {
     let depth = requested.matches('/').count();
-    if depth == 0 {
-        return html;
+    match base_insert_offset(&html) {
+        Some(at) if depth > 0 => insert_base(&html, at, depth),
+        _ => html,
     }
-    let Ok(text) = std::str::from_utf8(&html) else {
-        return html;
-    };
-    let lower = text.to_ascii_lowercase();
-    if lower.contains("<base") {
-        return html;
+}
+
+/// Byte offset just after `<head>`, or `None` when the shell declares its own
+/// `<base>` or has no `<head>`. Tags match ASCII case-insensitively in place,
+/// without decoding or lowercasing a copy of the document.
+fn base_insert_offset(html: &[u8]) -> Option<usize> {
+    if find_ignore_ascii_case(html, b"<base").is_some() {
+        return None;
     }
-    let Some(head) = lower.find("<head>") else {
-        return html;
-    };
-    let insert_at = head + "<head>".len();
+    find_ignore_ascii_case(html, b"<head>").map(|at| at + b"<head>".len())
+}
+
+fn find_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window.eq_ignore_ascii_case(needle))
+}
+
+/// One copy: the shell with `<base href="../…">` for `depth` spliced in at `at`.
+fn insert_base(html: &[u8], at: usize, depth: usize) -> Bytes {
     let base = format!("<base href=\"{}\">", "../".repeat(depth));
-    let mut out = String::with_capacity(text.len() + base.len());
-    out.push_str(&text[..insert_at]);
-    out.push_str(&base);
-    out.push_str(&text[insert_at..]);
+    let mut out = Vec::with_capacity(html.len() + base.len());
+    out.extend_from_slice(&html[..at]);
+    out.extend_from_slice(base.as_bytes());
+    out.extend_from_slice(&html[at..]);
     Bytes::from(out)
 }
 
@@ -432,6 +488,48 @@ mod tests {
         assert_eq!(with_relative_base(declared.clone(), "a/b"), declared);
         let headless = Bytes::from_static(b"<html><body></body></html>");
         assert_eq!(with_relative_base(headless.clone(), "a/b"), headless);
+        let upper = Bytes::from_static(b"<HTML><HEAD><BASE HREF=\"/x/\"></HEAD></HTML>");
+        assert_eq!(with_relative_base(upper.clone(), "a/b"), upper);
+        let mixed = Bytes::from_static(b"<html><Head><title>\xc3\xa9</title></Head></html>");
+        assert_eq!(
+            with_relative_base(mixed, "a/b"),
+            Bytes::from_static(
+                b"<html><Head><base href=\"../\"><title>\xc3\xa9</title></Head></html>"
+            )
+        );
+    }
+
+    #[test]
+    fn shell_rewrites_each_cached_depth_once_and_bounds_the_cache() {
+        let shell = Shell::new(Bytes::from_static(b"<html><head></head></html>"));
+        assert_eq!(shell.for_request("releases").as_ptr(), shell.html.as_ptr());
+        let first = shell.for_request("auth/callback");
+        assert_eq!(&first[..], b"<html><head><base href=\"../\"></head></html>");
+        assert_eq!(
+            shell.for_request("environments/prod").as_ptr(),
+            first.as_ptr()
+        );
+        let deepest = "a/".repeat(CACHED_DEPTHS);
+        assert_eq!(
+            shell.for_request(&deepest).as_ptr(),
+            shell.for_request(&deepest).as_ptr()
+        );
+        let beyond = "a/".repeat(CACHED_DEPTHS + 1);
+        let rebuilt = shell.for_request(&beyond);
+        assert_ne!(rebuilt.as_ptr(), shell.for_request(&beyond).as_ptr());
+        assert!(
+            rebuilt.starts_with(
+                format!(
+                    "<html><head><base href=\"{}\">",
+                    "../".repeat(CACHED_DEPTHS + 1)
+                )
+                .as_bytes()
+            )
+        );
+        let declared = Shell::new(Bytes::from_static(
+            b"<html><head><base href=\"/\"></head></html>",
+        ));
+        assert_eq!(declared.for_request("a/b").as_ptr(), declared.html.as_ptr());
     }
 
     const EMBEDDED: &[(&str, &[u8])] = &[
