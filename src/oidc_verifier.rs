@@ -92,6 +92,7 @@ pub struct OidcClientDiscovery {
     pub client_id: String,
     pub scopes: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::server::contract::omitted_when_none)]
     pub display_name: Option<String>,
     /// Host-side only: browser `connect-src` origins (issuer first).
     #[serde(skip)]

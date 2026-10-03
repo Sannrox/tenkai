@@ -891,6 +891,7 @@ pub struct EnvironmentInspectReport {
     /// Maintenance windows and their eligibility at inspect time. Absent for
     /// projections that do not read Tenkai-owned environment configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::server::contract::omitted_when_none)]
     pub maintenance: Option<EnvironmentMaintenanceInspect>,
     /// Environment constraints (`version_pin`, `version_range`, `require_fact`).
     #[serde(default)]
@@ -903,18 +904,22 @@ pub struct EnvironmentInspectReport {
     pub execution_note: String,
     /// Observed type digest used for workshop-module compatibility admission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::server::contract::omitted_when_none)]
     pub observed_type_digest: Option<String>,
     /// Observed runtime digest used for workshop-module compatibility admission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::server::contract::omitted_when_none)]
     pub observed_runtime_digest: Option<String>,
     /// Accepted workshop-module activation receipts for this environment.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub module_activations: Vec<crate::workshop_module::ModuleActivationReceipt>,
     /// Present only for preview environments bound to a branch pin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::server::contract::omitted_when_none)]
     pub preview: Option<crate::preview::PreviewInspect>,
     /// Present after this environment has been retired from operational use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::server::contract::omitted_when_none)]
     pub retirement: Option<EnvironmentRetirement>,
 }
 
@@ -929,12 +934,15 @@ pub struct EnvironmentMaintenanceInspect {
     pub eligibility: String,
     /// When `open`: end of the current window, in Unix milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::server::contract::omitted_when_none)]
     pub open_until_ms: Option<i64>,
     /// When `closed`: next opening of any window, in Unix milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::server::contract::omitted_when_none)]
     pub next_opens_at_ms: Option<i64>,
     /// When `invalid`: why the configuration cannot be evaluated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::server::contract::omitted_when_none)]
     pub detail: Option<String>,
     pub windows: Vec<EnvironmentMaintenanceWindow>,
 }
@@ -952,6 +960,7 @@ pub struct EnvironmentMaintenanceWindow {
     /// Next start of this window strictly after inspect time, in Unix
     /// milliseconds; absent when the window cannot be evaluated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::server::contract::omitted_when_none)]
     pub next_opens_at_ms: Option<i64>,
 }
 
@@ -990,6 +999,7 @@ pub struct EnvironmentPlanSummary {
     /// the plan route returns and approvals bind to. Absent for projections
     /// without an executable plan, such as development fixtures.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::server::contract::omitted_when_none)]
     pub digest: Option<String>,
     /// Bounded operator-facing lifecycle detail; never contains executable payloads.
     #[serde(default)]
