@@ -55,8 +55,10 @@ pub struct PreviewInspect {
     pub expires_at: i64,
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::server::contract::omitted_when_none)]
     pub teardown_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::server::contract::omitted_when_none)]
     pub teardown_at: Option<i64>,
 }
 

@@ -241,10 +241,7 @@
           "type": "integer"
         },
         "plan_id": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "result": {
           "type": "string"
@@ -352,14 +349,7 @@
           "$ref": "#/$defs/EnvironmentLeaseInspect"
         },
         "maintenance": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/EnvironmentMaintenanceInspect"
-            },
-            {
-              "type": "null"
-            }
-          ],
+          "$ref": "#/$defs/EnvironmentMaintenanceInspect",
           "description": "Maintenance windows and their eligibility at inspect time. Absent for\nprojections that do not read Tenkai-owned environment configuration."
         },
         "module_activations": {
@@ -374,17 +364,11 @@
         },
         "observed_runtime_digest": {
           "description": "Observed runtime digest used for workshop-module compatibility admission.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "observed_type_digest": {
           "description": "Observed type digest used for workshop-module compatibility admission.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "overlays": {
           "additionalProperties": {
@@ -395,25 +379,11 @@
           "type": "object"
         },
         "preview": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/PreviewInspect"
-            },
-            {
-              "type": "null"
-            }
-          ],
+          "$ref": "#/$defs/PreviewInspect",
           "description": "Present only for preview environments bound to a branch pin."
         },
         "retirement": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/EnvironmentRetirement"
-            },
-            {
-              "type": "null"
-            }
-          ],
+          "$ref": "#/$defs/EnvironmentRetirement",
           "description": "Present after this environment has been retired from operational use."
         },
         "subscriptions": {
@@ -522,10 +492,7 @@
       "properties": {
         "detail": {
           "description": "When `invalid`: why the configuration cannot be evaluated.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "eligibility": {
           "description": "`unrestricted` (no environment windows), `open`, `closed`, or\n`invalid`. Invalid configuration blocks apply until it is corrected.",
@@ -534,18 +501,12 @@
         "next_opens_at_ms": {
           "description": "When `closed`: next opening of any window, in Unix milliseconds.",
           "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
+          "type": "integer"
         },
         "open_until_ms": {
           "description": "When `open`: end of the current window, in Unix milliseconds.",
           "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
+          "type": "integer"
         },
         "windows": {
           "items": {
@@ -573,10 +534,7 @@
         "next_opens_at_ms": {
           "description": "Next start of this window strictly after inspect time, in Unix\nmilliseconds; absent when the window cannot be evaluated.",
           "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
+          "type": "integer"
         },
         "start": {
           "description": "Local wall-clock start in HH:MM form.",
@@ -652,10 +610,7 @@
         },
         "digest": {
           "description": "`sha256:` digest of the versioned executable-plan encoding, the value\nthe plan route returns and approvals bind to. Absent for projections\nwithout an executable plan, such as development fixtures.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "id": {
           "type": "string"
@@ -1047,10 +1002,7 @@
       "description": "Versioned result shared by catalog lifecycle routes.",
       "properties": {
         "digest": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "message": {
           "type": "string"
@@ -1059,10 +1011,7 @@
           "type": "string"
         },
         "resource": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "version": {
           "format": "uint32",
@@ -1175,10 +1124,7 @@
           "type": "string"
         },
         "backup_receipt_digest": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "declaration": {
           "$ref": "#/$defs/MigrationDeclaration"
@@ -1198,22 +1144,13 @@
           "type": "string"
         },
         "partition": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "pending_plan_id": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "pending_rollback_plan_id": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "receipts": {
           "items": {
@@ -1310,10 +1247,7 @@
           "type": "string"
         },
         "display_name": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "issuer": {
           "type": "string"
@@ -1567,16 +1501,10 @@
         },
         "teardown_at": {
           "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
+          "type": "integer"
         },
         "teardown_reason": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         }
       },
       "required": [
