@@ -53,3 +53,13 @@ pub fn enterprise_postgres_hub_profile(
 pub fn postgres_feature_enabled() -> bool {
     cfg!(feature = "postgres")
 }
+
+/// Cargo features compiled into this crate, reported by `tenkai-server --help`.
+pub fn compiled_host_feature_report() -> &'static str {
+    match (cfg!(feature = "postgres"), cfg!(feature = "ui")) {
+        (true, true) => "Compiled features: postgres, ui",
+        (true, false) => "Compiled features: postgres",
+        (false, true) => "Compiled features: ui",
+        (false, false) => "Compiled features: (none)",
+    }
+}

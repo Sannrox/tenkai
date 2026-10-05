@@ -4,11 +4,15 @@
 # Usage:
 #   scripts/package-release-binaries.sh package --out DIR [--bin-dir DIR]
 #       [--platform ID] [--strip]
+#   scripts/package-release-binaries.sh package-hub --out DIR [--bin-dir DIR]
+#       [--platform ID] [--strip]
 #   scripts/package-release-binaries.sh checksums --out DIR [--require-complete]
 #   scripts/package-release-binaries.sh self-test
 #
-# Hosts: tenkaictl, tenkai-server, tenkai-executor-guard, tenkai-runtime,
-# tenkai-runtime-guard. Platforms: linux-x86_64, darwin-aarch64.
+# Community hosts: tenkaictl, tenkai-server, tenkai-executor-guard,
+# tenkai-runtime, tenkai-runtime-guard. Hub host asset:
+# tenkai-server-postgres-<platform> (built with --features postgres,ui).
+# Platforms: linux-x86_64, darwin-aarch64.
 # The HTTP API contract (api/tenkai-http-v1.schema.json) is attached and
 # checksummed with them. These files are GitHub Release packaging, not
 # Catalog artifacts.
@@ -16,12 +20,13 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOSTS=(tenkaictl tenkai-server tenkai-executor-guard tenkai-runtime tenkai-runtime-guard)
+HUB_SERVER_ASSET=tenkai-server-postgres
 PLATFORMS=(linux-x86_64 darwin-aarch64)
 CHECKSUMS_NAME=SHA256SUMS
 CONTRACT_ASSETS=(tenkai-http-v1.schema.json)
 
 usage() {
-  sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-2}"
 }
 
@@ -55,6 +60,10 @@ packaged_name() {
   printf '%s-%s\n' "$1" "$2"
 }
 
+packaged_hub_name() {
+  printf '%s-%s\n' "$HUB_SERVER_ASSET" "$1"
+}
+
 is_packaged_name() {
   local name="$1" host platform asset
   for asset in "${CONTRACT_ASSETS[@]}"; do
@@ -69,6 +78,11 @@ is_packaged_name() {
       fi
     done
   done
+  for platform in "${PLATFORMS[@]}"; do
+    if [[ "$name" == "$(packaged_hub_name "$platform")" ]]; then
+      return 0
+    fi
+  done
   return 1
 }
 
@@ -79,6 +93,9 @@ complete_names() {
     for platform in "${PLATFORMS[@]}"; do
       packaged_name "$host" "$platform"
     done
+  done
+  for platform in "${PLATFORMS[@]}"; do
+    packaged_hub_name "$platform"
   done
 }
 
@@ -193,6 +210,64 @@ cmd_package() {
   done
 }
 
+cmd_package_hub() {
+  local out="" bin_dir="${ROOT}/target/release" platform="" do_strip=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --out)
+        [[ $# -ge 2 ]] || fail "--out requires a directory"
+        out="$2"
+        shift 2
+        ;;
+      --bin-dir)
+        [[ $# -ge 2 ]] || fail "--bin-dir requires a directory"
+        bin_dir="$2"
+        shift 2
+        ;;
+      --platform)
+        [[ $# -ge 2 ]] || fail "--platform requires an id"
+        platform="$2"
+        shift 2
+        ;;
+      --strip)
+        do_strip=true
+        shift
+        ;;
+      -h | --help) usage 0 ;;
+      *) fail "unknown package-hub argument: $1" ;;
+    esac
+  done
+  [[ -n "$out" ]] || fail "package-hub requires --out"
+  [[ -d "$bin_dir" ]] || fail "bin directory does not exist: ${bin_dir}"
+
+  local host_platform
+  host_platform="$(detect_platform)"
+  if [[ -z "$platform" ]]; then
+    platform="$host_platform"
+  fi
+  is_platform "$platform" || fail "unknown platform: ${platform}"
+  if [[ "$platform" != "$host_platform" ]]; then
+    fail "platform ${platform} does not match host ${host_platform}"
+  fi
+
+  mkdir -p "$out"
+  local src dest community
+  src="${bin_dir}/tenkai-server"
+  dest="${out}/$(packaged_hub_name "$platform")"
+  community="${out}/$(packaged_name tenkai-server "$platform")"
+  [[ -f "$src" ]] || fail "missing host binary: ${src}"
+  [[ -s "$src" ]] || fail "empty host binary: ${src}"
+  if [[ -e "$community" ]] && cmp -s "$src" "$community"; then
+    fail "hub tenkai-server matches community asset; rebuild with --features postgres,ui after packaging community hosts"
+  fi
+  cp "$src" "$dest"
+  chmod 0755 "$dest"
+  if $do_strip; then
+    command -v strip >/dev/null 2>&1 || fail "strip is required with --strip"
+    strip "$dest"
+  fi
+}
+
 cmd_checksums() {
   local out="" require_complete=false
   while [[ $# -gt 0 ]]; do
@@ -274,8 +349,20 @@ cmd_self_test() {
 
   bash "$0" package --out "$out" --bin-dir "$bin" --platform "$platform"
   [[ -f "${out}/$(packaged_name tenkaictl "$platform")" ]] || fail "self-test missing tenkaictl asset"
+  [[ -f "${out}/$(packaged_name tenkai-server "$platform")" ]] || fail "self-test missing community tenkai-server asset"
   [[ ! -e "${out}/tenkai-worker-lifecycle-fixture-${platform}" ]] || fail "self-test packaged fixture host"
   [[ ! -e "${out}/tenkai-delivery-conformance-${platform}" ]] || fail "self-test packaged conformance harness"
+
+  expect_fail "hub tenkai-server matches community asset" \
+    bash "$0" package-hub --out "$out" --bin-dir "$bin" --platform "$platform"
+  printf 'hub-postgres-ui\n' >"${bin}/tenkai-server"
+  chmod 0755 "${bin}/tenkai-server"
+  bash "$0" package-hub --out "$out" --bin-dir "$bin" --platform "$platform"
+  [[ -f "${out}/$(packaged_hub_name "$platform")" ]] || fail "self-test missing hub tenkai-server-postgres asset"
+  [[ "$(cat "${out}/$(packaged_name tenkai-server "$platform")")" == stub-tenkai-server ]] \
+    || fail "self-test replaced community tenkai-server asset"
+  [[ "$(cat "${out}/$(packaged_hub_name "$platform")")" == hub-postgres-ui ]] \
+    || fail "self-test hub asset did not keep postgres,ui binary"
 
   bash "$0" checksums --out "$out"
   [[ -f "${out}/${CHECKSUMS_NAME}" ]] || fail "self-test missing checksums"
@@ -312,6 +399,7 @@ main() {
   fi
   case "$cmd" in
     package) cmd_package "$@" ;;
+    package-hub) cmd_package_hub "$@" ;;
     checksums) cmd_checksums "$@" ;;
     self-test) cmd_self_test "$@" ;;
     -h | --help | "") usage 0 ;;

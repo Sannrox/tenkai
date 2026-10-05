@@ -59,7 +59,8 @@ and [signed plan approvals](docs/plan-approval.md).
 To verify build provenance with GitHub attestations, see
 [GitHub Release binaries](docs/release-binaries.md). To build from source
 instead, run `cargo build --bin tenkaictl` and use `./target/debug/tenkaictl`.
-Hub Postgres hosts are source-built with `--features postgres`.
+Hub Postgres hosts are the GitHub asset `tenkai-server-postgres-<platform>`,
+built with `--features postgres,ui`. Source build uses the same feature set.
 
 ## How it works
 

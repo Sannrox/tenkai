@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use clap::{Parser, ValueEnum};
+use clap::{CommandFactory, FromArgMatches, Parser, ValueEnum};
 use tenkai::assertion_verifier::{JwtAssertionVerifier, JwtEnterpriseAuthExtension};
 use tenkai::auth_context::{
     AUTH_CONTEXT_CONTRACT_VERSION, AuthHostConfig, EnterpriseAuthExtension,
@@ -17,8 +17,8 @@ use tenkai::oidc_verifier::{
     key_source, spawn_refresher,
 };
 use tenkai::postgres_tenant::{
-    resolve_reconcile_fence_for_replicas, resolve_server_tenant_store,
-    tenant_postgres_store_capabilities,
+    compiled_host_feature_report, require_hub_tenant_mode, resolve_reconcile_fence_for_replicas,
+    resolve_server_tenant_store, tenant_postgres_store_capabilities,
 };
 use tenkai::providers::{
     ChiseiOutcomeProvider, OUTCOME_PROVIDER_REGISTRATION_ENV, deliver_outcome_batch,
@@ -223,9 +223,18 @@ fn compose_oidc_auth(
     })
 }
 
+fn parse_cli() -> Cli {
+    let matches = Cli::command()
+        .after_help(compiled_host_feature_report())
+        .get_matches();
+    Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = parse_cli();
+    require_hub_tenant_mode(cli.tenant_mode)
+        .context("hub host refuses to start as the community SQLite host")?;
     if let Some(operation_id) = cli
         .operation_id
         .as_deref()
