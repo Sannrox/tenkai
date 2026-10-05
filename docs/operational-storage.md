@@ -49,7 +49,9 @@ bundle digest is an immutable conflict. This record survives a restart between
 verification and lifecycle completion, so an identical import can safely
 finish recovery.
 
-SQLite databases are migrated transactionally when opened. Tenkai refuses to
+SQLite databases are migrated when opened. A pre-0.3 `embedded_*` graph import
+streams rows and commits in batches so a readiness-timeout restart resumes
+instead of rolling the whole copy back. Tenkai refuses to
 open a database whose schema is newer than the binary supports. Use
 `tenkaictl backup <destination>` for a live, consistent snapshot; do not copy a
 database and its WAL files sequentially. Stop every writer before

@@ -57,6 +57,7 @@ uuid = { version = "1", features = ["v4"] }
 rusqlite = { version = "0.32", features = ["backup", "bundled"] }
 thiserror = "2"
 axum = "0.8"
+tower = { version = "0.5", features = ["util"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 kube = { version = "2.0.1", default-features = false, features = ["client", "rustls-tls"] }
 k8s-openapi = { version = "0.26.1", default-features = false, features = ["latest"] }
@@ -93,7 +94,6 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
 
 [dev-dependencies]
-tower = { version = "0.5", features = ["util"] }
 tokio-stream = "0.1"
 ed25519-dalek = "2"
 base64 = "0.22"

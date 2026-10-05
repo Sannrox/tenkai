@@ -123,7 +123,9 @@ tenkai-server \
 
 ## Health and diagnostics
 
-`GET /healthz` returns liveness. `GET /readyz` returns readiness after store
+`GET /healthz` returns liveness as soon as the listener binds, including while
+a legacy store import is still running. `GET /readyz` returns HTTP 503 until
+the operational store has finished opening, then readiness after store
 and required-provider health checks:
 
 ```json
