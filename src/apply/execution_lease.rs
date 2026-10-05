@@ -220,11 +220,7 @@ async fn claim_environment_with_options(
         .await
     {
         Ok(lease) => lease,
-        Err(error)
-            if error
-                .downcast_ref::<tonic::Status>()
-                .is_some_and(|status| status.code() == tonic::Code::AlreadyExists) =>
-        {
+        Err(crate::client::LeaseError::AlreadyExists) => {
             if let Some(existing) = get_environment_lease(ctx, environment).await? {
                 if existing.status == "active" && existing.expires_at_ms <= now {
                     if !automatic_takeover {
@@ -248,10 +244,10 @@ async fn claim_environment_with_options(
                     );
                 }
             } else {
-                return Err(error);
+                return Err(crate::client::LeaseError::AlreadyExists.into());
             }
         }
-        Err(error) => return Err(error),
+        Err(error) => return Err(error.into()),
     };
     let environment_lease = EnvironmentLease {
         environment: environment.into(),

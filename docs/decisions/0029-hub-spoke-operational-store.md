@@ -70,8 +70,8 @@ shapes that `OperationalStore` already persists.
 
 | Drill | Store in use | Outcome |
 | --- | --- | --- |
-| Signed stateful upgrade (`tests/stateful_upgrade_drill.rs`) | embedded `tenkai.db` via `tenkaictl` | Survives executor loss; recovery is Tenkai-owned |
-| Two-environment closure (`tests/two_environment_closure_drill.rs`) | embedded SQLite | One signed closure, two environments |
+| Signed stateful upgrade (`crates/tenkaictl/tests/stateful_upgrade_drill.rs`) | embedded `tenkai.db` via `tenkaictl` | Survives executor loss; recovery is Tenkai-owned |
+| Two-environment closure (`crates/tenkaictl/tests/two_environment_closure_drill.rs`) | embedded SQLite | One signed closure, two environments |
 | `tenkaictl backup` / `restore` (`src/embedded.rs` tests) | `EmbeddedStore` | Live backup, integrity-checked restore |
 | Enterprise PostgreSQL sole-store recovery | not a shipped profile drill | Gated by ADR 0010 until Postgres owns every authoritative surface |
 

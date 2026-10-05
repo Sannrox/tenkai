@@ -135,11 +135,23 @@ impl Ctx {
         key: &str,
         owner: &str,
         ttl_ms: i64,
-    ) -> Result<Lease> {
-        self.backend
+    ) -> std::result::Result<Lease, super::LeaseError> {
+        match self
+            .backend
             .lease_lifecycle()
             .acquire(namespace, key, owner, ttl_ms)
             .await
+        {
+            Ok(lease) => Ok(lease),
+            Err(error)
+                if error
+                    .downcast_ref::<tonic::Status>()
+                    .is_some_and(|status| status.code() == tonic::Code::AlreadyExists) =>
+            {
+                Err(super::LeaseError::AlreadyExists)
+            }
+            Err(error) => Err(super::LeaseError::Failed(error)),
+        }
     }
 
     pub(crate) async fn get_lease(&mut self, namespace: &str, key: &str) -> Result<Option<Lease>> {

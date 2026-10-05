@@ -148,7 +148,7 @@ Rules beyond the native workdir contract:
 ```bash
 # Requires kind + a copied kubeconfig file path; CI's kind job runs this, `make test` does not
 TENKAI_CLUSTER_CONFIG=$HOME/tenkai-cluster/config \
-  cargo test --locked --test in_process_kubernetes_kind -- --ignored --nocapture
+  cargo test --locked -p tenkai-executor --test in_process_kubernetes_kind -- --ignored --nocapture
 ```
 
 ### Optional kubectl live smoke

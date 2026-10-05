@@ -156,7 +156,6 @@ checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
 dependencies = [
  "axum-core",
  "bytes",
- "form_urlencoded",
  "futures-util",
  "http",
  "http-body",
@@ -172,13 +171,11 @@ dependencies = [
  "serde_core",
  "serde_json",
  "serde_path_to_error",
- "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tower",
  "tower-layer",
  "tower-service",
- "tracing",
 ]
 
 [[package]]
@@ -197,7 +194,6 @@ dependencies = [
  "sync_wrapper",
  "tower-layer",
  "tower-service",
- "tracing",
 ]
 
 [[package]]
@@ -2555,37 +2551,130 @@ dependencies = [
  "chrono-tz",
  "clap",
  "ed25519-dalek",
- "k8s-openapi",
- "kube",
  "libc",
- "postgres",
  "prost",
- "protoc-bin-vendored",
  "reqwest",
  "ring",
  "rusqlite",
- "rustls",
- "rustls-native-certs",
  "schemars",
  "sekai-client",
  "semver",
  "serde",
  "serde_json",
- "serde_yaml",
  "sha2 0.10.9",
+ "tenkai-wire",
  "thiserror",
  "tokio",
- "tokio-postgres-rustls",
  "tokio-stream",
  "toml",
  "tonic",
  "tonic-prost",
- "tonic-prost-build",
  "tower",
  "url",
  "uuid",
- "webpki-roots",
+]
+
+[[package]]
+name = "tenkai-executor"
+version = "0.4.1"
+dependencies = [
+ "anyhow",
+ "k8s-openapi",
+ "kube",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tenkai",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "tenkai-http"
+version = "0.4.1"
+dependencies = [
+ "anyhow",
+ "axum",
+ "reqwest",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tenkai",
+ "tokio",
+ "toml",
+ "tower",
+ "url",
+ "uuid",
  "zip",
+]
+
+[[package]]
+name = "tenkai-postgres"
+version = "0.4.1"
+dependencies = [
+ "anyhow",
+ "postgres",
+ "rustls",
+ "rustls-native-certs",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tenkai",
+ "thiserror",
+ "tokio",
+ "tokio-postgres-rustls",
+ "url",
+ "uuid",
+ "webpki-roots",
+]
+
+[[package]]
+name = "tenkai-server"
+version = "0.4.1"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64",
+ "clap",
+ "ed25519-dalek",
+ "serde_json",
+ "tenkai",
+ "tenkai-executor",
+ "tenkai-http",
+ "tenkai-postgres",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "tenkai-wire"
+version = "0.4.1"
+dependencies = [
+ "prost",
+ "protoc-bin-vendored",
+ "sekai-proto",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+]
+
+[[package]]
+name = "tenkaictl"
+version = "0.4.1"
+dependencies = [
+ "anyhow",
+ "base64",
+ "chrono",
+ "clap",
+ "ed25519-dalek",
+ "serde",
+ "serde_json",
+ "tenkai",
+ "tenkai-executor",
+ "tenkai-http",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

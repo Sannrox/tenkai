@@ -12,7 +12,7 @@ use tokio::process::Command;
 use crate::inventory::{self, RUNTIME_INVENTORY_SOURCE};
 use crate::plan::{Plan, Step};
 use crate::runtime_delivery::{RuntimeCompletion, RuntimeStepReceipt};
-use crate::server::{RuntimeHeartbeat, RuntimeInventoryReport, RuntimeWork};
+use crate::runtime_delivery::{RuntimeHeartbeat, RuntimeInventoryReport, RuntimeWork};
 
 #[derive(Clone)]
 pub struct RuntimeClient {

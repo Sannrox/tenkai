@@ -82,8 +82,8 @@ identity binary is required.
 
 `tenkai-server` management routes (`/v1/reconcile`, `/v1/environments/*`,
 and the reserved [management lifecycle](management-lifecycle.md) paths)
-authenticate through the composed `AuthStack` in `src/server.rs` /
-`src/server/auth.rs`:
+authenticate through the composed `AuthStack` in `crates/tenkai-http/src/lib.rs` /
+`crates/tenkai-http/src/auth.rs`:
 
 1. Extract the bearer token (runtime tokens remain on separate routes).
 2. Build `CredentialMaterial` with a request id (`x-request-id` or generated).

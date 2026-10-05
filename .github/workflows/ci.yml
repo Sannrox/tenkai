@@ -27,8 +27,8 @@ jobs:
       - run: make test
       - run: make test-integration
       # Downloads the pinned console release and fails on a checksum mismatch.
-      - run: cargo test --locked --features ui --lib server::ui
-      - run: cargo test --locked --features postgres,ui --lib postgres_tenant
+      - run: cargo test --locked -p tenkai-http --features ui --lib ui
+      - run: cargo test --locked -p tenkai-postgres --features postgres
 
   fmt:
     name: Rustfmt
@@ -95,4 +95,4 @@ jobs:
           kind get kubeconfig --name tenkai-ssa > "$scoped/config"
           chmod 600 "$scoped/config"
           TENKAI_CLUSTER_CONFIG="$scoped/config" \
-            cargo test --locked --test in_process_kubernetes_kind -- --ignored --nocapture --test-threads=1
+            cargo test --locked -p tenkai-executor --test in_process_kubernetes_kind -- --ignored --nocapture --test-threads=1

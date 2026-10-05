@@ -36,7 +36,7 @@ pub enum PlanStatus {
 }
 
 impl PlanStatus {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Computed => "computed",
             Self::Running => "running",
@@ -46,7 +46,7 @@ impl PlanStatus {
         }
     }
 
-    pub(crate) fn parse(value: &str) -> Result<Self> {
+    pub fn parse(value: &str) -> Result<Self> {
         match value {
             "computed" => Ok(Self::Computed),
             "running" => Ok(Self::Running),
@@ -60,7 +60,7 @@ impl PlanStatus {
         }
     }
 
-    pub(crate) fn allows(self, next: Self) -> bool {
+    pub fn allows(self, next: Self) -> bool {
         self == next
             || matches!(
                 (self, next),
@@ -132,7 +132,7 @@ pub enum RollbackStatus {
 }
 
 impl RollbackStatus {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
             Self::Running => "running",
@@ -141,7 +141,7 @@ impl RollbackStatus {
         }
     }
 
-    pub(crate) fn parse(value: &str) -> Result<Self> {
+    pub fn parse(value: &str) -> Result<Self> {
         match value {
             "pending" => Ok(Self::Pending),
             "running" => Ok(Self::Running),
@@ -154,7 +154,7 @@ impl RollbackStatus {
         }
     }
 
-    pub(crate) fn allows(self, next: Self) -> bool {
+    pub fn allows(self, next: Self) -> bool {
         self == next
             || matches!(
                 (self, next),

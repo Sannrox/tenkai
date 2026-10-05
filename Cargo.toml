@@ -1,3 +1,8 @@
+[workspace]
+members = [".", "crates/*"]
+default-members = [".", "crates/*"]
+resolver = "2"
+
 [package]
 name = "tenkai"
 version = "0.4.1"
@@ -8,16 +13,8 @@ readme = "README.md"
 description = "Local-first, constraint-based delivery control plane backed by sekai-chisei."
 
 [[bin]]
-name = "tenkaictl"
-path = "src/bin/tenkaictl/main.rs"
-
-[[bin]]
 name = "tenkai-executor-guard"
 path = "src/bin/tenkai-executor-guard.rs"
-
-[[bin]]
-name = "tenkai-server"
-path = "src/bin/tenkai-server.rs"
 
 [[bin]]
 name = "tenkai-runtime"
@@ -32,6 +29,7 @@ name = "tenkai-worker-lifecycle-fixture"
 path = "src/bin/tenkai-worker-lifecycle-fixture.rs"
 
 [dependencies]
+tenkai-wire = { path = "crates/tenkai-wire", version = "0.4.1" }
 tonic = { version = "0.14", features = ["tls-webpki-roots", "tls-ring"] }
 tonic-prost = "0.14"
 prost = "0.14"
@@ -56,44 +54,17 @@ chrono-tz = "0.10"
 uuid = { version = "1", features = ["v4"] }
 rusqlite = { version = "0.32", features = ["backup", "bundled"] }
 thiserror = "2"
-axum = "0.8"
 tower = { version = "0.5", features = ["util"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
-kube = { version = "2.0.1", default-features = false, features = ["client", "rustls-tls"] }
-k8s-openapi = { version = "0.26.1", default-features = false, features = ["latest"] }
-serde_yaml = "0.9"
 sekai-client = { git = "https://github.com/Sannrox/sekai-chisei", rev = "67157d1fa242ac2f133c88243ef23b56f88042e6", version = "0.1.2" }
-# Optional production multi-tenant operational store (hub control plane). Off by default.
-postgres = { version = "0.19", optional = true }
-# Verified TLS for non-loopback hub Postgres (#445): explicit ring provider,
-# platform trust store (honors SSL_CERT_FILE) plus Mozilla roots.
-tokio-postgres-rustls = { version = "0.14", optional = true, features = ["ring"] }
-rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std"] }
-rustls-native-certs = { version = "0.8", optional = true }
-webpki-roots = { version = "1", optional = true }
 
 [features]
 default = []
-# Embed the pinned web console and serve it at /ui/ (ADR 0031).
-# Enable with: cargo build --features ui
-ui = ["dep:reqwest", "dep:zip"]
-# Enable with: cargo build --features postgres
-postgres = [
-    "dep:postgres",
-    "dep:tokio-postgres-rustls",
-    "dep:rustls",
-    "dep:rustls-native-certs",
-    "dep:webpki-roots",
-]
-
-[build-dependencies]
-tonic-prost-build = "0.14"
-protoc-bin-vendored = "3"
-sha2 = "0.10"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"], optional = true }
-zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
+# Test helpers consumed by tenkai-http (OIDC signer, in-memory store outage).
+test-support = []
 
 [dev-dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 tokio-stream = "0.1"
 ed25519-dalek = "2"
 base64 = "0.22"

@@ -10,7 +10,7 @@ pub(super) fn ensure_provider_event_sequence_table(connection: &Connection) -> R
     Ok(())
 }
 
-pub(crate) fn provider_event_environment_id(payload_json: &str) -> Option<String> {
+pub fn provider_event_environment_id(payload_json: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(payload_json).ok()?;
     value
         .get("binding")?
@@ -20,7 +20,7 @@ pub(crate) fn provider_event_environment_id(payload_json: &str) -> Option<String
         .map(str::to_owned)
 }
 
-pub(crate) fn provider_event_observed_at(payload_json: &str, fallback: i64) -> i64 {
+pub fn provider_event_observed_at(payload_json: &str, fallback: i64) -> i64 {
     let observed_at = serde_json::from_str::<serde_json::Value>(payload_json)
         .ok()
         .and_then(|value| {

@@ -5,7 +5,7 @@
 //! `tenant_isolation` and enforces tenant-scoped reads/writes.
 //!
 //! - In-memory partitions: this module (`InMemoryTenantOperationalStore`).
-//! - Production hub Postgres: optional [`crate::postgres_tenant`] (feature
+//! - Production hub Postgres: optional `tenkai-postgres` crate (feature
 //!   `postgres`, schema-per-tenant, never identity-plane co-location).
 //!
 //! The adapter never shares a database with an identity plane (ADR 0005).
@@ -111,7 +111,7 @@ pub fn tenant_memory_store_capabilities() -> ComponentCapabilities {
 #[derive(Clone)]
 pub struct InMemoryTenantOperationalStore {
     partitions: Arc<Mutex<BTreeMap<String, Arc<SqliteStore>>>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     healthy: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -119,7 +119,7 @@ impl Default for InMemoryTenantOperationalStore {
     fn default() -> Self {
         Self {
             partitions: Arc::new(Mutex::new(BTreeMap::new())),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             healthy: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         }
     }
@@ -134,8 +134,8 @@ impl InMemoryTenantOperationalStore {
         tenant_memory_store_capabilities()
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_healthy(&self, healthy: bool) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_healthy(&self, healthy: bool) {
         self.healthy
             .store(healthy, std::sync::atomic::Ordering::SeqCst);
     }
@@ -344,7 +344,7 @@ impl TenantOperationalStore for InMemoryTenantOperationalStore {
     }
 
     fn check_health(&self) -> Result<()> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if !self.healthy.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(crate::storage::StoreError::AdapterUnavailable(
                 "synthetic tenant store outage".into(),

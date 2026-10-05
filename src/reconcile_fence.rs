@@ -8,7 +8,7 @@
 //! Implementations:
 //! - [`SharedReconcileFence`] — process-shared (tests / single host)
 //! - Postgres-backed fence — durable hub claims when feature `postgres` is on
-//!   (`crate::postgres_tenant::PostgresReconcileFence`, #135)
+//!   (`tenkai_postgres::PostgresReconcileFence`, #135)
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

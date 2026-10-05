@@ -77,7 +77,7 @@ and are not registered.
 | Set | Meaning |
 | --- | --- |
 | `tenant_visible_rpcs()` | Full isolation matrix (live HTTP plus harness / in-process surfaces) |
-| `http_exposed_tenant_rpc_ids()` | Subset that is **live on management/runtime HTTP** and enforced in `src/server.rs` / `src/server/` |
+| `http_exposed_tenant_rpc_ids()` | Subset that is **live on management/runtime HTTP** and enforced in `crates/tenkai-http` |
 
 **HTTP-enforced today**
 
@@ -152,7 +152,7 @@ Rules:
   membership derived by the auth stack — never from caller-selected headers.
 - Cross-tenant environment get/list uses the non-disclosing deny posture.
 - The adapter does **not** share a database with an identity plane (ADR 0005).
-- Optional in-tree PostgreSQL (`src/postgres_tenant.rs` / `src/postgres_tenant/`, Cargo feature
+- Optional in-tree PostgreSQL (`crates/tenkai-postgres`, Cargo feature
   `postgres`) is documented in [postgres-tenant-store.md](postgres-tenant-store.md).
   Community default remains SQLite; the adapter is not a supported operating
   profile until ADR 0010 readiness passes.

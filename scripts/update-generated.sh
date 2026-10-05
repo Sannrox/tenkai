@@ -6,4 +6,4 @@ cd "$ROOT"
 
 # Refresh build-generated protobuf bindings under Cargo's target directory
 # without changing the locked dependency graph.
-cargo check --all-targets --locked
+cargo check --workspace --all-targets --locked

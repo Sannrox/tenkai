@@ -36,7 +36,10 @@ mod tests;
 
 pub use error::*;
 pub use operational_store::OperationalStore;
+pub use provider_claims::provider_event_payloads_match;
+pub use provider_event_schema::{provider_event_environment_id, provider_event_observed_at};
 pub use records::*;
+pub use rollbacks::rollback_intent_digest;
 pub use sqlite_store::*;
 
 use fixture_matching::*;

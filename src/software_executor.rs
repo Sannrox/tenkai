@@ -18,18 +18,28 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 
+mod cluster_config;
 mod diagnostics;
-pub mod in_process_kubernetes;
 
+pub use cluster_config::{
+    CLUSTER_CONFIG_PATH_PROPERTY, cluster_config_path_from_properties, validate_cluster_config_path,
+};
 pub use diagnostics::{
     SoftwareDeployPhase, format_software_phase_error, rollback_channel_note,
     sanitize_diagnostic_text,
 };
+
+static IN_PROCESS_EXECUTOR: OnceLock<fn() -> Box<dyn SoftwareExecutor>> = OnceLock::new();
+
+/// Install the in-process Kubernetes adapter from `tenkai-executor`.
+pub fn install_in_process_software_executor(factory: fn() -> Box<dyn SoftwareExecutor>) {
+    let _ = IN_PROCESS_EXECUTOR.set(factory);
+}
 
 /// Request to apply or remove a software product generation on one environment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -467,7 +477,7 @@ impl SoftwareExecutor for KubernetesSoftwareExecutor {
     }
 }
 
-pub(crate) fn kubernetes_manifests_dir(workdir: &Path) -> Result<PathBuf> {
+pub fn kubernetes_manifests_dir(workdir: &Path) -> Result<PathBuf> {
     let dir = workdir.join(KUBERNETES_MANIFESTS_DIR);
     if !dir.is_dir() {
         bail!(
@@ -632,9 +642,9 @@ pub fn selected_software_executor() -> Option<Box<dyn SoftwareExecutor>> {
         Ok(value) if value.eq_ignore_ascii_case("fake") => {
             Some(Box::new(FakeSoftwareExecutor::new()))
         }
-        Ok(value) if value.eq_ignore_ascii_case("kubernetes-inprocess") => Some(Box::new(
-            in_process_kubernetes::selected_in_process_executor(),
-        )),
+        Ok(value) if value.eq_ignore_ascii_case("kubernetes-inprocess") => {
+            IN_PROCESS_EXECUTOR.get().map(|factory| factory())
+        }
         _ => None,
     }
 }
@@ -653,7 +663,7 @@ fn request_key(request: &SoftwareApplyRequest) -> String {
     }
 }
 
-pub(crate) fn validate_request(request: &SoftwareApplyRequest) -> Result<()> {
+pub fn validate_request(request: &SoftwareApplyRequest) -> Result<()> {
     for (label, value) in [
         ("product", request.product.as_str()),
         ("version", request.version.as_str()),

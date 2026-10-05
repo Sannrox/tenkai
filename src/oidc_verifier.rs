@@ -92,7 +92,7 @@ pub struct OidcClientDiscovery {
     pub client_id: String,
     pub scopes: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(transform = crate::server::contract::omitted_when_none)]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub display_name: Option<String>,
     /// Host-side only: browser `connect-src` origins (issuer first).
     #[serde(skip)]
@@ -822,7 +822,7 @@ impl EnterpriseAuthExtension for OidcAuthExtension {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod test_support;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 #[cfg(test)]
 mod tests;

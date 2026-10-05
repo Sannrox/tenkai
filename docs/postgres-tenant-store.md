@@ -18,7 +18,7 @@ requirement passes.
 | Tenant-store integration and conformance | Optional Postgres (`PostgresTenantOperationalStore`) |
 | Conformance without Postgres | In-memory tenant partitions (`InMemoryTenantOperationalStore`) |
 
-Source: `src/postgres_tenant.rs` and `src/postgres_tenant/`. Decision: [ADR 0008](decisions/0008-production-tenant-operational-store.md).
+Source: `crates/tenkai-postgres`. Decision: [ADR 0008](decisions/0008-production-tenant-operational-store.md).
 HA multi-replica: [ADR 0009](decisions/0009-multi-replica-reconcile-and-ha-profile.md).
 Operating profiles: [ADR 0010](decisions/0010-supported-operating-profiles.md).
 
@@ -68,7 +68,7 @@ identity-plane tables in this database (ADR 0005).
 
 ```bash
 # Compile with the optional adapter (add `ui` to embed the console)
-cargo build --features postgres
+cargo build -p tenkai-server --features postgres
 
 # Connection string via env only (not argv)
 export TENKAI_POSTGRES_URL='postgres://tenkai:tenkai@127.0.0.1:5432/tenkai'
@@ -106,7 +106,7 @@ docker run --rm -e POSTGRES_PASSWORD=tenkai -e POSTGRES_USER=tenkai \
   -e POSTGRES_DB=tenkai -p 5432:5432 postgres:16
 
 export TENKAI_POSTGRES_URL='postgres://tenkai:tenkai@127.0.0.1:5432/tenkai'
-cargo test --locked --features postgres live_postgres_tenant_isolation -- --ignored --nocapture
+cargo test --locked -p tenkai-postgres --features postgres live_postgres_tenant_isolation -- --ignored --nocapture
 ```
 
 Default CI does **not** require a Postgres service. Live tests are `#[ignore]`.
@@ -126,7 +126,7 @@ Default CI does **not** require a Postgres service. Live tests are `#[ignore]`.
 ## `tenkai-server` wiring (#127)
 
 ```bash
-cargo build --features postgres,ui --bin tenkai-server
+cargo build -p tenkai-server --features postgres,ui
 
 export TENKAI_MANAGEMENT_TOKEN=…
 export TENKAI_POSTGRES_URL='postgres://tenkai:tenkai@127.0.0.1:5432/tenkai'

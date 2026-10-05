@@ -192,7 +192,7 @@ async fn compute_snapshot_with_policy(
                             .unwrap_or_default(),
                     );
                     request.cluster_config_path =
-                        crate::software_executor::in_process_kubernetes::cluster_config_path_from_properties(
+                        crate::software_executor::cluster_config_path_from_properties(
                             &env_obj.properties,
                         )?;
                     match executor.observe(&request)? {

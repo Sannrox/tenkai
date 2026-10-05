@@ -61,12 +61,12 @@ impl TenantEnvironmentView for ReconcileTenantEnvironmentView {
 }
 
 /// Non-disclosing body for every rejected management credential.
-pub(crate) const INVALID_CREDENTIAL: &str = "invalid management credential";
+pub const INVALID_CREDENTIAL: &str = "invalid management credential";
 /// Body when no bearer token or assertion was sent.
-pub(crate) const MISSING_CREDENTIAL: &str = "missing bearer token";
+pub const MISSING_CREDENTIAL: &str = "missing bearer token";
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum ManagementError {
+pub enum ManagementError {
     #[error("{0}")]
     Unauthorized(String),
     #[error("{0}")]
@@ -83,7 +83,7 @@ pub(crate) enum ManagementError {
     Internal(String),
 }
 
-pub(crate) struct ManagementOperations {
+pub struct ManagementOperations {
     auth: AuthStack,
     tenant_mode: bool,
     reconciler: Arc<dyn ReconcilePort>,
@@ -94,7 +94,7 @@ pub(crate) struct ManagementOperations {
 }
 
 impl ManagementOperations {
-    pub(crate) fn new(
+    pub fn new(
         auth: AuthStack,
         tenant_mode: bool,
         reconciler: Arc<dyn ReconcilePort>,
@@ -122,7 +122,7 @@ impl ManagementOperations {
         }
     }
 
-    pub(crate) fn authenticate(
+    pub fn authenticate(
         &self,
         credential: &CredentialMaterial,
     ) -> Result<AuthenticatedRequestContext, ManagementError> {
@@ -171,7 +171,7 @@ impl ManagementOperations {
         }
     }
 
-    pub(crate) async fn fleet_status(
+    pub async fn fleet_status(
         &self,
         credential: &CredentialMaterial,
     ) -> Result<FleetStatusReport, ManagementError> {
@@ -187,7 +187,7 @@ impl ManagementOperations {
         self.reconciler.fleet_status().await.map_err(internal)
     }
 
-    pub(crate) async fn list_environments(
+    pub async fn list_environments(
         &self,
         credential: &CredentialMaterial,
     ) -> Result<Vec<EnvironmentListEntry>, ManagementError> {
@@ -203,7 +203,7 @@ impl ManagementOperations {
         self.reconciler.list_environments().await.map_err(internal)
     }
 
-    pub(crate) async fn inspect_environment(
+    pub async fn inspect_environment(
         &self,
         credential: &CredentialMaterial,
         environment: &str,
@@ -229,7 +229,7 @@ impl ManagementOperations {
         Ok(report)
     }
 
-    pub(crate) async fn retire_environment(
+    pub async fn retire_environment(
         &self,
         credential: &CredentialMaterial,
         environment: &str,
@@ -290,7 +290,7 @@ impl ManagementOperations {
         Ok(result)
     }
 
-    pub(crate) async fn environment_status(
+    pub async fn environment_status(
         &self,
         credential: &CredentialMaterial,
         environment: &str,
@@ -310,7 +310,7 @@ impl ManagementOperations {
             .map_err(map_environment_error)
     }
 
-    pub(crate) async fn reconcile(
+    pub async fn reconcile(
         &self,
         credential: &CredentialMaterial,
     ) -> Result<TickReport, ManagementError> {
@@ -357,7 +357,7 @@ impl ManagementOperations {
         }
     }
 
-    pub(crate) async fn preview_package_migration(
+    pub async fn preview_package_migration(
         &self,
         credential: &CredentialMaterial,
         name: &str,
@@ -384,7 +384,7 @@ impl ManagementOperations {
         Ok(PackageMigrationResult::from_record(record))
     }
 
-    pub(crate) async fn apply_package_migration(
+    pub async fn apply_package_migration(
         &self,
         credential: &CredentialMaterial,
         name: &str,
@@ -486,7 +486,7 @@ impl ManagementOperations {
         Ok(PackageMigrationResult::from_record(record))
     }
 
-    pub(crate) async fn package_migration_status(
+    pub async fn package_migration_status(
         &self,
         credential: &CredentialMaterial,
         name: &str,
@@ -504,7 +504,7 @@ impl ManagementOperations {
         Ok(PackageMigrationResult::from_record(record))
     }
 
-    pub(crate) async fn resume_package_migration(
+    pub async fn resume_package_migration(
         &self,
         credential: &CredentialMaterial,
         name: &str,
@@ -514,7 +514,7 @@ impl ManagementOperations {
             .await
     }
 
-    pub(crate) async fn rollback_package_migration(
+    pub async fn rollback_package_migration(
         &self,
         credential: &CredentialMaterial,
         name: &str,
@@ -637,7 +637,7 @@ impl ManagementOperations {
         Ok(())
     }
 
-    pub(crate) async fn publish_release(
+    pub async fn publish_release(
         &self,
         credential: &CredentialMaterial,
         request: PublishRequest,
@@ -680,7 +680,7 @@ impl ManagementOperations {
         ))
     }
 
-    pub(crate) async fn promote_release(
+    pub async fn promote_release(
         &self,
         credential: &CredentialMaterial,
         channel: &str,
@@ -709,7 +709,7 @@ impl ManagementOperations {
         ))
     }
 
-    pub(crate) async fn recall_release(
+    pub async fn recall_release(
         &self,
         credential: &CredentialMaterial,
         release: &str,
@@ -738,7 +738,7 @@ impl ManagementOperations {
         ))
     }
 
-    pub(crate) async fn subscribe_environment(
+    pub async fn subscribe_environment(
         &self,
         credential: &CredentialMaterial,
         environment: &str,
@@ -783,7 +783,7 @@ impl ManagementOperations {
         ))
     }
 
-    pub(crate) async fn plan_environment(
+    pub async fn plan_environment(
         &self,
         credential: &CredentialMaterial,
         environment: &str,
@@ -828,7 +828,7 @@ impl ManagementOperations {
         .with_digest(digest))
     }
 
-    pub(crate) async fn approve_plan(
+    pub async fn approve_plan(
         &self,
         credential: &CredentialMaterial,
         plan_id: &str,
@@ -884,7 +884,7 @@ impl ManagementOperations {
         .with_digest(evidence.plan_digest))
     }
 
-    pub(crate) async fn apply_plan(
+    pub async fn apply_plan(
         &self,
         credential: &CredentialMaterial,
         plan_id: &str,
@@ -954,7 +954,7 @@ impl ManagementOperations {
         .with_digest(digest))
     }
 
-    pub(crate) async fn rollback_environment(
+    pub async fn rollback_environment(
         &self,
         credential: &CredentialMaterial,
         environment: &str,

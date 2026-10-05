@@ -30,7 +30,7 @@ jobs:
           toolchain: 1.96.1
       - name: Build community hosts
         run: |
-          cargo build --release --locked --features ui \
+          cargo build --release --locked --workspace --features tenkai-server/ui \
             --bin tenkaictl \
             --bin tenkai-server \
             --bin tenkai-executor-guard \
@@ -44,7 +44,7 @@ jobs:
             --platform ${{ matrix.platform }} \
             --strip
       - name: Build hub tenkai-server
-        run: cargo build --release --locked --features postgres,ui --bin tenkai-server
+        run: cargo build --release --locked -p tenkai-server --features postgres,ui
       - name: Package hub tenkai-server
         run: |
           bash scripts/package-release-binaries.sh package-hub \

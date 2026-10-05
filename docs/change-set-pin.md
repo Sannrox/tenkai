@@ -60,5 +60,6 @@ without republishing member definitions. Rollback restores the Tenkai
 release pin; it does not undo foreign member documents.
 
 ```bash
-cargo test --locked --test two_environment_closure_drill -- --nocapture
+cargo build --locked --bin tenkaictl --bin tenkai-executor-guard
+cargo test --locked -p tenkaictl --test two_environment_closure_drill -- --nocapture
 ```

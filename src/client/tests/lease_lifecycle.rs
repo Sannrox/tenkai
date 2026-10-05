@@ -26,10 +26,7 @@ async fn assert_lease_lifecycle(mut ctx: Ctx) {
         .acquire_lease(namespace, key, "owner-b", 5_000)
         .await
         .unwrap_err();
-    let status = conflict
-        .downcast_ref::<tonic::Status>()
-        .expect("lease conflict should surface as tonic Status");
-    assert_eq!(status.code(), tonic::Code::AlreadyExists);
+    assert!(matches!(conflict, crate::client::LeaseError::AlreadyExists));
 
     let refreshed = ctx
         .refresh_lease(namespace, key, &acquired.fencing_token, 8_000)

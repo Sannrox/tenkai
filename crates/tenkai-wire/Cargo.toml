@@ -1,0 +1,17 @@
+[package]
+name = "tenkai-wire"
+version = "0.4.1"
+edition = "2024"
+rust-version = "1.96.1"
+license = "Apache-2.0"
+description = "Generated gRPC contracts for Tenkai runtime, graph-action, and Sekai-Chisei wire types."
+
+[dependencies]
+prost = "0.14"
+sekai-proto = { git = "https://github.com/Sannrox/sekai-chisei", rev = "67157d1fa242ac2f133c88243ef23b56f88042e6" }
+tonic = { version = "0.14", default-features = false, features = ["codegen"] }
+tonic-prost = "0.14"
+
+[build-dependencies]
+protoc-bin-vendored = "3"
+tonic-prost-build = "0.14"

@@ -6,4 +6,5 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-exec cargo test --locked --test stateful_upgrade_drill -- --nocapture "$@"
+cargo build --locked --bin tenkaictl --bin tenkai-executor-guard
+exec cargo test --locked -p tenkaictl --test stateful_upgrade_drill -- --nocapture "$@"

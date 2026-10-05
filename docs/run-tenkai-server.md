@@ -84,7 +84,7 @@ The bundle is a pinned console release built in with
 Cargo feature `ui` ([ADR 0031](decisions/0031-web-console.md)):
 
 ```sh
-cargo build --release --locked --features ui --bin tenkai-server
+cargo build --release --locked -p tenkai-server --features ui
 ```
 
 The build downloads the release named in `ui/console.pin` and fails unless its

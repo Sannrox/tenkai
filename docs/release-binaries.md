@@ -80,7 +80,7 @@ chmod 0755 "tenkai-server-postgres-${platform}"
 Source build when you need a hub host with the console:
 
 ```bash
-cargo build --release --locked --features postgres,ui --bin tenkai-server
+cargo build --release --locked -p tenkai-server --features postgres,ui
 ```
 
 Spoke and embedded CLI continue to refuse `TENKAI_POSTGRES_URL`.
@@ -88,8 +88,8 @@ Spoke and embedded CLI continue to refuse `TENKAI_POSTGRES_URL`.
 ## Packaging path
 
 Tag `v[0-9]+.[0-9]+.[0-9]+` starts `.github/workflows/release-binaries.yml`.
-That workflow builds the five community hosts with `--features ui`, then
-rebuilds `tenkai-server` with `--features postgres,ui` and names it
+That workflow builds the five community hosts with `--workspace --features tenkai-server/ui`, then
+rebuilds `tenkai-server` with `-p tenkai-server --features postgres,ui` and names it
 `tenkai-server-postgres-<platform>` with
 `scripts/package-release-binaries.sh package-hub`. It adds the HTTP API
 contract, writes `SHA256SUMS`, and attests every packaged file before the
