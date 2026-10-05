@@ -83,10 +83,7 @@ impl Files {
                 if !is_plain_relative(name) {
                     return None;
                 }
-                let path = root.join(name);
-                path.is_file()
-                    .then(|| std::fs::read(path).ok().map(Bytes::from))
-                    .flatten()
+                read_regular_file_under_root(root, name)
             }
         }
     }
@@ -277,6 +274,22 @@ fn is_plain_relative(name: &str) -> bool {
             .all(|part| matches!(part, Component::Normal(_)))
 }
 
+/// Serve a `--ui-dir` path only when it is a regular file inside `root`.
+/// Symlinks (including ones whose target is inside the root) are refused.
+fn read_regular_file_under_root(root: &Path, name: &str) -> Option<Bytes> {
+    let path = root.join(name);
+    let meta = std::fs::symlink_metadata(&path).ok()?;
+    if !meta.file_type().is_file() {
+        return None;
+    }
+    let canonical = path.canonicalize().ok()?;
+    let root_canonical = root.canonicalize().ok()?;
+    if !canonical.starts_with(&root_canonical) {
+        return None;
+    }
+    std::fs::read(path).ok().map(Bytes::from)
+}
+
 /// Build output lives under `assets/`; other static files have a known type.
 fn is_asset_path(name: &str) -> bool {
     name.starts_with("assets/") || content_type(name) != "application/octet-stream"
@@ -406,6 +419,44 @@ mod tests {
                 .contains("immutable")
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn directory_map_refuses_symlinks_and_still_serves_regular_files() {
+        let root = console_dir();
+        let outside = std::env::temp_dir().join(format!(
+            "tenkai-ui-outside-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&outside, "secret-outside\n").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("leak.txt")).unwrap();
+        std::os::unix::fs::symlink(root.join("index.html"), root.join("alias.html")).unwrap();
+        std::fs::write(root.join("ok.txt"), "inside\n").unwrap();
+        let files = Files::new(UiSource::Directory(root.clone()));
+        assert!(files.read("leak.txt").is_none());
+        assert!(files.read("alias.html").is_none());
+        assert_eq!(
+            files.read("ok.txt").as_deref(),
+            Some(b"inside\n".as_slice())
+        );
+        let app = app(&root);
+        let leak = call(&app, Method::GET, "/ui/leak.txt").await;
+        assert_eq!(leak.status(), StatusCode::NOT_FOUND);
+        assert_ne!(body(leak).await, "secret-outside\n");
+        let alias = call(&app, Method::GET, "/ui/alias.html").await;
+        assert_eq!(alias.status(), StatusCode::NOT_FOUND);
+        let ok = call(&app, Method::GET, "/ui/ok.txt").await;
+        assert_eq!(ok.status(), StatusCode::OK);
+        assert_eq!(body(ok).await, "inside\n");
+        let traversal = call(&app, Method::GET, "/ui/../Cargo.toml").await;
+        assert_eq!(traversal.status(), StatusCode::NOT_FOUND);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(&outside);
     }
 
     #[tokio::test]
