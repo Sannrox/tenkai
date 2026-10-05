@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use anyhow::{Context as _, Result, bail};
 
 use crate::apply;
-use crate::client::Ctx;
+use crate::client::{Ctx, LeaseError};
 use crate::ontology::{KIND_PACKAGE_MIGRATION_LOCK, NS};
 use crate::pb::sekai::Object;
 
@@ -30,14 +30,10 @@ pub(super) async fn acquire_execution_lease(
         .await
     {
         Ok(lease) => Ok(lease.fencing_token),
-        Err(error)
-            if error
-                .downcast_ref::<tonic::Status>()
-                .is_some_and(|status| status.code() == tonic::Code::AlreadyExists) =>
-        {
+        Err(LeaseError::AlreadyExists) => {
             bail!("package migration {name} already has an execution in progress")
         }
-        Err(error) => Err(error),
+        Err(error) => Err(error.into()),
     }
 }
 

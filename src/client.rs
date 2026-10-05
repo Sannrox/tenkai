@@ -14,6 +14,7 @@ mod lease_lifecycle;
 mod object_lifecycle;
 mod plan_kind_list;
 mod relation_lifecycle;
+mod schema_register;
 mod transport;
 
 #[cfg(test)]
@@ -32,6 +33,10 @@ pub(crate) use helpers::{
     canonical_update_request, lease_precondition,
 };
 pub(crate) use plan_kind_list::{PlanKindListSnapshot, PlanKindListTick, PlanRetargetTickGuard};
+pub use schema_register::{
+    known_action, known_actions, register, require_canary_schema,
+    require_connectivity_upgrade_schema, require_package_migration_schema, require_wave_schema,
+};
 pub(crate) use transport::{
     RemoteClient, block_embedded, block_embedded_status, remote_unary, remote_unary_with_options,
     token_transport_is_safe,
@@ -139,4 +144,30 @@ pub async fn connect() -> Result<Ctx> {
 pub(crate) fn is_unique_conflict(status: &Status) -> bool {
     status.code() == tonic::Code::AlreadyExists
         || (status.code() == tonic::Code::Internal && status.message().contains("UNIQUE"))
+}
+
+/// Typed lease admission failure. The client translates tonic already-exists
+/// into [`LeaseError::AlreadyExists`] so domain code does not name gRPC types.
+#[derive(Debug)]
+pub enum LeaseError {
+    AlreadyExists,
+    Failed(anyhow::Error),
+}
+
+impl std::fmt::Display for LeaseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AlreadyExists => write!(f, "lease already exists"),
+            Self::Failed(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for LeaseError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::AlreadyExists => None,
+            Self::Failed(error) => Some(error.as_ref()),
+        }
+    }
 }

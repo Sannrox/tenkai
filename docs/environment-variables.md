@@ -90,7 +90,7 @@ operator settings.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `TENKAI_UI_BUNDLE` | unset | With `cargo build --features ui`, path to a local copy of the pinned console zip; skips the download but still enforces the checksum in `ui/console.pin` ([open the web console](run-tenkai-server.md#open-the-web-console)) |
+| `TENKAI_UI_BUNDLE` | unset | With `cargo build -p tenkai-server --features ui`, path to a local copy of the pinned console zip; skips the download but still enforces the checksum in `ui/console.pin` ([open the web console](run-tenkai-server.md#open-the-web-console)) |
 
 ## Set by Tenkai for deploy commands
 
@@ -116,6 +116,6 @@ binaries.
 | --- | --- | --- |
 | `TENKAI_DOGFOOD_MODE` | `scripts/dogfood-minikube.sh` | `local`, `signed-multi-env`, or `canary` ([minikube dogfood](local-dogfood-minikube.md)) |
 | `TENKAI_DEV_KEYS` | `scripts/dogfood-minikube.sh` | Directory of development-only Ed25519 seeds |
-| `TENKAI_CLUSTER_CONFIG` | `tests/in_process_kubernetes_kind.rs` | Kubeconfig path for the kind in-process Kubernetes test |
-| `TENKAI_GATE_URL`, `TENKAI_GATE_TOKEN` | `tests/two_environment_closure_drill.rs` | Remote gate endpoint for the library-only HTTP gate adapter ([provider contracts](provider-contracts.md#remote-gate-http-json-contract-113)) |
+| `TENKAI_CLUSTER_CONFIG` | `crates/tenkai-executor/tests/in_process_kubernetes_kind.rs` | Kubeconfig path for the kind in-process Kubernetes test |
+| `TENKAI_GATE_URL`, `TENKAI_GATE_TOKEN` | `crates/tenkaictl/tests/two_environment_closure_drill.rs` | Remote gate endpoint for the library-only HTTP gate adapter ([provider contracts](provider-contracts.md#remote-gate-http-json-contract-113)) |
 | `SEKAI_CHISEI_DIR`, `REPLAY_OUTPUT_DIR` | `scripts/capture-rollback-replay.sh` | Provider checkout and output directory for the replay capture |

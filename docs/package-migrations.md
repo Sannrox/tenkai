@@ -197,7 +197,8 @@ bash scripts/stateful-upgrade-drill.sh
 Equivalent Cargo invocation:
 
 ```bash
-cargo test --locked --test stateful_upgrade_drill -- --nocapture
+cargo build --locked --bin tenkaictl --bin tenkai-executor-guard
+cargo test --locked -p tenkaictl --test stateful_upgrade_drill -- --nocapture
 ```
 
 The drill generates ephemeral `tenkaictl dev` keys, publishes signed

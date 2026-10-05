@@ -7,7 +7,7 @@ loopback, so plain `http` is allowed; a production deployment uses `https` (see
 [Going to production](#going-to-production)).
 
 You need Docker, a `tenkai-server` release binary (or a source build with
-`--features ui`), and a browser.
+`-p tenkai-server --features ui`), and a browser.
 
 ## 1. Start Keycloak
 

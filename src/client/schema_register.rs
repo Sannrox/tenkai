@@ -1,0 +1,739 @@
+//! Schema registration and built-in graph-action definitions.
+//!
+//! Kind constants live in [`crate::ontology`]. This module talks to `Ctx` and
+//! names wire types so ontology stays free of prost.
+
+use anyhow::{Result, bail};
+
+use super::Ctx;
+use crate::ontology::{
+    ACTION_CONFIGURE_MAINTENANCE, ACTION_CONFIGURE_PRODUCT_MAINTENANCE, ACTION_EMERGENCY_OVERRIDE,
+    ACTION_REPLACE_SUBSCRIPTION, ACTION_SUBSCRIBE, KIND_CANARY_ATTEMPT, KIND_CANARY_DESIGNATION,
+    KIND_CANARY_OUTCOME, KIND_CANARY_POLICY, KIND_CANARY_POLICY_POINTER, KIND_CHANNEL,
+    KIND_CONNECTIVITY_UPGRADE, KIND_DEPLOYMENT, KIND_ENVIRONMENT, KIND_ENVIRONMENT_EXECUTION,
+    KIND_MAINTENANCE_CONFIG, KIND_PACKAGE_MIGRATION, KIND_PACKAGE_MIGRATION_LOCK, KIND_PLAN,
+    KIND_PLAN_APPROVAL_VERIFICATION, KIND_PRODUCT, KIND_PRODUCT_MAINTENANCE_CONFIG,
+    KIND_PROMOTION_AUDIT, KIND_PROMOTION_LOCK, KIND_RELEASE, KIND_RELEASE_RECALL,
+    KIND_RELEASE_VERIFICATION, KIND_WAVE, REL_SUBSCRIBES,
+};
+use crate::pb::graph_action::{ActionOp, ActionParamDef, ActionTypeDef};
+use crate::pb::sekai::{ObjectType, PropertyDef};
+
+fn prop(name: &str, required: bool, description: &str) -> PropertyDef {
+    PropertyDef {
+        name: name.into(),
+        r#type: "string".into(),
+        required,
+        description: description.into(),
+        classification: "public".into(),
+        ..Default::default()
+    }
+}
+
+fn object_type(kind: &str, description: &str, properties: Vec<PropertyDef>) -> ObjectType {
+    ObjectType {
+        kind: kind.into(),
+        description: description.into(),
+        properties,
+        is_builtin: false,
+        implements: vec![],
+    }
+}
+
+fn string_param(name: &str) -> ActionParamDef {
+    ActionParamDef {
+        name: name.into(),
+        r#type: "string".into(),
+        required: true,
+        enum_values: vec![],
+    }
+}
+
+fn configure_maintenance_action() -> ActionTypeDef {
+    ActionTypeDef {
+        name: ACTION_CONFIGURE_MAINTENANCE.into(),
+        description: "Authorize and replace an environment's maintenance windows".into(),
+        params: vec![
+            string_param("environment"),
+            string_param("windows"),
+            string_param("revision"),
+            string_param("correlation"),
+        ],
+        ops: vec![
+            ActionOp {
+                op: "set_property".into(),
+                property: "environment".into(),
+                value_from: "environment".into(),
+                relation: String::new(),
+            },
+            ActionOp {
+                op: "set_property".into(),
+                property: "windows".into(),
+                value_from: "windows".into(),
+                relation: String::new(),
+            },
+            ActionOp {
+                op: "set_property".into(),
+                property: "revision".into(),
+                value_from: "revision".into(),
+                relation: String::new(),
+            },
+            ActionOp {
+                op: "set_property".into(),
+                property: "last_update_correlation".into(),
+                value_from: "correlation".into(),
+                relation: String::new(),
+            },
+        ],
+        target_kind: KIND_MAINTENANCE_CONFIG.into(),
+        created: crate::now_millis(),
+        required_purpose: String::new(),
+    }
+}
+
+fn configure_product_maintenance_action() -> ActionTypeDef {
+    ActionTypeDef {
+        name: ACTION_CONFIGURE_PRODUCT_MAINTENANCE.into(),
+        description: "Authorize and replace a product's maintenance windows".into(),
+        params: vec![
+            string_param("product"),
+            string_param("windows"),
+            string_param("revision"),
+            string_param("correlation"),
+        ],
+        ops: vec![
+            ActionOp {
+                op: "set_property".into(),
+                property: "product".into(),
+                value_from: "product".into(),
+                relation: String::new(),
+            },
+            ActionOp {
+                op: "set_property".into(),
+                property: "windows".into(),
+                value_from: "windows".into(),
+                relation: String::new(),
+            },
+            ActionOp {
+                op: "set_property".into(),
+                property: "revision".into(),
+                value_from: "revision".into(),
+                relation: String::new(),
+            },
+            ActionOp {
+                op: "set_property".into(),
+                property: "last_update_correlation".into(),
+                value_from: "correlation".into(),
+                relation: String::new(),
+            },
+        ],
+        target_kind: KIND_PRODUCT_MAINTENANCE_CONFIG.into(),
+        created: crate::now_millis(),
+        required_purpose: String::new(),
+    }
+}
+
+/// Built-in graph-action definitions owned by Tenkai.
+///
+/// Remote hosts still need these local mutation plans after Sekai admits a
+/// governed ActionInstance; embedded hosts persist the same definitions.
+pub fn known_actions() -> Vec<ActionTypeDef> {
+    vec![
+        ActionTypeDef {
+            name: ACTION_SUBSCRIBE.into(),
+            description: "Authorize and create an environment channel subscription".into(),
+            params: vec![string_param("channel_id")],
+            ops: vec![ActionOp {
+                op: "create_link".into(),
+                property: "channel_id".into(),
+                value_from: String::new(),
+                relation: REL_SUBSCRIBES.into(),
+            }],
+            target_kind: KIND_ENVIRONMENT.into(),
+            created: crate::now_millis(),
+            required_purpose: String::new(),
+        },
+        configure_maintenance_action(),
+        configure_product_maintenance_action(),
+        ActionTypeDef {
+            name: ACTION_EMERGENCY_OVERRIDE.into(),
+            description: "Authorize and audit an emergency maintenance-window override".into(),
+            params: vec![string_param("reason"), string_param("correlation")],
+            ops: vec![
+                ActionOp {
+                    op: "set_property".into(),
+                    property: "last_emergency_override_reason".into(),
+                    value_from: "reason".into(),
+                    relation: String::new(),
+                },
+                ActionOp {
+                    op: "set_property".into(),
+                    property: "last_emergency_override_correlation".into(),
+                    value_from: "correlation".into(),
+                    relation: String::new(),
+                },
+            ],
+            target_kind: KIND_PLAN.into(),
+            created: crate::now_millis(),
+            required_purpose: String::new(),
+        },
+        ActionTypeDef {
+            name: ACTION_REPLACE_SUBSCRIPTION.into(),
+            description: "Authorize and atomically replace an environment channel subscription"
+                .into(),
+            params: vec![string_param("channel_id"), string_param("old_link_id")],
+            ops: vec![
+                ActionOp {
+                    op: "create_link".into(),
+                    property: "channel_id".into(),
+                    value_from: String::new(),
+                    relation: REL_SUBSCRIBES.into(),
+                },
+                ActionOp {
+                    op: "delete_link".into(),
+                    property: String::new(),
+                    value_from: "old_link_id".into(),
+                    relation: String::new(),
+                },
+            ],
+            target_kind: KIND_ENVIRONMENT.into(),
+            created: crate::now_millis(),
+            required_purpose: String::new(),
+        },
+    ]
+}
+
+/// Look up one built-in Tenkai graph-action definition by name.
+pub fn known_action(name: &str) -> Option<ActionTypeDef> {
+    known_actions()
+        .into_iter()
+        .find(|action| action.name == name)
+}
+
+/// Register the tenkai schema types; existing types are left untouched.
+pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
+    let types = vec![
+        object_type(
+            KIND_PRODUCT,
+            "A deliverable unit of software or intelligence artifacts",
+            vec![prop("description", false, "What this product is")],
+        ),
+        object_type(
+            KIND_RELEASE,
+            "An immutable, digest-pinned version of a product",
+            vec![
+                prop("product", true, "Product name"),
+                prop("version", true, "Release version"),
+                prop("digest", true, "sha256 of the manifest content"),
+                prop(
+                    "artifact_digest",
+                    true,
+                    "sha256 tree digest of the immutable deployment workdir",
+                ),
+                prop("manifest", true, "Raw manifest as published"),
+                prop("workdir", false, "Absolute workdir for deploy commands"),
+                prop(
+                    "provenance_envelopes",
+                    false,
+                    "Canonical registered immutable provenance envelopes",
+                ),
+                prop(
+                    "provenance_digests",
+                    false,
+                    "Sorted canonical provenance-envelope digests",
+                ),
+                prop(
+                    "provenance_projections",
+                    false,
+                    "Bounded payload-free inspection projections",
+                ),
+                prop("recalled_at", false, "Unix-ms timestamp when recalled"),
+                prop("recalled_by", false, "Principal that recalled the release"),
+            ],
+        ),
+        object_type(
+            KIND_RELEASE_RECALL,
+            "An immutable first-writer claim that a release was recalled",
+            vec![
+                prop("release_id", true, "Recalled release object id"),
+                prop("recalled_at", true, "Unix-ms timestamp when recalled"),
+                prop("recalled_by", true, "Principal that recalled the release"),
+                prop(
+                    "principal_kind",
+                    false,
+                    "Authenticated principal kind that recalled the release",
+                ),
+            ],
+        ),
+        object_type(
+            KIND_RELEASE_VERIFICATION,
+            "An immutable first-writer claim for release verification evidence",
+            vec![
+                prop("release_id", true, "Release object id"),
+                prop("verification_status", true, "verified|unsigned-development"),
+                prop("signature_algorithm", true, "Signature algorithm"),
+                prop("signer_identity", false, "Trusted signer identity"),
+                prop("signer_key_id", false, "Trusted signer public-key digest"),
+                prop(
+                    "signer_public_key",
+                    false,
+                    "Trusted signer Ed25519 public key",
+                ),
+                prop(
+                    "signature_statement_digest",
+                    false,
+                    "sha256 of the canonical signed release statement",
+                ),
+                prop("signature_envelope", false, "Detached signature envelope"),
+                prop("provenance", false, "Canonical signed provenance JSON"),
+            ],
+        ),
+        object_type(
+            KIND_CHANNEL,
+            "A named release stream of a product (dev/canary/stable)",
+            vec![
+                prop("product", true, "Product name"),
+                prop("channel", true, "Channel name"),
+                prop("current_version", false, "Version the channel points at"),
+                prop(
+                    "current_release",
+                    false,
+                    "Release object id the channel points at",
+                ),
+            ],
+        ),
+        object_type(
+            KIND_ENVIRONMENT,
+            "A managed deployment target; deployed.* properties hold current state",
+            vec![prop("description", false, "What this environment is")],
+        ),
+        object_type(
+            KIND_MAINTENANCE_CONFIG,
+            "Action-controlled maintenance-window configuration for one environment",
+            vec![
+                prop("environment", true, "Environment name"),
+                prop(
+                    "windows",
+                    true,
+                    "JSON list of recurring maintenance windows",
+                ),
+                prop("revision", true, "Digest of the current windows JSON"),
+                prop(
+                    "last_update_correlation",
+                    false,
+                    "Correlation recorded by the most recent governed update",
+                ),
+            ],
+        ),
+        object_type(
+            KIND_PRODUCT_MAINTENANCE_CONFIG,
+            "Recurring maintenance windows that apply to one product in every environment",
+            vec![
+                prop("product", true, "Product name"),
+                prop(
+                    "windows",
+                    true,
+                    "JSON list of recurring maintenance windows",
+                ),
+                prop("revision", true, "Digest of the current windows JSON"),
+                prop(
+                    "last_update_correlation",
+                    false,
+                    "Correlation recorded by the most recent governed update",
+                ),
+            ],
+        ),
+        object_type(
+            KIND_PLAN,
+            "A computed set of steps converging one environment on its channels",
+            vec![
+                prop("format_version", true, "Serialized plan contract version"),
+                prop("environment", true, "Environment name"),
+                prop(
+                    "created_at",
+                    true,
+                    "Plan creation time in Unix milliseconds",
+                ),
+                prop(
+                    "content_digest",
+                    true,
+                    "Digest of immutable executable content",
+                ),
+                prop("plan", true, "Versioned serialized plan document"),
+                prop("status", true, "computed|running|blocked|succeeded|failed"),
+                prop(
+                    "last_emergency_override_reason",
+                    false,
+                    "Last governed maintenance override reason",
+                ),
+                prop(
+                    "last_emergency_override_correlation",
+                    false,
+                    "Correlation token for the last governed maintenance override",
+                ),
+                prop(
+                    "recalled_recovery_reason",
+                    false,
+                    "Audited reason that admits rollback onto recalled content",
+                ),
+            ],
+        ),
+        object_type(
+            KIND_PLAN_APPROVAL_VERIFICATION,
+            "Immutable evidence that an exact plan approval was verified before execution",
+            vec![
+                prop("evidence", true, "Redacted versioned verification evidence"),
+                prop("plan_id", true, "Approved plan object id"),
+                prop("plan_digest", true, "Approved executable plan digest"),
+                prop("environment", true, "Approved environment"),
+                prop(
+                    "signer_identity",
+                    true,
+                    "Trusted signer identity or development bypass",
+                ),
+                prop(
+                    "policy_provider",
+                    true,
+                    "Provider that produced the policy decision",
+                ),
+                prop("policy_evidence_id", true, "Provider decision evidence id"),
+                prop(
+                    "policy_digest",
+                    true,
+                    "Digest of the applied approval policy",
+                ),
+                prop(
+                    "verified_at",
+                    true,
+                    "Verification time in Unix milliseconds",
+                ),
+            ],
+        ),
+        object_type(
+            KIND_ENVIRONMENT_EXECUTION,
+            "An exclusive apply lock for one environment",
+            vec![
+                prop("environment", true, "Locked environment name"),
+                prop("owner", true, "Plan id holding the lease"),
+                prop("expires_at", true, "Lease expiry in Unix milliseconds"),
+                prop("generation", false, "Sekai lease fencing generation"),
+            ],
+        ),
+        object_type(
+            KIND_DEPLOYMENT,
+            "One executed step: a release applied to an environment",
+            vec![
+                prop("environment", true, "Environment name"),
+                prop("product", true, "Product name"),
+                prop("from_version", false, "Previously deployed version"),
+                prop("to_version", true, "Applied version"),
+                prop("status", true, "succeeded|failed|rolled_back"),
+                prop("detail", false, "Failure or rollback detail"),
+                prop("lease_generation", false, "Mutation fencing generation"),
+            ],
+        ),
+        object_type(
+            KIND_CANARY_DESIGNATION,
+            "An explicit fact designating an environment for canary cohorts",
+            vec![prop("environment", true, "Designated environment name")],
+        ),
+        object_type(
+            KIND_CANARY_POLICY,
+            "The immutable canary cohort and success rule for one release promotion",
+            vec![
+                prop("release_id", true, "Release governed by this policy"),
+                prop("release_digest", true, "Pinned release manifest digest"),
+                prop("artifact_digest", true, "Pinned release artifact digest"),
+                prop("target_channel", true, "Wider channel gated by this policy"),
+                prop("policy_digest", true, "Digest of the canonical policy"),
+                prop("active", true, "Whether policy activation completed"),
+                prop("policy", true, "Canonical JSON policy document"),
+            ],
+        ),
+        object_type(
+            KIND_CANARY_POLICY_POINTER,
+            "The currently active immutable policy for one release promotion",
+            vec![
+                prop("release_id", true, "Release governed by the active policy"),
+                prop("target_channel", true, "Wider channel gated by the policy"),
+                prop("policy_id", true, "Immutable active policy object"),
+                prop("policy_digest", true, "Digest of the active policy"),
+            ],
+        ),
+        object_type(
+            KIND_CANARY_ATTEMPT,
+            "A durable execution-time snapshot of applicable canary policies",
+            vec![
+                prop("plan_id", true, "Plan being executed"),
+                prop(
+                    "initial_plan_state",
+                    true,
+                    "Plan lifecycle state before this execution attempt",
+                ),
+                prop(
+                    "gates_skipped",
+                    true,
+                    "Whether evaluation gates were skipped",
+                ),
+                prop("status", true, "pending|ready|abandoned|complete"),
+                prop(
+                    "execution_started_at",
+                    false,
+                    "Apply start time in Unix milliseconds",
+                ),
+                prop(
+                    "plan_state",
+                    false,
+                    "Terminal state captured for this attempt",
+                ),
+                prop(
+                    "finished_at",
+                    false,
+                    "Attempt finish time in Unix milliseconds",
+                ),
+                prop(
+                    "status_detail",
+                    false,
+                    "Terminal detail captured for this attempt",
+                ),
+                prop(
+                    "outcomes",
+                    false,
+                    "Execution outcomes returned by the apply",
+                ),
+                prop("policies", true, "Policies active when execution began"),
+            ],
+        ),
+        object_type(
+            KIND_CANARY_OUTCOME,
+            "An immutable canary deployment outcome bound to a release and policy",
+            vec![
+                prop("release_id", true, "Release exercised by the canary"),
+                prop("policy_digest", true, "Policy in force during execution"),
+                prop(
+                    "policy_activated_at",
+                    true,
+                    "Activation time of the policy in force during execution",
+                ),
+                prop("environment", true, "Canary environment"),
+                prop("plan_id", true, "Plan that produced the outcome"),
+                prop("attempt_id", true, "Immutable execution attempt"),
+                prop("step_order", true, "Plan step represented by the outcome"),
+                prop("plan_state", true, "Terminal state of the producing plan"),
+                prop(
+                    "deployment_id",
+                    false,
+                    "Deployment proving a passing outcome",
+                ),
+                prop("executed_at", true, "Execution time in Unix milliseconds"),
+                prop("recorded_at", true, "Outcome time in Unix milliseconds"),
+                prop("outcome", true, "Canonical JSON outcome document"),
+            ],
+        ),
+        object_type(
+            KIND_PROMOTION_AUDIT,
+            "An immutable allow or deny decision with its complete canary evidence",
+            vec![
+                prop("release_id", true, "Release considered for promotion"),
+                prop("target_channel", true, "Destination channel"),
+                prop("policy_digest", true, "Policy evaluated"),
+                prop(
+                    "policy_activated_at",
+                    true,
+                    "Activation time of the policy evaluated",
+                ),
+                prop("allowed", true, "Whether promotion was permitted"),
+                prop("evaluated_at", true, "Decision time in Unix milliseconds"),
+                prop("evaluation", true, "Canonical JSON decision and evidence"),
+                prop(
+                    "principal_id",
+                    true,
+                    "Authenticated principal that requested promotion",
+                ),
+                prop(
+                    "principal_kind",
+                    true,
+                    "Authenticated principal kind that requested promotion",
+                ),
+            ],
+        ),
+        object_type(
+            KIND_PROMOTION_LOCK,
+            "An exclusive lock serializing policy changes and channel promotion",
+            vec![prop("owner", true, "Operation holding the lock")],
+        ),
+        object_type(
+            KIND_WAVE,
+            "A durable ordered-cohort advancement record bound to one exact release",
+            vec![
+                prop("name", true, "Operator-provided wave name"),
+                prop(
+                    "identity_digest",
+                    true,
+                    "Digest of the content-bound wave identity",
+                ),
+                prop("product", true, "Product name pinned by this wave"),
+                prop("version", true, "Release version pinned by this wave"),
+                prop("channel", true, "Channel whose head must match the pin"),
+                prop("release_id", true, "Pinned release object id"),
+                prop("release_digest", true, "Pinned release manifest digest"),
+                prop("artifact_digest", true, "Pinned release artifact digest"),
+                prop(
+                    "status",
+                    true,
+                    "admitted|running|awaiting_approval|succeeded|failed|stopped|rolling_back|rolled_back|recovery_required",
+                ),
+                prop("record", true, "Canonical JSON wave record"),
+            ],
+        ),
+        object_type(
+            KIND_CONNECTIVITY_UPGRADE,
+            "A durable upgrade coordinator spanning connected, intermittent, and isolated environments",
+            vec![
+                prop("name", true, "Operator-provided upgrade name"),
+                prop(
+                    "identity_digest",
+                    true,
+                    "Digest of the content-bound upgrade identity",
+                ),
+                prop("product", true, "Product name pinned by this upgrade"),
+                prop("version", true, "Release version pinned by this upgrade"),
+                prop("channel", true, "Channel whose head must match the pin"),
+                prop("status", true, "Upgrade lifecycle status"),
+                prop("record", true, "Canonical JSON upgrade record"),
+            ],
+        ),
+        object_type(
+            KIND_PACKAGE_MIGRATION,
+            "A durable package-migration plan with classified checkpoints and recovery",
+            vec![
+                prop("name", true, "Operator-provided migration name"),
+                prop(
+                    "identity_digest",
+                    true,
+                    "Digest of the content-bound migration identity",
+                ),
+                prop("environment", true, "Environment scoped by this migration"),
+                prop("status", true, "Migration lifecycle status"),
+                prop("record", true, "Canonical JSON migration record"),
+            ],
+        ),
+        object_type(
+            KIND_PACKAGE_MIGRATION_LOCK,
+            "An exclusive lock serializing package migration against one environment",
+            vec![
+                prop("environment", true, "Environment held by the lock"),
+                prop("owner", true, "Package migration name holding the lock"),
+                prop(
+                    "allowed_plan_id",
+                    false,
+                    "Plan identifier temporarily admitted to apply while the lock is held",
+                ),
+            ],
+        ),
+    ];
+
+    let mut registered = Vec::new();
+    for t in types {
+        let kind = t.kind.clone();
+        match ctx.register_schema(t).await {
+            Ok(()) => registered.push(kind),
+            Err(status) if crate::client::is_unique_conflict(&status) => {}
+            Err(status) => return Err(status.into()),
+        }
+    }
+    for action in known_actions() {
+        let name = action.name.clone();
+        match ctx.register_action(action).await {
+            Ok(()) => registered.push(name),
+            Err(status) if crate::client::is_unique_conflict(&status) => {}
+            Err(status) => return Err(status.into()),
+        }
+    }
+    Ok(registered)
+}
+
+async fn require_schema_kinds(ctx: &mut Ctx, label: &str, kinds: &[&str]) -> Result<()> {
+    let schemas = ctx.schemas().await?;
+    let missing: Vec<&str> = kinds
+        .iter()
+        .copied()
+        .filter(|kind| !schemas.iter().any(|schema| schema.kind == *kind))
+        .collect();
+    if !missing.is_empty() {
+        bail!(
+            "{label} schema upgrade required (missing {}); ask an administrator to run `tenkaictl init`",
+            missing.join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// Verify once per connected client that an administrator registered upgrade types.
+pub async fn require_connectivity_upgrade_schema(ctx: &mut Ctx) -> Result<()> {
+    require_schema_kinds(ctx, "connectivity-upgrade", &[KIND_CONNECTIVITY_UPGRADE]).await
+}
+
+/// Verify once per connected client that an administrator registered migration types.
+pub async fn require_package_migration_schema(ctx: &mut Ctx) -> Result<()> {
+    require_schema_kinds(
+        ctx,
+        "package-migration",
+        &[KIND_PACKAGE_MIGRATION, KIND_PACKAGE_MIGRATION_LOCK],
+    )
+    .await
+}
+
+/// Verify once per connected client that an administrator registered wave types.
+pub async fn require_wave_schema(ctx: &mut Ctx) -> Result<()> {
+    require_schema_kinds(ctx, "wave", &[KIND_WAVE]).await
+}
+
+/// Verify once per connected client that an administrator ran the schema upgrade.
+pub async fn require_canary_schema(ctx: &mut Ctx) -> Result<()> {
+    let preflight = ctx.canary_schema_preflight();
+    preflight
+        .get_or_try_init(|| async {
+            require_schema_kinds(
+                ctx,
+                "canary",
+                &[
+                    KIND_CANARY_DESIGNATION,
+                    KIND_CANARY_POLICY,
+                    KIND_CANARY_POLICY_POINTER,
+                    KIND_CANARY_ATTEMPT,
+                    KIND_CANARY_OUTCOME,
+                    KIND_PROMOTION_AUDIT,
+                    KIND_PROMOTION_LOCK,
+                ],
+            )
+            .await
+        })
+        .await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ontology::KIND_MAINTENANCE_CONFIG;
+
+    #[test]
+    fn maintenance_action_mutates_the_configuration_object() {
+        let action = configure_maintenance_action();
+        assert_eq!(action.target_kind, KIND_MAINTENANCE_CONFIG);
+        assert_eq!(
+            action
+                .ops
+                .iter()
+                .map(|operation| operation.property.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "environment",
+                "windows",
+                "revision",
+                "last_update_correlation"
+            ]
+        );
+    }
+}

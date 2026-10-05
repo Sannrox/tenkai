@@ -209,10 +209,10 @@ pub struct ManagementLifecycleResult {
     pub operation: String,
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(transform = crate::server::contract::omitted_when_none)]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub resource: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(transform = crate::server::contract::omitted_when_none)]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub digest: Option<String>,
 }
 

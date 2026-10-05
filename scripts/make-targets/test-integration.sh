@@ -6,15 +6,17 @@ cd "$ROOT"
 
 export LC_ALL=C
 
+cargo build --locked --bins --workspace
+
 count=0
-for test_file in tests/*.rs; do
+for test_file in tests/*.rs crates/*/tests/*.rs; do
   [[ -f "$test_file" ]] || continue
   test_target="${test_file##*/}"
   test_target="${test_target%.rs}"
   if [[ -n "${WHAT:-}" ]]; then
-    cargo test --locked --test "$test_target" "$WHAT"
+    cargo test --locked --workspace --test "$test_target" "$WHAT"
   else
-    cargo test --locked --test "$test_target"
+    cargo test --locked --workspace --test "$test_target"
   fi
   count=$((count + 1))
 done

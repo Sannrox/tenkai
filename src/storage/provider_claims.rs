@@ -239,7 +239,7 @@ pub(crate) fn enqueue_provider_event_in(
 /// A first-delivery collection timestamp is the only field allowed to be
 /// added to a durable provider envelope after enqueue. Preserve enqueue
 /// idempotency when the same event is submitted again after that binding.
-pub(crate) fn provider_event_payloads_match(left: &str, right: &str) -> bool {
+pub fn provider_event_payloads_match(left: &str, right: &str) -> bool {
     if left == right {
         return true;
     }

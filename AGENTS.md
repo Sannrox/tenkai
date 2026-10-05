@@ -9,13 +9,15 @@ graph projection, governance, evaluation, and learning; Tenkai must remain
 operable and recoverable without it unless an operation's policy explicitly
 requires provider evidence.
 
-Source code lives in `src/`. `src/lib.rs` exports the application core.
-Shipped binaries are `tenkaictl` (embedded and remote CLI), `tenkai-server`
-(network service), `tenkai-executor-guard` (local process fencing),
-`tenkai-runtime` and `tenkai-runtime-guard` (pull-only environment runtime),
-and `tenkai-worker-lifecycle-fixture` (live worker-lifecycle observation host).
-The Postgres delivery-effect harness is an autodiscovered `src/bin/` target
-behind feature `postgres`, not a packaged product binary; see
+Source code lives in `src/` (application core) and `crates/` (`tenkai-wire`,
+`tenkai-http`, `tenkai-server`, `tenkaictl`, `tenkai-executor`, and optional
+`tenkai-postgres`). `src/lib.rs` exports the application core. Shipped binaries
+are `tenkaictl` (embedded and remote CLI), `tenkai-server` (network service),
+`tenkai-executor-guard` (local process fencing), `tenkai-runtime` and
+`tenkai-runtime-guard` (pull-only environment runtime), and
+`tenkai-worker-lifecycle-fixture` (live worker-lifecycle observation host).
+The Postgres delivery-effect harness is the `tenkai-delivery-conformance`
+binary in `crates/tenkai-postgres`, behind feature `postgres`; see
 [delivery-effect conformance](docs/delivery-effect-conformance.md). Keep domain
 logic in the library and treat CLI, HTTP, gRPC, SQLite, and provider clients as
 adapters around shared application contracts. Protocol definitions live in
@@ -32,9 +34,9 @@ and advancing the issue frontier).
 ## Build, Test, and Development Commands
 
 - `cargo fmt --check` verifies Rust formatting.
-- `cargo test --locked` runs the unit and integration test suite.
-- `cargo build --all-targets --locked` verifies all binaries and test targets compile.
-- `cargo clippy --all-targets --all-features --locked -- -D warnings` runs
+- `cargo test --locked --workspace` runs the unit and integration test suite.
+- `cargo build --workspace --all-targets --locked` verifies all binaries and test targets compile.
+- `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` runs
   strict linting when Clippy is available (matches `make validate`).
 - `make test` runs the default test suite.
 - `make validate` runs every `scripts/validate-*.sh` (format, clippy, shell,
@@ -123,7 +125,7 @@ database as a portable ontology database.
 
 Follow standard Rust formatting (`scripts/validate-format.sh`). Use
 `snake_case` for files (`scripts/validate-rust-filenames.sh`; hyphens only in
-`src/bin/`), modules, functions, and variables; `PascalCase` for types and
+crate `src/bin/` paths), modules, functions, and variables; `PascalCase` for types and
 traits; and `SCREAMING_SNAKE_CASE` for constants. Prefer explicit domain types and
 validated state transitions over loosely structured strings or hidden side
 effects. Keep provider-specific behavior behind application ports and keep

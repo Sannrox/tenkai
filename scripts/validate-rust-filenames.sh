@@ -15,7 +15,7 @@ while IFS= read -r path; do
     printf 'rust filename is not snake_case: %s\n' "$path" >&2
     fail=1
   fi
-  if printf '%s' "$base" | grep -q '-' && [[ "$path" != src/bin/* ]]; then
+  if printf '%s' "$base" | grep -q '-' && [[ "$path" != src/bin/* && "$path" != */src/bin/* ]]; then
     printf 'rust filename uses a hyphen outside src/bin/: %s\n' "$path" >&2
     fail=1
   fi

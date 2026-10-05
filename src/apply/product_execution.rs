@@ -377,9 +377,7 @@ async fn software_request(
     );
     request.artifact_pulls = content.artifact_pulls.clone();
     request.cluster_config_path =
-        crate::software_executor::in_process_kubernetes::cluster_config_path_from_properties(
-            &env_obj.properties,
-        )?;
+        crate::software_executor::cluster_config_path_from_properties(&env_obj.properties)?;
     Ok(request)
 }
 

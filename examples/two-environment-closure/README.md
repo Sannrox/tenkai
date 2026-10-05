@@ -7,7 +7,8 @@ See [change-set closure pins](../../docs/change-set-pin.md#two-environment-drill
 and issue [#360](https://github.com/Sannrox/tenkai/issues/360).
 
 ```bash
-cargo test --locked --test two_environment_closure_drill -- --nocapture
+cargo build --locked --bin tenkaictl --bin tenkai-executor-guard
+cargo test --locked -p tenkaictl --test two_environment_closure_drill -- --nocapture
 ```
 
 The drill uses disposable local state and `tenkaictl dev` keys. It does not

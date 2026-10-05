@@ -24,7 +24,7 @@ commits. It also asserts one durable channel, plan, receipt, and rollback:
 
 ```bash
 export TENKAI_POSTGRES_URL='postgresql://127.0.0.1:5432/tenkai_test'
-cargo test --locked --features postgres \
+cargo test --locked -p tenkai-postgres --features postgres \
   live_postgres_delivery_effects_are_idempotent_and_fenced \
   -- --ignored --nocapture
 ```
@@ -37,11 +37,11 @@ adapter:
 
 ```bash
 export TENKAI_CONFORMANCE_POSTGRES_URL='postgresql://127.0.0.1:5432/tenkai_test'
-cargo run --locked --features postgres --bin tenkai-delivery-conformance
+cargo run --locked -p tenkai-postgres --features postgres --bin tenkai-delivery-conformance
 ```
 
-`tenkai-delivery-conformance` is an autodiscovered Postgres harness under
-`src/bin/`, not a product binary listed in `Cargo.toml`.
+`tenkai-delivery-conformance` is a Postgres harness in `crates/tenkai-postgres`,
+behind feature `postgres`; it is not a packaged product binary.
 
 The dedicated environment variable is accepted only when the host is
 loopback/localhost, the database name contains `test`, and the URL has no query
@@ -65,7 +65,7 @@ For the focused live test:
 
 ```bash
 TENKAI_CONFORMANCE_POSTGRES_URL='postgresql://127.0.0.1:5432/tenkai_test' \
-  cargo test --locked --features postgres --test delivery_conformance_adapter \
+  cargo test --locked -p tenkai-postgres --features postgres --test delivery_conformance_adapter \
   live_postgres_adapter_exercises_real_delivery_authority -- --ignored --nocapture
 ```
 
