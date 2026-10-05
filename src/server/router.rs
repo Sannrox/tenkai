@@ -34,7 +34,7 @@ pub(super) struct AppState {
     pub(super) runtime_delivery: Arc<RuntimeDeliveryOperations>,
 }
 
-#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[derive(Clone, Debug, Serialize, schemars::JsonSchema)]
 pub(super) struct ServiceStatus {
     pub(super) status: &'static str,
     pub(super) profile: String,

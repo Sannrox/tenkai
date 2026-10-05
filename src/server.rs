@@ -5,6 +5,7 @@ mod config;
 pub mod contract;
 mod inspect;
 mod lifecycle;
+mod opening;
 mod package_migration;
 mod remote_client;
 mod remote_client_lifecycle;
@@ -20,5 +21,6 @@ pub use crate::runtime_delivery::{
     RuntimeInventoryResponse, RuntimeWork, StatusEnvFuture, WorkFuture,
 };
 pub use config::{DevelopmentFixtureConfig, ServerConfig};
+pub use opening::{HotSwap, opening_router};
 pub use remote_client::RemoteClient;
 pub use router::router;

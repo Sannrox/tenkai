@@ -25,8 +25,11 @@ when any environment fails.
 ## Run `tenkai-server`
 
 `tenkai-server` hosts the same reconciliation contract as embedded CLI mode,
-serves unauthenticated liveness (`/healthz`) and readiness (`/readyz`) probes,
-and shuts down gracefully on SIGINT. Management mutations require a bearer
+binds its listener before opening the operational store, serves unauthenticated
+liveness (`/healthz`) immediately and readiness (`/readyz`) after the store is
+open, and shuts down gracefully on SIGINT. A large legacy graph import cannot
+delay bind; `/readyz` stays 503 until import finishes, and a restart keeps
+already-copied rows. Management mutations require a bearer
 token and append request and outcome records to the Tenkai operational
 database. Environment runtimes use separate tokens, each scoped server-side to
 exactly one environment. Continuous reconcile ticks emit structured diagnostics

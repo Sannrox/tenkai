@@ -280,10 +280,57 @@ async fn main() -> Result<()> {
             format!("creating operational state directory {}", parent.display())
         })?;
     }
-    let store = Arc::new(
-        SqliteStore::open(&cli.database)
-            .with_context(|| format!("opening {}", cli.database.display()))?,
-    );
+
+    // Bind and serve /healthz before SqliteStore::open so a large legacy import
+    // cannot delay the listener (#516). /readyz stays 503 until the store is open.
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+    let listener = tokio::net::TcpListener::bind(cli.listen).await?;
+    let bound = listener.local_addr()?;
+    let opening_profile = if cli.tenant_mode {
+        "enterprise-tenant-postgres"
+    } else {
+        "community-sqlite"
+    };
+    println!("tenkai-server listening on {bound} profile={opening_profile} capabilities=opening");
+    let swap =
+        tenkai::server::HotSwap::new(tenkai::server::opening_router(opening_profile, Vec::new()));
+    let serving = swap.clone();
+    let mut serve_shutdown = shutdown_tx.subscribe();
+    let signal_shutdown = shutdown_tx.clone();
+    tokio::spawn(async move {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            eprintln!("failed to install shutdown handler: {error}");
+        }
+        let _ = signal_shutdown.send(true);
+    });
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, serving)
+            .with_graceful_shutdown(async move {
+                loop {
+                    if *serve_shutdown.borrow() {
+                        break;
+                    }
+                    if serve_shutdown.changed().await.is_err() {
+                        break;
+                    }
+                }
+            })
+            .await
+    });
+
+    let database = cli.database.clone();
+    let store = match run_blocking_startup("operational sqlite store", move || {
+        SqliteStore::open(&database).with_context(|| format!("opening {}", database.display()))
+    })
+    .await
+    {
+        Ok(store) => Arc::new(store),
+        Err(error) => {
+            let _ = shutdown_tx.send(true);
+            let _ = server_task.await;
+            return Err(error);
+        }
+    };
     let outcome_provider = match cli.outcome_provider {
         OutcomeProviderMode::Disabled => {
             anyhow::ensure!(
@@ -481,10 +528,9 @@ async fn main() -> Result<()> {
         Some(source) => tenkai::server::ui::mount(app, source, &ui_connect_origins)?,
         None => app,
     };
-    let listener = tokio::net::TcpListener::bind(cli.listen).await?;
+    swap.replace(app);
     println!(
-        "tenkai-server listening on {} profile={} capabilities={}",
-        listener.local_addr()?,
+        "tenkai-server ready profile={} capabilities={}",
         capabilities.profile,
         capabilities.diagnostic_names().join(",")
     );
@@ -497,7 +543,6 @@ async fn main() -> Result<()> {
         !interval.is_zero(),
         "reconcile interval must be greater than zero"
     );
-    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
     let outcome_task = outcome_provider.map(|provider| {
         let outcome_store = store.clone();
         let mut outcome_shutdown_rx = shutdown_tx.subscribe();
@@ -576,14 +621,9 @@ async fn main() -> Result<()> {
         }
     });
 
-    let result = axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            if let Err(error) = tokio::signal::ctrl_c().await {
-                eprintln!("failed to install shutdown handler: {error}");
-            }
-            let _ = shutdown_tx.send(true);
-        })
-        .await;
+    let result = server_task
+        .await
+        .context("joining HTTP server task during shutdown")?;
     reconcile_task
         .await
         .context("joining reconciliation task during shutdown")?;

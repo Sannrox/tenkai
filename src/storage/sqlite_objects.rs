@@ -28,9 +28,6 @@ use crate::storage::{
 
 const STRICT_AUTHORITY_KINDS: &[&str] = &[KIND_PLAN, KIND_ENVIRONMENT, KIND_RELEASE];
 
-type DecisionRow = (String, i64, String, String, Vec<u8>);
-type ChangeRow = (String, String, i64, Vec<u8>);
-
 mod actions;
 mod backup;
 mod codec;
