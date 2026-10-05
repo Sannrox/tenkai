@@ -28,6 +28,7 @@ jobs:
       - run: make test-integration
       # Downloads the pinned console release and fails on a checksum mismatch.
       - run: cargo test --locked --features ui --lib server::ui
+      - run: cargo test --locked --features postgres,ui --lib postgres_tenant
 
   fmt:
     name: Rustfmt

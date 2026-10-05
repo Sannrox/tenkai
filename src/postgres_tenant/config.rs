@@ -53,6 +53,19 @@ impl PostgresTenantConfig {
     }
 }
 
+/// A `tenkai-server` compiled with `postgres` is a hub host.
+///
+/// It must not start as the community SQLite host when `--tenant-mode` is
+/// unset. Community GitHub assets are built without this feature.
+pub fn require_hub_tenant_mode(tenant_mode: bool) -> Result<()> {
+    if postgres_feature_enabled() && !tenant_mode {
+        return Err(StoreError::AdapterUnavailable(
+            "this hub host requires --tenant-mode and TENKAI_POSTGRES_URL; use the community tenkai-server-<platform> asset for SQLite".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Resolve the durable hub tenant store for `tenkai-server` startup (#127).
 ///
 /// - `tenant_mode == false` → `Ok(None)` (community path).

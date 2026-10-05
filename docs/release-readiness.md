@@ -62,8 +62,9 @@ cargo build --all-targets --locked
 ## 6. Artifacts
 
 - [ ] `tenkaictl`, `tenkai-server`, runtime/guard binaries build
-- [ ] Tag `vX.Y.Z` GitHub Release attaches community hosts for `linux-x86_64`
-      and `darwin-aarch64` plus `SHA256SUMS` ([release binaries](release-binaries.md))
+- [ ] Tag `vX.Y.Z` GitHub Release attaches community hosts and
+      `tenkai-server-postgres-<platform>` for `linux-x86_64` and
+      `darwin-aarch64` plus `SHA256SUMS` ([release binaries](release-binaries.md))
 - [ ] GitHub attestations verify for downloaded executables against the
       release-binaries workflow; checksums match before run
 - [ ] Optional container/bundle packaging (if any) version-aligned

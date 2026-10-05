@@ -28,10 +28,12 @@ mod store;
 mod tenant_store;
 
 pub use capabilities::{
-    POSTGRES_SHARED_REPLICA_WRITER_MODEL, SharedReplicaWriterModel,
+    POSTGRES_SHARED_REPLICA_WRITER_MODEL, SharedReplicaWriterModel, compiled_host_feature_report,
     enterprise_postgres_hub_profile, postgres_feature_enabled, tenant_postgres_store_capabilities,
 };
-pub use config::{PostgresTenantConfig, resolve_server_tenant_store, tenant_schema_name};
+pub use config::{
+    PostgresTenantConfig, require_hub_tenant_mode, resolve_server_tenant_store, tenant_schema_name,
+};
 #[cfg(feature = "postgres")]
 pub use fence::PostgresReconcileFence;
 pub use fence::{open_postgres_reconcile_fence, resolve_reconcile_fence_for_replicas};

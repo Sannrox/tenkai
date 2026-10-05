@@ -45,8 +45,8 @@ no single transaction, backup, restore, or cutover boundary.
 ## Prerequisites
 
 ```bash
-# Build with Postgres adapter
-cargo build --features postgres --bin tenkai-server
+# Build with Postgres adapter and the pinned console
+cargo build --features postgres,ui --bin tenkai-server
 
 # Required secrets (env only — never argv)
 export TENKAI_MANAGEMENT_TOKEN='…'          # management bearer
@@ -82,7 +82,7 @@ export TENKAI_INSTANCE_ID=hub-1
 export TENKAI_MANAGEMENT_TOKEN=lab-management-token
 export TENKAI_POSTGRES_URL='postgres://tenkai:tenkai@127.0.0.1:5432/tenkai'
 
-cargo run --features postgres --bin tenkai-server -- \
+cargo run --features postgres,ui --bin tenkai-server -- \
   --tenant-mode \
   --replica-count 2 \
   --listen 127.0.0.1:8080 \
@@ -100,7 +100,7 @@ identifier reports the current low-level composition; it is not the
 export TENKAI_INSTANCE_ID=hub-2
 # same TENKAI_POSTGRES_URL and TENKAI_MANAGEMENT_TOKEN
 
-cargo run --features postgres --bin tenkai-server -- \
+cargo run --features postgres,ui --bin tenkai-server -- \
   --tenant-mode \
   --replica-count 2 \
   --listen 127.0.0.1:8081 \

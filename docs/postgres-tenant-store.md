@@ -67,7 +67,7 @@ identity-plane tables in this database (ADR 0005).
 ## Build and configure
 
 ```bash
-# Compile with the optional adapter
+# Compile with the optional adapter (add `ui` to embed the console)
 cargo build --features postgres
 
 # Connection string via env only (not argv)
@@ -126,7 +126,7 @@ Default CI does **not** require a Postgres service. Live tests are `#[ignore]`.
 ## `tenkai-server` wiring (#127)
 
 ```bash
-cargo build --features postgres --bin tenkai-server
+cargo build --features postgres,ui --bin tenkai-server
 
 export TENKAI_MANAGEMENT_TOKEN=…
 export TENKAI_POSTGRES_URL='postgres://tenkai:tenkai@127.0.0.1:5432/tenkai'
@@ -135,11 +135,16 @@ export TENKAI_POSTGRES_URL='postgres://tenkai:tenkai@127.0.0.1:5432/tenkai'
 tenkai-server --tenant-mode --listen 127.0.0.1:8080
 ```
 
+Published GitHub Releases attach this host as `tenkai-server-postgres-<platform>`
+([release binaries](release-binaries.md#hub-postgres)). `tenkai-server --help`
+reports `Compiled features: postgres, ui`.
+
 Rules:
 
 | Condition | Result |
 | --- | --- |
-| No `--tenant-mode` | Community path; `tenant_store` unset |
+| No `--tenant-mode` on a community host (no `postgres` feature) | Community path; `tenant_store` unset |
+| No `--tenant-mode` on a `postgres`-feature hub host | Startup fails: this is not the community SQLite host |
 | `--tenant-mode` without feature | Startup fails: rebuild with `--features postgres` |
 | `--tenant-mode` without `TENKAI_POSTGRES_URL` | Startup fails closed |
 | `--tenant-mode` + feature + URL | Wires `PostgresTenantOperationalStore`; diagnostic composition `enterprise-tenant-postgres` |

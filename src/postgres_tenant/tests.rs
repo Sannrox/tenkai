@@ -124,6 +124,39 @@ fn multi_replica_requirement_accepts_postgres_hub_profile() {
 }
 
 #[test]
+fn compiled_host_feature_report_matches_cargo_features() {
+    let report = compiled_host_feature_report();
+    match (postgres_feature_enabled(), cfg!(feature = "ui")) {
+        (true, true) => assert_eq!(report, "Compiled features: postgres, ui"),
+        (true, false) => assert_eq!(report, "Compiled features: postgres"),
+        (false, true) => assert_eq!(report, "Compiled features: ui"),
+        (false, false) => assert_eq!(report, "Compiled features: (none)"),
+    }
+}
+
+#[test]
+fn hub_host_without_tenant_mode_fails_closed_when_postgres_compiled() {
+    match require_hub_tenant_mode(false) {
+        Ok(()) => assert!(
+            !postgres_feature_enabled(),
+            "postgres hub host must not start as the community SQLite host"
+        ),
+        Err(error) => {
+            assert!(postgres_feature_enabled(), "{error}");
+            let message = error.to_string();
+            assert!(message.contains("--tenant-mode"), "{message}");
+            assert!(message.contains("TENKAI_POSTGRES_URL"), "{message}");
+            assert!(message.contains("community tenkai-server-"), "{message}");
+        }
+    }
+}
+
+#[test]
+fn hub_host_with_tenant_mode_passes_feature_guard() {
+    require_hub_tenant_mode(true).expect("tenant mode is valid on every host");
+}
+
+#[test]
 fn resolve_server_tenant_store_community_is_none() {
     let resolved = resolve_server_tenant_store(false).unwrap();
     assert!(resolved.is_none());

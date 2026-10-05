@@ -36,10 +36,18 @@ jobs:
             --bin tenkai-executor-guard \
             --bin tenkai-runtime \
             --bin tenkai-runtime-guard
-      - name: Package
+      - name: Package community hosts
         run: |
           mkdir -p dist
           bash scripts/package-release-binaries.sh package \
+            --out dist \
+            --platform ${{ matrix.platform }} \
+            --strip
+      - name: Build hub tenkai-server
+        run: cargo build --release --locked --features postgres,ui --bin tenkai-server
+      - name: Package hub tenkai-server
+        run: |
+          bash scripts/package-release-binaries.sh package-hub \
             --out dist \
             --platform ${{ matrix.platform }} \
             --strip
