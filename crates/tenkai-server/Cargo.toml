@@ -1,6 +1,6 @@
 [package]
 name = "tenkai-server"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 rust-version = "1.96.1"
 license = "Apache-2.0"
@@ -16,10 +16,10 @@ ui = ["tenkai-http/ui"]
 postgres = ["tenkai-postgres/postgres"]
 
 [dependencies]
-tenkai = { path = "../..", version = "0.4.1" }
-tenkai-executor = { path = "../tenkai-executor", version = "0.4.1" }
-tenkai-postgres = { path = "../tenkai-postgres", version = "0.4.1" }
-tenkai-http = { path = "../tenkai-http", version = "0.4.1" }
+tenkai = { path = "../..", version = "0.4.2" }
+tenkai-executor = { path = "../tenkai-executor", version = "0.4.2" }
+tenkai-postgres = { path = "../tenkai-postgres", version = "0.4.2" }
+tenkai-http = { path = "../tenkai-http", version = "0.4.2" }
 anyhow = "1"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 base64 = "0.22"
