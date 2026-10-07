@@ -2542,7 +2542,7 @@ dependencies = [
 
 [[package]]
 name = "tenkai"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -2576,7 +2576,7 @@ dependencies = [
 
 [[package]]
 name = "tenkai-executor"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "k8s-openapi",
@@ -2591,7 +2591,7 @@ dependencies = [
 
 [[package]]
 name = "tenkai-http"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -2611,7 +2611,7 @@ dependencies = [
 
 [[package]]
 name = "tenkai-postgres"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "postgres",
@@ -2631,7 +2631,7 @@ dependencies = [
 
 [[package]]
 name = "tenkai-server"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -2649,7 +2649,7 @@ dependencies = [
 
 [[package]]
 name = "tenkai-wire"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "prost",
  "protoc-bin-vendored",
@@ -2661,7 +2661,7 @@ dependencies = [
 
 [[package]]
 name = "tenkaictl"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "base64",
