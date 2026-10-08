@@ -34,7 +34,11 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         }
         Command::Product { command } => crate::embedded_product::run(&mut ctx, command).await,
         command @ Command::Reconcile { .. } => crate::embedded_reconcile::run(ctx, command).await,
-        Command::Restore { .. } | Command::Dev { .. } | Command::ExecutorGuard { .. } => {
+        Command::Restore { .. }
+        | Command::Dev { .. }
+        | Command::ExecutorGuard { .. }
+        | Command::Login { .. }
+        | Command::Logout => {
             unreachable!("handled before opening the embedded database")
         }
     }

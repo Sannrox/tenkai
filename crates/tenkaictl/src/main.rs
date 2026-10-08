@@ -21,6 +21,7 @@ mod env_args;
 mod flags;
 mod fleet_args;
 mod fleet_watch;
+mod login;
 mod migrate_args;
 mod output;
 mod product_args;
@@ -29,6 +30,7 @@ mod remote_catalog;
 mod remote_delivery;
 #[cfg(test)]
 mod tests;
+mod token_cache;
 mod upgrade_args;
 mod wave_args;
 
@@ -147,6 +149,9 @@ async fn run(cli: Cli) -> Result<()> {
             *generation,
         )
         .await;
+    }
+    if matches!(cli.command, Command::Login { .. } | Command::Logout) {
+        return login::run(cli).await;
     }
     if cli.target == Target::Remote {
         return remote::run(cli).await;

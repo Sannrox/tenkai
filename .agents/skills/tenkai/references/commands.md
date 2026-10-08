@@ -11,11 +11,12 @@ Embedded mode owns local SQLite state:
 tenkaictl --database /path/to/tenkai.db <command>
 ```
 
-Remote mode requires a server URL and a management token loaded from secret
-configuration:
+Remote mode requires a server URL. Load `TENKAI_MANAGEMENT_TOKEN` from a secret
+store, or sign in once with `tenkaictl login` (Authorization Code + PKCE). The
+environment token wins over a saved login.
 
 ```sh
-export TENKAI_MANAGEMENT_TOKEN="<load-from-secret-store>"
+TENKAI_SERVER_URL=https://tenkai.example.internal tenkaictl login
 TENKAI_SERVER_URL=https://tenkai.example.internal \
   tenkaictl --target remote <command>
 ```

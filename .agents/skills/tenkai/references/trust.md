@@ -56,3 +56,5 @@ Keep management tokens, runtime tokens, private signing keys, and approval
 material out of command arguments, logs, reports, repositories, backups, and
 executor payloads. Supply runtime credentials through scoped secret
 configuration. Each runtime credential must authorize exactly one environment.
+Remote `tenkaictl` uses `TENKAI_MANAGEMENT_TOKEN` when set; otherwise it uses
+the login saved under `$XDG_CONFIG_HOME/tenkai/tokens.json`.

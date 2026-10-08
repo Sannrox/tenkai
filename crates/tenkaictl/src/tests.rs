@@ -124,6 +124,39 @@ fn remote_target_is_explicit_and_carries_no_cli_secret() {
 }
 
 #[test]
+fn parses_login_and_logout() {
+    let login = Cli::try_parse_from([
+        "tenkaictl",
+        "--server-url",
+        "https://tenkai.example.test",
+        "login",
+        "--no-browser",
+        "--callback-port",
+        "9876",
+        "--client-id",
+        "tenkai-cli",
+    ])
+    .unwrap();
+    assert!(matches!(
+        login.command,
+        Command::Login {
+            no_browser: true,
+            callback_port: 9876,
+            ref client_id,
+            timeout: 300,
+        } if client_id.as_deref() == Some("tenkai-cli")
+    ));
+    let logout = Cli::try_parse_from([
+        "tenkaictl",
+        "--server-url",
+        "https://tenkai.example.test",
+        "logout",
+    ])
+    .unwrap();
+    assert!(matches!(logout.command, Command::Logout));
+}
+
+#[test]
 fn parses_env_list_and_inspect() {
     let list = Cli::try_parse_from(["tenkaictl", "env", "list"]).unwrap();
     assert!(matches!(

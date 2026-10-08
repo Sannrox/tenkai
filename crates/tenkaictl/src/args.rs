@@ -83,6 +83,23 @@ pub(crate) enum Command {
     },
     /// Initialize Tenkai state and create the `local` environment.
     Init,
+    /// Sign in to a remote server through the configured OIDC provider.
+    Login {
+        /// Pre-registered public OIDC client ID. Defaults to GET /v1/auth/oidc.
+        #[arg(long, env = "TENKAI_CLIENT_ID")]
+        client_id: Option<String>,
+        /// Loopback port for the authorization redirect. 0 binds an ephemeral port.
+        #[arg(long, default_value_t = 0)]
+        callback_port: u16,
+        /// Print the authorization URL instead of opening a browser.
+        #[arg(long)]
+        no_browser: bool,
+        /// Seconds to wait for the browser callback.
+        #[arg(long, default_value_t = 300)]
+        timeout: u64,
+    },
+    /// Forget the saved OIDC login for a remote server.
+    Logout,
     /// Publish a manifest as an immutable release.
     Publish {
         manifest: PathBuf,
