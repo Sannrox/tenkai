@@ -36,7 +36,7 @@ $KC create realms -s realm=ops -s enabled=true
 CID=$($KC create clients -r ops -i \
   -s clientId=tenkai-console -s publicClient=true -s standardFlowEnabled=true \
   -s directAccessGrantsEnabled=false -s implicitFlowEnabled=false \
-  -s 'redirectUris=["'$CONSOLE'/ui/auth/callback"]' \
+  -s 'redirectUris=["'$CONSOLE'/ui/auth/callback","http://127.0.0.1:9876/callback"]' \
   -s 'webOrigins=["'$CONSOLE'"]' \
   -s 'attributes={"pkce.code.challenge.method":"S256","post.logout.redirect.uris":"'$CONSOLE'/ui/"}')
 
@@ -77,7 +77,7 @@ What each part does, in the Keycloak admin console's terms (`Clients` →
 | --- | --- | --- |
 | Client authentication | Off | Public client; the browser cannot keep a secret |
 | Standard flow / PKCE method | On / `S256` | Authorization Code with PKCE |
-| Valid redirect URIs | `<console URL>/ui/auth/callback` | Where Keycloak returns after login |
+| Valid redirect URIs | `<console URL>/ui/auth/callback` and `http://127.0.0.1:9876/callback` | Console callback, plus the `tenkaictl login --callback-port 9876` loopback |
 | Valid post logout redirect URIs | `<console URL>/ui/` | Where sign-out returns |
 | Web origins | The console's origin | The browser calls Keycloak's discovery and token endpoints directly (CORS) |
 | Audience mapper | `tenkai` in the access token | Tenkai rejects tokens whose `aud` lacks its audience |
@@ -133,6 +133,16 @@ delivery pages load because `tenkai-admins` grants `read` and `management`.
 
 The console keeps tokens in memory only and renews them before they expire
 while the tab is open. Reloading the page signs in again.
+
+The same client signs in `tenkaictl`. The fleet management token still starts
+the server; the CLI uses the saved login for remote commands:
+
+```sh
+unset TENKAI_MANAGEMENT_TOKEN
+export TENKAI_SERVER_URL=http://127.0.0.1:8080
+tenkaictl login --callback-port 9876
+tenkaictl --target remote env list
+```
 
 ## Going to production
 

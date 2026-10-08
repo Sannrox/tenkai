@@ -11,7 +11,7 @@ contract behind all modes is [authenticated request context](auth-request-contex
 | --- | --- | --- |
 | Community bearer tokens only | One team, shared secrets from a secret store | `TENKAI_MANAGEMENT_TOKEN`, optionally `TENKAI_ENVIRONMENT_MANAGEMENT_TOKENS` |
 | Enterprise JWT assertions | A trusted gateway mints short-lived Ed25519-signed assertions, optionally with tenant claims | `TENKAI_JWT_VERIFIER_CONFIG` |
-| OIDC access tokens | People sign in through your identity provider, for example with the web console | `TENKAI_OIDC_CONFIG` |
+| OIDC access tokens | People sign in through your identity provider, for example with the web console or `tenkaictl login` | `TENKAI_OIDC_CONFIG` |
 
 The JWT and OIDC modes are mutually exclusive. In both, the fleet management
 token stays valid as the break-glass credential, and environment-scoped tokens
@@ -139,3 +139,26 @@ Behavior:
   origin. If the provider's token endpoint is on another origin, list it in
   `[client] connect_origins` (https, or http on loopback, and no path); it is never served
   to clients.
+
+### CLI sign-in
+
+`tenkaictl login` is an OIDC client of the same public `[client]` the console
+uses. It discovers `GET /v1/auth/oidc`, opens Authorization Code + PKCE in a
+browser, and waits on a loopback redirect `http://127.0.0.1:<port>/callback`.
+The access and refresh tokens are stored in `$XDG_CONFIG_HOME/tenkai/tokens.json`
+(mode `0600`), keyed by server URL, with the issuer and token endpoint pinned
+at login. Refresh talks only to that pinned endpoint.
+
+```sh
+export TENKAI_SERVER_URL=https://tenkai.example.internal
+tenkaictl login --callback-port 9876
+tenkaictl --target remote env list
+tenkaictl logout
+```
+
+Register `http://127.0.0.1:9876/callback` on the public client (or pass a
+registered `--callback-port`). `--client-id` / `TENKAI_CLIENT_ID` overrides the
+discovered id. `--no-browser` prints the authorization URL. Remote commands
+use `TENKAI_MANAGEMENT_TOKEN` when it is set; otherwise they use the saved
+login. The server still requires the fleet management token at process start;
+that token remains the break-glass bearer.

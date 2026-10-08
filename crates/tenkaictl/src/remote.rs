@@ -8,13 +8,10 @@ use crate::fleet_watch::{FleetWatchOptions, print_fleet_status, run_fleet_watch}
 use crate::output::print_reconcile_report;
 
 pub(crate) async fn run(cli: Cli) -> Result<()> {
-    let server_url = cli
-        .server_url
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("--server-url is required with --target remote"))?;
-    let token = std::env::var("TENKAI_MANAGEMENT_TOKEN")
-        .map_err(|_| anyhow::anyhow!("TENKAI_MANAGEMENT_TOKEN is required for remote mode"))?;
-    let client = tenkai_http::RemoteClient::new(server_url, token)?;
+    let server_url = crate::login::require_server_url(cli.server_url.as_deref())?;
+    let runtime = crate::login::LoginRuntime::from_env()?;
+    let token = crate::login::bearer_token(&runtime, &server_url).await?;
+    let client = tenkai_http::RemoteClient::new(&server_url, token)?;
     match cli.command {
         Command::Reconcile {
             once: true, bypass, ..
@@ -56,9 +53,20 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
                 },
         } => {
             run_fleet_watch(
-                || {
-                    let client = client.clone();
-                    async move { client.fleet_status().await }
+                {
+                    let runtime = runtime.clone();
+                    let server_url = server_url.clone();
+                    move || {
+                        let runtime = runtime.clone();
+                        let server_url = server_url.clone();
+                        async move {
+                            // Refresh each sample so a saved OIDC access token
+                            // can expire during watch.
+                            let token = crate::login::bearer_token(&runtime, &server_url).await?;
+                            let client = tenkai_http::RemoteClient::new(&server_url, token)?;
+                            client.fleet_status().await
+                        }
+                    }
                 },
                 FleetWatchOptions {
                     interval,
