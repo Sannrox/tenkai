@@ -23,13 +23,14 @@ pub use crate::environment::{
     ENVIRONMENT_FACT_KEYS, EnvironmentInspectReport, EnvironmentListEntry,
     EnvironmentPlanStepSummary, EnvironmentPlanSummary, EnvironmentSubscriptionView, StatusRow,
     apply_runtime_inventory_facts, clear_artifact_mirror, clear_cluster_config_path,
-    clear_environment_constraint, clear_environment_fact, clear_environment_overlay,
-    cluster_config_path, env_add, fleet_status, inspect_environment,
-    inspect_environment_with_outcomes, list_artifact_mirrors, list_environment_constraints,
-    list_environment_facts, list_environment_overlays, list_environments, overlay_digest,
-    product_overlays, reconcile_deployment, require_environment_fact, set_artifact_mirror,
-    set_cluster_config_path, set_environment_constraint, set_environment_fact,
-    set_environment_overlay, status, subscribe, subscription_state,
+    clear_docker_secret_dir, clear_environment_constraint, clear_environment_fact,
+    clear_environment_overlay, cluster_config_path, docker_secret_dir, env_add, fleet_status,
+    inspect_environment, inspect_environment_with_outcomes, list_artifact_mirrors,
+    list_environment_constraints, list_environment_facts, list_environment_overlays,
+    list_environments, overlay_digest, product_overlays, reconcile_deployment,
+    require_environment_fact, set_artifact_mirror, set_cluster_config_path, set_docker_secret_dir,
+    set_environment_constraint, set_environment_fact, set_environment_overlay, status, subscribe,
+    subscription_state,
 };
 
 pub use crate::fleet::{

@@ -69,7 +69,8 @@ fn cluster_observe_executor() -> Option<Box<dyn crate::software_executor::Softwa
                 || value.eq_ignore_ascii_case("kubernetes")
                 || value.eq_ignore_ascii_case("k8s")
                 || value.eq_ignore_ascii_case("native")
-                || value.eq_ignore_ascii_case("kubernetes-inprocess") =>
+                || value.eq_ignore_ascii_case("kubernetes-inprocess")
+                || value.eq_ignore_ascii_case("docker") =>
         {
             crate::software_executor::selected_software_executor()
         }
@@ -195,6 +196,8 @@ async fn compute_snapshot_with_policy(
                         crate::software_executor::cluster_config_path_from_properties(
                             &env_obj.properties,
                         )?;
+                    request.secret_dir_path =
+                        crate::software_executor::secret_dir_from_properties(&env_obj.properties)?;
                     match executor.observe(&request)? {
                         crate::software_executor::SoftwareObserveStatus::Absent
                         | crate::software_executor::SoftwareObserveStatus::Mismatched => {

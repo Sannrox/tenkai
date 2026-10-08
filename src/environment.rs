@@ -1526,6 +1526,57 @@ pub async fn cluster_config_path(ctx: &mut Ctx, env: &str) -> Result<Option<Path
     crate::software_executor::cluster_config_path_from_properties(&env_obj.properties)
 }
 
+/// Record the environment-scoped Docker secret-file directory. Never stores secret bytes.
+pub async fn set_docker_secret_dir(ctx: &mut Ctx, env: &str, path: &Path) -> Result<String> {
+    validate_identifier("environment", env)?;
+    crate::software_executor::validate_secret_dir_path(path)?;
+    let canonical = path.canonicalize().with_context(|| {
+        format!(
+            "docker_secret_dir {} is not a readable directory",
+            path.display()
+        )
+    })?;
+    if !canonical.is_dir() {
+        bail!(
+            "docker_secret_dir {} is not a readable directory",
+            canonical.display()
+        );
+    }
+    let stored = canonical.to_string_lossy().into_owned();
+    crate::software_executor::validate_secret_dir_path(Path::new(&stored))?;
+    let mut env_obj = environment(ctx, env).await?;
+    env_obj.properties.insert(
+        crate::software_executor::DOCKER_SECRET_DIR_PROPERTY.into(),
+        stored.clone(),
+    );
+    env_obj.updated = crate::now_millis();
+    ctx.put(env_obj).await?;
+    Ok(format!("set {env} docker_secret_dir {stored}"))
+}
+
+/// Remove the environment-scoped Docker secret-file directory path.
+pub async fn clear_docker_secret_dir(ctx: &mut Ctx, env: &str) -> Result<String> {
+    validate_identifier("environment", env)?;
+    let mut env_obj = environment(ctx, env).await?;
+    if env_obj
+        .properties
+        .remove(crate::software_executor::DOCKER_SECRET_DIR_PROPERTY)
+        .is_none()
+    {
+        bail!("environment {env} has no docker_secret_dir");
+    }
+    env_obj.updated = crate::now_millis();
+    ctx.put(env_obj).await?;
+    Ok(format!("cleared {env} docker_secret_dir"))
+}
+
+/// Read the stored environment-scoped Docker secret-file directory, if any.
+pub async fn docker_secret_dir(ctx: &mut Ctx, env: &str) -> Result<Option<PathBuf>> {
+    validate_identifier("environment", env)?;
+    let env_obj = environment(ctx, env).await?;
+    crate::software_executor::secret_dir_from_properties(&env_obj.properties)
+}
+
 const ENVIRONMENT_OVERLAY_PREFIX: &str = "overlay.";
 
 fn reject_credential_material(label: &str, key: &str, value: &str) -> Result<()> {
@@ -2260,5 +2311,45 @@ mod tests {
         assert!(err.contains("file path"), "{err}");
         let _ = std::fs::remove_file(&database);
         let _ = std::fs::remove_file(&kubeconfig);
+    }
+
+    #[tokio::test]
+    async fn docker_secret_dir_stores_canonical_directory_and_refuses_credential_bytes() {
+        let database = std::env::temp_dir().join(format!(
+            "tenkai-docker-secrets-{}-{}.db",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let secret_dir = std::env::temp_dir().join(format!(
+            "tenkai-docker-secrets-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let _ = std::fs::remove_file(&database);
+        let _ = std::fs::remove_dir_all(&secret_dir);
+        std::fs::create_dir_all(&secret_dir).unwrap();
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        env_add(&mut ctx, "lab", "Lab").await.unwrap();
+        let set = set_docker_secret_dir(&mut ctx, "lab", &secret_dir)
+            .await
+            .unwrap();
+        assert!(set.contains("docker_secret_dir"), "{set}");
+        let stored = docker_secret_dir(&mut ctx, "lab").await.unwrap().unwrap();
+        assert_eq!(stored, secret_dir.canonicalize().unwrap());
+        assert!(
+            clear_docker_secret_dir(&mut ctx, "lab")
+                .await
+                .unwrap()
+                .contains("cleared")
+        );
+        assert!(docker_secret_dir(&mut ctx, "lab").await.unwrap().is_none());
+        let err = set_docker_secret_dir(&mut ctx, "lab", Path::new("password=s3cret"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("directory path"), "{err}");
+        let _ = std::fs::remove_file(&database);
+        let _ = std::fs::remove_dir_all(&secret_dir);
     }
 }

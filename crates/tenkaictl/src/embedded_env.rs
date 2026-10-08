@@ -142,6 +142,9 @@ pub(crate) async fn run(
         EnvCommand::ClusterConfig { command } => {
             crate::embedded_env_config::cluster_config(ctx, command).await?;
         }
+        EnvCommand::DockerSecrets { command } => {
+            crate::embedded_env_config::docker_secrets(ctx, command).await?;
+        }
     }
     Ok(())
 }

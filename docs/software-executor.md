@@ -1,8 +1,8 @@
-# Software executor (Kubernetes)
+# Software executor (Kubernetes and Docker host)
 
 Tenkai applies `product.kind = software` releases through a pluggable port so
-cluster delivery does not require hard-linking a cluster client into the core
-crate by default.
+cluster or Docker-host delivery does not require hard-linking a cluster client
+into the core crate by default.
 
 Source: `src/software_executor.rs`. Apply wiring: `src/apply.rs`.
 
@@ -14,6 +14,7 @@ Source: `src/software_executor.rs`. Apply wiring: `src/apply.rs`.
 | **Helm** (#95) | `helm` | Chart root = release workdir | `TENKAI_HELM_BIN` or `helm` |
 | **Native Kubernetes** (#105) | `kubernetes` / `k8s` / `native` | `{workdir}/manifests/**/*.yaml` | `TENKAI_KUBECTL_BIN` or `kubectl` |
 | **In-process Kubernetes** (#376) | `kubernetes-inprocess` | `{workdir}/manifests/**/*.yaml` | in-process client |
+| **Docker host** (#528) | `docker` | `{workdir}/docker/host.json` | `TENKAI_DOCKER_BIN` or `docker` |
 | Fake (tests) | `fake` | in-memory | n/a |
 
 **Helm** is the chart-oriented path. **Native** is for plain multi-doc YAML via
@@ -30,6 +31,7 @@ out of scope here. Custom-resource operators are refused.
 | `HelmSoftwareExecutor` | Helm chart path |
 | `KubernetesSoftwareExecutor` | Native manifests path (`kubectl`) |
 | `InProcessKubernetesExecutor` | Native manifests with server-side apply |
+| `DockerHostExecutor` | Digest-pinned host containers, networks, and volumes |
 
 Hosts (`tenkaictl`, the reconciler) select the adapter from
 `TENKAI_SOFTWARE_EXECUTOR` and pass it into apply. Apply does not read that
@@ -164,6 +166,8 @@ TENKAI_KUBECTL_BIN=kubectl \
 - No kubeconfig or tokens on Tenkai CLI argv for software apply.
 - Never store raw kubeconfig in operational SQLite. Store only an
   environment-scoped file path (`tenkaictl env cluster-config`).
+- Docker `env_file` values stay in operator-managed files. Store only the
+  environment-scoped directory path (`tenkaictl env docker-secrets`).
 - Scope cluster credentials per environment outside Tenkai.
 - Failures leave the plan step failed; rollback remains Tenkai-authoritative.
 - Label values are sanitized; do not put secrets in label fields.
@@ -174,7 +178,43 @@ TENKAI_KUBECTL_BIN=kubectl \
 cargo test --locked software_executor
 ```
 
-Default CI does not require a cluster, helm, or kubectl binary.
+Default CI does not require a cluster, helm, kubectl, or docker binary.
+
+## Docker host enablement (#528)
+
+```bash
+export TENKAI_SOFTWARE_EXECUTOR=docker
+export TENKAI_DOCKER_BIN=/usr/bin/docker   # optional
+tenkaictl env docker-secrets set lab /var/lib/tenkai/lab-secrets
+tenkaictl reconcile --once
+```
+
+### Workdir contract
+
+```text
+<release-workdir>/
+  docker/
+    host.json
+```
+
+`host.json` declares digest-pinned containers, networks, named volumes, mounts,
+`depends_on` order, optional health commands, and optional `env_file` basenames.
+Images must be `sha256:` plus 64 hex digits. Bind mounts and inline environment
+values are refused. `env_file` is a basename under the environment-scoped
+secret directory; Tenkai never reads those bytes into SQLite, argv values, or
+typed receipts.
+
+Apply creates networks and volumes, replaces containers in dependency order,
+waits until each declared health check is `healthy` (or the container is
+running when no health is declared), and removes leftover containers labeled
+for the same product and environment. Named volumes stay on remove so
+application data is not deleted. Restart bounces the current pin in the same
+order. Observe is `Present` only when every declared container is running with
+matching Tenkai version, release, digest, and image labels.
+
+Shell `deploy.install` remains the default when `TENKAI_SOFTWARE_EXECUTOR` is
+unset. Docker products should keep a fail-closed install reminder, the same
+pattern as Helm and Kubernetes examples. Default tests drive a fake Docker CLI.
 
 ## Local dogfood
 

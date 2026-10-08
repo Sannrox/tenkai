@@ -2,8 +2,8 @@ use anyhow::{Result, bail};
 use tenkai::{client, inventory, maintenance, plan};
 
 use crate::env_args::{
-    ArtifactMirrorCommand, ClusterConfigCommand, ConstraintsCommand, FactsCommand,
-    MaintenanceCommand, OverlayCommand,
+    ArtifactMirrorCommand, ClusterConfigCommand, ConstraintsCommand, DockerSecretsCommand,
+    FactsCommand, MaintenanceCommand, OverlayCommand,
 };
 
 pub(crate) async fn maintenance(ctx: &mut client::Ctx, command: MaintenanceCommand) -> Result<()> {
@@ -208,6 +208,25 @@ pub(crate) async fn cluster_config(
         }
         ClusterConfigCommand::Clear { env } => {
             println!("{}", plan::clear_cluster_config_path(ctx, &env).await?);
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn docker_secrets(
+    ctx: &mut client::Ctx,
+    command: DockerSecretsCommand,
+) -> Result<()> {
+    match command {
+        DockerSecretsCommand::Show { env } => match plan::docker_secret_dir(ctx, &env).await? {
+            Some(path) => println!("{}", path.display()),
+            None => println!("{env} has no docker_secret_dir"),
+        },
+        DockerSecretsCommand::Set { env, path } => {
+            println!("{}", plan::set_docker_secret_dir(ctx, &env, &path).await?);
+        }
+        DockerSecretsCommand::Clear { env } => {
+            println!("{}", plan::clear_docker_secret_dir(ctx, &env).await?);
         }
     }
     Ok(())

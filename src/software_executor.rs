@@ -1,4 +1,5 @@
-//! Software product apply ports (Kubernetes via Helm or native manifests).
+//! Software product apply ports (Kubernetes via Helm or native manifests,
+//! Docker host topology via the Docker CLI).
 //!
 //! **Helm (#95):** chart-oriented `helm upgrade --install` when
 //! `TENKAI_SOFTWARE_EXECUTOR=helm`.
@@ -10,10 +11,13 @@
 //! `tenkai`, bounded rollout wait, and health from workload conditions.
 //! Selected with `TENKAI_SOFTWARE_EXECUTOR=kubernetes-inprocess`.
 //!
+//! **Docker host (#528):** digest-pinned containers, networks, and volumes from
+//! `{workdir}/docker/host.json` via `TENKAI_SOFTWARE_EXECUTOR=docker`.
+//!
 //! Hosts select an adapter through [`selected_software_executor`] (or construct
 //! one directly) and pass it into apply. Community defaults keep the shell
 //! `deploy.install` path when no executor is supplied. Credential-free
-//! diagnostics for Helm and kubectl live in the private diagnostics module.
+//! diagnostics for Helm, kubectl, and docker live in the private diagnostics module.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -25,6 +29,7 @@ use serde::{Deserialize, Serialize};
 
 mod cluster_config;
 mod diagnostics;
+mod docker;
 
 pub use cluster_config::{
     CLUSTER_CONFIG_PATH_PROPERTY, cluster_config_path_from_properties, validate_cluster_config_path,
@@ -32,6 +37,11 @@ pub use cluster_config::{
 pub use diagnostics::{
     SoftwareDeployPhase, format_software_phase_error, rollback_channel_note,
     sanitize_diagnostic_text,
+};
+pub use docker::{
+    DOCKER_SECRET_DIR_PROPERTY, DOCKER_TOPOLOGY_DIR, DOCKER_TOPOLOGY_FILE, DockerHostExecutor,
+    DockerHostTopology, load_topology, secret_dir_from_properties, validate_secret_dir_path,
+    validate_topology,
 };
 
 static IN_PROCESS_EXECUTOR: OnceLock<fn() -> Box<dyn SoftwareExecutor>> = OnceLock::new();
@@ -63,6 +73,9 @@ pub struct SoftwareApplyRequest {
     /// Environment-scoped kubeconfig file path. Never a secret blob or argv flag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cluster_config_path: Option<PathBuf>,
+    /// Environment-scoped directory of Docker env files. Never secret bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_dir_path: Option<PathBuf>,
 }
 
 /// Pluggable software apply path. Tenkai never hard-depends on a cluster.
@@ -624,13 +637,16 @@ fn run_kubectl(
 
 /// Select a software executor from host runtime configuration.
 ///
-/// Reads `TENKAI_SOFTWARE_EXECUTOR` (helm / kubernetes / kubernetes-inprocess / fake). `None` means
+/// Reads `TENKAI_SOFTWARE_EXECUTOR` (helm / kubernetes / kubernetes-inprocess / docker / fake). `None` means
 /// the caller should keep the shell `deploy.install` path. Apply does not
 /// consult this itself; hosts pass the result through `ExecutionOptions`.
 pub fn selected_software_executor() -> Option<Box<dyn SoftwareExecutor>> {
     match std::env::var("TENKAI_SOFTWARE_EXECUTOR") {
         Ok(value) if value.eq_ignore_ascii_case("helm") => {
             Some(Box::new(HelmSoftwareExecutor::default()))
+        }
+        Ok(value) if value.eq_ignore_ascii_case("docker") => {
+            Some(Box::new(DockerHostExecutor::default()))
         }
         Ok(value)
             if value.eq_ignore_ascii_case("kubernetes")
@@ -697,6 +713,7 @@ pub fn request_from_parts(
         config_digest: String::new(),
         artifact_pulls: Vec::new(),
         cluster_config_path: None,
+        secret_dir_path: None,
     }
 }
 
@@ -889,6 +906,7 @@ mod tests {
             config_digest: String::new(),
             artifact_pulls: Vec::new(),
             cluster_config_path: None,
+            secret_dir_path: None,
         }
     }
 
@@ -1176,6 +1194,7 @@ data:
             config_digest: String::new(),
             artifact_pulls: Vec::new(),
             cluster_config_path: None,
+            secret_dir_path: None,
         };
         let executor = KubernetesSoftwareExecutor {
             kubectl_binary: PathBuf::from(binary),

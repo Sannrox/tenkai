@@ -1,0 +1,21 @@
+# Local Docker-host product (embedded tenkaictl, no tenkai-server).
+#
+# Requires:
+#   export TENKAI_SOFTWARE_EXECUTOR=docker
+#
+# See examples/hello-docker/README.md
+
+[product]
+name = "hello-docker"
+version = "0.1.0"
+description = "Minimal two-container Docker host topology"
+kind = "software"
+
+[deploy]
+workdir = "."
+# Docker executor applies docker/host.json; install is unused when
+# TENKAI_SOFTWARE_EXECUTOR=docker. Kept as a fail-closed reminder if the
+# executor env is forgotten.
+install = "echo 'set TENKAI_SOFTWARE_EXECUTOR=docker for this product' >&2; exit 1"
+uninstall = "true"
+inputs = ["docker"]
