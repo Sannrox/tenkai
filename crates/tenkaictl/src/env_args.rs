@@ -91,6 +91,11 @@ pub(crate) enum EnvCommand {
         #[command(subcommand)]
         command: ClusterConfigCommand,
     },
+    /// Manage the environment-scoped Docker secret-file directory. Never secret bytes.
+    DockerSecrets {
+        #[command(subcommand)]
+        command: DockerSecretsCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -110,6 +115,16 @@ pub(crate) enum ClusterConfigCommand {
     /// Set the environment-scoped kubeconfig file path.
     Set { env: String, path: PathBuf },
     /// Clear the stored kubeconfig file path.
+    Clear { env: String },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum DockerSecretsCommand {
+    /// Show the stored secret-file directory path (never file contents).
+    Show { env: String },
+    /// Set the environment-scoped secret-file directory.
+    Set { env: String, path: PathBuf },
+    /// Clear the stored secret-file directory path.
     Clear { env: String },
 }
 

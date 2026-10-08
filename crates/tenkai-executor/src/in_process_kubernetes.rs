@@ -879,6 +879,7 @@ mod tests {
             config_digest: String::new(),
             artifact_pulls: Vec::new(),
             cluster_config_path: Some(kubeconfig.to_path_buf()),
+            secret_dir_path: None,
         }
     }
 

@@ -378,6 +378,8 @@ async fn software_request(
     request.artifact_pulls = content.artifact_pulls.clone();
     request.cluster_config_path =
         crate::software_executor::cluster_config_path_from_properties(&env_obj.properties)?;
+    request.secret_dir_path =
+        crate::software_executor::secret_dir_from_properties(&env_obj.properties)?;
     Ok(request)
 }
 

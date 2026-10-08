@@ -64,9 +64,10 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `TENKAI_SOFTWARE_EXECUTOR` | unset | Host software adapter: `helm`, `kubernetes` (`k8s` / `native`), `kubernetes-inprocess`, or `fake`; unset keeps the shell install path ([software executors](software-executor.md)) |
+| `TENKAI_SOFTWARE_EXECUTOR` | unset | Host software adapter: `helm`, `kubernetes` (`k8s` / `native`), `kubernetes-inprocess`, `docker`, or `fake`; unset keeps the shell install path ([software executors](software-executor.md)) |
 | `TENKAI_HELM_BIN` | `helm` | Helm binary used by the Helm software executor |
 | `TENKAI_KUBECTL_BIN` | `kubectl` | kubectl binary used by the native Kubernetes software executor |
+| `TENKAI_DOCKER_BIN` | `docker` | Docker CLI used by the Docker host software executor |
 
 ## Telemetry
 

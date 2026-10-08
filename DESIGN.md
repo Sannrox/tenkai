@@ -123,8 +123,8 @@ transactions, and recovery semantics; transport is not a domain boundary:
   gates, maintenance windows, and approvals, executes under a generation-fenced
   lease, probes health, and rolls back on failure.
 - **Executors** apply plan steps. Manifests run shell commands by default;
-  in-tree Helm, native `kubectl`, and in-process server-side-apply executors
-  handle Kubernetes ([software executors](docs/software-executor.md)).
+  in-tree Helm, native `kubectl`, in-process server-side-apply, and Docker host
+  executors handle software targets ([software executors](docs/software-executor.md)).
 - **`tenkai-runtime`** is a pull-only process scoped to one environment. It
   pulls plans (never pushed, so it works through NAT and firewalls), runs a
   local executor under the claim's fencing generation, and reports receipts

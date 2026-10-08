@@ -228,6 +228,23 @@ fn parses_env_list_and_inspect() {
             }
         } if env == "lab" && path == std::path::Path::new("/tmp/lab.kubeconfig")
     ));
+    let docker_secrets = Cli::try_parse_from([
+        "tenkaictl",
+        "env",
+        "docker-secrets",
+        "set",
+        "lab",
+        "/var/lib/tenkai/lab-secrets",
+    ])
+    .unwrap();
+    assert!(matches!(
+        docker_secrets.command,
+        Command::Env {
+            command: EnvCommand::DockerSecrets {
+                command: crate::env_args::DockerSecretsCommand::Set { ref env, ref path }
+            }
+        } if env == "lab" && path == std::path::Path::new("/var/lib/tenkai/lab-secrets")
+    ));
 }
 
 #[test]

@@ -1,0 +1,30 @@
+{
+  "networks": ["appnet"],
+  "volumes": ["appdata"],
+  "containers": [
+    {
+      "name": "db",
+      "image": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "networks": ["appnet"],
+      "volumes": [
+        {
+          "name": "appdata",
+          "path": "/var/lib/data"
+        }
+      ],
+      "health": {
+        "cmd": "true"
+      }
+    },
+    {
+      "name": "api",
+      "image": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "networks": ["appnet"],
+      "depends_on": ["db"],
+      "env_file": "api.env",
+      "health": {
+        "cmd": "true"
+      }
+    }
+  ]
+}
