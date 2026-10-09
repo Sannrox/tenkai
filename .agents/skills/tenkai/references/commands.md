@@ -19,8 +19,26 @@ TENKAI_SERVER_URL=<server-url> tenkaictl --target remote <command>
 ```
 
 Remote CLI support can be narrower than embedded support. Stay in the selected
-target mode. Remote `plan`, `apply`, `approval submit`, `rollback`, and
-`env subscribe` require `--generation`.
+target mode. `--output json-v1` is embedded-only; in remote mode read state
+back with `env inspect <env>`, which prints JSON.
+
+Remote `plan`, `apply`, `approval submit`, `rollback`, and `env subscribe`
+require `--generation`. Read it from `lease.generation` in
+`tenkaictl --target remote env inspect <env>`; pass `0` when it is `null`
+(no lease was ever taken). A released or expired lease keeps its generation.
+`stale fencing generation N cannot complete; expected M` means another tick or
+operator moved the fence: re-inspect, re-plan when the plan changed, and retry
+with `M`.
+
+A `--tenant-mode` hub refuses lifecycle routes for credentials without a tenant
+claim, including the fleet management token. Continuous delivery of a host's
+own services needs a separate community `tenkai-server` with its own database,
+token, and an OIDC config without `tenant_claim`.
+
+Embedded `promote`, `release recall`, and `canary designate` record an
+authenticated actor. They need `TENKAI_MANAGEMENT_TOKEN` (or
+`TENKAI_JWT_ASSERTION` with `TENKAI_JWT_VERIFIER_CONFIG`) even with no server
+running.
 
 ## Route
 
@@ -40,6 +58,18 @@ target mode. Remote `plan`, `apply`, `approval submit`, `rollback`, and
 | Recover | `env reconcile`, `env unlock`, `backup`, `restore`, `recovery export` |
 
 For syntax, flags, and target-mode support, run `tenkaictl <family> --help`.
+
+## Adopt a running version
+
+To put an already-running deployment under Tenkai without a redeploy:
+
+1. Publish a release whose manifest pins exactly what is running, and promote
+   it to the channel.
+2. `env subscribe <env> <product>=<channel>`.
+3. `env reconcile <env> <product> --deployed <version>` records the verified
+   running version.
+4. `plan --env <env>` must report the environment up to date. Any step means
+   the release does not match what runs; fix the release, not the target.
 
 ## Invariants
 
@@ -73,6 +103,16 @@ identifiers as opaque. Reject unknown fields or enum values.
 
 **Reconcile.** `--once` for a bounded agent operation. Continuous reconciliation
 belongs under an operator-managed supervisor.
+
+**Shell executor.** On a failed install or health probe Tenkai runs
+`uninstall` of the new release, then `install` and `health` of the previous
+release. The plan ends `failed` with step `rolled_back` only when every one of
+those succeeds; a missing or failing `uninstall` leaves deployment state
+unknown. Make `uninstall` safe and idempotent. Commands run under `sh -c` with
+a cleared environment: `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`,
+`LC_CTYPE`, `TMPDIR`, `TMP`, `TEMP`, `TZ` when set, plus `TENKAI_ENVIRONMENT`,
+`TENKAI_PRODUCT`, `COMPOSE_PROJECT_NAME`, and `TENKAI_FENCING_GENERATION`.
+Use absolute paths in wrappers and never expect control-plane credentials.
 
 **Rollback.** Creates and executes the normal pinned-release plan path.
 Non-local rollback can stop at approval-required state and return the plan
