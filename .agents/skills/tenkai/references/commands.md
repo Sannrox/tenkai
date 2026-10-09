@@ -1,9 +1,8 @@
-# Operator commands
+# Command routing
 
-Use installed `--help` as the syntax authority. These are the stable operating
-patterns in the repository version of Tenkai.
+Installed `--help` is the syntax authority.
 
-## Select the target
+## Target
 
 Embedded mode owns local SQLite state:
 
@@ -11,131 +10,90 @@ Embedded mode owns local SQLite state:
 tenkaictl --database /path/to/tenkai.db <command>
 ```
 
-Remote mode requires a server URL. Load `TENKAI_MANAGEMENT_TOKEN` from a secret
-store, or sign in once with `tenkaictl login` (Authorization Code + PKCE). The
-environment token wins over a saved login.
+Remote mode uses a server URL. Sign in with `tenkaictl login`, or load
+`TENKAI_MANAGEMENT_TOKEN` from a secret store.
 
 ```sh
-TENKAI_SERVER_URL=https://tenkai.example.internal tenkaictl login
-TENKAI_SERVER_URL=https://tenkai.example.internal \
-  tenkaictl --target remote <command>
+TENKAI_SERVER_URL=<server-url> tenkaictl login
+TENKAI_SERVER_URL=<server-url> tenkaictl --target remote <command>
 ```
 
-Remote CLI support can be narrower than embedded support. Do not fall back to
-embedded mode when a remote command is unsupported. Never place the management
-token in command arguments, logs, or reports.
+Remote CLI support can be narrower than embedded support. Stay in the selected
+target mode. Remote `plan`, `apply`, `approval submit`, `rollback`, and
+`env subscribe` require `--generation`.
 
-## Observe
+## Route
 
-```sh
-tenkaictl env list
-tenkaictl env inspect <environment>
-tenkaictl status --env <environment>
-tenkaictl fleet status
-tenkaictl inspect
-tenkaictl release inspect <product>@<version>
-tenkaictl approval inspect <plan-id>
-```
+| Job | Family |
+| --- | --- |
+| Bootstrap | `init` |
+| Sign in | `login`, `logout` |
+| Publish | `publish`, `release inspect`, `release verify` |
+| Promote | `promote`, `canary` |
+| Configure | `env add`, `env subscribe`, `env facts`, `env overlay`, `env constraints`, `env maintenance`, `env connectivity`, `env observe`, `env preview`, `env close-preview`, `env retire`, `env artifact-mirror`, `env cluster-config`, `env docker-secrets`, `product maintenance` |
+| Plan and apply | `plan`, `apply`, `approval inspect`, `approval submit` |
+| Reconcile | `reconcile --once` |
+| Roll back | `rollback`, `restart`, `release recall` |
+| Migrate | `migrate` |
+| Wave | `wave` |
+| Upgrade | `upgrade` |
+| Recover | `env reconcile`, `env unlock`, `backup`, `restore`, `recovery export` |
 
-Use `inspect` for embedded control-plane totals and `env inspect` for
-subscriptions, deployed observations, lease/fence state, and the latest plan.
-Use fleet commands for cross-environment posture.
+For syntax, flags, and target-mode support, run `tenkaictl <family> --help`.
 
-## Publish and promote
+## Invariants
 
-```sh
-tenkaictl publish <manifest> \
-  --signature <release-signature.json> \
-  --trust-roots <release-trust.toml>
-tenkaictl release verify <product>@<version> \
-  --trust-roots <release-trust.toml>
-export TENKAI_MANAGEMENT_TOKEN="<load-from-secret-store>"
-tenkaictl promote <product>@<version> <channel>
-```
+**Login.** `login` is Authorization Code + PKCE against `GET /v1/auth/oidc`.
+`logout` forgets the saved login for that server URL.
 
-Publication creates an immutable release. Republish identical content only to
-reconcile an uncertain outcome; changed content requires a new version.
+**Plans.** Stored dry runs over current desired state. A maintenance-blocked
+plan may be re-applied or resumed by reconcile when the resolved environment
+and product windows are open.
 
-## Configure desired state
+**Overlays.** Non-secret product config. An overlay change can emit a
+same-version Restart.
 
-```sh
-tenkaictl env add <environment> --description "<description>"
-tenkaictl env subscribe <environment> <product>=<channel>
-tenkaictl env facts list <environment>
-tenkaictl env overlay list <environment>
-tenkaictl env constraints list <environment>
-tenkaictl env maintenance list <environment>
-```
+**Artifact mirrors.** Apply pulls OCI artifacts only from
+`env artifact-mirror`. A missing mirror refuses origin pull.
 
-Consult `tenkaictl env <subcommand> --help` before changing facts,
-overlays, constraints, maintenance windows, or canary policy. Inspect the
-environment again after each configuration mutation. Overlay changes can emit a
-same-version Restart without a new product version. Secrets are not overlays.
+**Cluster config.** Store an environment-scoped kubeconfig path. Never
+credential bytes.
 
-## Plan and apply
+**Docker secrets.** Store an environment-scoped secret-file directory path.
+Never secret bytes.
 
-```sh
-tenkaictl plan --env <environment>
-tenkaictl apply <plan-id> \
-  --approval <approval.json> \
-  --approval-trust-roots <plan-approvers.toml>
-tenkaictl status --env <environment>
-tenkaictl env inspect <environment>
-```
+**Publication.** Creates an immutable release. Republish identical content only
+to reconcile an uncertain outcome; changed content requires a new version.
 
-Plans are stored dry runs over current desired state. Applying an old plan does
-not mean applying newly changed desired state. A maintenance-blocked plan may be
-re-applied or resumed by reconcile when the resolved environment and product
-windows are open. Product windows are configured with
-`tenkaictl product maintenance`.
+**Machine results.** Require `schema = "tenkai.command-result/v1"`. Treat
+identifiers as opaque. Reject unknown fields or enum values.
 
-## Reconcile and roll back
+**Reconcile.** `--once` for a bounded agent operation. Continuous reconciliation
+belongs under an operator-managed supervisor.
 
-```sh
-tenkaictl reconcile --once
-tenkaictl rollback <product> --env <environment>
-tenkaictl rollback <product> --env <environment> \
-  --allow-recalled-recovery --recovery-reason "<audited reason>"
-tenkaictl restart <product> --env <environment>
-tenkaictl release recall <product>@<version>
-tenkaictl product maintenance list <product>
-```
+**Rollback.** Creates and executes the normal pinned-release plan path.
+Non-local rollback can stop at approval-required state and return the plan
+identifier.
 
-Use one-shot reconciliation for a bounded agent operation. Continuous
-reconciliation belongs under an operator-managed supervisor. Rollback creates
-and executes the normal pinned-release plan path; non-local rollback can stop
-at approval-required state and return the plan identifier.
+**Canary.** Policy requires successful evidence from every named environment
+before promotion. Repair rebuilds durable outcomes for a completed apply.
 
-## Package migration
+**Preview.** `env preview` registers a non-promotable environment from a branch
+pin. `env close-preview` tears down only a preview.
 
-```sh
-tenkaictl migrate preview <name> --declaration <declaration.json>
-tenkaictl migrate apply <name> --declaration <declaration.json> \
-  --approval <approval.json> --approval-trust-roots <approvers.toml>
-tenkaictl migrate status <name>
-tenkaictl migrate resume <name> \
-  --approval <approval.json> --approval-trust-roots <approvers.toml>
-tenkaictl migrate rollback <name> \
-  --approval <approval.json> --approval-trust-roots <approvers.toml>
-```
+**Migrate.** Declaration is `tenkai.package_migration.v1`. Compensating
+checkpoints apply the target pin through existing plans. Irreversible
+checkpoints require `--backup-receipt-digest` at admit. Accepted irreversible
+work records `recovery_required` and never reports rollback success.
+Local-development bypass stays on the built-in `local` environment.
 
-The declaration is `tenkai.package_migration.v1`. Tenkai binds source and
-target Catalog pins, consumed compatibility evidence, and classified
-checkpoints. Compensating checkpoints apply the target pin through existing
-plans. Irreversible checkpoints require `--backup-receipt-digest` at admit.
-Accepted irreversible work records `recovery_required` and never reports
-rollback success. Local-development bypass stays on the built-in `local`
-environment.
+**Wave.** `wave run` observes an ordered cohort. `wave execute` admits a durable
+named wave; the name is a content-bound identity key. Stop skips remaining
+cohorts without rewriting completed ones. Rollback uses Tenkai rollback plans.
 
-## Machine results
+**Upgrade.** One signed upgrade across connected, intermittent, and isolated
+environments. Isolated work binds a `tenkai.offline-bundle.v1` and imports a
+`tenkai.offline-receipt.v1`; conflicts fail closed.
 
-For supported embedded commands, place the global output option before the
-subcommand:
-
-```sh
-tenkaictl --output json-v1 plan --env <environment>
-```
-
-Require `schema = "tenkai.command-result/v1"`. Treat identifiers as opaque.
-Reject unknown fields or enum values. Reconcile before retrying when output is
-absent, duplicated, malformed, incompatible, or reports an unknown outcome.
+**Recovery export.** Read-only diagnostic for one plan. Recovery authority
+stays on Tenkai state.

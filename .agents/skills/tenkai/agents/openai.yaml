@@ -1,4 +1,4 @@
 interface:
-  display_name: "Tenkai Operator"
-  short_description: "Operate Tenkai delivery control planes safely"
-  default_prompt: "Use $tenkai to inspect this Tenkai environment and perform the requested delivery operation safely."
+  display_name: "Tenkai control loop"
+  short_description: "Run the Tenkai control loop with tenkaictl"
+  default_prompt: "Use $tenkai to observe this Tenkai environment, bound one transition, execute it once, and verify the durable result."
