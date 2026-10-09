@@ -27,6 +27,9 @@ tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-threa
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 base64 = "0.22"
 ed25519-dalek = "2"
