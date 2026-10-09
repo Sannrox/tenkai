@@ -206,10 +206,14 @@ values are refused. `env_file` is a basename under the environment-scoped
 secret directory; Tenkai never reads those bytes into SQLite, argv values, or
 typed receipts.
 
-Apply creates networks and volumes, replaces containers in dependency order,
-waits until each declared health check is `healthy` (or the container is
+Apply creates networks and volumes, pulls missing digest-pinned images,
+then replaces containers in dependency order. A running container whose
+image and Tenkai labels already match is left in place. Apply waits until
+each declared health check is `healthy` (or the container is
 running when no health is declared), and removes leftover containers labeled
-for the same product and environment. Runtime names are `t` plus a 12-hex
+for the same product and environment. Host apply, restart, and remove run
+inside `tokio::task::block_in_place` on the multi-thread runtime so a long
+Docker wait does not pin a Tokio worker without the runtime knowing. Runtime names are `t` plus a 12-hex
 digest of environment and product, then `-ctr-` / `-net-` / `-vol-` and the
 declared name, so hyphenated environment or product values cannot collide.
 Existing objects whose Tenkai ownership labels differ are refused rather than

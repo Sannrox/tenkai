@@ -21,9 +21,10 @@ def main() -> int:
     if forbidden and forbidden in joined:
         sys.stderr.write("secret material leaked onto docker argv\n")
         return 2
-    state = {"containers": {}, "networks": {}, "volumes": {}}
+    state = {"containers": {}, "networks": {}, "volumes": {}, "images": []}
     if state_path.exists():
         state = json.loads(state_path.read_text(encoding="utf-8"))
+        state.setdefault("images", [])
     args = sys.argv[1:]
     if not args:
         sys.stderr.write("missing docker command\n")
@@ -44,6 +45,10 @@ def main() -> int:
         return handle_restart(state, rest)
     if command == "ps":
         return handle_ps(state, rest)
+    if command == "image":
+        return handle_image(state, rest)
+    if command == "pull":
+        return handle_pull(state, state_path, rest)
     sys.stderr.write(f"unsupported docker command {command}\n")
     return 1
 
@@ -194,8 +199,35 @@ def handle_run(state: dict, state_path: Path, args: list[str]) -> int:
         "health": "healthy" if healthy else "unhealthy",
         "mounts": mounts,
     }
+    images = state.setdefault("images", [])
+    if image not in images:
+        images.append(image)
     save(state_path, state)
     sys.stdout.write(name + "\n")
+    return 0
+
+
+def handle_image(state: dict, args: list[str]) -> int:
+    if not args or args[0] != "inspect":
+        sys.stderr.write("expected image inspect\n")
+        return 1
+    image = args[-1]
+    if image in state.get("images", []):
+        sys.stdout.write("[]\n")
+        return 0
+    sys.stderr.write(f"Error: No such image: {image}\n")
+    return 1
+
+
+def handle_pull(state: dict, state_path: Path, args: list[str]) -> int:
+    if not args:
+        sys.stderr.write("docker pull requires an image\n")
+        return 1
+    image = args[-1]
+    images = state.setdefault("images", [])
+    if image not in images:
+        images.append(image)
+    save(state_path, state)
     return 0
 
 
