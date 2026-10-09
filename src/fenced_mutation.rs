@@ -40,14 +40,19 @@ const DEPLOY_CHILD_INHERITED_ENV: &[&str] = &[
     "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TMP", "TEMP", "TZ",
 ];
 
-fn executor_guard_executable() -> Result<PathBuf> {
+/// Resolve the `tenkai-executor-guard` that fences shell-executor deploys.
+///
+/// `TENKAI_EXECUTOR_GUARD` wins; otherwise `tenkaictl` guards itself and other
+/// hosts look for `tenkai-executor-guard` beside their own binary or one
+/// directory up. Hosts call this at startup to advertise the shell executor.
+pub fn executor_guard_executable() -> Result<PathBuf> {
     if let Some(configured) = std::env::var_os("TENKAI_EXECUTOR_GUARD") {
         let configured = PathBuf::from(configured);
-        if configured.is_file() {
+        if is_executable_file(&configured) {
             return Ok(configured);
         }
         bail!(
-            "TENKAI_EXECUTOR_GUARD does not identify a file: {}",
+            "TENKAI_EXECUTOR_GUARD does not identify an executable file: {}",
             configured.display()
         );
     }
@@ -60,7 +65,7 @@ fn executor_guard_executable() -> Result<PathBuf> {
     }
     for directory in current.ancestors().skip(1).take(2) {
         let candidate = directory.join("tenkai-executor-guard");
-        if candidate.is_file() {
+        if is_executable_file(&candidate) {
             return Ok(candidate);
         }
     }
@@ -68,6 +73,12 @@ fn executor_guard_executable() -> Result<PathBuf> {
         "tenkai-executor-guard was not found beside {}; install both Tenkai binaries or set TENKAI_EXECUTOR_GUARD",
         current.display()
     )
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    path.metadata()
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
 }
 
 /// Build the scrubbed environment for a deploy child process.

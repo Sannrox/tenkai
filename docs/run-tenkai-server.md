@@ -58,6 +58,52 @@ TENKAI_MANAGEMENT_TOKEN="$TENKAI_MANAGEMENT_TOKEN" \
   reconcile --once
 ```
 
+### Install a server host
+
+Install `tenkai-server` and `tenkai-executor-guard` side by side, as shown in
+[release binaries](release-binaries.md#install-a-server-host), or point
+`TENKAI_EXECUTOR_GUARD` at the guard. The server resolves the guard at startup:
+when it is missing, it logs `tenkai-server warning: shell executor
+unavailable`, omits `shell_executor:v1` from `/readyz` capabilities, and the
+first shell-executor apply fails with the same instruction. Pass
+`--require-executor` to refuse to start instead.
+
+A reference systemd unit keeps secrets in an `EnvironmentFile` (never argv),
+listens on loopback behind a TLS proxy, and relies on the default SIGTERM stop:
+
+```ini
+# /etc/systemd/system/tenkai-server.service
+[Unit]
+Description=Tenkai control plane
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=tenkai
+Group=tenkai
+# Holds the management and runtime tokens; owner-only mode 0600.
+EnvironmentFile=/etc/tenkai/server.env
+StateDirectory=tenkai
+ExecStart=/usr/local/bin/tenkai-server \
+  --listen 127.0.0.1:8080 \
+  --database /var/lib/tenkai/tenkai.db \
+  --require-executor
+# SIGTERM is the default stop signal and shuts down gracefully.
+TimeoutStopSec=60
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+MemoryMax=2G
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+A stop cancels an in-flight deploy command under its fence, so
+`TimeoutStopSec` only has to cover the current tick recording that outcome; the
+next start converges from durable state.
+
 To authenticate with enterprise JWT assertions or with an identity provider
 (OIDC) instead of shared bearer tokens, see
 [configure server authentication](configure-server-authentication.md).
