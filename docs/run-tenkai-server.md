@@ -50,6 +50,8 @@ embedded development permissions. The server reconciles every
 ```sh
 export TENKAI_MANAGEMENT_TOKEN='replace-from-secret-store'
 export TENKAI_RUNTIME_TOKENS='{"runtime-token":"prod"}'
+# Host-owned release signing roots; remote publish never trusts caller-supplied roots.
+export TENKAI_RELEASE_TRUST_ROOTS=/etc/tenkai/release-trust.toml
 cargo run --bin tenkai-server -- --database .tenkai-state/tenkai.db
 
 # In another shell, request an immediate server-side tick.

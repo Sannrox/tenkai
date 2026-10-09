@@ -90,10 +90,12 @@ pub struct ManagementOperations {
     store: Arc<dyn OperationalStore>,
     tenant_environments: Option<TenantEnvironmentOperations>,
     package_migration_trust_roots: Option<ApprovalTrustRoots>,
+    release_trust_roots: Option<std::path::PathBuf>,
     environment_grants: std::collections::HashMap<String, String>,
 }
 
 impl ManagementOperations {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         auth: AuthStack,
         tenant_mode: bool,
@@ -101,6 +103,7 @@ impl ManagementOperations {
         store: Arc<dyn OperationalStore>,
         tenant_store: Option<Arc<dyn TenantOperationalStore>>,
         package_migration_trust_roots: Option<ApprovalTrustRoots>,
+        release_trust_roots: Option<std::path::PathBuf>,
         environment_grants: std::collections::HashMap<String, String>,
     ) -> Self {
         let tenant_environments = tenant_store.map(|tenant_store| {
@@ -118,6 +121,7 @@ impl ManagementOperations {
             store,
             tenant_environments,
             package_migration_trust_roots,
+            release_trust_roots,
             environment_grants,
         }
     }
@@ -719,10 +723,17 @@ impl ManagementOperations {
             self.granted_environment(credential, &context),
         )
         .map_err(map_lifecycle_error)?;
+        let release_trust_roots = self.release_trust_roots.as_ref().ok_or_else(|| {
+            ManagementError::Unavailable(
+                "remote publication requires server-configured release trust roots".into(),
+            )
+        })?;
+        let trusted_roots = crate::release_signing::TrustRoots::load(release_trust_roots)
+            .map_err(|error| ManagementError::Internal(error.to_string()))?;
         let files = management_lifecycle::RemotePublishFiles::materialize(
             &request.manifest,
             &request.signature,
-            &request.trust_roots,
+            &trusted_roots,
         )
         .map_err(map_lifecycle_error)?;
         let actor = context.principal_id();
@@ -733,7 +744,7 @@ impl ManagementOperations {
             &files.manifest,
             &crate::catalog::PublishOptions {
                 signature: Some(files.signature.clone()),
-                trust_roots: Some(files.trust_roots.clone()),
+                trust_roots: Some(release_trust_roots.clone()),
                 allow_unsigned_development: false,
                 ..Default::default()
             },
@@ -1548,6 +1559,7 @@ mod tests {
             Arc::new(SqliteStore::open_in_memory().unwrap()),
             None,
             None,
+            None,
             std::collections::HashMap::new(),
         )
     }
@@ -1736,6 +1748,7 @@ mod tests {
             store,
             None,
             None,
+            Some(root.join("trust-roots.toml")),
             std::collections::HashMap::new(),
         )
     }
@@ -1781,10 +1794,9 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let ops = catalog_ops(&root, grant_auth([DeliveryCapability::Publish], [])).await;
         let credential = grant_credential();
-        let published = ops
-            .publish_release(&credential, signed_publish_request(&root, "1.0.0"))
-            .await
-            .unwrap();
+        let mut request = signed_publish_request(&root, "1.0.0");
+        request.trust_roots.signers[0].public_key = "caller-supplied-key-is-ignored".into();
+        let published = ops.publish_release(&credential, request).await.unwrap();
         assert!(published.message.contains("api@1.0.0"), "{published:?}");
         ops.promote_release(
             &credential,

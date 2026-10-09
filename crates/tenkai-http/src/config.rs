@@ -47,6 +47,8 @@ pub struct ServerConfig {
     /// Remote apply/resume/rollback require this file; request-supplied roots
     /// must match it and cannot introduce a caller-chosen signer set.
     pub package_migration_trust_roots: Option<std::path::PathBuf>,
+    /// Host-owned release signing roots used by remote publication.
+    pub release_trust_roots: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -75,6 +77,7 @@ impl ServerConfig {
             metrics_enabled: false,
             development_fixtures: None,
             package_migration_trust_roots: None,
+            release_trust_roots: None,
         }
     }
 
