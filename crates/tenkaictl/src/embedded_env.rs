@@ -145,6 +145,9 @@ pub(crate) async fn run(
         EnvCommand::DockerSecrets { command } => {
             crate::embedded_env_config::docker_secrets(ctx, command).await?;
         }
+        EnvCommand::ApprovalPolicy { command } => {
+            crate::embedded_env_config::approval_policy(ctx, command).await?;
+        }
     }
     Ok(())
 }

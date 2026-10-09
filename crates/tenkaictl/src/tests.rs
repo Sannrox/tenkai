@@ -245,6 +245,23 @@ fn parses_env_list_and_inspect() {
             }
         } if env == "lab" && path == std::path::Path::new("/var/lib/tenkai/lab-secrets")
     ));
+    let approval_policy = Cli::try_parse_from([
+        "tenkaictl",
+        "env",
+        "approval-policy",
+        "set",
+        "lab",
+        "/etc/tenkai/lab-approval-policy.toml",
+    ])
+    .unwrap();
+    assert!(matches!(
+        approval_policy.command,
+        Command::Env {
+            command: EnvCommand::ApprovalPolicy {
+                command: crate::env_args::ApprovalPolicyCommand::Set { ref env, ref path }
+            }
+        } if env == "lab" && path == std::path::Path::new("/etc/tenkai/lab-approval-policy.toml")
+    ));
 }
 
 #[test]

@@ -41,6 +41,19 @@ tenkaictl env constraints set prod version_range hello-local 1.0.0..2.0.0
 tenkaictl env constraints set prod require_fact architecture arm64
 ```
 
+## Plan approval policy
+
+An environment may point at a TOML policy that signs `tenkai.plan-approval.v1`
+envelopes for matching plans. The property stores a file path, never a private
+key. Skip-gates and rollback stay human by default. See
+[plan approval](plan-approval.md#unattended-approval-policy).
+
+```bash
+tenkaictl env approval-policy set lab /etc/tenkai/lab-approval-policy.toml
+tenkaictl env approval-policy show lab
+tenkaictl env approval-policy clear lab
+```
+
 ## Maintenance windows
 
 Recurring windows are configured per environment with an IANA timezone, ISO
