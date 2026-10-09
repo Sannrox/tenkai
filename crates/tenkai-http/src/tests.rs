@@ -8,6 +8,7 @@ mod package_migration_closed;
 mod package_migration_preview;
 mod package_migration_scope;
 mod remote_catalog;
+mod remote_failure;
 mod remote_plan;
 mod runtime;
 mod runtime_unknown_fields;

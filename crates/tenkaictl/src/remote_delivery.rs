@@ -1,11 +1,19 @@
 use anyhow::{Result, bail};
 
-use crate::args::Command;
+use tenkai::command_result::{CommandName, CommandOutcome, CommandResultV1, RetryGuidance};
+
+use crate::args::{Command, OutputFormat};
 use crate::authorization::{load_remote_migration_authorization, reject_remote_migration_bypass};
 use crate::migrate_args::MigrateCommand;
+use crate::output::{print_machine_result, reported_machine_failure, with_remote_resources};
 use tenkai::package_migration;
 
-pub(crate) async fn run(client: &tenkai_http::RemoteClient, command: Command) -> Result<()> {
+pub(crate) async fn run(
+    client: &tenkai_http::RemoteClient,
+    command: Command,
+    output: OutputFormat,
+) -> Result<()> {
+    let machine = output == OutputFormat::JsonV1;
     match command {
         Command::Apply {
             plan_id,
@@ -36,7 +44,24 @@ pub(crate) async fn run(client: &tenkai_http::RemoteClient, command: Command) ->
                 skip_gates,
                 emergency_reason,
             )?;
-            let result = client.apply_plan(&plan_id, &request).await?;
+            let result = client
+                .apply_plan(&plan_id, &request)
+                .await
+                .map_err(|error| {
+                    with_remote_resources(
+                        error,
+                        output,
+                        CommandName::Apply,
+                        &[("plan", &plan_id), ("environment", env)],
+                    )
+                })?;
+            if machine {
+                return print_machine_result(
+                    &CommandResultV1::succeeded(CommandName::Apply)
+                        .resource("plan", &plan_id)
+                        .resource("environment", env),
+                );
+            }
             println!("{}", result.message);
             Ok(())
         }
@@ -66,7 +91,31 @@ pub(crate) async fn run(client: &tenkai_http::RemoteClient, command: Command) ->
             };
             let result = client
                 .rollback_environment(&env, &product, generation, recovery)
-                .await?;
+                .await
+                .map_err(|error| {
+                    with_remote_resources(
+                        error,
+                        output,
+                        CommandName::Rollback,
+                        &[("environment", &env)],
+                    )
+                })?;
+            if machine {
+                // Remote rollback only plans; executing it always needs a signed approval.
+                let mut awaiting = crate::remote_catalog::remote_plan_result(
+                    CommandResultV1::failed(
+                        CommandName::Rollback,
+                        "approval_required",
+                        "The rollback plan requires signed approval",
+                        RetryGuidance::NotSafe,
+                    ),
+                    &result,
+                    &env,
+                    generation,
+                )?;
+                awaiting.outcome = CommandOutcome::AwaitingApproval;
+                return Err(reported_machine_failure(awaiting));
+            }
             println!("{}", result.message);
             if let Some(plan_id) = &result.resource {
                 println!("plan id: {plan_id}");

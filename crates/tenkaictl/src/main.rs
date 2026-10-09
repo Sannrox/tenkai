@@ -45,7 +45,7 @@ use tenkai::command_result::{CommandName, CommandResultV1, RetryGuidance};
 use args::{Cli, Command, OutputFormat, Target};
 use output::{
     ReportedMachineFailure, command_name, machine_output_requested, mutation_retry,
-    print_machine_result, reported_machine_failure,
+    print_machine_result, remote_failure_result, reported_machine_failure,
 };
 
 #[tokio::main]
@@ -80,14 +80,20 @@ async fn main() -> ExitCode {
         }
     };
     let output = cli.output;
-    let machine_command = command_name(&cli.command).unwrap_or(CommandName::Invocation);
+    let machine_command = command_name(&cli.command, cli.target).unwrap_or(CommandName::Invocation);
     match run(cli).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             if output == OutputFormat::JsonV1 {
+                let remote = error
+                    .chain()
+                    .find_map(|cause| cause.downcast_ref::<tenkai_http::RemoteFailure>());
                 let result = error
                     .downcast_ref::<ReportedMachineFailure>()
                     .map(|reported| reported.0.clone())
+                    .or_else(|| {
+                        remote.map(|failure| remote_failure_result(machine_command, failure))
+                    })
                     .unwrap_or_else(|| {
                         CommandResultV1::failed(
                             machine_command,
@@ -114,19 +120,21 @@ async fn run(cli: Cli) -> Result<()> {
     {
         tenkai::telemetry::bind_process_operation_id(operation_id);
     }
-    if cli.output == OutputFormat::JsonV1 && command_name(&cli.command).is_none() {
+    if cli.output == OutputFormat::JsonV1 && command_name(&cli.command, cli.target).is_none() {
+        let (code, message) = match cli.target {
+            Target::Embedded => (
+                "unsupported_command",
+                "This command does not support tenkai.command-result/v1",
+            ),
+            Target::Remote => (
+                "unsupported_target",
+                "This command has no tenkai.command-result/v1 result with --target remote",
+            ),
+        };
         return Err(reported_machine_failure(CommandResultV1::failed(
             CommandName::Invocation,
-            "unsupported_command",
-            "This command does not support tenkai.command-result/v1",
-            RetryGuidance::CorrectRequest,
-        )));
-    }
-    if cli.output == OutputFormat::JsonV1 && cli.target == Target::Remote {
-        return Err(reported_machine_failure(CommandResultV1::failed(
-            command_name(&cli.command).unwrap_or(CommandName::Invocation),
-            "unsupported_target",
-            "Machine-readable results currently require --target embedded",
+            code,
+            message,
             RetryGuidance::CorrectRequest,
         )));
     }

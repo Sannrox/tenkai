@@ -1,17 +1,18 @@
 use anyhow::{Result, bail};
 use tenkai::plan;
 
-use crate::args::{Cli, Command};
+use crate::args::{Cli, Command, OutputFormat};
 use crate::env_args::EnvCommand;
 use crate::fleet_args::FleetCommand;
 use crate::fleet_watch::{FleetWatchOptions, print_fleet_status, run_fleet_watch};
-use crate::output::print_reconcile_report;
+use crate::output::{print_machine_result, print_reconcile_report};
 
 pub(crate) async fn run(cli: Cli) -> Result<()> {
     let server_url = crate::login::require_server_url(cli.server_url.as_deref())?;
     let runtime = crate::login::LoginRuntime::from_env()?;
     let token = crate::login::bearer_token(&runtime, &server_url).await?;
     let client = tenkai_http::RemoteClient::new(&server_url, token)?;
+    let output = cli.output;
     match cli.command {
         Command::Reconcile {
             once: true, bypass, ..
@@ -36,6 +37,9 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
             command: FleetCommand::Status,
         } => {
             let report = client.fleet_status().await?;
+            if output == OutputFormat::JsonV1 {
+                return print_machine_result(&crate::output::fleet_status_result(&report));
+            }
             print_fleet_status(&report);
             Ok(())
         }
@@ -86,6 +90,11 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
             command: EnvCommand::List,
         } => {
             let entries = client.list_environments().await?;
+            if output == OutputFormat::JsonV1 {
+                return print_machine_result(&crate::output::list_environments_result(
+                    entries.len(),
+                ));
+            }
             if entries.is_empty() {
                 println!("no environments registered");
             } else {
@@ -113,6 +122,9 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
             command: EnvCommand::Inspect { env },
         } => {
             let report = client.inspect_environment(&env).await?;
+            if output == OutputFormat::JsonV1 {
+                return print_machine_result(&crate::output::inspect_result(&report));
+            }
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
@@ -137,6 +149,9 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         }
         Command::Status { env } => {
             let rows = client.environment_status(&env).await?;
+            if output == OutputFormat::JsonV1 {
+                return print_machine_result(&crate::output::status_result(&env, rows.len()));
+            }
             if let Ok(report) = client.inspect_environment(&env).await
                 && let Some(hold) = report.delivery_hold
             {
@@ -178,6 +193,6 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
             crate::remote_delivery::run_migrate(&client, command).await?;
             Ok(())
         }
-        other => crate::remote_catalog::run(&client, other).await,
+        other => crate::remote_catalog::run(&client, other, output).await,
     }
 }

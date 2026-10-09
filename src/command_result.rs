@@ -1,4 +1,5 @@
-//! Versioned, bounded machine-readable results for typed local CLI adapters.
+//! Versioned, bounded machine-readable results for typed CLI adapters, in
+//! embedded and remote mode alike.
 //!
 //! These envelopes are correlation metadata, not execution receipts or
 //! recovery state. A client that does not receive one complete envelope must
@@ -21,6 +22,10 @@ pub enum CommandName {
     Rollback,
     Restart,
     Recall,
+    Approve,
+    Subscribe,
+    ListEnvironments,
+    FleetStatus,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

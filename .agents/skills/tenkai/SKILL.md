@@ -51,12 +51,10 @@ required trust artifact is present and current.
 
 ## 3. Execute once
 
-1. For supported embedded commands that another agent or program will consume,
-   pass `--output json-v1` before the subcommand. It is embedded-only: with
-   `--target remote` it fails with `unsupported_target`. Remote mutations print
-   text, and only `env inspect` (and `fleet watch --json`) print JSON, so
-   follow every remote mutation with an observe step. Never trust a remote
-   exit code alone.
+1. For supported commands that another agent or program will consume, pass
+   `--output json-v1` before the subcommand, in embedded or remote mode (see
+   `docs/command-results.md`). An `unknown` outcome means observe before any
+   retry. Never trust an exit code alone.
 2. Execute the bounded transition once.
 3. Preserve the complete result envelope, opaque resource identifiers, exit
    status, and sanitized diagnostics. Keep secrets, signing keys, bearer tokens,

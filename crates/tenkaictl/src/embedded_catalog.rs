@@ -100,11 +100,10 @@ pub(crate) async fn run(
                 )?;
                 tenkai::plan_approval::record(ctx, &evidence).await?;
                 if output == OutputFormat::JsonV1 {
-                    print_machine_result(
-                        &CommandResultV1::succeeded(CommandName::Plan)
-                            .resource("plan", stored.id)
-                            .resource("environment", stored.environment),
-                    )?;
+                    print_machine_result(&crate::output::approve_result(
+                        &stored.id,
+                        &stored.environment,
+                    ))?;
                 } else {
                     println!("recorded approval for {}", evidence.plan_id);
                     println!("plan digest: {}", evidence.plan_digest);
@@ -142,11 +141,7 @@ pub(crate) async fn run(
             let actor = embedded_management_actor()?;
             let message = catalog::promote(ctx, &actor, &spec, &channel).await?;
             if output == OutputFormat::JsonV1 {
-                let product = spec.split_once('@').map_or(spec.as_str(), |value| value.0);
-                print_machine_result(
-                    &CommandResultV1::succeeded(CommandName::Promote)
-                        .resource("channel", format!("{product}/{channel}")),
-                )?;
+                print_machine_result(&crate::output::promote_result(&spec, &channel))?;
             } else {
                 println!("{message}");
             }

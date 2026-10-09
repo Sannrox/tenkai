@@ -19,8 +19,8 @@ TENKAI_SERVER_URL=<server-url> tenkaictl --target remote <command>
 ```
 
 Remote CLI support can be narrower than embedded support. Stay in the selected
-target mode. `--output json-v1` is embedded-only; in remote mode read state
-back with `env inspect <env>`, which prints JSON.
+target mode. `--output json-v1` works in both modes; a remote `plan` result
+carries the plan id, `plan_digest`, and `generation` for the next step.
 
 Remote `plan`, `apply`, `approval submit`, `rollback`, and `env subscribe`
 require `--generation`. Read it from `lease.generation` in

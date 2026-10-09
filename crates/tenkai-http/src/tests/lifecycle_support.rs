@@ -32,11 +32,20 @@ pub(super) fn signed_catalog_fixture(
     root: &std::path::Path,
     version: &str,
 ) -> tenkai::management_lifecycle::PublishRequest {
+    signed_catalog_fixture_installing(root, version, "true")
+}
+
+/// A signed `api@version` release whose install command is `install`.
+pub(super) fn signed_catalog_fixture_installing(
+    root: &std::path::Path,
+    version: &str,
+    install: &str,
+) -> tenkai::management_lifecycle::PublishRequest {
     let manifest = root.join("tenkai.toml");
     std::fs::write(
         &manifest,
         format!(
-            "[product]\nname = \"api\"\nversion = \"{version}\"\n\n[deploy]\ninstall = \"true\"\n"
+            "[product]\nname = \"api\"\nversion = \"{version}\"\n\n[deploy]\ninstall = \"{install}\"\n"
         ),
     )
     .unwrap();

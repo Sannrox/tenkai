@@ -30,7 +30,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
             .await
         }
         Command::Fleet { command } => {
-            crate::embedded_fleet::run(&mut ctx, command, &database).await
+            crate::embedded_fleet::run(&mut ctx, command, &database, output).await
         }
         Command::Upgrade { command } => crate::embedded_upgrade::run(&mut ctx, command).await,
         Command::Migrate { command } => crate::embedded_migrate::run(&mut ctx, command).await,
