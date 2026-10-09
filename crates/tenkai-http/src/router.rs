@@ -74,6 +74,7 @@ pub fn router(
         store.clone(),
         config.tenant_store.clone(),
         package_migration_trust_roots,
+        config.release_trust_roots.clone(),
         config.environment_management_assignments.clone(),
     ));
     let mut router = Router::new()

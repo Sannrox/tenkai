@@ -463,6 +463,9 @@ async fn main() -> Result<()> {
             .await
             .context("connecting explicitly configured remote provider")?,
     };
+    let ctx = ctx.with_release_trust_roots(
+        std::env::var_os("TENKAI_RELEASE_TRUST_ROOTS").map(std::path::PathBuf::from),
+    );
     let runtime_environments = runtime_assignments
         .values()
         .cloned()
@@ -526,6 +529,8 @@ async fn main() -> Result<()> {
                 "TENKAI_PACKAGE_MIGRATION_APPROVAL_TRUST_ROOTS",
             )
             .map(std::path::PathBuf::from),
+            release_trust_roots: std::env::var_os("TENKAI_RELEASE_TRUST_ROOTS")
+                .map(std::path::PathBuf::from),
         },
         reconciler.clone(),
         store.clone(),

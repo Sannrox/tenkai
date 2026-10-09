@@ -80,6 +80,7 @@ pub(super) async fn lifecycle_router(
         "management-secret",
         HashMap::from([("runtime-secret".into(), "stage".into())]),
     );
+    config.release_trust_roots = Some(root.join("trust-roots.toml"));
     config
         .environment_management_assignments
         .insert("stage-secret".into(), "stage".into());

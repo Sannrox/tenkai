@@ -102,6 +102,13 @@ async fn remote_plan_apply_rollback_a_to_b_through_a_real_hub() {
 
     let second_root = root.join("v2");
     std::fs::create_dir_all(&second_root).unwrap();
+    std::fs::create_dir_all(second_root.join("keys")).unwrap();
+    for key in std::fs::read_dir(root.join("keys")).unwrap() {
+        let key = key.unwrap();
+        if key.file_type().unwrap().is_file() {
+            std::fs::copy(key.path(), second_root.join("keys").join(key.file_name())).unwrap();
+        }
+    }
     let second = signed_catalog_fixture(&second_root, "1.1.0");
     client.publish_release(&second).await.unwrap();
     client.promote_release("api@1.1.0", "stable").await.unwrap();

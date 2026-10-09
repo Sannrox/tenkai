@@ -171,6 +171,8 @@ pub(super) async fn remote_ctx(state: MockSekaiState) -> (Ctx, tokio::task::Join
             canary_schema_preflight: Arc::new(OnceCell::new()),
             outcome_export_enabled: false,
             outcome_inspection_enabled: false,
+            release_trust_roots: None,
+            require_host_release_trust: false,
             plan_kind_list: Arc::new(PlanKindListTick::default()),
         },
         server,
