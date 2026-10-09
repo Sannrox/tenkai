@@ -56,6 +56,33 @@ That grep checks only the downloaded host. Download every asset you will run
 and check each name the same way, or check the full `SHA256SUMS` file when
 every listed file is present.
 
+## Install a server host
+
+`tenkai-server` runs shell-executor deploys under `tenkai-executor-guard`. It
+finds a file named exactly `tenkai-executor-guard` beside its own binary or
+one directory up, or the path in `TENKAI_EXECUTOR_GUARD`. A server host
+therefore needs both assets, installed under their unsuffixed names:
+
+```bash
+for binary in tenkai-server tenkai-executor-guard; do
+  curl -fsSL -O "${base}/${binary}-${platform}"
+  gh attestation verify "${binary}-${platform}" \
+    --repo Sannrox/tenkai \
+    --signer-workflow Sannrox/tenkai/.github/workflows/release-binaries.yml \
+    --source-ref "refs/tags/${tag}"
+  grep " ${binary}-${platform}$" SHA256SUMS | sha256sum -c -
+  sudo install -m 0755 "${binary}-${platform}" "/usr/local/bin/${binary}"
+done
+tenkai-server --help | grep -- --require-executor
+```
+
+At startup the server logs `tenkai-server warning: shell executor unavailable`
+and leaves `shell_executor` out of `/readyz` capabilities when the guard is
+missing; `--require-executor` refuses to start instead. `tenkaictl` guards its
+own embedded applies and needs no separate guard. Run the server under a
+supervisor as described in
+[run tenkai-server](run-tenkai-server.md#install-a-server-host).
+
 ## Hub Postgres
 
 Community assets are SQLite hosts built with feature `ui`, which embeds the

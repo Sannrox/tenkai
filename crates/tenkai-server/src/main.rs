@@ -22,7 +22,7 @@ use tenkai::providers::{
 use tenkai::reconciler::{Config as ReconcilerConfig, Reconciler};
 use tenkai::runtime_capabilities::{
     RuntimeRequirements, community_auth_capabilities, community_sqlite_profile,
-    enterprise_auth_capabilities, validate_runtime_capabilities,
+    enterprise_auth_capabilities, shell_executor_capabilities, validate_runtime_capabilities,
 };
 use tenkai::storage::{OperationalStore, SqliteStore};
 use tenkai_http::{ServerConfig, router};
@@ -73,6 +73,10 @@ struct Cli {
     /// Minimum operational store migration level required at startup.
     #[arg(long, default_value_t = 1)]
     min_migration_level: u32,
+    /// Refuse to start unless the shell executor guard resolves: a file named
+    /// `tenkai-executor-guard` beside this binary, or the path in TENKAI_EXECUTOR_GUARD.
+    #[arg(long, default_value_t = false)]
+    require_executor: bool,
     /// Require an enterprise JWT verifier configured by TENKAI_JWT_VERIFIER_CONFIG.
     #[arg(long, default_value_t = false)]
     with_enterprise_auth: bool,
@@ -286,6 +290,12 @@ async fn main() -> Result<()> {
         })?;
     }
 
+    // A host that must run shell-executor deploys refuses before it binds.
+    if cli.require_executor {
+        tenkai::fenced_mutation::executor_guard_executable()
+            .context("--require-executor: the shell executor is unavailable")?;
+    }
+
     // Bind and serve /healthz before SqliteStore::open so a large legacy import
     // cannot delay the listener (#516). /readyz stays 503 until the store is open.
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
@@ -419,12 +429,20 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Resolve the deploy guard now so a missing install surfaces at startup and
+    // in /readyz capabilities, not at the first shell-executor apply.
+    match tenkai::fenced_mutation::executor_guard_executable() {
+        Ok(_) => capabilities.components.push(shell_executor_capabilities()),
+        Err(error) => eprintln!("tenkai-server warning: shell executor unavailable: {error:#}"),
+    }
+
     let requirements = RuntimeRequirements {
         tenant_mode: cli.tenant_mode,
         replica_count: cli.replica_count,
         require_high_availability: cli.require_high_availability,
         require_enterprise_authentication: cli.require_enterprise_auth,
         min_migration_level: cli.min_migration_level,
+        require_shell_executor: cli.require_executor,
     };
     // Fail before accepting traffic when the composed runtime cannot satisfy
     // the requested capability set (tenant mode, multi-replica, HA, auth).
