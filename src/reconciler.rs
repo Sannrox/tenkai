@@ -341,12 +341,39 @@ impl Reconciler {
     /// not a full plan catalog scan.
     pub async fn pending_work(&self, environment: &str) -> Result<Option<plan::Plan>> {
         let mut ctx = self.ctx.clone();
-        plan::oldest_for_environment(
+        let oldest = plan::oldest_for_environment(
             &mut ctx,
             environment,
             &[PlanState::Computed, PlanState::Running],
         )
-        .await
+        .await?;
+        if oldest.is_none() {
+            return Ok(None);
+        }
+        if let Some(plan) = oldest
+            && (plan.state == PlanState::Running
+                || !environment_lifecycle::held_candidate(&mut ctx, &plan).await?)
+        {
+            return Ok(Some(plan));
+        }
+        for plan in plan::load_for_environment(
+            &mut ctx,
+            environment,
+            Some(&[PlanState::Computed, PlanState::Running]),
+            false,
+            None,
+            None,
+            Some(true),
+        )
+        .await?
+        {
+            if plan.state == PlanState::Running
+                || !environment_lifecycle::held_candidate(&mut ctx, &plan).await?
+            {
+                return Ok(Some(plan));
+            }
+        }
+        Ok(None)
     }
 
     pub async fn check_provider_health(&self) -> Result<()> {

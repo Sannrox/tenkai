@@ -60,6 +60,7 @@ async fn reconcile_runtime_managed(ctx: &mut Ctx, environment: &str) -> Result<E
         &[PlanState::Computed, PlanState::Running],
     )
     .await?
+        && (plan.state == PlanState::Running || !held_candidate(ctx, &plan).await?)
     {
         // A claimed Running plan finishes; only queued work reports the hold.
         if plan.state == PlanState::Computed
@@ -68,6 +69,21 @@ async fn reconcile_runtime_managed(ctx: &mut Ctx, environment: &str) -> Result<E
             return Ok(held);
         }
         return Ok(awaiting_runtime(plan));
+    }
+    for plan in plan::load_for_environment(
+        ctx,
+        environment,
+        Some(&[PlanState::Computed, PlanState::Running]),
+        false,
+        None,
+        None,
+        Some(true),
+    )
+    .await?
+    {
+        if plan.state == PlanState::Running || !held_candidate(ctx, &plan).await? {
+            return Ok(awaiting_runtime(plan));
+        }
     }
     if crate::preview::is_terminal_residue(ctx, environment, crate::now_millis()).await? {
         return Ok(EnvironmentStatus::Current);
@@ -99,6 +115,23 @@ fn awaiting_runtime(plan: Plan) -> EnvironmentStatus {
         plan_id: plan.id,
         steps: plan.steps.len(),
     }
+}
+
+pub(super) async fn held_candidate(ctx: &mut Ctx, plan: &Plan) -> Result<bool> {
+    let Some(environment) = ctx.get(&crate::ontology::env_id(&plan.environment)).await? else {
+        return Ok(false);
+    };
+    Ok(plan.steps.iter().any(|step| {
+        environment
+            .properties
+            .get(&format!("failed_target.{}", step.product))
+            == Some(&step.release_id)
+            && environment
+                .properties
+                .get(&format!("failed_target_at.{}", step.product))
+                .and_then(|at| at.parse::<i64>().ok())
+                .is_none_or(|at| plan.created_at <= at)
+    }))
 }
 
 async fn select_plan(ctx: &mut Ctx, environment: &str, approval_required: bool) -> Result<Plan> {
@@ -172,6 +205,9 @@ async fn first_admissible_in(
     maintenance_blocked_only: bool,
 ) -> Result<Option<Plan>> {
     for candidate in candidates {
+        if held_candidate(ctx, &candidate).await? {
+            continue;
+        }
         if candidate.steps.is_empty() {
             bail!(
                 "plan {} has_steps index selected an executable plan without steps",
