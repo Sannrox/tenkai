@@ -608,18 +608,17 @@ pub fn validate_topology(topology: &DockerHostTopology, secret_dir: Option<&Path
             }
             validate_mount_target_path(&container.name, &mount.name, &mount.path)?;
         }
-        if let Some(user) = &container.user {
-            if user.is_empty()
+        if let Some(user) = &container.user
+            && (user.is_empty()
                 || user.len() > 128
                 || user
                     .chars()
-                    .any(|c| c.is_whitespace() || c == ':' || c == ',' || c == '=')
-            {
-                bail!(
-                    "container {} user must be a bounded UID:GID or username",
-                    container.name
-                );
-            }
+                    .any(|c| c.is_whitespace() || c == ':' || c == ',' || c == '='))
+        {
+            bail!(
+                "container {} user must be a bounded UID:GID or username",
+                container.name
+            );
         }
         let mut tmpfs_paths = BTreeSet::new();
         for tmpfs in &container.tmpfs {
@@ -640,13 +639,13 @@ pub fn validate_topology(topology: &DockerHostTopology, secret_dir: Option<&Path
                 container.name
             );
         }
-        if let DockerRestartPolicy::OnFailure { max_retries } = container.restart {
-            if max_retries == 0 || max_retries > 10 {
-                bail!(
-                    "container {} restart max_retries must be 1..=10",
-                    container.name
-                );
-            }
+        if let DockerRestartPolicy::OnFailure { max_retries } = container.restart
+            && (max_retries == 0 || max_retries > 10)
+        {
+            bail!(
+                "container {} restart max_retries must be 1..=10",
+                container.name
+            );
         }
         if container.files.len() > 64 {
             bail!("container {} exceeds 64 config files", container.name);
