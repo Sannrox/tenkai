@@ -21,7 +21,7 @@ def main() -> int:
     if forbidden and forbidden in joined:
         sys.stderr.write("secret material leaked onto docker argv\n")
         return 2
-    state = {"containers": {}, "networks": [], "volumes": []}
+    state = {"containers": {}, "networks": {}, "volumes": {}}
     if state_path.exists():
         state = json.loads(state_path.read_text(encoding="utf-8"))
     args = sys.argv[1:]
@@ -75,25 +75,43 @@ def take_flag(args: list[str], flag: str) -> list[str]:
     return values
 
 
+def labeled_resources(state: dict, kind: str) -> dict:
+    resources = state.get(kind, {})
+    if isinstance(resources, list):
+        converted = {name: {"labels": {}} for name in resources}
+        state[kind] = converted
+        return converted
+    return resources
+
+
 def handle_network(state: dict, state_path: Path, args: list[str]) -> int:
     if not args or args[0] != "create":
         sys.stderr.write("expected network create\n")
         return 1
-    name = args[-1]
-    if name not in state["networks"]:
-        state["networks"].append(name)
-        save(state_path, state)
-    return 0
+    return create_labeled_resource(state, state_path, "networks", "network", args)
 
 
 def handle_volume(state: dict, state_path: Path, args: list[str]) -> int:
     if not args or args[0] != "create":
         sys.stderr.write("expected volume create\n")
         return 1
+    return create_labeled_resource(state, state_path, "volumes", "volume", args)
+
+
+def create_labeled_resource(
+    state: dict, state_path: Path, kind: str, noun: str, args: list[str]
+) -> int:
+    labels = {}
+    for item in take_flag(args, "--label"):
+        key, _, value = item.partition("=")
+        labels[key] = value
     name = args[-1]
-    if name not in state["volumes"]:
-        state["volumes"].append(name)
-        save(state_path, state)
+    resources = labeled_resources(state, kind)
+    if name in resources:
+        sys.stderr.write(f"{noun} with name {name} already exists\n")
+        return 1
+    resources[name] = {"labels": labels}
+    save(state_path, state)
     return 0
 
 
@@ -103,6 +121,11 @@ def handle_run(state: dict, state_path: Path, args: list[str]) -> int:
         sys.stderr.write("docker run requires one --name\n")
         return 1
     name = names[0]
+    if name in state["containers"]:
+        sys.stderr.write(
+            f'docker: Error response from daemon: Conflict. The container name "/{name}" is already in use\n'
+        )
+        return 1
     labels = {}
     for item in take_flag(args, "--label"):
         key, _, value = item.partition("=")
@@ -189,28 +212,48 @@ def container_id(name: str) -> str:
     return hashlib.sha256(name.encode()).hexdigest()[:12]
 
 
+def inspect_payload(name: str, labels: dict, image: str = "", running: bool = False, health: str = "") -> dict:
+    return {
+        "Name": name,
+        "Labels": labels,
+        "Config": {
+            "Image": image,
+            "Labels": labels,
+        },
+        "State": {
+            "Running": running,
+            "Health": {"Status": health},
+        },
+    }
+
+
 def handle_inspect(state: dict, args: list[str]) -> int:
     names = [item for item in args if not item.startswith("-")]
     payload = []
     for name in names:
         found = lookup_container(state, name)
-        if found is None:
-            sys.stderr.write(f"Error: No such object: {name}\n")
-            return 1
-        found_name, container = found
-        payload.append(
-            {
-                "Name": f"/{found_name}",
-                "Config": {
-                    "Image": container["image"],
-                    "Labels": container["labels"],
-                },
-                "State": {
-                    "Running": container["running"],
-                    "Health": {"Status": container["health"]},
-                },
-            }
-        )
+        if found is not None:
+            found_name, container = found
+            payload.append(
+                inspect_payload(
+                    f"/{found_name}",
+                    container.get("labels", {}),
+                    image=container.get("image", ""),
+                    running=container.get("running", False),
+                    health=container.get("health", ""),
+                )
+            )
+            continue
+        network = labeled_resources(state, "networks").get(name)
+        if network is not None:
+            payload.append(inspect_payload(name, network.get("labels", {})))
+            continue
+        volume = labeled_resources(state, "volumes").get(name)
+        if volume is not None:
+            payload.append(inspect_payload(name, volume.get("labels", {})))
+            continue
+        sys.stderr.write(f"Error: No such object: {name}\n")
+        return 1
     sys.stdout.write(json.dumps(payload))
     return 0
 
