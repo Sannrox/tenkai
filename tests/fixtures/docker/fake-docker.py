@@ -43,6 +43,10 @@ def main() -> int:
         return handle_rm(state, state_path, rest)
     if command == "restart":
         return handle_restart(state, rest)
+    if command in {"stop", "start"}:
+        return handle_running(state, state_path, rest, command == "start")
+    if command == "rename":
+        return handle_rename(state, state_path, rest)
     if command == "ps":
         return handle_ps(state, rest)
     if command == "image":
@@ -307,6 +311,33 @@ def handle_restart(state: dict, args: list[str]) -> int:
             sys.stderr.write(f"Error: No such container: {name}\n")
             return 1
         state["containers"][name]["running"] = True
+    return 0
+
+
+def handle_running(state: dict, state_path: Path, args: list[str], running: bool) -> int:
+    names = [item for item in args if not item.startswith("-")]
+    for name in names:
+        if name not in state["containers"]:
+            sys.stderr.write(f"Error: No such container: {name}\n")
+            return 1
+        state["containers"][name]["running"] = running
+    save(state_path, state)
+    return 0
+
+
+def handle_rename(state: dict, state_path: Path, args: list[str]) -> int:
+    if len(args) != 2:
+        sys.stderr.write("docker rename requires CONTAINER NEW_NAME\n")
+        return 1
+    old, new = args
+    if old not in state["containers"]:
+        sys.stderr.write(f"Error: No such container: {old}\n")
+        return 1
+    if new in state["containers"]:
+        sys.stderr.write(f"Error: the container name {new} is already in use\n")
+        return 1
+    state["containers"][new] = state["containers"].pop(old)
+    save(state_path, state)
     return 0
 
 
