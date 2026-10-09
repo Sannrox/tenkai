@@ -3,6 +3,7 @@ use std::path::Path;
 use anyhow::Result;
 use tenkai::{client, fleet_budget, fleet_fairness, fleet_workload, plan};
 
+use crate::args::OutputFormat;
 use crate::fleet_args::FleetCommand;
 use crate::fleet_watch::{FleetWatchOptions, print_fleet_status, run_fleet_watch};
 
@@ -10,11 +11,16 @@ pub(crate) async fn run(
     ctx: &mut client::Ctx,
     command: FleetCommand,
     database: &Path,
+    output: OutputFormat,
 ) -> Result<()> {
     match command {
         FleetCommand::Status => {
             let report = plan::fleet_status(ctx).await?;
-            print_fleet_status(&report);
+            if output == OutputFormat::JsonV1 {
+                crate::output::print_machine_result(&crate::output::fleet_status_result(&report))?;
+            } else {
+                print_fleet_status(&report);
+            }
         }
         FleetCommand::Generate {
             seed,

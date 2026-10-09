@@ -1,5 +1,4 @@
 use anyhow::{Context as _, Result, bail};
-use tenkai::command_result::{CommandName, CommandResultV1};
 use tenkai::{apply, client, connectivity, plan, preview};
 
 use crate::args::OutputFormat;
@@ -45,6 +44,11 @@ pub(crate) async fn run(
         }
         EnvCommand::List => {
             let entries = plan::list_environments(ctx).await?;
+            if output == OutputFormat::JsonV1 {
+                return print_machine_result(&crate::output::list_environments_result(
+                    entries.len(),
+                ));
+            }
             if entries.is_empty() {
                 println!("no environments registered (tenkaictl env add <name>)");
                 return Ok(());
@@ -70,11 +74,7 @@ pub(crate) async fn run(
         EnvCommand::Inspect { env } => {
             let report = plan::inspect_environment_with_outcomes(ctx, &env).await?;
             if output == OutputFormat::JsonV1 {
-                print_machine_result(
-                    &CommandResultV1::succeeded(CommandName::InspectEnvironment)
-                        .resource("environment", report.id)
-                        .counts(None, Some(report.subscriptions.len())),
-                )?;
+                print_machine_result(&crate::output::inspect_result(&report))?;
             } else {
                 // JSON keeps multi-env inspect machine-readable without secrets.
                 println!("{}", serde_json::to_string_pretty(&report)?);
@@ -94,7 +94,12 @@ pub(crate) async fn run(
             let Some((product, channel)) = spec.split_once('=') else {
                 bail!("expected <product>=<channel>, got {spec:?}");
             };
-            println!("{}", plan::subscribe(ctx, &env, product, channel).await?);
+            let message = plan::subscribe(ctx, &env, product, channel).await?;
+            if output == OutputFormat::JsonV1 {
+                print_machine_result(&crate::output::subscribe_result(&env, &spec))?;
+            } else {
+                println!("{message}");
+            }
         }
         EnvCommand::Unlock { env } => {
             println!("{}", apply::unlock_environment(ctx, &env).await?);

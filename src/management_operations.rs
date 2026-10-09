@@ -77,6 +77,9 @@ pub enum ManagementError {
     BadRequest(String),
     #[error("{0}")]
     Conflict(String),
+    /// The operation ran, but one or more delivery steps did not succeed.
+    #[error("{0}")]
+    ExecutionFailed(String),
     #[error("{0}")]
     Unavailable(String),
     #[error("{0}")]
@@ -741,7 +744,7 @@ impl ManagementOperations {
         let actor = context.principal_id();
         self.audit(actor, "catalog.publish.requested")?;
         let mut ctx = self.application_ctx()?;
-        let message = crate::catalog::publish(
+        let published = crate::catalog::publish_with_result(
             &mut ctx,
             &files.manifest,
             &crate::catalog::PublishOptions {
@@ -756,8 +759,8 @@ impl ManagementOperations {
         self.audit(actor, "catalog.publish.completed")?;
         Ok(ManagementLifecycleResult::new(
             ManagementLifecycleOperation::Publish,
-            message,
-            None,
+            published.message,
+            Some(published.release),
         ))
     }
 
@@ -1045,6 +1048,23 @@ impl ManagementOperations {
         )
         .await
         .map_err(map_plan_lifecycle_error)?;
+        let mut failed = 0;
+        for outcome in &outcomes {
+            if !outcome
+                .classified_status()
+                .map_err(map_plan_lifecycle_error)?
+                .is_success()
+            {
+                failed += 1;
+            }
+        }
+        if failed > 0 {
+            self.audit(actor, "plan.apply.failed")?;
+            return Err(ManagementError::ExecutionFailed(format!(
+                "{failed} of {} step(s) for {plan_id} did not succeed",
+                outcomes.len()
+            )));
+        }
         self.audit(actor, "plan.apply.completed")?;
         Ok(ManagementLifecycleResult::new(
             ManagementLifecycleOperation::Apply,

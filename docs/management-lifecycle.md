@@ -66,7 +66,10 @@ enough. `Management` satisfies `Publish`; `Publish` does not satisfy
 | Runtime | Exactly one environment | Refused on every management lifecycle operation. Runtime tokens stay on `/v1/runtime/*`. |
 
 Missing approval evidence fails closed. A stale fencing generation cannot
-complete apply. Cached inspect payloads and retained files cannot grant
+complete apply. An apply whose delivery steps do not all succeed returns
+`422 Unprocessable Entity` after recording the outcome. Earlier version `1`
+servers answered such an apply with a success result; that was a defect, and
+the correction only turns a false success into a refusal. Cached inspect payloads and retained files cannot grant
 execution authority.
 
 `--allow-unapproved-development` remains embedded-only and restricted to the

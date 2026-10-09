@@ -1,20 +1,27 @@
 # Machine-readable command results
 
-`tenkaictl --output json-v1` exposes a bounded result envelope for local typed
-adapters. The default remains `--output human`; existing scripts and operator
-output are unchanged.
+`tenkaictl --output json-v1` exposes a bounded result envelope for typed
+adapters, against embedded state and a remote server alike. The default
+remains `--output human`; existing scripts and operator output are unchanged.
 
-Version 1 is available only with `--target embedded` for:
+| Command | `--target embedded` | `--target remote` |
+| --- | --- | --- |
+| `publish` | yes | yes |
+| `promote` | yes | yes |
+| `release recall` (`recall`) | yes | yes |
+| `env subscribe` (`subscribe`) | yes | yes |
+| `plan` | yes | yes |
+| `approval submit` (`approve`) | yes | yes |
+| `apply` | yes | yes |
+| `rollback` | yes | yes |
+| `restart` | yes | no |
+| `status` | yes | yes |
+| `env inspect` (`inspect_environment`) | yes | yes |
+| `env list` (`list_environments`) | yes | yes |
+| `fleet status` (`fleet_status`) | yes | yes |
 
-- `publish`
-- `promote`
-- `plan`
-- `apply`
-- `status`
-- `env inspect`
-- `rollback`
-- `restart`
-- `release recall` (`recall`)
+Any other command, or a `no` above, fails closed before contacting Tenkai with
+`unsupported_command` (embedded) or `unsupported_target` (remote).
 
 Every supported invocation writes exactly one compact JSON object to standard
 output:
@@ -37,7 +44,8 @@ The fixed fields are:
 
 - `schema`: exactly `tenkai.command-result/v1`.
 - `command`: `invocation`, `publish`, `promote`, `plan`, `apply`, `status`,
-  `inspect_environment`, `rollback`, `restart`, or `recall`.
+  `inspect_environment`, `rollback`, `restart`, `recall`, `approve`,
+  `subscribe`, `list_environments`, or `fleet_status`.
 - `outcome`: `succeeded`, `failed`, `awaiting_approval`, or `unknown`.
 - `retry`: `not_needed`, `correct_request`, `reconcile_before_retry`, or
   `not_safe`.
@@ -78,6 +86,35 @@ Mutation retry behavior:
 | `apply` | Inspect plan state and environment status; never blindly repeat an unknown apply. |
 | `rollback` | Inspect the rollback plan and environment; approval-required and unknown rollback are not safe to repeat blindly. |
 
-`status` and `env inspect` are reads. Correct rejected input before retrying
-them. Machine-readable remote mutation APIs and a general command-execution
-protocol are outside this contract.
+`status`, `env inspect`, `env list`, and `fleet status` are reads. Correct
+rejected input before retrying them. A general command-execution protocol is
+outside this contract.
+
+## Remote mode
+
+Both targets build each envelope the same way. Remote results differ only in
+these documented, target-only fields:
+
+- `plan` and `rollback` add a `plan_digest` resource and the `generation`
+  resource that `approval submit` and `apply` take as `--generation`.
+- `plan`, `apply`, and `rollback` omit `counts`; the v1 HTTP result does not
+  report step counts.
+- A remote `rollback` only plans, so it always returns `awaiting_approval`
+  with `approval_required`.
+
+Remote failures carry a fixed `code` and never echo server detail:
+
+| Code | Cause | Outcome | Retry |
+| --- | --- | --- | --- |
+| `transport_unavailable` | The request never reached the server | `failed` | `correct_request` |
+| `transport_interrupted` | No complete response arrived | `unknown` for mutations, `failed` for reads | `reconcile_before_retry` |
+| `authentication_refused` | HTTP 401 | `failed` | `correct_request` |
+| `authorization_denied` | HTTP 403 | `failed` | `correct_request` |
+| `conflict` | HTTP 409: stale `--generation`, lease, or state conflict | `failed` | `reconcile_before_retry` |
+| `execution_failed` | HTTP 422: one or more apply steps did not succeed | `failed` | `reconcile_before_retry` |
+| `domain_denied` | Any other HTTP 4xx | `failed` | `correct_request` |
+| `server_error` | HTTP 5xx | `unknown` for mutations, `failed` for reads | `reconcile_before_retry` |
+
+A failed remote `plan`, `approval submit`, `apply`, `rollback`, or
+`env subscribe` keeps the `plan`, `environment`, and `subscription` resources it
+targeted. A mutation interrupted mid-flight is never reported as `succeeded`.

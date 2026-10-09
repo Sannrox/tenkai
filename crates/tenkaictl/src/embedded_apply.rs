@@ -100,11 +100,7 @@ pub(crate) async fn run(
         Command::Status { env } => {
             let rows = plan::status(ctx, &env).await?;
             if output == OutputFormat::JsonV1 {
-                print_machine_result(
-                    &CommandResultV1::succeeded(CommandName::Status)
-                        .resource("environment", env)
-                        .counts(None, Some(rows.len())),
-                )?;
+                print_machine_result(&crate::output::status_result(&env, rows.len()))?;
                 return Ok(());
             }
             if let Some(hold) = tenkai::delivery_hold::get(

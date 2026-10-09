@@ -1,5 +1,35 @@
 use tenkai::reconciler::TickReport;
 
+/// Why a remote call failed. Callers downcast the `anyhow::Error` to tell a
+/// refused request from one whose outcome is unknown.
+#[derive(Debug)]
+pub enum RemoteFailure {
+    /// The request never reached the server, so nothing ran.
+    NotSent(String),
+    /// The request was sent but no complete response arrived; the server may
+    /// or may not have acted.
+    ResponseLost(String),
+    /// The server answered with a non-success status.
+    Rejected { status: u16, detail: String },
+}
+
+impl std::fmt::Display for RemoteFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotSent(detail) => write!(formatter, "remote server is unreachable: {detail}"),
+            Self::ResponseLost(detail) => write!(
+                formatter,
+                "remote response was lost and the outcome is unknown: {detail}"
+            ),
+            Self::Rejected { status, detail } => {
+                write!(formatter, "remote server returned {status}: {detail}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RemoteFailure {}
+
 #[derive(Clone)]
 pub struct RemoteClient {
     pub(super) base_url: String,
@@ -123,12 +153,26 @@ impl RemoteClient {
         if let Some(body) = body {
             request = request.json(body);
         }
-        let response = request.send().await?;
+        let response = request.send().await.map_err(|error| {
+            if error.is_connect() || error.is_builder() {
+                RemoteFailure::NotSent(error.to_string())
+            } else {
+                RemoteFailure::ResponseLost(error.to_string())
+            }
+        })?;
         let status = response.status();
         if !status.is_success() {
             let detail = response.text().await.unwrap_or_default();
-            anyhow::bail!("remote server returned {status}: {detail}");
+            return Err(RemoteFailure::Rejected {
+                status: status.as_u16(),
+                detail,
+            }
+            .into());
         }
-        Ok(response.json().await?)
+        // A success status with an unreadable body still means the server acted.
+        Ok(response
+            .json()
+            .await
+            .map_err(|error| RemoteFailure::ResponseLost(error.to_string()))?)
     }
 }
