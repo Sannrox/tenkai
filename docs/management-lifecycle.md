@@ -86,8 +86,8 @@ Existing `/v1/reconcile`, `/v1/environments`, `/v1/fleet/status`, and
 ## Machine-readable contract
 
 `api/tenkai-http-v1.schema.json` (contract id `tenkai.http.v1`) lists every
-public route with its method, path, required capability (`none`, `read`, or
-`management`), and JSON Schema request and response types. It is generated
+public route with its method, path, required capability (`none`, `read`,
+`publish`, or `management`), and JSON Schema request and response types. It is generated
 from the handlers' serde types; `make update` regenerates it and
 `make validate` fails when it is stale. Each release attaches it next to the
 binaries, covered by `SHA256SUMS` and the attestation. `/healthz` lists the
