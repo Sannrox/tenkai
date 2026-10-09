@@ -19,7 +19,10 @@ purpose, gate-bypass choice, policy evidence, and current approver trust roots.
 Create a new approval after any plan change.
 
 If continuous reconciliation reports `awaiting_approval`, preserve the plan and
-obtain approval for that exact identifier.
+obtain approval for that exact identifier. An environment may opt into
+automatic signing through `tenkaictl env approval-policy`; skip-gates and
+rollback still need a human. Clearing the policy or the auto-signer key
+revokes pending automatic envelopes.
 
 ## Gates and emergency starts
 

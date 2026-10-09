@@ -79,6 +79,45 @@ server operator can configure `TENKAI_PLAN_APPROVAL_DIR` and
 execute that exact plan. Missing files, incomplete configuration, stale plans,
 and invalid or expired approvals remain pending or fail closed.
 
+## Unattended approval policy
+
+An environment may opt into automatic signing of the same envelope. Auto
+approval is never inferred from provider absence and is never the default.
+
+```toml
+version = 1
+mode = "auto"          # or "manual"
+ttl_ms = 3600000
+auto_signer_key = "/var/lib/tenkai/lab-auto-approver.ed25519"
+
+# skip_gates and rollback always require a human. Extra products:
+
+[[require_human]]
+product = "payments"
+```
+
+The signer key is a 32-byte Ed25519 seed, mode `0600`, not a symlink. Its
+public key must already be in `TENKAI_PLAN_APPROVAL_TRUST_ROOTS`. Tenkai
+stores only the canonical policy file path on the environment:
+
+```sh
+tenkaictl env approval-policy set lab /etc/tenkai/lab-approval-policy.toml
+tenkaictl env approval-policy show lab
+tenkaictl env approval-policy clear lab
+```
+
+When `mode = "auto"` and the plan does not match a require-human rule, the
+next reconcile tick signs `$TENKAI_PLAN_APPROVAL_DIR/<plan-id>.json` with
+`policy_provider = "builtin-auto"`, `policy_evidence_id = "auto"`, and
+`policy_digest` bound to the policy document, then executes. Skip-gates and
+rollback plans stay `awaiting_approval` until a human-signed envelope appears.
+
+Execute re-checks the live policy. Clearing the policy path, switching
+`mode` to `manual`, adding a require-human match, or removing the signer key
+leaves pending automatic envelopes unexecuted. Human-signed envelopes
+(`policy_provider` other than `builtin-auto`) are unchanged. Production
+environments should keep `mode = "manual"` or leave the property unset.
+
 For local development only, an operator may use:
 
 ```sh

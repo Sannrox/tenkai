@@ -96,6 +96,11 @@ pub(crate) enum EnvCommand {
         #[command(subcommand)]
         command: DockerSecretsCommand,
     },
+    /// Manage the environment-scoped plan approval policy file path. Never key bytes.
+    ApprovalPolicy {
+        #[command(subcommand)]
+        command: ApprovalPolicyCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -125,6 +130,16 @@ pub(crate) enum DockerSecretsCommand {
     /// Set the environment-scoped secret-file directory.
     Set { env: String, path: PathBuf },
     /// Clear the stored secret-file directory path.
+    Clear { env: String },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum ApprovalPolicyCommand {
+    /// Show the stored plan approval policy file path (never key bytes).
+    Show { env: String },
+    /// Set the environment-scoped plan approval policy file.
+    Set { env: String, path: PathBuf },
+    /// Clear the stored plan approval policy path.
     Clear { env: String },
 }
 

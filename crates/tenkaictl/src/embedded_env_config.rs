@@ -2,8 +2,8 @@ use anyhow::{Result, bail};
 use tenkai::{client, inventory, maintenance, plan};
 
 use crate::env_args::{
-    ArtifactMirrorCommand, ClusterConfigCommand, ConstraintsCommand, DockerSecretsCommand,
-    FactsCommand, MaintenanceCommand, OverlayCommand,
+    ApprovalPolicyCommand, ArtifactMirrorCommand, ClusterConfigCommand, ConstraintsCommand,
+    DockerSecretsCommand, FactsCommand, MaintenanceCommand, OverlayCommand,
 };
 
 pub(crate) async fn maintenance(ctx: &mut client::Ctx, command: MaintenanceCommand) -> Result<()> {
@@ -227,6 +227,28 @@ pub(crate) async fn docker_secrets(
         }
         DockerSecretsCommand::Clear { env } => {
             println!("{}", plan::clear_docker_secret_dir(ctx, &env).await?);
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn approval_policy(
+    ctx: &mut client::Ctx,
+    command: ApprovalPolicyCommand,
+) -> Result<()> {
+    match command {
+        ApprovalPolicyCommand::Show { env } => match plan::plan_approval_policy(ctx, &env).await? {
+            Some(path) => println!("{}", path.display()),
+            None => println!("{env} has no plan_approval_policy"),
+        },
+        ApprovalPolicyCommand::Set { env, path } => {
+            println!(
+                "{}",
+                plan::set_plan_approval_policy(ctx, &env, &path).await?
+            );
+        }
+        ApprovalPolicyCommand::Clear { env } => {
+            println!("{}", plan::clear_plan_approval_policy(ctx, &env).await?);
         }
     }
     Ok(())

@@ -173,7 +173,7 @@ async fn execute(
     stored: Plan,
     approval_required: bool,
 ) -> Result<EnvironmentStatus> {
-    let plan_id = stored.id;
+    let plan_id = stored.id.clone();
     let steps = stored.steps.len();
     if approval_required {
         let (Some(directory), Some(roots)) = (
@@ -182,22 +182,32 @@ async fn execute(
         ) else {
             return Ok(EnvironmentStatus::AwaitingApproval { plan_id, steps });
         };
-        let envelope = directory.join(format!("{plan_id}.json"));
-        if !envelope.is_file() {
-            return Ok(EnvironmentStatus::AwaitingApproval { plan_id, steps });
-        }
-        return execute_authorized(
-            ctx,
-            request.environment,
-            &plan_id,
-            steps,
+        let env_obj = crate::environment::environment(ctx, request.environment).await?;
+        match crate::approval_policy::resolve_auto_envelope(
+            &env_obj.properties,
+            &stored,
             request.policy.skip_gates,
-            apply::ExecutionAuthorization::Signed {
-                approval: &envelope,
-                trust_roots: roots,
-            },
-        )
-        .await;
+            directory,
+            crate::now_millis(),
+        )? {
+            crate::approval_policy::AutoEnvelope::NeedsHuman => {
+                return Ok(EnvironmentStatus::AwaitingApproval { plan_id, steps });
+            }
+            crate::approval_policy::AutoEnvelope::Signed(envelope) => {
+                return execute_authorized(
+                    ctx,
+                    request.environment,
+                    &plan_id,
+                    steps,
+                    request.policy.skip_gates,
+                    apply::ExecutionAuthorization::Signed {
+                        approval: &envelope,
+                        trust_roots: roots,
+                    },
+                )
+                .await;
+            }
+        }
     }
     let reason = request
         .policy
