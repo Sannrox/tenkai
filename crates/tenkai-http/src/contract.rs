@@ -37,6 +37,7 @@ enum Auth {
     None,
     Read,
     Management,
+    Publish,
 }
 
 struct Route {
@@ -177,7 +178,7 @@ pub fn http_contract() -> Value {
         Route {
             method: "POST",
             path: "/v1/releases",
-            auth: Auth::Management,
+            auth: Auth::Publish,
             request: Some(schema::<PublishRequest>(&mut g)),
             response: lifecycle.clone(),
         },
@@ -191,7 +192,7 @@ pub fn http_contract() -> Value {
         Route {
             method: "POST",
             path: "/v1/channels/{channel}/promote",
-            auth: Auth::Management,
+            auth: Auth::Publish,
             request: Some(schema::<PromoteRequest>(&mut g)),
             response: lifecycle,
         },
@@ -242,6 +243,7 @@ pub fn http_contract() -> Value {
                     Auth::None => "none",
                     Auth::Read => "read",
                     Auth::Management => "management",
+                    Auth::Publish => "publish",
                 },
                 "request": route.request,
                 "response": route.response,

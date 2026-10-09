@@ -2555,7 +2555,7 @@
       }
     },
     {
-      "auth": "management",
+      "auth": "publish",
       "method": "POST",
       "path": "/v1/releases",
       "request": {
@@ -2577,7 +2577,7 @@
       }
     },
     {
-      "auth": "management",
+      "auth": "publish",
       "method": "POST",
       "path": "/v1/channels/{channel}/promote",
       "request": {
