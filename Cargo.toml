@@ -57,6 +57,7 @@ thiserror = "2"
 tower = { version = "0.5", features = ["util"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 sekai-client = { git = "https://github.com/Sannrox/sekai-chisei", rev = "67157d1fa242ac2f133c88243ef23b56f88042e6", version = "0.1.2" }
+tar = { version = "0.4", default-features = false }
 
 [features]
 default = []

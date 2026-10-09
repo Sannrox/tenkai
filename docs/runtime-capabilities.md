@@ -29,6 +29,7 @@ runtime currently provides.
 | `high_availability` | HA semantics beyond a single process |
 | `enterprise_authentication` | Host can verify enterprise authentication assertions |
 | `operational_store_migration` | Supported operational schema / migration level |
+| `shell_executor` | Host resolved `tenkai-executor-guard` and can run shell-executor deploys |
 
 Each capability is versioned. Migration also carries a numeric `level` (the
 store schema version).
@@ -61,7 +62,15 @@ Embedded SQLite and the default `tenkai-server` profile advertise:
 profile: community-sqlite
 capabilities:
   - operational_store_migration:v1:levelN   # N = SCHEMA_VERSION
+  - shell_executor:v1                       # tenkai-server, when the guard resolves
 ```
+
+`tenkai-server` resolves `tenkai-executor-guard` at startup, beside its own
+binary (or one directory up) or at `TENKAI_EXECUTOR_GUARD`. When the guard is
+missing, the server logs `tenkai-server warning: shell executor unavailable`,
+omits `shell_executor`, and still starts; the first shell-executor apply then
+fails with the same instruction. See
+[install a server host](run-tenkai-server.md#install-a-server-host).
 
 They do **not** advertise tenant isolation, shared replica state, high
 availability, or enterprise authentication. Community operation is
@@ -93,6 +102,7 @@ and [multi-replica-hub-runbook.md](multi-replica-hub-runbook.md).
 | `require_high_availability` | false | Requires `high_availability` |
 | `require_enterprise_authentication` | false | Requires `enterprise_authentication` |
 | `min_migration_level` | 1 | Requires migration level ≥ value |
+| `require_shell_executor` | false | Requires `shell_executor` (`--require-executor`) |
 
 `validate_runtime_capabilities(provided, required)` is the single negotiation
 entry point used by the server router and the `tenkai-server` binary.
@@ -106,10 +116,13 @@ tenkai-server \
   --require-high-availability \
   --require-enterprise-auth \
   --min-migration-level 1 \
-  --with-enterprise-auth
+  --with-enterprise-auth \
+  --require-executor
 ```
 
 - Requesting tenant mode against community SQLite **fails startup**.
+- `--require-executor` **fails startup** unless `tenkai-executor-guard`
+  resolves, for hosts that must be able to run shell-executor deploys.
 - Requesting `--replica-count 2` without a shared-replica-capable store **fails
   startup**.
 - Enterprise JWT authentication requires

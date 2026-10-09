@@ -37,6 +37,7 @@ enum Auth {
     None,
     Read,
     Management,
+    Publish,
 }
 
 struct Route {
@@ -60,6 +61,22 @@ pub fn http_contract() -> Value {
     let migration = schema::<PackageMigrationResult>(&mut g);
     let status = schema::<ServiceStatus>(&mut g);
     let routes = vec![
+        Route {
+            method: "GET",
+            path: "/v1/environments/{environment}/compatibility/{release}",
+            auth: Auth::Read,
+            request: None,
+            response: schema::<Option<tenkai::software_compatibility::CompatibilityReport>>(&mut g),
+        },
+        Route {
+            method: "POST",
+            path: "/v1/environments/{environment}/compatibility/evidence",
+            auth: Auth::Management,
+            request: Some(schema::<
+                tenkai::software_compatibility::CompatibilityEvidence,
+            >(&mut g)),
+            response: schema::<()>(&mut g),
+        },
         Route {
             method: "GET",
             path: "/healthz",
@@ -161,7 +178,7 @@ pub fn http_contract() -> Value {
         Route {
             method: "POST",
             path: "/v1/releases",
-            auth: Auth::Management,
+            auth: Auth::Publish,
             request: Some(schema::<PublishRequest>(&mut g)),
             response: lifecycle.clone(),
         },
@@ -175,7 +192,7 @@ pub fn http_contract() -> Value {
         Route {
             method: "POST",
             path: "/v1/channels/{channel}/promote",
-            auth: Auth::Management,
+            auth: Auth::Publish,
             request: Some(schema::<PromoteRequest>(&mut g)),
             response: lifecycle,
         },
@@ -226,6 +243,7 @@ pub fn http_contract() -> Value {
                     Auth::None => "none",
                     Auth::Read => "read",
                     Auth::Management => "management",
+                    Auth::Publish => "publish",
                 },
                 "request": route.request,
                 "response": route.response,
@@ -258,6 +276,9 @@ mod tests {
             ("EnvironmentInspectReport", "observed_type_digest"),
             ("EnvironmentInspectReport", "preview"),
             ("EnvironmentInspectReport", "retirement"),
+            ("EnvironmentInspectReport", "delivery_hold"),
+            ("EnvironmentSubscriptionView", "delivery_hold"),
+            ("StatusRow", "delivery_hold"),
             ("EnvironmentMaintenanceInspect", "open_until_ms"),
             ("EnvironmentMaintenanceInspect", "next_opens_at_ms"),
             ("EnvironmentMaintenanceInspect", "detail"),

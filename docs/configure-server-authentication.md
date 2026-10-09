@@ -102,6 +102,12 @@ capabilities = ["read", "management"]
 value = "prod-operators"
 capabilities = ["management"]
 environment = "prod"         # confine management to one environment
+
+[[grants.rules]]
+value = "ci-publishers"
+capabilities = ["publish"]
+channels = ["stable"]        # confine promote; publish stays catalog-wide
+kind = "service"             # CI client; default remains human
 ```
 
 Behavior:
@@ -130,7 +136,11 @@ Behavior:
   but has no delivery capability. Rules with `environment` bind management to
   that environment exactly like an environment-scoped management token, unless
   another rule already grants fleet management. Rules for more than one
-  environment are refused.
+  environment are refused. Rules with `channels` bind promote to those
+  channel names (unioned across matching rules) unless a matching rule already
+  grants fleet management. Publish ignores channel bindings. `kind = "service"`
+  sets the principal kind to service; the default remains human. Runtime
+  principals still cannot call management lifecycle.
 - The principal is `<sub>@<iss>` in audit records.
 - `GET /v1/auth/oidc` is unauthenticated and returns only `issuer`,
   `audience`, `client_id`, `scopes`, and `display_name` when set; it is 404
@@ -157,8 +167,42 @@ tenkaictl logout
 ```
 
 Register `http://127.0.0.1:9876/callback` on the public client (or pass a
-registered `--callback-port`). `--client-id` / `TENKAI_CLIENT_ID` overrides the
-discovered id. `--no-browser` prints the authorization URL. Remote commands
-use `TENKAI_MANAGEMENT_TOKEN` when it is set; otherwise they use the saved
-login. The server still requires the fleet management token at process start;
-that token remains the break-glass bearer.
+registered `--callback-port`). `--client-id` / `TENKAI_OIDC_CLIENT_ID` /
+`TENKAI_CLIENT_ID` overrides the discovered id. `--no-browser` prints the
+authorization URL. Remote commands use `TENKAI_MANAGEMENT_TOKEN` when it is
+set; otherwise they use the saved login. The server still requires the fleet
+management token at process start; that token remains the break-glass bearer.
+
+### CI client-credentials login
+
+CI jobs use a confidential OIDC client and
+`tenkaictl login --client-credentials`. The secret is `TENKAI_OIDC_CLIENT_SECRET`
+in the runner environment only. It is never an argv flag, never written to
+`tokens.json`, and never configured on `tenkai-server`. Tenkai stays a resource
+server: it verifies access tokens and holds no client secrets.
+
+```sh
+export TENKAI_SERVER_URL=https://tenkai.example.internal
+export TENKAI_OIDC_CLIENT_ID=tenkai-ci
+export TENKAI_OIDC_CLIENT_SECRET=replace-from-secret-store
+tenkaictl login --client-credentials
+tenkaictl --target remote publish tenkai.toml \
+  --signature tenkai.sig.json \
+  --trust-roots /etc/tenkai/release-trust.toml
+tenkaictl --target remote promote product@1.2.3 stable
+```
+
+Client-credentials tokens typically have no refresh token. When the saved
+access token expires, `tenkaictl` re-requests with `TENKAI_OIDC_CLIENT_SECRET`
+still in the environment; otherwise run login again. Grant the CI client
+`capabilities = ["publish"]` and optional `channels` / `kind = "service"` as
+above. Do not put the fleet `TENKAI_MANAGEMENT_TOKEN` on the runner.
+
+Release signing is unchanged. Hold the 32-byte Ed25519 seed as an
+environment-protected CI secret, sign the digest-pinned manifest in the job,
+and keep only public trust roots on the server. Rotate by overlapping the old
+and new public keys in the trust-root file, then removing the old key after
+signatures signed by it have been published; see
+[release signing](release-signing.md). Do not use
+`--allow-unsigned-development` in CI. A sample workflow is
+[examples/ci-publish](../examples/ci-publish/).

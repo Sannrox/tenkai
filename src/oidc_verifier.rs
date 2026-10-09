@@ -134,11 +134,18 @@ pub struct OidcGrantMapping {
 #[serde(deny_unknown_fields)]
 pub struct OidcGrantRule {
     pub value: String,
-    /// `read` and/or `management`.
+    /// `read`, `management`, and/or `publish`.
     pub capabilities: Vec<String>,
     /// When set, management from this rule is confined to one environment.
     #[serde(default)]
     pub environment: Option<String>,
+    /// When non-empty and the token has no fleet management, promote is
+    /// confined to these channels. Publish ignores channel bindings.
+    #[serde(default)]
+    pub channels: Vec<String>,
+    /// Principal kind for this rule. Default remains human; `service` is for CI.
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 fn default_algorithms() -> Vec<String> {
@@ -251,6 +258,21 @@ impl OidcConfig {
                 .is_some_and(|environment| environment.trim().is_empty())
             {
                 return invalid("OIDC grant rule environment must not be empty when set");
+            }
+            if rule
+                .channels
+                .iter()
+                .any(|channel| channel.trim().is_empty())
+            {
+                return invalid("OIDC grant rule channels must not contain empty values");
+            }
+            match rule.kind.as_deref() {
+                None | Some("human") | Some("service") => {}
+                Some(other) => {
+                    return invalid(&format!(
+                        "OIDC grant rule kind {other:?} must be \"human\" or \"service\""
+                    ));
+                }
             }
         }
         Ok(())
@@ -615,6 +637,8 @@ struct Grants {
     tenant: Option<String>,
     capabilities: BTreeSet<DeliveryCapability>,
     environment: Option<String>,
+    channel_bindings: BTreeSet<String>,
+    principal_kind: PrincipalKind,
 }
 
 /// Enterprise auth extension for OIDC access tokens.
@@ -716,6 +740,8 @@ impl OidcAuthExtension {
         let values = claim_values(claims.rest.get(&self.config.grants.claim));
         let mut fleet = BTreeSet::new();
         let mut scoped: BTreeMap<&str, BTreeSet<DeliveryCapability>> = BTreeMap::new();
+        let mut channel_bindings = BTreeSet::new();
+        let mut principal_kind = PrincipalKind::Human;
         for rule in &self.config.grants.rules {
             if !values.contains(rule.value.as_str()) {
                 continue;
@@ -724,6 +750,15 @@ impl OidcAuthExtension {
             match &rule.environment {
                 None => fleet.extend(capabilities),
                 Some(environment) => scoped.entry(environment).or_default().extend(capabilities),
+            }
+            if rule.kind.as_deref() == Some("service") {
+                principal_kind = PrincipalKind::Service;
+            }
+            for channel in &rule.channels {
+                let channel = channel.trim();
+                if !channel.is_empty() {
+                    channel_bindings.insert(channel.to_string());
+                }
             }
         }
         // Fleet management already covers every environment.
@@ -742,6 +777,9 @@ impl OidcAuthExtension {
                 ));
             }
         };
+        if fleet_management {
+            channel_bindings.clear();
+        }
 
         let tenant = match &self.config.grants.tenant_claim {
             Some(claim) => match claims.rest.get(claim) {
@@ -758,6 +796,8 @@ impl OidcAuthExtension {
             tenant,
             capabilities,
             environment,
+            channel_bindings,
+            principal_kind,
         })
     }
 }
@@ -801,13 +841,16 @@ impl EnterpriseAuthExtension for OidcAuthExtension {
             credential.request_id.clone(),
             PrincipalIdentity {
                 id: grants.subject,
-                kind: PrincipalKind::Human,
+                kind: grants.principal_kind,
             },
             OIDC_AUTH_EXTENSION_ID,
         )
         .with_delivery_capabilities(grants.capabilities);
         if let Some(environment) = grants.environment {
             builder = builder.with_environment_binding(environment);
+        }
+        if !grants.channel_bindings.is_empty() {
+            builder = builder.with_channel_bindings(grants.channel_bindings);
         }
         match (grants.tenant, self.require_tenant) {
             (Some(tenant), _) => builder = builder.with_tenant(&tenant, authority)?,

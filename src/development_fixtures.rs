@@ -123,6 +123,7 @@ impl FixtureEnvironmentProjection {
                 product_count
             },
             lease_held: false,
+            delivery_held: false,
         }
     }
 
@@ -151,6 +152,7 @@ impl FixtureEnvironmentProjection {
                     error,
                     head: projection.head.clone(),
                     overlay_stale: false,
+                    delivery_hold: None,
                 }
             })
             .collect()
@@ -177,6 +179,7 @@ impl FixtureEnvironmentProjection {
                 error: row.error,
                 overlay_digest: None,
                 applied_overlay: None,
+                delivery_hold: None,
             })
             .collect();
         crate::plan::EnvironmentInspectReport {
@@ -214,6 +217,7 @@ impl FixtureEnvironmentProjection {
             module_activations: Vec::new(),
             retirement: None,
             preview: None,
+            delivery_hold: None,
         }
     }
 

@@ -18,6 +18,10 @@ inputs = ["compose.yaml"]          # immutable files/directories used by these c
 
 [gate]
 eval_suite = "my-suite"          # chisei eval suite; latest run must fully pass
+
+[delivery]
+has_migration = false            # schema or data migration; auto policy stays human
+changes_identity_config = false  # identity-provider realm/client change; same
 ```
 
 This example shows every common field. The minimal working manifest used by the
@@ -25,6 +29,13 @@ quickstart is [`examples/hello-local/tenkai.toml`](../examples/hello-local/tenka
 Deploy commands run with a cleared environment; see
 [environment variables](environment-variables.md#set-by-tenkai-for-deploy-commands)
 for what they receive.
+
+## Delivery signals
+
+Optional `[delivery]` flags are part of the signed manifest. Both default to
+`false`. Changing them for an already-published version is rejected; bump
+`product.version`. Unattended auto approval always requires a human when
+either flag is true; see [plan approval](plan-approval.md#unattended-approval-policy).
 
 ## Immutability
 
@@ -49,6 +60,16 @@ The detached envelope and trust-root formats are documented in
 [release signing](release-signing.md). Executing a plan separately requires a
 signed approval bound to the exact plan and environment; see
 [plan approval](plan-approval.md).
+
+## Software compatibility
+
+Software releases can declare a versioned `[compatibility]` profile with immutable
+component pins, required and provided contracts, runtime capabilities, facts, and
+schema bounds. The profile is signed with the manifest. Planning, apply, restart,
+and rollback check fresh environment-scoped evidence before mutation;
+`--skip-gates` does not bypass these checks. See
+[software compatibility preflight](software-compatibility.md) for the contract,
+observation format, and CLI/API commands.
 
 ## Gates
 

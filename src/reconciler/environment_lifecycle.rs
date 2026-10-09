@@ -45,6 +45,9 @@ pub(super) async fn reconcile(ctx: &mut Ctx, request: Request<'_>) -> Result<Env
     if stored.steps.is_empty() {
         return Ok(EnvironmentStatus::Current);
     }
+    if let Some(held) = held(ctx, &stored).await? {
+        return Ok(held);
+    }
     execute(ctx, request, stored, approval_required).await
 }
 
@@ -58,6 +61,12 @@ async fn reconcile_runtime_managed(ctx: &mut Ctx, environment: &str) -> Result<E
     )
     .await?
     {
+        // A claimed Running plan finishes; only queued work reports the hold.
+        if plan.state == PlanState::Computed
+            && let Some(held) = held(ctx, &plan).await?
+        {
+            return Ok(held);
+        }
         return Ok(awaiting_runtime(plan));
     }
     if crate::preview::is_terminal_residue(ctx, environment, crate::now_millis()).await? {
@@ -67,8 +76,22 @@ async fn reconcile_runtime_managed(ctx: &mut Ctx, environment: &str) -> Result<E
     if stored.steps.is_empty() {
         Ok(EnvironmentStatus::Current)
     } else {
-        Ok(awaiting_runtime(stored))
+        Ok(held(ctx, &stored)
+            .await?
+            .unwrap_or_else(|| awaiting_runtime(stored)))
     }
+}
+
+/// `Held` while a delivery hold pauses `plan`; the plan stays queued.
+async fn held(ctx: &mut Ctx, plan: &Plan) -> Result<Option<EnvironmentStatus>> {
+    Ok(crate::delivery_hold::active_for_plan(ctx, plan)
+        .await?
+        .map(|(hold, scope)| EnvironmentStatus::Held {
+            plan_id: plan.id.clone(),
+            steps: plan.steps.len(),
+            reason: hold.reason,
+            scope: scope.key(),
+        }))
 }
 
 fn awaiting_runtime(plan: Plan) -> EnvironmentStatus {
@@ -183,10 +206,12 @@ async fn execute(
             return Ok(EnvironmentStatus::AwaitingApproval { plan_id, steps });
         };
         let env_obj = crate::environment::environment(ctx, request.environment).await?;
+        let signals = delivery_signals_for_plan(ctx, &stored).await?;
         match crate::approval_policy::resolve_auto_envelope(
             &env_obj.properties,
             &stored,
             request.policy.skip_gates,
+            signals,
             directory,
             crate::now_millis(),
         )? {
@@ -269,6 +294,67 @@ async fn execute_authorized(
         plan_id: plan_id.into(),
         steps,
     })
+}
+
+/// Merge the signed `[delivery]` signals of every release a plan crosses.
+/// An upgrade crosses each published version in `(from, to]`, so skipping an
+/// intermediate migration still counts; a downgrade or rollback reverses each
+/// version in `(to, from]`. A restart re-activates the deployed release and
+/// contributes nothing.
+pub(super) async fn delivery_signals_for_plan(
+    ctx: &mut Ctx,
+    plan: &Plan,
+) -> Result<crate::approval_policy::DeliverySignals> {
+    use crate::approval_policy::DeliverySignals;
+    use crate::plan::Action;
+    let mut signals = DeliverySignals::default();
+    let mut releases = None;
+    for step in &plan.steps {
+        if step.action == Action::Restart {
+            continue;
+        }
+        if let Some(release) = ctx.get(&step.release_id).await? {
+            signals = signals.merge(DeliverySignals::target(&release.properties));
+        }
+        let reverse = matches!(step.action, Action::Downgrade | Action::Rollback);
+        let Some(from) = &step.from else {
+            continue;
+        };
+        let range = semver::Version::parse(from)
+            .and_then(|from| Ok((from, semver::Version::parse(&step.to)?)));
+        let Ok((from, to)) = range else {
+            // Without ordered versions, only the departed release is known.
+            if reverse
+                && let Some(release) = ctx
+                    .get(&crate::ontology::release_id(&step.product, from))
+                    .await?
+            {
+                signals = signals.merge(DeliverySignals::departed(&release.properties));
+            }
+            continue;
+        };
+        let (low, high) = if reverse { (&to, &from) } else { (&from, &to) };
+        if releases.is_none() {
+            releases = Some(ctx.list_kind(crate::ontology::KIND_RELEASE).await?);
+        }
+        for release in releases.iter().flatten() {
+            let crossed = release.properties.get("product") == Some(&step.product)
+                && release
+                    .properties
+                    .get("version")
+                    .and_then(|version| semver::Version::parse(version).ok())
+                    .is_some_and(|version| *low < version && version <= *high);
+            if !crossed {
+                continue;
+            }
+            signals = signals.merge(if reverse {
+                DeliverySignals::departed(&release.properties)
+            } else {
+                DeliverySignals::target(&release.properties)
+            });
+        }
+    }
+    Ok(signals)
 }
 
 /// Deterministically terminate Plans orphaned by a stopped controller. An

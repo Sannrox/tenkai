@@ -888,6 +888,7 @@ mod tests {
     fn from_manifest_builds_descriptor() {
         let sample = sample_descriptor();
         let manifest = Manifest {
+            compatibility: None,
             product: ProductSection {
                 name: "qwen-coder".into(),
                 version: "3.2.1".into(),
@@ -909,6 +910,7 @@ mod tests {
             worker_pool: None,
             artifacts: Vec::new(),
             gate: GateSection::default(),
+            delivery: Default::default(),
         };
         let descriptor = ModelRuntimeDescriptor::from_manifest(&manifest).unwrap();
         assert_eq!(descriptor.product_name, "qwen-coder");

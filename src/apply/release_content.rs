@@ -12,6 +12,7 @@ use super::*;
 pub(super) struct ReleaseContent {
     pub(super) manifest: Manifest,
     pub(super) artifact_digest: String,
+    pub(super) manifest_digest: String,
     pub(super) workdir: PathBuf,
     pub(super) environment: String,
     pub(super) product: String,
@@ -122,6 +123,7 @@ pub(super) async fn admit(
     Ok(ReleaseContent {
         manifest,
         artifact_digest: pin.artifact_digest.clone(),
+        manifest_digest: pin.digest.clone(),
         workdir,
         environment: environment.to_string(),
         product: product.to_string(),

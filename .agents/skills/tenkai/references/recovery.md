@@ -29,6 +29,20 @@ When failed cleanup leaves the external target unknown:
 
 `env reconcile` records an observation of the already-verified target.
 
+## After an automatic rollback
+
+A failed health probe rolls back to the previous release and ends the plan
+`failed`. Until the planner keeps a failed-target marker, the next reconcile
+tick computes a new plan for the same failed release, and non-local
+environments report `awaiting_approval` for it. Do not approve that plan.
+Recall the release (`release recall`) or promote a fixed version, then plan
+again.
+
+Derive deploy outcomes from the plan's terminal state plus the subscription's
+`deployed` and `health` in `env inspect`, not from `latest_plan` alone: a
+re-plan replaces `latest_plan` right after a rollback. There is no outbound
+deploy-outcome notification yet; poll `env inspect` or `fleet watch`.
+
 ## Leases and fences
 
 An expired generation-fenced lease is taken over through normal reconciliation.

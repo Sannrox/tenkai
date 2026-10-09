@@ -27,6 +27,14 @@ its outcome row. PostgreSQL retains the same kind-filtered outbox contract, but
 the current mixed enterprise composition cannot claim atomic terminal wiring
 until PostgreSQL owns the corresponding authoritative state under ADR 0010.
 
+Software compatibility observations are immutable content-addressed operational
+records (`tenkai.software_compatibility_evidence`), indexed by environment and
+target release manifest digest. The existing catalog sidecar stores them without
+changing environment configuration, deployed versions, or the storage schema.
+Record time does not refresh observation age. Apply and rollback reevaluate the
+latest unambiguous observation against current installed profiles. See
+[software compatibility preflight](software-compatibility.md).
+
 Server management requests and their terminal outcomes are appended to the
 `audit_events` table. Audit identifiers are immutable and survive server
 restart. The table contains principals, operation/resource identifiers, and

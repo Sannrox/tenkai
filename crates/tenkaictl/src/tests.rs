@@ -141,10 +141,29 @@ fn parses_login_and_logout() {
         login.command,
         Command::Login {
             no_browser: true,
+            client_credentials: false,
             callback_port: 9876,
             ref client_id,
             timeout: 300,
         } if client_id.as_deref() == Some("tenkai-cli")
+    ));
+    let client_credentials = Cli::try_parse_from([
+        "tenkaictl",
+        "--server-url",
+        "https://tenkai.example.test",
+        "login",
+        "--client-credentials",
+        "--client-id",
+        "tenkai-ci",
+    ])
+    .unwrap();
+    assert!(matches!(
+        client_credentials.command,
+        Command::Login {
+            client_credentials: true,
+            ref client_id,
+            ..
+        } if client_id.as_deref() == Some("tenkai-ci")
     ));
     let logout = Cli::try_parse_from([
         "tenkaictl",

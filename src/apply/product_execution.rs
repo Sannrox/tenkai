@@ -28,6 +28,13 @@ pub(super) async fn activate(
     content: &ReleaseContent,
     adapters: TargetAdapters<'_>,
 ) -> Result<Result<(), String>> {
+    crate::software_compatibility::require_manifest(
+        ctx,
+        &content.environment,
+        &content.manifest,
+        &content.manifest_digest,
+    )
+    .await?;
     if content.manifest.product.kind.policy().target() == ProductTarget::RoutingConfig {
         prepare_fenced_mutation(ctx, lease, content).await?;
         let routing = content
@@ -200,6 +207,13 @@ pub(super) async fn restart(
     content: &ReleaseContent,
     adapters: TargetAdapters<'_>,
 ) -> Result<Result<(), String>> {
+    crate::software_compatibility::require_manifest(
+        ctx,
+        &content.environment,
+        &content.manifest,
+        &content.manifest_digest,
+    )
+    .await?;
     if content.manifest.product.kind.policy().target() == ProductTarget::WorkerPool {
         prepare_fenced_mutation(ctx, lease, content).await?;
         return admit_worker_pool(ctx, lease, content, adapters.worker_lifecycle, false, true)
@@ -239,12 +253,32 @@ pub(super) async fn restart(
     activate(ctx, lease, content, adapters).await
 }
 
+/// Why a release is being deactivated.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Removal {
+    /// Remove the deployed release.
+    Release,
+    /// Clean up after its activation failed; software adapters may already
+    /// have restored the previous runtime.
+    FailedApply,
+}
+
 /// Deactivate one release under the current environment fence.
 pub(super) async fn deactivate(
     ctx: &mut Ctx,
     lease: &EnvironmentLease,
     content: &ReleaseContent,
     adapters: TargetAdapters<'_>,
+) -> Result<Result<(), String>> {
+    deactivate_for(ctx, lease, content, adapters, Removal::Release).await
+}
+
+async fn deactivate_for(
+    ctx: &mut Ctx,
+    lease: &EnvironmentLease,
+    content: &ReleaseContent,
+    adapters: TargetAdapters<'_>,
+    removal: Removal,
 ) -> Result<Result<(), String>> {
     if content.manifest.product.kind.policy().target() == ProductTarget::RoutingConfig {
         refresh_environment_lease(ctx, lease).await?;
@@ -306,15 +340,17 @@ pub(super) async fn deactivate(
             return Ok(Err(detail));
         }
         let request = software_request(ctx, content).await?;
-        return Ok(
-            software_blocking(|| executor.remove(&request)).map_err(|error| {
-                software_phase_error(
-                    crate::software_executor::SoftwareDeployPhase::Remove,
-                    content,
-                    &error.to_string(),
-                )
-            }),
-        );
+        return Ok(software_blocking(|| match removal {
+            Removal::Release => executor.remove(&request),
+            Removal::FailedApply => executor.cleanup_failed_apply(&request),
+        })
+        .map_err(|error| {
+            software_phase_error(
+                crate::software_executor::SoftwareDeployPhase::Remove,
+                content,
+                &error.to_string(),
+            )
+        }));
     }
     if let Err(detail) = require_artifact_pull_consumer(content, None) {
         return Ok(Err(detail));
@@ -345,14 +381,16 @@ pub(super) async fn cleanup_failed_activation(
         return Ok((true, failure));
     }
     Ok(match content.manifest.deploy.uninstall.as_deref() {
-        Some(_) => match deactivate(ctx, lease, content, adapters).await {
-            Ok(Ok(())) => (true, format!("{failure}; cleaned up failed install")),
-            Ok(Err(cleanup)) => (false, format!("{failure}; cleanup also failed: {cleanup}")),
-            Err(error) => (
-                false,
-                format!("{failure}; cleanup executor also failed: {error}"),
-            ),
-        },
+        Some(_) => {
+            match deactivate_for(ctx, lease, content, adapters, Removal::FailedApply).await {
+                Ok(Ok(())) => (true, format!("{failure}; cleaned up failed install")),
+                Ok(Err(cleanup)) => (false, format!("{failure}; cleanup also failed: {cleanup}")),
+                Err(error) => (
+                    false,
+                    format!("{failure}; cleanup executor also failed: {error}"),
+                ),
+            }
+        }
         None => (false, failure),
     })
 }

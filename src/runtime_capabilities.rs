@@ -32,6 +32,8 @@ pub enum CapabilityName {
     EnterpriseAuthentication,
     /// Operational store schema / migration level the component supports.
     OperationalStoreMigration,
+    /// Host resolved `tenkai-executor-guard` and can run shell-executor deploys.
+    ShellExecutor,
 }
 
 impl CapabilityName {
@@ -42,6 +44,7 @@ impl CapabilityName {
             Self::HighAvailability => "high_availability",
             Self::EnterpriseAuthentication => "enterprise_authentication",
             Self::OperationalStoreMigration => "operational_store_migration",
+            Self::ShellExecutor => "shell_executor",
         }
     }
 }
@@ -177,6 +180,9 @@ pub struct RuntimeRequirements {
     pub require_high_availability: bool,
     pub require_enterprise_authentication: bool,
     pub min_migration_level: u32,
+    /// Refuse to start unless [`CapabilityName::ShellExecutor`] is provided.
+    #[serde(default)]
+    pub require_shell_executor: bool,
 }
 
 impl Default for RuntimeRequirements {
@@ -187,6 +193,7 @@ impl Default for RuntimeRequirements {
             require_high_availability: false,
             require_enterprise_authentication: false,
             min_migration_level: 1,
+            require_shell_executor: false,
         }
     }
 }
@@ -216,6 +223,10 @@ pub enum CapabilityError {
     HighAvailabilityRequired { needed: String, provided: String },
     #[error("enterprise authentication requires the `{needed}` capability; provided: {provided}")]
     EnterpriseAuthenticationRequired { needed: String, provided: String },
+    #[error(
+        "the shell executor requires the `{needed}` capability; install tenkai-executor-guard beside the host binary or set TENKAI_EXECUTOR_GUARD; provided: {provided}"
+    )]
+    ShellExecutorRequired { needed: String, provided: String },
     #[error("operational store migration level {found} is below required minimum {required}")]
     MigrationLevelTooLow { found: u32, required: u32 },
     #[error("operational store migration capability is missing")]
@@ -245,6 +256,17 @@ pub fn enterprise_auth_capabilities() -> ComponentCapabilities {
         "auth.enterprise",
         [Capability::named(
             CapabilityName::EnterpriseAuthentication,
+            RUNTIME_CAPABILITY_CONTRACT_VERSION,
+        )],
+    )
+}
+
+/// Shell executor available: the host resolved its `tenkai-executor-guard`.
+pub fn shell_executor_capabilities() -> ComponentCapabilities {
+    ComponentCapabilities::new(
+        "executor.shell",
+        [Capability::named(
+            CapabilityName::ShellExecutor,
             RUNTIME_CAPABILITY_CONTRACT_VERSION,
         )],
     )
@@ -307,6 +329,13 @@ pub fn validate_runtime_capabilities(
     {
         return Err(CapabilityError::EnterpriseAuthenticationRequired {
             needed: CapabilityName::EnterpriseAuthentication.as_str().into(),
+            provided: diagnostic.clone(),
+        });
+    }
+
+    if required.require_shell_executor && !provided.supports(CapabilityName::ShellExecutor) {
+        return Err(CapabilityError::ShellExecutorRequired {
+            needed: CapabilityName::ShellExecutor.as_str().into(),
             provided: diagnostic.clone(),
         });
     }
@@ -428,6 +457,26 @@ mod tests {
         assert!(!provided.supports(CapabilityName::EnterpriseAuthentication));
         assert_eq!(provided.migration_level(), Some(SCHEMA_VERSION));
         validate_runtime_capabilities(&provided, &RuntimeRequirements::community()).unwrap();
+    }
+
+    #[test]
+    fn required_shell_executor_needs_a_resolved_guard() {
+        let required = RuntimeRequirements {
+            require_shell_executor: true,
+            ..RuntimeRequirements::community()
+        };
+        let mut provided = community_sqlite_profile(community_auth_capabilities());
+        assert!(matches!(
+            validate_runtime_capabilities(&provided, &required),
+            Err(CapabilityError::ShellExecutorRequired { .. })
+        ));
+        provided.components.push(shell_executor_capabilities());
+        validate_runtime_capabilities(&provided, &required).unwrap();
+        assert!(
+            provided
+                .diagnostic_names()
+                .contains(&"shell_executor:v1".to_string())
+        );
     }
 
     #[test]

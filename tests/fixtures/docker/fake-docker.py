@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import hashlib
+import io
+import tarfile
 import json
 import os
 import sys
@@ -35,14 +37,20 @@ def main() -> int:
         return handle_network(state, state_path, rest)
     if command == "volume":
         return handle_volume(state, state_path, rest)
-    if command == "run":
-        return handle_run(state, state_path, rest)
+    if command in {"run", "create"}:
+        return handle_run(state, state_path, rest, command == "create")
+    if command == "cp":
+        return handle_cp(state, state_path, rest)
     if command == "inspect":
         return handle_inspect(state, rest)
     if command == "rm":
         return handle_rm(state, state_path, rest)
     if command == "restart":
         return handle_restart(state, rest)
+    if command in {"stop", "start"}:
+        return handle_running(state, state_path, rest, command == "start")
+    if command == "rename":
+        return handle_rename(state, state_path, rest)
     if command == "ps":
         return handle_ps(state, rest)
     if command == "image":
@@ -90,6 +98,20 @@ def labeled_resources(state: dict, kind: str) -> dict:
 
 
 def handle_network(state: dict, state_path: Path, args: list[str]) -> int:
+    if args and args[0] == "connect":
+        aliases = take_flag(args, "--alias")
+        positional = [item for item in args[1:] if not item.startswith("-") and item not in aliases]
+        if len(positional) != 2:
+            sys.stderr.write("docker network connect requires NETWORK CONTAINER\n")
+            return 1
+        network, name = positional
+        container = state["containers"].get(name)
+        if container is None:
+            sys.stderr.write(f"Error: No such container: {name}\n")
+            return 1
+        container.setdefault("networks", {})[network] = aliases
+        save(state_path, state)
+        return 0
     if not args or args[0] != "create":
         sys.stderr.write("expected network create\n")
         return 1
@@ -120,7 +142,7 @@ def create_labeled_resource(
     return 0
 
 
-def handle_run(state: dict, state_path: Path, args: list[str]) -> int:
+def handle_run(state: dict, state_path: Path, args: list[str], created: bool = False) -> int:
     names = take_flag(args, "--name")
     if len(names) != 1:
         sys.stderr.write("docker run requires one --name\n")
@@ -136,19 +158,28 @@ def handle_run(state: dict, state_path: Path, args: list[str]) -> int:
         key, _, value = item.partition("=")
         labels[key] = value
     image = None
+    command: list[str] = []
     skip = False
     flags_with_value = {
         "--name",
         "--label",
         "--network",
+        "--network-alias",
+        "--publish",
+        "--entrypoint",
         "--mount",
         "--env-file",
         "--health-cmd",
         "--health-interval",
         "--health-retries",
         "--health-timeout",
+        "--user",
+        "--restart",
     }
     for index, item in enumerate(args):
+        if image is not None:
+            command.append(item)
+            continue
         if skip:
             skip = False
             continue
@@ -167,12 +198,13 @@ def handle_run(state: dict, state_path: Path, args: list[str]) -> int:
     mounts = []
     for value in take_flag(args, "--mount"):
         fields = parse_mount(value)
-        if fields.get("type") != "volume" or not fields.get("source") or not fields.get("target"):
-            sys.stderr.write(
-                "docker run --mount must be type=volume with source and target only\n"
-            )
+        if fields.get("type") == "volume" and (not fields.get("source") or not fields.get("target")):
             return 1
-        extra = set(fields) - {"type", "source", "target"}
+        if fields.get("type") == "tmpfs" and not fields.get("destination"):
+            return 1
+        if fields.get("type") not in {"volume", "tmpfs"}:
+            return 1
+        extra = set(fields) - {"type", "source", "target", "readonly", "tmpfs-size", "tmpfs-uid", "tmpfs-gid", "tmpfs-mode", "destination"}
         if extra:
             sys.stderr.write(
                 "docker run --mount must be type=volume with source and target only\n"
@@ -191,19 +223,49 @@ def handle_run(state: dict, state_path: Path, args: list[str]) -> int:
         if digest.strip()
     }
     healthy = image not in fail
+    detached = "-d" in args or "--detach" in args
+    job = labels.get("tenkai.job") == "true"
+    job_running = job and os.environ.get("TENKAI_DOCKER_FAKE_JOB_RUNNING") == "1"
+    running = not created and (job_running or (detached and not job))
     state["containers"][name] = {
         "id": container_id(name),
         "image": image,
         "labels": labels,
-        "running": True,
+        "running": running,
+        "status": "created" if created else ("running" if running else "exited"),
+        "exit_code": 0 if healthy else 1,
         "health": "healthy" if healthy else "unhealthy",
         "mounts": mounts,
+        "ports": take_flag(args, "--publish"),
+        "entrypoint": take_flag(args, "--entrypoint"),
+        "command": command,
+        "networks": {
+            network: take_flag(args, "--network-alias")
+            for network in take_flag(args, "--network")
+        },
     }
     images = state.setdefault("images", [])
     if image not in images:
         images.append(image)
     save(state_path, state)
     sys.stdout.write(name + "\n")
+    return 0
+
+
+def handle_cp(state: dict, state_path: Path, args: list[str]) -> int:
+    if len(args) != 2 or args[0] != "-":
+        return 1
+    name, _, destination = args[1].partition(":")
+    container = state["containers"].get(name)
+    if container is None or container["status"] != "created":
+        return 1
+    with tarfile.open(fileobj=io.BytesIO(sys.stdin.buffer.read()), mode="r:") as archive:
+        for member in archive:
+            contents = archive.extractfile(member).read()
+            container.setdefault("files", {})[str(Path(destination) / member.name)] = {
+                "contents": contents.decode(), "mode": member.mode, "uid": member.uid, "gid": member.gid,
+            }
+    save(state_path, state)
     return 0
 
 
@@ -244,7 +306,7 @@ def container_id(name: str) -> str:
     return hashlib.sha256(name.encode()).hexdigest()[:12]
 
 
-def inspect_payload(name: str, labels: dict, image: str = "", running: bool = False, health: str = "") -> dict:
+def inspect_payload(name: str, labels: dict, image: str = "", running: bool = False, health: str = "", status: str = "", exit_code: int | None = None) -> dict:
     return {
         "Name": name,
         "Labels": labels,
@@ -254,6 +316,8 @@ def inspect_payload(name: str, labels: dict, image: str = "", running: bool = Fa
         },
         "State": {
             "Running": running,
+            "Status": status or ("running" if running else "exited"),
+            "ExitCode": exit_code if exit_code is not None else 0,
             "Health": {"Status": health},
         },
     }
@@ -273,6 +337,8 @@ def handle_inspect(state: dict, args: list[str]) -> int:
                     image=container.get("image", ""),
                     running=container.get("running", False),
                     health=container.get("health", ""),
+                    status=container.get("status", ""),
+                    exit_code=container.get("exit_code"),
                 )
             )
             continue
@@ -307,6 +373,38 @@ def handle_restart(state: dict, args: list[str]) -> int:
             sys.stderr.write(f"Error: No such container: {name}\n")
             return 1
         state["containers"][name]["running"] = True
+    return 0
+
+
+def handle_running(state: dict, state_path: Path, args: list[str], running: bool) -> int:
+    names = [item for item in args if not item.startswith("-")]
+    for name in names:
+        if name not in state["containers"]:
+            sys.stderr.write(f"Error: No such container: {name}\n")
+            return 1
+        container = state["containers"][name]
+        job = container["labels"].get("tenkai.job") == "true"
+        container["running"] = running and not job
+        container["status"] = "exited" if job else ("running" if running else "exited")
+        if running:
+            container["files_at_start"] = container.get("files", {}).copy()
+    save(state_path, state)
+    return 0
+
+
+def handle_rename(state: dict, state_path: Path, args: list[str]) -> int:
+    if len(args) != 2:
+        sys.stderr.write("docker rename requires CONTAINER NEW_NAME\n")
+        return 1
+    old, new = args
+    if old not in state["containers"]:
+        sys.stderr.write(f"Error: No such container: {old}\n")
+        return 1
+    if new in state["containers"]:
+        sys.stderr.write(f"Error: the container name {new} is already in use\n")
+        return 1
+    state["containers"][new] = state["containers"].pop(old)
+    save(state_path, state)
     return 0
 
 

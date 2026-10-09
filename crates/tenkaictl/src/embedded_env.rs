@@ -50,17 +50,19 @@ pub(crate) async fn run(
                 return Ok(());
             }
             println!(
-                "{:<20} {:<8} {:<10} {:<6} description",
-                "name", "subs", "deployed", "lease"
+                "{:<20} {:<8} {:<10} {:<6} {:<6} description",
+                "name", "subs", "deployed", "lease", "hold"
             );
             for entry in entries {
                 let lease = if entry.lease_held { "held" } else { "-" };
+                let hold = if entry.delivery_held { "hold" } else { "-" };
                 println!(
-                    "{:<20} {:<8} {:<10} {:<6} {}",
+                    "{:<20} {:<8} {:<10} {:<6} {:<6} {}",
                     entry.name,
                     entry.subscription_count,
                     entry.deployed_product_count,
                     lease,
+                    hold,
                     entry.description
                 );
             }
@@ -127,6 +129,9 @@ pub(crate) async fn run(
                 plan::set_observed_compatibility(ctx, &env, &type_digest, &runtime_digest).await?
             );
         }
+        EnvCommand::Compatibility { command } => {
+            crate::embedded_env_config::compatibility(ctx, command).await?;
+        }
         EnvCommand::Facts { command } => {
             crate::embedded_env_config::facts(ctx, command).await?;
         }
@@ -147,6 +152,14 @@ pub(crate) async fn run(
         }
         EnvCommand::ApprovalPolicy { command } => {
             crate::embedded_env_config::approval_policy(ctx, command).await?;
+        }
+        EnvCommand::Hold { env, action } => {
+            crate::embedded_hold::run(
+                ctx,
+                tenkai::delivery_hold::HoldScope::environment(&env),
+                action,
+            )
+            .await?;
         }
     }
     Ok(())

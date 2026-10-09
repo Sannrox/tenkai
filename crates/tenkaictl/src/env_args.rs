@@ -4,6 +4,11 @@ use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub(crate) enum EnvCommand {
+    /// Record or inspect software compatibility preflight evidence.
+    Compatibility {
+        #[command(subcommand)]
+        command: CompatibilityCommand,
+    },
     /// Register an environment.
     Add {
         name: String,
@@ -101,6 +106,12 @@ pub(crate) enum EnvCommand {
         #[command(subcommand)]
         command: ApprovalPolicyCommand,
     },
+    /// Pause delivery to an environment. The reconciler still plans.
+    Hold {
+        env: String,
+        #[command(subcommand)]
+        action: HoldAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -131,6 +142,21 @@ pub(crate) enum DockerSecretsCommand {
     Set { env: String, path: PathBuf },
     /// Clear the stored secret-file directory path.
     Clear { env: String },
+}
+
+/// Set, clear, or show an environment or channel delivery hold. The actor is
+/// the authenticated management principal.
+#[derive(Subcommand)]
+pub(crate) enum HoldAction {
+    /// Pause new execution; in-flight applies finish.
+    Set {
+        #[arg(long)]
+        reason: String,
+    },
+    /// Resume execution on the next reconcile tick.
+    Clear,
+    /// Show the active hold and its set/clear history.
+    Show,
 }
 
 #[derive(Subcommand)]
@@ -221,4 +247,12 @@ pub(crate) enum MaintenanceCommand {
     Remove { env: String, identity: String },
     /// Replace an invalid configuration with an empty governed schedule.
     Repair { env: String },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum CompatibilityCommand {
+    /// Store a versioned observation JSON document for one environment.
+    Record { env: String, evidence: PathBuf },
+    /// Print the compatibility report for product@version; fail if blocked.
+    Check { env: String, release: String },
 }

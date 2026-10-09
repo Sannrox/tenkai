@@ -89,11 +89,13 @@ authenticate through the composed `AuthStack` in `crates/tenkai-http/src/lib.rs`
 2. Build `CredentialMaterial` with a request id (`x-request-id` or generated).
 3. Call `AuthStack::authenticate` — never raw token equality alone.
 4. Enforce delivery capabilities after authentication (`read` for inspect/fleet
-   surfaces; `management` for reconcile, Catalog promote, and canary policy
-   mutations). Missing capabilities fail closed. Catalog `promote` /
-   `authorize_promotion` / `configure` / `set_designated` / `unlock_promotion`
-   / `repair_pending` require `DeliveryCapability::Management` before canary
-   evaluation or attempt/plan/outcome mutation.
+   surfaces; `publish` for Catalog publish and channel promote;
+   `management` for reconcile, recall, subscribe, plan, apply, and canary
+   policy mutations). Missing capabilities fail closed. Catalog `promote` /
+   `authorize_promotion` require `DeliveryCapability::Publish` before canary
+   evaluation. `configure` / `set_designated` / `unlock_promotion` /
+   `repair_pending` still require `DeliveryCapability::Management`.
+   `Management` implies `read` and `publish`; `publish` does not imply `read`.
 5. Use the returned principal for audit; optional tenant is only present when an
    enterprise extension derived it under host authority.
 
@@ -154,9 +156,9 @@ public_key = "<base64-encoded-32-byte-Ed25519-public-key>"
 
 Load with `JwtVerifierConfig::load(path)` / `JwtAssertionVerifier::from_path`.
 Required claims: `iss`, `aud`, `sub`, `exp`. Optional: `nbf`, `principal_kind`,
-`tenant_id` (or `tenkai_tenant`), `tenkai_capabilities` (array of `read` and/or
-`management`). Fail closed on bad signature, wrong audience, wrong issuer,
-unsupported capability values, or expiry outside clock skew.
+`tenant_id` (or `tenkai_tenant`), `tenkai_capabilities` (array of `read`,
+`management`, and/or `publish`). Fail closed on bad signature, wrong audience,
+wrong issuer, unsupported capability values, or expiry outside clock skew.
 
 Delivery authorization after JWT authentication:
 

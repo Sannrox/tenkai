@@ -20,6 +20,9 @@ pub(crate) struct SavedLogin {
     /// Unix seconds; omit when the provider did not send `expires_in`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at_unix: Option<i64>,
+    /// Scopes requested at login; used to re-request a client-credentials token.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
 }
 
 /// Exclusive hold on `tokens.json.lock`. Dropping it releases the flock.
@@ -237,6 +240,7 @@ mod tests {
             access_token: access.into(),
             refresh_token: Some(format!("refresh-{access}")),
             expires_at_unix: None,
+            scopes: Vec::new(),
         }
     }
 
@@ -329,6 +333,7 @@ mod tests {
             access_token: "access".into(),
             refresh_token: Some("refresh".into()),
             expires_at_unix: None,
+            scopes: Vec::new(),
         };
         assert!(!login.access_token_usable());
     }

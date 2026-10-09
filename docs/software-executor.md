@@ -4,6 +4,8 @@ Tenkai applies `product.kind = software` releases through a pluggable port so
 cluster or Docker-host delivery does not require hard-linking a cluster client
 into the core crate by default.
 
+Software releases can declare [signed compatibility preflight requirements](software-compatibility.md) independently of executor health checks.
+
 Source: `src/software_executor.rs`. Apply wiring: `src/apply.rs`.
 
 ## Strategies
@@ -26,7 +28,7 @@ out of scope here. Custom-resource operators are refused.
 
 | Type | Role |
 | --- | --- |
-| `SoftwareExecutor` | apply / remove / observe / restart |
+| `SoftwareExecutor` | apply / remove / observe / restart, plus `cleanup_failed_apply` (defaults to remove) |
 | `FakeSoftwareExecutor` | CI without cluster |
 | `HelmSoftwareExecutor` | Helm chart path |
 | `KubernetesSoftwareExecutor` | Native manifests path (`kubectl`) |
@@ -200,18 +202,48 @@ tenkaictl reconcile --once
 ```
 
 `host.json` declares digest-pinned containers, networks, named volumes, mounts,
-`depends_on` order, optional health commands, and optional `env_file` basenames.
-Images must be `sha256:` plus 64 hex digits. Bind mounts and inline environment
-values are refused. `env_file` is a basename under the environment-scoped
-secret directory; Tenkai never reads those bytes into SQLite, argv values, or
-typed receipts.
+`depends_on` order, optional health commands, and optional `env_file` basenames,
+plus these per-container runtime settings:
+
+| Field | Meaning |
+| --- | --- |
+| `image` | `<repository>@sha256:<64 hex>` (registry manifest digest, pulled when missing) or `sha256:<64 hex>` (a local image ID that must already be on the host). Tags are refused, alone or next to a digest. |
+| `ports` | `[{"host_ip": "127.0.0.1", "host_port": 8080, "container_port": 80, "protocol": "tcp"}]`. `host_ip` defaults to loopback and `protocol` to `tcp` (`udp` allowed). Ports are 1-65535, and a host address, port, and protocol may be published once per topology. |
+| `entrypoint` | Argument array. The first element becomes `--entrypoint`; the rest lead the container arguments. Setting it clears the image command, as `docker run --entrypoint` does. |
+| `command` | Argument array passed after the image. Absent keeps the image default. |
+| `aliases` | `{"<network>": ["<alias>"]}` DNS aliases on networks the container joins, unique per network. |
+| `user` | Optional bounded username or `UID:GID`; whitespace and `:`, `,`, `=` are refused. |
+| `volumes[].read_only` | Mounts a declared named volume read-only when `true`. |
+| `tmpfs` | Ephemeral mounts with absolute targets, 1 byte to 16 GiB, unique paths, and mode `000` to `0777`; `uid` and `gid` default to zero. |
+| `restart` | `no` (the default), `on_failure` with 1 to 10 retries, `always`, or `unless_stopped`. One-shot jobs require `no`. |
+
+Arguments are stored in the release and visible through `docker inspect`, so
+credential-looking values are refused; secrets belong in `env_file`. There is no
+free-form Docker flag escape hatch. Bind mounts, arbitrary host mounts, privileged
+mode, and inline environment values are refused. Tmpfs data is removed with the
+container and is never persistent release state. `env_file` is a basename under the environment-scoped
+secret directory; Tenkai never writes those bytes into SQLite, argv values,
+labels, or typed receipts. Apply hashes the resolved path and contents in memory
+into each container's `tenkai.spec-digest` label (`docker inspect` already
+shows the values), so rotating an `env_file`, or pointing
+`env docker-secrets` at another directory, makes observe report `Mismatched`
+and the next apply or restart recreate that container with the new values. No
+new release is needed. Containers created before this label existed are
+recreated once on their next apply.
 
 Apply creates networks and volumes, pulls missing digest-pinned images,
 then replaces containers in dependency order. A running container whose
-image and Tenkai labels already match is left in place. Apply waits until
-each declared health check is `healthy` (or the container is
-running when no health is declared), and removes leftover containers labeled
-for the same product and environment. Host apply, restart, and remove run
+image and Tenkai labels already match, and whose health is not `unhealthy`, is
+left in place. A container being replaced is stopped and kept as
+a `-prev-` name until the apply succeeds. Apply waits until each declared
+health check is `healthy` (or the container is running when no health is
+declared), then deletes those previous containers and removes leftover
+containers labeled for the same product and environment. When a container
+fails to start or become healthy, apply removes the containers it started,
+renames and starts the previous ones, and reports
+`restored the previous containers`; failed-activation cleanup then only finishes
+a restore that apply could not complete, and the rollback to the previous
+release finds its containers already running. Host apply, restart, and remove run
 inside `tokio::task::block_in_place` on the multi-thread runtime so a long
 Docker wait does not pin a Tokio worker without the runtime knowing. Runtime names are `t` plus a 12-hex
 digest of environment and product, then `-ctr-` / `-net-` / `-vol-` and the
@@ -219,8 +251,10 @@ declared name, so hyphenated environment or product values cannot collide.
 Existing objects whose Tenkai ownership labels differ are refused rather than
 reused or `rm -f`'d. Named volumes stay on remove so
 application data is not deleted. Restart bounces the current pin in the same
-order. Observe is `Present` only when every declared container is running with
-matching Tenkai version, release, digest, and image labels.
+order with `docker restart`, which keeps a container's original environment,
+so a container whose spec digest changed is recreated instead. Observe is
+`Present` only when every declared container matches its image and Tenkai
+version, release, config digest, and spec digest labels.
 
 Shell `deploy.install` remains the default when `TENKAI_SOFTWARE_EXECUTOR` is
 unset. Docker products should keep a fail-closed install reminder, the same
@@ -239,3 +273,60 @@ include **phase** (`apply` / `health` / `restore` / `remove`), product@version,
 and environment/namespace. Auto-rollback does not rewrite channel head — status
 may show `behind` until re-promote. Laptop dogfood script modes:
 `TENKAI_DOGFOOD_MODE=local|signed-multi-env|canary` (see local dogfood note).
+
+### Completion-gated initialization jobs
+
+A Docker topology may declare a container as a bounded one-shot job:
+
+```json
+{
+  "name": "init",
+  "image": "registry.example/app@sha256:<digest>",
+  "mode": {"one_shot": {"timeout_secs": 300}}
+}
+```
+
+A dependent service can require `started`, `healthy`, or
+`completed_successfully` directly in `depends_on`, for example
+`[{"container": "init", "condition": "completed_successfully"}]`.
+Legacy string dependencies retain their existing service readiness ordering. One-shot jobs must
+use `completed_successfully`; they cannot declare a health probe. Tenkai waits
+for an exited container with exit code zero and keeps that container as
+release-bound completion evidence. It never copies job output into receipts.
+
+Successful apply retains the current completion container and the most recent
+predecessor for each declared job; older and removed-job evidence is reclaimed.
+Matching successful jobs are reused by reconciliation and restart, so an
+ordinary observe or restart does not replay initialization side effects. A
+changed release, configuration, or job specification gets a new job identity
+and may run once. A failed job blocks dependents and may be retried explicitly.
+Rollback may replay the target release's job when its completion evidence is no
+longer present; database effects remain application-owned and are not reversed
+by Tenkai. Removing a product removes managed job containers in reverse
+lifecycle order and preserves named volumes.
+
+### Release-owned Docker configuration files
+
+A container may declare non-secret files from the release workdir:
+
+```json
+{"source":"docker/realm.json","destination":"/etc/app/realm.json","read_only":true}
+```
+
+Sources are regular files beneath the release root. Source symlinks, including
+symlinked parent directories, are rejected through descriptor-relative file
+access on Unix; this input feature fails closed on other platforms. Destinations are absolute,
+non-traversing paths and may not collide with each other or declared volume
+mounts. Tenkai creates the container, streams the file archive through the
+Docker client, sets root ownership and mode `0444` for `read_only` or `0644` otherwise, and
+starts the container only after every file is installed. The parent directory
+must already exist in the image. Read-only is a Unix permission rule: root or a
+process with suitable capabilities can still modify a file. It is not a
+read-only mount. At most 64 files per container and 16 MiB per file are admitted.
+
+File bytes are excluded from receipts. Observe checks the declared source
+bytes and file specification against the stored container spec digest; it does
+not inspect the live writable layer for missing or modified files. This is the
+supported verification boundary. Source changes cause replacement on apply or
+restart; upgrades and rollback install their own release's bytes before start.
+Secret material remains an environment-scoped `env_file`.

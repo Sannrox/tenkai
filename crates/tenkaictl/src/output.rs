@@ -107,6 +107,17 @@ pub(crate) fn print_reconcile_report(report: reconciler::TickReport) {
                     result.environment
                 );
             }
+            reconciler::EnvironmentStatus::Held {
+                plan_id,
+                steps,
+                reason,
+                scope,
+            } => {
+                println!(
+                    "{:<24} held ({scope}) for {steps} step(s) in {plan_id}: {reason}",
+                    result.environment
+                );
+            }
             reconciler::EnvironmentStatus::Failed { error } => {
                 eprintln!("{:<24} FAILED {error}", result.environment);
             }

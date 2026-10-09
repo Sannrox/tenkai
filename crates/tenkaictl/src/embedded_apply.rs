@@ -107,6 +107,17 @@ pub(crate) async fn run(
                 )?;
                 return Ok(());
             }
+            if let Some(hold) = tenkai::delivery_hold::get(
+                ctx,
+                &tenkai::delivery_hold::HoldScope::environment(&env),
+            )
+            .await?
+            {
+                println!(
+                    "{env} held at {} by {}: {}",
+                    hold.held_at, hold.actor, hold.reason
+                );
+            }
             if rows.is_empty() {
                 println!("{env} has no channel subscriptions");
                 return Ok(());
@@ -127,6 +138,12 @@ pub(crate) async fn run(
                     "{:<24} {:<10} {:<12} {:<12} {state}",
                     r.product, r.channel, deployed, r.head
                 );
+                if let Some(hold) = &r.delivery_hold {
+                    println!(
+                        "  channel hold at {} by {}: {}",
+                        hold.held_at, hold.actor, hold.reason
+                    );
+                }
                 if matches!(state, "unknown" | "unhealthy")
                     && let Some(error) = r.error.as_deref()
                 {

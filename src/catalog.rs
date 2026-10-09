@@ -541,7 +541,7 @@ pub async fn promote(
     channel: &str,
 ) -> Result<String> {
     actor
-        .require_delivery_capability(DeliveryCapability::Management)
+        .require_delivery_capability(DeliveryCapability::Publish)
         .map_err(|error| anyhow::anyhow!("{error}"))?;
     let Some((name, version)) = spec.split_once('@') else {
         bail!("expected <product>@<version>, got {spec:?}");

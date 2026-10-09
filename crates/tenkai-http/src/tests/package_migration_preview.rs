@@ -115,7 +115,7 @@ async fn package_migration_preview_hides_cross_tenant_environment() {
         .unwrap();
 
     let store = Arc::new(tenkai::storage::SqliteStore::open_in_memory().unwrap());
-    let tenant_app = router(config, Arc::new(FixedReconciler), store).unwrap();
+    let tenant_app = router(config, Arc::new(FixedReconciler::default()), store).unwrap();
     let cross = tenant_app
         .oneshot(
             Request::post("/v1/migrations/cutover/preview")

@@ -66,6 +66,34 @@ impl RemoteClient {
         .await
     }
 
+    pub async fn software_compatibility_report(
+        &self,
+        environment: &str,
+        release: &str,
+    ) -> anyhow::Result<Option<tenkai::software_compatibility::CompatibilityReport>> {
+        self.request_json(
+            reqwest::Method::GET,
+            &format!(
+                "/v1/environments/{environment}/compatibility/{}",
+                super::runtime::encode_plan_path(release)
+            ),
+        )
+        .await
+    }
+
+    pub async fn record_software_compatibility_evidence(
+        &self,
+        environment: &str,
+        evidence: &tenkai::software_compatibility::CompatibilityEvidence,
+    ) -> anyhow::Result<()> {
+        self.request_json_body(
+            reqwest::Method::POST,
+            &format!("/v1/environments/{environment}/compatibility/evidence"),
+            Some(evidence),
+        )
+        .await
+    }
+
     pub async fn fleet_status(&self) -> anyhow::Result<tenkai::plan::FleetStatusReport> {
         self.request_json(reqwest::Method::GET, "/v1/fleet/status")
             .await

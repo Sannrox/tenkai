@@ -33,6 +33,7 @@ will be split over time. Contributor and agent workflow live in
 | Manage environments and maintenance windows | [manage-environments.md](manage-environments.md) |
 | Upgrade, roll back, and recover a product | [upgrade-and-rollback.md](upgrade-and-rollback.md) |
 | Deploy releases from GitHub | [deploy-from-github.md](deploy-from-github.md) |
+| Publish a signed release from CI | [examples/ci-publish](../examples/ci-publish/) |
 | Back up and restore embedded state | [backup-restore.md](backup-restore.md) |
 | Diagnose a server and watch fleet drift | [server-diagnostics.md](server-diagnostics.md) |
 | Observe and execute rollout waves | [rollout-waves.md](rollout-waves.md) |
@@ -65,6 +66,7 @@ will be split over time. Contributor and agent workflow live in
 | --- | --- |
 | The manifest (`tenkai.toml`) and product kinds | [manifest.md](manifest.md) |
 | Software executors (Helm, Kubernetes) | [software-executor.md](software-executor.md) |
+| Signed software compatibility preflight | [software-compatibility.md](software-compatibility.md) |
 | `model_runtime` products | [model-runtime.md](model-runtime.md) |
 | Policy, eval-suite, and agent products | [staged-products.md](staged-products.md) |
 | Worker pools | [worker-pool.md](worker-pool.md) |

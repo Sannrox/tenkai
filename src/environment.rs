@@ -838,6 +838,10 @@ pub struct StatusRow {
     pub head: String,
     #[serde(default)]
     pub overlay_stale: bool,
+    /// Present while the subscribed channel is held.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub delivery_hold: Option<crate::delivery_hold::DeliveryHold>,
 }
 
 /// Classify one subscription for inspect, status, and fleet posture.
@@ -866,6 +870,9 @@ pub struct EnvironmentListEntry {
     pub subscription_count: usize,
     pub deployed_product_count: usize,
     pub lease_held: bool,
+    /// The environment or one of its subscribed channels is held.
+    #[serde(default)]
+    pub delivery_held: bool,
 }
 
 /// Initial capability/inventory fact keys admitted for environments.
@@ -921,6 +928,10 @@ pub struct EnvironmentInspectReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub retirement: Option<EnvironmentRetirement>,
+    /// Present while delivery is paused for this environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub delivery_hold: Option<crate::delivery_hold::DeliveryHold>,
 }
 
 /// Read-only view of the environment's own maintenance schedule, evaluated
@@ -987,6 +998,10 @@ pub struct EnvironmentSubscriptionView {
     #[serde(default)]
     pub applied_overlay: Option<String>,
     pub state: String,
+    /// Present while the subscribed channel is held.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub delivery_hold: Option<crate::delivery_hold::DeliveryHold>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -1033,6 +1048,12 @@ async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<Statu
     let mut rows = Vec::new();
     for ch in channels {
         let product = ch.properties.get("product").cloned().unwrap_or_default();
+        let channel = ch.properties.get("channel").cloned().unwrap_or_default();
+        let delivery_hold = crate::delivery_hold::get(
+            ctx,
+            &crate::delivery_hold::HoldScope::channel(&product, &channel),
+        )
+        .await?;
         let overlay_digest = overlay_digest_for(env_obj, &product);
         let applied = env_obj
             .properties
@@ -1052,7 +1073,7 @@ async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<Statu
                 .properties
                 .get(&format!("deployment_error.{product}"))
                 .cloned(),
-            channel: ch.properties.get("channel").cloned().unwrap_or_default(),
+            channel,
             head: ch
                 .properties
                 .get("current_version")
@@ -1060,6 +1081,7 @@ async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<Statu
                 .unwrap_or_else(|| "-".into()),
             overlay_stale: overlay_digest != applied,
             product,
+            delivery_hold,
         });
     }
     rows.sort_by(|a, b| a.product.cmp(&b.product));
@@ -1095,6 +1117,7 @@ fn subscription_views_from_status(
                     config_stale,
                 )
                 .to_string(),
+                delivery_hold: row.delivery_hold,
             }
         })
         .collect()
@@ -1117,6 +1140,19 @@ pub async fn list_environments(ctx: &mut Ctx) -> Result<Vec<EnvironmentListEntry
             .filter(|key| key.starts_with("deployed.") && !key.starts_with("deployed_"))
             .count();
         let lease = crate::apply::inspect_environment_lease(ctx, &name).await?;
+        // Held when the environment itself or any subscribed channel is held.
+        let mut scopes = vec![crate::delivery_hold::HoldScope::environment(&name)];
+        scopes.extend(channels.iter().map(|channel| {
+            let property = |key: &str| channel.properties.get(key).cloned().unwrap_or_default();
+            crate::delivery_hold::HoldScope::channel(&property("product"), &property("channel"))
+        }));
+        let mut delivery_held = false;
+        for scope in &scopes {
+            if crate::delivery_hold::get(ctx, scope).await?.is_some() {
+                delivery_held = true;
+                break;
+            }
+        }
         entries.push(EnvironmentListEntry {
             name,
             id: env_obj.id,
@@ -1128,6 +1164,7 @@ pub async fn list_environments(ctx: &mut Ctx) -> Result<Vec<EnvironmentListEntry
             subscription_count: channels.len(),
             deployed_product_count,
             lease_held: lease.held,
+            delivery_held,
         });
     }
     Ok(entries)
@@ -1165,6 +1202,11 @@ pub async fn fleet_status(ctx: &mut Ctx) -> Result<FleetStatusReport> {
         let subscriptions = subscription_views_from_status(&env_obj, rows);
         let lease = crate::apply::inspect_environment_lease(ctx, &env_obj.name).await?;
         let retirement = retirement_from_object(&env_obj);
+        let delivery_hold = crate::delivery_hold::get(
+            ctx,
+            &crate::delivery_hold::HoldScope::environment(&env_obj.name),
+        )
+        .await?;
         reports.push(EnvironmentInspectReport {
             name: env_obj.name,
             id: env_obj.id,
@@ -1187,6 +1229,7 @@ pub async fn fleet_status(ctx: &mut Ctx) -> Result<FleetStatusReport> {
             module_activations: Vec::new(),
             preview: None,
             retirement,
+            delivery_hold,
         });
     }
     Ok(fleet_status_from_inspects(reports))
@@ -1220,6 +1263,11 @@ async fn inspect_environment_base(ctx: &mut Ctx, env: &str) -> Result<Environmen
     let module_activations = crate::workshop_module::activations_from_object(&env_obj)?;
     let preview = crate::preview::inspect_from_object(&env_obj)?;
     let retirement = retirement_from_object(&env_obj);
+    let delivery_hold = crate::delivery_hold::get(
+        ctx,
+        &crate::delivery_hold::HoldScope::environment(&env_obj.name),
+    )
+    .await?;
     let constraints = environment_constraints_from_object(&env_obj);
     let now = chrono::DateTime::from_timestamp_millis(crate::now_millis())
         .context("current time is outside the supported maintenance-window range")?;
@@ -1247,6 +1295,7 @@ async fn inspect_environment_base(ctx: &mut Ctx, env: &str) -> Result<Environmen
         module_activations,
         preview,
         retirement,
+        delivery_hold,
     })
 }
 
@@ -1340,7 +1389,7 @@ pub(crate) fn validate_fact_key(key: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_fact_value(key: &str, value: &str) -> Result<()> {
+pub(crate) fn validate_fact_value(key: &str, value: &str) -> Result<()> {
     if value.trim().is_empty() {
         bail!("environment fact {key} must not be empty");
     }

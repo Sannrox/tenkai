@@ -55,6 +55,48 @@ pub struct ApprovalPolicy {
     source_digest: Option<String>,
 }
 
+/// Signed release metadata (`[delivery]`) that forces a human approval.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeliverySignals {
+    /// A target release declares a schema migration.
+    pub has_migration: bool,
+    /// A target release changes identity-provider configuration.
+    pub changes_identity_config: bool,
+    /// A downgrade or rollback leaves a release that declared a migration.
+    pub reverses_migration: bool,
+}
+
+impl DeliverySignals {
+    /// Signals of a release a plan moves to.
+    pub fn target(properties: &HashMap<String, String>) -> Self {
+        Self {
+            has_migration: flag(properties, "has_migration"),
+            changes_identity_config: flag(properties, "changes_identity_config"),
+            reverses_migration: false,
+        }
+    }
+
+    /// Signals of a release a downgrade or rollback moves away from.
+    pub fn departed(properties: &HashMap<String, String>) -> Self {
+        Self {
+            reverses_migration: flag(properties, "has_migration"),
+            ..Self::default()
+        }
+    }
+
+    pub fn merge(self, other: Self) -> Self {
+        Self {
+            has_migration: self.has_migration || other.has_migration,
+            changes_identity_config: self.changes_identity_config || other.changes_identity_config,
+            reverses_migration: self.reverses_migration || other.reverses_migration,
+        }
+    }
+}
+
+fn flag(properties: &HashMap<String, String>, key: &str) -> bool {
+    properties.get(key).is_some_and(|value| value == "true")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
     Auto { evidence_id: String },
@@ -141,7 +183,12 @@ pub fn policy_path_from_properties(
     }
 }
 
-pub fn evaluate(policy: &ApprovalPolicy, plan: &Plan, skip_gates: bool) -> Decision {
+pub fn evaluate(
+    policy: &ApprovalPolicy,
+    plan: &Plan,
+    skip_gates: bool,
+    signals: DeliverySignals,
+) -> Decision {
     if policy.mode != PolicyMode::Auto {
         return Decision::RequireHuman {
             reason: "policy mode is manual".into(),
@@ -159,6 +206,21 @@ pub fn evaluate(policy: &ApprovalPolicy, plan: &Plan, skip_gates: bool) -> Decis
     {
         return Decision::RequireHuman {
             reason: "rollback requires a human-signed envelope".into(),
+        };
+    }
+    if signals.has_migration {
+        return Decision::RequireHuman {
+            reason: "has_migration requires a human-signed envelope".into(),
+        };
+    }
+    if signals.changes_identity_config {
+        return Decision::RequireHuman {
+            reason: "changes_identity_config requires a human-signed envelope".into(),
+        };
+    }
+    if signals.reverses_migration {
+        return Decision::RequireHuman {
+            reason: "downgrade across a migration boundary requires a human-signed envelope".into(),
         };
     }
     for rule in &policy.require_human {
@@ -200,6 +262,7 @@ pub fn resolve_auto_envelope(
     properties: &HashMap<String, String>,
     plan: &Plan,
     skip_gates: bool,
+    signals: DeliverySignals,
     directory: &Path,
     now: i64,
 ) -> Result<AutoEnvelope> {
@@ -209,7 +272,7 @@ pub fn resolve_auto_envelope(
         None => Decision::RequireHuman {
             reason: "no plan approval policy".into(),
         },
-        Some(policy) => evaluate(policy, plan, skip_gates),
+        Some(policy) => evaluate(policy, plan, skip_gates, signals),
     };
     if envelope.is_file() {
         if is_auto_envelope(&envelope)? {
@@ -528,29 +591,125 @@ mod tests {
         let policy = auto_policy(Path::new("/tmp/key"), None);
         let install = sample_plan(Action::Install, "api");
         assert!(matches!(
-            evaluate(&policy, &install, false),
+            evaluate(&policy, &install, false, DeliverySignals::default()),
             Decision::Auto { .. }
         ));
         assert!(matches!(
-            evaluate(&policy, &install, true),
+            evaluate(&policy, &install, true, DeliverySignals::default()),
             Decision::RequireHuman { reason } if reason.contains("skip_gates")
         ));
         let rollback = sample_plan(Action::Rollback, "api");
         assert!(matches!(
-            evaluate(&policy, &rollback, false),
+            evaluate(&policy, &rollback, false, DeliverySignals::default()),
             Decision::RequireHuman { reason } if reason.contains("rollback")
         ));
         let payments = auto_policy(Path::new("/tmp/key"), Some("payments"));
         assert!(matches!(
-            evaluate(&payments, &sample_plan(Action::Install, "payments"), false),
+            evaluate(
+                &payments,
+                &sample_plan(Action::Install, "payments"),
+                false,
+                DeliverySignals::default()
+            ),
             Decision::RequireHuman { reason } if reason.contains("payments")
         ));
         let mut manual = policy.clone();
         manual.mode = PolicyMode::Manual;
         assert!(matches!(
-            evaluate(&manual, &install, false),
+            evaluate(&manual, &install, false, DeliverySignals::default()),
             Decision::RequireHuman { reason } if reason.contains("manual")
         ));
+    }
+
+    #[test]
+    fn evaluate_requires_human_for_signed_delivery_metadata() {
+        let policy = auto_policy(Path::new("/tmp/key"), None);
+        let install = sample_plan(Action::Install, "api");
+        assert!(matches!(
+            evaluate(&policy, &install, false, DeliverySignals::default()),
+            Decision::Auto { .. }
+        ));
+        assert!(matches!(
+            evaluate(
+                &policy,
+                &install,
+                false,
+                DeliverySignals {
+                    has_migration: true,
+                    ..DeliverySignals::default()
+                }
+            ),
+            Decision::RequireHuman { reason } if reason.contains("has_migration")
+        ));
+        assert!(matches!(
+            evaluate(
+                &policy,
+                &install,
+                false,
+                DeliverySignals {
+                    changes_identity_config: true,
+                    ..DeliverySignals::default()
+                }
+            ),
+            Decision::RequireHuman { reason } if reason.contains("changes_identity_config")
+        ));
+        assert!(matches!(
+            evaluate(
+                &policy,
+                &sample_plan(Action::Downgrade, "api"),
+                false,
+                DeliverySignals {
+                    reverses_migration: true,
+                    ..DeliverySignals::default()
+                }
+            ),
+            Decision::RequireHuman { reason } if reason.contains("migration boundary")
+        ));
+    }
+
+    #[test]
+    fn live_delivery_signals_revoke_an_existing_auto_envelope() {
+        let dir = unique_dir("signals-revoke");
+        let key = write_seed(&dir);
+        let policy = auto_policy(&key, None);
+        let policy_path = write_policy(&dir, &policy);
+        let plan = sample_plan(Action::Install, "api");
+        let now = 1_800_000_000_000;
+        let approvals = dir.join("approvals");
+        fs::create_dir_all(&approvals).unwrap();
+        let mut properties = HashMap::new();
+        properties.insert(
+            PLAN_APPROVAL_POLICY_PROPERTY.into(),
+            policy_path.to_string_lossy().into_owned(),
+        );
+        assert!(matches!(
+            resolve_auto_envelope(
+                &properties,
+                &plan,
+                false,
+                DeliverySignals::default(),
+                &approvals,
+                now
+            )
+            .unwrap(),
+            AutoEnvelope::Signed(_)
+        ));
+        assert_eq!(
+            resolve_auto_envelope(
+                &properties,
+                &plan,
+                false,
+                DeliverySignals {
+                    has_migration: true,
+                    ..DeliverySignals::default()
+                },
+                &approvals,
+                now
+            )
+            .unwrap(),
+            AutoEnvelope::NeedsHuman
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -569,9 +728,15 @@ mod tests {
             policy_path.to_string_lossy().into_owned(),
         );
 
-        let AutoEnvelope::Signed(envelope) =
-            resolve_auto_envelope(&properties, &plan, false, &approvals, now).unwrap()
-        else {
+        let AutoEnvelope::Signed(envelope) = resolve_auto_envelope(
+            &properties,
+            &plan,
+            false,
+            DeliverySignals::default(),
+            &approvals,
+            now,
+        )
+        .unwrap() else {
             panic!("expected auto envelope");
         };
         let trust = write_trust_roots(&dir, &[7_u8; 32]);
@@ -583,7 +748,15 @@ mod tests {
 
         properties.remove(PLAN_APPROVAL_POLICY_PROPERTY);
         assert_eq!(
-            resolve_auto_envelope(&properties, &plan, false, &approvals, now).unwrap(),
+            resolve_auto_envelope(
+                &properties,
+                &plan,
+                false,
+                DeliverySignals::default(),
+                &approvals,
+                now
+            )
+            .unwrap(),
             AutoEnvelope::NeedsHuman
         );
 
@@ -593,14 +766,28 @@ mod tests {
         );
         fs::remove_file(&key).unwrap();
         assert_eq!(
-            resolve_auto_envelope(&properties, &plan, false, &approvals, now).unwrap(),
+            resolve_auto_envelope(
+                &properties,
+                &plan,
+                false,
+                DeliverySignals::default(),
+                &approvals,
+                now
+            )
+            .unwrap(),
             AutoEnvelope::NeedsHuman
         );
         write_seed(&dir);
 
-        let AutoEnvelope::Signed(path) =
-            resolve_auto_envelope(&properties, &plan, false, &approvals, now + 120_000).unwrap()
-        else {
+        let AutoEnvelope::Signed(path) = resolve_auto_envelope(
+            &properties,
+            &plan,
+            false,
+            DeliverySignals::default(),
+            &approvals,
+            now + 120_000,
+        )
+        .unwrap() else {
             panic!("expected re-sign after expiry");
         };
         assert_eq!(path, envelope);
@@ -624,7 +811,15 @@ mod tests {
         );
         let approvals = dir.join("approvals");
         assert_eq!(
-            resolve_auto_envelope(&properties, &plan, false, &approvals, 1).unwrap(),
+            resolve_auto_envelope(
+                &properties,
+                &plan,
+                false,
+                DeliverySignals::default(),
+                &approvals,
+                1
+            )
+            .unwrap(),
             AutoEnvelope::NeedsHuman
         );
         let err = validate_policy_file_path(Path::new("password=s3cret"))

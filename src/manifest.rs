@@ -9,6 +9,9 @@ use sha2::{Digest as _, Sha256};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
+    /// Versioned requirements bound by the release signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compatibility: Option<crate::software_compatibility::CompatibilityProfile>,
     pub product: ProductSection,
     #[serde(default)]
     pub deploy: DeploySection,
@@ -52,6 +55,19 @@ pub struct Manifest {
     pub artifacts: Vec<crate::oci_artifact::OciArtifactRef>,
     #[serde(default)]
     pub gate: GateSection,
+    /// Signed delivery signals used by unattended approval policy.
+    #[serde(default)]
+    pub delivery: DeliverySection,
+}
+
+/// Optional release metadata covered by the content digest.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeliverySection {
+    #[serde(default)]
+    pub has_migration: bool,
+    #[serde(default)]
+    pub changes_identity_config: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -272,6 +288,7 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
     };
     let manifest: Manifest =
         toml::from_str(&raw).with_context(|| format!("parsing manifest {}", path.display()))?;
+    validate_software_compatibility(&manifest)?;
     if manifest.product.name.is_empty() || manifest.product.version.is_empty() {
         bail!("manifest needs product.name and product.version");
     }
@@ -513,7 +530,19 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
 }
 
 pub fn parse_raw(raw: &str) -> Result<Manifest> {
-    Ok(toml::from_str(raw)?)
+    let manifest = toml::from_str(raw)?;
+    validate_software_compatibility(&manifest)?;
+    Ok(manifest)
+}
+
+fn validate_software_compatibility(manifest: &Manifest) -> Result<()> {
+    if let Some(profile) = &manifest.compatibility {
+        if manifest.product.kind != ProductKind::Software {
+            bail!("compatibility profiles are only supported for software products");
+        }
+        profile.validate()?;
+    }
+    Ok(())
 }
 
 impl Manifest {
@@ -879,6 +908,7 @@ mod tests {
     #[test]
     fn routing_manifest_binds_configuration_as_an_immutable_input() {
         let manifest = Manifest {
+            compatibility: None,
             product: ProductSection {
                 name: "routing".into(),
                 version: "1.0.0".into(),
@@ -903,6 +933,7 @@ mod tests {
             worker_pool: None,
             artifacts: Vec::new(),
             gate: GateSection::default(),
+            delivery: Default::default(),
         };
         assert_eq!(manifest.immutable_inputs(), vec!["routing.json"]);
     }

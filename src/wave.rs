@@ -307,6 +307,7 @@ mod tests {
                     overlay_digest: None,
                     applied_overlay: None,
                     state: state.into(),
+                    delivery_hold: None,
                 }]
             },
             facts: Default::default(),
@@ -328,6 +329,7 @@ mod tests {
             module_activations: Vec::new(),
             retirement: None,
             preview: None,
+            delivery_hold: None,
         }
     }
 

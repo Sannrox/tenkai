@@ -54,8 +54,10 @@ Community and spoke hosts serve these routes. Tenant-mode hubs support `retire` 
 ## Credentials
 
 Authentication stays on `AuthStack` ([request context](auth-request-context.md)).
-`DeliveryCapability::Management` is required for every lifecycle operation.
-`read` is not enough.
+`publish` and `promote` require `DeliveryCapability::Publish`. Every other
+lifecycle operation requires `DeliveryCapability::Management`. `read` is not
+enough. `Management` satisfies `Publish`; `Publish` does not satisfy
+`Management` or `Read`.
 
 | Principal | Grant | Lifecycle effect |
 | --- | --- | --- |
@@ -84,8 +86,8 @@ Existing `/v1/reconcile`, `/v1/environments`, `/v1/fleet/status`, and
 ## Machine-readable contract
 
 `api/tenkai-http-v1.schema.json` (contract id `tenkai.http.v1`) lists every
-public route with its method, path, required capability (`none`, `read`, or
-`management`), and JSON Schema request and response types. It is generated
+public route with its method, path, required capability (`none`, `read`,
+`publish`, or `management`), and JSON Schema request and response types. It is generated
 from the handlers' serde types; `make update` regenerates it and
 `make validate` fails when it is stale. Each release attaches it next to the
 binaries, covered by `SHA256SUMS` and the attestation. `/healthz` lists the

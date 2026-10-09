@@ -171,6 +171,20 @@ impl ManagementOperations {
         }
     }
 
+    fn require_channel_binding(
+        context: &AuthenticatedRequestContext,
+        channel: &str,
+    ) -> Result<(), ManagementError> {
+        let bindings = context.channel_bindings();
+        if bindings.is_empty() || bindings.contains(channel) {
+            Ok(())
+        } else {
+            Err(ManagementError::Forbidden(
+                "insufficient delivery capability".into(),
+            ))
+        }
+    }
+
     pub async fn fleet_status(
         &self,
         credential: &CredentialMaterial,
@@ -227,6 +241,60 @@ impl ManagementOperations {
                 terminal_outcomes_from_store(self.store.as_ref(), environment).map_err(internal)?;
         }
         Ok(report)
+    }
+
+    pub async fn software_compatibility_report(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+        release: &str,
+    ) -> Result<Option<crate::software_compatibility::CompatibilityReport>, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        self.require_community_catalog_host()?;
+        self.require_environment_grant(
+            credential,
+            &context,
+            Some(environment),
+            "software compatibility",
+        )?;
+        let mut ctx = self.application_ctx()?;
+        crate::software_compatibility::report(&mut ctx, environment, release)
+            .await
+            .map_err(|_| {
+                ManagementError::Unavailable("software compatibility preflight unavailable".into())
+            })
+    }
+
+    pub async fn record_software_compatibility_evidence(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+        evidence: crate::software_compatibility::CompatibilityEvidence,
+    ) -> Result<(), ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        self.require_community_catalog_host()?;
+        management_lifecycle::authorize_management_lifecycle_scope(
+            context.principal.kind,
+            self.granted_environment(credential, &context),
+            ManagementLifecycleOperation::Subscribe,
+            Some(environment),
+        )
+        .map_err(map_lifecycle_error)?;
+        self.audit(
+            context.principal_id(),
+            "software_compatibility.record.requested",
+        )?;
+        let mut ctx = self.application_ctx()?;
+        crate::software_compatibility::record_evidence(&mut ctx, environment, evidence)
+            .await
+            .map_err(map_catalog_error)?;
+        self.audit(
+            context.principal_id(),
+            "software_compatibility.record.completed",
+        )?;
+        Ok(())
     }
 
     pub async fn retire_environment(
@@ -643,7 +711,7 @@ impl ManagementOperations {
         request: PublishRequest,
     ) -> Result<ManagementLifecycleResult, ManagementError> {
         let context = self.authenticate(credential)?;
-        Self::require_capability(&context, DeliveryCapability::Management)?;
+        Self::require_capability(&context, DeliveryCapability::Publish)?;
         self.require_community_catalog_host()?;
         management_lifecycle::admit_publish(
             &request,
@@ -687,7 +755,8 @@ impl ManagementOperations {
         request: PromoteRequest,
     ) -> Result<ManagementLifecycleResult, ManagementError> {
         let context = self.authenticate(credential)?;
-        Self::require_capability(&context, DeliveryCapability::Management)?;
+        Self::require_capability(&context, DeliveryCapability::Publish)?;
+        Self::require_channel_binding(&context, channel)?;
         self.require_community_catalog_host()?;
         management_lifecycle::admit_promote(
             &request,
@@ -1161,6 +1230,8 @@ fn map_catalog_error(error: anyhow::Error) -> ManagementError {
     let message = format!("{error:#}");
     if message.contains("already published") {
         ManagementError::Conflict(message)
+    } else if message.contains("insufficient delivery capability") {
+        ManagementError::Forbidden(message)
     } else if message.contains("not published")
         || message.contains("not registered")
         || message.contains("does not exist")
@@ -1264,8 +1335,9 @@ mod tests {
         JwtAssertionVerifier, JwtEnterpriseAuthExtension, JwtTrustedKey, JwtVerifierConfig,
     };
     use crate::auth_context::{
-        AUTH_CONTEXT_CONTRACT_VERSION, AuthHostConfig, CommunityTokenAuthenticator,
-        PrincipalIdentity, PrincipalKind, build_auth_stack,
+        AUTH_CONTEXT_CONTRACT_VERSION, AuthHostConfig, AuthenticatedRequestContext,
+        AuthenticatedRequestContextBuilder, CommunityTokenAuthenticator, CredentialAuthenticator,
+        DeliveryCapability, PrincipalIdentity, PrincipalKind, build_auth_stack,
     };
     use crate::runtime_delivery::{
         CompletionFuture, FleetStatusFuture, HealthFuture, InspectEnvFuture, InventoryFuture,
@@ -1274,7 +1346,7 @@ mod tests {
     use crate::storage::SqliteStore;
     use base64::Engine as _;
     use ed25519_dalek::{Signer as _, SigningKey};
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
 
     struct FixedReconciler;
@@ -1340,6 +1412,7 @@ mod tests {
                     subscription_count: 0,
                     deployed_product_count: 0,
                     lease_held: false,
+                    delivery_held: false,
                 }])
             })
         }
@@ -1370,6 +1443,7 @@ mod tests {
                     module_activations: Vec::new(),
                     retirement: None,
                     preview: None,
+                    delivery_hold: None,
                 })
             })
         }
@@ -1586,5 +1660,265 @@ mod tests {
         let report = ops.reconcile(&credential).await.unwrap();
         assert_eq!(report.environments[0].environment, "prod");
         ops.fleet_status(&credential).await.unwrap();
+    }
+
+    struct GrantAuth {
+        capabilities: BTreeSet<DeliveryCapability>,
+        channels: BTreeSet<String>,
+    }
+
+    impl CredentialAuthenticator for GrantAuth {
+        fn authenticator_id(&self) -> &str {
+            "test-grant"
+        }
+
+        fn authenticate(
+            &self,
+            credential: &CredentialMaterial,
+        ) -> Result<AuthenticatedRequestContext, crate::auth_context::AuthError> {
+            AuthenticatedRequestContextBuilder::new(
+                credential.request_id.clone(),
+                PrincipalIdentity {
+                    id: "ci".into(),
+                    kind: PrincipalKind::Service,
+                },
+                "test-grant",
+            )
+            .with_delivery_capabilities(self.capabilities.clone())
+            .with_channel_bindings(self.channels.clone())
+            .build()
+        }
+    }
+
+    fn grant_credential() -> CredentialMaterial {
+        CredentialMaterial {
+            request_id: "req-grant".into(),
+            bearer_token: Some("unused".into()),
+            assertion: None,
+        }
+    }
+
+    fn grant_auth(
+        capabilities: impl IntoIterator<Item = DeliveryCapability>,
+        channels: impl IntoIterator<Item = &'static str>,
+    ) -> Arc<GrantAuth> {
+        Arc::new(GrantAuth {
+            capabilities: capabilities.into_iter().collect(),
+            channels: channels.into_iter().map(str::to_string).collect(),
+        })
+    }
+
+    async fn catalog_ops(
+        root: &std::path::Path,
+        authenticator: Arc<dyn CredentialAuthenticator>,
+    ) -> ManagementOperations {
+        let database = root.join("tenkai.db");
+        let mut ctx = crate::client::Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::plan::env_add(&mut ctx, "stage", "fixture")
+            .await
+            .unwrap();
+        let reconciler =
+            crate::reconciler::Reconciler::new(ctx, crate::reconciler::Config::default()).unwrap();
+        let store = Arc::new(SqliteStore::open(&database).unwrap());
+        store
+            .put_environment(&crate::storage::EnvironmentRecord {
+                id: "stage".into(),
+                revision: 0,
+                configuration_json: "{}".into(),
+            })
+            .unwrap();
+        let auth = build_auth_stack(&AuthHostConfig::community(), None, authenticator).unwrap();
+        ManagementOperations::new(
+            auth,
+            false,
+            Arc::new(reconciler),
+            store,
+            None,
+            None,
+            std::collections::HashMap::new(),
+        )
+    }
+
+    fn signed_publish_request(root: &std::path::Path, version: &str) -> PublishRequest {
+        let manifest = root.join("tenkai.toml");
+        std::fs::write(
+            &manifest,
+            format!(
+                "[product]\nname = \"api\"\nversion = \"{version}\"\n\n[deploy]\ninstall = \"true\"\n"
+            ),
+        )
+        .unwrap();
+        let keys = root.join("keys");
+        let signature = root.join("signature.json");
+        let trust_roots = root.join("trust-roots.toml");
+        crate::dev_sign::sign_release(&keys, &manifest, &signature, &trust_roots).unwrap();
+        crate::management_lifecycle::load_publish_request(&manifest, &signature, &trust_roots)
+            .unwrap()
+    }
+
+    fn dummy_apply_request() -> ApplyRequest {
+        serde_json::from_str(
+            r#"{"version":1,"operation":"apply","environment":"stage","expected_generation":0,"approval":{"schema":"tenkai.plan-approval.v1","key_id":"k","statement":{"plan_digest":"sha256:aa","environment":"stage","purpose":"execute_plan","skip_gates":false,"issued_at":1,"expires_at":2,"policy_provider":"builtin","policy_evidence_id":"d","policy_digest":"sha256:bb"},"signature":"c2ln"},"trust_roots":{"version":1,"signers":[{"key_id":"k","identity":"dev","public_key":"cA=="}]}}"#,
+        )
+        .unwrap()
+    }
+
+    fn capability_forbidden(error: ManagementError) {
+        assert!(
+            matches!(error, ManagementError::Forbidden(ref msg) if msg.contains("capability")),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_only_principal_can_publish_and_promote_but_not_mutate_environments() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-publish-grant-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let ops = catalog_ops(&root, grant_auth([DeliveryCapability::Publish], [])).await;
+        let credential = grant_credential();
+        let published = ops
+            .publish_release(&credential, signed_publish_request(&root, "1.0.0"))
+            .await
+            .unwrap();
+        assert!(published.message.contains("api@1.0.0"), "{published:?}");
+        ops.promote_release(
+            &credential,
+            "stable",
+            PromoteRequest {
+                version: 1,
+                operation: "promote".into(),
+                spec: "api@1.0.0".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        capability_forbidden(
+            ops.subscribe_environment(
+                &credential,
+                "stage",
+                SubscribeRequest {
+                    version: 1,
+                    operation: "subscribe".into(),
+                    environment: "stage".into(),
+                    expected_generation: 0,
+                    spec: "api=stable".into(),
+                },
+            )
+            .await
+            .unwrap_err(),
+        );
+        capability_forbidden(
+            ops.plan_environment(
+                &credential,
+                "stage",
+                PlanRequest {
+                    version: 1,
+                    operation: "plan".into(),
+                    environment: "stage".into(),
+                    expected_generation: 0,
+                },
+            )
+            .await
+            .unwrap_err(),
+        );
+        capability_forbidden(
+            ops.apply_plan(&credential, "plan-1", dummy_apply_request())
+                .await
+                .unwrap_err(),
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn channel_bindings_confine_promote_and_ignore_publish() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-channel-grant-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let ops = catalog_ops(&root, grant_auth([DeliveryCapability::Publish], ["stable"])).await;
+        let credential = grant_credential();
+        ops.publish_release(&credential, signed_publish_request(&root, "1.0.0"))
+            .await
+            .unwrap();
+        ops.promote_release(
+            &credential,
+            "stable",
+            PromoteRequest {
+                version: 1,
+                operation: "promote".into(),
+                spec: "api@1.0.0".into(),
+            },
+        )
+        .await
+        .unwrap();
+        capability_forbidden(
+            ops.promote_release(
+                &credential,
+                "beta",
+                PromoteRequest {
+                    version: 1,
+                    operation: "promote".into(),
+                    spec: "api@1.0.0".into(),
+                },
+            )
+            .await
+            .unwrap_err(),
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn management_principal_can_publish_promote_and_subscribe() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-management-grant-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let ops = catalog_ops(
+            &root,
+            grant_auth(
+                [DeliveryCapability::Read, DeliveryCapability::Management],
+                [],
+            ),
+        )
+        .await;
+        let credential = grant_credential();
+        ops.publish_release(&credential, signed_publish_request(&root, "1.0.0"))
+            .await
+            .unwrap();
+        ops.promote_release(
+            &credential,
+            "stable",
+            PromoteRequest {
+                version: 1,
+                operation: "promote".into(),
+                spec: "api@1.0.0".into(),
+            },
+        )
+        .await
+        .unwrap();
+        ops.subscribe_environment(
+            &credential,
+            "stage",
+            SubscribeRequest {
+                version: 1,
+                operation: "subscribe".into(),
+                environment: "stage".into(),
+                expected_generation: 0,
+                spec: "api=stable".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
