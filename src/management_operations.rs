@@ -967,13 +967,15 @@ impl ManagementOperations {
                 request.environment, stored.environment
             )));
         }
-        let evidence = crate::plan_approval::verify(
+        let evidence = crate::plan_approval::verify_for_execution(
+            &mut ctx,
             &stored,
             &files.approval,
             &files.trust_roots,
             crate::now_millis(),
             false,
         )
+        .await
         .map_err(map_plan_lifecycle_error)?;
         crate::plan_approval::record(&mut ctx, &evidence)
             .await

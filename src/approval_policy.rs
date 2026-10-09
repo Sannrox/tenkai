@@ -22,6 +22,7 @@ use crate::plan_approval::{APPROVAL_SCHEMA, ApprovalEnvelope, ApprovalStatement,
 
 /// Environment property storing the canonical path of the policy TOML file.
 pub const PLAN_APPROVAL_POLICY_PROPERTY: &str = "plan_approval_policy";
+pub(crate) const AUTO_SIGNER_KEYS_PROPERTY: &str = "plan_approval_auto_keys";
 /// `policy_provider` written into envelopes signed by this policy.
 pub const POLICY_PROVIDER: &str = "builtin-auto";
 const POLICY_VERSION: u32 = 1;
@@ -307,7 +308,9 @@ pub fn resolve_auto_envelope(
     }
 }
 
-fn load_live_policy(properties: &HashMap<String, String>) -> Result<Option<ApprovalPolicy>> {
+pub(crate) fn load_live_policy(
+    properties: &HashMap<String, String>,
+) -> Result<Option<ApprovalPolicy>> {
     let Some(path) = policy_path_from_properties(properties)? else {
         return Ok(None);
     };
@@ -315,6 +318,15 @@ fn load_live_policy(properties: &HashMap<String, String>) -> Result<Option<Appro
         return Ok(None);
     }
     Ok(Some(ApprovalPolicy::load(&path)?))
+}
+
+pub(crate) fn signer_key_id(policy: &ApprovalPolicy) -> Result<Option<String>> {
+    let Some(path) = &policy.auto_signer_key else {
+        return Ok(None);
+    };
+    let seed = load_auto_signer_seed(path)?;
+    let public = SigningKey::from_bytes(&seed).verifying_key().to_bytes();
+    Ok(Some(crate::signature_verification::key_id(&public)))
 }
 
 fn auto_signer_present(policy: &ApprovalPolicy) -> bool {
@@ -457,6 +469,67 @@ fn write_text_owner_only(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
+/// Merge the signed `[delivery]` signals of every release a plan crosses.
+/// An upgrade crosses each published version in `(from, to]`, so skipping an
+/// intermediate migration still counts; a downgrade or rollback reverses each
+/// version in `(to, from]`. A restart re-activates the deployed release and
+/// contributes nothing.
+pub(crate) async fn delivery_signals_for_plan(
+    ctx: &mut crate::client::Ctx,
+    plan: &Plan,
+) -> Result<crate::approval_policy::DeliverySignals> {
+    use crate::approval_policy::DeliverySignals;
+    use crate::plan::Action;
+    let mut signals = DeliverySignals::default();
+    let mut releases = None;
+    for step in &plan.steps {
+        if step.action == Action::Restart {
+            continue;
+        }
+        if let Some(release) = ctx.get(&step.release_id).await? {
+            signals = signals.merge(DeliverySignals::target(&release.properties));
+        }
+        let reverse = matches!(step.action, Action::Downgrade | Action::Rollback);
+        let Some(from) = &step.from else {
+            continue;
+        };
+        let range = semver::Version::parse(from)
+            .and_then(|from| Ok((from, semver::Version::parse(&step.to)?)));
+        let Ok((from, to)) = range else {
+            // Without ordered versions, only the departed release is known.
+            if reverse
+                && let Some(release) = ctx
+                    .get(&crate::ontology::release_id(&step.product, from))
+                    .await?
+            {
+                signals = signals.merge(DeliverySignals::departed(&release.properties));
+            }
+            continue;
+        };
+        let (low, high) = if reverse { (&to, &from) } else { (&from, &to) };
+        if releases.is_none() {
+            releases = Some(ctx.list_kind(crate::ontology::KIND_RELEASE).await?);
+        }
+        for release in releases.iter().flatten() {
+            let crossed = release.properties.get("product") == Some(&step.product)
+                && release
+                    .properties
+                    .get("version")
+                    .and_then(|version| semver::Version::parse(version).ok())
+                    .is_some_and(|version| *low < version && version <= *high);
+            if !crossed {
+                continue;
+            }
+            signals = signals.merge(if reverse {
+                DeliverySignals::departed(&release.properties)
+            } else {
+                DeliverySignals::target(&release.properties)
+            });
+        }
+    }
+    Ok(signals)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -566,7 +639,7 @@ mod tests {
         fs::write(
             &path,
             format!(
-                "version = 1\n\n[[signers]]\nkey_id = \"{kid}\"\nidentity = \"auto-approver@lab\"\npublic_key = \"{}\"\n",
+                "version = 1\n\n[[signers]]\nkey_id = \"{kid}\"\nidentity = \"auto-approver@lab\"\npublic_key = \"{}\"\nenvironments = [\"lab\"]\nproviders = [\"builtin-auto\"]\n",
                 STANDARD.encode(public)
             ),
         )
@@ -584,6 +657,104 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[tokio::test]
+    async fn automatic_keys_cannot_impersonate_humans_and_revocation_preserves_human_approval() {
+        let dir = unique_dir("signer-scope");
+        fs::create_dir_all(&dir).unwrap();
+        let key = write_seed(&dir);
+        let policy = auto_policy(&key, None);
+        let policy_path = dir.join("policy.toml");
+        fs::write(&policy_path, toml::to_string(&policy).unwrap()).unwrap();
+        let mut ctx = crate::client::Ctx::embedded(dir.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::plan::env_add(&mut ctx, "lab", "Lab").await.unwrap();
+        crate::plan::env_add(&mut ctx, "prod", "Production")
+            .await
+            .unwrap();
+        crate::environment::set_plan_approval_policy(&mut ctx, "lab", &policy_path)
+            .await
+            .unwrap();
+        let mut plan = sample_plan(Action::Install, "api");
+        plan.environment = "prod".into();
+        let now = crate::now_millis();
+        let envelope_path = dir.join("forged.json");
+        sign_auto_approval(&policy, &plan, false, now, "auto".into(), &envelope_path).unwrap();
+        let mut forged: ApprovalEnvelope =
+            serde_json::from_slice(&fs::read(&envelope_path).unwrap()).unwrap();
+        forged.statement.policy_provider = "human".into();
+        forged.signature = STANDARD.encode(
+            SigningKey::from_bytes(&[7_u8; 32])
+                .sign(&canonical_bytes(&forged.statement).unwrap())
+                .to_bytes(),
+        );
+        fs::write(&envelope_path, serde_json::to_vec(&forged).unwrap()).unwrap();
+        let trust = write_trust_roots(&dir, &[7_u8; 32]);
+        let mut legacy = crate::plan_approval::TrustRoots::load(&trust).unwrap();
+        legacy.signers[0].environments.clear();
+        legacy.signers[0].providers.clear();
+        fs::write(&trust, toml::to_string(&legacy).unwrap()).unwrap();
+        assert!(
+            crate::plan_approval::verify_for_execution(
+                &mut ctx,
+                &plan,
+                &envelope_path,
+                &trust,
+                now + 1,
+                false
+            )
+            .await
+            .is_err()
+        );
+        legacy.signers[0].environments = vec!["prod".into()];
+        legacy.signers[0].providers = vec!["human".into()];
+        fs::write(&trust, toml::to_string(&legacy).unwrap()).unwrap();
+        assert!(
+            crate::plan_approval::verify_for_execution(
+                &mut ctx,
+                &plan,
+                &envelope_path,
+                &trust,
+                now + 1,
+                false
+            )
+            .await
+            .is_err()
+        );
+        fs::remove_file(&key).unwrap();
+        assert!(
+            crate::plan_approval::verify_for_execution(
+                &mut ctx,
+                &plan,
+                &envelope_path,
+                &trust,
+                now + 1,
+                false
+            )
+            .await
+            .is_err()
+        );
+        crate::dev_sign::sign_plan_approval_for_digest(
+            &dir.join("human-keys"),
+            &format!("sha256:{}", plan.executable_digest().unwrap()),
+            "prod",
+            &envelope_path,
+            &trust,
+            3600,
+        )
+        .unwrap();
+        crate::plan_approval::verify_for_execution(
+            &mut ctx,
+            &plan,
+            &envelope_path,
+            &trust,
+            crate::now_millis(),
+            false,
+        )
+        .await
+        .unwrap();
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -745,6 +916,39 @@ mod tests {
         assert_eq!(evidence.policy_evidence_id, "auto");
         let loaded = ApprovalPolicy::load(&policy_path).unwrap();
         assert_eq!(evidence.policy_digest, loaded.digest().unwrap());
+        let mut foreign_plan = plan.clone();
+        foreign_plan.environment = "prod".into();
+        let foreign_envelope = dir.join("foreign.json");
+        sign_auto_approval(
+            &loaded,
+            &foreign_plan,
+            false,
+            now,
+            "auto".into(),
+            &foreign_envelope,
+        )
+        .unwrap();
+        assert!(
+            verify(&foreign_plan, &foreign_envelope, &trust, now + 1, false)
+                .unwrap_err()
+                .to_string()
+                .contains("environment scope")
+        );
+        let mut forged: ApprovalEnvelope =
+            serde_json::from_slice(&fs::read(&envelope).unwrap()).unwrap();
+        forged.statement.policy_provider = "human".into();
+        forged.signature = STANDARD.encode(
+            SigningKey::from_bytes(&[7_u8; 32])
+                .sign(&canonical_bytes(&forged.statement).unwrap())
+                .to_bytes(),
+        );
+        fs::write(&foreign_envelope, serde_json::to_vec(&forged).unwrap()).unwrap();
+        assert!(
+            verify(&plan, &foreign_envelope, &trust, now + 1, false)
+                .unwrap_err()
+                .to_string()
+                .contains("provider scope")
+        );
 
         properties.remove(PLAN_APPROVAL_POLICY_PROPERTY);
         assert_eq!(

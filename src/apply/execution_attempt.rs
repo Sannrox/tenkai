@@ -134,13 +134,17 @@ async fn execute_with_options_inner(
         ExecutionAuthorization::Signed {
             approval,
             trust_roots,
-        } => crate::plan_approval::verify(
-            &stored_plan,
-            approval,
-            trust_roots,
-            now,
-            options.skip_gates,
-        )?,
+        } => {
+            crate::plan_approval::verify_for_execution(
+                ctx,
+                &stored_plan,
+                approval,
+                trust_roots,
+                now,
+                options.skip_gates,
+            )
+            .await?
+        }
         ExecutionAuthorization::LocalDevelopment { reason } if ctx.is_embedded() => {
             crate::plan_approval::local_bypass(&stored_plan, reason, now)?
         }

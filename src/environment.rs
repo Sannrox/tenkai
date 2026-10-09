@@ -1692,10 +1692,23 @@ pub async fn set_plan_approval_policy(ctx: &mut Ctx, env: &str, path: &Path) -> 
             canonical.display()
         );
     }
-    crate::approval_policy::ApprovalPolicy::load(&canonical)?;
+    let policy = crate::approval_policy::ApprovalPolicy::load(&canonical)?;
     let stored = canonical.to_string_lossy().into_owned();
     crate::approval_policy::validate_policy_file_path(Path::new(&stored))?;
     let mut env_obj = environment(ctx, env).await?;
+    if let Some(key_id) = crate::approval_policy::signer_key_id(&policy)? {
+        let mut keys: std::collections::BTreeSet<String> = env_obj
+            .properties
+            .get(crate::approval_policy::AUTO_SIGNER_KEYS_PROPERTY)
+            .map(|raw| serde_json::from_str(raw))
+            .transpose()?
+            .unwrap_or_default();
+        keys.insert(key_id);
+        env_obj.properties.insert(
+            crate::approval_policy::AUTO_SIGNER_KEYS_PROPERTY.into(),
+            serde_json::to_string(&keys)?,
+        );
+    }
     env_obj.properties.insert(
         crate::approval_policy::PLAN_APPROVAL_POLICY_PROPERTY.into(),
         stored.clone(),

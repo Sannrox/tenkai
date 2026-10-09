@@ -1900,11 +1900,23 @@
     "PlanApprovalTrustedSigner": {
       "additionalProperties": false,
       "properties": {
+        "environments": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "identity": {
           "type": "string"
         },
         "key_id": {
           "type": "string"
+        },
+        "providers": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "public_key": {
           "type": "string"

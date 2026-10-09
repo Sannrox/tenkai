@@ -226,7 +226,15 @@ async fn admit_before_delegation(
         &adapter.capabilities().into_iter().collect::<Vec<_>>(),
     )?;
     if let Some((approval, trust_roots)) = options.approval {
-        delivery_manifest::admit_signed_plan(plan, approval, trust_roots, options.now)?;
+        crate::plan_approval::verify_for_execution(
+            ctx,
+            plan,
+            approval,
+            trust_roots,
+            options.now,
+            false,
+        )
+        .await?;
         let apply_already_admitted_gates =
             crate::apply::environment_lease_status(ctx, &plan.environment)
                 .await?

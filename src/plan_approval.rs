@@ -54,6 +54,10 @@ pub struct TrustedSigner {
     pub key_id: String,
     pub identity: String,
     pub public_key: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub environments: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +138,19 @@ impl TrustRoots {
         let mut keys = BTreeMap::new();
         let mut identities = std::collections::BTreeSet::new();
         for signer in &roots.signers {
+            for scope in signer.environments.iter().chain(&signer.providers) {
+                validate_text("trusted signer scope", scope)?;
+            }
+            if signer
+                .providers
+                .iter()
+                .any(|provider| provider == "builtin-auto")
+                && (signer.environments.is_empty() || signer.providers.len() != 1)
+            {
+                bail!(
+                    "automatic approval signers require explicit environments and only the builtin-auto provider"
+                );
+            }
             validate_text("trusted signer identity", &signer.identity)?;
             crate::signature_verification::trusted_key(
                 "plan approval public key",
@@ -153,6 +170,68 @@ impl TrustRoots {
             .find(|signer| signer.key_id == key_id)
             .with_context(|| format!("plan approval signer {key_id} is not currently trusted"))
     }
+}
+
+/// Check host-configured automatic keys as well as the envelope's root scopes.
+pub async fn verify_for_execution(
+    ctx: &mut Ctx,
+    plan: &Plan,
+    envelope_path: &Path,
+    trust_roots_path: &Path,
+    now: i64,
+    skip_gates: bool,
+) -> Result<VerificationEvidence> {
+    let evidence = verify(plan, envelope_path, trust_roots_path, now, skip_gates)?;
+    if evidence.policy_provider == "builtin-auto" {
+        let environment = crate::environment::environment(ctx, &plan.environment).await?;
+        let policy = crate::approval_policy::load_live_policy(&environment.properties)?
+            .ok_or_else(|| {
+                anyhow::anyhow!("automatic approval requires a live environment policy")
+            })?;
+        if policy.mode != crate::approval_policy::PolicyMode::Auto
+            || crate::approval_policy::signer_key_id(&policy)?.as_deref()
+                != Some(evidence.key_id.as_str())
+        {
+            bail!("automatic approval signer is not authorized by this environment's live policy");
+        }
+        let signals = crate::approval_policy::delivery_signals_for_plan(ctx, plan).await?;
+        if !matches!(
+            crate::approval_policy::evaluate(&policy, plan, skip_gates, signals),
+            crate::approval_policy::Decision::Auto { .. }
+        ) {
+            bail!("live environment policy requires human approval");
+        }
+    }
+    let roots = TrustRoots::load(trust_roots_path)?;
+    let signer = roots.signer(&evidence.key_id)?;
+    if signer.environments.is_empty() || signer.providers != ["builtin-auto"] {
+        for environment in ctx.list_kind(crate::ontology::KIND_ENVIRONMENT).await? {
+            let known_keys: std::collections::BTreeSet<String> = environment
+                .properties
+                .get(crate::approval_policy::AUTO_SIGNER_KEYS_PROPERTY)
+                .map(|raw| serde_json::from_str(raw))
+                .transpose()?
+                .unwrap_or_default();
+            // Legacy policies may predate retained public key identities. A
+            // missing unrelated policy/key must not revoke human authority.
+            let live_key = crate::approval_policy::load_live_policy(&environment.properties)
+                .ok()
+                .flatten()
+                .and_then(|policy| {
+                    crate::approval_policy::signer_key_id(&policy)
+                        .ok()
+                        .flatten()
+                });
+            if known_keys.contains(&evidence.key_id)
+                || live_key.as_deref() == Some(evidence.key_id.as_str())
+            {
+                bail!(
+                    "host-configured automatic key requires explicit environment and builtin-auto scopes"
+                );
+            }
+        }
+    }
+    Ok(evidence)
 }
 
 pub fn verify(
@@ -186,6 +265,21 @@ pub fn verify(
     }
     let roots = TrustRoots::load(trust_roots_path)?;
     let signer = roots.signer(&envelope.key_id)?;
+    if !signer.environments.is_empty() && !signer.environments.contains(&plan.environment) {
+        bail!("plan approval signer is outside its environment scope");
+    }
+    if !signer.providers.is_empty()
+        && !signer
+            .providers
+            .contains(&envelope.statement.policy_provider)
+    {
+        bail!("plan approval signer is outside its provider scope");
+    }
+    if envelope.statement.policy_provider == "builtin-auto"
+        && (signer.environments.is_empty() || signer.providers != ["builtin-auto"])
+    {
+        bail!("automatic approval requires an environment-scoped builtin-auto signer");
+    }
     let public_key = crate::signature_verification::trusted_key(
         "trusted signer public key",
         &signer.public_key,
