@@ -5,6 +5,7 @@
 //! stay in operator-managed env files; Tenkai stores only the directory path.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::Duration;
@@ -81,6 +82,62 @@ pub struct DockerHostContainer {
     pub env_file: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health: Option<DockerHealthCheck>,
+    /// Host port publications; loopback unless `host_ip` says otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<DockerPortPublication>,
+    /// Replaces the image entrypoint. The first element is the executable;
+    /// the rest are passed ahead of `command`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entrypoint: Option<Vec<String>>,
+    /// Replaces the image command. Absent keeps the image default unless
+    /// `entrypoint` is set, which clears it as `docker run --entrypoint` does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<Vec<String>>,
+    /// Stable DNS aliases per declared network, independent of runtime names.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub aliases: BTreeMap<String, Vec<String>>,
+}
+
+/// One `docker run --publish`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DockerPortPublication {
+    #[serde(default = "loopback")]
+    pub host_ip: IpAddr,
+    pub host_port: u16,
+    pub container_port: u16,
+    #[serde(default)]
+    pub protocol: DockerPortProtocol,
+}
+
+fn loopback() -> IpAddr {
+    IpAddr::V4(Ipv4Addr::LOCALHOST)
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DockerPortProtocol {
+    #[default]
+    Tcp,
+    Udp,
+}
+
+impl DockerPortPublication {
+    /// `--publish` value; IPv6 host addresses are bracketed.
+    fn publish_arg(&self) -> String {
+        let host = match self.host_ip {
+            IpAddr::V4(ip) => ip.to_string(),
+            IpAddr::V6(ip) => format!("[{ip}]"),
+        };
+        let protocol = match self.protocol {
+            DockerPortProtocol::Tcp => "tcp",
+            DockerPortProtocol::Udp => "udp",
+        };
+        format!(
+            "{host}:{}:{}/{protocol}",
+            self.host_port, self.container_port
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -345,6 +402,8 @@ pub fn validate_topology(topology: &DockerHostTopology, secret_dir: Option<&Path
         validate_resource_name("resource", name)?;
     }
     let mut seen = BTreeSet::new();
+    let mut published = BTreeSet::new();
+    let mut aliased = BTreeSet::new();
     for container in &topology.containers {
         validate_resource_name("container", &container.name)?;
         if !seen.insert(container.name.as_str()) {
@@ -353,7 +412,53 @@ pub fn validate_topology(topology: &DockerHostTopology, secret_dir: Option<&Path
                 container.name
             );
         }
-        validate_image_digest(&container.image)?;
+        validate_image_reference(&container.image)?;
+        for port in &container.ports {
+            if port.host_port == 0 || port.container_port == 0 {
+                bail!(
+                    "container {} ports must be between 1 and 65535",
+                    container.name
+                );
+            }
+            if !published.insert((port.host_ip, port.host_port, port.protocol)) {
+                bail!(
+                    "container {} publishes {} more than once in the topology",
+                    container.name,
+                    port.publish_arg()
+                );
+            }
+        }
+        if let Some(entrypoint) = &container.entrypoint {
+            match entrypoint.first() {
+                Some(executable) if !executable.is_empty() && !executable.starts_with('-') => {}
+                _ => bail!(
+                    "container {} entrypoint must start with an executable",
+                    container.name
+                ),
+            }
+        }
+        for argument in container
+            .entrypoint
+            .iter()
+            .chain(container.command.iter())
+            .flatten()
+        {
+            validate_argument(&container.name, argument)?;
+        }
+        for (network, aliases) in &container.aliases {
+            if !container.networks.contains(network) {
+                bail!(
+                    "container {} declares aliases on network {network} it does not join",
+                    container.name
+                );
+            }
+            for alias in aliases {
+                validate_resource_name("network alias", alias)?;
+                if !aliased.insert((network.as_str(), alias.as_str())) {
+                    bail!("network {network} alias {alias} is declared more than once");
+                }
+            }
+        }
         for network in &container.networks {
             if !networks.contains(network.as_str()) {
                 bail!(
@@ -386,18 +491,34 @@ pub fn validate_topology(topology: &DockerHostTopology, secret_dir: Option<&Path
             if health.cmd.trim().is_empty() {
                 bail!("container {} health.cmd must not be empty", container.name);
             }
-            let lower = health.cmd.to_ascii_lowercase();
-            for needle in ["bearer ", "token=", "password=", "secret="] {
-                if lower.contains(needle) {
-                    bail!(
-                        "container {} health.cmd must not carry credential material",
-                        container.name
-                    );
-                }
+            if carries_credential(&health.cmd) {
+                bail!(
+                    "container {} health.cmd must not carry credential material",
+                    container.name
+                );
             }
         }
     }
     order_containers(topology)?;
+    Ok(())
+}
+
+fn carries_credential(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    ["bearer ", "token=", "password=", "secret="]
+        .iter()
+        .any(|needle| lower.contains(needle))
+}
+
+/// Entrypoint and command arguments reach the container, not the Docker CLI,
+/// but they are stored in the release and shown by `docker inspect`.
+fn validate_argument(container: &str, argument: &str) -> Result<()> {
+    if argument.contains('\0') {
+        bail!("container {container} arguments must not contain NUL");
+    }
+    if carries_credential(argument) {
+        bail!("container {container} arguments must not carry credential material; use env_file");
+    }
     Ok(())
 }
 
@@ -433,14 +554,88 @@ fn validate_resource_name(kind: &str, name: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_image_digest(image: &str) -> Result<()> {
-    let Some(hex) = image.strip_prefix(IMAGE_DIGEST_PREFIX) else {
-        bail!("docker image {image} must be digest-pinned as sha256:<64 hex>");
+/// Admit `sha256:<64 hex>` (a local image ID, never pulled) or
+/// `<repository>@sha256:<64 hex>` (a registry manifest digest, pulled when
+/// missing). Tags are refused, alone or next to a digest.
+fn validate_image_reference(image: &str) -> Result<()> {
+    let refused = || {
+        anyhow::anyhow!(
+            "docker image {image} must be digest-pinned as sha256:<64 hex> or <repository>@sha256:<64 hex>, without a tag"
+        )
     };
-    if hex.len() != IMAGE_DIGEST_HEX_LEN || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
-        bail!("docker image {image} must be digest-pinned as sha256:<64 hex>");
+    let (repository, digest) = match image.split_once('@') {
+        Some((repository, digest)) => (Some(repository), digest),
+        None => (None, image),
+    };
+    let hex = digest
+        .strip_prefix(IMAGE_DIGEST_PREFIX)
+        .ok_or_else(refused)?;
+    if hex.len() != IMAGE_DIGEST_HEX_LEN
+        || !hex
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, 'a'..='f'))
+    {
+        return Err(refused());
+    }
+    if let Some(repository) = repository
+        && !valid_repository(repository)
+    {
+        return Err(refused());
     }
     Ok(())
+}
+
+/// Docker reference grammar without a tag: an optional `host[:port]/` prefix
+/// and lowercase path components separated by `.`, `_`, `__`, or `-`.
+fn valid_repository(repository: &str) -> bool {
+    let mut components: Vec<&str> = repository.split('/').collect();
+    if components.len() > 1
+        && let Some(host) = components.first().copied()
+        && (host.contains('.') || host.contains(':') || host == "localhost")
+    {
+        let (name, port) = match host.split_once(':') {
+            Some((name, port)) => (name, Some(port)),
+            None => (host, None),
+        };
+        let host_ok = !name.is_empty()
+            && name.split('.').all(|label| {
+                !label.is_empty()
+                    && !label.starts_with('-')
+                    && !label.ends_with('-')
+                    && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            });
+        let port_ok = port.is_none_or(|port| {
+            !port.is_empty() && port.len() <= 5 && port.chars().all(|c| c.is_ascii_digit())
+        });
+        if !host_ok || !port_ok {
+            return false;
+        }
+        components.remove(0);
+    }
+    !components.is_empty() && components.into_iter().all(valid_path_component)
+}
+
+/// `[a-z0-9]+` runs joined by `.`, `_`, `__`, or one or more `-`.
+fn valid_path_component(component: &str) -> bool {
+    let mut separator = String::new();
+    let mut started = false;
+    for c in component.chars() {
+        if c.is_ascii_lowercase() || c.is_ascii_digit() {
+            let joined = separator.is_empty()
+                || matches!(separator.as_str(), "." | "_" | "__")
+                || separator.chars().all(|c| c == '-');
+            if !joined {
+                return false;
+            }
+            separator.clear();
+            started = true;
+        } else if started && matches!(c, '.' | '_' | '-') {
+            separator.push(c);
+        } else {
+            return false;
+        }
+    }
+    started && separator.is_empty()
 }
 
 fn validate_env_file_name(name: &str) -> Result<()> {
@@ -609,6 +804,15 @@ fn pull_missing_images(
         if image_present(executor, &container.image)? {
             continue;
         }
+        if !container.image.contains('@') {
+            bail!(
+                "software deploy phase={} product={} environment/namespace={}: local image ID {} is not present on the host; pin a <repository>@sha256 reference to pull it",
+                SoftwareDeployPhase::Apply.as_str(),
+                request.product,
+                request.environment,
+                container.image
+            );
+        }
         docker_ok(
             executor,
             request,
@@ -771,13 +975,19 @@ fn replace_container(
         args.push("--label".into());
         args.push(format!("tenkai.config.{key}={value}"));
     }
-    match container.networks.as_slice() {
-        [] => {}
-        [first, rest @ ..] => {
-            args.push("--network".into());
-            args.push(network_runtime_name(request, first));
-            let _ = rest;
+    // `--network-alias` applies only to the `--network` joined at run time;
+    // later networks take their aliases on `network connect`.
+    if let Some(first) = container.networks.first() {
+        args.push("--network".into());
+        args.push(network_runtime_name(request, first));
+        for alias in container.aliases.get(first).into_iter().flatten() {
+            args.push("--network-alias".into());
+            args.push(alias.clone());
         }
+    }
+    for port in &container.ports {
+        args.push("--publish".into());
+        args.push(port.publish_arg());
     }
     for mount in &container.volumes {
         args.push("--mount".into());
@@ -801,7 +1011,19 @@ fn replace_container(
         args.push("--health-timeout".into());
         args.push("1s".into());
     }
+    // Docker takes one entrypoint executable; its remaining elements lead the
+    // container arguments, which is the same process argv.
+    let (entrypoint, entrypoint_args) = match container.entrypoint.as_deref() {
+        Some([executable, rest @ ..]) => (Some(executable), rest),
+        _ => (None, &[][..]),
+    };
+    if let Some(executable) = entrypoint {
+        args.push("--entrypoint".into());
+        args.push(executable.clone());
+    }
     args.push(container.image.clone());
+    args.extend(entrypoint_args.iter().cloned());
+    args.extend(container.command.iter().flatten().cloned());
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     docker_ok(
         executor,
@@ -812,13 +1034,20 @@ fn replace_container(
     )?;
     if let Some((_, rest)) = container.networks.split_first() {
         for network in rest {
-            let network_name = network_runtime_name(request, network);
+            let mut connect = vec!["network".to_string(), "connect".into()];
+            for alias in container.aliases.get(network).into_iter().flatten() {
+                connect.push("--alias".into());
+                connect.push(alias.clone());
+            }
+            connect.push(network_runtime_name(request, network));
+            connect.push(name.clone());
+            let connect: Vec<&str> = connect.iter().map(String::as_str).collect();
             docker_ok(
                 executor,
                 request,
                 SoftwareDeployPhase::Apply,
                 "network connect",
-                &["network", "connect", &network_name, &name],
+                &connect,
             )?;
         }
     }
@@ -1223,12 +1452,9 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
     use std::sync::Arc;
 
-    const DIGEST_A: &str =
-        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const DIGEST_B: &str =
-        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    const DIGEST_C: &str =
-        "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    const DIGEST_A: &str = "registry.example:5000/edge/db@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const DIGEST_B: &str = "registry.example:5000/edge/api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const DIGEST_C: &str = "registry.example:5000/edge/api@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
     const SECRET: &str = "super-secret-token-value";
 
     fn fake_docker(root: &Path) -> (PathBuf, PathBuf) {
@@ -1245,13 +1471,13 @@ mod tests {
 
     fn sample_topology() -> DockerHostTopology {
         DockerHostTopology {
-            networks: vec!["appnet".into()],
+            networks: vec!["appnet".into(), "backnet".into()],
             volumes: vec!["appdata".into()],
             containers: vec![
                 DockerHostContainer {
                     name: "db".into(),
                     image: DIGEST_A.into(),
-                    networks: vec!["appnet".into()],
+                    networks: vec!["appnet".into(), "backnet".into()],
                     volumes: vec![DockerVolumeMount {
                         name: "appdata".into(),
                         path: "/var/lib/data".into(),
@@ -1259,6 +1485,13 @@ mod tests {
                     depends_on: Vec::new(),
                     env_file: None,
                     health: Some(DockerHealthCheck { cmd: "true".into() }),
+                    ports: Vec::new(),
+                    entrypoint: Some(vec!["docker-entrypoint.sh".into(), "--verbose".into()]),
+                    command: Some(vec!["postgres".into(), "-c".into(), "fsync=on".into()]),
+                    aliases: BTreeMap::from([
+                        ("appnet".into(), vec!["database".into()]),
+                        ("backnet".into(), vec!["db-backend".into()]),
+                    ]),
                 },
                 DockerHostContainer {
                     name: "api".into(),
@@ -1268,6 +1501,15 @@ mod tests {
                     depends_on: vec!["db".into()],
                     env_file: Some("api.env".into()),
                     health: Some(DockerHealthCheck { cmd: "true".into() }),
+                    ports: vec![DockerPortPublication {
+                        host_ip: loopback(),
+                        host_port: 8080,
+                        container_port: 80,
+                        protocol: DockerPortProtocol::Tcp,
+                    }],
+                    entrypoint: None,
+                    command: None,
+                    aliases: BTreeMap::new(),
                 },
             ],
         }
@@ -1329,6 +1571,96 @@ inputs = ["docker"]
         topology.containers[1].env_file = Some("../etc/passwd".into());
         let err = validate_topology(&topology, None).unwrap_err().to_string();
         assert!(err.contains("basename"), "{err}");
+    }
+
+    #[test]
+    fn image_references_must_carry_a_digest_and_no_tag() {
+        let hex = "a".repeat(64);
+        for admitted in [
+            format!("sha256:{hex}"),
+            format!("nginx@sha256:{hex}"),
+            format!("docker.io/library/nginx@sha256:{hex}"),
+            format!("localhost:5000/team/app__v2@sha256:{hex}"),
+            format!("ghcr.io/org/app-name.web@sha256:{hex}"),
+        ] {
+            validate_image_reference(&admitted)
+                .unwrap_or_else(|error| panic!("{admitted}: {error}"));
+        }
+        for refused in [
+            "nginx".to_string(),
+            "nginx:1.27".to_string(),
+            format!("nginx:1.27@sha256:{hex}"),
+            format!("Nginx@sha256:{hex}"),
+            format!("@sha256:{hex}"),
+            format!("nginx@sha256:{}", "A".repeat(64)),
+            format!("nginx@sha512:{hex}"),
+            format!("team//app@sha256:{hex}"),
+            format!("app-@sha256:{hex}"),
+            format!("app._x@sha256:{hex}"),
+            format!("--privileged@sha256:{hex}"),
+        ] {
+            assert!(validate_image_reference(&refused).is_err(), "{refused}");
+        }
+    }
+
+    #[test]
+    fn topology_rejects_invalid_publications_aliases_and_entrypoints() {
+        let invalid = |edit: &dyn Fn(&mut DockerHostTopology)| {
+            let mut topology = sample_topology();
+            topology.containers[1].env_file = None;
+            edit(&mut topology);
+            validate_topology(&topology, None).unwrap_err().to_string()
+        };
+        assert!(
+            invalid(&|t| t.containers[1].ports[0].host_port = 0).contains("between 1 and 65535")
+        );
+        assert!(
+            invalid(&|t| t.containers[0].ports = t.containers[1].ports.clone())
+                .contains("more than once")
+        );
+        assert!(
+            invalid(&|t| {
+                t.containers[1]
+                    .aliases
+                    .insert("othernet".into(), vec!["web".into()]);
+            })
+            .contains("does not join")
+        );
+        assert!(
+            invalid(&|t| {
+                t.containers[1]
+                    .aliases
+                    .insert("appnet".into(), vec!["database".into()]);
+            })
+            .contains("more than once")
+        );
+        assert!(
+            invalid(&|t| {
+                t.containers[1]
+                    .aliases
+                    .insert("appnet".into(), vec!["Bad_Alias".into()]);
+            })
+            .contains("network alias")
+        );
+        assert!(
+            invalid(&|t| t.containers[1].entrypoint = Some(vec!["--privileged".into()]))
+                .contains("executable")
+        );
+        assert!(
+            invalid(&|t| t.containers[1].command = Some(vec!["PASSWORD=hunter2".into()]))
+                .contains("credential")
+        );
+
+        let unknown = r#"{"containers":[{"name":"web","image":"nginx@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","privileged":true}]}"#;
+        assert!(serde_json::from_str::<DockerHostTopology>(unknown).is_err());
+        let port = r#"{"host_port":8080,"container_port":80,"protocol":"sctp"}"#;
+        assert!(serde_json::from_str::<DockerPortPublication>(port).is_err());
+        let port = r#"{"host_ip":"::1","host_port":8080,"container_port":80}"#;
+        let port: DockerPortPublication = serde_json::from_str(port).unwrap();
+        assert_eq!(port.publish_arg(), "[::1]:8080:80/tcp");
+        let port = r#"{"host_port":8080,"container_port":80}"#;
+        let port: DockerPortPublication = serde_json::from_str(port).unwrap();
+        assert_eq!(port.publish_arg(), "127.0.0.1:8080:80/tcp");
     }
 
     #[test]
@@ -1401,6 +1733,21 @@ inputs = ["docker"]
         let db = fake_state["containers"][&db_name]
             .as_object()
             .expect("db container");
+        let net = network_runtime_name(&request, "appnet");
+        assert_eq!(
+            db["entrypoint"],
+            serde_json::json!(["docker-entrypoint.sh"])
+        );
+        assert_eq!(
+            db["command"],
+            serde_json::json!(["--verbose", "postgres", "-c", "fsync=on"])
+        );
+        assert_eq!(db["networks"][&net], serde_json::json!(["database"]));
+        let backnet = network_runtime_name(&request, "backnet");
+        assert_eq!(db["networks"][&backnet], serde_json::json!(["db-backend"]));
+        let api = &fake_state["containers"][&api_name];
+        assert_eq!(api["ports"], serde_json::json!(["127.0.0.1:8080:80/tcp"]));
+        assert_eq!(api["command"], serde_json::json!([]));
         let mounts = db["mounts"].as_array().expect("parsed mounts");
         assert_eq!(mounts.len(), 1, "{mounts:?}");
         assert_eq!(mounts[0]["type"], "volume");
@@ -1868,5 +2215,67 @@ inputs = ["docker"]
             assert!(!outcome.detail.contains(SECRET), "{outcome:?}");
         }
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Clean-engine drill: two registry digest pins, a loopback web endpoint,
+    /// alias-based service discovery, and a declared command.
+    #[test]
+    #[ignore = "requires a Docker engine with registry access; run with --ignored"]
+    fn live_engine_registry_pins_ports_aliases_and_command() {
+        const WEB: &str =
+            "nginx@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10";
+        const CLIENT: &str =
+            "busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e";
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-docker-live-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        std::fs::create_dir_all(root.join("1.0.0/docker")).unwrap();
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let topology = serde_json::json!({
+            "networks": ["appnet"],
+            "containers": [
+                {
+                    "name": "web",
+                    "image": WEB,
+                    "networks": ["appnet"],
+                    "aliases": {"appnet": ["web"]},
+                    "ports": [{"host_port": port, "container_port": 80}]
+                },
+                {
+                    "name": "client",
+                    "image": CLIENT,
+                    "networks": ["appnet"],
+                    "depends_on": ["web"],
+                    "entrypoint": ["sh", "-c"],
+                    "command": ["while true; do wget -q -O /tmp/index http://web/ && touch /tmp/ok; sleep 1; done"],
+                    "health": {"cmd": "test -f /tmp/ok"}
+                }
+            ]
+        });
+        std::fs::write(
+            root.join("1.0.0/docker/host.json"),
+            serde_json::to_string_pretty(&topology).unwrap(),
+        )
+        .unwrap();
+        let request = request_for(&root, &root, "1.0.0");
+        let executor = DockerHostExecutor::default();
+        let result = executor.apply(&request).and_then(|()| {
+            assert_eq!(executor.observe(&request)?, SoftwareObserveStatus::Present);
+            let mut stream = std::net::TcpStream::connect(("127.0.0.1", port))?;
+            std::io::Write::write_all(&mut stream, b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")?;
+            let mut response = String::new();
+            std::io::Read::read_to_string(&mut stream, &mut response)?;
+            assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+            executor.restart(&request)
+        });
+        executor.remove(&request).unwrap();
+        let _ = std::fs::remove_dir_all(root);
+        result.unwrap();
     }
 }
