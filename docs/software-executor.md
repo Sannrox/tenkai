@@ -299,3 +299,27 @@ Rollback may replay the target release's job when its completion evidence is no
 longer present; database effects remain application-owned and are not reversed
 by Tenkai. Removing a product removes managed job containers in reverse
 lifecycle order and preserves named volumes.
+
+### Release-owned Docker configuration files
+
+A container may declare non-secret files from the release workdir:
+
+```json
+{"source":"docker/realm.json","destination":"/etc/app/realm.json","read_only":true}
+```
+
+Sources are regular files beneath the release root. Destinations are absolute,
+non-traversing paths and may not collide with each other or declared volume
+mounts. Tenkai creates the container, streams the file archive through the
+Docker client, sets root ownership and mode `0444` for `read_only` or `0644` otherwise, and
+starts the container only after every file is installed. The parent directory
+must already exist in the image. Read-only is a Unix permission rule: root or a
+process with suitable capabilities can still modify a file. It is not a
+read-only mount. At most 64 files per container and 16 MiB per file are admitted.
+
+File bytes are excluded from receipts. Observe checks the declared source
+bytes and file specification against the stored container spec digest; it does
+not inspect the live writable layer for missing or modified files. This is the
+supported verification boundary. Source changes cause replacement on apply or
+restart; upgrades and rollback install their own release's bytes before start.
+Secret material remains an environment-scoped `env_file`.
