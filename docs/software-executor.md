@@ -212,11 +212,16 @@ plus these per-container runtime settings:
 | `entrypoint` | Argument array. The first element becomes `--entrypoint`; the rest lead the container arguments. Setting it clears the image command, as `docker run --entrypoint` does. |
 | `command` | Argument array passed after the image. Absent keeps the image default. |
 | `aliases` | `{"<network>": ["<alias>"]}` DNS aliases on networks the container joins, unique per network. |
+| `user` | Optional bounded username or `UID:GID`; whitespace and `:`, `,`, `=` are refused. |
+| `volumes[].read_only` | Mounts a declared named volume read-only when `true`. |
+| `tmpfs` | Ephemeral mounts with absolute targets, 1 byte to 16 GiB, unique paths, and mode `000` to `0777`; `uid` and `gid` default to zero. |
+| `restart` | `no` (the default), `on_failure` with 1 to 10 retries, `always`, or `unless_stopped`. One-shot jobs require `no`. |
 
 Arguments are stored in the release and visible through `docker inspect`, so
 credential-looking values are refused; secrets belong in `env_file`. There is no
-free-form Docker flag escape hatch. Bind mounts and inline environment values
-are refused. `env_file` is a basename under the environment-scoped
+free-form Docker flag escape hatch. Bind mounts, arbitrary host mounts, privileged
+mode, and inline environment values are refused. Tmpfs data is removed with the
+container and is never persistent release state. `env_file` is a basename under the environment-scoped
 secret directory; Tenkai never writes those bytes into SQLite, argv values,
 labels, or typed receipts. Apply hashes the resolved path and contents in memory
 into each container's `tenkai.spec-digest` label (`docker inspect` already

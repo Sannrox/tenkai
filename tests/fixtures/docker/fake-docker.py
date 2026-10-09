@@ -173,6 +173,8 @@ def handle_run(state: dict, state_path: Path, args: list[str], created: bool = F
         "--health-interval",
         "--health-retries",
         "--health-timeout",
+        "--user",
+        "--restart",
     }
     for index, item in enumerate(args):
         if image is not None:
@@ -196,12 +198,13 @@ def handle_run(state: dict, state_path: Path, args: list[str], created: bool = F
     mounts = []
     for value in take_flag(args, "--mount"):
         fields = parse_mount(value)
-        if fields.get("type") != "volume" or not fields.get("source") or not fields.get("target"):
-            sys.stderr.write(
-                "docker run --mount must be type=volume with source and target only\n"
-            )
+        if fields.get("type") == "volume" and (not fields.get("source") or not fields.get("target")):
             return 1
-        extra = set(fields) - {"type", "source", "target"}
+        if fields.get("type") == "tmpfs" and not fields.get("destination"):
+            return 1
+        if fields.get("type") not in {"volume", "tmpfs"}:
+            return 1
+        extra = set(fields) - {"type", "source", "target", "readonly", "tmpfs-size", "tmpfs-uid", "tmpfs-gid", "tmpfs-mode", "destination"}
         if extra:
             sys.stderr.write(
                 "docker run --mount must be type=volume with source and target only\n"

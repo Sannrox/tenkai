@@ -76,6 +76,12 @@ pub struct DockerHostContainer {
     pub networks: Vec<String>,
     #[serde(default)]
     pub volumes: Vec<DockerVolumeMount>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tmpfs: Vec<DockerTmpfsMount>,
+    #[serde(default)]
+    pub restart: DockerRestartPolicy,
     #[serde(default)]
     pub depends_on: Vec<DockerDependency>,
     #[serde(default)]
@@ -212,6 +218,37 @@ impl DockerPortPublication {
 pub struct DockerVolumeMount {
     pub name: String,
     pub path: String,
+    #[serde(default)]
+    pub read_only: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DockerTmpfsMount {
+    pub path: String,
+    pub size_bytes: u64,
+    #[serde(default)]
+    pub uid: u32,
+    #[serde(default)]
+    pub gid: u32,
+    #[serde(default = "default_tmpfs_mode")]
+    pub mode: u32,
+}
+
+fn default_tmpfs_mode() -> u32 {
+    0o700
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DockerRestartPolicy {
+    #[default]
+    No,
+    OnFailure {
+        max_retries: u32,
+    },
+    Always,
+    UnlessStopped,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -570,6 +607,46 @@ pub fn validate_topology(topology: &DockerHostTopology, secret_dir: Option<&Path
                 );
             }
             validate_mount_target_path(&container.name, &mount.name, &mount.path)?;
+        }
+        if let Some(user) = &container.user {
+            if user.is_empty()
+                || user.len() > 128
+                || user
+                    .chars()
+                    .any(|c| c.is_whitespace() || c == ':' || c == ',' || c == '=')
+            {
+                bail!(
+                    "container {} user must be a bounded UID:GID or username",
+                    container.name
+                );
+            }
+        }
+        let mut tmpfs_paths = BTreeSet::new();
+        for tmpfs in &container.tmpfs {
+            validate_mount_target_path(&container.name, "tmpfs", &tmpfs.path)?;
+            if tmpfs.size_bytes == 0
+                || tmpfs.size_bytes > 16 * 1024 * 1024 * 1024
+                || !tmpfs_paths.insert(&tmpfs.path)
+                || tmpfs.mode > 0o777
+            {
+                bail!("container {} tmpfs declaration is invalid", container.name);
+            }
+        }
+        if matches!(container.mode, DockerContainerMode::OneShot { .. })
+            && !matches!(container.restart, DockerRestartPolicy::No)
+        {
+            bail!(
+                "container {} one-shot jobs must use restart=no",
+                container.name
+            );
+        }
+        if let DockerRestartPolicy::OnFailure { max_retries } = container.restart {
+            if max_retries == 0 || max_retries > 10 {
+                bail!(
+                    "container {} restart max_retries must be 1..=10",
+                    container.name
+                );
+            }
         }
         if container.files.len() > 64 {
             bail!("container {} exceeds 64 config files", container.name);
@@ -1121,6 +1198,7 @@ fn spec_digest_with_files(
     files: &[Vec<u8>],
 ) -> Result<String> {
     let mut hasher = Sha256::new();
+    hasher.update(serde_json::to_vec(container)?);
     if let Some(path) = env_file_path(request, container)? {
         let contents =
             std::fs::read(&path).with_context(|| format!("reading env_file {}", path.display()))?;
@@ -1357,10 +1435,32 @@ fn replace_container(
     for mount in &container.volumes {
         args.push("--mount".into());
         args.push(format!(
-            "type=volume,source={},target={}",
+            "type=volume,source={},target={}{}",
             volume_runtime_name(request, &mount.name),
-            mount.path
+            mount.path,
+            if mount.read_only { ",readonly" } else { "" }
         ));
+    }
+    for tmpfs in &container.tmpfs {
+        args.push("--mount".into());
+        args.push(format!(
+            "type=tmpfs,destination={},tmpfs-size={},tmpfs-uid={},tmpfs-gid={},tmpfs-mode={:o}",
+            tmpfs.path, tmpfs.size_bytes, tmpfs.uid, tmpfs.gid, tmpfs.mode
+        ));
+    }
+    if let Some(user) = &container.user {
+        args.push("--user".into());
+        args.push(user.clone());
+    }
+    match container.restart {
+        DockerRestartPolicy::No => args.extend(["--restart".into(), "no".into()]),
+        DockerRestartPolicy::OnFailure { max_retries } => {
+            args.extend(["--restart".into(), format!("on-failure:{max_retries}")])
+        }
+        DockerRestartPolicy::Always => args.extend(["--restart".into(), "always".into()]),
+        DockerRestartPolicy::UnlessStopped => {
+            args.extend(["--restart".into(), "unless-stopped".into()])
+        }
     }
     if let Some(path) = env_file_path(request, container)? {
         args.push("--env-file".into());
@@ -2064,7 +2164,11 @@ mod tests {
                     volumes: vec![DockerVolumeMount {
                         name: "appdata".into(),
                         path: "/var/lib/data".into(),
+                        read_only: false,
                     }],
+                    user: None,
+                    tmpfs: Vec::new(),
+                    restart: DockerRestartPolicy::No,
                     depends_on: Vec::new(),
                     mode: DockerContainerMode::Service,
                     env_file: None,
@@ -2083,6 +2187,9 @@ mod tests {
                     image: DIGEST_B.into(),
                     networks: vec!["appnet".into()],
                     volumes: Vec::new(),
+                    user: None,
+                    tmpfs: Vec::new(),
+                    restart: DockerRestartPolicy::No,
                     depends_on: vec!["db".into()],
                     mode: DockerContainerMode::Service,
                     env_file: Some("api.env".into()),
