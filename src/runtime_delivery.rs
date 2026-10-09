@@ -232,13 +232,13 @@ pub(crate) async fn complete_runtime_work(
     }
     let observed_at = crate::now_millis();
     let mut environment_object = None;
-    if completion.succeeded && ctx.outcome_export_enabled() {
-        if crate::apply::environment_lease_status(ctx, environment)
-            .await?
-            .is_some()
-        {
-            anyhow::bail!("environment {environment} has an apply in progress");
-        }
+    if crate::apply::environment_lease_status(ctx, environment)
+        .await?
+        .is_some()
+    {
+        anyhow::bail!("environment {environment} has an apply in progress");
+    }
+    if completion.succeeded {
         let mut object = ctx
             .get(&crate::ontology::env_id(environment))
             .await?
@@ -253,10 +253,69 @@ pub(crate) async fn complete_runtime_work(
         )
         .await?;
         environment_object = Some(object);
-    } else if completion.succeeded {
-        for step in &stored.steps {
-            crate::plan::reconcile_deployment(ctx, environment, &step.product, Some(&step.to))
-                .await?;
+    }
+    if environment_object.is_none() {
+        environment_object = Some(
+            ctx.get(&crate::ontology::env_id(environment))
+                .await?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("environment {environment} disappeared during completion")
+                })?,
+        );
+    }
+    let object = environment_object
+        .as_mut()
+        .expect("completion loads the environment");
+    if !completion.succeeded {
+        let succeeded_steps = stored
+            .steps
+            .iter()
+            .filter(|step| {
+                completion
+                    .receipts
+                    .iter()
+                    .any(|receipt| receipt.step_id == step.id && receipt.succeeded)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        crate::plan::update_runtime_deployments_object(ctx, object, &succeeded_steps, observed_at)
+            .await?;
+    }
+    for step in &stored.steps {
+        let Some(receipt) = completion
+            .receipts
+            .iter()
+            .find(|receipt| receipt.step_id == step.id)
+        else {
+            continue;
+        };
+        let key = format!("failed_target.{}", step.product);
+        if crate::terminal_outcome::classify(
+            step.action,
+            crate::terminal_outcome::Observation::Runtime {
+                succeeded: receipt.succeeded,
+                detail: &receipt.detail,
+            },
+        )
+        .is_none()
+        {
+            continue;
+        }
+        if !receipt.succeeded && step.action != crate::plan::Action::Rollback {
+            object.properties.insert(key, step.release_id.clone());
+            object.properties.insert(
+                format!("failed_target_plan.{}", step.product),
+                stored.id.clone(),
+            );
+            object.properties.insert(
+                format!("failed_target_at.{}", step.product),
+                observed_at.to_string(),
+            );
+        } else if receipt.succeeded && object.properties.get(&key) == Some(&step.release_id) {
+            object.properties.remove(&key);
+            object
+                .properties
+                .remove(&format!("failed_target_plan.{}", step.product));
         }
     }
     let provider_events = if ctx.outcome_export_enabled() {
@@ -312,14 +371,24 @@ pub(crate) async fn complete_runtime_work(
     } else {
         Vec::new()
     };
-    if completion.succeeded && ctx.outcome_export_enabled() {
+    if let Some(environment) = environment_object {
+        if !ctx.is_embedded() {
+            ctx.put(environment).await?;
+            crate::plan::transition(
+                ctx,
+                &mut stored,
+                crate::plan::Transition::new(terminal, completion.detail.clone()),
+                crate::plan::Persistence::Standard,
+            )
+            .await?;
+            return Ok(());
+        }
         crate::plan::transition(
             ctx,
             &mut stored,
             crate::plan::Transition::new(terminal, completion.detail.clone()),
             crate::plan::Persistence::WithEnvironmentAndProviderEvents {
-                environment: environment_object
-                    .expect("successful outcome export updates its environment"),
+                environment,
                 provider_events: &provider_events,
             },
         )
