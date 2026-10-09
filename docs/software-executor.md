@@ -203,8 +203,14 @@ tenkaictl reconcile --once
 `depends_on` order, optional health commands, and optional `env_file` basenames.
 Images must be `sha256:` plus 64 hex digits. Bind mounts and inline environment
 values are refused. `env_file` is a basename under the environment-scoped
-secret directory; Tenkai never reads those bytes into SQLite, argv values, or
-typed receipts.
+secret directory; Tenkai never writes those bytes into SQLite, argv values,
+labels, or typed receipts. Apply hashes the resolved path and contents in memory
+into each container's `tenkai.spec-digest` label (`docker inspect` already
+shows the values), so rotating an `env_file`, or pointing
+`env docker-secrets` at another directory, makes observe report `Mismatched`
+and the next apply or restart recreate that container with the new values. No
+new release is needed. Containers created before this label existed are
+recreated once on their next apply.
 
 Apply creates networks and volumes, pulls missing digest-pinned images,
 then replaces containers in dependency order. A running container whose
@@ -226,8 +232,10 @@ declared name, so hyphenated environment or product values cannot collide.
 Existing objects whose Tenkai ownership labels differ are refused rather than
 reused or `rm -f`'d. Named volumes stay on remove so
 application data is not deleted. Restart bounces the current pin in the same
-order. Observe is `Present` only when every declared container is running with
-matching Tenkai version, release, digest, and image labels.
+order with `docker restart`, which keeps a container's original environment,
+so a container whose spec digest changed is recreated instead. Observe is
+`Present` only when every declared container matches its image and Tenkai
+version, release, config digest, and spec digest labels.
 
 Shell `deploy.install` remains the default when `TENKAI_SOFTWARE_EXECUTOR` is
 unset. Docker products should keep a fail-closed install reminder, the same

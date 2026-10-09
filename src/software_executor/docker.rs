@@ -247,10 +247,13 @@ impl SoftwareExecutor for DockerHostExecutor {
         let mut present = 0;
         for container in &topology.containers {
             let name = container_runtime_name(request, &container.name);
+            let Ok(spec_digest) = container_spec_digest(request, container) else {
+                return Ok(SoftwareObserveStatus::Unknown);
+            };
             match inspect_container(self, &name) {
                 Ok(None) => return Ok(SoftwareObserveStatus::Absent),
                 Ok(Some(inspected)) => {
-                    if container_mismatch(request, container, &inspected) {
+                    if container_mismatch(request, container, &spec_digest, &inspected) {
                         return Ok(SoftwareObserveStatus::Mismatched);
                     }
                     present += 1;
@@ -269,21 +272,23 @@ impl SoftwareExecutor for DockerHostExecutor {
         validate_request(request)?;
         let topology = self.topology(request)?;
         validate_topology(&topology, request.secret_dir_path.as_deref())?;
+        let mut journal = Vec::new();
         for container in order_containers(&topology)? {
-            let name = container_runtime_name(request, &container.name);
-            refuse_foreign_container(self, request, &name)?;
-            if inspect_container(self, &name)?.is_none() {
-                replace_container(self, request, &topology, container, &mut Vec::new())?;
-            } else {
-                docker_ok(
-                    self,
-                    request,
-                    SoftwareDeployPhase::Restart,
-                    "restart",
-                    &["restart", &name],
-                )?;
+            let restarted = restart_container(self, request, &topology, container, &mut journal)
+                .and_then(|()| wait_healthy(self, request, container));
+            if let Err(error) = restarted {
+                return Err(match roll_back(self, request, &journal) {
+                    Ok(()) => anyhow::anyhow!("{error:#}; restored the previous containers"),
+                    Err(restore) => anyhow::anyhow!(
+                        "{error:#}; restoring the previous containers also failed: {restore:#}"
+                    ),
+                });
             }
-            wait_healthy(self, request, container)?;
+        }
+        for change in &journal {
+            if let Change::Replaced { previous, .. } = change {
+                remove_if_present(self, request, previous)?;
+            }
         }
         Ok(())
     }
@@ -635,6 +640,70 @@ fn previous_runtime_name(request: &SoftwareApplyRequest, name: &str) -> String {
     format!("{}-prev-{name}", scope_prefix(request))
 }
 
+/// Bounce one container. `docker restart` keeps the environment a container
+/// was created with, so a missing container or one whose spec changed (for
+/// example a rotated `env_file`) is recreated instead.
+fn restart_container(
+    executor: &DockerHostExecutor,
+    request: &SoftwareApplyRequest,
+    topology: &DockerHostTopology,
+    container: &DockerHostContainer,
+    journal: &mut Vec<Change>,
+) -> Result<()> {
+    let name = container_runtime_name(request, &container.name);
+    refuse_foreign_container(executor, request, &name)?;
+    let spec_digest = container_spec_digest(request, container)?;
+    match inspect_container(executor, &name)? {
+        Some(inspected) if !container_mismatch(request, container, &spec_digest, &inspected) => {
+            docker_ok(
+                executor,
+                request,
+                SoftwareDeployPhase::Restart,
+                "restart",
+                &["restart", &name],
+            )
+        }
+        _ => replace_container(executor, request, topology, container, journal),
+    }
+}
+
+/// Resolve a container's declared `env_file` inside the environment's secret
+/// directory.
+fn env_file_path(
+    request: &SoftwareApplyRequest,
+    container: &DockerHostContainer,
+) -> Result<Option<PathBuf>> {
+    let Some(env_file) = &container.env_file else {
+        return Ok(None);
+    };
+    let secret_dir = request.secret_dir_path.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "container {} declares env_file {env_file} but docker_secret_dir is unset",
+            container.name
+        )
+    })?;
+    resolve_env_file(secret_dir, env_file).map(Some)
+}
+
+/// Digest of what `docker run` bakes into a container but release and config
+/// labels cannot see: the resolved `env_file` path and its contents. The bytes
+/// are hashed in memory; only the digest becomes the `tenkai.spec-digest`
+/// label, and `docker inspect` already exposes the values themselves.
+fn container_spec_digest(
+    request: &SoftwareApplyRequest,
+    container: &DockerHostContainer,
+) -> Result<String> {
+    let mut hasher = Sha256::new();
+    if let Some(path) = env_file_path(request, container)? {
+        let contents =
+            std::fs::read(&path).with_context(|| format!("reading env_file {}", path.display()))?;
+        hasher.update(path.as_os_str().as_encoded_bytes());
+        hasher.update([0]);
+        hasher.update(contents);
+    }
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
 /// Create the container for `container` unless a matching, running, not
 /// unhealthy one already exists. A container being replaced is stopped and
 /// kept under [`previous_runtime_name`]; every change is pushed onto `journal` before
@@ -648,9 +717,10 @@ fn replace_container(
 ) -> Result<()> {
     let name = container_runtime_name(request, &container.name);
     refuse_foreign_container(executor, request, &name)?;
+    let spec_digest = container_spec_digest(request, container)?;
     match inspect_container(executor, &name)? {
         Some(inspected)
-            if !container_mismatch(request, container, &inspected)
+            if !container_mismatch(request, container, &spec_digest, &inspected)
                 && inspected.running
                 && inspected.health != "unhealthy" =>
         {
@@ -695,6 +765,8 @@ fn replace_container(
         args.push("--label".into());
         args.push(label);
     }
+    args.push("--label".into());
+    args.push(format!("tenkai.spec-digest={spec_digest}"));
     for (key, value) in &request.overlays {
         args.push("--label".into());
         args.push(format!("tenkai.config.{key}={value}"));
@@ -715,14 +787,7 @@ fn replace_container(
             mount.path
         ));
     }
-    if let Some(env_file) = &container.env_file {
-        let secret_dir = request.secret_dir_path.as_deref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "container {} declares env_file {env_file} but docker_secret_dir is unset",
-                container.name
-            )
-        })?;
-        let path = resolve_env_file(secret_dir, env_file)?;
+    if let Some(path) = env_file_path(request, container)? {
         args.push("--env-file".into());
         args.push(path.to_string_lossy().into_owned());
     }
@@ -967,9 +1032,15 @@ fn parse_inspect_json(raw: &str) -> Result<Option<InspectedContainer>> {
 fn container_mismatch(
     request: &SoftwareApplyRequest,
     container: &DockerHostContainer,
+    spec_digest: &str,
     inspected: &InspectedContainer,
 ) -> bool {
     inspected.image != container.image
+        || inspected
+            .labels
+            .get("tenkai.spec-digest")
+            .map(String::as_str)
+            != Some(spec_digest)
         || inspected.labels.get("tenkai.version").map(String::as_str)
             != Some(request.version.as_str())
         || inspected
@@ -1592,6 +1663,65 @@ inputs = ["docker"]
         let after = std::fs::read_to_string(root.join("argv.log")).unwrap();
         assert!(!after[before.len()..].contains("\"run\""), "{after}");
         assert_eq!(fake_containers(&state).len(), 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rotated_env_file_recreates_its_container_on_reapply_and_restart() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-docker-rotate-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let secret_dir = root.join("secrets");
+        std::fs::create_dir_all(&secret_dir).unwrap();
+        std::fs::write(secret_dir.join("api.env"), "TOKEN=old\n").unwrap();
+        write_release(&root, "1.0.0", DIGEST_B);
+        let (script, state) = fake_docker(&root);
+        let executor = executor_for(&script, &state, &[]);
+        let request = request_for(&root, &secret_dir, "1.0.0");
+        executor.apply(&request).unwrap();
+        let api = container_runtime_name(&request, "api");
+        let runs_since = |before: &str| {
+            let argv = std::fs::read_to_string(root.join("argv.log")).unwrap();
+            argv[before.len()..]
+                .lines()
+                .filter(|line| line.starts_with(r#"["run""#))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+
+        std::fs::write(secret_dir.join("api.env"), "TOKEN=new\n").unwrap();
+        assert_eq!(
+            executor.observe(&request).unwrap(),
+            SoftwareObserveStatus::Mismatched
+        );
+        let before = std::fs::read_to_string(root.join("argv.log")).unwrap();
+        executor.apply(&request).unwrap();
+        let runs = runs_since(&before);
+        assert_eq!(runs.len(), 1, "only api is recreated: {runs:?}");
+        assert!(runs[0].contains(&api), "{runs:?}");
+        assert_eq!(
+            executor.observe(&request).unwrap(),
+            SoftwareObserveStatus::Present
+        );
+
+        // `docker restart` would keep the old values, so restart recreates.
+        std::fs::write(secret_dir.join("api.env"), "TOKEN=newer\n").unwrap();
+        let before = std::fs::read_to_string(root.join("argv.log")).unwrap();
+        executor.restart(&request).unwrap();
+        let runs = runs_since(&before);
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        assert!(runs[0].contains(&api), "{runs:?}");
+        assert_eq!(
+            executor.observe(&request).unwrap(),
+            SoftwareObserveStatus::Present
+        );
+        assert!(!fake_containers(&state).contains_key(&previous_runtime_name(&request, "api")));
+        let argv = std::fs::read_to_string(root.join("argv.log")).unwrap();
+        assert!(!argv.contains("TOKEN="), "{argv}");
         let _ = std::fs::remove_dir_all(root);
     }
 
