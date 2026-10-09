@@ -77,7 +77,9 @@ pub struct DockerHostContainer {
     #[serde(default)]
     pub volumes: Vec<DockerVolumeMount>,
     #[serde(default)]
-    pub depends_on: Vec<String>,
+    pub depends_on: Vec<DockerDependency>,
+    #[serde(default)]
+    pub mode: DockerContainerMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_file: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -96,6 +98,60 @@ pub struct DockerHostContainer {
     /// Stable DNS aliases per declared network, independent of runtime names.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub aliases: BTreeMap<String, Vec<String>>,
+}
+
+/// Legacy names keep their existing readiness ordering; conditional dependencies
+/// express the process state a dependent must observe before it can start.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum DockerDependency {
+    Legacy(String),
+    Conditional {
+        container: String,
+        condition: DockerDependencyCondition,
+    },
+}
+
+impl DockerDependency {
+    fn name(&self) -> &str {
+        match self {
+            Self::Legacy(name)
+            | Self::Conditional {
+                container: name, ..
+            } => name,
+        }
+    }
+    fn condition(&self) -> Option<DockerDependencyCondition> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::Conditional { condition, .. } => Some(*condition),
+        }
+    }
+}
+
+impl From<&str> for DockerDependency {
+    fn from(name: &str) -> Self {
+        Self::Legacy(name.into())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DockerContainerMode {
+    #[default]
+    Service,
+    OneShot {
+        timeout_secs: u64,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DockerDependencyCondition {
+    #[default]
+    Started,
+    Healthy,
+    CompletedSuccessfully,
 }
 
 /// One `docker run --publish`.
@@ -227,12 +283,13 @@ impl SoftwareExecutor for DockerHostExecutor {
         let ordered = order_containers(&topology)?;
         let desired: BTreeSet<String> = ordered
             .iter()
-            .map(|container| container_runtime_name(request, &container.name))
-            .collect();
+            .map(|container| managed_container_name(request, container))
+            .collect::<Result<_>>()?;
         let mut journal = Vec::new();
         for container in &ordered {
-            let replaced = replace_container(self, request, &topology, container, &mut journal)
-                .and_then(|()| wait_healthy(self, request, container));
+            let replaced = check_dependencies(self, request, &topology, container)
+                .and_then(|()| replace_container(self, request, &topology, container, &mut journal))
+                .and_then(|()| wait_container(self, request, container));
             if let Err(error) = replaced {
                 // Return the product to the containers it ran before this apply.
                 return Err(match roll_back(self, request, &journal) {
@@ -245,7 +302,7 @@ impl SoftwareExecutor for DockerHostExecutor {
         }
         // Deletes the previous containers too. If this fails the caller still
         // re-applies the previous release, which replaces whatever runs here.
-        remove_unowned_containers(self, request, &desired)?;
+        remove_unowned_containers(self, request, &desired, true)?;
         Ok(())
     }
 
@@ -260,13 +317,14 @@ impl SoftwareExecutor for DockerHostExecutor {
         let ordered = order_containers(&topology)?;
         let mut kept = Vec::new();
         for container in ordered.iter().rev() {
-            let name = container_runtime_name(request, &container.name);
+            let name = managed_container_name(request, container)?;
             let previous = previous_runtime_name(request, &container.name);
             if inspect_container(self, &previous)?.is_some() {
                 remove_if_present(self, request, &name)?;
                 kept.push((name, previous));
             } else if inspect_container(self, &name)?.is_some_and(|inspected| {
                 inspected.labels.get("tenkai.release-id") == Some(&request.release_id)
+                    && !successful_job(&inspected)
             }) {
                 remove_if_present(self, request, &name)?;
             }
@@ -285,7 +343,7 @@ impl SoftwareExecutor for DockerHostExecutor {
         let topology = self.topology(request)?;
         validate_topology(&topology, request.secret_dir_path.as_deref())?;
         for container in order_containers(&topology)?.iter().rev() {
-            let name = container_runtime_name(request, &container.name);
+            let name = managed_container_name(request, container)?;
             remove_if_present(self, request, &name)?;
             remove_if_present(
                 self,
@@ -293,6 +351,7 @@ impl SoftwareExecutor for DockerHostExecutor {
                 &previous_runtime_name(request, &container.name),
             )?;
         }
+        remove_unowned_containers(self, request, &BTreeSet::new(), false)?;
         remove_networks(self, request, &topology);
         Ok(())
     }
@@ -303,14 +362,17 @@ impl SoftwareExecutor for DockerHostExecutor {
         validate_topology(&topology, request.secret_dir_path.as_deref())?;
         let mut present = 0;
         for container in &topology.containers {
-            let name = container_runtime_name(request, &container.name);
+            let name = managed_container_name(request, container)?;
             let Ok(spec_digest) = container_spec_digest(request, container) else {
                 return Ok(SoftwareObserveStatus::Unknown);
             };
             match inspect_container(self, &name) {
                 Ok(None) => return Ok(SoftwareObserveStatus::Absent),
                 Ok(Some(inspected)) => {
-                    if container_mismatch(request, container, &spec_digest, &inspected) {
+                    if container_mismatch(request, container, &spec_digest, &inspected)
+                        || matches!(container.mode, DockerContainerMode::OneShot { .. })
+                            && !successful_job(&inspected)
+                    {
                         return Ok(SoftwareObserveStatus::Mismatched);
                     }
                     present += 1;
@@ -331,8 +393,9 @@ impl SoftwareExecutor for DockerHostExecutor {
         validate_topology(&topology, request.secret_dir_path.as_deref())?;
         let mut journal = Vec::new();
         for container in order_containers(&topology)? {
-            let restarted = restart_container(self, request, &topology, container, &mut journal)
-                .and_then(|()| wait_healthy(self, request, container));
+            let restarted = check_dependencies(self, request, &topology, container)
+                .and_then(|()| restart_container(self, request, &topology, container, &mut journal))
+                .and_then(|()| wait_container(self, request, container));
             if let Err(error) = restarted {
                 return Err(match roll_back(self, request, &journal) {
                     Ok(()) => anyhow::anyhow!("{error:#}; restored the previous containers"),
@@ -413,6 +476,20 @@ pub fn validate_topology(topology: &DockerHostTopology, secret_dir: Option<&Path
             );
         }
         validate_image_reference(&container.image)?;
+        if let DockerContainerMode::OneShot { timeout_secs } = container.mode {
+            if !(1..=86_400).contains(&timeout_secs) {
+                bail!(
+                    "container {} one-shot timeout must be 1..86400 seconds",
+                    container.name
+                );
+            }
+            if container.health.is_some() {
+                bail!(
+                    "container {} one-shot completion cannot use a health check",
+                    container.name
+                );
+            }
+        }
         for port in &container.ports {
             if port.host_port == 0 || port.container_port == 0 {
                 bail!(
@@ -496,6 +573,44 @@ pub fn validate_topology(topology: &DockerHostTopology, secret_dir: Option<&Path
                     "container {} health.cmd must not carry credential material",
                     container.name
                 );
+            }
+        }
+    }
+    for container in &topology.containers {
+        let mut dependencies = BTreeSet::new();
+        for dependency in &container.depends_on {
+            let name = dependency.name();
+            if !dependencies.insert(name) {
+                bail!("container {} repeats dependency {name}", container.name);
+            }
+            let target = topology
+                .containers
+                .iter()
+                .find(|target| target.name == name)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "container {} depends on undeclared container {name}",
+                        container.name
+                    )
+                })?;
+            let condition = dependency
+                .condition()
+                .unwrap_or(DockerDependencyCondition::Started);
+            match condition {
+                DockerDependencyCondition::Started | DockerDependencyCondition::Healthy
+                    if !matches!(target.mode, DockerContainerMode::Service) =>
+                {
+                    bail!("dependency {name} is a one-shot job; require completed_successfully")
+                }
+                DockerDependencyCondition::Healthy if target.health.is_none() => {
+                    bail!("dependency {name} has no health check")
+                }
+                DockerDependencyCondition::CompletedSuccessfully
+                    if matches!(target.mode, DockerContainerMode::Service) =>
+                {
+                    bail!("dependency {name} is a service; completion requires a one-shot job")
+                }
+                _ => {}
             }
         }
     }
@@ -699,7 +814,7 @@ fn order_containers(topology: &DockerHostTopology) -> Result<Vec<&DockerHostCont
                 index[name]
                     .depends_on
                     .iter()
-                    .all(|dep| !remaining.contains(dep.as_str()))
+                    .all(|dep| !remaining.contains(dep.name()))
             })
             .collect::<Vec<_>>();
         if ready.is_empty() {
@@ -709,10 +824,11 @@ fn order_containers(topology: &DockerHostTopology) -> Result<Vec<&DockerHostCont
             remaining.remove(name);
             let container = index[name];
             for dep in &container.depends_on {
-                if !index.contains_key(dep.as_str()) {
+                if !index.contains_key(dep.name()) {
                     bail!(
-                        "container {} depends_on undeclared container {dep}",
-                        container.name
+                        "container {} depends_on undeclared container {}",
+                        container.name,
+                        dep.name()
                     );
                 }
             }
@@ -724,6 +840,38 @@ fn order_containers(topology: &DockerHostTopology) -> Result<Vec<&DockerHostCont
 
 fn container_runtime_name(request: &SoftwareApplyRequest, name: &str) -> String {
     format!("{}-ctr-{name}", scope_prefix(request))
+}
+
+/// A completion receipt belongs to one release and effective configuration.
+fn managed_container_name(
+    request: &SoftwareApplyRequest,
+    container: &DockerHostContainer,
+) -> Result<String> {
+    if matches!(container.mode, DockerContainerMode::Service) {
+        return Ok(container_runtime_name(request, &container.name));
+    }
+    let mut hash = Sha256::new();
+    hash.update(request.release_id.as_bytes());
+    hash.update([0]);
+    hash.update(request.config_digest.as_bytes());
+    hash.update([0]);
+    hash.update(container_spec_digest(request, container)?.as_bytes());
+    let generation = format!("{:x}", hash.finalize());
+    Ok(format!(
+        "{}-job-{}-{}",
+        scope_prefix(request),
+        container.name,
+        &generation[..16]
+    ))
+}
+
+fn successful_job(inspected: &InspectedContainer) -> bool {
+    inspected
+        .labels
+        .get("tenkai.job")
+        .is_some_and(|value| value == "true")
+        && inspected.status == "exited"
+        && inspected.exit_code == Some(0)
 }
 
 fn network_runtime_name(request: &SoftwareApplyRequest, name: &str) -> String {
@@ -832,7 +980,7 @@ fn image_present(executor: &DockerHostExecutor, image: &str) -> Result<bool> {
 /// One container an `apply` created or replaced, in order, so a failed apply
 /// can return to the containers that ran before it.
 enum Change {
-    /// No container ran under this name before the apply.
+    /// Created by this attempt, or an interrupted job adopted for bounded cleanup.
     Created(String),
     /// The previous container was stopped and renamed to `previous`.
     Replaced { name: String, previous: String },
@@ -854,7 +1002,10 @@ fn restart_container(
     container: &DockerHostContainer,
     journal: &mut Vec<Change>,
 ) -> Result<()> {
-    let name = container_runtime_name(request, &container.name);
+    if matches!(container.mode, DockerContainerMode::OneShot { .. }) {
+        return replace_container(executor, request, topology, container, journal);
+    }
+    let name = managed_container_name(request, container)?;
     refuse_foreign_container(executor, request, &name)?;
     let spec_digest = container_spec_digest(request, container)?;
     match inspect_container(executor, &name)? {
@@ -919,15 +1070,29 @@ fn replace_container(
     container: &DockerHostContainer,
     journal: &mut Vec<Change>,
 ) -> Result<()> {
-    let name = container_runtime_name(request, &container.name);
+    let name = managed_container_name(request, container)?;
     refuse_foreign_container(executor, request, &name)?;
     let spec_digest = container_spec_digest(request, container)?;
     match inspect_container(executor, &name)? {
         Some(inspected)
             if !container_mismatch(request, container, &spec_digest, &inspected)
-                && inspected.running
-                && inspected.health != "unhealthy" =>
+                && ((matches!(container.mode, DockerContainerMode::Service)
+                    && inspected.running
+                    && inspected.health != "unhealthy")
+                    || (matches!(container.mode, DockerContainerMode::OneShot { .. })
+                        && inspected.status == "exited"
+                        && inspected.exit_code == Some(0))) =>
         {
+            return Ok(());
+        }
+        Some(inspected)
+            if matches!(container.mode, DockerContainerMode::OneShot { .. })
+                && inspected.running
+                && !container_mismatch(request, container, &spec_digest, &inspected) =>
+        {
+            // Adopt work left by an interrupted attempt so timeout and recovery
+            // own its cleanup; successful completion remains reusable evidence.
+            journal.push(Change::Created(name));
             return Ok(());
         }
         Some(inspected) => {
@@ -971,6 +1136,12 @@ fn replace_container(
     }
     args.push("--label".into());
     args.push(format!("tenkai.spec-digest={spec_digest}"));
+    if matches!(container.mode, DockerContainerMode::OneShot { .. }) {
+        args.push("--label".into());
+        args.push("tenkai.job=true".into());
+        args.push("--label".into());
+        args.push(format!("tenkai.job-started-at-ms={}", crate::now_millis()));
+    }
     for (key, value) in &request.overlays {
         args.push("--label".into());
         args.push(format!("tenkai.config.{key}={value}"));
@@ -1025,13 +1196,17 @@ fn replace_container(
     args.extend(entrypoint_args.iter().cloned());
     args.extend(container.command.iter().flatten().cloned());
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    docker_ok(
-        executor,
-        request,
-        SoftwareDeployPhase::Apply,
-        "run",
-        &arg_refs,
-    )?;
+    if let DockerContainerMode::OneShot { timeout_secs } = container.mode {
+        run_one_shot(executor, request, &arg_refs, timeout_secs)?;
+    } else {
+        docker_ok(
+            executor,
+            request,
+            SoftwareDeployPhase::Apply,
+            "run",
+            &arg_refs,
+        )?;
+    }
     if let Some((_, rest)) = container.networks.split_first() {
         for network in rest {
             let mut connect = vec!["network".to_string(), "connect".into()];
@@ -1064,6 +1239,13 @@ fn roll_back(
 ) -> Result<()> {
     for change in journal.iter().rev() {
         let (Change::Created(name) | Change::Replaced { name, .. }) = change;
+        if matches!(change, Change::Created(_))
+            && inspect_container(executor, name)?
+                .as_ref()
+                .is_some_and(successful_job)
+        {
+            continue;
+        }
         remove_if_present(executor, request, name)?;
     }
     for change in journal {
@@ -1089,6 +1271,17 @@ fn reinstate(
         "rename",
         &["rename", previous, name],
     )?;
+    if inspect_container(executor, name)?
+        .as_ref()
+        .is_some_and(|inspected| {
+            inspected
+                .labels
+                .get("tenkai.job")
+                .is_some_and(|value| value == "true")
+        })
+    {
+        return Ok(());
+    }
     docker_ok(
         executor,
         request,
@@ -1138,12 +1331,123 @@ fn remove_if_present(
     )
 }
 
-fn wait_healthy(
+fn check_dependencies(
+    executor: &DockerHostExecutor,
+    request: &SoftwareApplyRequest,
+    topology: &DockerHostTopology,
+    container: &DockerHostContainer,
+) -> Result<()> {
+    for dependency in &container.depends_on {
+        let Some(condition) = dependency.condition() else {
+            continue;
+        };
+        let dependency = dependency.name();
+        let target = topology
+            .containers
+            .iter()
+            .find(|target| target.name == dependency)
+            .ok_or_else(|| anyhow::anyhow!("dependency {dependency} is not declared"))?;
+        let name = managed_container_name(request, target)?;
+        let observed = inspect_container(executor, &name)?
+            .ok_or_else(|| anyhow::anyhow!("dependency {dependency} is absent"))?;
+        let satisfied = match condition {
+            DockerDependencyCondition::Started => observed.running,
+            DockerDependencyCondition::Healthy => observed.running && observed.health == "healthy",
+            DockerDependencyCondition::CompletedSuccessfully => {
+                observed.status == "exited" && observed.exit_code == Some(0)
+            }
+        };
+        if !satisfied {
+            bail!(
+                "dependency {dependency} for {} does not satisfy {condition:?}",
+                container.name
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Bound job startup without exporting its potentially secret-bearing logs.
+fn run_one_shot(
+    executor: &DockerHostExecutor,
+    request: &SoftwareApplyRequest,
+    args: &[&str],
+    timeout_secs: u64,
+) -> Result<()> {
+    use std::process::Stdio;
+    let mut child = executor
+        .docker_command()
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("starting one-shot docker job")?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
+    loop {
+        if let Some(status) = child.try_wait()? {
+            if status.success() {
+                return Ok(());
+            }
+            bail!(
+                "one-shot job for {} exited unsuccessfully (code {:?})",
+                request.product,
+                status.code()
+            );
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!(
+                "one-shot job for {} exceeded timeout of {timeout_secs} seconds",
+                request.product
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn wait_container(
     executor: &DockerHostExecutor,
     request: &SoftwareApplyRequest,
     container: &DockerHostContainer,
 ) -> Result<()> {
-    let name = container_runtime_name(request, &container.name);
+    let name = managed_container_name(request, container)?;
+    if let DockerContainerMode::OneShot { timeout_secs } = container.mode {
+        let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
+        loop {
+            let observed = inspect_container(executor, &name)?
+                .ok_or_else(|| anyhow::anyhow!("one-shot job {} disappeared", container.name))?;
+            if observed.status == "exited" {
+                if observed.exit_code == Some(0) {
+                    return Ok(());
+                }
+                bail!(
+                    "one-shot job {} exited unsuccessfully (code {:?})",
+                    container.name,
+                    observed.exit_code
+                );
+            }
+            if std::time::Instant::now() >= deadline {
+                remove_if_present(executor, request, &name)?;
+                bail!(
+                    "one-shot job {} exceeded timeout of {timeout_secs} seconds",
+                    container.name
+                );
+            }
+            if !observed.running {
+                bail!(
+                    "one-shot job {} has no running or completed process",
+                    container.name
+                );
+            }
+            std::thread::sleep(
+                executor
+                    .health_delay
+                    .max(Duration::from_millis(10))
+                    .min(deadline.saturating_duration_since(std::time::Instant::now())),
+            );
+        }
+    }
     for attempt in 0..executor.health_attempts {
         let inspected = inspect_container(executor, &name)?.ok_or_else(|| {
             anyhow::anyhow!("docker container {name} disappeared during health wait")
@@ -1187,6 +1491,8 @@ struct InspectedContainer {
     image: String,
     labels: BTreeMap<String, String>,
     running: bool,
+    status: String,
+    exit_code: Option<i64>,
     health: String,
 }
 
@@ -1245,6 +1551,14 @@ fn parse_inspect_json(raw: &str) -> Result<Option<InspectedContainer>> {
         .pointer("/State/Running")
         .and_then(|value| value.as_bool())
         .unwrap_or(false);
+    let status = entry
+        .pointer("/State/Status")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let exit_code = entry
+        .pointer("/State/ExitCode")
+        .and_then(|value| value.as_i64());
     let health = entry
         .pointer("/State/Health/Status")
         .and_then(|value| value.as_str())
@@ -1254,6 +1568,8 @@ fn parse_inspect_json(raw: &str) -> Result<Option<InspectedContainer>> {
         image,
         labels,
         running,
+        status,
+        exit_code,
         health,
     }))
 }
@@ -1289,6 +1605,7 @@ fn remove_unowned_containers(
     executor: &DockerHostExecutor,
     request: &SoftwareApplyRequest,
     desired: &BTreeSet<String>,
+    retain_completed_jobs: bool,
 ) -> Result<()> {
     let filter = format!("label=tenkai.product={}", request.product);
     let env_filter = format!("label=tenkai.environment={}", request.environment);
@@ -1308,9 +1625,57 @@ fn remove_unowned_containers(
     if !output.status.success() {
         return Ok(());
     }
+    let mut observed = Vec::new();
+    let mut active_jobs = BTreeSet::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         let name = line.trim();
-        if name.is_empty() || desired.contains(name) {
+        if name.is_empty() {
+            continue;
+        }
+        let inspected = inspect_container(executor, name)?;
+        if retain_completed_jobs
+            && desired.contains(name)
+            && let Some(job) = inspected.as_ref().filter(|job| successful_job(job))
+            && let Some(component) = job.labels.get("tenkai.container")
+        {
+            active_jobs.insert(component.clone());
+        }
+        observed.push((name.to_string(), inspected));
+    }
+    // Keep the active generation and one recent predecessor per declared job.
+    let mut previous = BTreeMap::<String, (i64, String)>::new();
+    if retain_completed_jobs {
+        for (name, inspected) in &observed {
+            if desired.contains(name) {
+                continue;
+            }
+            let Some(job) = inspected.as_ref().filter(|job| successful_job(job)) else {
+                continue;
+            };
+            let Some(component) = job
+                .labels
+                .get("tenkai.container")
+                .filter(|component| active_jobs.contains(*component))
+            else {
+                continue;
+            };
+            let started_at = job
+                .labels
+                .get("tenkai.job-started-at-ms")
+                .and_then(|value| value.parse::<i64>().ok())
+                .unwrap_or(0);
+            let candidate = (started_at, name.clone());
+            if previous
+                .get(component)
+                .is_none_or(|prior| &candidate > prior)
+            {
+                previous.insert(component.clone(), candidate);
+            }
+        }
+    }
+    let retained: BTreeSet<_> = previous.into_values().map(|(_, name)| name).collect();
+    for (name, _) in observed {
+        if desired.contains(&name) || retained.contains(&name) {
             continue;
         }
         docker_ok(
@@ -1318,7 +1683,7 @@ fn remove_unowned_containers(
             request,
             SoftwareDeployPhase::Apply,
             "rm extra",
-            &["rm", "-f", name],
+            &["rm", "-f", &name],
         )?;
     }
     Ok(())
@@ -1483,6 +1848,7 @@ mod tests {
                         path: "/var/lib/data".into(),
                     }],
                     depends_on: Vec::new(),
+                    mode: DockerContainerMode::Service,
                     env_file: None,
                     health: Some(DockerHealthCheck { cmd: "true".into() }),
                     ports: Vec::new(),
@@ -1499,6 +1865,7 @@ mod tests {
                     networks: vec!["appnet".into()],
                     volumes: Vec::new(),
                     depends_on: vec!["db".into()],
+                    mode: DockerContainerMode::Service,
                     env_file: Some("api.env".into()),
                     health: Some(DockerHealthCheck { cmd: "true".into() }),
                     ports: vec![DockerPortPublication {
@@ -1558,6 +1925,239 @@ inputs = ["docker"]
 
     fn executor_for(script: &Path, state: &Path, unhealthy: &[&str]) -> DockerHostExecutor {
         DockerHostExecutor::for_binary(script.to_path_buf()).with_fake_env(state, SECRET, unhealthy)
+    }
+
+    fn write_job_release(root: &Path, version: &str) -> DockerHostTopology {
+        write_release(root, version, DIGEST_B);
+        let mut topology = sample_topology();
+        let mut service = topology.containers[1].clone();
+        service.name = "worker".into();
+        service.env_file = None;
+        service.depends_on = vec![DockerDependency::Conditional {
+            container: "init".into(),
+            condition: DockerDependencyCondition::CompletedSuccessfully,
+        }];
+        topology.containers[1].name = "init".into();
+        topology.containers[1].env_file = None;
+        topology.containers[1].health = None;
+        topology.containers[1].ports.clear();
+        topology.containers[1].mode = DockerContainerMode::OneShot { timeout_secs: 1 };
+        topology.containers[1].depends_on = vec![DockerDependency::Conditional {
+            container: "db".into(),
+            condition: DockerDependencyCondition::Healthy,
+        }];
+        topology.containers.push(service);
+        std::fs::write(
+            root.join(version).join("docker/host.json"),
+            serde_json::to_vec_pretty(&topology).unwrap(),
+        )
+        .unwrap();
+        topology
+    }
+
+    #[test]
+    fn completion_gated_jobs_retain_evidence_across_apply_restart_and_rollback_activation() {
+        let root = std::env::temp_dir().join(format!("tenkai-job-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let topology = write_job_release(&root, "1.0.0");
+        write_job_release(&root, "1.1.0");
+        let (script, state) = fake_docker(&root);
+        let executor = executor_for(&script, &state, &[]);
+        let first = request_for(&root, &root, "1.0.0");
+        executor.apply(&first).unwrap();
+        assert_eq!(
+            executor.observe(&first).unwrap(),
+            SoftwareObserveStatus::Present
+        );
+        let log_path = root.join("argv.log");
+        let first_log = std::fs::read_to_string(&log_path).unwrap();
+        let calls: Vec<Vec<String>> = first_log
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let launched: Vec<_> = calls
+            .iter()
+            .filter(|args| args[0] == "run")
+            .map(|args| args[args.iter().position(|arg| arg == "--name").unwrap() + 1].clone())
+            .collect();
+        assert_eq!(
+            launched,
+            topology
+                .containers
+                .iter()
+                .map(|container| managed_container_name(&first, container).unwrap())
+                .collect::<Vec<_>>()
+        );
+        executor.apply(&first).unwrap();
+        executor.restart(&first).unwrap();
+        let repeated = std::fs::read_to_string(&log_path).unwrap();
+        assert!(!repeated[first_log.len()..].lines().any(|line| {
+            let args: Vec<String> = serde_json::from_str(line).unwrap();
+            args[0] == "run"
+        }));
+        let second = request_for(&root, &root, "1.1.0");
+        let mut next_topology = write_job_release(&root, "1.1.0");
+        next_topology.containers[2].image = DIGEST_C.into();
+        std::fs::write(
+            root.join("1.1.0/docker/host.json"),
+            serde_json::to_vec_pretty(&next_topology).unwrap(),
+        )
+        .unwrap();
+        let failed = executor_for(&script, &state, &[DIGEST_C]);
+        assert!(
+            failed
+                .apply(&second)
+                .unwrap_err()
+                .to_string()
+                .contains("restored the previous containers")
+        );
+        failed.cleanup_failed_apply(&second).unwrap();
+        executor.apply(&first).unwrap();
+        let before_retry = std::fs::read_to_string(&log_path).unwrap();
+        executor.apply(&second).unwrap();
+        let after_retry = std::fs::read_to_string(&log_path).unwrap();
+        let completed_job = managed_container_name(&second, &next_topology.containers[1]).unwrap();
+        assert!(!after_retry[before_retry.len()..].lines().any(|line| {
+            let args: Vec<String> = serde_json::from_str(line).unwrap();
+            args[0] == "run" && args.contains(&completed_job)
+        }));
+        let upgraded = std::fs::read_to_string(&log_path).unwrap();
+        executor.apply(&first).unwrap();
+        let rolled_back = std::fs::read_to_string(&log_path).unwrap();
+        let old_job = managed_container_name(&first, &topology.containers[1]).unwrap();
+        assert!(!rolled_back[upgraded.len()..].lines().any(|line| {
+            let args: Vec<String> = serde_json::from_str(line).unwrap();
+            args[0] == "run" && args.contains(&old_job)
+        }));
+        executor.remove(&first).unwrap();
+        let final_state: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+        assert!(final_state["containers"].as_object().unwrap().is_empty());
+        assert_eq!(final_state["volumes"].as_object().unwrap().len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn job_nonzero_exit_and_timeout_block_dependents_and_allow_explicit_retry() {
+        for timeout in [false, true] {
+            let root =
+                std::env::temp_dir().join(format!("tenkai-job-refusal-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&root).unwrap();
+            let topology = write_job_release(&root, "1.0.0");
+            let (script, state) = fake_docker(&root);
+            let mut executor =
+                executor_for(&script, &state, if timeout { &[] } else { &[DIGEST_B] });
+            if timeout {
+                executor
+                    .extra_env
+                    .insert("TENKAI_DOCKER_FAKE_JOB_RUNNING".into(), "1".into());
+            }
+            let request = request_for(&root, &root, "1.0.0");
+            let error = executor.apply(&request).unwrap_err().to_string();
+            assert!(
+                error.contains(if timeout {
+                    "exceeded timeout"
+                } else {
+                    "exited unsuccessfully"
+                }),
+                "{error}"
+            );
+            assert!(!error.contains(SECRET));
+            let refused_state: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+            assert!(refused_state["containers"].as_object().unwrap().is_empty());
+            let log = std::fs::read_to_string(root.join("argv.log")).unwrap();
+            let worker = managed_container_name(&request, &topology.containers[2]).unwrap();
+            assert!(!log.lines().any(|line| {
+                let args: Vec<String> = serde_json::from_str(line).unwrap();
+                args[0] == "run" && args.contains(&worker)
+            }));
+            let retried = executor_for(&script, &state, &[]);
+            retried.apply(&request).unwrap();
+            assert_eq!(
+                retried.observe(&request).unwrap(),
+                SoftwareObserveStatus::Present
+            );
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn interrupted_running_job_is_removed_when_its_adopted_attempt_times_out() {
+        let root =
+            std::env::temp_dir().join(format!("tenkai-interrupted-job-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let topology = write_job_release(&root, "1.0.0");
+        let (script, state_path) = fake_docker(&root);
+        let executor = executor_for(&script, &state_path, &[]);
+        let request = request_for(&root, &root, "1.0.0");
+        executor.apply(&request).unwrap();
+        let job = managed_container_name(&request, &topology.containers[1]).unwrap();
+        let worker = managed_container_name(&request, &topology.containers[2]).unwrap();
+        let mut state: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+        state["containers"].as_object_mut().unwrap().remove(&worker);
+        state["containers"][&job]["running"] = true.into();
+        state["containers"][&job]["status"] = "running".into();
+        std::fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+        let error = executor.apply(&request).unwrap_err().to_string();
+        assert!(error.contains("exceeded timeout"), "{error}");
+        let stopped: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+        assert!(stopped["containers"].get(&job).is_none());
+        assert!(stopped["containers"].get(&worker).is_none());
+        executor.apply(&request).unwrap();
+        assert_eq!(
+            executor.observe(&request).unwrap(),
+            SoftwareObserveStatus::Present
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn topology_rejects_unbounded_jobs_and_incompatible_dependency_conditions() {
+        let mut topology = sample_topology();
+        topology.containers[1].env_file = None;
+        topology.containers[1].health = None;
+        topology.containers[1].mode = DockerContainerMode::OneShot { timeout_secs: 0 };
+        assert!(
+            validate_topology(&topology, None)
+                .unwrap_err()
+                .to_string()
+                .contains("timeout")
+        );
+        topology.containers[1].mode = DockerContainerMode::OneShot { timeout_secs: 1 };
+        topology.containers[1].health = Some(DockerHealthCheck { cmd: "true".into() });
+        assert!(
+            validate_topology(&topology, None)
+                .unwrap_err()
+                .to_string()
+                .contains("health check")
+        );
+        topology.containers[1].health = None;
+        topology.containers[1].depends_on = vec![DockerDependency::Conditional {
+            container: "db".into(),
+            condition: DockerDependencyCondition::CompletedSuccessfully,
+        }];
+        assert!(
+            validate_topology(&topology, None)
+                .unwrap_err()
+                .to_string()
+                .contains("requires a one-shot job")
+        );
+        topology.containers[1].depends_on.clear();
+        topology.containers[0].depends_on = vec!["api".into()];
+        assert!(
+            validate_topology(&topology, None)
+                .unwrap_err()
+                .to_string()
+                .contains("require completed_successfully")
+        );
+        topology.containers[0].depends_on = vec![DockerDependency::Conditional {
+            container: "api".into(),
+            condition: DockerDependencyCondition::CompletedSuccessfully,
+        }];
+        validate_topology(&topology, None).unwrap();
     }
 
     #[test]

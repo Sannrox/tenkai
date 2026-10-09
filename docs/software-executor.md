@@ -268,3 +268,34 @@ include **phase** (`apply` / `health` / `restore` / `remove`), product@version,
 and environment/namespace. Auto-rollback does not rewrite channel head — status
 may show `behind` until re-promote. Laptop dogfood script modes:
 `TENKAI_DOGFOOD_MODE=local|signed-multi-env|canary` (see local dogfood note).
+
+### Completion-gated initialization jobs
+
+A Docker topology may declare a container as a bounded one-shot job:
+
+```json
+{
+  "name": "init",
+  "image": "registry.example/app@sha256:<digest>",
+  "mode": {"one_shot": {"timeout_secs": 300}}
+}
+```
+
+A dependent service can require `started`, `healthy`, or
+`completed_successfully` directly in `depends_on`, for example
+`[{"container": "init", "condition": "completed_successfully"}]`.
+Legacy string dependencies retain their existing service readiness ordering. One-shot jobs must
+use `completed_successfully`; they cannot declare a health probe. Tenkai waits
+for an exited container with exit code zero and keeps that container as
+release-bound completion evidence. It never copies job output into receipts.
+
+Successful apply retains the current completion container and the most recent
+predecessor for each declared job; older and removed-job evidence is reclaimed.
+Matching successful jobs are reused by reconciliation and restart, so an
+ordinary observe or restart does not replay initialization side effects. A
+changed release, configuration, or job specification gets a new job identity
+and may run once. A failed job blocks dependents and may be retried explicitly.
+Rollback may replay the target release's job when its completion evidence is no
+longer present; database effects remain application-owned and are not reversed
+by Tenkai. Removing a product removes managed job containers in reverse
+lifecycle order and preserves named volumes.

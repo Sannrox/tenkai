@@ -216,11 +216,17 @@ def handle_run(state: dict, state_path: Path, args: list[str]) -> int:
         if digest.strip()
     }
     healthy = image not in fail
+    detached = "-d" in args or "--detach" in args
+    job = labels.get("tenkai.job") == "true"
+    job_running = job and os.environ.get("TENKAI_DOCKER_FAKE_JOB_RUNNING") == "1"
+    running = job_running or (detached and not job)
     state["containers"][name] = {
         "id": container_id(name),
         "image": image,
         "labels": labels,
-        "running": True,
+        "running": running,
+        "status": "running" if running else "exited",
+        "exit_code": 0 if healthy else 1,
         "health": "healthy" if healthy else "unhealthy",
         "mounts": mounts,
         "ports": take_flag(args, "--publish"),
@@ -276,7 +282,7 @@ def container_id(name: str) -> str:
     return hashlib.sha256(name.encode()).hexdigest()[:12]
 
 
-def inspect_payload(name: str, labels: dict, image: str = "", running: bool = False, health: str = "") -> dict:
+def inspect_payload(name: str, labels: dict, image: str = "", running: bool = False, health: str = "", status: str = "", exit_code: int | None = None) -> dict:
     return {
         "Name": name,
         "Labels": labels,
@@ -286,6 +292,8 @@ def inspect_payload(name: str, labels: dict, image: str = "", running: bool = Fa
         },
         "State": {
             "Running": running,
+            "Status": status or ("running" if running else "exited"),
+            "ExitCode": exit_code if exit_code is not None else 0,
             "Health": {"Status": health},
         },
     }
@@ -305,6 +313,8 @@ def handle_inspect(state: dict, args: list[str]) -> int:
                     image=container.get("image", ""),
                     running=container.get("running", False),
                     health=container.get("health", ""),
+                    status=container.get("status", ""),
+                    exit_code=container.get("exit_code"),
                 )
             )
             continue
