@@ -27,12 +27,11 @@ When failed cleanup leaves the external target unknown:
    version.
 5. Re-inspect the environment, create a fresh plan, and resume normal delivery.
 
-`env reconcile` records an observation; it does not repair the external target.
+`env reconcile` records an observation of the already-verified target.
 
 ## Leases and fences
 
 An expired generation-fenced lease is taken over through normal reconciliation.
-Do not delete or rewrite lease state manually.
 
 For a legacy object-only lease, first stop the old controller and every child
 process, verify no apply is running, then use:
@@ -41,7 +40,7 @@ process, verify no apply is running, then use:
 tenkaictl env unlock <environment>
 ```
 
-Never unlock merely because an operation is slow.
+Unlock only after that verification.
 
 ## Backup
 
@@ -75,6 +74,3 @@ state:
 5. Verify with `env list`, `inspect`, and affected `env inspect` commands.
 6. Re-inject remote credentials from the secret store and rehydrate external
    artifacts separately.
-
-Provider availability is not a restore prerequisite and provider projections
-must not be used to reconstruct operational state.
