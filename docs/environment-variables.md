@@ -16,6 +16,8 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | `TENKAI_PRINCIPAL` | `tenkai` (`local-operator` for embedded `env retire`) | Embedded audit principal or remote provider caller identity |
 | `TENKAI_MANAGEMENT_TOKEN` | unset | Community management bearer for server management requests, remote CLI mode, and embedded `promote` / canary mutations including `canary repair`. When set, remote `tenkaictl` uses it instead of a saved OIDC login |
 | `TENKAI_CLIENT_ID` | unset | Optional public OIDC client id for `tenkaictl login`; defaults to `GET /v1/auth/oidc` |
+| `TENKAI_OIDC_CLIENT_ID` | unset | Optional OIDC client id for `tenkaictl login`, including `--client-credentials`; preferred over `TENKAI_CLIENT_ID`. CLI-only |
+| `TENKAI_OIDC_CLIENT_SECRET` | unset | Confidential OIDC client secret for `tenkaictl login --client-credentials`. CLI-only; never passed on a command line, never stored in `tokens.json`, and never set on `tenkai-server` |
 | `TENKAI_JWT_ASSERTION` | unset | Optional compact JWT for embedded `promote` / canary mutations including `canary repair`; requires `TENKAI_JWT_VERIFIER_CONFIG` |
 | `TENKAI_JWT_VERIFIER_CONFIG` | unset | Filesystem path to a JWT trust TOML file for enterprise JWT verification |
 | `TENKAI_OCI_STORE` | unset | Filesystem adapter root used to verify digest-bound OCI artifact references at publish and apply, and to load signed offline-bundle layers onto an environment mirror |

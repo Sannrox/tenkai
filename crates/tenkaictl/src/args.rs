@@ -85,9 +85,12 @@ pub(crate) enum Command {
     Init,
     /// Sign in to a remote server through the configured OIDC provider.
     Login {
-        /// Pre-registered public OIDC client ID. Defaults to GET /v1/auth/oidc.
-        #[arg(long, env = "TENKAI_CLIENT_ID")]
+        /// Pre-registered OIDC client ID. Defaults to GET /v1/auth/oidc.
+        #[arg(long)]
         client_id: Option<String>,
+        /// Non-interactive client-credentials login. Reads TENKAI_OIDC_CLIENT_SECRET.
+        #[arg(long)]
+        client_credentials: bool,
         /// Loopback port for the authorization redirect. 0 binds an ephemeral port.
         #[arg(long, default_value_t = 0)]
         callback_port: u16,

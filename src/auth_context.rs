@@ -121,6 +121,8 @@ pub enum PrincipalKind {
 pub enum DeliveryCapability {
     /// Read fleet/environment inspection surfaces.
     Read,
+    /// Catalog publish and channel promote.
+    Publish,
     /// Mutating management operations such as reconcile.
     Management,
 }
@@ -157,6 +159,10 @@ pub struct AuthenticatedRequestContext {
     /// verifying authenticator (for example an OIDC group rule).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     environment_binding: Option<String>,
+    /// Channels this principal may promote into. Empty means no channel
+    /// confinement. Ignored for catalog-wide publish.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    channel_bindings: BTreeSet<String>,
 }
 
 impl AuthenticatedRequestContext {
@@ -180,11 +186,22 @@ impl AuthenticatedRequestContext {
         self.environment_binding.as_deref()
     }
 
+    pub fn channel_bindings(&self) -> &BTreeSet<String> {
+        &self.channel_bindings
+    }
+
     pub fn has_delivery_capability(&self, required: DeliveryCapability) -> bool {
         match required {
             DeliveryCapability::Read => {
                 self.delivery_capabilities
                     .contains(&DeliveryCapability::Read)
+                    || self
+                        .delivery_capabilities
+                        .contains(&DeliveryCapability::Management)
+            }
+            DeliveryCapability::Publish => {
+                self.delivery_capabilities
+                    .contains(&DeliveryCapability::Publish)
                     || self
                         .delivery_capabilities
                         .contains(&DeliveryCapability::Management)
@@ -266,6 +283,7 @@ pub struct AuthenticatedRequestContextBuilder {
     tenant: Option<TenantContext>,
     delivery_capabilities: BTreeSet<DeliveryCapability>,
     environment_binding: Option<String>,
+    channel_bindings: BTreeSet<String>,
 }
 
 impl AuthenticatedRequestContextBuilder {
@@ -282,6 +300,7 @@ impl AuthenticatedRequestContextBuilder {
             tenant: None,
             delivery_capabilities,
             environment_binding: None,
+            channel_bindings: BTreeSet::new(),
         }
     }
 
@@ -323,6 +342,19 @@ impl AuthenticatedRequestContextBuilder {
         self
     }
 
+    /// Confine promote to these channels. Empty names are skipped.
+    pub fn with_channel_bindings(
+        mut self,
+        channels: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.channel_bindings = channels
+            .into_iter()
+            .map(Into::into)
+            .filter(|channel| !channel.trim().is_empty())
+            .collect();
+        self
+    }
+
     pub fn build(self) -> Result<AuthenticatedRequestContext, AuthError> {
         let context = AuthenticatedRequestContext {
             contract_version: AUTH_CONTEXT_CONTRACT_VERSION,
@@ -332,6 +364,7 @@ impl AuthenticatedRequestContextBuilder {
             authenticator_id: self.authenticator_id,
             delivery_capabilities: self.delivery_capabilities,
             environment_binding: self.environment_binding,
+            channel_bindings: self.channel_bindings,
         };
         context.validate()?;
         Ok(context)
@@ -1033,6 +1066,55 @@ mod tests {
             .unwrap();
         assert!(context.has_delivery_capability(DeliveryCapability::Management));
         assert!(context.has_delivery_capability(DeliveryCapability::Read));
+        assert!(context.has_delivery_capability(DeliveryCapability::Publish));
+    }
+
+    #[test]
+    fn publish_does_not_imply_read_or_management() {
+        let context = AuthenticatedRequestContextBuilder::new(
+            "cap-publish",
+            PrincipalIdentity {
+                id: "ci".into(),
+                kind: PrincipalKind::Service,
+            },
+            "test-auth",
+        )
+        .with_delivery_capabilities([DeliveryCapability::Publish])
+        .build()
+        .unwrap();
+        assert!(context.has_delivery_capability(DeliveryCapability::Publish));
+        assert!(!context.has_delivery_capability(DeliveryCapability::Read));
+        assert!(!context.has_delivery_capability(DeliveryCapability::Management));
+        context
+            .require_delivery_capability(DeliveryCapability::Publish)
+            .unwrap();
+        let error = context
+            .require_delivery_capability(DeliveryCapability::Management)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            AuthError::Forbidden(ref message) if message.contains("insufficient delivery capability")
+        ));
+    }
+
+    #[test]
+    fn channel_bindings_skip_empty_names() {
+        let context = AuthenticatedRequestContextBuilder::new(
+            "cap-channels",
+            PrincipalIdentity {
+                id: "ci".into(),
+                kind: PrincipalKind::Service,
+            },
+            "test-auth",
+        )
+        .with_delivery_capabilities([DeliveryCapability::Publish])
+        .with_channel_bindings(["stable", "", "  "])
+        .build()
+        .unwrap();
+        assert_eq!(
+            context.channel_bindings(),
+            &BTreeSet::from(["stable".into()])
+        );
     }
 
     #[test]

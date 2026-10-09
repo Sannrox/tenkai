@@ -236,7 +236,7 @@ struct JwtClaims {
     tenant_id: Option<String>,
     #[serde(default)]
     tenkai_tenant: Option<String>,
-    /// Explicit delivery RBAC claim: `["read"]`, `["management"]`, or both.
+    /// Explicit delivery RBAC claim: `read`, `management`, and/or `publish`.
     #[serde(default)]
     tenkai_capabilities: Option<Vec<String>>,
 }
@@ -318,6 +318,9 @@ pub(crate) fn parse_delivery_capabilities(
         match value.as_str() {
             "read" => {
                 capabilities.insert(DeliveryCapability::Read);
+            }
+            "publish" => {
+                capabilities.insert(DeliveryCapability::Publish);
             }
             "management" => {
                 capabilities.insert(DeliveryCapability::Management);
@@ -736,6 +739,7 @@ mod tests {
             .unwrap();
         assert_eq!(ctx.principal.kind, PrincipalKind::Human);
         assert!(!ctx.has_delivery_capability(DeliveryCapability::Read));
+        assert!(!ctx.has_delivery_capability(DeliveryCapability::Publish));
         assert!(!ctx.has_delivery_capability(DeliveryCapability::Management));
     }
 
@@ -756,6 +760,16 @@ mod tests {
             Some(std::collections::BTreeSet::from([
                 DeliveryCapability::Read,
                 DeliveryCapability::Management,
+            ]))
+        );
+
+        claims.insert("tenkai_capabilities".into(), serde_json::json!(["publish"]));
+        let publish = mint_jwt(&signing, &claims, Some("k1"));
+        let verified = v.verify(publish.as_bytes(), now).unwrap();
+        assert_eq!(
+            verified.delivery_capabilities,
+            Some(std::collections::BTreeSet::from([
+                DeliveryCapability::Publish,
             ]))
         );
 

@@ -55,6 +55,9 @@ impl EnterpriseAuthExtension for TenantAssertionExtension {
                     Some("read") => {
                         parsed.insert(tenkai::auth_context::DeliveryCapability::Read);
                     }
+                    Some("publish") => {
+                        parsed.insert(tenkai::auth_context::DeliveryCapability::Publish);
+                    }
                     Some("management") => {
                         parsed.insert(tenkai::auth_context::DeliveryCapability::Management);
                     }

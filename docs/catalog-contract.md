@@ -18,7 +18,8 @@ Its Rust contract version is `CATALOG_CONTRACT_VERSION = 1`.
   releases fail closed.
 - **Promote** changes one channel head through one governed operation. The
   caller must present an `AuthenticatedRequestContext` with
-  `DeliveryCapability::Management` before canary evaluation. The authorization
+  `DeliveryCapability::Publish` before canary evaluation (`Management`
+  implies `Publish`). The authorization
   decision, audit record (including `principal_id` and `principal_kind`), and
   head mutation share the adapter's atomic commit boundary; a transport must
   not acknowledge a partial result.

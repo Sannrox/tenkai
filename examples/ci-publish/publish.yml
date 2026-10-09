@@ -1,0 +1,41 @@
+# Sample product-repo workflow. Copy into the product repository; do not enable
+# it as a live workflow in the Tenkai control-plane checkout.
+name: Publish to Tenkai
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      TENKAI_SERVER_URL: ${{ vars.TENKAI_SERVER_URL }}
+      TENKAI_OIDC_CLIENT_ID: ${{ vars.TENKAI_OIDC_CLIENT_ID }}
+      TENKAI_OIDC_CLIENT_SECRET: ${{ secrets.TENKAI_OIDC_CLIENT_SECRET }}
+      TENKAI_PRODUCT: ${{ vars.TENKAI_PRODUCT }}
+      TENKAI_CHANNEL: stable
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tenkaictl
+        run: |
+          set -euo pipefail
+          # Install a pinned tenkaictl from your artifact store.
+          install -m 0755 ./tenkaictl /usr/local/bin/tenkaictl
+      - name: Login, publish, and promote
+        env:
+          TENKAI_TRUST_ROOTS: ${{ secrets.TENKAI_TRUST_ROOTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s' "$TENKAI_TRUST_ROOTS" > "$RUNNER_TEMP/release-trust.toml"
+          tenkaictl login --client-credentials
+          tenkaictl --target remote publish deploy/tenkai.toml \
+            --signature deploy/tenkai.sig.json \
+            --trust-roots "$RUNNER_TEMP/release-trust.toml"
+          version="${GITHUB_REF_NAME#v}"
+          tenkaictl --target remote promote "${TENKAI_PRODUCT}@${version}" "$TENKAI_CHANNEL"

@@ -54,8 +54,10 @@ Community and spoke hosts serve these routes. Tenant-mode hubs support `retire` 
 ## Credentials
 
 Authentication stays on `AuthStack` ([request context](auth-request-context.md)).
-`DeliveryCapability::Management` is required for every lifecycle operation.
-`read` is not enough.
+`publish` and `promote` require `DeliveryCapability::Publish`. Every other
+lifecycle operation requires `DeliveryCapability::Management`. `read` is not
+enough. `Management` satisfies `Publish`; `Publish` does not satisfy
+`Management` or `Read`.
 
 | Principal | Grant | Lifecycle effect |
 | --- | --- | --- |
