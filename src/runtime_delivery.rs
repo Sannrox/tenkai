@@ -482,6 +482,25 @@ impl RuntimeDeliveryOperations {
                 claim: None,
             });
         };
+        let Some(mut ctx) = self.reconciler.application_ctx() else {
+            return Err(RuntimeDeliveryError::Unavailable(
+                "software compatibility preflight unavailable".into(),
+            ));
+        };
+        for step in &plan.steps {
+            crate::software_compatibility::require_release(&mut ctx, environment, &step.release_id)
+                .await
+                .map_err(|error| {
+                    match error
+                        .downcast_ref::<crate::software_compatibility::CompatibilityBlocked>()
+                    {
+                        Some(blocked) => RuntimeDeliveryError::InvalidRequest(blocked.to_string()),
+                        None => RuntimeDeliveryError::Unavailable(
+                            "software compatibility preflight unavailable".into(),
+                        ),
+                    }
+                })?;
+        }
         let expires_at = crate::now_millis().saturating_add(2 * 60 * 1000);
         let claim = self
             .store
@@ -529,7 +548,7 @@ impl RuntimeDeliveryOperations {
             .map_err(|error| RuntimeDeliveryError::Internal(format!("{error:#}")))
     }
 
-    pub fn renew(
+    pub async fn renew(
         &self,
         token: Option<&str>,
         instance: Option<&str>,
@@ -537,6 +556,35 @@ impl RuntimeDeliveryOperations {
         heartbeat: &RuntimeHeartbeat,
     ) -> Result<RuntimeClaim, RuntimeDeliveryError> {
         let identity = self.admit(token, instance, environment)?;
+        let Some(mut ctx) = self.reconciler.application_ctx() else {
+            return Err(RuntimeDeliveryError::Unavailable(
+                "software compatibility preflight unavailable".into(),
+            ));
+        };
+        let plan = crate::plan::load(&mut ctx, &heartbeat.plan_id)
+            .await
+            .map_err(|_| {
+                RuntimeDeliveryError::Unavailable(
+                    "software compatibility preflight unavailable".into(),
+                )
+            })?;
+        if plan.environment != environment {
+            return Err(RuntimeDeliveryError::ForeignEnvironment);
+        }
+        for step in &plan.steps {
+            crate::software_compatibility::require_release(&mut ctx, environment, &step.release_id)
+                .await
+                .map_err(|error| {
+                    match error
+                        .downcast_ref::<crate::software_compatibility::CompatibilityBlocked>()
+                    {
+                        Some(blocked) => RuntimeDeliveryError::InvalidRequest(blocked.to_string()),
+                        None => RuntimeDeliveryError::Unavailable(
+                            "software compatibility preflight unavailable".into(),
+                        ),
+                    }
+                })?;
+        }
         let expires_at = crate::now_millis().saturating_add(2 * 60 * 1000);
         self.store
             .renew_runtime_plan(
@@ -648,6 +696,8 @@ mod tests {
     struct Port {
         store: Arc<dyn OperationalStore>,
         calls: Mutex<Vec<&'static str>>,
+        ctx: Option<Ctx>,
+        plan: tokio::sync::OnceCell<Plan>,
     }
 
     impl ReconcilePort for Port {
@@ -657,22 +707,39 @@ mod tests {
 
         fn pending_work(&self, environment: String) -> WorkFuture<'_> {
             Box::pin(async move {
-                Ok(Some(Plan {
-                    format_version: 1,
-                    id: "plan-1".into(),
-                    content_id: "sha256:plan".into(),
-                    environment,
-                    created_at: 1,
-                    inputs: Vec::new(),
-                    steps: Vec::new(),
-                    state: crate::plan::PlanState::Computed,
-                    gates_skipped: None,
-                    status_detail: String::new(),
-                    maintenance_blocked: false,
-                    prior_warnings: Vec::new(),
-                    recalled_recovery_reason: None,
-                }))
+                let plan = if let Some(mut ctx) = self.ctx.clone() {
+                    self.plan
+                        .get_or_try_init(|| async {
+                            crate::ontology::register(&mut ctx).await?;
+                            crate::environment::env_add(&mut ctx, &environment, "runtime-test")
+                                .await?;
+                            crate::plan::create_from_steps(&mut ctx, &environment, Vec::new()).await
+                        })
+                        .await?
+                        .clone()
+                } else {
+                    Plan {
+                        format_version: 1,
+                        id: "plan-1".into(),
+                        content_id: "sha256:plan".into(),
+                        environment,
+                        created_at: 1,
+                        inputs: Vec::new(),
+                        steps: Vec::new(),
+                        state: crate::plan::PlanState::Computed,
+                        gates_skipped: None,
+                        status_detail: String::new(),
+                        maintenance_blocked: false,
+                        prior_warnings: Vec::new(),
+                        recalled_recovery_reason: None,
+                    }
+                };
+                Ok(Some(plan))
             })
+        }
+
+        fn application_ctx(&self) -> Option<Ctx> {
+            self.ctx.clone()
         }
 
         fn check_health(&self) -> HealthFuture<'_> {
@@ -753,6 +820,8 @@ mod tests {
         let port = Arc::new(Port {
             store: store.clone(),
             calls: Mutex::new(Vec::new()),
+            ctx: Some(Ctx::embedded(":memory:").unwrap()),
+            plan: tokio::sync::OnceCell::new(),
         });
         (
             RuntimeDeliveryOperations::new(
@@ -762,6 +831,37 @@ mod tests {
             ),
             port,
         )
+    }
+
+    #[tokio::test]
+    async fn unavailable_application_context_refuses_claim_and_renewal() {
+        let (mut operations, _) = operations();
+        operations.reconciler = Arc::new(Port {
+            store: operations.store.clone(),
+            calls: Mutex::new(Vec::new()),
+            ctx: None,
+            plan: tokio::sync::OnceCell::new(),
+        });
+        assert!(matches!(
+            operations
+                .claim_work(Some("runtime-secret"), Some("instance-a"), "prod")
+                .await,
+            Err(RuntimeDeliveryError::Unavailable(_))
+        ));
+        assert!(matches!(
+            operations
+                .renew(
+                    Some("runtime-secret"),
+                    Some("instance-a"),
+                    "prod",
+                    &RuntimeHeartbeat {
+                        plan_id: "plan-1".into(),
+                        generation: 1,
+                    }
+                )
+                .await,
+            Err(RuntimeDeliveryError::Unavailable(_))
+        ));
     }
 
     #[tokio::test]
@@ -799,10 +899,11 @@ mod tests {
                 Some("instance-a"),
                 "prod",
                 &RuntimeHeartbeat {
-                    plan_id: "plan-1".into(),
+                    plan_id: claim.plan_id.clone(),
                     generation: claim.generation,
                 },
             )
+            .await
             .unwrap();
         assert_eq!(renewed.generation, claim.generation);
 
@@ -812,7 +913,7 @@ mod tests {
                 Some("instance-a"),
                 "prod",
                 RuntimeCompletion {
-                    plan_id: "plan-1".into(),
+                    plan_id: claim.plan_id.clone(),
                     generation: claim.generation,
                     succeeded: true,
                     detail: "deployed".into(),

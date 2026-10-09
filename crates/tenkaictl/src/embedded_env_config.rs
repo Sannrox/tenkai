@@ -253,3 +253,31 @@ pub(crate) async fn approval_policy(
     }
     Ok(())
 }
+
+pub(crate) async fn compatibility(
+    ctx: &mut client::Ctx,
+    command: crate::env_args::CompatibilityCommand,
+) -> Result<()> {
+    match command {
+        crate::env_args::CompatibilityCommand::Record { env, evidence } => {
+            let evidence = serde_json::from_slice(&std::fs::read(evidence)?)?;
+            tenkai::software_compatibility::record_evidence(ctx, &env, evidence).await?;
+            println!("recorded software compatibility evidence for {env}");
+        }
+        crate::env_args::CompatibilityCommand::Check { env, release } => {
+            let report = tenkai::software_compatibility::report(ctx, &env, &release).await?;
+            print_compatibility_report(report)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn print_compatibility_report(
+    report: Option<tenkai::software_compatibility::CompatibilityReport>,
+) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    if report.is_some_and(|report| !report.failures.is_empty()) {
+        bail!("software compatibility blocked");
+    }
+    Ok(())
+}

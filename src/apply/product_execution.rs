@@ -28,6 +28,13 @@ pub(super) async fn activate(
     content: &ReleaseContent,
     adapters: TargetAdapters<'_>,
 ) -> Result<Result<(), String>> {
+    crate::software_compatibility::require_manifest(
+        ctx,
+        &content.environment,
+        &content.manifest,
+        &content.manifest_digest,
+    )
+    .await?;
     if content.manifest.product.kind.policy().target() == ProductTarget::RoutingConfig {
         prepare_fenced_mutation(ctx, lease, content).await?;
         let routing = content
@@ -200,6 +207,13 @@ pub(super) async fn restart(
     content: &ReleaseContent,
     adapters: TargetAdapters<'_>,
 ) -> Result<Result<(), String>> {
+    crate::software_compatibility::require_manifest(
+        ctx,
+        &content.environment,
+        &content.manifest,
+        &content.manifest_digest,
+    )
+    .await?;
     if content.manifest.product.kind.policy().target() == ProductTarget::WorkerPool {
         prepare_fenced_mutation(ctx, lease, content).await?;
         return admit_worker_pool(ctx, lease, content, adapters.worker_lifecycle, false, true)

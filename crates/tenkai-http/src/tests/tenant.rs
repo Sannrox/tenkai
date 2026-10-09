@@ -75,7 +75,7 @@ async fn tenant_mode_management_apis_isolate_environments() {
         .unwrap();
 
     let store = Arc::new(tenkai::storage::SqliteStore::open_in_memory().unwrap());
-    let tenant_app = router(config, Arc::new(FixedReconciler), store).unwrap();
+    let tenant_app = router(config, Arc::new(FixedReconciler::default()), store).unwrap();
 
     let list_a = tenant_app
         .clone()

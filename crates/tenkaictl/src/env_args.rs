@@ -4,6 +4,11 @@ use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub(crate) enum EnvCommand {
+    /// Record or inspect software compatibility preflight evidence.
+    Compatibility {
+        #[command(subcommand)]
+        command: CompatibilityCommand,
+    },
     /// Register an environment.
     Add {
         name: String,
@@ -221,4 +226,12 @@ pub(crate) enum MaintenanceCommand {
     Remove { env: String, identity: String },
     /// Replace an invalid configuration with an empty governed schedule.
     Repair { env: String },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum CompatibilityCommand {
+    /// Store a versioned observation JSON document for one environment.
+    Record { env: String, evidence: PathBuf },
+    /// Print the compatibility report for product@version; fail if blocked.
+    Check { env: String, release: String },
 }

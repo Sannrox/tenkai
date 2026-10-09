@@ -50,6 +50,16 @@ The detached envelope and trust-root formats are documented in
 signed approval bound to the exact plan and environment; see
 [plan approval](plan-approval.md).
 
+## Software compatibility
+
+Software releases can declare a versioned `[compatibility]` profile with immutable
+component pins, required and provided contracts, runtime capabilities, facts, and
+schema bounds. The profile is signed with the manifest. Planning, apply, restart,
+and rollback check fresh environment-scoped evidence before mutation;
+`--skip-gates` does not bypass these checks. See
+[software compatibility preflight](software-compatibility.md) for the contract,
+observation format, and CLI/API commands.
+
 ## Gates
 
 If a release declares `gate.eval_suite`, `apply` blocks unless the suite's

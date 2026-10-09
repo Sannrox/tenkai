@@ -4,6 +4,8 @@ Tenkai applies `product.kind = software` releases through a pluggable port so
 cluster or Docker-host delivery does not require hard-linking a cluster client
 into the core crate by default.
 
+Software releases can declare [signed compatibility preflight requirements](software-compatibility.md) independently of executor health checks.
+
 Source: `src/software_executor.rs`. Apply wiring: `src/apply.rs`.
 
 ## Strategies

@@ -142,6 +142,7 @@ async fn compute_snapshot_with_policy(
             );
         }
         let target = pin_release(ctx, &release, env).await?;
+        crate::software_compatibility::require_release(ctx, env, &release).await?;
         if env_obj
             .properties
             .get(&format!("deployment_health.{product}"))
@@ -510,6 +511,7 @@ pub(super) async fn rollback_step_with_recovery(
     } else {
         pin_release(ctx, &prev_id, env).await?
     };
+    crate::software_compatibility::require_release(ctx, env, &prev_id).await?;
     let restore = match current.as_deref() {
         Some(version) => {
             let current_id = release_id(product, version);
@@ -557,6 +559,7 @@ pub(super) async fn restart_step(ctx: &mut Ctx, env: &str, product: &str) -> Res
         bail!("cannot restart recalled release {current_id}");
     }
     let target = pin_release(ctx, &current_id, env).await?;
+    crate::software_compatibility::require_release(ctx, env, &current_id).await?;
     Ok(Step {
         id: format!("{}:restart:{product}", env_id(env)),
         order: 0,

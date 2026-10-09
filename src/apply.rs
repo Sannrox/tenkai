@@ -357,7 +357,9 @@ mod tests {
         uninstall: Option<&str>,
     ) -> ReleaseContent {
         ReleaseContent {
+            manifest_digest: String::new(),
             manifest: Manifest {
+                compatibility: None,
                 product: ProductSection {
                     name: "api".into(),
                     version: "1.0.0".into(),

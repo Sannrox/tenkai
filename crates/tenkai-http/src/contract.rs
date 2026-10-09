@@ -62,6 +62,22 @@ pub fn http_contract() -> Value {
     let routes = vec![
         Route {
             method: "GET",
+            path: "/v1/environments/{environment}/compatibility/{release}",
+            auth: Auth::Read,
+            request: None,
+            response: schema::<Option<tenkai::software_compatibility::CompatibilityReport>>(&mut g),
+        },
+        Route {
+            method: "POST",
+            path: "/v1/environments/{environment}/compatibility/evidence",
+            auth: Auth::Management,
+            request: Some(schema::<
+                tenkai::software_compatibility::CompatibilityEvidence,
+            >(&mut g)),
+            response: schema::<()>(&mut g),
+        },
+        Route {
+            method: "GET",
             path: "/healthz",
             auth: Auth::None,
             request: None,
