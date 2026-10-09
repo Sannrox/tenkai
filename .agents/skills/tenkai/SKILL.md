@@ -10,11 +10,15 @@ Tenkai is the authority.
 
 ## 1. Observe
 
-1. Resolve the `tenkaictl` binary, target mode, and environment.
+1. Resolve the `tenkaictl` binary, target mode, and environment. A server you
+   start or supervise needs `tenkai-executor-guard` beside it and the default
+   SIGTERM stop; see "Install a server host" in `docs/run-tenkai-server.md`.
 2. For embedded mode, set `--database` or `TENKAI_DATABASE`. Use the default
    `.tenkai-state/tenkai.db` only when the user intends that path.
 3. For remote mode, use `--target remote` with a configured server URL. Load
-   credentials from environment, secret configuration, or `tenkaictl login`.
+   credentials from environment, secret configuration, or `tenkaictl login`
+   (`--client-credentials` for unattended jobs; see
+   [references/trust.md](references/trust.md#credentials)).
    Keep tokens, signing keys, and approval material out of argv, logs, and
    reports.
 4. When the installed version may differ from this skill, run `tenkaictl --help`
@@ -48,7 +52,11 @@ required trust artifact is present and current.
 ## 3. Execute once
 
 1. For supported embedded commands that another agent or program will consume,
-   pass `--output json-v1` before the subcommand.
+   pass `--output json-v1` before the subcommand. It is embedded-only: with
+   `--target remote` it fails with `unsupported_target`. Remote mutations print
+   text, and only `env inspect` (and `fleet watch --json`) print JSON, so
+   follow every remote mutation with an observe step. Never trust a remote
+   exit code alone.
 2. Execute the bounded transition once.
 3. Preserve the complete result envelope, opaque resource identifiers, exit
    status, and sanitized diagnostics. Keep secrets, signing keys, bearer tokens,
@@ -68,9 +76,9 @@ as blocked or unknown.
 1. Re-inspect the affected release, environment, plan, or fleet.
 2. Confirm observed deployment state, channel head, plan lifecycle, and trust
    evidence as they apply. A successful process exit is not a **receipt**.
-3. For an unknown apply or rollback, failed cleanup, or recovery, follow
-   [references/recovery.md](references/recovery.md). Inspect plan and
-   environment before retrying. Record a manual observation only after
+3. For an unknown apply or rollback, failed cleanup, an automatic rollback, or
+   recovery, follow [references/recovery.md](references/recovery.md). Inspect
+   plan and environment before retrying. Record a manual observation only after
    independently verifying the live target.
 
 **Done when:** durable Tenkai state matches the intended outcome, or the report
