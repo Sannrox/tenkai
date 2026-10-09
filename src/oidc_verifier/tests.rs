@@ -412,15 +412,24 @@ claim = "groups"
 value = "ci-publishers"
 capabilities = ["publish"]
 channels = ["stable"]
+products = ["api"]
 kind = "service"
 [[grants.rules]]
 value = "ci-beta"
 capabilities = ["publish"]
 channels = ["beta"]
+products = ["worker"]
 kind = "service"
 [[grants.rules]]
 value = "tenkai-admins"
 capabilities = ["read", "management"]
+[[grants.rules]]
+value = "read-workers"
+capabilities = ["read"]
+products = ["worker"]
+[[grants.rules]]
+value = "catalog-publishers"
+capabilities = ["publish"]
 "#
     ))
     .unwrap();
@@ -431,6 +440,10 @@ capabilities = ["read", "management"]
         signer.sign(&far_future(serde_json::json!(["ci-publishers"]))),
     )
     .unwrap();
+    assert_eq!(
+        publisher.product_bindings(),
+        &BTreeSet::from(["api".into()])
+    );
     assert_eq!(publisher.principal.kind, PrincipalKind::Service);
     assert!(publisher.has_delivery_capability(DeliveryCapability::Publish));
     assert!(!publisher.has_delivery_capability(DeliveryCapability::Management));
@@ -446,6 +459,10 @@ capabilities = ["read", "management"]
     )
     .unwrap();
     assert_eq!(
+        unioned.product_bindings(),
+        &BTreeSet::from(["api".into(), "worker".into()])
+    );
+    assert_eq!(
         unioned.channel_bindings(),
         &BTreeSet::from(["beta".into(), "stable".into()])
     );
@@ -460,7 +477,29 @@ capabilities = ["read", "management"]
     .unwrap();
     assert!(admin.has_delivery_capability(DeliveryCapability::Management));
     assert!(admin.channel_bindings().is_empty());
+    assert!(admin.product_bindings().is_empty());
     assert_eq!(admin.principal.kind, PrincipalKind::Service);
+    let read_and_publish = authenticate(
+        &ext,
+        signer.sign(&far_future(serde_json::json!([
+            "ci-publishers",
+            "read-workers"
+        ]))),
+    )
+    .unwrap();
+    assert_eq!(
+        read_and_publish.product_bindings(),
+        &BTreeSet::from(["api".into()])
+    );
+    let unrestricted = authenticate(
+        &ext,
+        signer.sign(&far_future(serde_json::json!([
+            "ci-publishers",
+            "catalog-publishers"
+        ]))),
+    )
+    .unwrap();
+    assert!(unrestricted.product_bindings().is_empty());
 }
 
 #[test]

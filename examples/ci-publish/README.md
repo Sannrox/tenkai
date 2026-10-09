@@ -19,6 +19,7 @@ channel:
 value = "ci-publishers"
 capabilities = ["publish"]
 channels = ["stable"]
+products = ["api"]
 kind = "service"
 ```
 

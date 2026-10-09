@@ -163,6 +163,8 @@ pub struct AuthenticatedRequestContext {
     /// confinement. Ignored for catalog-wide publish.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     channel_bindings: BTreeSet<String>,
+    #[serde(default)]
+    product_bindings: BTreeSet<String>,
 }
 
 impl AuthenticatedRequestContext {
@@ -184,6 +186,10 @@ impl AuthenticatedRequestContext {
 
     pub fn environment_binding(&self) -> Option<&str> {
         self.environment_binding.as_deref()
+    }
+
+    pub fn product_bindings(&self) -> &BTreeSet<String> {
+        &self.product_bindings
     }
 
     pub fn channel_bindings(&self) -> &BTreeSet<String> {
@@ -284,6 +290,7 @@ pub struct AuthenticatedRequestContextBuilder {
     delivery_capabilities: BTreeSet<DeliveryCapability>,
     environment_binding: Option<String>,
     channel_bindings: BTreeSet<String>,
+    product_bindings: BTreeSet<String>,
 }
 
 impl AuthenticatedRequestContextBuilder {
@@ -301,6 +308,7 @@ impl AuthenticatedRequestContextBuilder {
             delivery_capabilities,
             environment_binding: None,
             channel_bindings: BTreeSet::new(),
+            product_bindings: BTreeSet::new(),
         }
     }
 
@@ -343,6 +351,11 @@ impl AuthenticatedRequestContextBuilder {
     }
 
     /// Confine promote to these channels. Empty names are skipped.
+    pub fn with_product_bindings(mut self, products: impl IntoIterator<Item = String>) -> Self {
+        self.product_bindings = products.into_iter().collect();
+        self
+    }
+
     pub fn with_channel_bindings(
         mut self,
         channels: impl IntoIterator<Item = impl Into<String>>,
@@ -365,6 +378,7 @@ impl AuthenticatedRequestContextBuilder {
             delivery_capabilities: self.delivery_capabilities,
             environment_binding: self.environment_binding,
             channel_bindings: self.channel_bindings,
+            product_bindings: self.product_bindings,
         };
         context.validate()?;
         Ok(context)

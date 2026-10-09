@@ -24,6 +24,13 @@ when any environment fails.
 
 ## Run `tenkai-server`
 
+Remote publication and non-local deployment verify signatures against the current
+host file `TENKAI_RELEASE_TRUST_ROOTS`. Caller-supplied roots cannot add trusted
+signers. Removing a signer from the host file prevents subsequent deployment of
+its releases. Configure OIDC grant rules with `products = ["api"]` to confine
+publication and promotion to those products; omitted product bindings retain
+catalog-wide authority. Fleet management grants retain full catalog authority.
+
 `tenkai-server` hosts the same reconciliation contract as embedded CLI mode,
 binds its listener before opening the operational store, serves unauthenticated
 liveness (`/healthz`) immediately and readiness (`/readyz`) after the store is

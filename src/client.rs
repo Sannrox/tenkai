@@ -44,6 +44,8 @@ pub(crate) use transport::{
 
 #[derive(Clone)]
 pub struct Ctx {
+    pub(crate) release_trust_roots: Option<std::path::PathBuf>,
+    pub(crate) require_host_release_trust: bool,
     backend: Backend,
     canary_schema_preflight: Arc<OnceCell<()>>,
     outcome_export_enabled: bool,
@@ -129,6 +131,8 @@ pub async fn connect() -> Result<Ctx> {
             )
         })?;
     Ok(Ctx {
+        release_trust_roots: None,
+        require_host_release_trust: false,
         backend: Backend::Remote {
             client: Arc::new(client),
             action_defs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),

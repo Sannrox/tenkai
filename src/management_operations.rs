@@ -716,6 +716,8 @@ impl ManagementOperations {
     ) -> Result<ManagementLifecycleResult, ManagementError> {
         let context = self.authenticate(credential)?;
         Self::require_capability(&context, DeliveryCapability::Publish)?;
+        let manifest = crate::manifest::parse_raw(&request.manifest).map_err(map_catalog_error)?;
+        Self::require_product_grant(&context, &manifest.product.name)?;
         self.require_community_catalog_host()?;
         management_lifecycle::admit_publish(
             &request,
@@ -759,6 +761,18 @@ impl ManagementOperations {
         ))
     }
 
+    fn require_product_grant(
+        context: &AuthenticatedRequestContext,
+        product: &str,
+    ) -> Result<(), ManagementError> {
+        if !context.product_bindings().is_empty() && !context.product_bindings().contains(product) {
+            return Err(ManagementError::Forbidden(
+                "product is outside the publication grant".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub async fn promote_release(
         &self,
         credential: &CredentialMaterial,
@@ -768,6 +782,12 @@ impl ManagementOperations {
         let context = self.authenticate(credential)?;
         Self::require_capability(&context, DeliveryCapability::Publish)?;
         Self::require_channel_binding(&context, channel)?;
+        let product = request
+            .spec
+            .split_once('@')
+            .map(|(product, _)| product)
+            .unwrap_or(&request.spec);
+        Self::require_product_grant(&context, product)?;
         self.require_community_catalog_host()?;
         management_lifecycle::admit_promote(
             &request,
@@ -1110,9 +1130,14 @@ impl ManagementOperations {
     }
 
     fn application_ctx(&self) -> Result<Ctx, ManagementError> {
-        self.reconciler.application_ctx().ok_or_else(|| {
-            ManagementError::Unavailable("application core is not available on this host".into())
-        })
+        self.reconciler
+            .application_ctx()
+            .map(|ctx| ctx.with_release_trust_roots(self.release_trust_roots.clone()))
+            .ok_or_else(|| {
+                ManagementError::Unavailable(
+                    "application core is not available on this host".into(),
+                )
+            })
     }
 
     fn require_matching_migration_trust_roots(
@@ -1698,6 +1723,7 @@ mod tests {
             )
             .with_delivery_capabilities(self.capabilities.clone())
             .with_channel_bindings(self.channels.clone())
+            .with_product_bindings(["api".into()])
             .build()
         }
     }
@@ -1798,6 +1824,39 @@ mod tests {
         request.trust_roots.signers[0].public_key = "caller-supplied-key-is-ignored".into();
         let published = ops.publish_release(&credential, request).await.unwrap();
         assert!(published.message.contains("api@1.0.0"), "{published:?}");
+        let mut ctx = ops.application_ctx().unwrap();
+        let release = ctx
+            .get(&crate::ontology::release_id("api", "1.0.0"))
+            .await
+            .unwrap()
+            .unwrap();
+        crate::catalog::require_deployable_trust(&mut ctx, &release, "stage")
+            .await
+            .unwrap();
+        let attacker = root.join("attacker");
+        std::fs::create_dir_all(&attacker).unwrap();
+        let forged = signed_publish_request(&attacker, "2.0.0");
+        assert!(ops.publish_release(&credential, forged).await.is_err());
+        let original_roots = std::fs::read(root.join("trust-roots.toml")).unwrap();
+        std::fs::copy(
+            attacker.join("trust-roots.toml"),
+            root.join("trust-roots.toml"),
+        )
+        .unwrap();
+        assert!(
+            crate::catalog::require_deployable_trust(&mut ctx, &release, "stage")
+                .await
+                .is_err()
+        );
+        std::fs::write(root.join("trust-roots.toml"), original_roots).unwrap();
+        let mut foreign_product = signed_publish_request(&root, "3.0.0");
+        foreign_product.manifest = foreign_product
+            .manifest
+            .replace("name = \"api\"", "name = \"other\"");
+        assert!(matches!(
+            ops.publish_release(&credential, foreign_product).await,
+            Err(ManagementError::Forbidden(_))
+        ));
         ops.promote_release(
             &credential,
             "stable",

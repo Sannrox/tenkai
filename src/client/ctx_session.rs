@@ -12,6 +12,12 @@ use crate::pb::sekai::Object;
 use crate::storage::OperationalStore;
 
 impl Ctx {
+    /// Configure host-owned release roots for deployment re-verification.
+    pub fn with_release_trust_roots(mut self, path: Option<std::path::PathBuf>) -> Self {
+        self.release_trust_roots = path;
+        self.require_host_release_trust = true;
+        self
+    }
     /// Open the complete in-process backend used by the solo CLI.
     pub fn embedded(path: impl AsRef<Path>) -> Result<Self> {
         Self::embedded_with_outcome_export(path, false)
@@ -49,6 +55,8 @@ impl Ctx {
             canary_schema_preflight: Arc::new(OnceCell::new()),
             outcome_export_enabled,
             outcome_inspection_enabled: true,
+            release_trust_roots: None,
+            require_host_release_trust: false,
             plan_kind_list: Arc::new(PlanKindListTick::default()),
         })
     }

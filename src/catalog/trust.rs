@@ -295,6 +295,20 @@ pub async fn require_deployable_trust(
     }
     let properties = stored_verification_properties(ctx, release).await?;
     verification_view(release, &properties)?;
+    if ctx.require_host_release_trust {
+        let path = ctx.release_trust_roots.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("deployment requires server-configured release trust roots")
+        })?;
+        let roots = release_signing::TrustRoots::load(path)?;
+        let envelope: release_signing::SignatureEnvelope =
+            serde_json::from_str(property(&properties, "signature_envelope")?)?;
+        release_signing::verify_release(
+            &envelope,
+            &roots,
+            property(&release.properties, "digest")?,
+            property(&release.properties, "artifact_digest")?,
+        )?;
+    }
     require_deployable_trust_properties(&properties, environment)
 }
 

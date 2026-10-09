@@ -143,6 +143,9 @@ pub struct OidcGrantRule {
     /// confined to these channels. Publish ignores channel bindings.
     #[serde(default)]
     pub channels: Vec<String>,
+    /// Products this rule may publish or promote.
+    #[serde(default)]
+    pub products: Vec<String>,
     /// Principal kind for this rule. Default remains human; `service` is for CI.
     #[serde(default)]
     pub kind: Option<String>,
@@ -246,6 +249,15 @@ impl OidcConfig {
             return invalid("OIDC grants.rules must name at least one claim value");
         }
         for rule in &self.grants.rules {
+            if rule
+                .products
+                .iter()
+                .any(|product| product.trim().is_empty() || product.trim() != product)
+            {
+                return invalid(
+                    "OIDC grant rule products must be nonempty names without surrounding whitespace",
+                );
+            }
             if rule.value.trim().is_empty() {
                 return invalid("OIDC grant rule value must not be empty");
             }
@@ -638,6 +650,7 @@ struct Grants {
     capabilities: BTreeSet<DeliveryCapability>,
     environment: Option<String>,
     channel_bindings: BTreeSet<String>,
+    product_bindings: BTreeSet<String>,
     principal_kind: PrincipalKind,
 }
 
@@ -741,12 +754,20 @@ impl OidcAuthExtension {
         let mut fleet = BTreeSet::new();
         let mut scoped: BTreeMap<&str, BTreeSet<DeliveryCapability>> = BTreeMap::new();
         let mut channel_bindings = BTreeSet::new();
+        let mut product_bindings = BTreeSet::new();
+        let mut unrestricted_publication = false;
         let mut principal_kind = PrincipalKind::Human;
         for rule in &self.config.grants.rules {
             if !values.contains(rule.value.as_str()) {
                 continue;
             }
             let capabilities = parse_delivery_capabilities(&rule.capabilities)?;
+            if capabilities.contains(&DeliveryCapability::Publish)
+                || capabilities.contains(&DeliveryCapability::Management)
+            {
+                unrestricted_publication |= rule.products.is_empty();
+                product_bindings.extend(rule.products.iter().cloned());
+            }
             match &rule.environment {
                 None => fleet.extend(capabilities),
                 Some(environment) => scoped.entry(environment).or_default().extend(capabilities),
@@ -780,6 +801,9 @@ impl OidcAuthExtension {
         if fleet_management {
             channel_bindings.clear();
         }
+        if fleet_management || unrestricted_publication {
+            product_bindings.clear();
+        }
 
         let tenant = match &self.config.grants.tenant_claim {
             Some(claim) => match claims.rest.get(claim) {
@@ -797,6 +821,7 @@ impl OidcAuthExtension {
             capabilities,
             environment,
             channel_bindings,
+            product_bindings,
             principal_kind,
         })
     }
@@ -849,6 +874,7 @@ impl EnterpriseAuthExtension for OidcAuthExtension {
         if let Some(environment) = grants.environment {
             builder = builder.with_environment_binding(environment);
         }
+        builder = builder.with_product_bindings(grants.product_bindings);
         if !grants.channel_bindings.is_empty() {
             builder = builder.with_channel_bindings(grants.channel_bindings);
         }
