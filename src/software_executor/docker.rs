@@ -782,7 +782,16 @@ fn remove_unowned_containers(
     let env_filter = format!("label=tenkai.environment={}", request.environment);
     let output = docker_output(
         executor,
-        &["ps", "-aq", "--filter", &filter, "--filter", &env_filter],
+        &[
+            "ps",
+            "-a",
+            "--format",
+            "{{.Names}}",
+            "--filter",
+            &filter,
+            "--filter",
+            &env_filter,
+        ],
     )?;
     if !output.status.success() {
         return Ok(());
@@ -1042,6 +1051,27 @@ inputs = ["docker"]
         assert_eq!(
             executor.observe(&request).unwrap(),
             SoftwareObserveStatus::Present
+        );
+        executor.apply(&request).unwrap();
+        assert_eq!(
+            executor.observe(&request).unwrap(),
+            SoftwareObserveStatus::Present
+        );
+        let fake_state: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&state).unwrap()).unwrap();
+        assert!(
+            fake_state["containers"]
+                .as_object()
+                .unwrap()
+                .contains_key("local-edge-app-ctr-db"),
+            "{fake_state}"
+        );
+        assert!(
+            fake_state["containers"]
+                .as_object()
+                .unwrap()
+                .contains_key("local-edge-app-ctr-api"),
+            "{fake_state}"
         );
         executor.restart(&request).unwrap();
         assert_eq!(
