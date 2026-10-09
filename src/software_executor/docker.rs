@@ -1136,29 +1136,60 @@ fn spec_digest_with_files(
 }
 
 fn config_file_bytes(request: &SoftwareApplyRequest, file: &DockerConfigFile) -> Result<Vec<u8>> {
-    let root = request.workdir.canonicalize()?;
-    let source = root.join(&file.source).canonicalize()?;
-    if !source.starts_with(&root) || !source.is_file() {
-        bail!("config file source escapes the release workdir");
-    }
+    let file = open_config_source(&request.workdir, &file.source)?;
     use std::io::Read as _;
     let mut contents = Vec::new();
     const MAX_CONFIG_BYTES: u64 = 16 * 1024 * 1024;
-    #[cfg(unix)]
-    let file = {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(source)?
-    };
-    #[cfg(not(unix))]
-    let file = std::fs::File::open(source)?;
     file.take(MAX_CONFIG_BYTES + 1).read_to_end(&mut contents)?;
     if contents.len() as u64 > MAX_CONFIG_BYTES {
         bail!("config file exceeds 16 MiB limit");
     }
     Ok(contents)
+}
+
+/// Anchor each source component to an open directory, so renaming a source
+/// or replacing a parent with a symlink cannot redirect reads outside the root.
+#[cfg(unix)]
+fn open_config_source(root: &Path, source: &str) -> Result<std::fs::File> {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let mut directory = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(root)?;
+    let mut components = Path::new(source).components().peekable();
+    while let Some(component) = components.next() {
+        let std::path::Component::Normal(component) = component else {
+            bail!("config source must be a relative path without traversal");
+        };
+        let name = std::ffi::CString::new(component.as_encoded_bytes())?;
+        let last = components.peek().is_none();
+        let flags = libc::O_RDONLY
+            | libc::O_NOFOLLOW
+            | libc::O_CLOEXEC
+            | libc::O_NONBLOCK
+            | if last { 0 } else { libc::O_DIRECTORY };
+        // SAFETY: directory owns a live descriptor and name is NUL-terminated.
+        let fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        // SAFETY: openat returned a new descriptor, transferred to File once.
+        let opened = unsafe { std::fs::File::from_raw_fd(fd) };
+        if last {
+            if !opened.metadata()?.is_file() {
+                bail!("config source must be a regular file");
+            }
+            return Ok(opened);
+        }
+        directory = opened;
+    }
+    bail!("config source must not be empty")
+}
+
+#[cfg(not(unix))]
+fn open_config_source(_root: &Path, _source: &str) -> Result<std::fs::File> {
+    bail!("Docker release configuration files require descriptor-relative Unix file access")
 }
 
 /// Stream a root-owned regular file into a stopped container. Only archive

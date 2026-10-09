@@ -308,7 +308,9 @@ A container may declare non-secret files from the release workdir:
 {"source":"docker/realm.json","destination":"/etc/app/realm.json","read_only":true}
 ```
 
-Sources are regular files beneath the release root. Destinations are absolute,
+Sources are regular files beneath the release root. Source symlinks, including
+symlinked parent directories, are rejected through descriptor-relative file
+access on Unix; this input feature fails closed on other platforms. Destinations are absolute,
 non-traversing paths and may not collide with each other or declared volume
 mounts. Tenkai creates the container, streams the file archive through the
 Docker client, sets root ownership and mode `0444` for `read_only` or `0644` otherwise, and
