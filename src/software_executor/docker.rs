@@ -597,13 +597,14 @@ pub fn validate_topology(topology: &DockerHostTopology, secret_dir: Option<&Path
                     )
                 })
                 || !destinations.insert(&file.destination)
-                || container
-                    .volumes
-                    .iter()
-                    .any(|mount| destination.starts_with(&mount.path))
+                || container.volumes.iter().any(|mount| {
+                    destination.starts_with(&mount.path)
+                        || Path::new(&mount.path).starts_with(destination)
+                })
                 || container.files.iter().any(|other| {
                     other.destination != file.destination
-                        && destination.starts_with(&other.destination)
+                        && (destination.starts_with(&other.destination)
+                            || Path::new(&other.destination).starts_with(destination))
                 })
             {
                 bail!(
@@ -2232,6 +2233,7 @@ inputs = ["docker"]
             ("docker/missing.json", "/etc/app.json"),
             ("docker/host.json", "/etc/../app.json"),
             ("docker/host.json", "/var/lib/data/app.json"),
+            ("docker/host.json", "/var/lib"),
         ] {
             let mut topology = sample_topology();
             topology.containers[1].env_file = None;
