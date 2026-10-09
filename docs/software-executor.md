@@ -168,6 +168,8 @@ TENKAI_KUBECTL_BIN=kubectl \
   environment-scoped file path (`tenkaictl env cluster-config`).
 - Docker `env_file` values stay in operator-managed files. Store only the
   environment-scoped directory path (`tenkaictl env docker-secrets`).
+- Volume mount targets are allowlisted unix paths. Comma, `=`, quotes, and
+  whitespace are refused so they cannot inject extra `--mount` fields.
 - Scope cluster credentials per environment outside Tenkai.
 - Failures leave the plan step failed; rollback remains Tenkai-authoritative.
 - Label values are sanitized; do not put secrets in label fields.

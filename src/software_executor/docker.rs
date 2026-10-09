@@ -329,16 +329,7 @@ pub fn validate_topology(topology: &DockerHostTopology, secret_dir: Option<&Path
                     mount.name
                 );
             }
-            if !mount.path.starts_with('/')
-                || mount.path.contains('\0')
-                || mount.path.contains("..")
-            {
-                bail!(
-                    "container {} volume {} path must be absolute and stay in-container",
-                    container.name,
-                    mount.name
-                );
-            }
+            validate_mount_target_path(&container.name, &mount.name, &mount.path)?;
         }
         if let Some(env_file) = &container.env_file {
             validate_env_file_name(env_file)?;
@@ -366,6 +357,25 @@ pub fn validate_topology(topology: &DockerHostTopology, secret_dir: Option<&Path
         }
     }
     order_containers(topology)?;
+    Ok(())
+}
+
+/// Volume `--mount` target. Comma, `=`, quotes, and whitespace would inject
+/// extra Docker mount fields (bind-mount override). `..` leaves the container.
+fn validate_mount_target_path(container: &str, volume: &str, path: &str) -> Result<()> {
+    let allowed = path
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-'));
+    if !path.starts_with('/')
+        || path.len() < 2
+        || path.contains('\0')
+        || path.contains("..")
+        || !allowed
+    {
+        bail!(
+            "container {container} volume {volume} path must be an absolute in-container unix path without mount-option characters"
+        );
+    }
     Ok(())
 }
 
@@ -969,6 +979,20 @@ inputs = ["docker"]
     }
 
     #[test]
+    fn topology_rejects_mount_option_injection_in_volume_path() {
+        let mut topology = sample_topology();
+        topology.containers[1].env_file = None;
+        topology.containers[0].volumes[0].path = "/host,type=bind,source=/".into();
+        let err = validate_topology(&topology, None).unwrap_err().to_string();
+        assert!(err.contains("mount-option"), "{err}");
+        topology.containers[0].volumes[0].path = "/var/lib/data=evil".into();
+        let err = validate_topology(&topology, None).unwrap_err().to_string();
+        assert!(err.contains("mount-option"), "{err}");
+        topology.containers[0].volumes[0].path = "/var/lib/data".into();
+        validate_topology(&topology, None).unwrap();
+    }
+
+    #[test]
     fn topology_rejects_depends_on_cycles() {
         let mut topology = sample_topology();
         topology.containers[0].depends_on = vec!["api".into()];
@@ -1006,6 +1030,15 @@ inputs = ["docker"]
             SoftwareObserveStatus::Absent
         );
         executor.apply(&request).unwrap();
+        let fake_state: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&state).unwrap()).unwrap();
+        let db = fake_state["containers"]["local-edge-app-ctr-db"]
+            .as_object()
+            .expect("db container");
+        let mounts = db["mounts"].as_array().expect("parsed mounts");
+        assert_eq!(mounts.len(), 1, "{mounts:?}");
+        assert_eq!(mounts[0]["type"], "volume");
+        assert_eq!(mounts[0]["target"], "/var/lib/data");
         assert_eq!(
             executor.observe(&request).unwrap(),
             SoftwareObserveStatus::Present

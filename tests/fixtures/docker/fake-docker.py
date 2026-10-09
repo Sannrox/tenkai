@@ -51,6 +51,17 @@ def save(state_path: Path, state: dict) -> None:
     state_path.write_text(json.dumps(state), encoding="utf-8")
 
 
+def parse_mount(value: str) -> dict[str, str]:
+    """Last-key-wins CSV like Docker's --mount parser."""
+    fields: dict[str, str] = {}
+    for part in value.split(","):
+        key, sep, field = part.partition("=")
+        if not sep:
+            continue
+        fields[key] = field
+    return fields
+
+
 def take_flag(args: list[str], flag: str) -> list[str]:
     values = []
     i = 0
@@ -124,6 +135,27 @@ def handle_run(state: dict, state_path: Path, args: list[str]) -> int:
     if not image:
         sys.stderr.write("docker run requires an image digest\n")
         return 1
+    mounts = []
+    for value in take_flag(args, "--mount"):
+        fields = parse_mount(value)
+        if fields.get("type") != "volume" or not fields.get("source") or not fields.get("target"):
+            sys.stderr.write(
+                "docker run --mount must be type=volume with source and target only\n"
+            )
+            return 1
+        extra = set(fields) - {"type", "source", "target"}
+        if extra:
+            sys.stderr.write(
+                "docker run --mount must be type=volume with source and target only\n"
+            )
+            return 1
+        mounts.append(
+            {
+                "type": fields["type"],
+                "source": fields["source"],
+                "target": fields["target"],
+            }
+        )
     fail = {
         digest.strip()
         for digest in os.environ.get("TENKAI_DOCKER_FAKE_UNHEALTHY", "").split(",")
@@ -135,6 +167,7 @@ def handle_run(state: dict, state_path: Path, args: list[str]) -> int:
         "labels": labels,
         "running": True,
         "health": "healthy" if healthy else "unhealthy",
+        "mounts": mounts,
     }
     save(state_path, state)
     sys.stdout.write(name + "\n")
