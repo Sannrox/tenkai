@@ -33,6 +33,7 @@ will be split over time. Contributor and agent workflow live in
 | Manage environments and maintenance windows | [manage-environments.md](manage-environments.md) |
 | Upgrade, roll back, and recover a product | [upgrade-and-rollback.md](upgrade-and-rollback.md) |
 | Deploy releases from GitHub | [deploy-from-github.md](deploy-from-github.md) |
+| Publish a signed release from CI | [examples/ci-publish](../examples/ci-publish/) |
 | Back up and restore embedded state | [backup-restore.md](backup-restore.md) |
 | Diagnose a server and watch fleet drift | [server-diagnostics.md](server-diagnostics.md) |
 | Observe and execute rollout waves | [rollout-waves.md](rollout-waves.md) |

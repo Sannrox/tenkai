@@ -30,6 +30,9 @@ pub(crate) struct LoginRuntime {
     pub open_browser: OpenBrowser,
     pub config_dir: PathBuf,
     pub env_token: Option<String>,
+    pub oidc_client_id: Option<String>,
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
 }
 
 fn http_client() -> Result<Client> {
@@ -45,12 +48,19 @@ impl LoginRuntime {
             http: http_client()?,
             open_browser: Arc::new(open_system_browser),
             config_dir: config_dir_from_env()?,
-            env_token: std::env::var("TENKAI_MANAGEMENT_TOKEN")
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty()),
+            env_token: env_nonempty("TENKAI_MANAGEMENT_TOKEN"),
+            oidc_client_id: env_nonempty("TENKAI_OIDC_CLIENT_ID"),
+            client_id: env_nonempty("TENKAI_CLIENT_ID"),
+            client_secret: env_nonempty("TENKAI_OIDC_CLIENT_SECRET"),
         })
     }
+}
+
+fn env_nonempty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,6 +95,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Login {
             client_id,
+            client_credentials,
             callback_port,
             no_browser,
             timeout,
@@ -93,6 +104,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
                 &runtime,
                 require_server_url(cli.server_url.as_deref())?,
                 client_id,
+                client_credentials,
                 callback_port,
                 no_browser,
                 Duration::from_secs(timeout),
@@ -131,19 +143,24 @@ async fn login(
     runtime: &LoginRuntime,
     server_url: String,
     client_id_override: Option<String>,
+    client_credentials: bool,
     callback_port: u16,
     no_browser: bool,
     timeout: Duration,
 ) -> Result<()> {
     let discovery = discover_client(runtime, &server_url).await?;
-    let client_id = client_id_override
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or(discovery.client_id.clone());
-    if client_id.is_empty() {
-        bail!("no OIDC client ID; pass --client-id or set TENKAI_CLIENT_ID");
+    let client_id = resolve_client_id(runtime, client_id_override, &discovery.client_id)?;
+    let auth_server = discover_auth_server(runtime, &discovery.issuer, !client_credentials).await?;
+    if client_credentials {
+        return login_client_credentials(
+            runtime,
+            &server_url,
+            &client_id,
+            &discovery,
+            &auth_server,
+        )
+        .await;
     }
-    let auth_server = discover_auth_server(runtime, &discovery.issuer).await?;
 
     let listener = TcpListener::bind(("127.0.0.1", callback_port))
         .await
@@ -194,6 +211,7 @@ async fn login(
             access_token: token.access_token,
             refresh_token: token.refresh_token,
             expires_at_unix: token.expires_in.map(|secs| now_unix().saturating_add(secs)),
+            scopes: discovery.scopes.clone(),
         },
     )?;
     eprintln!("Logged in to {server_url}");
@@ -232,13 +250,26 @@ async fn saved_access_token(
     if login.access_token_usable() && !force_refresh {
         return Ok(login.access_token);
     }
-    let refresh_token = login
-        .refresh_token
-        .clone()
-        .ok_or_else(|| anyhow!("the saved login has expired; run tenkaictl login"))?;
-    let token = refresh(runtime, &login.token_url, &login.client_id, &refresh_token)
+    let token = if let Some(refresh_token) = login.refresh_token.clone() {
+        refresh(runtime, &login.token_url, &login.client_id, &refresh_token)
+            .await
+            .context("refreshing the saved login failed; run tenkaictl login")?
+    } else {
+        let secret = runtime.client_secret.as_deref().ok_or_else(|| {
+            anyhow!(
+                "the saved login has expired; run tenkaictl login --client-credentials with TENKAI_OIDC_CLIENT_SECRET set"
+            )
+        })?;
+        request_client_credentials(
+            runtime,
+            &login.token_url,
+            &login.client_id,
+            secret,
+            &login.scopes,
+        )
         .await
-        .context("refreshing the saved login failed; run tenkaictl login")?;
+        .context("client-credentials re-request failed; run tenkaictl login --client-credentials")?
+    };
     login.access_token = token.access_token.clone();
     if let Some(next) = token.refresh_token {
         login.refresh_token = Some(next);
@@ -246,6 +277,64 @@ async fn saved_access_token(
     login.expires_at_unix = token.expires_in.map(|secs| now_unix().saturating_add(secs));
     cache.put_locked(&lock, server_url, Some(&login))?;
     Ok(token.access_token)
+}
+
+fn resolve_client_id(
+    runtime: &LoginRuntime,
+    override_id: Option<String>,
+    discovered: &str,
+) -> Result<String> {
+    for candidate in [
+        override_id,
+        runtime.oidc_client_id.clone(),
+        runtime.client_id.clone(),
+        Some(discovered.to_string()),
+    ] {
+        if let Some(value) = candidate
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            return Ok(value);
+        }
+    }
+    bail!("no OIDC client ID; pass --client-id or set TENKAI_OIDC_CLIENT_ID or TENKAI_CLIENT_ID")
+}
+
+async fn login_client_credentials(
+    runtime: &LoginRuntime,
+    server_url: &str,
+    client_id: &str,
+    discovery: &OidcClientDiscovery,
+    auth_server: &AuthServerMetadata,
+) -> Result<()> {
+    let secret = runtime
+        .client_secret
+        .as_deref()
+        .ok_or_else(|| anyhow!("TENKAI_OIDC_CLIENT_SECRET is required for --client-credentials"))?;
+    let token = request_client_credentials(
+        runtime,
+        &auth_server.token_endpoint,
+        client_id,
+        secret,
+        &discovery.scopes,
+    )
+    .await?;
+    persist_login(
+        runtime,
+        server_url,
+        SavedLogin {
+            issuer: auth_server.issuer.clone(),
+            token_url: auth_server.token_endpoint.clone(),
+            client_id: client_id.to_string(),
+            audience: discovery.audience.clone(),
+            access_token: token.access_token,
+            refresh_token: token.refresh_token,
+            expires_at_unix: token.expires_in.map(|secs| now_unix().saturating_add(secs)),
+            scopes: discovery.scopes.clone(),
+        },
+    )?;
+    eprintln!("Logged in to {server_url}");
+    Ok(())
 }
 
 fn persist_login(runtime: &LoginRuntime, server_url: &str, login: SavedLogin) -> Result<()> {
@@ -277,7 +366,11 @@ async fn discover_client(runtime: &LoginRuntime, server_url: &str) -> Result<Oid
     Ok(discovery)
 }
 
-async fn discover_auth_server(runtime: &LoginRuntime, issuer: &str) -> Result<AuthServerMetadata> {
+async fn discover_auth_server(
+    runtime: &LoginRuntime,
+    issuer: &str,
+    require_pkce: bool,
+) -> Result<AuthServerMetadata> {
     let issuer = issuer.trim().trim_end_matches('/').to_string();
     require_https(&issuer)?;
     let mut last_error = None;
@@ -292,10 +385,11 @@ async fn discover_auth_server(runtime: &LoginRuntime, issuer: &str) -> Result<Au
                 }
                 require_https(&metadata.authorization_endpoint)?;
                 require_https(&metadata.token_endpoint)?;
-                if !metadata
-                    .code_challenge_methods_supported
-                    .iter()
-                    .any(|method| method == "S256")
+                if require_pkce
+                    && !metadata
+                        .code_challenge_methods_supported
+                        .iter()
+                        .any(|method| method == "S256")
                 {
                     bail!("authorization server {issuer} does not support PKCE S256");
                 }
@@ -396,6 +490,27 @@ async fn refresh(
         ],
     )
     .await
+}
+
+async fn request_client_credentials(
+    runtime: &LoginRuntime,
+    token_url: &str,
+    client_id: &str,
+    client_secret: &str,
+    scopes: &[String],
+) -> Result<TokenResponse> {
+    let scope = scopes.join(" ");
+    let mut form = vec![
+        ("grant_type", "client_credentials"),
+        ("client_id", client_id),
+        ("client_secret", client_secret),
+    ];
+    if !scope.is_empty() {
+        form.push(("scope", &scope));
+    }
+    post_token(runtime, token_url, &form)
+        .await
+        .context("client-credentials token request failed")
 }
 
 async fn post_token(
@@ -747,6 +862,27 @@ mod tests {
                             .to_string(),
                         )
                     }
+                    Some("client_credentials") => {
+                        if form.get("client_id").map(String::as_str) != Some("tenkai-cli")
+                            || form.get("client_secret").map(String::as_str) != Some("ci-secret")
+                        {
+                            return (
+                                400,
+                                "application/json",
+                                r#"{"error":"invalid_client"}"#.into(),
+                            );
+                        }
+                        (
+                            200,
+                            "application/json",
+                            serde_json::json!({
+                                "access_token": "access-cc",
+                                "token_type": "Bearer",
+                                "expires_in": 3600,
+                            })
+                            .to_string(),
+                        )
+                    }
                     Some("refresh_token") => {
                         let presented = form.get("refresh_token").cloned().unwrap_or_default();
                         if !fake.live_refresh.lock().unwrap().remove(&presented) {
@@ -839,6 +975,9 @@ mod tests {
             }),
             config_dir,
             env_token,
+            oidc_client_id: None,
+            client_id: None,
+            client_secret: None,
         }
     }
 
@@ -871,6 +1010,7 @@ mod tests {
             &runtime,
             fake.url.clone(),
             None,
+            false,
             0,
             false,
             Duration::from_secs(300),
@@ -916,6 +1056,7 @@ mod tests {
             &runtime,
             fake.url.clone(),
             None,
+            false,
             0,
             false,
             Duration::from_secs(300),
@@ -946,6 +1087,7 @@ mod tests {
             &runtime,
             fake.url.clone(),
             None,
+            false,
             0,
             false,
             Duration::from_secs(300),
@@ -991,5 +1133,81 @@ mod tests {
         serde_json::from_slice::<serde_json::Value>(&raw).unwrap();
         let _ = fake.shutdown.send(true);
         let _ = std::fs::remove_dir_all(&config_dir);
+    }
+
+    #[tokio::test]
+    async fn client_credentials_login_and_rerequest() {
+        let fake = spawn_fake_auth().await;
+        let config_dir = temp_config();
+        let mut runtime = runtime_for(&fake, config_dir.clone(), None);
+        runtime.client_secret = Some("ci-secret".into());
+
+        login(
+            &runtime,
+            fake.url.clone(),
+            None,
+            true,
+            0,
+            false,
+            Duration::from_secs(300),
+        )
+        .await
+        .unwrap();
+
+        let cache_path = config_dir.join("tokens.json");
+        let saved = std::fs::read_to_string(&cache_path).unwrap();
+        assert!(!saved.contains("ci-secret"), "{saved}");
+        assert!(!saved.contains("client_secret"), "{saved}");
+        assert_eq!(
+            bearer_token(&runtime, &fake.url).await.unwrap(),
+            "access-cc"
+        );
+
+        let cache = TokenCache::new(&config_dir);
+        let mut saved_login = cache.get(&fake.url).unwrap().unwrap();
+        saved_login.expires_at_unix = Some(now_unix() - EXPIRY_SKEW_SECS - 1);
+        cache.put(&fake.url, Some(&saved_login)).unwrap();
+        assert_eq!(
+            bearer_token(&runtime, &fake.url).await.unwrap(),
+            "access-cc"
+        );
+        assert_eq!(
+            fake.grants.lock().unwrap().as_slice(),
+            ["client_credentials", "client_credentials"]
+        );
+
+        runtime.client_secret = None;
+        let mut saved_login = cache.get(&fake.url).unwrap().unwrap();
+        saved_login.expires_at_unix = Some(now_unix() - EXPIRY_SKEW_SECS - 1);
+        cache.put(&fake.url, Some(&saved_login)).unwrap();
+        let error = bearer_token(&runtime, &fake.url).await.unwrap_err();
+        assert!(
+            error.to_string().contains("TENKAI_OIDC_CLIENT_SECRET"),
+            "{error:#}"
+        );
+        let _ = fake.shutdown.send(true);
+        let _ = std::fs::remove_dir_all(&config_dir);
+    }
+
+    #[tokio::test]
+    async fn client_credentials_requires_secret() {
+        let fake = spawn_fake_auth().await;
+        let runtime = runtime_for(&fake, temp_config(), None);
+        let error = login(
+            &runtime,
+            fake.url.clone(),
+            None,
+            true,
+            0,
+            false,
+            Duration::from_secs(300),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("TENKAI_OIDC_CLIENT_SECRET"),
+            "{error:#}"
+        );
+        let _ = fake.shutdown.send(true);
     }
 }

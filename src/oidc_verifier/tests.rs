@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use super::test_support::{Signer, b64, jwks};
 use super::*;
 
@@ -393,6 +395,84 @@ fn jwks_skips_unusable_keys() {
     assert!(keys.get("k1").is_some());
     assert!(keys.get("sym").is_none() && keys.get("enc").is_none());
     assert!(KeySet::from_jwks_json(r#"{"keys":[]}"#).is_err());
+}
+
+#[test]
+fn publish_grant_does_not_imply_management_and_may_bind_channels() {
+    let signer = Signer::new("k1");
+    let cache =
+        JwksCache::with_min_interval(static_source(jwks(&[&signer])), Duration::ZERO).unwrap();
+    let config = toml::from_str(&format!(
+        r#"
+issuer = "{ISSUER}"
+audience = "{AUDIENCE}"
+[grants]
+claim = "groups"
+[[grants.rules]]
+value = "ci-publishers"
+capabilities = ["publish"]
+channels = ["stable"]
+kind = "service"
+[[grants.rules]]
+value = "ci-beta"
+capabilities = ["publish"]
+channels = ["beta"]
+kind = "service"
+[[grants.rules]]
+value = "tenkai-admins"
+capabilities = ["read", "management"]
+"#
+    ))
+    .unwrap();
+    let ext = OidcAuthExtension::new(config, Arc::new(cache), None, false).unwrap();
+
+    let publisher = authenticate(
+        &ext,
+        signer.sign(&far_future(serde_json::json!(["ci-publishers"]))),
+    )
+    .unwrap();
+    assert_eq!(publisher.principal.kind, PrincipalKind::Service);
+    assert!(publisher.has_delivery_capability(DeliveryCapability::Publish));
+    assert!(!publisher.has_delivery_capability(DeliveryCapability::Management));
+    assert!(!publisher.has_delivery_capability(DeliveryCapability::Read));
+    assert_eq!(
+        publisher.channel_bindings(),
+        &BTreeSet::from(["stable".into()])
+    );
+
+    let unioned = authenticate(
+        &ext,
+        signer.sign(&far_future(serde_json::json!(["ci-publishers", "ci-beta"]))),
+    )
+    .unwrap();
+    assert_eq!(
+        unioned.channel_bindings(),
+        &BTreeSet::from(["beta".into(), "stable".into()])
+    );
+
+    let admin = authenticate(
+        &ext,
+        signer.sign(&far_future(serde_json::json!([
+            "ci-publishers",
+            "tenkai-admins"
+        ]))),
+    )
+    .unwrap();
+    assert!(admin.has_delivery_capability(DeliveryCapability::Management));
+    assert!(admin.channel_bindings().is_empty());
+    assert_eq!(admin.principal.kind, PrincipalKind::Service);
+}
+
+#[test]
+fn grant_kind_defaults_to_human() {
+    let signer = Signer::new("k1");
+    let ext = extension(&[&signer], false);
+    let context = authenticate(
+        &ext,
+        signer.sign(&far_future(serde_json::json!(["tenkai-admins"]))),
+    )
+    .unwrap();
+    assert_eq!(context.principal.kind, PrincipalKind::Human);
 }
 
 #[test]

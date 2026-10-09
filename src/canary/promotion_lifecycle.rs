@@ -9,6 +9,12 @@ pub(crate) fn require_management(actor: &AuthenticatedRequestContext) -> Result<
         .map_err(|error| anyhow::anyhow!("{error}"))
 }
 
+fn require_publish(actor: &AuthenticatedRequestContext) -> Result<()> {
+    actor
+        .require_delivery_capability(DeliveryCapability::Publish)
+        .map_err(|error| anyhow::anyhow!("{error}"))
+}
+
 fn policy_id(product: &str, version: &str, target_channel: &str) -> String {
     format!("tenkai:canary-policy:{product}@{version}:{target_channel}")
 }
@@ -678,7 +684,7 @@ pub async fn authorize_promotion(
     version: &str,
     target_channel: &str,
 ) -> Result<Option<ActiveCanaryPolicy>> {
-    require_management(actor)?;
+    require_publish(actor)?;
     let Some(active) = maybe_active_policy(ctx, product, version, target_channel).await? else {
         return Ok(None);
     };
@@ -729,7 +735,7 @@ pub(crate) async fn guarded_promotion<T, F>(
 where
     F: for<'a> FnOnce(&'a mut Ctx) -> Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>,
 {
-    require_management(actor)?;
+    require_publish(actor)?;
     let lock = claim_promotion_lock(ctx, product, target_channel, owner).await?;
     let result = async {
         let authorization =

@@ -30,7 +30,7 @@ target mode. Remote `plan`, `apply`, `approval submit`, `rollback`, and
 | Sign in | `login`, `logout` |
 | Publish | `publish`, `release inspect`, `release verify` |
 | Promote | `promote`, `canary` |
-| Configure | `env add`, `env subscribe`, `env facts`, `env overlay`, `env constraints`, `env maintenance`, `env connectivity`, `env observe`, `env preview`, `env close-preview`, `env retire`, `env artifact-mirror`, `env cluster-config`, `env docker-secrets`, `product maintenance` |
+| Configure | `env add`, `env subscribe`, `env facts`, `env overlay`, `env constraints`, `env maintenance`, `env connectivity`, `env observe`, `env preview`, `env close-preview`, `env retire`, `env artifact-mirror`, `env cluster-config`, `env docker-secrets`, `env approval-policy`, `product maintenance` |
 | Plan and apply | `plan`, `apply`, `approval inspect`, `approval submit` |
 | Reconcile | `reconcile --once` |
 | Roll back | `rollback`, `restart`, `release recall` |
@@ -61,6 +61,9 @@ credential bytes.
 
 **Docker secrets.** Store an environment-scoped secret-file directory path.
 Never secret bytes.
+
+**Approval policy.** Store an environment-scoped plan approval policy file
+path. Never signer key bytes. Skip-gates and rollback stay human.
 
 **Publication.** Creates an immutable release. Republish identical content only
 to reconcile an uncertain outcome; changed content requires a new version.

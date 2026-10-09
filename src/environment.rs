@@ -1577,6 +1577,58 @@ pub async fn docker_secret_dir(ctx: &mut Ctx, env: &str) -> Result<Option<PathBu
     crate::software_executor::secret_dir_from_properties(&env_obj.properties)
 }
 
+/// Record the environment-scoped plan approval policy file path. Never stores key bytes.
+pub async fn set_plan_approval_policy(ctx: &mut Ctx, env: &str, path: &Path) -> Result<String> {
+    validate_identifier("environment", env)?;
+    crate::approval_policy::validate_policy_file_path(path)?;
+    let canonical = path.canonicalize().with_context(|| {
+        format!(
+            "plan_approval_policy {} is not a readable policy file",
+            path.display()
+        )
+    })?;
+    if !canonical.is_file() {
+        bail!(
+            "plan_approval_policy {} is not a readable policy file",
+            canonical.display()
+        );
+    }
+    crate::approval_policy::ApprovalPolicy::load(&canonical)?;
+    let stored = canonical.to_string_lossy().into_owned();
+    crate::approval_policy::validate_policy_file_path(Path::new(&stored))?;
+    let mut env_obj = environment(ctx, env).await?;
+    env_obj.properties.insert(
+        crate::approval_policy::PLAN_APPROVAL_POLICY_PROPERTY.into(),
+        stored.clone(),
+    );
+    env_obj.updated = crate::now_millis();
+    ctx.put(env_obj).await?;
+    Ok(format!("set {env} plan_approval_policy {stored}"))
+}
+
+/// Remove the environment-scoped plan approval policy path.
+pub async fn clear_plan_approval_policy(ctx: &mut Ctx, env: &str) -> Result<String> {
+    validate_identifier("environment", env)?;
+    let mut env_obj = environment(ctx, env).await?;
+    if env_obj
+        .properties
+        .remove(crate::approval_policy::PLAN_APPROVAL_POLICY_PROPERTY)
+        .is_none()
+    {
+        bail!("environment {env} has no plan_approval_policy");
+    }
+    env_obj.updated = crate::now_millis();
+    ctx.put(env_obj).await?;
+    Ok(format!("cleared {env} plan_approval_policy"))
+}
+
+/// Read the stored environment-scoped plan approval policy path, if any.
+pub async fn plan_approval_policy(ctx: &mut Ctx, env: &str) -> Result<Option<PathBuf>> {
+    validate_identifier("environment", env)?;
+    let env_obj = environment(ctx, env).await?;
+    crate::approval_policy::policy_path_from_properties(&env_obj.properties)
+}
+
 const ENVIRONMENT_OVERLAY_PREFIX: &str = "overlay.";
 
 fn reject_credential_material(label: &str, key: &str, value: &str) -> Result<()> {
@@ -2351,5 +2403,55 @@ mod tests {
         assert!(err.contains("directory path"), "{err}");
         let _ = std::fs::remove_file(&database);
         let _ = std::fs::remove_dir_all(&secret_dir);
+    }
+
+    #[tokio::test]
+    async fn plan_approval_policy_stores_canonical_file_and_refuses_credential_bytes() {
+        let database = std::env::temp_dir().join(format!(
+            "tenkai-approval-policy-{}-{}.db",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let policy_dir = std::env::temp_dir().join(format!(
+            "tenkai-approval-policy-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let _ = std::fs::remove_file(&database);
+        let _ = std::fs::remove_dir_all(&policy_dir);
+        std::fs::create_dir_all(&policy_dir).unwrap();
+        let policy = policy_dir.join("policy.toml");
+        std::fs::write(&policy, "version = 1\nmode = \"manual\"\nttl_ms = 60000\n").unwrap();
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        env_add(&mut ctx, "lab", "Lab").await.unwrap();
+        let set = set_plan_approval_policy(&mut ctx, "lab", &policy)
+            .await
+            .unwrap();
+        assert!(set.contains("plan_approval_policy"), "{set}");
+        let stored = plan_approval_policy(&mut ctx, "lab")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored, policy.canonicalize().unwrap());
+        assert!(
+            clear_plan_approval_policy(&mut ctx, "lab")
+                .await
+                .unwrap()
+                .contains("cleared")
+        );
+        assert!(
+            plan_approval_policy(&mut ctx, "lab")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let err = set_plan_approval_policy(&mut ctx, "lab", Path::new("password=s3cret"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("file path"), "{err}");
+        let _ = std::fs::remove_file(&database);
+        let _ = std::fs::remove_dir_all(&policy_dir);
     }
 }

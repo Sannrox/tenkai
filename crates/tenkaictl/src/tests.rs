@@ -141,10 +141,29 @@ fn parses_login_and_logout() {
         login.command,
         Command::Login {
             no_browser: true,
+            client_credentials: false,
             callback_port: 9876,
             ref client_id,
             timeout: 300,
         } if client_id.as_deref() == Some("tenkai-cli")
+    ));
+    let client_credentials = Cli::try_parse_from([
+        "tenkaictl",
+        "--server-url",
+        "https://tenkai.example.test",
+        "login",
+        "--client-credentials",
+        "--client-id",
+        "tenkai-ci",
+    ])
+    .unwrap();
+    assert!(matches!(
+        client_credentials.command,
+        Command::Login {
+            client_credentials: true,
+            ref client_id,
+            ..
+        } if client_id.as_deref() == Some("tenkai-ci")
     ));
     let logout = Cli::try_parse_from([
         "tenkaictl",
@@ -244,6 +263,23 @@ fn parses_env_list_and_inspect() {
                 command: crate::env_args::DockerSecretsCommand::Set { ref env, ref path }
             }
         } if env == "lab" && path == std::path::Path::new("/var/lib/tenkai/lab-secrets")
+    ));
+    let approval_policy = Cli::try_parse_from([
+        "tenkaictl",
+        "env",
+        "approval-policy",
+        "set",
+        "lab",
+        "/etc/tenkai/lab-approval-policy.toml",
+    ])
+    .unwrap();
+    assert!(matches!(
+        approval_policy.command,
+        Command::Env {
+            command: EnvCommand::ApprovalPolicy {
+                command: crate::env_args::ApprovalPolicyCommand::Set { ref env, ref path }
+            }
+        } if env == "lab" && path == std::path::Path::new("/etc/tenkai/lab-approval-policy.toml")
     ));
 }
 
