@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 
 use super::{
     SoftwareApplyRequest, SoftwareDeployPhase, SoftwareExecutor, SoftwareObserveStatus,
@@ -184,6 +185,7 @@ impl SoftwareExecutor for DockerHostExecutor {
         validate_topology(&topology, request.secret_dir_path.as_deref())?;
         for container in order_containers(&topology)?.iter().rev() {
             let name = container_runtime_name(request, &container.name);
+            refuse_foreign_container(self, request, &name)?;
             docker_ok(
                 self,
                 request,
@@ -236,6 +238,7 @@ impl SoftwareExecutor for DockerHostExecutor {
         validate_topology(&topology, request.secret_dir_path.as_deref())?;
         for container in order_containers(&topology)? {
             let name = container_runtime_name(request, &container.name);
+            refuse_foreign_container(self, request, &name)?;
             if inspect_container(self, &name)?.is_none() {
                 replace_container(self, request, &topology, container)?;
             } else {
@@ -487,15 +490,25 @@ fn order_containers(topology: &DockerHostTopology) -> Result<Vec<&DockerHostCont
 }
 
 fn container_runtime_name(request: &SoftwareApplyRequest, name: &str) -> String {
-    format!("{}-{}-ctr-{name}", request.environment, request.product)
+    format!("{}-ctr-{name}", scope_prefix(request))
 }
 
 fn network_runtime_name(request: &SoftwareApplyRequest, name: &str) -> String {
-    format!("{}-{}-net-{name}", request.environment, request.product)
+    format!("{}-net-{name}", scope_prefix(request))
 }
 
 fn volume_runtime_name(request: &SoftwareApplyRequest, name: &str) -> String {
-    format!("{}-{}-vol-{name}", request.environment, request.product)
+    format!("{}-vol-{name}", scope_prefix(request))
+}
+
+/// Content-addressed prefix so hyphenated environment or product values cannot collide.
+fn scope_prefix(request: &SoftwareApplyRequest) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(request.environment.as_bytes());
+    hasher.update([0]);
+    hasher.update(request.product.as_bytes());
+    let hex = format!("{:x}", hasher.finalize());
+    format!("t{}", &hex[..12])
 }
 
 fn ownership_labels(request: &SoftwareApplyRequest, container: &str) -> Vec<String> {
@@ -552,6 +565,7 @@ fn replace_container(
     container: &DockerHostContainer,
 ) -> Result<()> {
     let name = container_runtime_name(request, &container.name);
+    refuse_foreign_container(executor, request, &name)?;
     docker_ok(
         executor,
         request,
@@ -703,7 +717,11 @@ fn inspect_container(
         })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
-        if stderr.contains("no such object") || stderr.contains("no such container") {
+        if stderr.contains("no such object")
+            || stderr.contains("no such container")
+            || stderr.contains("no such network")
+            || stderr.contains("no such volume")
+        {
             return Ok(None);
         }
         bail!(
@@ -725,13 +743,12 @@ fn parse_inspect_json(raw: &str) -> Result<Option<InspectedContainer>> {
         .unwrap_or_default()
         .to_string();
     let mut labels = BTreeMap::new();
-    if let Some(map) = entry
-        .pointer("/Config/Labels")
-        .and_then(|value| value.as_object())
-    {
-        for (key, value) in map {
-            if let Some(text) = value.as_str() {
-                labels.insert(key.clone(), text.to_string());
+    for pointer in ["/Labels", "/Config/Labels"] {
+        if let Some(map) = entry.pointer(pointer).and_then(|value| value.as_object()) {
+            for (key, value) in map {
+                if let Some(text) = value.as_str() {
+                    labels.insert(key.clone(), text.to_string());
+                }
             }
         }
     }
@@ -812,6 +829,66 @@ fn remove_unowned_containers(
     Ok(())
 }
 
+fn labels_owned_by(request: &SoftwareApplyRequest, labels: &BTreeMap<String, String>) -> bool {
+    labels.get("tenkai.product").map(String::as_str) == Some(request.product.as_str())
+        && labels.get("tenkai.environment").map(String::as_str)
+            == Some(request.environment.as_str())
+}
+
+fn foreign_owner_error(
+    request: &SoftwareApplyRequest,
+    name: &str,
+    labels: &BTreeMap<String, String>,
+) -> anyhow::Error {
+    anyhow::anyhow!(
+        "software deploy phase={} product={} environment/namespace={}: docker name {name} is owned by product={} environment={}",
+        SoftwareDeployPhase::Apply.as_str(),
+        request.product,
+        request.environment,
+        labels
+            .get("tenkai.product")
+            .map(String::as_str)
+            .unwrap_or("unknown"),
+        labels
+            .get("tenkai.environment")
+            .map(String::as_str)
+            .unwrap_or("unknown"),
+    )
+}
+
+fn refuse_foreign_container(
+    executor: &DockerHostExecutor,
+    request: &SoftwareApplyRequest,
+    name: &str,
+) -> Result<()> {
+    let Some(inspected) = inspect_container(executor, name)? else {
+        return Ok(());
+    };
+    if labels_owned_by(request, &inspected.labels) {
+        return Ok(());
+    }
+    Err(foreign_owner_error(request, name, &inspected.labels))
+}
+
+fn require_existing_owned(
+    executor: &DockerHostExecutor,
+    request: &SoftwareApplyRequest,
+    name: &str,
+) -> Result<()> {
+    let Some(inspected) = inspect_container(executor, name)? else {
+        bail!(
+            "software deploy phase={} product={} environment/namespace={}: docker name {name} already exists but inspect found nothing",
+            SoftwareDeployPhase::Apply.as_str(),
+            request.product,
+            request.environment
+        );
+    };
+    if labels_owned_by(request, &inspected.labels) {
+        return Ok(());
+    }
+    Err(foreign_owner_error(request, name, &inspected.labels))
+}
+
 fn docker_create_idempotent(
     executor: &DockerHostExecutor,
     request: &SoftwareApplyRequest,
@@ -825,7 +902,8 @@ fn docker_create_idempotent(
     }
     let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
     if stderr.contains("already exists") {
-        return Ok(());
+        let name = args.last().map(String::as_str).unwrap_or("");
+        return require_existing_owned(executor, request, name);
     }
     let detail = diagnostics::sanitize_diagnostic_text(stderr.trim());
     bail!(
@@ -1041,7 +1119,9 @@ inputs = ["docker"]
         executor.apply(&request).unwrap();
         let fake_state: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&state).unwrap()).unwrap();
-        let db = fake_state["containers"]["local-edge-app-ctr-db"]
+        let db_name = container_runtime_name(&request, "db");
+        let api_name = container_runtime_name(&request, "api");
+        let db = fake_state["containers"][&db_name]
             .as_object()
             .expect("db container");
         let mounts = db["mounts"].as_array().expect("parsed mounts");
@@ -1063,14 +1143,14 @@ inputs = ["docker"]
             fake_state["containers"]
                 .as_object()
                 .unwrap()
-                .contains_key("local-edge-app-ctr-db"),
+                .contains_key(&db_name),
             "{fake_state}"
         );
         assert!(
             fake_state["containers"]
                 .as_object()
                 .unwrap()
-                .contains_key("local-edge-app-ctr-api"),
+                .contains_key(&api_name),
             "{fake_state}"
         );
         executor.restart(&request).unwrap();
@@ -1088,6 +1168,131 @@ inputs = ["docker"]
         assert_eq!(
             executor.observe(&request).unwrap(),
             SoftwareObserveStatus::Absent
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn hyphenated_environment_and_product_pairs_do_not_share_runtime_names() {
+        let left = super::super::request_from_parts(
+            "edge-app",
+            "1.0.0",
+            "prod",
+            ".",
+            "tenkai:release:edge-app@1.0.0",
+        );
+        let right = super::super::request_from_parts(
+            "app",
+            "1.0.0",
+            "prod-edge",
+            ".",
+            "tenkai:release:app@1.0.0",
+        );
+        assert_ne!(
+            container_runtime_name(&left, "db"),
+            container_runtime_name(&right, "db")
+        );
+        assert_ne!(
+            volume_runtime_name(&left, "data"),
+            volume_runtime_name(&right, "data")
+        );
+        assert_ne!(
+            network_runtime_name(&left, "net"),
+            network_runtime_name(&right, "net")
+        );
+        assert_ne!(container_runtime_name(&left, "db"), "prod-edge-app-ctr-db");
+    }
+
+    #[test]
+    fn colliding_hyphen_pairs_keep_both_releases() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-docker-collide-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let secret_dir = root.join("secrets");
+        std::fs::create_dir_all(&secret_dir).unwrap();
+        std::fs::write(secret_dir.join("api.env"), format!("TOKEN={SECRET}\n")).unwrap();
+        write_release(&root, "1.0.0", DIGEST_B);
+        let (script, state) = fake_docker(&root);
+        let executor = executor_for(&script, &state, &[]);
+        let mut left = request_for(&root, &secret_dir, "1.0.0");
+        left.environment = "prod".into();
+        left.product = "edge-app".into();
+        let mut right = request_for(&root, &secret_dir, "1.0.0");
+        right.environment = "prod-edge".into();
+        right.product = "app".into();
+        right.release_id = "tenkai:release:app@1.0.0".into();
+        executor.apply(&left).unwrap();
+        executor.apply(&right).unwrap();
+        let fake_state: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&state).unwrap()).unwrap();
+        let containers = fake_state["containers"].as_object().unwrap();
+        let left_db = container_runtime_name(&left, "db");
+        let right_db = container_runtime_name(&right, "db");
+        assert_ne!(left_db, right_db);
+        assert!(containers.contains_key(&left_db), "{fake_state}");
+        assert!(containers.contains_key(&right_db), "{fake_state}");
+        assert_eq!(
+            executor.observe(&left).unwrap(),
+            SoftwareObserveStatus::Present
+        );
+        assert_eq!(
+            executor.observe(&right).unwrap(),
+            SoftwareObserveStatus::Present
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn apply_refuses_to_remove_a_container_owned_by_another_release() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-docker-foreign-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let secret_dir = root.join("secrets");
+        std::fs::create_dir_all(&secret_dir).unwrap();
+        std::fs::write(secret_dir.join("api.env"), format!("TOKEN={SECRET}\n")).unwrap();
+        write_release(&root, "1.0.0", DIGEST_B);
+        let (script, state) = fake_docker(&root);
+        let executor = executor_for(&script, &state, &[]);
+        let request = request_for(&root, &secret_dir, "1.0.0");
+        let name = container_runtime_name(&request, "db");
+        let seeded = serde_json::json!({
+            "containers": {
+                name.clone(): {
+                    "id": "aaaaaaaaaaaa",
+                    "image": DIGEST_A,
+                    "labels": {
+                        "tenkai.product": "other",
+                        "tenkai.environment": "lab",
+                        "tenkai.container": "db"
+                    },
+                    "running": true,
+                    "health": "healthy",
+                    "mounts": []
+                }
+            },
+            "networks": {},
+            "volumes": {}
+        });
+        std::fs::write(&state, seeded.to_string()).unwrap();
+        let err = executor.apply(&request).unwrap_err().to_string();
+        assert!(err.contains("owned by"), "{err}");
+        assert!(err.contains("other"), "{err}");
+        let fake_state: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&state).unwrap()).unwrap();
+        assert!(
+            fake_state["containers"]
+                .as_object()
+                .unwrap()
+                .contains_key(&name),
+            "{fake_state}"
         );
         let _ = std::fs::remove_dir_all(root);
     }

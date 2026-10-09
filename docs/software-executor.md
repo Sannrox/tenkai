@@ -209,7 +209,11 @@ typed receipts.
 Apply creates networks and volumes, replaces containers in dependency order,
 waits until each declared health check is `healthy` (or the container is
 running when no health is declared), and removes leftover containers labeled
-for the same product and environment. Named volumes stay on remove so
+for the same product and environment. Runtime names are `t` plus a 12-hex
+digest of environment and product, then `-ctr-` / `-net-` / `-vol-` and the
+declared name, so hyphenated environment or product values cannot collide.
+Existing objects whose Tenkai ownership labels differ are refused rather than
+reused or `rm -f`'d. Named volumes stay on remove so
 application data is not deleted. Restart bounces the current pin in the same
 order. Observe is `Present` only when every declared container is running with
 matching Tenkai version, release, digest, and image labels.
