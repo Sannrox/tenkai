@@ -220,6 +220,18 @@ async fn saved_access_token(
     if login.access_token_usable() && !force_refresh {
         return Ok(login.access_token);
     }
+    let cache_for_lock = cache.clone();
+    let lock = tokio::task::spawn_blocking(move || cache_for_lock.lock_exclusive())
+        .await
+        .context("locking the token cache")??;
+    login = cache.get(server_url)?.ok_or_else(|| {
+        anyhow!(
+            "not logged in to {server_url}; run tenkaictl login, or set TENKAI_MANAGEMENT_TOKEN"
+        )
+    })?;
+    if login.access_token_usable() && !force_refresh {
+        return Ok(login.access_token);
+    }
     let refresh_token = login
         .refresh_token
         .clone()
@@ -232,7 +244,7 @@ async fn saved_access_token(
         login.refresh_token = Some(next);
     }
     login.expires_at_unix = token.expires_in.map(|secs| now_unix().saturating_add(secs));
-    cache.put(server_url, Some(&login))?;
+    cache.put_locked(&lock, server_url, Some(&login))?;
     Ok(token.access_token)
 }
 
@@ -571,6 +583,8 @@ mod tests {
         as_issuer: Mutex<String>,
         challenge: Arc<Mutex<String>>,
         grants: Mutex<Vec<String>>,
+        live_refresh: Mutex<std::collections::HashSet<String>>,
+        refresh_serial: Mutex<u64>,
         shutdown: tokio::sync::watch::Sender<bool>,
     }
 
@@ -586,6 +600,8 @@ mod tests {
             as_issuer: Mutex::new(issuer),
             challenge: Arc::new(Mutex::new(String::new())),
             grants: Mutex::new(Vec::new()),
+            live_refresh: Mutex::new(std::collections::HashSet::new()),
+            refresh_serial: Mutex::new(1),
             shutdown,
         });
         let serving = fake.clone();
@@ -715,6 +731,10 @@ mod tests {
                                 r#"{"error":"invalid_grant"}"#.into(),
                             );
                         }
+                        fake.live_refresh
+                            .lock()
+                            .unwrap()
+                            .insert("refresh-1".to_string());
                         (
                             200,
                             "application/json",
@@ -727,17 +747,33 @@ mod tests {
                             .to_string(),
                         )
                     }
-                    Some("refresh_token")
-                        if form.get("refresh_token").map(String::as_str) == Some("refresh-1") =>
-                    {
+                    Some("refresh_token") => {
+                        let presented = form.get("refresh_token").cloned().unwrap_or_default();
+                        if !fake.live_refresh.lock().unwrap().remove(&presented) {
+                            return (
+                                400,
+                                "application/json",
+                                r#"{"error":"invalid_grant"}"#.into(),
+                            );
+                        }
+                        let n = {
+                            let mut serial = fake.refresh_serial.lock().unwrap();
+                            *serial += 1;
+                            *serial
+                        };
+                        let next_refresh = format!("refresh-{n}");
+                        fake.live_refresh
+                            .lock()
+                            .unwrap()
+                            .insert(next_refresh.clone());
                         (
                             200,
                             "application/json",
                             serde_json::json!({
-                                "access_token": "access-2",
+                                "access_token": format!("access-{n}"),
                                 "token_type": "Bearer",
                                 "expires_in": 3600,
-                                "refresh_token": "refresh-1",
+                                "refresh_token": next_refresh,
                             })
                             .to_string(),
                         )
@@ -897,5 +933,63 @@ mod tests {
         let token = bearer_token(&runtime, &fake.url).await.unwrap();
         assert_eq!(token, "env-token");
         let _ = fake.shutdown.send(true);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn concurrent_refresh_reuses_rotated_token() {
+        let fake = spawn_fake_auth().await;
+        let config_dir = temp_config();
+        let runtime = runtime_for(&fake, config_dir.clone(), None);
+
+        login(
+            &runtime,
+            fake.url.clone(),
+            None,
+            0,
+            false,
+            Duration::from_secs(300),
+        )
+        .await
+        .unwrap();
+
+        let cache = TokenCache::new(&config_dir);
+        let mut saved = cache.get(&fake.url).unwrap().unwrap();
+        saved.expires_at_unix = Some(now_unix() - EXPIRY_SKEW_SECS - 1);
+        cache.put(&fake.url, Some(&saved)).unwrap();
+
+        let held = cache.lock_exclusive().unwrap();
+        let first = runtime.clone();
+        let second = runtime.clone();
+        let url = fake.url.clone();
+        let t1 = tokio::spawn(async move { bearer_token(&first, &url).await });
+        let url = fake.url.clone();
+        let t2 = tokio::spawn(async move { bearer_token(&second, &url).await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !t1.is_finished() && !t2.is_finished(),
+            "both refreshers should wait on the cache lock"
+        );
+        drop(held);
+
+        let first_token = t1.await.unwrap().unwrap();
+        let second_token = t2.await.unwrap().unwrap();
+        assert_eq!(first_token, "access-2");
+        assert_eq!(second_token, "access-2");
+        let refresh_grants = fake
+            .grants
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|grant| *grant == "refresh_token")
+            .count();
+        assert_eq!(refresh_grants, 1, "the waiter must skip after re-read");
+        let saved = cache.get(&fake.url).unwrap().unwrap();
+        assert_eq!(saved.access_token, "access-2");
+        assert_eq!(saved.refresh_token.as_deref(), Some("refresh-2"));
+        let raw = std::fs::read(config_dir.join("tokens.json")).unwrap();
+        serde_json::from_slice::<serde_json::Value>(&raw).unwrap();
+        let _ = fake.shutdown.send(true);
+        let _ = std::fs::remove_dir_all(&config_dir);
     }
 }
