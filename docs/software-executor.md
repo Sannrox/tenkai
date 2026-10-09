@@ -26,7 +26,7 @@ out of scope here. Custom-resource operators are refused.
 
 | Type | Role |
 | --- | --- |
-| `SoftwareExecutor` | apply / remove / observe / restart |
+| `SoftwareExecutor` | apply / remove / observe / restart, plus `cleanup_failed_apply` (defaults to remove) |
 | `FakeSoftwareExecutor` | CI without cluster |
 | `HelmSoftwareExecutor` | Helm chart path |
 | `KubernetesSoftwareExecutor` | Native manifests path (`kubectl`) |
@@ -208,10 +208,17 @@ typed receipts.
 
 Apply creates networks and volumes, pulls missing digest-pinned images,
 then replaces containers in dependency order. A running container whose
-image and Tenkai labels already match is left in place. Apply waits until
-each declared health check is `healthy` (or the container is
-running when no health is declared), and removes leftover containers labeled
-for the same product and environment. Host apply, restart, and remove run
+image and Tenkai labels already match, and whose health is not `unhealthy`, is
+left in place. A container being replaced is stopped and kept as
+a `-prev-` name until the apply succeeds. Apply waits until each declared
+health check is `healthy` (or the container is running when no health is
+declared), then deletes those previous containers and removes leftover
+containers labeled for the same product and environment. When a container
+fails to start or become healthy, apply removes the containers it started,
+renames and starts the previous ones, and reports
+`restored the previous containers`; failed-activation cleanup then only finishes
+a restore that apply could not complete, and the rollback to the previous
+release finds its containers already running. Host apply, restart, and remove run
 inside `tokio::task::block_in_place` on the multi-thread runtime so a long
 Docker wait does not pin a Tokio worker without the runtime knowing. Runtime names are `t` plus a 12-hex
 digest of environment and product, then `-ctr-` / `-net-` / `-vol-` and the

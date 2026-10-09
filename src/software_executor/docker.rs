@@ -172,11 +172,54 @@ impl SoftwareExecutor for DockerHostExecutor {
             .iter()
             .map(|container| container_runtime_name(request, &container.name))
             .collect();
+        let mut journal = Vec::new();
         for container in &ordered {
-            replace_container(self, request, &topology, container)?;
-            wait_healthy(self, request, container)?;
+            let replaced = replace_container(self, request, &topology, container, &mut journal)
+                .and_then(|()| wait_healthy(self, request, container));
+            if let Err(error) = replaced {
+                // Return the product to the containers it ran before this apply.
+                return Err(match roll_back(self, request, &journal) {
+                    Ok(()) => anyhow::anyhow!("{error:#}; restored the previous containers"),
+                    Err(restore) => anyhow::anyhow!(
+                        "{error:#}; restoring the previous containers also failed: {restore:#}"
+                    ),
+                });
+            }
         }
+        // Deletes the previous containers too. If this fails the caller still
+        // re-applies the previous release, which replaces whatever runs here.
         remove_unowned_containers(self, request, &desired)?;
+        Ok(())
+    }
+
+    /// `apply` restores the previous containers itself when it fails, so the
+    /// caller only finishes a restore that `apply` could not complete: remove
+    /// containers that have a kept previous one or still carry the failed
+    /// release's label (a failed apply always targets a new release), then
+    /// bring the kept ones back in dependency order.
+    fn cleanup_failed_apply(&self, request: &SoftwareApplyRequest) -> Result<()> {
+        validate_request(request)?;
+        let topology = self.topology(request)?;
+        let ordered = order_containers(&topology)?;
+        let mut kept = Vec::new();
+        for container in ordered.iter().rev() {
+            let name = container_runtime_name(request, &container.name);
+            let previous = previous_runtime_name(request, &container.name);
+            if inspect_container(self, &previous)?.is_some() {
+                remove_if_present(self, request, &name)?;
+                kept.push((name, previous));
+            } else if inspect_container(self, &name)?.is_some_and(|inspected| {
+                inspected.labels.get("tenkai.release-id") == Some(&request.release_id)
+            }) {
+                remove_if_present(self, request, &name)?;
+            }
+        }
+        for (name, previous) in kept.iter().rev() {
+            reinstate(self, request, name, previous)?;
+        }
+        // Drops networks only the failed release created; Docker keeps any
+        // network a restored container still uses.
+        remove_networks(self, request, &topology);
         Ok(())
     }
 
@@ -186,25 +229,14 @@ impl SoftwareExecutor for DockerHostExecutor {
         validate_topology(&topology, request.secret_dir_path.as_deref())?;
         for container in order_containers(&topology)?.iter().rev() {
             let name = container_runtime_name(request, &container.name);
-            refuse_foreign_container(self, request, &name)?;
-            docker_ok(
+            remove_if_present(self, request, &name)?;
+            remove_if_present(
                 self,
                 request,
-                SoftwareDeployPhase::Remove,
-                "rm",
-                &["rm", "-f", &name],
+                &previous_runtime_name(request, &container.name),
             )?;
         }
-        for network in &topology.networks {
-            let name = network_runtime_name(request, network);
-            let _ = docker_ok(
-                self,
-                request,
-                SoftwareDeployPhase::Remove,
-                "network rm",
-                &["network", "rm", &name],
-            );
-        }
+        remove_networks(self, request, &topology);
         Ok(())
     }
 
@@ -241,7 +273,7 @@ impl SoftwareExecutor for DockerHostExecutor {
             let name = container_runtime_name(request, &container.name);
             refuse_foreign_container(self, request, &name)?;
             if inspect_container(self, &name)?.is_none() {
-                replace_container(self, request, &topology, container)?;
+                replace_container(self, request, &topology, container, &mut Vec::new())?;
             } else {
                 docker_ok(
                     self,
@@ -588,27 +620,71 @@ fn image_present(executor: &DockerHostExecutor, image: &str) -> Result<bool> {
     Ok(output.status.success())
 }
 
+/// One container an `apply` created or replaced, in order, so a failed apply
+/// can return to the containers that ran before it.
+enum Change {
+    /// No container ran under this name before the apply.
+    Created(String),
+    /// The previous container was stopped and renamed to `previous`.
+    Replaced { name: String, previous: String },
+}
+
+/// Name a replaced container keeps until the new one is healthy. Its `-prev-`
+/// namespace cannot collide with a declared container's `-ctr-` name.
+fn previous_runtime_name(request: &SoftwareApplyRequest, name: &str) -> String {
+    format!("{}-prev-{name}", scope_prefix(request))
+}
+
+/// Create the container for `container` unless a matching, running, not
+/// unhealthy one already exists. A container being replaced is stopped and
+/// kept under [`previous_runtime_name`]; every change is pushed onto `journal` before
+/// the new container starts.
 fn replace_container(
     executor: &DockerHostExecutor,
     request: &SoftwareApplyRequest,
     topology: &DockerHostTopology,
     container: &DockerHostContainer,
+    journal: &mut Vec<Change>,
 ) -> Result<()> {
     let name = container_runtime_name(request, &container.name);
     refuse_foreign_container(executor, request, &name)?;
-    if let Some(inspected) = inspect_container(executor, &name)?
-        && !container_mismatch(request, container, &inspected)
-        && inspected.running
-    {
-        return Ok(());
+    match inspect_container(executor, &name)? {
+        Some(inspected)
+            if !container_mismatch(request, container, &inspected)
+                && inspected.running
+                && inspected.health != "unhealthy" =>
+        {
+            return Ok(());
+        }
+        Some(inspected) => {
+            let previous = previous_runtime_name(request, &container.name);
+            // A leftover from an interrupted apply; the live container wins.
+            remove_if_present(executor, request, &previous)?;
+            // Rename before stopping: a failed rename leaves the old container
+            // running, and once journaled a failed stop is still restorable.
+            docker_ok(
+                executor,
+                request,
+                SoftwareDeployPhase::Apply,
+                "rename",
+                &["rename", &name, &previous],
+            )?;
+            journal.push(Change::Replaced {
+                name: name.clone(),
+                previous: previous.clone(),
+            });
+            if inspected.running {
+                docker_ok(
+                    executor,
+                    request,
+                    SoftwareDeployPhase::Apply,
+                    "stop",
+                    &["stop", &previous],
+                )?;
+            }
+        }
+        None => journal.push(Change::Created(name.clone())),
     }
-    docker_ok(
-        executor,
-        request,
-        SoftwareDeployPhase::Apply,
-        "rm",
-        &["rm", "-f", &name],
-    )?;
     let mut args = vec![
         "run".to_string(),
         "-d".into(),
@@ -683,6 +759,89 @@ fn replace_container(
     }
     let _ = topology;
     Ok(())
+}
+
+/// Undo `journal`: remove what the apply started in reverse dependency order,
+/// then bring back each replaced container in dependency order.
+fn roll_back(
+    executor: &DockerHostExecutor,
+    request: &SoftwareApplyRequest,
+    journal: &[Change],
+) -> Result<()> {
+    for change in journal.iter().rev() {
+        let (Change::Created(name) | Change::Replaced { name, .. }) = change;
+        remove_if_present(executor, request, name)?;
+    }
+    for change in journal {
+        if let Change::Replaced { name, previous } = change {
+            reinstate(executor, request, name, previous)?;
+        }
+    }
+    Ok(())
+}
+
+/// Rename the stopped `previous` container back to `name` and start it.
+fn reinstate(
+    executor: &DockerHostExecutor,
+    request: &SoftwareApplyRequest,
+    name: &str,
+    previous: &str,
+) -> Result<()> {
+    refuse_foreign_container(executor, request, previous)?;
+    docker_ok(
+        executor,
+        request,
+        SoftwareDeployPhase::Restore,
+        "rename",
+        &["rename", previous, name],
+    )?;
+    docker_ok(
+        executor,
+        request,
+        SoftwareDeployPhase::Restore,
+        "start",
+        &["start", name],
+    )
+}
+
+/// Best effort: Docker refuses to remove a network a container still uses.
+fn remove_networks(
+    executor: &DockerHostExecutor,
+    request: &SoftwareApplyRequest,
+    topology: &DockerHostTopology,
+) {
+    for network in &topology.networks {
+        let name = network_runtime_name(request, network);
+        let _ = docker_ok(
+            executor,
+            request,
+            SoftwareDeployPhase::Remove,
+            "network rm",
+            &["network", "rm", &name],
+        );
+    }
+}
+
+/// `docker rm -f` a container of this product and environment, if it exists;
+/// a container owned by anyone else is refused.
+fn remove_if_present(
+    executor: &DockerHostExecutor,
+    request: &SoftwareApplyRequest,
+    name: &str,
+) -> Result<()> {
+    let Some(inspected) = inspect_container(executor, name)? else {
+        return Ok(());
+    };
+    if !labels_owned_by(request, &inspected.labels) {
+        return Err(foreign_owner_error(request, name, &inspected.labels));
+    }
+    docker_ok(
+        executor,
+        request,
+        SoftwareDeployPhase::Remove,
+        "rm",
+        &["rm", "-f", name],
+    )
 }
 
 fn wait_healthy(
@@ -1159,10 +1318,10 @@ inputs = ["docker"]
             "first apply should pull images: {argv_after_first}"
         );
         let pull_at = argv_after_first.find("\"pull\"").unwrap();
-        let rm_at = argv_after_first.find("\"rm\"").expect("first apply rm");
+        let run_at = argv_after_first.find("\"run\"").expect("first apply run");
         assert!(
-            pull_at < rm_at,
-            "pull must happen before rm: {argv_after_first}"
+            pull_at < run_at,
+            "pull must happen before run: {argv_after_first}"
         );
         let fake_state: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&state).unwrap()).unwrap();
@@ -1369,6 +1528,99 @@ inputs = ["docker"]
         let err = executor.apply(&request).unwrap_err().to_string();
         assert!(err.contains("phase=health"), "{err}");
         assert!(!err.contains(SECRET), "{err}");
+        // A failed first install keeps no container and drops its network.
+        executor.cleanup_failed_apply(&request).unwrap();
+        assert!(fake_containers(&state).is_empty());
+        let argv = std::fs::read_to_string(root.join("argv.log")).unwrap();
+        assert!(argv.contains(r#"["network", "rm""#), "{argv}");
+        // Cleanup also removes containers an interrupted rollback left behind.
+        executor_for(&script, &state, &[]).apply(&request).unwrap();
+        executor.cleanup_failed_apply(&request).unwrap();
+        assert!(fake_containers(&state).is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn fake_containers(state: &Path) -> serde_json::Map<String, serde_json::Value> {
+        let state: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(state).unwrap()).unwrap();
+        state["containers"].as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn failed_upgrade_restores_the_previous_containers() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-docker-restore-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let secret_dir = root.join("secrets");
+        std::fs::create_dir_all(&secret_dir).unwrap();
+        std::fs::write(secret_dir.join("api.env"), "TOKEN=x\n").unwrap();
+        write_release(&root, "1.0.0", DIGEST_B);
+        write_release(&root, "2.0.0", DIGEST_C);
+        let (script, state) = fake_docker(&root);
+        let executor = executor_for(&script, &state, &[DIGEST_C]);
+        let v1 = request_for(&root, &secret_dir, "1.0.0");
+        let v2 = request_for(&root, &secret_dir, "2.0.0");
+        executor.apply(&v1).unwrap();
+
+        // db comes up healthy under 2.0.0, api never does.
+        let error = executor.apply(&v2).unwrap_err().to_string();
+        assert!(error.contains("phase=health"), "{error}");
+        assert!(
+            error.contains("restored the previous containers"),
+            "{error}"
+        );
+        let containers = fake_containers(&state);
+        assert_eq!(containers.len(), 2, "{containers:?}");
+        for container in containers.values() {
+            assert_eq!(container["labels"]["tenkai.version"], "1.0.0");
+            assert_eq!(container["running"], true);
+        }
+        assert_eq!(
+            executor.observe(&v1).unwrap(),
+            SoftwareObserveStatus::Present
+        );
+
+        // Cleanup leaves the restored release alone, and re-applying it
+        // recreates nothing.
+        executor.cleanup_failed_apply(&v2).unwrap();
+        let before = std::fs::read_to_string(root.join("argv.log")).unwrap();
+        executor.apply(&v1).unwrap();
+        let after = std::fs::read_to_string(root.join("argv.log")).unwrap();
+        assert!(!after[before.len()..].contains("\"run\""), "{after}");
+        assert_eq!(fake_containers(&state).len(), 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reapply_replaces_a_matching_but_unhealthy_container() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-docker-unhealthy-skip-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let secret_dir = root.join("secrets");
+        std::fs::create_dir_all(&secret_dir).unwrap();
+        std::fs::write(secret_dir.join("api.env"), "TOKEN=x\n").unwrap();
+        write_release(&root, "1.0.0", DIGEST_B);
+        let (script, state) = fake_docker(&root);
+        let executor = executor_for(&script, &state, &[]);
+        let request = request_for(&root, &secret_dir, "1.0.0");
+        executor.apply(&request).unwrap();
+        let db = container_runtime_name(&request, "db");
+        let mut fake: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&state).unwrap()).unwrap();
+        fake["containers"][&db]["health"] = "unhealthy".into();
+        std::fs::write(&state, fake.to_string()).unwrap();
+
+        executor.apply(&request).unwrap();
+        assert_eq!(fake_containers(&state)[&db]["health"], "healthy");
+        assert!(!fake_containers(&state).contains_key(&previous_runtime_name(&request, "db")));
         let _ = std::fs::remove_dir_all(root);
     }
 

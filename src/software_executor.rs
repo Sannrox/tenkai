@@ -83,6 +83,11 @@ pub trait SoftwareExecutor: Send + Sync {
     fn apply(&self, request: &SoftwareApplyRequest) -> Result<()>;
     fn remove(&self, request: &SoftwareApplyRequest) -> Result<()>;
     fn observe(&self, request: &SoftwareApplyRequest) -> Result<SoftwareObserveStatus>;
+    /// Clean up after `apply` failed. Default removes the release; an adapter
+    /// whose failed `apply` already restored the previous runtime overrides it.
+    fn cleanup_failed_apply(&self, request: &SoftwareApplyRequest) -> Result<()> {
+        self.remove(request)
+    }
     /// Same-version bounce. Default re-applies the current pin.
     fn restart(&self, request: &SoftwareApplyRequest) -> Result<()> {
         self.apply(request)
