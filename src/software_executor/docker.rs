@@ -166,6 +166,7 @@ impl SoftwareExecutor for DockerHostExecutor {
         validate_topology(&topology, request.secret_dir_path.as_deref())?;
         ensure_networks(self, request, &topology)?;
         ensure_volumes(self, request, &topology)?;
+        pull_missing_images(self, request, &topology)?;
         let ordered = order_containers(&topology)?;
         let desired: BTreeSet<String> = ordered
             .iter()
@@ -558,6 +559,35 @@ fn ensure_volumes(
     Ok(())
 }
 
+fn pull_missing_images(
+    executor: &DockerHostExecutor,
+    request: &SoftwareApplyRequest,
+    topology: &DockerHostTopology,
+) -> Result<()> {
+    let mut seen = BTreeSet::new();
+    for container in &topology.containers {
+        if !seen.insert(container.image.as_str()) {
+            continue;
+        }
+        if image_present(executor, &container.image)? {
+            continue;
+        }
+        docker_ok(
+            executor,
+            request,
+            SoftwareDeployPhase::Apply,
+            "pull",
+            &["pull", &container.image],
+        )?;
+    }
+    Ok(())
+}
+
+fn image_present(executor: &DockerHostExecutor, image: &str) -> Result<bool> {
+    let output = docker_output(executor, &["image", "inspect", image])?;
+    Ok(output.status.success())
+}
+
 fn replace_container(
     executor: &DockerHostExecutor,
     request: &SoftwareApplyRequest,
@@ -566,6 +596,12 @@ fn replace_container(
 ) -> Result<()> {
     let name = container_runtime_name(request, &container.name);
     refuse_foreign_container(executor, request, &name)?;
+    if let Some(inspected) = inspect_container(executor, &name)?
+        && !container_mismatch(request, container, &inspected)
+        && inspected.running
+    {
+        return Ok(());
+    }
     docker_ok(
         executor,
         request,
@@ -1117,6 +1153,17 @@ inputs = ["docker"]
             SoftwareObserveStatus::Absent
         );
         executor.apply(&request).unwrap();
+        let argv_after_first = std::fs::read_to_string(root.join("argv.log")).unwrap();
+        assert!(
+            argv_after_first.contains("\"pull\""),
+            "first apply should pull images: {argv_after_first}"
+        );
+        let pull_at = argv_after_first.find("\"pull\"").unwrap();
+        let rm_at = argv_after_first.find("\"rm\"").expect("first apply rm");
+        assert!(
+            pull_at < rm_at,
+            "pull must happen before rm: {argv_after_first}"
+        );
         let fake_state: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&state).unwrap()).unwrap();
         let db_name = container_runtime_name(&request, "db");
@@ -1136,6 +1183,12 @@ inputs = ["docker"]
         assert_eq!(
             executor.observe(&request).unwrap(),
             SoftwareObserveStatus::Present
+        );
+        let argv_after_second = std::fs::read_to_string(root.join("argv.log")).unwrap();
+        let second_argv = &argv_after_second[argv_after_first.len()..];
+        assert!(
+            !second_argv.contains("\"run\""),
+            "unchanged containers must not be replaced: {second_argv}"
         );
         let fake_state: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&state).unwrap()).unwrap();

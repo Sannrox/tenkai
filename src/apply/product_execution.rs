@@ -105,7 +105,7 @@ pub(super) async fn activate(
             return Ok(Err(detail));
         }
         let request = software_request(ctx, content).await?;
-        let install = executor.apply(&request).map_err(|error| {
+        let install = software_blocking(|| executor.apply(&request)).map_err(|error| {
             software_phase_error(
                 crate::software_executor::SoftwareDeployPhase::Apply,
                 content,
@@ -211,7 +211,7 @@ pub(super) async fn restart(
             return Ok(Err(detail));
         }
         let request = software_request(ctx, content).await?;
-        let bounce = executor.restart(&request).map_err(|error| {
+        let bounce = software_blocking(|| executor.restart(&request)).map_err(|error| {
             software_phase_error(
                 crate::software_executor::SoftwareDeployPhase::Restart,
                 content,
@@ -305,15 +305,16 @@ pub(super) async fn deactivate(
         if let Err(detail) = require_artifact_pull_consumer(content, Some(executor)) {
             return Ok(Err(detail));
         }
-        return Ok(executor
-            .remove(&software_request(ctx, content).await?)
-            .map_err(|error| {
+        let request = software_request(ctx, content).await?;
+        return Ok(
+            software_blocking(|| executor.remove(&request)).map_err(|error| {
                 software_phase_error(
                     crate::software_executor::SoftwareDeployPhase::Remove,
                     content,
                     &error.to_string(),
                 )
-            }));
+            }),
+        );
     }
     if let Err(detail) = require_artifact_pull_consumer(content, None) {
         return Ok(Err(detail));
@@ -354,6 +355,17 @@ pub(super) async fn cleanup_failed_activation(
         },
         None => (false, failure),
     })
+}
+
+/// Run a borrowed software-executor call off the async worker when the runtime
+/// can compensate. `spawn_blocking` needs `'static`; the adapter is a borrow.
+fn software_blocking<T>(work: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(work)
+        }
+        _ => work(),
+    }
 }
 
 async fn software_request(
