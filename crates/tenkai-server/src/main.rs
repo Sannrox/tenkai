@@ -301,10 +301,10 @@ async fn main() -> Result<()> {
     let serving = swap.clone();
     let mut serve_shutdown = shutdown_tx.subscribe();
     let signal_shutdown = shutdown_tx.clone();
+    let signal_received = tenkai::shutdown::listen().context("installing shutdown handler")?;
     tokio::spawn(async move {
-        if let Err(error) = tokio::signal::ctrl_c().await {
-            eprintln!("failed to install shutdown handler: {error}");
-        }
+        let signal = signal_received.await;
+        eprintln!("tenkai-server shutting down signal={signal}");
         let _ = signal_shutdown.send(true);
     });
     let server_task = tokio::spawn(async move {

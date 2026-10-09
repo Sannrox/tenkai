@@ -27,7 +27,11 @@ when any environment fails.
 `tenkai-server` hosts the same reconciliation contract as embedded CLI mode,
 binds its listener before opening the operational store, serves unauthenticated
 liveness (`/healthz`) immediately and readiness (`/readyz`) after the store is
-open, and shuts down gracefully on SIGINT. A large legacy graph import cannot
+open, and shuts down gracefully on SIGINT or SIGTERM. Shutdown stops
+accepting requests, cancels an in-flight deploy command under its fence, lets
+the current tick record that outcome, and exits 0, so supervisors that send
+SIGTERM (systemd, Docker, Kubernetes) need no `KillSignal` override;
+`tenkaictl reconcile` without `--once` stops the same way. A large legacy graph import cannot
 delay bind; `/readyz` stays 503 until import finishes, and a restart keeps
 already-copied rows. Management mutations require a bearer
 token and append request and outcome records to the Tenkai operational
