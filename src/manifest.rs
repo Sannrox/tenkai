@@ -55,6 +55,19 @@ pub struct Manifest {
     pub artifacts: Vec<crate::oci_artifact::OciArtifactRef>,
     #[serde(default)]
     pub gate: GateSection,
+    /// Signed delivery signals used by unattended approval policy.
+    #[serde(default)]
+    pub delivery: DeliverySection,
+}
+
+/// Optional release metadata covered by the content digest.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeliverySection {
+    #[serde(default)]
+    pub has_migration: bool,
+    #[serde(default)]
+    pub changes_identity_config: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -920,6 +933,7 @@ mod tests {
             worker_pool: None,
             artifacts: Vec::new(),
             gate: GateSection::default(),
+            delivery: Default::default(),
         };
         assert_eq!(manifest.immutable_inputs(), vec!["routing.json"]);
     }

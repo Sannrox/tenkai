@@ -54,6 +54,34 @@ tenkaictl env approval-policy show lab
 tenkaictl env approval-policy clear lab
 ```
 
+## Delivery hold
+
+Hold pauses new execution without unsubscribing, recalling, or opening a
+maintenance window. The reconciler still plans and reports `held`; `apply`
+refuses a held plan and a pull-only runtime receives no work. In-flight
+applies finish, and rollback-only plans are never held. `env inspect`,
+`env list`, and `status` report the hold.
+
+```bash
+tenkaictl env hold prod set --reason "change freeze"
+tenkaictl env hold prod show
+tenkaictl env hold prod clear
+```
+
+A channel hold blocks every environment subscribed to that channel:
+
+```bash
+tenkaictl channel hold hello-local stable set --reason "pause stable"
+tenkaictl channel hold hello-local stable show
+tenkaictl channel hold hello-local stable clear
+```
+
+Setting and clearing a hold require the management credential, like promote.
+The authenticated principal is recorded as the actor. Every set and clear
+appends an immutable audit event; `show` prints the active hold and that
+history. Promote, subscribe, and deploy do not touch a hold. A hold is an
+embedded operation; the v1 remote API does not expose it.
+
 ## Maintenance windows
 
 Recurring windows are configured per environment with an IANA timezone, ISO

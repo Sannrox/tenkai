@@ -406,6 +406,7 @@ mod tests {
             module_activations: Vec::new(),
             retirement: None,
             preview: None,
+            delivery_hold: None,
         };
         annotate_plan_with_priors(
             &mut plan,
@@ -551,6 +552,7 @@ mod tests {
             module_activations: Vec::new(),
             retirement: None,
             preview: None,
+            delivery_hold: None,
         };
         let config = PriorConfig {
             enabled: true,

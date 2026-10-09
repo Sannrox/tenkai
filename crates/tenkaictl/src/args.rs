@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::catalog_args::{ApprovalCommand, CanaryCommand, ReleaseCommand};
+use crate::catalog_args::{ApprovalCommand, CanaryCommand, ChannelCommand, ReleaseCommand};
 use crate::dev_args::DevCommand;
 use crate::env_args::EnvCommand;
 use crate::flags::{ApprovalFileFlags, DevelopmentBypassFlags};
@@ -141,6 +141,11 @@ pub(crate) enum Command {
     Canary {
         #[command(subcommand)]
         command: CanaryCommand,
+    },
+    /// Channel operations.
+    Channel {
+        #[command(subcommand)]
+        command: ChannelCommand,
     },
     /// Manage environments.
     Env {

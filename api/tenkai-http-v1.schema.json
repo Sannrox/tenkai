@@ -675,6 +675,27 @@
         }
       ]
     },
+    "DeliveryHold": {
+      "description": "Durable evidence that delivery is paused for a scope.",
+      "properties": {
+        "actor": {
+          "type": "string"
+        },
+        "held_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason",
+        "actor",
+        "held_at"
+      ],
+      "type": "object"
+    },
     "EnvironmentConstraint": {
       "description": "One environment constraint, as set by `tenkaictl env constraints set`.",
       "properties": {
@@ -707,6 +728,10 @@
             "$ref": "#/$defs/EnvironmentConstraint"
           },
           "type": "array"
+        },
+        "delivery_hold": {
+          "$ref": "#/$defs/DeliveryHold",
+          "description": "Present while delivery is paused for this environment."
         },
         "description": {
           "type": "string"
@@ -844,6 +869,11 @@
     "EnvironmentListEntry": {
       "description": "Summary row for fleet listing (no credentials).",
       "properties": {
+        "delivery_held": {
+          "default": false,
+          "description": "The environment or one of its subscribed channels is held.",
+          "type": "boolean"
+        },
         "deployed_product_count": {
           "format": "uint",
           "minimum": 0,
@@ -1158,6 +1188,36 @@
         },
         {
           "properties": {
+            "plan_id": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "scope": {
+              "type": "string"
+            },
+            "state": {
+              "const": "held",
+              "type": "string"
+            },
+            "steps": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "state",
+            "plan_id",
+            "steps",
+            "reason",
+            "scope"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
             "error": {
               "type": "string"
             },
@@ -1214,6 +1274,10 @@
         },
         "channel": {
           "type": "string"
+        },
+        "delivery_hold": {
+          "$ref": "#/$defs/DeliveryHold",
+          "description": "Present while the subscribed channel is held."
         },
         "deployed": {
           "type": [
@@ -2193,6 +2257,10 @@
       "properties": {
         "channel": {
           "type": "string"
+        },
+        "delivery_hold": {
+          "$ref": "#/$defs/DeliveryHold",
+          "description": "Present while the subscribed channel is held."
         },
         "deployed": {
           "type": [

@@ -109,8 +109,12 @@ tenkaictl env approval-policy clear lab
 When `mode = "auto"` and the plan does not match a require-human rule, the
 next reconcile tick signs `$TENKAI_PLAN_APPROVAL_DIR/<plan-id>.json` with
 `policy_provider = "builtin-auto"`, `policy_evidence_id = "auto"`, and
-`policy_digest` bound to the policy document, then executes. Skip-gates and
-rollback plans stay `awaiting_approval` until a human-signed envelope appears.
+`policy_digest` bound to the policy document, then executes. These plans stay
+`awaiting_approval` until a human-signed envelope appears: skip-gates,
+rollback, and any upgrade or downgrade that crosses a published release
+declaring `has_migration` or `changes_identity_config` in `[delivery]`. Those flags are signed with the release and always require a
+human under auto; they are not extra `[[require_human]]` matchers. A restart
+re-activates the deployed release and ignores its flags.
 
 Execute re-checks the live policy. Clearing the policy path, switching
 `mode` to `manual`, adding a require-human match, or removing the signer key

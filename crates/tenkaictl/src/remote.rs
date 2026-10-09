@@ -90,17 +90,19 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
                 println!("no environments registered");
             } else {
                 println!(
-                    "{:<20} {:<8} {:<10} {:<6} description",
-                    "name", "subs", "deployed", "lease"
+                    "{:<20} {:<8} {:<10} {:<6} {:<6} description",
+                    "name", "subs", "deployed", "lease", "hold"
                 );
                 for entry in entries {
                     let lease = if entry.lease_held { "held" } else { "-" };
+                    let hold = if entry.delivery_held { "hold" } else { "-" };
                     println!(
-                        "{:<20} {:<8} {:<10} {:<6} {}",
+                        "{:<20} {:<8} {:<10} {:<6} {:<6} {}",
                         entry.name,
                         entry.subscription_count,
                         entry.deployed_product_count,
                         lease,
+                        hold,
                         entry.description
                     );
                 }
@@ -135,6 +137,14 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         }
         Command::Status { env } => {
             let rows = client.environment_status(&env).await?;
+            if let Ok(report) = client.inspect_environment(&env).await
+                && let Some(hold) = report.delivery_hold
+            {
+                println!(
+                    "{env} held at {} by {}: {}",
+                    hold.held_at, hold.actor, hold.reason
+                );
+            }
             if rows.is_empty() {
                 println!("{env} has no channel subscriptions");
             } else {
@@ -154,6 +164,12 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
                         "{:<24} {:<10} {:<12} {:<12} {state}",
                         r.product, r.channel, deployed, r.head
                     );
+                    if let Some(hold) = &r.delivery_hold {
+                        println!(
+                            "  channel hold at {} by {}: {}",
+                            hold.held_at, hold.actor, hold.reason
+                        );
+                    }
                 }
             }
             Ok(())

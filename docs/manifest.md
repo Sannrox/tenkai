@@ -18,6 +18,10 @@ inputs = ["compose.yaml"]          # immutable files/directories used by these c
 
 [gate]
 eval_suite = "my-suite"          # chisei eval suite; latest run must fully pass
+
+[delivery]
+has_migration = false            # schema or data migration; auto policy stays human
+changes_identity_config = false  # identity-provider realm/client change; same
 ```
 
 This example shows every common field. The minimal working manifest used by the
@@ -25,6 +29,13 @@ quickstart is [`examples/hello-local/tenkai.toml`](../examples/hello-local/tenka
 Deploy commands run with a cleared environment; see
 [environment variables](environment-variables.md#set-by-tenkai-for-deploy-commands)
 for what they receive.
+
+## Delivery signals
+
+Optional `[delivery]` flags are part of the signed manifest. Both default to
+`false`. Changing them for an already-published version is rejected; bump
+`product.version`. Unattended auto approval always requires a human when
+either flag is true; see [plan approval](plan-approval.md#unattended-approval-policy).
 
 ## Immutability
 

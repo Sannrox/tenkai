@@ -14,6 +14,21 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         | Command::Approval { .. }
         | Command::Promote { .. }
         | Command::Canary { .. }) => crate::embedded_catalog::run(&mut ctx, command, output).await,
+        Command::Channel {
+            command:
+                crate::catalog_args::ChannelCommand::Hold {
+                    product,
+                    channel,
+                    action,
+                },
+        } => {
+            crate::embedded_hold::run(
+                &mut ctx,
+                tenkai::delivery_hold::HoldScope::channel(&product, &channel),
+                action,
+            )
+            .await
+        }
         Command::Fleet { command } => {
             crate::embedded_fleet::run(&mut ctx, command, &database).await
         }

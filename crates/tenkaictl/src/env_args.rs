@@ -106,6 +106,12 @@ pub(crate) enum EnvCommand {
         #[command(subcommand)]
         command: ApprovalPolicyCommand,
     },
+    /// Pause delivery to an environment. The reconciler still plans.
+    Hold {
+        env: String,
+        #[command(subcommand)]
+        action: HoldAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -136,6 +142,21 @@ pub(crate) enum DockerSecretsCommand {
     Set { env: String, path: PathBuf },
     /// Clear the stored secret-file directory path.
     Clear { env: String },
+}
+
+/// Set, clear, or show an environment or channel delivery hold. The actor is
+/// the authenticated management principal.
+#[derive(Subcommand)]
+pub(crate) enum HoldAction {
+    /// Pause new execution; in-flight applies finish.
+    Set {
+        #[arg(long)]
+        reason: String,
+    },
+    /// Resume execution on the next reconcile tick.
+    Clear,
+    /// Show the active hold and its set/clear history.
+    Show,
 }
 
 #[derive(Subcommand)]

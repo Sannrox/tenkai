@@ -501,6 +501,19 @@ impl RuntimeDeliveryOperations {
                     }
                 })?;
         }
+        // A held queued plan stays queued; a claimed Running plan finishes.
+        let held = plan.state == crate::plan::PlanState::Computed
+            && crate::delivery_hold::active_for_plan(&mut ctx, &plan)
+                .await
+                .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))?
+                .is_some();
+        if held {
+            return Ok(RuntimeWork {
+                environment: environment.into(),
+                plan: None,
+                claim: None,
+            });
+        }
         let expires_at = crate::now_millis().saturating_add(2 * 60 * 1000);
         let claim = self
             .store

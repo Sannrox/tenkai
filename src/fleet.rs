@@ -434,6 +434,7 @@ mod tests {
                 overlay_digest: None,
                 applied_overlay: None,
                 state: "current".into(),
+                delivery_hold: None,
             }],
             facts: Default::default(),
             overlays: Default::default(),
@@ -463,6 +464,7 @@ mod tests {
             module_activations: Vec::new(),
             retirement: None,
             preview: None,
+            delivery_hold: None,
         };
         let behind = EnvironmentInspectReport {
             name: "beta".into(),
@@ -478,6 +480,7 @@ mod tests {
                 overlay_digest: None,
                 applied_overlay: None,
                 state: "behind".into(),
+                delivery_hold: None,
             }],
             facts: Default::default(),
             overlays: Default::default(),
@@ -498,6 +501,7 @@ mod tests {
             module_activations: Vec::new(),
             retirement: None,
             preview: None,
+            delivery_hold: None,
         };
         let unhealthy = EnvironmentInspectReport {
             name: "gamma".into(),
@@ -513,6 +517,7 @@ mod tests {
                 overlay_digest: None,
                 applied_overlay: None,
                 state: "unknown".into(),
+                delivery_hold: None,
             }],
             facts: Default::default(),
             overlays: Default::default(),
@@ -533,6 +538,7 @@ mod tests {
             module_activations: Vec::new(),
             retirement: None,
             preview: None,
+            delivery_hold: None,
         };
         let empty = EnvironmentInspectReport {
             name: "delta".into(),
@@ -558,6 +564,7 @@ mod tests {
             module_activations: Vec::new(),
             retirement: None,
             preview: None,
+            delivery_hold: None,
         };
         let report = fleet_status_from_inspects(vec![behind, empty, unhealthy, current]);
         assert_eq!(report.environment_count, 4);
@@ -599,6 +606,7 @@ mod tests {
                 overlay_digest: Some("abc".into()),
                 applied_overlay: None,
                 state: "config_stale".into(),
+                delivery_hold: None,
             }],
             facts: Default::default(),
             overlays: Default::default(),
@@ -619,6 +627,7 @@ mod tests {
             module_activations: Vec::new(),
             retirement: None,
             preview: None,
+            delivery_hold: None,
         };
         let report = fleet_status_from_inspects(vec![stale]);
         assert_eq!(report.environments[0].posture, "behind");

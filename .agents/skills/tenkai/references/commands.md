@@ -48,7 +48,7 @@ running.
 | Sign in | `login`, `logout` |
 | Publish | `publish`, `release inspect`, `release verify` |
 | Promote | `promote`, `canary` |
-| Configure | `env add`, `env subscribe`, `env facts`, `env overlay`, `env constraints`, `env maintenance`, `env connectivity`, `env observe`, `env preview`, `env close-preview`, `env retire`, `env artifact-mirror`, `env cluster-config`, `env docker-secrets`, `env approval-policy`, `product maintenance` |
+| Configure | `env add`, `env subscribe`, `env facts`, `env overlay`, `env constraints`, `env maintenance`, `env connectivity`, `env observe`, `env preview`, `env close-preview`, `env retire`, `env artifact-mirror`, `env cluster-config`, `env docker-secrets`, `env approval-policy`, `env hold`, `channel hold`, `product maintenance` |
 | Plan and apply | `plan`, `apply`, `approval inspect`, `approval submit` |
 | Reconcile | `reconcile --once` |
 | Roll back | `rollback`, `restart`, `release recall` |
@@ -93,7 +93,14 @@ credential bytes.
 Never secret bytes.
 
 **Approval policy.** Store an environment-scoped plan approval policy file
-path. Never signer key bytes. Skip-gates and rollback stay human.
+path. Never signer key bytes. Skip-gates, rollback, `has_migration`,
+`changes_identity_config`, and downgrades across a migration stay human.
+
+**Hold.** `env hold <env>` and `channel hold <product> <channel>` pause new
+execution (`set --reason`, `clear`, `show`): the reconciler plans, apply and
+runtime claims refuse, rollback stays allowed.
+Inspect, list, and status report the hold; set and clear are audited with the
+management principal.
 
 **Publication.** Creates an immutable release. Republish identical content only
 to reconcile an uncertain outcome; changed content requires a new version.

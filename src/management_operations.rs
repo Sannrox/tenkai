@@ -1412,6 +1412,7 @@ mod tests {
                     subscription_count: 0,
                     deployed_product_count: 0,
                     lease_held: false,
+                    delivery_held: false,
                 }])
             })
         }
@@ -1442,6 +1443,7 @@ mod tests {
                     module_activations: Vec::new(),
                     retirement: None,
                     preview: None,
+                    delivery_hold: None,
                 })
             })
         }

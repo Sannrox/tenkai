@@ -93,6 +93,7 @@ impl ReconcilePort for FixedReconciler {
                 subscription_count: 0,
                 deployed_product_count: 0,
                 lease_held: false,
+                delivery_held: false,
             }])
         })
     }
@@ -123,6 +124,7 @@ impl ReconcilePort for FixedReconciler {
                 module_activations: Vec::new(),
                 retirement: None,
                 preview: None,
+                delivery_hold: None,
             })
         })
     }

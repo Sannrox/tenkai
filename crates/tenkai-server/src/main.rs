@@ -621,7 +621,7 @@ async fn main() -> Result<()> {
                             let diag = report.diagnostics();
                             // Structured diagnostics: stable field names, no secrets.
                             eprintln!(
-                                "tenkai.reconcile outcome={} environments_total={} environments_failed={} environments_current={} environments_applied={} environments_busy={} environments_deferred={} environments_awaiting_runtime={} environments_awaiting_approval={}",
+                                "tenkai.reconcile outcome={} environments_total={} environments_failed={} environments_current={} environments_applied={} environments_busy={} environments_deferred={} environments_awaiting_runtime={} environments_awaiting_approval={} environments_held={}",
                                 diag.outcome,
                                 diag.environments_total,
                                 diag.environments_failed,
@@ -630,7 +630,8 @@ async fn main() -> Result<()> {
                                 diag.environments_busy,
                                 diag.environments_deferred,
                                 diag.environments_awaiting_runtime,
-                                diag.environments_awaiting_approval
+                                diag.environments_awaiting_approval,
+                                diag.environments_held
                             );
                         }
                         Err(error) => {

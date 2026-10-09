@@ -56,11 +56,30 @@ impl Default for Config {
 #[serde(rename_all = "snake_case", tag = "state")]
 pub enum EnvironmentStatus {
     Current,
-    Applied { plan_id: String, steps: usize },
-    AwaitingRuntime { plan_id: String, steps: usize },
-    AwaitingApproval { plan_id: String, steps: usize },
-    Failed { error: String },
-    Deferred { retry_at: i64 },
+    Applied {
+        plan_id: String,
+        steps: usize,
+    },
+    AwaitingRuntime {
+        plan_id: String,
+        steps: usize,
+    },
+    AwaitingApproval {
+        plan_id: String,
+        steps: usize,
+    },
+    Held {
+        plan_id: String,
+        steps: usize,
+        reason: String,
+        scope: String,
+    },
+    Failed {
+        error: String,
+    },
+    Deferred {
+        retry_at: i64,
+    },
     Busy,
 }
 
@@ -93,7 +112,9 @@ impl TickReport {
                     .filter(|result| {
                         matches!(
                             result.status,
-                            EnvironmentStatus::Busy | EnvironmentStatus::Deferred { .. }
+                            EnvironmentStatus::Busy
+                                | EnvironmentStatus::Deferred { .. }
+                                | EnvironmentStatus::Held { .. }
                         )
                     })
                     .count(),
@@ -109,6 +130,7 @@ impl TickReport {
         let mut current = 0usize;
         let mut awaiting_runtime = 0usize;
         let mut awaiting_approval = 0usize;
+        let mut held = 0usize;
         for result in &self.environments {
             match &result.status {
                 EnvironmentStatus::Failed { .. } => failed += 1,
@@ -118,6 +140,7 @@ impl TickReport {
                 EnvironmentStatus::Current => current += 1,
                 EnvironmentStatus::AwaitingRuntime { .. } => awaiting_runtime += 1,
                 EnvironmentStatus::AwaitingApproval { .. } => awaiting_approval += 1,
+                EnvironmentStatus::Held { .. } => held += 1,
             }
         }
         TickDiagnostics {
@@ -129,6 +152,7 @@ impl TickReport {
             environments_current: current,
             environments_awaiting_runtime: awaiting_runtime,
             environments_awaiting_approval: awaiting_approval,
+            environments_held: held,
             outcome: if failed == 0 { "ok" } else { "degraded" },
         }
     }
@@ -145,6 +169,7 @@ pub struct TickDiagnostics {
     pub environments_current: usize,
     pub environments_awaiting_runtime: usize,
     pub environments_awaiting_approval: usize,
+    pub environments_held: usize,
     /// `ok` when no environment failed this tick; otherwise `degraded`.
     pub outcome: &'static str,
 }
@@ -1253,5 +1278,198 @@ mod tests {
         cumulative.record_tick(&report);
         assert_eq!(cumulative.ticks_failed, 1);
         assert_eq!(cumulative.last_outcome, "degraded");
+    }
+
+    async fn put_channel(ctx: &mut Ctx) {
+        ctx.put(crate::pb::sekai::Object {
+            id: "tenkai:channel:api/stable".into(),
+            kind: crate::ontology::KIND_CHANNEL.into(),
+            name: "api/stable".into(),
+            namespace: crate::ontology::NS.into(),
+            external_id: String::new(),
+            properties: std::collections::HashMap::from([
+                ("product".into(), "api".into()),
+                ("channel".into(), "stable".into()),
+                ("current_version".into(), "2.0.0".into()),
+                ("current_release".into(), "tenkai:release:api@2.0.0".into()),
+            ]),
+            created: crate::now_millis(),
+            updated: crate::now_millis(),
+        })
+        .await
+        .unwrap();
+    }
+
+    async fn stage_with_work(label: &str) -> (std::path::PathBuf, Ctx, crate::plan::Plan) {
+        let (database, mut ctx) = registered_ctx(label, &["stage"]).await;
+        let work = test_plan("stage", 100, PlanState::Computed);
+        plan::store(&mut ctx, &work).await.unwrap();
+        let mut environment = ctx
+            .get(&crate::ontology::env_id("stage"))
+            .await
+            .unwrap()
+            .unwrap();
+        environment
+            .properties
+            .insert("deployed.api".into(), "1.0.0".into());
+        ctx.put(environment).await.unwrap();
+        put_channel(&mut ctx).await;
+        (database, ctx, work)
+    }
+
+    #[tokio::test]
+    async fn plan_signals_read_target_and_departed_release_metadata() {
+        use crate::approval_policy::DeliverySignals;
+        let (database, mut ctx) = registered_ctx("delivery-signals", &["stage"]).await;
+        for (version, has_migration) in [("1.0.0", "false"), ("2.0.0", "true"), ("3.0.0", "false")]
+        {
+            ctx.put(crate::pb::sekai::Object {
+                id: format!("tenkai:release:api@{version}"),
+                kind: crate::ontology::KIND_RELEASE.into(),
+                name: format!("api@{version}"),
+                namespace: crate::ontology::NS.into(),
+                external_id: String::new(),
+                properties: std::collections::HashMap::from([
+                    ("product".into(), "api".into()),
+                    ("version".into(), version.into()),
+                    ("digest".into(), format!("digest-{version}")),
+                    ("has_migration".into(), has_migration.into()),
+                    ("changes_identity_config".into(), "false".into()),
+                ]),
+                created: 1,
+                updated: 1,
+            })
+            .await
+            .unwrap();
+        }
+        // 1.0.0 -> 3.0.0 skips past the 2.0.0 migration and still runs it.
+        let upgrade = test_upgrade_plan("stage", 100, PlanState::Computed, "1.0.0", "3.0.0");
+        assert_eq!(
+            environment_lifecycle::delivery_signals_for_plan(&mut ctx, &upgrade)
+                .await
+                .unwrap(),
+            DeliverySignals {
+                has_migration: true,
+                ..DeliverySignals::default()
+            }
+        );
+        // 3.0.0 -> 1.0.0 skips past the 2.0.0 migration and still reverses it.
+        let mut downgrade = test_upgrade_plan("stage", 101, PlanState::Computed, "3.0.0", "1.0.0");
+        downgrade.steps[0].action = crate::plan::Action::Downgrade;
+        assert_eq!(
+            environment_lifecycle::delivery_signals_for_plan(&mut ctx, &downgrade)
+                .await
+                .unwrap(),
+            DeliverySignals {
+                reverses_migration: true,
+                ..DeliverySignals::default()
+            }
+        );
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
+    async fn environment_hold_plans_and_does_not_execute() {
+        let (database, mut ctx, work) = stage_with_work("env-hold").await;
+        crate::delivery_hold::set(
+            &mut ctx,
+            &crate::delivery_hold::HoldScope::environment("stage"),
+            "freeze",
+            "alice",
+        )
+        .await
+        .unwrap();
+        let reconciler = Reconciler::new(ctx.clone(), config()).unwrap();
+        let report = reconciler.run_once().await.unwrap();
+        assert!(
+            matches!(
+                &report.environments[0].status,
+                EnvironmentStatus::Held {
+                    plan_id,
+                    steps,
+                    reason,
+                    scope
+                } if plan_id == &work.id && *steps == 1 && reason == "freeze" && scope == "environment:stage"
+            ),
+            "{:?}",
+            report.environments[0].status
+        );
+        assert_eq!(report.failures(), 0);
+        assert_eq!(report.successes(), 0);
+        assert_eq!(report.diagnostics().environments_held, 1);
+        let error = crate::delivery_hold::require_not_held(&mut ctx, &work)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("environment:stage"), "{error}");
+        let mut rollback = work.clone();
+        rollback.steps[0].action = crate::plan::Action::Rollback;
+        crate::delivery_hold::require_not_held(&mut ctx, &rollback)
+            .await
+            .unwrap();
+        let stored = plan::load(&mut ctx, &work.id).await.unwrap();
+        assert_eq!(stored.state, PlanState::Computed);
+        crate::delivery_hold::clear(
+            &mut ctx,
+            &crate::delivery_hold::HoldScope::environment("stage"),
+            "alice",
+        )
+        .await
+        .unwrap();
+        let report = reconciler.run_once().await.unwrap();
+        assert!(
+            matches!(
+                &report.environments[0].status,
+                EnvironmentStatus::AwaitingApproval { plan_id, steps }
+                    if plan_id == &work.id && *steps == 1
+            ),
+            "{:?}",
+            report.environments[0].status
+        );
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
+    async fn channel_hold_blocks_subscribed_environment() {
+        let (database, mut ctx, work) = stage_with_work("channel-hold").await;
+        crate::delivery_hold::set(
+            &mut ctx,
+            &crate::delivery_hold::HoldScope::channel("api", "stable"),
+            "channel-freeze",
+            "carol",
+        )
+        .await
+        .unwrap();
+        let reconciler = Reconciler::new(ctx.clone(), config()).unwrap();
+        let report = reconciler.run_once().await.unwrap();
+        assert!(
+            matches!(
+                &report.environments[0].status,
+                EnvironmentStatus::Held {
+                    plan_id,
+                    steps,
+                    reason,
+                    scope
+                } if plan_id == &work.id
+                    && *steps == 1
+                    && reason == "channel-freeze"
+                    && scope == "channel:api/stable"
+            ),
+            "{:?}",
+            report.environments[0].status
+        );
+        ctx.link(
+            &crate::ontology::env_id("stage"),
+            "tenkai:channel:api/stable",
+            crate::ontology::REL_SUBSCRIBES,
+        )
+        .await
+        .unwrap();
+        let listed = crate::environment::list_environments(&mut ctx)
+            .await
+            .unwrap();
+        assert!(listed[0].delivery_held);
+        let stored = plan::load(&mut ctx, &work.id).await.unwrap();
+        assert_eq!(stored.state, PlanState::Computed);
+        let _ = std::fs::remove_file(&database);
     }
 }

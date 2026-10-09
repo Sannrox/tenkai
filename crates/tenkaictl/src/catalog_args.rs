@@ -43,6 +43,17 @@ pub(crate) enum ReleaseCommand {
 }
 
 #[derive(Subcommand)]
+pub(crate) enum ChannelCommand {
+    /// Pause delivery to every environment subscribed to this channel.
+    Hold {
+        product: String,
+        channel: String,
+        #[command(subcommand)]
+        action: crate::env_args::HoldAction,
+    },
+}
+
+#[derive(Subcommand)]
 pub(crate) enum ApprovalCommand {
     /// Show signer, policy, scope, expiry, and bypass evidence without credentials.
     Inspect { plan_id: String },

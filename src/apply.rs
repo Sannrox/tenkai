@@ -231,6 +231,7 @@ async fn execute_locked(
 ) -> Result<Vec<Outcome>> {
     let skip_gates = options.skip_gates;
     execution_admission::admit(ctx, &stored_plan).await?;
+    crate::delivery_hold::require_not_held(ctx, &stored_plan).await?;
     let plan_id = stored_plan.id.clone();
     let env = stored_plan.environment.clone();
     let steps = stored_plan.steps.clone();
@@ -387,6 +388,7 @@ mod tests {
                 worker_pool: None,
                 artifacts: Vec::new(),
                 gate: GateSection::default(),
+                delivery: Default::default(),
             },
             artifact_digest: manifest::artifact_digest(&workdir, &[]).unwrap(),
             workdir,

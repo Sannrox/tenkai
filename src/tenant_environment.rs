@@ -79,6 +79,7 @@ impl TenantEnvironmentOperations {
                         subscription_count: 0,
                         deployed_product_count: 0,
                         lease_held: false,
+                        delivery_held: false,
                     }),
                 }
             }
@@ -334,6 +335,7 @@ fn partition_local_inspect(name: &str) -> EnvironmentInspectReport {
         module_activations: Vec::new(),
         preview: None,
         retirement: None,
+        delivery_hold: None,
     }
 }
 
@@ -566,6 +568,7 @@ mod tests {
                 overlay_digest: None,
                 applied_overlay: None,
                 state: "current".into(),
+                delivery_hold: None,
             }],
             facts: Default::default(),
             overlays: Default::default(),
@@ -586,6 +589,7 @@ mod tests {
             module_activations: Vec::new(),
             retirement: None,
             preview: None,
+            delivery_hold: None,
         }
     }
 
@@ -607,6 +611,7 @@ mod tests {
                     error: None,
                     head: "9.9.9".into(),
                     overlay_stale: false,
+                    delivery_hold: None,
                 }])
             })
         }

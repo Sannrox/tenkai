@@ -232,6 +232,35 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
             ],
         ),
         object_type(
+            crate::delivery_hold::HOLD_KIND,
+            "The active delivery hold for one environment or channel",
+            vec![
+                prop(
+                    "scope",
+                    true,
+                    "environment:<env> or channel:<product>/<channel>",
+                ),
+                prop("reason", true, "Why delivery is paused"),
+                prop("actor", true, "Principal that set the hold"),
+                prop("held_at", true, "Unix-ms timestamp when held"),
+            ],
+        ),
+        object_type(
+            crate::delivery_hold::HOLD_AUDIT_KIND,
+            "An immutable delivery hold set or clear event",
+            vec![
+                prop(
+                    "scope",
+                    true,
+                    "environment:<env> or channel:<product>/<channel>",
+                ),
+                prop("action", true, "set|clear"),
+                prop("reason", true, "Hold reason"),
+                prop("actor", true, "Principal that set or cleared the hold"),
+                prop("at", true, "Unix-ms timestamp of the transition"),
+            ],
+        ),
+        object_type(
             KIND_PRODUCT,
             "A deliverable unit of software or intelligence artifacts",
             vec![prop("description", false, "What this product is")],

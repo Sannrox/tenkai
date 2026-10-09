@@ -117,6 +117,7 @@ pub(super) async fn admit(
             ("workdir".into(), versioned_workdir.display().to_string()),
         ]);
         persist_oci_artifacts(&mut properties, &loaded.manifest.artifacts)?;
+        persist_delivery_properties(&mut properties, &loaded.manifest.delivery);
         properties.extend(provenance_properties.clone());
         properties.extend(pin_properties.clone());
         let release = object(
@@ -194,6 +195,28 @@ pub(super) async fn admit(
     }
 }
 
+fn persist_delivery_properties(
+    properties: &mut HashMap<String, String>,
+    delivery: &crate::manifest::DeliverySection,
+) {
+    properties.insert(
+        "has_migration".into(),
+        if delivery.has_migration {
+            "true".into()
+        } else {
+            "false".into()
+        },
+    );
+    properties.insert(
+        "changes_identity_config".into(),
+        if delivery.changes_identity_config {
+            "true".into()
+        } else {
+            "false".into()
+        },
+    );
+}
+
 fn persist_oci_artifacts(
     properties: &mut HashMap<String, String>,
     artifacts: &[crate::oci_artifact::OciArtifactRef],
@@ -204,4 +227,79 @@ fn persist_oci_artifacts(
     }
     properties.insert("oci_artifacts".into(), serde_json::to_string(artifacts)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::Ctx;
+    use crate::ontology::release_id;
+
+    #[tokio::test]
+    async fn changed_delivery_section_is_rejected_as_immutable() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-delivery-immutable-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let database = root.join("tenkai.db");
+        std::fs::create_dir_all(&root).unwrap();
+        write_manifest(&root, false);
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let options = PublishOptions {
+            allow_unsigned_development: true,
+            ..Default::default()
+        };
+        publish(&mut ctx, &root.join("tenkai.toml"), &options)
+            .await
+            .unwrap();
+        let release = ctx
+            .get(&release_id("delivery-demo", "1.0.0"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            release.properties.get("has_migration").map(String::as_str),
+            Some("false")
+        );
+        assert_eq!(
+            release
+                .properties
+                .get("changes_identity_config")
+                .map(String::as_str),
+            Some("false")
+        );
+        write_manifest(&root, true);
+        let error = publish(&mut ctx, &root.join("tenkai.toml"), &options)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("immutable") || error.contains("bump product.version"),
+            "{error}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn write_manifest(dir: &std::path::Path, has_migration: bool) {
+        std::fs::write(
+            dir.join("tenkai.toml"),
+            format!(
+                r#"
+[product]
+name = "delivery-demo"
+version = "1.0.0"
+
+[deploy]
+install = "true"
+
+[delivery]
+has_migration = {has_migration}
+changes_identity_config = false
+"#
+            ),
+        )
+        .unwrap();
+    }
 }

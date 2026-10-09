@@ -60,12 +60,15 @@ pub fn format_report(report: &FairnessReport) -> String {
     )
 }
 
+/// Fairness counts whether a tick serviced the environment and planned, not
+/// whether it executed: approval waits and operator holds are both serviced.
 pub fn status_is_plan_progress(status: &EnvironmentStatus) -> bool {
     matches!(
         status,
         EnvironmentStatus::Applied { .. }
             | EnvironmentStatus::AwaitingApproval { .. }
             | EnvironmentStatus::AwaitingRuntime { .. }
+            | EnvironmentStatus::Held { .. }
     )
 }
 

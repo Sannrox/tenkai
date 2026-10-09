@@ -140,6 +140,7 @@ pub mod client;
 pub mod command_result;
 pub mod connectivity;
 pub mod delivery_bridge;
+pub mod delivery_hold;
 pub mod delivery_manifest;
 pub mod dev_sign;
 pub mod development_fixtures;

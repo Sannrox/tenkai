@@ -11,6 +11,7 @@ mod embedded_dev;
 mod embedded_env;
 mod embedded_env_config;
 mod embedded_fleet;
+mod embedded_hold;
 mod embedded_migrate;
 mod embedded_product;
 mod embedded_reconcile;
