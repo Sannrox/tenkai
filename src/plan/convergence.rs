@@ -62,6 +62,16 @@ async fn release_is_recalled(ctx: &mut Ctx, release_id: &str) -> Result<bool> {
     crate::catalog::release_is_recalled(ctx, release_id).await
 }
 
+fn failed_target_is_held(
+    properties: &std::collections::HashMap<String, String>,
+    product: &str,
+    release: &str,
+) -> bool {
+    properties
+        .get(&format!("failed_target.{product}"))
+        .is_some_and(|failed_target| failed_target == release)
+}
+
 fn cluster_observe_executor() -> Option<Box<dyn crate::software_executor::SoftwareExecutor>> {
     match std::env::var("TENKAI_SOFTWARE_EXECUTOR") {
         Ok(value)
@@ -107,6 +117,8 @@ async fn compute_snapshot_with_policy(
 
     let mut inputs = Vec::new();
     let mut pending = Vec::new();
+    let mut held_model = false;
+    let mut held_routing = false;
     for ch in channels {
         let product = ch.properties.get("product").cloned().unwrap_or_default();
         let channel = ch.properties.get("channel").cloned().unwrap_or_default();
@@ -157,6 +169,11 @@ async fn compute_snapshot_with_policy(
                 "deployment state for {product} in {env} is unknown: {detail}; reconcile it or use rollback before creating a new plan"
             );
         }
+        if policy.observe_live && failed_target_is_held(&env_obj.properties, &product, &release) {
+            held_model |= selected.kind == crate::manifest::ProductKind::ModelRuntime;
+            held_routing |= selected.kind == crate::manifest::ProductKind::RoutingConfig;
+            continue;
+        }
         let deployed = env_obj
             .properties
             .get(&format!("deployed.{product}"))
@@ -177,7 +194,8 @@ async fn compute_snapshot_with_policy(
         });
         match deployed {
             Some(v) if v == desired => {
-                let mut restart = false;
+                let mut restart = !policy.observe_live
+                    && failed_target_is_held(&env_obj.properties, &product, &release);
                 if policy.observe_live
                     && let Some(executor) = cluster_observe_executor()
                 {
@@ -252,6 +270,15 @@ async fn compute_snapshot_with_policy(
         }
     }
     inputs.sort_by(|a, b| a.product.cmp(&b.product));
+    if held_model {
+        pending.retain(|entry| entry.6 != crate::manifest::ProductKind::RoutingConfig);
+    }
+    if held_routing {
+        pending.retain(|entry| {
+            entry.6 != crate::manifest::ProductKind::ModelRuntime
+                || !matches!(entry.1, Action::Downgrade | Action::Rollback)
+        });
+    }
     // Enforce model_runtime ↔ routing_config rollout order (see docs).
     pending.sort_by(|a, b| {
         model_routing_rollout_rank(a.6, a.1)
@@ -799,6 +826,139 @@ install = "true"
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn rolled_back_target_is_durably_held_but_operator_retry_and_new_head_are_planned() {
+        let root =
+            std::env::temp_dir().join(format!("tenkai-failed-target-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let database = root.join("tenkai.db");
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        for version in ["1.0.0", "1.1.0", "1.2.0"] {
+            published_software(&mut ctx, &root, version).await;
+        }
+        let actor = crate::auth_context::test_management_context("hold-test");
+        crate::catalog::promote(&mut ctx, &actor, "api@1.1.0", "stable")
+            .await
+            .unwrap();
+        env_add(&mut ctx, "local", "fixture").await.unwrap();
+        subscribe(&mut ctx, "local", "api", "stable").await.unwrap();
+        let mut environment = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        environment
+            .properties
+            .insert("deployed.api".into(), "1.0.0".into());
+        ctx.put(environment).await.unwrap();
+        let plan = create(&mut ctx, "local").await.unwrap();
+        let lease = crate::apply::claim_environment(&mut ctx, "local", "hold-test")
+            .await
+            .unwrap();
+        crate::environment::record_deployment_observation(
+            &mut ctx,
+            &lease,
+            crate::environment::DeploymentObservation {
+                environment: "local",
+                plan_id: &plan.id,
+                step: &plan.steps[0],
+                status: "rolled_back",
+                detail: "health failed; previous release restored",
+                transition: crate::environment::DeploymentTransition::Unchanged,
+            },
+        )
+        .await
+        .unwrap();
+        drop(ctx);
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        for _ in 0..2 {
+            assert!(
+                create_for_reconcile(&mut ctx, "local")
+                    .await
+                    .unwrap()
+                    .steps
+                    .is_empty()
+            );
+        }
+        assert!(
+            crate::environment::status(&mut ctx, "local").await.unwrap()[0]
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("held")
+        );
+        assert_eq!(
+            create(&mut ctx, "local").await.unwrap().steps[0].to,
+            "1.1.0"
+        );
+        let mut environment = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        environment
+            .properties
+            .insert("deployment_health.api".into(), "unknown".into());
+        environment.properties.insert(
+            "deployment_error.api".into(),
+            "restore needs manual recovery".into(),
+        );
+        ctx.put(environment).await.unwrap();
+        assert!(
+            create_for_reconcile(&mut ctx, "local")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("unknown")
+        );
+        assert_eq!(
+            crate::environment::status(&mut ctx, "local").await.unwrap()[0]
+                .error
+                .as_deref(),
+            Some("restore needs manual recovery")
+        );
+        let mut environment = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        environment
+            .properties
+            .insert("deployment_health.api".into(), "healthy".into());
+        environment.properties.remove("deployment_error.api");
+        ctx.put(environment).await.unwrap();
+        crate::catalog::promote(&mut ctx, &actor, "api@1.2.0", "stable")
+            .await
+            .unwrap();
+        assert_eq!(
+            create_for_reconcile(&mut ctx, "local").await.unwrap().steps[0].to,
+            "1.2.0"
+        );
+        crate::environment::record_deployment_observation(
+            &mut ctx,
+            &lease,
+            crate::environment::DeploymentObservation {
+                environment: "local",
+                plan_id: &plan.id,
+                step: &plan.steps[0],
+                status: "succeeded",
+                detail: "operator retry succeeded",
+                transition: crate::environment::DeploymentTransition::Deployed {
+                    version: "1.1.0".into(),
+                    previous: Some("1.0.0".into()),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let environment = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        assert!(!environment.properties.contains_key("failed_target.api"));
+        assert!(
+            !environment
+                .properties
+                .contains_key("failed_target_plan.api")
+        );
+        drop(ctx);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

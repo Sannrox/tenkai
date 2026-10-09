@@ -509,14 +509,13 @@ pub(crate) async fn record_deployment_observation(
     deployment.updated = crate::now_millis();
     let mut environment = if ctx.outcome_export_enabled()
         || observation.transition != DeploymentTransition::Unchanged
+        || matches!(observation.status, "failed" | "rolled_back")
     {
         Some(environment(ctx, observation.environment).await?)
     } else {
         None
     };
-    if let Some(environment) = environment.as_mut()
-        && observation.transition != DeploymentTransition::Unchanged
-    {
+    if let Some(environment) = environment.as_mut() {
         transition_deployment(
             environment,
             &observation.step.product,
@@ -524,6 +523,33 @@ pub(crate) async fn record_deployment_observation(
             observation.detail,
             deployment.updated,
         );
+        let failed_target_key = format!("failed_target.{}", observation.step.product);
+        if matches!(observation.status, "failed" | "rolled_back")
+            && observation.step.action != crate::plan::Action::Rollback
+        {
+            environment
+                .properties
+                .insert(failed_target_key, observation.step.release_id.clone());
+            environment.properties.insert(
+                format!("failed_target_plan.{}", observation.step.product),
+                observation.plan_id.into(),
+            );
+            environment.properties.insert(
+                format!("failed_target_at.{}", observation.step.product),
+                deployment.updated.to_string(),
+            );
+        } else if observation.status == "succeeded"
+            && environment.properties.get(&failed_target_key) == Some(&observation.step.release_id)
+            && matches!(
+                observation.transition,
+                DeploymentTransition::Deployed { .. } | DeploymentTransition::Refreshed
+            )
+        {
+            environment.properties.remove(&failed_target_key);
+            environment
+                .properties
+                .remove(&format!("failed_target_plan.{}", observation.step.product));
+        }
         if observation.transition == DeploymentTransition::Unknown {
             environment.properties.insert(
                 format!("deployment_unknown_plan.{}", observation.step.product),
@@ -569,9 +595,11 @@ pub(crate) async fn record_deployment_observation(
     } else {
         Vec::new()
     };
+    let environment_changed = observation.transition != DeploymentTransition::Unchanged
+        || matches!(observation.status, "failed" | "rolled_back");
     let update_result = if ctx.outcome_export_enabled() {
         let mut objects = vec![deployment];
-        if observation.transition != DeploymentTransition::Unchanged {
+        if environment_changed {
             objects.push(environment.expect("an Environment transition loads its object"));
         }
         ctx.guarded_update_objects_with_provider_events(
@@ -583,7 +611,7 @@ pub(crate) async fn record_deployment_observation(
         )
         .await
     } else {
-        if observation.transition != DeploymentTransition::Unchanged {
+        if environment_changed {
             guarded_update(
                 ctx,
                 lease,
@@ -1060,6 +1088,24 @@ async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<Statu
             .get(&format!("applied_config.{product}"))
             .cloned()
             .unwrap_or_default();
+        let selected_release = crate::plan::resolve_subscription_selection(
+            ctx,
+            env_obj,
+            &env_obj.name,
+            &product,
+            ch.properties
+                .get("current_version")
+                .map(String::as_str)
+                .unwrap_or_default(),
+            ch.properties
+                .get("current_release")
+                .map(String::as_str)
+                .unwrap_or_default(),
+        )
+        .await;
+        let held = selected_release.as_ref().is_ok_and(|(_, release)| {
+            env_obj.properties.get(&format!("failed_target.{product}")) == Some(release)
+        });
         rows.push(StatusRow {
             deployed: env_obj
                 .properties
@@ -1069,10 +1115,14 @@ async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<Statu
                 .properties
                 .get(&format!("deployment_health.{product}"))
                 .cloned(),
-            error: env_obj
-                .properties
-                .get(&format!("deployment_error.{product}"))
-                .cloned(),
+            error: if held
+                && env_obj.properties.get(&format!("deployment_health.{product}"))
+                    .is_none_or(|health| health != "unknown")
+            {
+                Some("target failed; automatic retry held; create and approve an explicit plan to retry".into())
+            } else {
+                env_obj.properties.get(&format!("deployment_error.{product}")).cloned()
+            },
             channel,
             head: ch
                 .properties
