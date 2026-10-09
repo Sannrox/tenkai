@@ -214,6 +214,24 @@ pub fn known_action(name: &str) -> Option<ActionTypeDef> {
 pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
     let types = vec![
         object_type(
+            crate::software_compatibility::EVIDENCE_KIND,
+            "Immutable environment-scoped software compatibility observation",
+            vec![
+                prop("environment", true, "Environment scope"),
+                prop("release_digest", true, "Target release manifest digest"),
+                prop(
+                    "observed_at_order",
+                    true,
+                    "Fixed-width observation-time ordering key",
+                ),
+                prop(
+                    "evidence",
+                    true,
+                    "Versioned bounded observation without secrets",
+                ),
+            ],
+        ),
+        object_type(
             KIND_PRODUCT,
             "A deliverable unit of software or intelligence artifacts",
             vec![prop("description", false, "What this product is")],

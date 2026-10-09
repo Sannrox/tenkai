@@ -127,6 +127,9 @@ pub(crate) async fn run(
                 plan::set_observed_compatibility(ctx, &env, &type_digest, &runtime_digest).await?
             );
         }
+        EnvCommand::Compatibility { command } => {
+            crate::embedded_env_config::compatibility(ctx, command).await?;
+        }
         EnvCommand::Facts { command } => {
             crate::embedded_env_config::facts(ctx, command).await?;
         }

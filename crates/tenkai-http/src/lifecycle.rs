@@ -198,3 +198,42 @@ pub(super) async fn rollback_environment(
             .await,
     )
 }
+
+pub(super) async fn record_software_compatibility_evidence(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(value) => value,
+        Err(error) => return *error,
+    };
+    let evidence = match parse_management_json(&body) {
+        Ok(value) => value,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .record_software_compatibility_evidence(&credential, &environment, evidence)
+            .await,
+    )
+}
+
+pub(super) async fn software_compatibility_report(
+    State(state): State<Arc<AppState>>,
+    Path((environment, release)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(value) => value,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .software_compatibility_report(&credential, &environment, &release)
+            .await,
+    )
+}

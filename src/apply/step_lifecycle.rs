@@ -55,6 +55,15 @@ pub(super) async fn execute(
         )?;
     }
 
+    crate::software_compatibility::require_manifest(
+        ctx,
+        environment,
+        &content.manifest,
+        &content.manifest_digest,
+    )
+    .await?;
+
+    let mut outgoing_removed = false;
     if step.action == Action::Rollback
         && let Some(outgoing) = restore_content.as_ref()
         && outgoing
@@ -87,6 +96,7 @@ pub(super) async fn execute(
             .await?;
             return Ok(outcome);
         }
+        outgoing_removed = true;
     }
 
     let activation = match if step.action == Action::Restart {
@@ -95,6 +105,26 @@ pub(super) async fn execute(
         product_execution::activate(ctx, lease, &content, adapters).await
     } {
         Ok(result) => result,
+        Err(error)
+            if error
+                .downcast_ref::<crate::software_compatibility::CompatibilityBlocked>()
+                .is_some() =>
+        {
+            if outgoing_removed {
+                let outcome =
+                    Outcome::new(step.clone(), StepOutcomeStatus::Blocked, error.to_string());
+                record(
+                    ctx,
+                    lease,
+                    environment,
+                    plan_id,
+                    &outcome,
+                    crate::environment::DeploymentTransition::Unknown,
+                )
+                .await?;
+            }
+            return Err(error);
+        }
         Err(error) => Err(format!("deployment executor failed: {error}")),
     };
     let outcome = match activation {

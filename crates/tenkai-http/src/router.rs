@@ -17,7 +17,8 @@ use super::inspect::{
 };
 use super::lifecycle::{
     apply_plan, approve_plan, plan_environment, promote_release, publish_release, recall_release,
-    retire_environment, rollback_environment, subscribe_environment,
+    record_software_compatibility_evidence, retire_environment, rollback_environment,
+    software_compatibility_report, subscribe_environment,
 };
 use super::package_migration::{
     apply_package_migration, package_migration_status, preview_package_migration,
@@ -82,6 +83,14 @@ pub fn router(
         .route("/v1/reconcile", post(reconcile))
         .route("/v1/fleet/status", get(fleet_status))
         .route("/v1/environments", get(list_environments))
+        .route(
+            "/v1/environments/{environment}/compatibility/evidence",
+            post(record_software_compatibility_evidence),
+        )
+        .route(
+            "/v1/environments/{environment}/compatibility/{release}",
+            get(software_compatibility_report),
+        )
         .route("/v1/environments/{environment}", get(inspect_environment))
         .route(
             "/v1/environments/{environment}/status",

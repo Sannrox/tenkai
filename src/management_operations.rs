@@ -243,6 +243,60 @@ impl ManagementOperations {
         Ok(report)
     }
 
+    pub async fn software_compatibility_report(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+        release: &str,
+    ) -> Result<Option<crate::software_compatibility::CompatibilityReport>, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        self.require_community_catalog_host()?;
+        self.require_environment_grant(
+            credential,
+            &context,
+            Some(environment),
+            "software compatibility",
+        )?;
+        let mut ctx = self.application_ctx()?;
+        crate::software_compatibility::report(&mut ctx, environment, release)
+            .await
+            .map_err(|_| {
+                ManagementError::Unavailable("software compatibility preflight unavailable".into())
+            })
+    }
+
+    pub async fn record_software_compatibility_evidence(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+        evidence: crate::software_compatibility::CompatibilityEvidence,
+    ) -> Result<(), ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        self.require_community_catalog_host()?;
+        management_lifecycle::authorize_management_lifecycle_scope(
+            context.principal.kind,
+            self.granted_environment(credential, &context),
+            ManagementLifecycleOperation::Subscribe,
+            Some(environment),
+        )
+        .map_err(map_lifecycle_error)?;
+        self.audit(
+            context.principal_id(),
+            "software_compatibility.record.requested",
+        )?;
+        let mut ctx = self.application_ctx()?;
+        crate::software_compatibility::record_evidence(&mut ctx, environment, evidence)
+            .await
+            .map_err(map_catalog_error)?;
+        self.audit(
+            context.principal_id(),
+            "software_compatibility.record.completed",
+        )?;
+        Ok(())
+    }
+
     pub async fn retire_environment(
         &self,
         credential: &CredentialMaterial,

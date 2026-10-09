@@ -66,6 +66,7 @@ will be split over time. Contributor and agent workflow live in
 | --- | --- |
 | The manifest (`tenkai.toml`) and product kinds | [manifest.md](manifest.md) |
 | Software executors (Helm, Kubernetes) | [software-executor.md](software-executor.md) |
+| Signed software compatibility preflight | [software-compatibility.md](software-compatibility.md) |
 | `model_runtime` products | [model-runtime.md](model-runtime.md) |
 | Policy, eval-suite, and agent products | [staged-products.md](staged-products.md) |
 | Worker pools | [worker-pool.md](worker-pool.md) |

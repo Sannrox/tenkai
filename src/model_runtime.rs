@@ -888,6 +888,7 @@ mod tests {
     fn from_manifest_builds_descriptor() {
         let sample = sample_descriptor();
         let manifest = Manifest {
+            compatibility: None,
             product: ProductSection {
                 name: "qwen-coder".into(),
                 version: "3.2.1".into(),

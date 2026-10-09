@@ -58,6 +58,10 @@ pub(super) async fn admit(
     plan: &mut Plan,
     policy: AdmissionPolicy<'_>,
 ) -> Result<Option<Vec<Outcome>>> {
+    for step in &plan.steps {
+        crate::software_compatibility::require_release(ctx, &plan.environment, &step.release_id)
+            .await?;
+    }
     if !policy.skip_gates {
         for step in &plan.steps.clone() {
             if step.action == Action::Rollback {

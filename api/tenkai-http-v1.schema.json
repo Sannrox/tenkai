@@ -278,12 +278,402 @@
       ],
       "type": "object"
     },
+    "CompatibilityEvidence2": {
+      "additionalProperties": false,
+      "description": "Observations describe the candidate's constituents and installed dependencies.\nThe environment owner supplies this evidence; it grants no execution authority.",
+      "properties": {
+        "capabilities": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "components": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ComponentObservation"
+          },
+          "type": "object"
+        },
+        "contracts": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "environment": {
+          "type": "string"
+        },
+        "migration": {
+          "$ref": "#/$defs/MigrationState"
+        },
+        "observed_at_ms": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "release_digest": {
+          "type": "string"
+        },
+        "schema_version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "release_digest",
+        "environment",
+        "observed_at_ms",
+        "components",
+        "contracts",
+        "capabilities",
+        "migration"
+      ],
+      "type": "object"
+    },
+    "CompatibilityFailure": {
+      "oneOf": [
+        {
+          "properties": {
+            "reason": {
+              "const": "missing_evidence",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "const": "invalid_evidence",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "const": "ambiguous_evidence",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "const": "preflight_unavailable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "component": {
+              "type": "string"
+            },
+            "reason": {
+              "const": "ambiguous_component",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason",
+            "component"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "const": "release_binding",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "const": "environment_binding",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "const": "stale_evidence",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "component": {
+              "type": "string"
+            },
+            "reason": {
+              "const": "missing_component",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason",
+            "component"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "component": {
+              "type": "string"
+            },
+            "reason": {
+              "const": "component_changed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason",
+            "component"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "capability": {
+              "type": "string"
+            },
+            "reason": {
+              "const": "missing_capability",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason",
+            "capability"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "fact": {
+              "type": "string"
+            },
+            "reason": {
+              "const": "unsatisfied_fact",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason",
+            "fact"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "contract": {
+              "type": "string"
+            },
+            "reason": {
+              "const": "missing_contract",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason",
+            "contract"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "contract": {
+              "type": "string"
+            },
+            "reason": {
+              "const": "ambiguous_contract",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason",
+            "contract"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "contract": {
+              "type": "string"
+            },
+            "reason": {
+              "const": "incompatible_contract",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason",
+            "contract"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "const": "unsupported_schema",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "const": "migration_state",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "CompatibilityReport": {
+      "description": "Public reports contain requirement identifiers, never observed facts or payloads.",
+      "properties": {
+        "failures": {
+          "items": {
+            "$ref": "#/$defs/CompatibilityFailure"
+          },
+          "type": "array"
+        },
+        "release_digest": {
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "release_digest",
+        "failures"
+      ],
+      "type": "object"
+    },
     "CompatibilityStatus": {
       "enum": [
         "compatible",
         "incompatible"
       ],
       "type": "string"
+    },
+    "ComponentObservation": {
+      "additionalProperties": false,
+      "properties": {
+        "pin": {
+          "$ref": "#/$defs/ComponentPin"
+        },
+        "provides": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "requires": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "type": "object"
+        }
+      },
+      "required": [
+        "pin",
+        "provides"
+      ],
+      "type": "object"
+    },
+    "ComponentPin": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "revision",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "digest",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "EnvironmentConstraint": {
       "description": "One environment constraint, as set by `tenkaictl env constraints set`.",
@@ -1174,6 +1564,13 @@
       ],
       "type": "object"
     },
+    "MigrationState": {
+      "enum": [
+        "stable",
+        "pending"
+      ],
+      "type": "string"
+    },
     "MigrationStatus": {
       "enum": [
         "admitted",
@@ -1986,6 +2383,33 @@
     "$ref": "#/$defs/ErrorBody"
   },
   "routes": [
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/environments/{environment}/compatibility/{release}",
+      "request": null,
+      "response": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/CompatibilityReport"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/environments/{environment}/compatibility/evidence",
+      "request": {
+        "$ref": "#/$defs/CompatibilityEvidence2"
+      },
+      "response": {
+        "type": "null"
+      }
+    },
     {
       "auth": "none",
       "method": "GET",

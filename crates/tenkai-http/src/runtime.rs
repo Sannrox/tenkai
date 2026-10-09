@@ -52,12 +52,16 @@ pub(super) async fn runtime_heartbeat(
     headers: HeaderMap,
     Json(heartbeat): Json<RuntimeHeartbeat>,
 ) -> Response {
-    match state.runtime_delivery.renew(
-        bearer(&headers),
-        runtime_instance(&headers),
-        &environment,
-        &heartbeat,
-    ) {
+    match state
+        .runtime_delivery
+        .renew(
+            bearer(&headers),
+            runtime_instance(&headers),
+            &environment,
+            &heartbeat,
+        )
+        .await
+    {
         Ok(claim) => Json(claim).into_response(),
         Err(error) => runtime_delivery_error(error),
     }

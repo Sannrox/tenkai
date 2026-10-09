@@ -58,7 +58,7 @@ fn oidc_app(signer: &Signer) -> Router {
     };
     server.enterprise_auth = Some(Arc::new(extension));
     server.oidc_client = OidcClientDiscovery::from_config(&config);
-    router(server, Arc::new(FixedReconciler), store).unwrap()
+    router(server, Arc::new(FixedReconciler::default()), store).unwrap()
 }
 
 fn token(signer: &Signer, groups: &[&str]) -> String {

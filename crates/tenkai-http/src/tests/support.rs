@@ -1,6 +1,19 @@
 use super::*;
 
-pub(super) struct FixedReconciler;
+#[derive(Default)]
+pub(super) struct FixedReconciler {
+    ctx: Option<tenkai::client::Ctx>,
+    plan: tokio::sync::OnceCell<tenkai::plan::Plan>,
+}
+
+impl FixedReconciler {
+    pub(super) fn for_runtime() -> Self {
+        Self {
+            ctx: Some(tenkai::client::Ctx::embedded(":memory:").unwrap()),
+            plan: tokio::sync::OnceCell::new(),
+        }
+    }
+}
 
 impl ReconcilePort for FixedReconciler {
     fn reconcile(&self) -> ReconcileFuture<'_> {
@@ -30,22 +43,25 @@ impl ReconcilePort for FixedReconciler {
 
     fn pending_work(&self, environment: String) -> WorkFuture<'_> {
         Box::pin(async move {
-            Ok(Some(tenkai::plan::Plan {
-                format_version: 1,
-                id: "plan-1".into(),
-                content_id: "sha256:plan".into(),
-                environment,
-                created_at: 1,
-                inputs: Vec::new(),
-                steps: Vec::new(),
-                state: tenkai::plan::PlanState::Computed,
-                gates_skipped: None,
-                status_detail: String::new(),
-                maintenance_blocked: false,
-                prior_warnings: Vec::new(),
-                recalled_recovery_reason: None,
-            }))
+            let plan = self
+                .plan
+                .get_or_try_init(|| async {
+                    let mut ctx = self
+                        .ctx
+                        .clone()
+                        .ok_or_else(|| anyhow::anyhow!("application context unavailable"))?;
+                    tenkai::ontology::register(&mut ctx).await?;
+                    tenkai::environment::env_add(&mut ctx, &environment, "runtime-test").await?;
+                    tenkai::plan::create_from_steps(&mut ctx, &environment, Vec::new()).await
+                })
+                .await?
+                .clone();
+            Ok(Some(plan))
         })
+    }
+
+    fn application_ctx(&self) -> Option<tenkai::client::Ctx> {
+        self.ctx.clone()
     }
 
     fn check_health(&self) -> HealthFuture<'_> {
@@ -176,6 +192,12 @@ impl ReconcilePort for FixedReconciler {
 }
 
 pub(super) fn app() -> (Router, Arc<tenkai::storage::SqliteStore>) {
+    app_with_reconciler(FixedReconciler::default())
+}
+
+pub(super) fn app_with_reconciler(
+    reconciler: FixedReconciler,
+) -> (Router, Arc<tenkai::storage::SqliteStore>) {
     let store = Arc::new(tenkai::storage::SqliteStore::open_in_memory().unwrap());
     store
         .put_environment(&tenkai::storage::EnvironmentRecord {
@@ -189,7 +211,7 @@ pub(super) fn app() -> (Router, Arc<tenkai::storage::SqliteStore>) {
             "management-secret",
             HashMap::from([("runtime-secret".into(), "prod".into())]),
         ),
-        Arc::new(FixedReconciler),
+        Arc::new(reconciler),
         store.clone(),
     )
     .unwrap();

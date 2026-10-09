@@ -1340,7 +1340,7 @@ pub(crate) fn validate_fact_key(key: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_fact_value(key: &str, value: &str) -> Result<()> {
+pub(crate) fn validate_fact_value(key: &str, value: &str) -> Result<()> {
     if value.trim().is_empty() {
         bail!("environment fact {key} must not be empty");
     }

@@ -114,6 +114,25 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
+        Command::Env {
+            command: EnvCommand::Compatibility { command },
+        } => {
+            match command {
+                crate::env_args::CompatibilityCommand::Record { env, evidence } => {
+                    let evidence = serde_json::from_slice(&std::fs::read(evidence)?)?;
+                    client
+                        .record_software_compatibility_evidence(&env, &evidence)
+                        .await?;
+                    println!("recorded software compatibility evidence for {env}");
+                }
+                crate::env_args::CompatibilityCommand::Check { env, release } => {
+                    crate::embedded_env_config::print_compatibility_report(
+                        client.software_compatibility_report(&env, &release).await?,
+                    )?;
+                }
+            }
+            Ok(())
+        }
         Command::Status { env } => {
             let rows = client.environment_status(&env).await?;
             if rows.is_empty() {

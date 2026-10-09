@@ -1,4 +1,4 @@
-use super::support::{FixedReconciler, app};
+use super::support::{FixedReconciler, app, app_with_reconciler};
 use super::*;
 
 #[tokio::test]
@@ -22,7 +22,7 @@ async fn openmetrics_enabled_exposes_series_without_secrets() {
         HashMap::from([("runtime-secret".into(), "prod".into())]),
     );
     config.metrics_enabled = true;
-    let app = router(config, Arc::new(FixedReconciler), store).unwrap();
+    let app = router(config, Arc::new(FixedReconciler::default()), store).unwrap();
     let response = app
         .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
         .await
@@ -116,7 +116,7 @@ async fn runtime_inventory_accepts_admitted_facts_and_rejects_foreign_env() {
 
 #[tokio::test]
 async fn embedded_and_http_reconciliation_share_the_same_contract() {
-    let embedded = FixedReconciler.reconcile().await.unwrap();
+    let embedded = FixedReconciler::default().reconcile().await.unwrap();
     let (app, store) = app();
     let response = app
         .oneshot(
@@ -138,7 +138,7 @@ async fn embedded_and_http_reconciliation_share_the_same_contract() {
 
 #[tokio::test]
 async fn runtime_credentials_are_environment_scoped() {
-    let (app, _) = app();
+    let (app, _) = app_with_reconciler(FixedReconciler::for_runtime());
     let denied = app
         .clone()
         .oneshot(
@@ -169,7 +169,8 @@ async fn runtime_credentials_are_environment_scoped() {
         .unwrap();
     let first: RuntimeWork = serde_json::from_slice(&bytes).unwrap();
     assert!(first.plan.is_some());
-    let generation = first.claim.unwrap().generation;
+    let claim = first.claim.unwrap();
+    let generation = claim.generation;
     assert_eq!(generation, 1);
 
     let overlapping = app
@@ -199,7 +200,7 @@ async fn runtime_credentials_are_environment_scoped() {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&tenkai::runtime_delivery::RuntimeCompletion {
-                        plan_id: "plan-1".into(),
+                        plan_id: claim.plan_id.clone(),
                         generation,
                         succeeded: true,
                         detail: "deployed".into(),

@@ -185,6 +185,7 @@ pub mod runtime_protocol;
 pub mod schema_contract;
 pub mod shutdown;
 mod signature_verification;
+pub mod software_compatibility;
 pub mod software_executor;
 pub mod staged_artifact;
 pub mod storage;
