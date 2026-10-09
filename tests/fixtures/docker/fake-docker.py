@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -163,6 +164,7 @@ def handle_run(state: dict, state_path: Path, args: list[str]) -> int:
     }
     healthy = image not in fail
     state["containers"][name] = {
+        "id": container_id(name),
         "image": image,
         "labels": labels,
         "running": True,
@@ -174,17 +176,31 @@ def handle_run(state: dict, state_path: Path, args: list[str]) -> int:
     return 0
 
 
+def lookup_container(state: dict, token: str) -> tuple[str, dict] | None:
+    if token in state["containers"]:
+        return token, state["containers"][token]
+    for name, container in state["containers"].items():
+        if container.get("id") == token:
+            return name, container
+    return None
+
+
+def container_id(name: str) -> str:
+    return hashlib.sha256(name.encode()).hexdigest()[:12]
+
+
 def handle_inspect(state: dict, args: list[str]) -> int:
     names = [item for item in args if not item.startswith("-")]
     payload = []
     for name in names:
-        container = state["containers"].get(name)
-        if container is None:
+        found = lookup_container(state, name)
+        if found is None:
             sys.stderr.write(f"Error: No such object: {name}\n")
             return 1
+        found_name, container = found
         payload.append(
             {
-                "Name": f"/{name}",
+                "Name": f"/{found_name}",
                 "Config": {
                     "Image": container["image"],
                     "Labels": container["labels"],
@@ -200,9 +216,11 @@ def handle_inspect(state: dict, args: list[str]) -> int:
 
 
 def handle_rm(state: dict, state_path: Path, args: list[str]) -> int:
-    names = [item for item in args if not item.startswith("-")]
-    for name in names:
-        state["containers"].pop(name, None)
+    tokens = [item for item in args if not item.startswith("-")]
+    for token in tokens:
+        found = lookup_container(state, token)
+        if found is not None:
+            state["containers"].pop(found[0], None)
     save(state_path, state)
     return 0
 
@@ -225,10 +243,21 @@ def handle_ps(state: dict, args: list[str]) -> int:
         if key == "label":
             label_key, _, label_value = value.partition("=")
             wanted[label_key] = label_value
+    quiet = any(
+        item in {"-q", "-aq", "-qa"}
+        or (item.startswith("-") and not item.startswith("--") and "q" in item)
+        for item in args
+    )
+    formats = take_flag(args, "--format")
     for name, container in state["containers"].items():
         labels = container.get("labels", {})
         if all(labels.get(key) == value for key, value in wanted.items()):
-            sys.stdout.write(name + "\n")
+            if quiet:
+                sys.stdout.write(container.get("id", container_id(name)) + "\n")
+            elif formats == ["{{.Names}}"]:
+                sys.stdout.write(name + "\n")
+            else:
+                sys.stdout.write(name + "\n")
     return 0
 
 
