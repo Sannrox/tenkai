@@ -200,9 +200,21 @@ tenkaictl reconcile --once
 ```
 
 `host.json` declares digest-pinned containers, networks, named volumes, mounts,
-`depends_on` order, optional health commands, and optional `env_file` basenames.
-Images must be `sha256:` plus 64 hex digits. Bind mounts and inline environment
-values are refused. `env_file` is a basename under the environment-scoped
+`depends_on` order, optional health commands, and optional `env_file` basenames,
+plus these per-container runtime settings:
+
+| Field | Meaning |
+| --- | --- |
+| `image` | `<repository>@sha256:<64 hex>` (registry manifest digest, pulled when missing) or `sha256:<64 hex>` (a local image ID that must already be on the host). Tags are refused, alone or next to a digest. |
+| `ports` | `[{"host_ip": "127.0.0.1", "host_port": 8080, "container_port": 80, "protocol": "tcp"}]`. `host_ip` defaults to loopback and `protocol` to `tcp` (`udp` allowed). Ports are 1-65535, and a host address, port, and protocol may be published once per topology. |
+| `entrypoint` | Argument array. The first element becomes `--entrypoint`; the rest lead the container arguments. Setting it clears the image command, as `docker run --entrypoint` does. |
+| `command` | Argument array passed after the image. Absent keeps the image default. |
+| `aliases` | `{"<network>": ["<alias>"]}` DNS aliases on networks the container joins, unique per network. |
+
+Arguments are stored in the release and visible through `docker inspect`, so
+credential-looking values are refused; secrets belong in `env_file`. There is no
+free-form Docker flag escape hatch. Bind mounts and inline environment values
+are refused. `env_file` is a basename under the environment-scoped
 secret directory; Tenkai never writes those bytes into SQLite, argv values,
 labels, or typed receipts. Apply hashes the resolved path and contents in memory
 into each container's `tenkai.spec-digest` label (`docker inspect` already

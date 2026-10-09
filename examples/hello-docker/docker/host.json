@@ -1,11 +1,17 @@
 {
-  "networks": ["appnet"],
-  "volumes": ["appdata"],
+  "networks": [
+    "appnet"
+  ],
+  "volumes": [
+    "appdata"
+  ],
   "containers": [
     {
       "name": "db",
-      "image": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      "networks": ["appnet"],
+      "image": "registry.example/hello/db@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "networks": [
+        "appnet"
+      ],
       "volumes": [
         {
           "name": "appdata",
@@ -14,17 +20,36 @@
       ],
       "health": {
         "cmd": "true"
-      }
+      },
+      "aliases": {
+        "appnet": [
+          "database"
+        ]
+      },
+      "command": [
+        "--data-dir",
+        "/var/lib/data"
+      ]
     },
     {
       "name": "api",
-      "image": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-      "networks": ["appnet"],
-      "depends_on": ["db"],
+      "image": "registry.example/hello/api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "networks": [
+        "appnet"
+      ],
+      "depends_on": [
+        "db"
+      ],
       "env_file": "api.env",
       "health": {
         "cmd": "true"
-      }
+      },
+      "ports": [
+        {
+          "host_port": 8080,
+          "container_port": 80
+        }
+      ]
     }
   ]
 }

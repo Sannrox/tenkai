@@ -94,6 +94,20 @@ def labeled_resources(state: dict, kind: str) -> dict:
 
 
 def handle_network(state: dict, state_path: Path, args: list[str]) -> int:
+    if args and args[0] == "connect":
+        aliases = take_flag(args, "--alias")
+        positional = [item for item in args[1:] if not item.startswith("-") and item not in aliases]
+        if len(positional) != 2:
+            sys.stderr.write("docker network connect requires NETWORK CONTAINER\n")
+            return 1
+        network, name = positional
+        container = state["containers"].get(name)
+        if container is None:
+            sys.stderr.write(f"Error: No such container: {name}\n")
+            return 1
+        container.setdefault("networks", {})[network] = aliases
+        save(state_path, state)
+        return 0
     if not args or args[0] != "create":
         sys.stderr.write("expected network create\n")
         return 1
@@ -140,11 +154,15 @@ def handle_run(state: dict, state_path: Path, args: list[str]) -> int:
         key, _, value = item.partition("=")
         labels[key] = value
     image = None
+    command: list[str] = []
     skip = False
     flags_with_value = {
         "--name",
         "--label",
         "--network",
+        "--network-alias",
+        "--publish",
+        "--entrypoint",
         "--mount",
         "--env-file",
         "--health-cmd",
@@ -153,6 +171,9 @@ def handle_run(state: dict, state_path: Path, args: list[str]) -> int:
         "--health-timeout",
     }
     for index, item in enumerate(args):
+        if image is not None:
+            command.append(item)
+            continue
         if skip:
             skip = False
             continue
@@ -202,6 +223,13 @@ def handle_run(state: dict, state_path: Path, args: list[str]) -> int:
         "running": True,
         "health": "healthy" if healthy else "unhealthy",
         "mounts": mounts,
+        "ports": take_flag(args, "--publish"),
+        "entrypoint": take_flag(args, "--entrypoint"),
+        "command": command,
+        "networks": {
+            network: take_flag(args, "--network-alias")
+            for network in take_flag(args, "--network")
+        },
     }
     images = state.setdefault("images", [])
     if image not in images:
