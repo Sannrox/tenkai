@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import hashlib
+import io
+import tarfile
 import json
 import os
 import sys
@@ -35,8 +37,10 @@ def main() -> int:
         return handle_network(state, state_path, rest)
     if command == "volume":
         return handle_volume(state, state_path, rest)
-    if command == "run":
-        return handle_run(state, state_path, rest)
+    if command in {"run", "create"}:
+        return handle_run(state, state_path, rest, command == "create")
+    if command == "cp":
+        return handle_cp(state, state_path, rest)
     if command == "inspect":
         return handle_inspect(state, rest)
     if command == "rm":
@@ -138,7 +142,7 @@ def create_labeled_resource(
     return 0
 
 
-def handle_run(state: dict, state_path: Path, args: list[str]) -> int:
+def handle_run(state: dict, state_path: Path, args: list[str], created: bool = False) -> int:
     names = take_flag(args, "--name")
     if len(names) != 1:
         sys.stderr.write("docker run requires one --name\n")
@@ -219,13 +223,13 @@ def handle_run(state: dict, state_path: Path, args: list[str]) -> int:
     detached = "-d" in args or "--detach" in args
     job = labels.get("tenkai.job") == "true"
     job_running = job and os.environ.get("TENKAI_DOCKER_FAKE_JOB_RUNNING") == "1"
-    running = job_running or (detached and not job)
+    running = not created and (job_running or (detached and not job))
     state["containers"][name] = {
         "id": container_id(name),
         "image": image,
         "labels": labels,
         "running": running,
-        "status": "running" if running else "exited",
+        "status": "created" if created else ("running" if running else "exited"),
         "exit_code": 0 if healthy else 1,
         "health": "healthy" if healthy else "unhealthy",
         "mounts": mounts,
@@ -242,6 +246,23 @@ def handle_run(state: dict, state_path: Path, args: list[str]) -> int:
         images.append(image)
     save(state_path, state)
     sys.stdout.write(name + "\n")
+    return 0
+
+
+def handle_cp(state: dict, state_path: Path, args: list[str]) -> int:
+    if len(args) != 2 or args[0] != "-":
+        return 1
+    name, _, destination = args[1].partition(":")
+    container = state["containers"].get(name)
+    if container is None or container["status"] != "created":
+        return 1
+    with tarfile.open(fileobj=io.BytesIO(sys.stdin.buffer.read()), mode="r:") as archive:
+        for member in archive:
+            contents = archive.extractfile(member).read()
+            container.setdefault("files", {})[str(Path(destination) / member.name)] = {
+                "contents": contents.decode(), "mode": member.mode, "uid": member.uid, "gid": member.gid,
+            }
+    save(state_path, state)
     return 0
 
 
@@ -358,7 +379,12 @@ def handle_running(state: dict, state_path: Path, args: list[str], running: bool
         if name not in state["containers"]:
             sys.stderr.write(f"Error: No such container: {name}\n")
             return 1
-        state["containers"][name]["running"] = running
+        container = state["containers"][name]
+        job = container["labels"].get("tenkai.job") == "true"
+        container["running"] = running and not job
+        container["status"] = "exited" if job else ("running" if running else "exited")
+        if running:
+            container["files_at_start"] = container.get("files", {}).copy()
     save(state_path, state)
     return 0
 

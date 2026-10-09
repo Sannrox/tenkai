@@ -98,6 +98,17 @@ pub struct DockerHostContainer {
     /// Stable DNS aliases per declared network, independent of runtime names.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub aliases: BTreeMap<String, Vec<String>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<DockerConfigFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DockerConfigFile {
+    pub source: String,
+    pub destination: String,
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 /// Legacy names keep their existing readiness ordering; conditional dependencies
@@ -277,6 +288,9 @@ impl SoftwareExecutor for DockerHostExecutor {
         validate_request(request)?;
         let topology = self.topology(request)?;
         validate_topology(&topology, request.secret_dir_path.as_deref())?;
+        for container in &topology.containers {
+            container_spec_digest(request, container)?;
+        }
         ensure_networks(self, request, &topology)?;
         ensure_volumes(self, request, &topology)?;
         pull_missing_images(self, request, &topology)?;
@@ -391,6 +405,9 @@ impl SoftwareExecutor for DockerHostExecutor {
         validate_request(request)?;
         let topology = self.topology(request)?;
         validate_topology(&topology, request.secret_dir_path.as_deref())?;
+        for container in &topology.containers {
+            container_spec_digest(request, container)?;
+        }
         let mut journal = Vec::new();
         for container in order_containers(&topology)? {
             let restarted = check_dependencies(self, request, &topology, container)
@@ -553,6 +570,48 @@ pub fn validate_topology(topology: &DockerHostTopology, secret_dir: Option<&Path
                 );
             }
             validate_mount_target_path(&container.name, &mount.name, &mount.path)?;
+        }
+        if container.files.len() > 64 {
+            bail!("container {} exceeds 64 config files", container.name);
+        }
+        let mut destinations = BTreeSet::new();
+        for file in &container.files {
+            let source = Path::new(&file.source);
+            if file.source.is_empty()
+                || !source
+                    .components()
+                    .all(|part| matches!(part, std::path::Component::Normal(_)))
+            {
+                bail!(
+                    "container {} config source must be a relative release path without traversal",
+                    container.name
+                );
+            }
+            validate_mount_target_path(&container.name, "config file", &file.destination)?;
+            let destination = Path::new(&file.destination);
+            if destination.file_name().is_none()
+                || destination.components().any(|part| {
+                    matches!(
+                        part,
+                        std::path::Component::ParentDir | std::path::Component::CurDir
+                    )
+                })
+                || !destinations.insert(&file.destination)
+                || container.volumes.iter().any(|mount| {
+                    destination.starts_with(&mount.path)
+                        || Path::new(&mount.path).starts_with(destination)
+                })
+                || container.files.iter().any(|other| {
+                    other.destination != file.destination
+                        && (destination.starts_with(&other.destination)
+                            || Path::new(&other.destination).starts_with(destination))
+                })
+            {
+                bail!(
+                    "container {} has a colliding or invalid config destination",
+                    container.name
+                );
+            }
         }
         if let Some(env_file) = &container.env_file {
             validate_env_file_name(env_file)?;
@@ -1048,6 +1107,19 @@ fn container_spec_digest(
     request: &SoftwareApplyRequest,
     container: &DockerHostContainer,
 ) -> Result<String> {
+    let files = container
+        .files
+        .iter()
+        .map(|file| config_file_bytes(request, file))
+        .collect::<Result<Vec<_>>>()?;
+    spec_digest_with_files(request, container, &files)
+}
+
+fn spec_digest_with_files(
+    request: &SoftwareApplyRequest,
+    container: &DockerHostContainer,
+    files: &[Vec<u8>],
+) -> Result<String> {
     let mut hasher = Sha256::new();
     if let Some(path) = env_file_path(request, container)? {
         let contents =
@@ -1056,7 +1128,124 @@ fn container_spec_digest(
         hasher.update([0]);
         hasher.update(contents);
     }
+    for (file, contents) in container.files.iter().zip(files) {
+        hasher.update(serde_json::to_vec(file)?);
+        hasher.update([0]);
+        hasher.update(Sha256::digest(contents));
+    }
     Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+fn config_file_bytes(request: &SoftwareApplyRequest, file: &DockerConfigFile) -> Result<Vec<u8>> {
+    let file = open_config_source(&request.workdir, &file.source)?;
+    use std::io::Read as _;
+    let mut contents = Vec::new();
+    const MAX_CONFIG_BYTES: u64 = 16 * 1024 * 1024;
+    file.take(MAX_CONFIG_BYTES + 1).read_to_end(&mut contents)?;
+    if contents.len() as u64 > MAX_CONFIG_BYTES {
+        bail!("config file exceeds 16 MiB limit");
+    }
+    Ok(contents)
+}
+
+/// Anchor each source component to an open directory, so renaming a source
+/// or replacing a parent with a symlink cannot redirect reads outside the root.
+#[cfg(unix)]
+fn open_config_source(root: &Path, source: &str) -> Result<std::fs::File> {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let mut directory = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(root)?;
+    let mut components = Path::new(source).components().peekable();
+    while let Some(component) = components.next() {
+        let std::path::Component::Normal(component) = component else {
+            bail!("config source must be a relative path without traversal");
+        };
+        let name = std::ffi::CString::new(component.as_encoded_bytes())?;
+        let last = components.peek().is_none();
+        let flags = libc::O_RDONLY
+            | libc::O_NOFOLLOW
+            | libc::O_CLOEXEC
+            | libc::O_NONBLOCK
+            | if last { 0 } else { libc::O_DIRECTORY };
+        // SAFETY: directory owns a live descriptor and name is NUL-terminated.
+        let fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        // SAFETY: openat returned a new descriptor, transferred to File once.
+        let opened = unsafe { std::fs::File::from_raw_fd(fd) };
+        if last {
+            if !opened.metadata()?.is_file() {
+                bail!("config source must be a regular file");
+            }
+            return Ok(opened);
+        }
+        directory = opened;
+    }
+    bail!("config source must not be empty")
+}
+
+#[cfg(not(unix))]
+fn open_config_source(_root: &Path, _source: &str) -> Result<std::fs::File> {
+    bail!("Docker release configuration files require descriptor-relative Unix file access")
+}
+
+/// Stream a root-owned regular file into a stopped container. Only archive
+/// metadata and file bytes cross the Docker client boundary; receipts omit both.
+fn populate_config_files(
+    executor: &DockerHostExecutor,
+    container: &DockerHostContainer,
+    name: &str,
+    files: &[Vec<u8>],
+) -> Result<()> {
+    use std::io::Write as _;
+    use std::process::Stdio;
+    for (file, contents) in container.files.iter().zip(files) {
+        let destination = Path::new(&file.destination);
+        let filename = destination
+            .file_name()
+            .context("config destination has no filename")?;
+        let parent = destination
+            .parent()
+            .context("config destination has no parent")?;
+        let mut archive = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(contents.len() as u64);
+        header.set_mode(if file.read_only { 0o444 } else { 0o644 });
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_mtime(0);
+        header.set_cksum();
+        archive.append_data(&mut header, Path::new(filename), contents.as_slice())?;
+        let bytes = archive.into_inner()?;
+        let target = format!("{name}:{}", parent.display());
+        let mut child = executor
+            .docker_command()
+            .args(["cp", "-", &target])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("starting Docker config copy")?;
+        let write = child
+            .stdin
+            .take()
+            .context("Docker config copy has no input")?
+            .write_all(&bytes);
+        let status = child.wait()?;
+        write.context("streaming Docker config file")?;
+        if !status.success() {
+            bail!(
+                "Docker config copy failed for container {} destination {}",
+                container.name,
+                file.destination
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Create the container for `container` unless a matching, running, not
@@ -1072,7 +1261,12 @@ fn replace_container(
 ) -> Result<()> {
     let name = managed_container_name(request, container)?;
     refuse_foreign_container(executor, request, &name)?;
-    let spec_digest = container_spec_digest(request, container)?;
+    let files = container
+        .files
+        .iter()
+        .map(|file| config_file_bytes(request, file))
+        .collect::<Result<Vec<_>>>()?;
+    let spec_digest = spec_digest_with_files(request, container, &files)?;
     match inspect_container(executor, &name)? {
         Some(inspected)
             if !container_mismatch(request, container, &spec_digest, &inspected)
@@ -1124,12 +1318,12 @@ fn replace_container(
         }
         None => journal.push(Change::Created(name.clone())),
     }
-    let mut args = vec![
-        "run".to_string(),
-        "-d".into(),
-        "--name".into(),
-        name.clone(),
-    ];
+    let mut args = if container.files.is_empty() {
+        vec!["run".to_string(), "-d".into()]
+    } else {
+        vec!["create".to_string()]
+    };
+    args.extend(["--name".into(), name.clone()]);
     for label in ownership_labels(request, &container.name) {
         args.push("--label".into());
         args.push(label);
@@ -1196,7 +1390,31 @@ fn replace_container(
     args.extend(entrypoint_args.iter().cloned());
     args.extend(container.command.iter().flatten().cloned());
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    if let DockerContainerMode::OneShot { timeout_secs } = container.mode {
+    if !container.files.is_empty() {
+        docker_ok(
+            executor,
+            request,
+            SoftwareDeployPhase::Apply,
+            "create",
+            &arg_refs,
+        )?;
+        populate_config_files(executor, container, &name, &files)?;
+        if container_spec_digest(request, container)? != spec_digest {
+            bail!("release configuration changed during container creation");
+        }
+        let start = ["start", name.as_str()];
+        if let DockerContainerMode::OneShot { timeout_secs } = container.mode {
+            run_one_shot(executor, request, &start, timeout_secs)?;
+        } else {
+            docker_ok(
+                executor,
+                request,
+                SoftwareDeployPhase::Apply,
+                "start",
+                &start,
+            )?;
+        }
+    } else if let DockerContainerMode::OneShot { timeout_secs } = container.mode {
         run_one_shot(executor, request, &arg_refs, timeout_secs)?;
     } else {
         docker_ok(
@@ -1858,6 +2076,7 @@ mod tests {
                         ("appnet".into(), vec!["database".into()]),
                         ("backnet".into(), vec!["db-backend".into()]),
                     ]),
+                    files: Vec::new(),
                 },
                 DockerHostContainer {
                     name: "api".into(),
@@ -1877,6 +2096,7 @@ mod tests {
                     entrypoint: None,
                     command: None,
                     aliases: BTreeMap::new(),
+                    files: Vec::new(),
                 },
             ],
         }
@@ -1925,6 +2145,115 @@ inputs = ["docker"]
 
     fn executor_for(script: &Path, state: &Path, unhealthy: &[&str]) -> DockerHostExecutor {
         DockerHostExecutor::for_binary(script.to_path_buf()).with_fake_env(state, SECRET, unhealthy)
+    }
+
+    #[test]
+    fn config_files_are_installed_before_start_and_follow_release_replacement() {
+        let root = std::env::temp_dir().join(format!("tenkai-config-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let (script, state) = fake_docker(&root);
+        let executor = executor_for(&script, &state, &[]);
+        for (version, contents) in [
+            ("1.0.0", "first configuration"),
+            ("2.0.0", "second configuration"),
+        ] {
+            write_release(&root, version, DIGEST_B);
+            let mut topology = sample_topology();
+            topology.containers[1].env_file = None;
+            topology.containers[1].files = vec![DockerConfigFile {
+                source: "docker/app.json".into(),
+                destination: "/etc/app.json".into(),
+                read_only: true,
+            }];
+            std::fs::write(root.join(version).join("docker/app.json"), contents).unwrap();
+            std::fs::write(
+                root.join(version).join("docker/host.json"),
+                serde_json::to_vec(&topology).unwrap(),
+            )
+            .unwrap();
+        }
+        let first = request_for(&root, &root, "1.0.0");
+        let second = request_for(&root, &root, "2.0.0");
+        for (request, expected) in [
+            (&first, "first configuration"),
+            (&second, "second configuration"),
+            (&first, "first configuration"),
+        ] {
+            executor.apply(request).unwrap();
+            executor.restart(request).unwrap();
+            assert_eq!(
+                executor.observe(request).unwrap(),
+                SoftwareObserveStatus::Present
+            );
+            let data: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+            let topology = load_topology(&request.workdir).unwrap();
+            let name = managed_container_name(request, &topology.containers[1]).unwrap();
+            let file = &data["containers"][&name]["files_at_start"]["/etc/app.json"];
+            assert_eq!(file["contents"], expected);
+            assert_eq!(file["mode"], 0o444);
+            assert_eq!(file["uid"], 0);
+            assert_eq!(file["gid"], 0);
+        }
+        std::fs::write(first.workdir.join("docker/app.json"), "changed source").unwrap();
+        assert_eq!(
+            executor.observe(&first).unwrap(),
+            SoftwareObserveStatus::Mismatched
+        );
+        executor.apply(&first).unwrap();
+        assert_eq!(
+            executor.observe(&first).unwrap(),
+            SoftwareObserveStatus::Present
+        );
+        let log = std::fs::read_to_string(root.join("argv.log")).unwrap();
+        assert!(!log.contains("first configuration"));
+        assert!(!log.contains("second configuration"));
+        assert!(log.contains("\"cp\", \"-\""));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn config_admission_rejects_path_escapes_and_collisions_before_docker_mutation() {
+        let root =
+            std::env::temp_dir().join(format!("tenkai-config-admit-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let (script, state) = fake_docker(&root);
+        let executor = executor_for(&script, &state, &[]);
+        write_release(&root, "1.0.0", DIGEST_B);
+        let request = request_for(&root, &root, "1.0.0");
+        std::fs::write(root.join("outside.json"), "outside").unwrap();
+        std::os::unix::fs::symlink(
+            root.join("outside.json"),
+            request.workdir.join("docker/escape.json"),
+        )
+        .unwrap();
+        for (source, destination) in [
+            ("../outside.json", "/etc/app.json"),
+            ("docker/escape.json", "/etc/app.json"),
+            ("docker/missing.json", "/etc/app.json"),
+            ("docker/host.json", "/etc/../app.json"),
+            ("docker/host.json", "/var/lib/data/app.json"),
+            ("docker/host.json", "/var/lib"),
+        ] {
+            let mut topology = sample_topology();
+            topology.containers[1].env_file = None;
+            topology.containers[0].files = vec![DockerConfigFile {
+                source: source.into(),
+                destination: destination.into(),
+                read_only: true,
+            }];
+            std::fs::write(
+                request.workdir.join("docker/host.json"),
+                serde_json::to_vec(&topology).unwrap(),
+            )
+            .unwrap();
+            assert!(
+                executor.apply(&request).is_err(),
+                "{source} -> {destination}"
+            );
+            assert!(!state.exists());
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn write_job_release(root: &Path, version: &str) -> DockerHostTopology {
