@@ -353,7 +353,7 @@ impl Reconciler {
         crate::runtime_delivery::complete_runtime_work(&mut ctx, environment, completion).await
     }
 
-    /// Run complete ticks until Ctrl-C. A slow tick never overlaps its successor.
+    /// Run complete ticks until SIGINT or SIGTERM. A slow tick never overlaps its successor.
     pub async fn run_until<H>(&self, interval: Duration, mut handle_report: H) -> Result<()>
     where
         H: FnMut(Result<TickReport>),
@@ -363,11 +363,14 @@ impl Reconciler {
         }
         let mut timer = tokio::time::interval(interval);
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Listen before the first tick, so a signal during any tick is not lost.
+        let shutdown =
+            crate::shutdown::listen().context("installing reconciler shutdown handler")?;
+        tokio::pin!(shutdown);
         loop {
             tokio::select! {
                 _ = timer.tick() => handle_report(self.run_once().await),
-                signal = tokio::signal::ctrl_c() => {
-                    signal.context("installing reconciler shutdown handler")?;
+                _ = &mut shutdown => {
                     return Ok(());
                 }
             }
