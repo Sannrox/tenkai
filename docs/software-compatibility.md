@@ -147,6 +147,6 @@ Automatic recovery and restart also check compatibility before activation. Keep
 fresh evidence for rollback targets when preparing an upgrade; a historical
 successful deployment does not prove that an older release fits today's schema.
 
-The [Apollo comparison](research/software-compatibility-preflight.md) records the
+The [compatibility preflight research](research/software-compatibility-preflight.md) records the
 primary sources behind the dependency-graph approach and the stricter evidence
 requirements specific to Tenkai.
