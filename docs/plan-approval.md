@@ -90,7 +90,7 @@ mode = "auto"          # or "manual"
 ttl_ms = 3600000
 auto_signer_key = "/var/lib/tenkai/lab-auto-approver.ed25519"
 
-# skip_gates and rollback always require a human. Extra products:
+# skip_gates, downgrade, and rollback always require a human. Extra products:
 
 [[require_human]]
 product = "payments"
@@ -128,9 +128,10 @@ next reconcile tick signs `$TENKAI_PLAN_APPROVAL_DIR/<plan-id>.json` with
 `policy_provider = "builtin-auto"`, `policy_evidence_id = "auto"`, and
 `policy_digest` bound to the policy document, then executes. These plans stay
 `awaiting_approval` until a human-signed envelope appears: skip-gates,
-rollback, and any upgrade or downgrade that crosses a published release
-declaring `has_migration` or `changes_identity_config` in `[delivery]`. Those flags are signed with the release and always require a
-human under auto; they are not extra `[[require_human]]` matchers. A restart
+every downgrade or rollback, and any upgrade that crosses a published release
+declaring `has_migration` or `changes_identity_config` in `[delivery]`.
+Downgrades require a human even when no release declares either flag. Those
+flags are signed with the release and always require a human under auto; they are not extra `[[require_human]]` matchers. A restart
 re-activates the deployed release and ignores its flags.
 
 Execute re-checks the live policy. Clearing the policy path, switching
