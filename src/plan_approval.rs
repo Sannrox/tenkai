@@ -194,6 +194,11 @@ pub async fn verify_for_execution(
         {
             bail!("automatic approval signer is not authorized by this environment's live policy");
         }
+        if evidence.policy_digest != policy.digest()? {
+            bail!(
+                "automatic approval policy digest no longer matches the current environment policy"
+            );
+        }
         let signals = crate::approval_policy::delivery_signals_for_plan(ctx, plan).await?;
         if !matches!(
             crate::approval_policy::evaluate(&policy, plan, skip_gates, signals),
