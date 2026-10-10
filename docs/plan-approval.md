@@ -100,6 +100,23 @@ The signer key is a 32-byte Ed25519 seed, mode `0600`, not a symlink. Its
 public key must already be in `TENKAI_PLAN_APPROVAL_TRUST_ROOTS`. Tenkai
 stores only the canonical policy file path on the environment:
 
+Automatic signing keys must have explicit trust-root scopes:
+
+```toml
+[[signers]]
+key_id = "sha256:<key digest>"
+identity = "lab-auto-approver"
+public_key = "<base64 public key>"
+environments = ["lab"]
+providers = ["builtin-auto"]
+```
+
+Migrate existing automatic signer entries to these scopes before enabling auto
+approval. Unscoped entries cannot verify automatic approvals. A scoped key
+cannot approve another environment or claim to be a human signer. Empty scopes
+on existing human signer entries retain their previous authority; never install
+an automatic signing key as an unscoped human root.
+
 ```sh
 tenkaictl env approval-policy set lab /etc/tenkai/lab-approval-policy.toml
 tenkaictl env approval-policy show lab

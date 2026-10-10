@@ -1372,7 +1372,7 @@ mod tests {
         // 1.0.0 -> 3.0.0 skips past the 2.0.0 migration and still runs it.
         let upgrade = test_upgrade_plan("stage", 100, PlanState::Computed, "1.0.0", "3.0.0");
         assert_eq!(
-            environment_lifecycle::delivery_signals_for_plan(&mut ctx, &upgrade)
+            crate::approval_policy::delivery_signals_for_plan(&mut ctx, &upgrade)
                 .await
                 .unwrap(),
             DeliverySignals {
@@ -1384,7 +1384,7 @@ mod tests {
         let mut downgrade = test_upgrade_plan("stage", 101, PlanState::Computed, "3.0.0", "1.0.0");
         downgrade.steps[0].action = crate::plan::Action::Downgrade;
         assert_eq!(
-            environment_lifecycle::delivery_signals_for_plan(&mut ctx, &downgrade)
+            crate::approval_policy::delivery_signals_for_plan(&mut ctx, &downgrade)
                 .await
                 .unwrap(),
             DeliverySignals {
