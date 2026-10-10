@@ -1,6 +1,6 @@
 [package]
 name = "tenkai-http"
-version = "0.4.2"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.96.1"
 license = "Apache-2.0"
@@ -11,7 +11,7 @@ default = []
 ui = ["dep:reqwest", "dep:zip"]
 
 [dependencies]
-tenkai = { path = "../..", version = "0.4.2" }
+tenkai = { path = "../..", version = "0.5.0" }
 anyhow = "1"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "matched-path", "tokio"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -24,7 +24,7 @@ url = "2"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
-tenkai = { path = "../..", version = "0.4.2", features = ["test-support"] }
+tenkai = { path = "../..", version = "0.5.0", features = ["test-support"] }
 toml = "0.8"
 
 [build-dependencies]
