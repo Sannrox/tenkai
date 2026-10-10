@@ -249,12 +249,14 @@ pub fn is_auto_envelope(path: &Path) -> Result<bool> {
     Ok(envelope.statement.policy_provider == POLICY_PROVIDER)
 }
 
-fn envelope_expired(path: &Path, now: i64) -> Result<bool> {
+fn auto_envelope_current(path: &Path, policy: &ApprovalPolicy, now: i64) -> Result<bool> {
     let raw =
         fs::read(path).with_context(|| format!("reading plan approval {}", path.display()))?;
     let envelope: ApprovalEnvelope =
         serde_json::from_slice(&raw).context("parsing plan approval envelope")?;
-    Ok(now >= envelope.statement.expires_at)
+    Ok(now < envelope.statement.expires_at
+        && envelope.statement.policy_digest == policy.digest()?
+        && signer_key_id(policy)?.as_deref() == Some(envelope.key_id.as_str()))
 }
 
 /// Decide whether the live environment policy still authorizes automatic
@@ -286,7 +288,7 @@ pub fn resolve_auto_envelope(
                     if !auto_signer_present(policy) {
                         return Ok(AutoEnvelope::NeedsHuman);
                     }
-                    if !envelope_expired(&envelope, now)? {
+                    if auto_envelope_current(&envelope, policy, now)? {
                         return Ok(AutoEnvelope::Signed(envelope));
                     }
                 }
@@ -755,6 +757,132 @@ mod tests {
         .await
         .unwrap();
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn policy_changes_revoke_pending_auto_approvals_and_reconcile_refreshes_them() {
+        let dir = unique_dir("policy-digest");
+        let key = write_seed(&dir);
+        let mut policy = auto_policy(&key, None);
+        let policy_path = write_policy(&dir, &policy);
+        let mut ctx = crate::client::Ctx::embedded(dir.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::plan::env_add(&mut ctx, "lab", "fixture")
+            .await
+            .unwrap();
+        crate::environment::set_plan_approval_policy(&mut ctx, "lab", &policy_path)
+            .await
+            .unwrap();
+        let plan = sample_plan(Action::Install, "api");
+        let now = crate::now_millis();
+        let approvals = dir.join("approvals");
+        let properties = crate::environment::environment(&mut ctx, "lab")
+            .await
+            .unwrap()
+            .properties;
+        let AutoEnvelope::Signed(envelope) = resolve_auto_envelope(
+            &properties,
+            &plan,
+            false,
+            DeliverySignals::default(),
+            &approvals,
+            now,
+        )
+        .unwrap() else {
+            panic!("expected initial automatic approval")
+        };
+        let roots = write_trust_roots(&dir, &[7_u8; 32]);
+        crate::plan_approval::verify_for_execution(&mut ctx, &plan, &envelope, &roots, now, false)
+            .await
+            .unwrap();
+
+        policy.ttl_ms /= 2;
+        fs::write(&policy_path, toml::to_string(&policy).unwrap()).unwrap();
+        let properties = crate::environment::environment(&mut ctx, "lab")
+            .await
+            .unwrap()
+            .properties;
+        let error = crate::plan_approval::verify_for_execution(
+            &mut ctx,
+            &plan,
+            &envelope,
+            &roots,
+            now + 1,
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("policy digest"), "{error}");
+        assert!(matches!(
+            resolve_auto_envelope(
+                &properties,
+                &plan,
+                false,
+                DeliverySignals::default(),
+                &approvals,
+                now + 1,
+            )
+            .unwrap(),
+            AutoEnvelope::Signed(_)
+        ));
+        let refreshed = crate::plan_approval::verify_for_execution(
+            &mut ctx,
+            &plan,
+            &envelope,
+            &roots,
+            now + 1,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            refreshed.policy_digest,
+            ApprovalPolicy::load(&policy_path)
+                .unwrap()
+                .digest()
+                .unwrap()
+        );
+
+        let mut environment = crate::environment::environment(&mut ctx, "lab")
+            .await
+            .unwrap();
+        environment.properties.remove(PLAN_APPROVAL_POLICY_PROPERTY);
+        ctx.put(environment).await.unwrap();
+        assert!(
+            crate::plan_approval::verify_for_execution(
+                &mut ctx,
+                &plan,
+                &envelope,
+                &roots,
+                now + 2,
+                false
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("live environment policy")
+        );
+        crate::dev_sign::sign_plan_approval_for_digest(
+            &dir.join("human-keys"),
+            &format!("sha256:{}", plan.executable_digest().unwrap()),
+            "lab",
+            &envelope,
+            &roots,
+            3600,
+        )
+        .unwrap();
+        crate::plan_approval::verify_for_execution(
+            &mut ctx,
+            &plan,
+            &envelope,
+            &roots,
+            crate::now_millis(),
+            false,
+        )
+        .await
+        .unwrap();
+        drop(ctx);
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
