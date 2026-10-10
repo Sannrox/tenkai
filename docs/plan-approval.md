@@ -137,7 +137,10 @@ re-activates the deployed release and ignores its flags.
 Execute re-checks the live policy. Clearing the policy path, switching
 `mode` to `manual`, adding a require-human match, or removing the signer key
 leaves pending automatic envelopes unexecuted. Human-signed envelopes
-(`policy_provider` other than `builtin-auto`) are unchanged. Production
+(`policy_provider` other than `builtin-auto`) are unchanged. An automatic envelope
+must match the current policy digest and configured signer at execution time,
+including direct apply and rollout waves. Reconciliation replaces an outdated
+automatic envelope only when the current policy still permits automatic approval. Production
 environments should keep `mode = "manual"` or leave the property unset.
 
 For local development only, an operator may use:
