@@ -111,6 +111,7 @@ will be split over time. Contributor and agent workflow live in
 
 ### Releases
 
+- [Release 0.5.0 notes](releases/0.5.0.md)
 - [Release 0.4.2 notes](releases/0.4.2.md)
 - [Release 0.4.1 notes](releases/0.4.1.md)
 - [Release 0.4.0 notes](releases/0.4.0.md)
