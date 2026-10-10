@@ -962,6 +962,127 @@ install = "true"
     }
 
     #[tokio::test]
+    async fn failed_target_hold_preserves_model_and_routing_coordination() {
+        let root =
+            std::env::temp_dir().join(format!("tenkai-coordinated-hold-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let options = crate::catalog::PublishOptions {
+            allow_unsigned_development: true,
+            ..Default::default()
+        };
+        let mut model = String::new();
+        for version in ["1.0.0", "2.0.0"] {
+            let dir = root.join(format!("model-{version}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            write_model_runtime_manifest(&dir, version, 16, "Q4_K_M");
+            let path = dir.join("tenkai.toml");
+            model = crate::manifest::load(&path).unwrap().manifest.product.name;
+            crate::catalog::publish(&mut ctx, &path, &options)
+                .await
+                .unwrap();
+        }
+        let routing_dir = root.join("routing");
+        std::fs::create_dir_all(&routing_dir).unwrap();
+        std::fs::write(
+            routing_dir.join("routing.json"),
+            include_str!("../../examples/routing-local/routing.json"),
+        )
+        .unwrap();
+        std::fs::write(
+            routing_dir.join("tenkai.toml"),
+            r#"[product]
+name = "routes"
+version = "1.0.0"
+kind = "routing_config"
+[routing]
+config = "routing.json"
+allowed_providers = ["local"]
+"#,
+        )
+        .unwrap();
+        crate::catalog::publish(&mut ctx, &routing_dir.join("tenkai.toml"), &options)
+            .await
+            .unwrap();
+        let actor = crate::auth_context::test_management_context("coordinated-hold");
+        crate::catalog::promote(&mut ctx, &actor, &format!("{model}@1.0.0"), "stable")
+            .await
+            .unwrap();
+        crate::catalog::promote(&mut ctx, &actor, "routes@1.0.0", "stable")
+            .await
+            .unwrap();
+        env_add(&mut ctx, "local", "fixture").await.unwrap();
+        for product in [&model, "routes"] {
+            subscribe(&mut ctx, "local", product, "stable")
+                .await
+                .unwrap();
+        }
+        for (key, value) in [
+            ("architecture", "arm64"),
+            ("accelerator", "apple-metal"),
+            ("memory_gib", "64"),
+        ] {
+            set_environment_fact(&mut ctx, "local", key, value)
+                .await
+                .unwrap();
+        }
+        let mut environment = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        environment.properties.insert(
+            format!("failed_target.{model}"),
+            release_id(&model, "1.0.0"),
+        );
+        ctx.put(environment).await.unwrap();
+        assert!(
+            create_for_reconcile(&mut ctx, "local")
+                .await
+                .unwrap()
+                .steps
+                .is_empty()
+        );
+
+        let mut environment = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        environment
+            .properties
+            .remove(&format!("failed_target.{model}"));
+        environment
+            .properties
+            .insert("failed_target.routes".into(), release_id("routes", "1.0.0"));
+        environment
+            .properties
+            .insert(format!("deployed.{model}"), "2.0.0".into());
+        ctx.put(environment).await.unwrap();
+        assert!(
+            create_for_reconcile(&mut ctx, "local")
+                .await
+                .unwrap()
+                .steps
+                .is_empty()
+        );
+
+        let mut environment = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        environment
+            .properties
+            .insert(format!("deployed.{model}"), "1.0.0".into());
+        ctx.put(environment).await.unwrap();
+        crate::catalog::promote(&mut ctx, &actor, &format!("{model}@2.0.0"), "stable")
+            .await
+            .unwrap();
+        let forward = create_for_reconcile(&mut ctx, "local").await.unwrap();
+        assert_eq!(forward.steps.len(), 1);
+        assert_eq!(forward.steps[0].product, model);
+        assert_eq!(forward.steps[0].action, Action::Upgrade);
+        drop(ctx);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn overlay_change_emits_same_version_restart() {
         let root = std::env::temp_dir().join(format!(
             "tenkai-overlay-{}-{}",

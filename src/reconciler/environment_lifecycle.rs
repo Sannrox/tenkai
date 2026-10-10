@@ -368,3 +368,150 @@ async fn recover_or_detect_active_plan(ctx: &mut Ctx, environment: &str) -> Resu
     }
     Ok(false)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plan::{Action, Step};
+
+    #[tokio::test]
+    async fn failed_target_hold_precedes_human_and_auto_approval_and_admits_new_retry() {
+        for automatic in [false, true] {
+            for equal_timestamp in [false, true] {
+                let root =
+                    std::env::temp_dir().join(format!("tenkai-hold-{}", uuid::Uuid::new_v4()));
+                std::fs::create_dir_all(&root).unwrap();
+                let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+                crate::ontology::register(&mut ctx).await.unwrap();
+                plan::env_add(&mut ctx, "local", "hold fixture")
+                    .await
+                    .unwrap();
+                let step = Step {
+                    id: String::new(),
+                    order: 0,
+                    product: "api".into(),
+                    action: Action::Install,
+                    from: None,
+                    to: "1.0.0".into(),
+                    release_id: "tenkai:release:api@1.0.0".into(),
+                    release_digest: "fixture".into(),
+                    artifact_digest: "fixture".into(),
+                    workdir: ".".into(),
+                    restore: None,
+                };
+                let old = plan::create_from_steps(&mut ctx, "local", vec![step.clone()])
+                    .await
+                    .unwrap();
+                let failed_at = old.created_at + i64::from(!equal_timestamp);
+                let mut environment = crate::environment::environment(&mut ctx, "local")
+                    .await
+                    .unwrap();
+                environment
+                    .properties
+                    .insert("failed_target.api".into(), step.release_id.clone());
+                environment
+                    .properties
+                    .insert("failed_target_at.api".into(), failed_at.to_string());
+                ctx.put(environment).await.unwrap();
+
+                let keys = root.join("keys");
+                let envelope = root.join("approvals").join(format!("{}.json", old.id));
+                let roots = root.join("roots.toml");
+                crate::dev_sign::sign_plan_approval_for_digest(
+                    &keys,
+                    &format!("sha256:{}", old.executable_digest().unwrap()),
+                    "local",
+                    &envelope,
+                    &roots,
+                    3600,
+                )
+                .unwrap();
+                if automatic {
+                    let policy = root.join("policy.toml");
+                    std::fs::write(&policy, format!(
+                        "version = 1\nmode = \"auto\"\nttl_ms = 3600000\nauto_signer_key = {:?}\n",
+                        keys.join("approval.ed25519").to_str().unwrap(),
+                    )).unwrap();
+                    let mut environment = crate::environment::environment(&mut ctx, "local")
+                        .await
+                        .unwrap();
+                    environment.properties.insert(
+                        crate::approval_policy::PLAN_APPROVAL_POLICY_PROPERTY.into(),
+                        policy.to_string_lossy().into_owned(),
+                    );
+                    std::fs::remove_file(&envelope).unwrap();
+                    assert!(matches!(
+                        crate::approval_policy::resolve_auto_envelope(
+                            &environment.properties,
+                            &old,
+                            false,
+                            crate::approval_policy::DeliverySignals::default(),
+                            envelope.parent().unwrap(),
+                            crate::now_millis(),
+                        )
+                        .unwrap(),
+                        crate::approval_policy::AutoEnvelope::Signed(_)
+                    ));
+                    ctx.put(environment).await.unwrap();
+                    let mut trust = crate::plan_approval::TrustRoots::load(&roots).unwrap();
+                    trust.signers[0].environments = vec!["local".into()];
+                    trust.signers[0].providers = vec!["builtin-auto".into()];
+                    std::fs::write(&roots, toml::to_string(&trust).unwrap()).unwrap();
+                }
+                crate::plan_approval::verify_for_execution(
+                    &mut ctx,
+                    &old,
+                    &envelope,
+                    &roots,
+                    crate::now_millis(),
+                    false,
+                )
+                .await
+                .unwrap();
+                assert!(
+                    first_admissible_in(&mut ctx, vec![old.clone()], false)
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+                let reconciler = crate::reconciler::Reconciler::new(
+                    ctx.clone(),
+                    crate::reconciler::Config::default(),
+                )
+                .unwrap();
+                assert!(reconciler.pending_work("local").await.unwrap().is_none());
+                assert_eq!(
+                    reconcile_runtime_managed(&mut ctx, "local").await.unwrap(),
+                    EnvironmentStatus::Current
+                );
+
+                // Create the explicit retry after the failure, including on coarse clocks.
+                while crate::now_millis() <= failed_at {
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+                let retry = plan::create_from_steps(&mut ctx, "local", vec![step])
+                    .await
+                    .unwrap();
+                assert!(retry.created_at > failed_at);
+                assert_eq!(
+                    first_admissible_in(&mut ctx, vec![old, retry.clone()], false)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .id,
+                    retry.id
+                );
+                assert_eq!(
+                    reconciler.pending_work("local").await.unwrap().unwrap().id,
+                    retry.id
+                );
+                assert!(
+                    matches!(reconcile_runtime_managed(&mut ctx, "local").await.unwrap(),
+                    EnvironmentStatus::AwaitingRuntime { plan_id, .. } if plan_id == retry.id)
+                );
+                drop(ctx);
+                std::fs::remove_dir_all(root).unwrap();
+            }
+        }
+    }
+}

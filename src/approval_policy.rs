@@ -203,10 +203,10 @@ pub fn evaluate(
     if plan
         .steps
         .iter()
-        .any(|step| step.action == Action::Rollback)
+        .any(|step| matches!(step.action, Action::Downgrade | Action::Rollback))
     {
         return Decision::RequireHuman {
-            reason: "rollback requires a human-signed envelope".into(),
+            reason: "downgrade or rollback requires a human-signed envelope".into(),
         };
     }
     if signals.has_migration {
@@ -774,6 +774,11 @@ mod tests {
             evaluate(&policy, &rollback, false, DeliverySignals::default()),
             Decision::RequireHuman { reason } if reason.contains("rollback")
         ));
+        let downgrade = sample_plan(Action::Downgrade, "api");
+        assert!(matches!(
+            evaluate(&policy, &downgrade, false, DeliverySignals::default()),
+            Decision::RequireHuman { reason } if reason.contains("downgrade")
+        ));
         let payments = auto_policy(Path::new("/tmp/key"), Some("payments"));
         assert!(matches!(
             evaluate(
@@ -834,8 +839,53 @@ mod tests {
                     ..DeliverySignals::default()
                 }
             ),
-            Decision::RequireHuman { reason } if reason.contains("migration boundary")
+            Decision::RequireHuman { .. }
         ));
+    }
+
+    #[test]
+    fn downgrade_needs_human_without_creating_or_reusing_auto_approval() {
+        let dir = unique_dir("downgrade");
+        let key = write_seed(&dir);
+        let policy = auto_policy(&key, None);
+        let policy_path = write_policy(&dir, &policy);
+        let plan = sample_plan(Action::Downgrade, "api");
+        let now = 1_800_000_000_000;
+        let approvals = dir.join("approvals");
+        let properties = HashMap::from([(
+            PLAN_APPROVAL_POLICY_PROPERTY.into(),
+            policy_path.to_string_lossy().into_owned(),
+        )]);
+        let envelope = approvals.join(format!("{}.json", plan.id));
+        assert_eq!(
+            resolve_auto_envelope(
+                &properties,
+                &plan,
+                false,
+                DeliverySignals::default(),
+                &approvals,
+                now,
+            )
+            .unwrap(),
+            AutoEnvelope::NeedsHuman
+        );
+        assert!(!envelope.exists());
+
+        // Simulate a pending approval issued before downgrades required a human.
+        sign_auto_approval(&policy, &plan, false, now, "auto".into(), &envelope).unwrap();
+        assert_eq!(
+            resolve_auto_envelope(
+                &properties,
+                &plan,
+                false,
+                DeliverySignals::default(),
+                &approvals,
+                now + 1,
+            )
+            .unwrap(),
+            AutoEnvelope::NeedsHuman
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

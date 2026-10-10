@@ -623,6 +623,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_receipts_hold_failed_target_and_clear_only_matching_success() {
+        let (database, mut ctx) = registered_ctx("runtime-failed-target", &["env-a"]).await;
+        let failed = test_plan("env-a", 100, PlanState::Computed);
+        plan::store(&mut ctx, &failed).await.unwrap();
+        let completion = |plan: &Plan, succeeded| RuntimeCompletion {
+            plan_id: plan.id.clone(),
+            generation: 1,
+            succeeded,
+            detail: "runtime fixture".into(),
+            receipts: vec![RuntimeStepReceipt {
+                step_id: plan.steps[0].id.clone(),
+                succeeded,
+                detail: "runtime fixture".into(),
+            }],
+        };
+        let before = crate::now_millis();
+        crate::runtime_delivery::complete_runtime_work(
+            &mut ctx,
+            "env-a",
+            &completion(&failed, false),
+        )
+        .await
+        .unwrap();
+        let environment = crate::environment::environment(&mut ctx, "env-a")
+            .await
+            .unwrap();
+        assert_eq!(
+            environment.properties.get("failed_target.api"),
+            Some(&failed.steps[0].release_id)
+        );
+        assert_eq!(
+            environment.properties.get("failed_target_plan.api"),
+            Some(&failed.id)
+        );
+        let failed_at = environment.properties["failed_target_at.api"]
+            .parse::<i64>()
+            .unwrap();
+        assert!(before <= failed_at && failed_at <= crate::now_millis());
+        assert_eq!(
+            plan::load(&mut ctx, &failed.id).await.unwrap().state,
+            PlanState::Failed
+        );
+
+        for (created_at, target) in [(200, "3.0.0"), (300, "2.0.0")] {
+            let retry =
+                test_upgrade_plan("env-a", created_at, PlanState::Computed, "1.0.0", target);
+            plan::store(&mut ctx, &retry).await.unwrap();
+            ctx.put(crate::pb::sekai::Object {
+                id: retry.steps[0].release_id.clone(),
+                kind: crate::ontology::KIND_RELEASE.into(),
+                name: format!("api@{target}"),
+                namespace: crate::ontology::NS.into(),
+                properties: std::collections::HashMap::from([
+                    ("product".into(), "api".into()),
+                    ("version".into(), target.into()),
+                ]),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+            crate::runtime_delivery::complete_runtime_work(
+                &mut ctx,
+                "env-a",
+                &completion(&retry, true),
+            )
+            .await
+            .unwrap();
+            let environment = crate::environment::environment(&mut ctx, "env-a")
+                .await
+                .unwrap();
+            if target == "3.0.0" {
+                assert_eq!(
+                    environment.properties.get("failed_target.api"),
+                    Some(&failed.steps[0].release_id)
+                );
+            } else {
+                assert!(!environment.properties.contains_key("failed_target.api"));
+                assert!(
+                    !environment
+                        .properties
+                        .contains_key("failed_target_plan.api")
+                );
+            }
+            assert_eq!(environment.properties["deployed.api"], target);
+        }
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[tokio::test]
     async fn runtime_noop_reconcile_does_not_persist_empty_plans() {
         let (database, ctx) = registered_ctx("noop-empty-plans", &["env-a"]).await;
         let reconciler = Reconciler::new(ctx.clone(), config())
