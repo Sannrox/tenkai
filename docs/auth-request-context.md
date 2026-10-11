@@ -156,8 +156,10 @@ public_key = "<base64-encoded-32-byte-Ed25519-public-key>"
 
 Load with `JwtVerifierConfig::load(path)` / `JwtAssertionVerifier::from_path`.
 Required claims: `iss`, `aud`, `sub`, `exp`. Optional: `nbf`, `principal_kind`,
-`tenant_id` (or `tenkai_tenant`), `tenkai_capabilities` (array of `read`,
-`management`, and/or `publish`). Fail closed on bad signature, wrong audience,
+`tenant_id`, `tenkai_capabilities` (array of `read`,
+`management`, and/or `publish`). `tenkai_tenant` is a deprecated alias of
+`tenant_id`: it is accepted when `tenant_id` is absent and logs a warning.
+Conflicting values fail closed. Fail closed on bad signature, wrong audience,
 wrong issuer, unsupported capability values, or expiry outside clock skew.
 
 Delivery authorization after JWT authentication:

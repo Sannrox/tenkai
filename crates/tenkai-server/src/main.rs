@@ -12,6 +12,7 @@ use tenkai::assertion_verifier::{JwtAssertionVerifier, JwtEnterpriseAuthExtensio
 use tenkai::auth_context::{
     AUTH_CONTEXT_CONTRACT_VERSION, AuthHostConfig, EnterpriseAuthExtension,
 };
+use tenkai::issuer_auth::{ISSUER_AUTH_EXTENSION_ID, IssuerAuthExtension};
 use tenkai::oidc_verifier::{
     JwksCache, OIDC_AUTH_EXTENSION_ID, OidcAuthExtension, OidcClientDiscovery, OidcConfig,
     key_source, spawn_refresher,
@@ -124,7 +125,8 @@ struct EnterpriseAuthComposition {
     oidc_client: Option<OidcClientDiscovery>,
 }
 
-/// Paths naming the enterprise verifier; at most one may be set.
+/// Paths naming enterprise verifiers. JWT and OIDC may both be set; tokens are
+/// selected by `iss`.
 #[derive(Clone, Copy, Default)]
 struct EnterpriseAuthSources<'a> {
     jwt_trust: Option<&'a std::path::Path>,
@@ -147,9 +149,6 @@ fn compose_enterprise_auth(
     require_tenant: bool,
 ) -> Result<EnterpriseAuthComposition> {
     match (sources.jwt_trust, sources.oidc) {
-        (Some(_), Some(_)) => {
-            anyhow::bail!("set only one of {JWT_VERIFIER_CONFIG_ENV} and {OIDC_CONFIG_ENV}")
-        }
         (None, None) => {
             anyhow::ensure!(
                 !requested,
@@ -163,19 +162,23 @@ fn compose_enterprise_auth(
         }
         (Some(trust_path), None) => compose_jwt_auth(trust_path, require_tenant),
         (None, Some(oidc_path)) => compose_oidc_auth(oidc_path, require_tenant),
+        (Some(trust_path), Some(oidc_path)) => {
+            compose_issuer_auth(trust_path, oidc_path, require_tenant)
+        }
     }
 }
 
-fn compose_jwt_auth(
+fn load_jwt_extension(
     trust_path: &std::path::Path,
     require_tenant: bool,
-) -> Result<EnterpriseAuthComposition> {
+) -> Result<(String, String, Arc<dyn EnterpriseAuthExtension>)> {
     let verifier = JwtAssertionVerifier::from_path(trust_path).with_context(|| {
         format!(
             "loading enterprise JWT trust configuration from {}",
             trust_path.display()
         )
     })?;
+    let issuer = verifier.config().issuer.clone();
     let audience = verifier.config().audience.clone();
     let extension: Arc<dyn EnterpriseAuthExtension> =
         Arc::new(JwtEnterpriseAuthExtension::from_jwt_verifier(
@@ -183,6 +186,14 @@ fn compose_jwt_auth(
             verifier,
             require_tenant,
         ));
+    Ok((issuer, audience, extension))
+}
+
+fn compose_jwt_auth(
+    trust_path: &std::path::Path,
+    require_tenant: bool,
+) -> Result<EnterpriseAuthComposition> {
+    let (_issuer, audience, extension) = load_jwt_extension(trust_path, require_tenant)?;
     Ok(EnterpriseAuthComposition {
         auth_host: AuthHostConfig {
             required_extension_id: Some(JWT_AUTH_EXTENSION_ID.into()),
@@ -196,12 +207,27 @@ fn compose_jwt_auth(
 
 /// Load the OIDC trust config and the provider's keys before serving. Startup
 /// fails closed when no usable signing key can be loaded.
-fn compose_oidc_auth(
+fn load_oidc_extension(
     config_path: &std::path::Path,
     require_tenant: bool,
-) -> Result<EnterpriseAuthComposition> {
+) -> Result<(
+    String,
+    Option<OidcClientDiscovery>,
+    Arc<dyn EnterpriseAuthExtension>,
+)> {
     let config = OidcConfig::load(config_path)
         .with_context(|| format!("loading OIDC configuration from {}", config_path.display()))?;
+    if require_tenant
+        && config
+            .grants
+            .tenant_claim
+            .as_deref()
+            .is_none_or(|claim| claim.trim().is_empty())
+    {
+        anyhow::bail!(
+            "tenant mode requires grants.tenant_claim in the OIDC config so tokens can resolve a tenant"
+        );
+    }
     // Discovery and JWKS use a blocking HTTP client, which must not run on
     // the async runtime's threads.
     let loader_config = config.clone();
@@ -211,17 +237,56 @@ fn compose_oidc_auth(
         .context("loading OIDC signing keys")?;
     let keys = Arc::new(keys);
     let refresh = spawn_refresher(keys.clone(), Duration::from_secs(config.jwks_refresh_secs));
-    let audience = config.audience.clone();
+    let issuer = config.issuer.clone();
     let oidc_client = OidcClientDiscovery::from_config(&config);
     let extension: Arc<dyn EnterpriseAuthExtension> = Arc::new(
         OidcAuthExtension::new(config, keys, Some(refresh), require_tenant)
             .context("composing OIDC authentication")?,
     );
+    Ok((issuer, oidc_client, extension))
+}
+
+fn compose_oidc_auth(
+    config_path: &std::path::Path,
+    require_tenant: bool,
+) -> Result<EnterpriseAuthComposition> {
+    let (_issuer, oidc_client, extension) = load_oidc_extension(config_path, require_tenant)?;
+    let audience = extension.expected_audience().to_string();
     Ok(EnterpriseAuthComposition {
         auth_host: AuthHostConfig {
             required_extension_id: Some(OIDC_AUTH_EXTENSION_ID.into()),
             expected_contract_version: AUTH_CONTEXT_CONTRACT_VERSION,
             expected_audience: Some(audience),
+        },
+        extension: Some(extension),
+        oidc_client,
+    })
+}
+
+fn compose_issuer_auth(
+    jwt_trust: &std::path::Path,
+    oidc_path: &std::path::Path,
+    require_tenant: bool,
+) -> Result<EnterpriseAuthComposition> {
+    let (jwt_issuer, _jwt_audience, jwt_extension) = load_jwt_extension(jwt_trust, require_tenant)?;
+    let (oidc_issuer, oidc_client, oidc_extension) =
+        load_oidc_extension(oidc_path, require_tenant)?;
+    anyhow::ensure!(
+        jwt_issuer != oidc_issuer,
+        "JWT and OIDC verifiers must use distinct issuers; both are {jwt_issuer}"
+    );
+    let extension: Arc<dyn EnterpriseAuthExtension> = Arc::new(
+        IssuerAuthExtension::new(vec![
+            (jwt_issuer, jwt_extension),
+            (oidc_issuer, oidc_extension),
+        ])
+        .context("composing multi-issuer authentication")?,
+    );
+    Ok(EnterpriseAuthComposition {
+        auth_host: AuthHostConfig {
+            required_extension_id: Some(ISSUER_AUTH_EXTENSION_ID.into()),
+            expected_contract_version: AUTH_CONTEXT_CONTRACT_VERSION,
+            expected_audience: None,
         },
         extension: Some(extension),
         oidc_client,
@@ -818,9 +883,57 @@ mod tests {
     }
 
     #[test]
-    fn oidc_and_jwt_trust_are_mutually_exclusive_and_keys_are_required() {
+    fn oidc_and_jwt_trust_compose_one_issuer_router() {
         let (dir, config) = oidc_files();
         let jwt = trust_file();
+        let composition = compose_enterprise_auth(
+            EnterpriseAuthSources {
+                jwt_trust: Some(&jwt),
+                oidc: Some(&config),
+            },
+            true,
+            false,
+        )
+        .unwrap();
+        std::fs::remove_file(jwt).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+
+        let extension = composition.extension.unwrap();
+        assert_eq!(extension.extension_id(), ISSUER_AUTH_EXTENSION_ID);
+        assert_eq!(
+            composition.auth_host.required_extension_id.as_deref(),
+            Some(ISSUER_AUTH_EXTENSION_ID)
+        );
+        assert!(composition.auth_host.expected_audience.is_none());
+        assert_eq!(
+            composition
+                .oidc_client
+                .as_ref()
+                .map(|client| client.client_id.as_str()),
+            Some("tenkai-console")
+        );
+    }
+
+    #[test]
+    fn oidc_and_jwt_trust_reject_duplicate_issuers_and_missing_keys() {
+        let (dir, config) = oidc_files();
+        let jwt = std::env::temp_dir().join(format!(
+            "tenkai-jwt-dup-{}-{}.toml",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let public_key = base64::engine::general_purpose::STANDARD.encode(
+            SigningKey::from_bytes(&[7_u8; 32])
+                .verifying_key()
+                .as_bytes(),
+        );
+        std::fs::write(
+            &jwt,
+            format!(
+                "issuer = \"https://idp.example.test/realms/ops\"\naudience = \"tenkai-control-plane\"\nclock_skew_secs = 60\n\n[[keys]]\nkey_id = \"active\"\npublic_key = \"{public_key}\"\n"
+            ),
+        )
+        .unwrap();
         let both = compose_enterprise_auth(
             EnterpriseAuthSources {
                 jwt_trust: Some(&jwt),
@@ -832,7 +945,7 @@ mod tests {
         .err()
         .unwrap()
         .to_string();
-        assert!(both.contains(OIDC_CONFIG_ENV), "{both}");
+        assert!(both.contains("distinct issuers"), "{both}");
         std::fs::remove_file(jwt).unwrap();
 
         std::fs::remove_file(dir.join("jwks.json")).unwrap();
@@ -851,6 +964,24 @@ mod tests {
             "{missing_keys:#}"
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn tenant_mode_oidc_requires_tenant_claim_mapping() {
+        let (dir, config) = oidc_files();
+        let error = compose_enterprise_auth(
+            EnterpriseAuthSources {
+                jwt_trust: None,
+                oidc: Some(&config),
+            },
+            true,
+            true,
+        )
+        .err()
+        .unwrap()
+        .to_string();
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!(error.contains("tenant_claim"), "{error}");
     }
 
     #[cfg(feature = "postgres")]
