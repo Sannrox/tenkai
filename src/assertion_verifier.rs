@@ -234,6 +234,7 @@ struct JwtClaims {
     /// Tenant claim accepted only after signature verification.
     #[serde(default)]
     tenant_id: Option<String>,
+    /// Deprecated alias of [`JwtClaims::tenant_id`]. Accepted with a warning.
     #[serde(default)]
     tenkai_tenant: Option<String>,
     /// Explicit delivery RBAC claim: `read`, `management`, and/or `publish`.
@@ -289,11 +290,17 @@ fn validate_claims(
             "JWT contains conflicting tenant claims".into(),
         ));
     }
-    let tenant_id = claims
-        .tenant_id
-        .clone()
-        .or_else(|| claims.tenkai_tenant.clone())
-        .filter(|value| !value.trim().is_empty());
+    let tenant_id = match (
+        nonempty_claim(claims.tenant_id.as_deref()),
+        nonempty_claim(claims.tenkai_tenant.as_deref()),
+    ) {
+        (Some(tenant_id), _) => Some(tenant_id.to_string()),
+        (None, Some(tenkai_tenant)) => {
+            warn_deprecated_tenkai_tenant();
+            Some(tenkai_tenant.to_string())
+        }
+        (None, None) => None,
+    };
     let delivery_capabilities = match &claims.tenkai_capabilities {
         None => None,
         Some(values) => Some(parse_delivery_capabilities(values)?),
@@ -366,6 +373,60 @@ pub(crate) fn b64url_decode(input: &str) -> Result<Vec<u8>, AuthError> {
         .decode(input)
         .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(input))
         .map_err(|_| AuthError::Unauthorized("JWT segment is not valid base64url".into()))
+}
+
+/// Canonical tenant claim. `tenkai_tenant` is a deprecated alias.
+pub const TENKAI_TENANT_CLAIM_DEPRECATION: &str =
+    "JWT claim tenkai_tenant is deprecated; use tenant_id";
+
+fn nonempty_claim(value: Option<&str>) -> Option<&str> {
+    value.filter(|value| !value.trim().is_empty())
+}
+
+#[cfg(test)]
+thread_local! {
+    static LAST_TENKAI_TENANT_DEPRECATION: std::cell::RefCell<Option<&'static str>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn warn_deprecated_tenkai_tenant() {
+    eprintln!("tenkai warning: {TENKAI_TENANT_CLAIM_DEPRECATION}");
+    #[cfg(test)]
+    LAST_TENKAI_TENANT_DEPRECATION.with(|slot| {
+        *slot.borrow_mut() = Some(TENKAI_TENANT_CLAIM_DEPRECATION);
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn take_tenkai_tenant_deprecation() -> Option<&'static str> {
+    LAST_TENKAI_TENANT_DEPRECATION.with(|slot| slot.borrow_mut().take())
+}
+
+/// Read `iss` from a compact JWT payload without verifying the signature.
+///
+/// Used only to select a verifier. The selected verifier still verifies
+/// signature, audience, lifetime, and claims.
+pub fn unverified_jwt_issuer(token: &[u8]) -> Result<String, AuthError> {
+    let token = std::str::from_utf8(token)
+        .map_err(|_| AuthError::Unauthorized("token is not valid UTF-8 JWT text".into()))?;
+    let mut parts = token.trim().split('.');
+    let (Some(_header), Some(payload), Some(_signature), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err(AuthError::Unauthorized(
+            "token is not a compact JWT (header.payload.signature)".into(),
+        ));
+    };
+    let payload_raw = b64url_decode(payload)?;
+    #[derive(Deserialize)]
+    struct IssClaim {
+        iss: Option<String>,
+    }
+    let claims: IssClaim = serde_json::from_slice(&payload_raw)
+        .map_err(|_| AuthError::Unauthorized("JWT payload is not valid JSON claims".into()))?;
+    nonempty_claim(claims.iss.as_deref())
+        .map(str::to_owned)
+        .ok_or_else(|| AuthError::Unauthorized("JWT is missing issuer".into()))
 }
 
 /// Enterprise auth extension that verifies JWTs via an [`AssertionVerifier`].
@@ -701,6 +762,27 @@ mod tests {
         let token = mint_jwt(&signing, &claims, Some("k1"));
         let err = v.verify(token.as_bytes(), now).unwrap_err().to_string();
         assert!(err.contains("expired"), "{err}");
+    }
+
+    #[test]
+    fn tenkai_tenant_alone_logs_deprecation() {
+        let _ = take_tenkai_tenant_deprecation();
+        let (signing, public_b64) = keypair();
+        let v = verifier(&public_b64);
+        let now = 1_700_000_000_i64;
+        let mut claims = base_claims(now);
+        claims.remove("tenant_id");
+        claims.insert(
+            "tenkai_tenant".into(),
+            serde_json::Value::String("tenant-a".into()),
+        );
+        let token = mint_jwt(&signing, &claims, Some("k1"));
+        let verified = v.verify(token.as_bytes(), now).unwrap();
+        assert_eq!(verified.tenant_id.as_deref(), Some("tenant-a"));
+        assert_eq!(
+            take_tenkai_tenant_deprecation(),
+            Some(TENKAI_TENANT_CLAIM_DEPRECATION)
+        );
     }
 
     #[test]

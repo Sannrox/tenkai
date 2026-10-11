@@ -153,6 +153,7 @@ pub mod fleet_budget;
 pub mod fleet_fairness;
 pub mod fleet_workload;
 pub mod inventory;
+pub mod issuer_auth;
 pub mod maintenance;
 pub mod management_lifecycle;
 pub mod management_operations;

@@ -12,10 +12,16 @@ contract behind all modes is [authenticated request context](auth-request-contex
 | Community bearer tokens only | One team, shared secrets from a secret store | `TENKAI_MANAGEMENT_TOKEN`, optionally `TENKAI_ENVIRONMENT_MANAGEMENT_TOKENS` |
 | Enterprise JWT assertions | A trusted gateway mints short-lived Ed25519-signed assertions, optionally with tenant claims | `TENKAI_JWT_VERIFIER_CONFIG` |
 | OIDC access tokens | People sign in through your identity provider, for example with the web console or `tenkaictl login` | `TENKAI_OIDC_CONFIG` |
+| JWT and OIDC together | Platform assertions and IdP access tokens in one process | both `TENKAI_JWT_VERIFIER_CONFIG` and `TENKAI_OIDC_CONFIG`, with distinct `iss` values |
 
-The JWT and OIDC modes are mutually exclusive. In both, the fleet management
-token stays valid as the break-glass credential, and environment-scoped tokens
-keep working; keep the fleet token in your secret store.
+JWT and OIDC may run in the same process. Tokens are selected by issuer
+(`iss`); each verifier keeps its own JWKS and audience. An unknown issuer is
+rejected. The fleet management token stays valid as the break-glass
+credential, and environment-scoped tokens keep working; keep the fleet token
+in your secret store.
+
+The canonical tenant claim is `tenant_id`. Platform JWTs that send only
+`tenkai_tenant` still authenticate and log a deprecation warning.
 
 ## Community bearer tokens
 
@@ -55,8 +61,10 @@ neither flag creates a capability-only claim.
 
 Aldunis assertions must use the exact `audience` configured in the trust file.
 Issuer, audience, signature, expiry, principal, and optional tenant claims are
-verified for every request. Tenant-mode compositions require a verified tenant
-claim and reject caller-selected tenant metadata.
+verified for every request. The tenant claim is `tenant_id`. `tenkai_tenant` is
+a deprecated alias: it is still accepted when `tenant_id` is absent, and the
+server logs a warning. Conflicting values fail closed. Tenant-mode compositions
+require a verified tenant claim and reject caller-selected tenant metadata.
 
 Trust roots are a startup snapshot. For key rotation, publish a trust file that
 temporarily contains both the old and new public keys, restart every server
@@ -69,11 +77,12 @@ customer data.
 
 ## OIDC access tokens (#468)
 
-`tenkai-server` can instead verify OIDC access tokens from the deployment's
+`tenkai-server` can verify OIDC access tokens from the deployment's
 identity provider ([ADR 0031](decisions/0031-web-console.md)). Tenkai is a
 resource server only: it runs no login flow, stores no passwords, and holds no
-client secrets. Set `TENKAI_OIDC_CONFIG` to a TOML file; it is mutually
-exclusive with `TENKAI_JWT_VERIFIER_CONFIG`.
+client secrets. Set `TENKAI_OIDC_CONFIG` to a TOML file. Combine it with
+`TENKAI_JWT_VERIFIER_CONFIG` when the same process must also accept platform
+JWT assertions; the two files must name different issuers.
 
 ```toml
 issuer = "https://idp.example.com/realms/ops"   # exact `iss`; https except loopback
@@ -92,7 +101,7 @@ scopes = ["openid", "groups"]
 
 [grants]
 claim = "groups"             # string or array claim holding group/role values
-# tenant_claim = "tenant"    # required on tenant-mode hubs
+# tenant_claim = "tenant_id" # required on tenant-mode hubs; refuse tokens without it on tenant routes
 
 [[grants.rules]]
 value = "tenkai-admins"
@@ -132,6 +141,9 @@ Behavior:
   token names an unknown `kid` (at most once per 30 seconds). That token is
   refused; a refresh failure keeps the previous keys. Request authentication
   never performs network I/O.
+- Tenant comes from `grants.tenant_claim` (prefer `tenant_id`). Tenant-mode
+  hosts refuse to start without that mapping, and tenant-scoped routes refuse
+  tokens that do not resolve a tenant.
 - Grants come only from `grants.rules`. A token matching no rule authenticates
   but has no delivery capability. Rules with `environment` bind management to
   that environment exactly like an environment-scoped management token, unless
