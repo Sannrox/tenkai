@@ -50,6 +50,66 @@ pub struct VllmConfig {
     pub tolerations: Vec<Value>,
 }
 
+/// Host factory that binds the vLLM executor to one environment.
+///
+/// Serving configuration is host configuration, never manifest data: the
+/// digest-pinned serving image (`TENKAI_VLLM_IMAGE`), the weights claim
+/// (`TENKAI_VLLM_WEIGHTS_CLAIM`), and the weight-cache root
+/// (`TENKAI_VLLM_WEIGHTS_ROOT`) must be set, or executor construction fails
+/// closed with a named error. The cache root must be the host mount of the
+/// weights claim: the executor writes verified weights there and serving
+/// pods mount the same claim read-only; nothing copies between volumes. The
+/// environment name is the namespace, as on the in-process software path.
+/// `TENKAI_VLLM_SMOKE_BASE_URL` overrides the smoke-probe URL template.
+pub struct VllmExecutorFactory;
+
+impl tenkai::model_runtime::ModelRuntimeExecutorFactory for VllmExecutorFactory {
+    fn executor(
+        &self,
+        environment: &str,
+        cluster_config: &Path,
+        state_path: &Path,
+        artifacts: Option<tenkai::model_runtime::ModelRuntimeArtifacts>,
+    ) -> Result<std::sync::Arc<dyn ModelRuntimeExecutor>> {
+        let image = std::env::var("TENKAI_VLLM_IMAGE").ok().filter(|v| !v.trim().is_empty())
+            .context("model_runtime engine vllm requires TENKAI_VLLM_IMAGE (digest-pinned serving image) on this host")?;
+        if !image.contains("@sha256:") {
+            bail!("TENKAI_VLLM_IMAGE must pin the serving image by digest (@sha256:...)");
+        }
+        let weights_claim = std::env::var("TENKAI_VLLM_WEIGHTS_CLAIM")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .context("model_runtime engine vllm requires TENKAI_VLLM_WEIGHTS_CLAIM on this host")?;
+        let weights_root = std::env::var_os("TENKAI_VLLM_WEIGHTS_ROOT")
+            .map(PathBuf::from)
+            .filter(|path| !path.as_os_str().is_empty())
+            .context("model_runtime engine vllm requires TENKAI_VLLM_WEIGHTS_ROOT (host mount of the weights claim) on this host")?;
+        let probe = HttpSmokeProbe {
+            base_url: std::env::var("TENKAI_VLLM_SMOKE_BASE_URL")
+                .unwrap_or_else(|_| "http://{service}.{namespace}.svc:{port}".into()),
+            timeout: Duration::from_secs(30),
+        };
+        Ok(std::sync::Arc::new(VllmModelRuntimeExecutor::new(
+            crate::in_process_kubernetes::LiveKubeApi,
+            probe,
+            VllmConfig {
+                cluster_config: cluster_config.to_path_buf(),
+                namespace: environment.to_string(),
+                image,
+                weights_claim,
+                node_selector: BTreeMap::new(),
+                tolerations: Vec::new(),
+            },
+            match artifacts {
+                Some(artifacts) => WeightCache::new(weights_root)
+                    .with_artifact_registry(artifacts.registry, artifacts.mirrors),
+                None => WeightCache::new(weights_root),
+            },
+            state_path.to_path_buf(),
+        )))
+    }
+}
+
 /// Fixed completion probe against a candidate Service before activation.
 pub trait SmokeProbe: Send + Sync {
     /// One attempt, finished within `timeout` (the remaining startup budget).

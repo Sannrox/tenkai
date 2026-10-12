@@ -236,6 +236,56 @@ pub async fn run(
     })
 }
 
+/// Run in-process `work` while holding the mutation lock, the same flock the
+/// executor guard takes for shell commands. Callers refresh their generation
+/// fence before and after, exactly as [`run`] does around a supervised shell.
+///
+/// The outer error is a lock failure; the inner result is `work`'s own, so
+/// callers can keep control failures distinct from target failures.
+pub fn with_mutation_lock<T>(
+    lock_path: &Path,
+    work: impl FnOnce() -> Result<T>,
+) -> Result<Result<T>> {
+    with_mutation_lock_authorized(lock_path, || Ok(()), work)
+}
+
+/// [`with_mutation_lock`] with a post-acquisition authorization handshake:
+/// `authorize` runs after the lock is held and before `work`; when it fails,
+/// `work` never runs. This mirrors the shell guard's ready/go exchange, so a
+/// waiter that lost its fence while queued on the lock cannot mutate.
+pub fn with_mutation_lock_authorized<T>(
+    lock_path: &Path,
+    authorize: impl FnOnce() -> Result<()>,
+    work: impl FnOnce() -> Result<T>,
+) -> Result<Result<T>> {
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)?;
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    // Authorization is checked only once the lock is held; a failed check
+    // releases the lock (on drop) without running the mutation.
+    authorize()?;
+    let result = work();
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) } != 0 {
+        let unlock = std::io::Error::last_os_error();
+        return match result {
+            Ok(value) => Ok(Ok(value)),
+            Err(error) => {
+                Err(error.context(format!("releasing mutation lock also failed: {unlock}")))
+            }
+        };
+    }
+    Ok(result)
+}
+
 pub async fn supervise(mutation: MutationCommand<'_>, generation: u64) -> Result<()> {
     let lock = OpenOptions::new()
         .create(true)
@@ -420,6 +470,58 @@ mod tests {
         assert!(dumped.contains("TENKAI_ENVIRONMENT=lab"));
         assert!(dumped.contains("TENKAI_PRODUCT=app"));
         assert!(dumped.contains("TENKAI_FENCING_GENERATION=3"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn denied_authorization_never_runs_guarded_work() {
+        let dir = std::env::temp_dir().join(format!("tenkai-mutation-auth-{}", std::process::id()));
+        let lock_path = dir.join("mutation.lock");
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = ran.clone();
+        let result = with_mutation_lock_authorized(
+            &lock_path,
+            || anyhow::bail!("fence lost while queued"),
+            move || {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        );
+        assert!(result.is_err(), "denied authorization must fail the guard");
+        assert!(
+            !ran.load(std::sync::atomic::Ordering::SeqCst),
+            "guarded work ran without authorization"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mutation_lock_excludes_a_second_holder_while_work_runs() {
+        let dir = std::env::temp_dir().join(format!("tenkai-mutation-lock-{}", std::process::id()));
+        let lock_path = dir.join("mutation.lock");
+        let probe_path = lock_path.clone();
+        let observed =
+            with_mutation_lock(&lock_path, move || {
+                // A second open of the same lock must not acquire it while held.
+                let second = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&probe_path)?;
+                let rc = unsafe { libc::flock(second.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+                Ok(rc != 0
+                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::EWOULDBLOCK))
+            })
+            .unwrap()
+            .unwrap();
+        assert!(observed, "mutation lock was not held during guarded work");
+        // After release the lock is free again.
+        let third = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        let rc = unsafe { libc::flock(third.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        assert_eq!(rc, 0, "mutation lock stayed held after guarded work");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

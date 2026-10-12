@@ -83,6 +83,8 @@ pub(crate) async fn run(
                     emergency_reason: emergency_reason.as_deref(),
                     authorization,
                     software_executor: None,
+                    model_runtime_executor:
+                        tenkai::model_runtime::selected_model_runtime_executor_factory(),
                     worker_lifecycle: None,
                     artifact_registry: None,
                     delivery_adapter: None,
@@ -193,6 +195,7 @@ pub(crate) async fn run_plan(
         emergency_reason: execution.emergency_reason,
         authorization: execution.authorization,
         software_executor: software,
+        model_runtime_executor: tenkai::model_runtime::selected_model_runtime_executor_factory(),
         worker_lifecycle,
         artifact_registry: tenkai::oci_artifact::selected_registry()?,
         delivery_adapter: None,

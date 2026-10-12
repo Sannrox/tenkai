@@ -554,6 +554,82 @@ pub trait ModelRuntimeExecutor: Send + Sync {
     fn observe(&self) -> Result<Option<String>>;
 }
 
+/// Host injection point for non-reference model-runtime executors.
+///
+/// The core crate cannot depend on cluster adapters, so hosts that can serve
+/// additional engines (for example a Kubernetes vLLM executor) install a
+/// factory and pass it through the apply options. The factory binds one
+/// executor to an environment's cluster configuration and descriptor state.
+pub trait ModelRuntimeExecutorFactory: Send + Sync {
+    /// Build the executor for one environment, or fail with a named error.
+    /// `artifacts` carries the admitted registry and environment mirrors for
+    /// `oci://` weight sources, when the host configured a registry.
+    fn executor(
+        &self,
+        environment: &str,
+        cluster_config: &Path,
+        state_path: &Path,
+        artifacts: Option<ModelRuntimeArtifacts>,
+    ) -> Result<Arc<dyn ModelRuntimeExecutor>>;
+}
+
+/// Registry access for `oci://` model weights: the admitted registry plus the
+/// environment's origin-to-mirror rewrites. Origin pull is refused.
+#[derive(Clone)]
+pub struct ModelRuntimeArtifacts {
+    pub registry: Arc<dyn crate::oci_artifact::ArtifactRegistry>,
+    pub mirrors: BTreeMap<String, String>,
+}
+
+static MODEL_RUNTIME_EXECUTOR_FACTORY: std::sync::OnceLock<Arc<dyn ModelRuntimeExecutorFactory>> =
+    std::sync::OnceLock::new();
+
+/// Install the host's model-runtime executor factory (called once at process
+/// start by the crate that owns the cluster adapters).
+pub fn install_model_runtime_executor_factory(factory: Arc<dyn ModelRuntimeExecutorFactory>) {
+    let _ = MODEL_RUNTIME_EXECUTOR_FACTORY.set(factory);
+}
+
+/// The installed host factory, when the host registered one.
+pub fn selected_model_runtime_executor_factory() -> Option<Arc<dyn ModelRuntimeExecutorFactory>> {
+    MODEL_RUNTIME_EXECUTOR_FACTORY.get().cloned()
+}
+
+/// Select the executor for one descriptor by `runtime.engine`.
+///
+/// `llama.cpp` always keeps the reference executor. `vllm` uses the injected
+/// host executor, and only on an environment that carries a cluster
+/// configuration. Every other case fails closed with a named error: an engine
+/// must never fall back to an executor that does not implement it.
+pub fn select_model_runtime_executor(
+    descriptor: &ModelRuntimeDescriptor,
+    environment: &str,
+    cluster_config: Option<&Path>,
+    factory: Option<&dyn ModelRuntimeExecutorFactory>,
+    state_path: &Path,
+    artifacts: Option<ModelRuntimeArtifacts>,
+) -> Result<Arc<dyn ModelRuntimeExecutor>> {
+    match descriptor.runtime.engine.as_str() {
+        "llama.cpp" => Ok(Arc::new(ReferenceLlamaCppExecutor::for_operator_host(
+            state_path.to_path_buf(),
+        ))),
+        "vllm" => {
+            let cluster_config = cluster_config.with_context(|| {
+                format!(
+                    "model_runtime engine vllm requires an environment cluster_config_path; environment {environment} has none"
+                )
+            })?;
+            let factory = factory.with_context(|| {
+                "model_runtime engine vllm has no executor on this host: no model-runtime executor factory is installed".to_string()
+            })?;
+            factory.executor(environment, cluster_config, state_path, artifacts)
+        }
+        engine => bail!(
+            "unknown model_runtime engine {engine} for environment {environment}: no executor is available"
+        ),
+    }
+}
+
 /// Local reference executor that stages the validated descriptor and, when a
 /// [`WeightCache`] is configured, fetches and verifies weight digests.
 ///
@@ -1098,6 +1174,153 @@ mod tests {
                 max_startup_seconds: 300,
             },
         }
+    }
+
+    #[derive(Default)]
+    struct RecordingExecutor {
+        applied: std::sync::Mutex<Vec<String>>,
+        removed: std::sync::Mutex<u32>,
+    }
+
+    impl ModelRuntimeExecutor for RecordingExecutor {
+        fn apply(&self, descriptor: &ModelRuntimeDescriptor) -> Result<String> {
+            self.applied
+                .lock()
+                .unwrap()
+                .push(descriptor.runtime.engine.clone());
+            Ok("injected".into())
+        }
+
+        fn remove(&self) -> Result<()> {
+            *self.removed.lock().unwrap() += 1;
+            Ok(())
+        }
+
+        fn observe(&self) -> Result<Option<String>> {
+            Ok(None)
+        }
+    }
+
+    struct RecordingFactory {
+        executor: Arc<RecordingExecutor>,
+        calls: std::sync::Mutex<Vec<PathBuf>>,
+    }
+
+    impl ModelRuntimeExecutorFactory for RecordingFactory {
+        fn executor(
+            &self,
+            _environment: &str,
+            cluster_config: &Path,
+            _state_path: &Path,
+            _artifacts: Option<ModelRuntimeArtifacts>,
+        ) -> Result<Arc<dyn ModelRuntimeExecutor>> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(cluster_config.to_path_buf());
+            Ok(self.executor.clone())
+        }
+    }
+
+    #[test]
+    fn engine_selection_keeps_reference_for_llama_cpp() {
+        let descriptor = sample_descriptor();
+        let root = std::env::temp_dir().join(format!("tenkai-select-llama-{}", std::process::id()));
+        let state = root.join("active.json");
+        let selected =
+            select_model_runtime_executor(&descriptor, "lab", None, None, &state, None).unwrap();
+        let digest = selected.apply(&descriptor).unwrap();
+        assert_eq!(digest, descriptor.digest().unwrap());
+        assert!(
+            state.exists(),
+            "reference executor must stage the descriptor"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn engine_selection_uses_injected_executor_for_vllm_on_cluster_environment() {
+        let mut descriptor = sample_descriptor();
+        descriptor.runtime.engine = "vllm".into();
+        let recording = Arc::new(RecordingExecutor::default());
+        let factory = RecordingFactory {
+            executor: recording.clone(),
+            calls: std::sync::Mutex::new(Vec::new()),
+        };
+        let cluster = Path::new("/etc/tenkai/kubeconfig");
+        let state = Path::new("/tmp/model-runtime-state.json");
+        let selected = select_model_runtime_executor(
+            &descriptor,
+            "lab",
+            Some(cluster),
+            Some(&factory),
+            state,
+            None,
+        )
+        .unwrap();
+        assert_eq!(selected.apply(&descriptor).unwrap(), "injected");
+        assert_eq!(recording.applied.lock().unwrap().as_slice(), ["vllm"]);
+        assert_eq!(
+            factory.calls.lock().unwrap().as_slice(),
+            [cluster.to_path_buf()]
+        );
+    }
+
+    #[test]
+    fn engine_selection_refuses_vllm_without_cluster_or_factory() {
+        let mut descriptor = sample_descriptor();
+        descriptor.runtime.engine = "vllm".into();
+        let state = Path::new("/tmp/model-runtime-state.json");
+        let no_cluster = select_model_runtime_executor(&descriptor, "lab", None, None, state, None)
+            .err()
+            .unwrap();
+        assert!(
+            no_cluster.to_string().contains("cluster_config_path"),
+            "{no_cluster}"
+        );
+        let recording = Arc::new(RecordingExecutor::default());
+        let _factory = RecordingFactory {
+            executor: recording,
+            calls: std::sync::Mutex::new(Vec::new()),
+        };
+        let no_factory = select_model_runtime_executor(
+            &descriptor,
+            "lab",
+            Some(Path::new("/etc/tenkai/kubeconfig")),
+            None,
+            state,
+            None,
+        )
+        .err()
+        .unwrap();
+        assert!(
+            no_factory
+                .to_string()
+                .contains("no model-runtime executor factory"),
+            "{no_factory}"
+        );
+    }
+
+    #[test]
+    fn engine_selection_refuses_unknown_engines() {
+        let mut descriptor = sample_descriptor();
+        descriptor.runtime.engine = "tensorrt".into();
+        let error = select_model_runtime_executor(
+            &descriptor,
+            "lab",
+            Some(Path::new("/etc/tenkai/kubeconfig")),
+            None,
+            Path::new("/tmp/model-runtime-state.json"),
+            None,
+        )
+        .err()
+        .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown model_runtime engine tensorrt"),
+            "{error}"
+        );
     }
 
     #[test]

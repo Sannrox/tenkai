@@ -2,7 +2,7 @@
 
 use super::*;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct StepContext<'a> {
     lease: &'a EnvironmentLease,
     environment: &'a str,
@@ -24,7 +24,7 @@ pub(super) async fn execute(
         lease,
         environment,
         plan_id,
-        adapters,
+        adapters: adapters.clone(),
     };
     let target = ReleasePin {
         release_id: step.release_id.clone(),
@@ -74,7 +74,7 @@ pub(super) async fn execute(
             .is_some_and(|command| !command.is_empty())
     {
         let cleanup_failure =
-            match product_execution::deactivate(ctx, lease, outgoing, adapters).await {
+            match product_execution::deactivate(ctx, lease, outgoing, adapters.clone()).await {
                 Ok(Ok(())) => None,
                 Ok(Err(detail)) => Some(detail),
                 Err(error) => Some(format!("cleanup executor failed: {error}")),
@@ -100,9 +100,9 @@ pub(super) async fn execute(
     }
 
     let activation = match if step.action == Action::Restart {
-        product_execution::restart(ctx, lease, &content, adapters).await
+        product_execution::restart(ctx, lease, &content, adapters.clone()).await
     } else {
-        product_execution::activate(ctx, lease, &content, adapters).await
+        product_execution::activate(ctx, lease, &content, adapters.clone()).await
     } {
         Ok(result) => result,
         Err(error)
@@ -140,8 +140,16 @@ pub(super) async fn execute(
             };
             if let Err(error) = record(ctx, lease, environment, plan_id, &outcome, transition).await
             {
-                compensate_activation(ctx, lease, environment, step, &content, &error, adapters)
-                    .await;
+                compensate_activation(
+                    ctx,
+                    lease,
+                    environment,
+                    step,
+                    &content,
+                    &error,
+                    adapters.clone(),
+                )
+                .await;
                 return Err(error);
             }
             return Ok(outcome);
@@ -181,7 +189,13 @@ async fn recover_restart(
     detail: String,
 ) -> Result<(Outcome, Option<crate::environment::DeploymentTransition>)> {
     let reapplied = matches!(
-        product_execution::activate(ctx, step_context.lease, content, step_context.adapters).await,
+        product_execution::activate(
+            ctx,
+            step_context.lease,
+            content,
+            step_context.adapters.clone()
+        )
+        .await,
         Ok(Ok(()))
     );
     Ok((
@@ -215,7 +229,7 @@ async fn recover_activation(
         step_context.lease,
         content,
         detail,
-        step_context.adapters,
+        step_context.adapters.clone(),
     )
     .await?;
     let Some(previous) = step.from.as_deref() else {
@@ -334,7 +348,7 @@ async fn compensate_activation(
     }
     let failure = format!("deployment bookkeeping failed after activation: {failure}");
     let cleaned = matches!(
-        product_execution::deactivate(ctx, lease, content, adapters).await,
+        product_execution::deactivate(ctx, lease, content, adapters.clone()).await,
         Ok(Ok(()))
     );
     let mut restored = step.from.is_none();

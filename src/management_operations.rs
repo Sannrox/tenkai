@@ -1042,6 +1042,8 @@ impl ManagementOperations {
                     trust_roots: &files.trust_roots,
                 },
                 software_executor: None,
+                model_runtime_executor:
+                    crate::model_runtime::selected_model_runtime_executor_factory(),
                 worker_lifecycle: None,
                 artifact_registry: None,
                 delivery_adapter: None,

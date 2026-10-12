@@ -368,6 +368,73 @@ impl crate::fenced_mutation::MutationFence for ApplyMutationFence<'_> {
     }
 }
 
+/// Run an in-process mutation under the executor guard: refresh the
+/// environment fence, hold the mutation lock for the whole call, and keep
+/// refreshing the fence while the blocking work runs, like
+/// [`run_mutation_command`] does for shell commands. Fence and lock failures
+/// are outer errors. In-process work cannot be killed when the fence is lost;
+/// it keeps the mutation lock until it returns, so no second guarded mutation
+/// can start, and the lost fence is reported as soon as it is observed.
+pub(super) async fn run_guarded_mutation<T>(
+    ctx: &mut Ctx,
+    lease: &EnvironmentLease,
+    content: &ReleaseContent,
+    work: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<Result<T, String>>
+where
+    T: Send + 'static,
+{
+    refresh_environment_lease(ctx, lease).await?;
+    let lock_path = content.mutation_lock.clone();
+    let (acquired_tx, mut acquired_rx) = tokio::sync::oneshot::channel::<()>();
+    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+    let mut guarded = tokio::task::spawn_blocking(move || {
+        crate::fenced_mutation::with_mutation_lock_authorized(
+            &lock_path,
+            move || {
+                // Ready/go handshake, as in the shell guard: announce the
+                // held lock, then start only on explicit authorization.
+                let _ = acquired_tx.send(());
+                go_rx
+                    .recv()
+                    .map_err(|_| anyhow::anyhow!("model-runtime mutation was not authorized"))
+            },
+            work,
+        )
+    });
+    let mut refresh = tokio::time::interval(std::time::Duration::from_secs(10));
+    refresh.tick().await;
+    // Wait for the lock while keeping the fence fresh. Losing the fence here
+    // drops the go channel, so the queued task releases the lock unused.
+    loop {
+        tokio::select! {
+            acquired = &mut acquired_rx => {
+                acquired.context("guarded model-runtime mutation ended before acquiring the lock")?;
+                break;
+            }
+            joined = &mut guarded => {
+                let finished = joined.context("guarded model-runtime mutation task failed")??;
+                refresh_environment_lease(ctx, lease).await?;
+                return Ok(finished.map_err(|error| error.to_string()));
+            }
+            _ = refresh.tick() => refresh_environment_lease(ctx, lease).await?,
+        }
+    }
+    // The lock is held; revalidate the fence before authorizing any mutation.
+    refresh_environment_lease(ctx, lease).await?;
+    let _ = go_tx.send(());
+    let mut refresh = tokio::time::interval(std::time::Duration::from_secs(10));
+    refresh.tick().await;
+    let guarded = loop {
+        tokio::select! {
+            joined = &mut guarded => break joined.context("guarded model-runtime mutation task failed")??,
+            _ = refresh.tick() => refresh_environment_lease(ctx, lease).await?,
+        }
+    };
+    refresh_environment_lease(ctx, lease).await?;
+    Ok(guarded.map_err(|error| error.to_string()))
+}
+
 pub(super) async fn run_mutation_command(
     ctx: &mut Ctx,
     lease: &EnvironmentLease,
