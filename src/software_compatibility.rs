@@ -837,6 +837,7 @@ mod tests {
                 reason: "compatibility lifecycle fixture",
             },
             software_executor: Some(executor),
+            model_runtime_executor: None,
             worker_lifecycle: None,
             artifact_registry: None,
             delivery_adapter: None,

@@ -13,7 +13,6 @@ use std::process::Stdio;
 
 use crate::client::Ctx;
 use crate::manifest::{self, Manifest};
-use crate::model_runtime::ModelRuntimeExecutor as _;
 use crate::plan::{self, Action, Plan, PlanState, ReleasePin, Step};
 use crate::routing::RoutingConfigExecutor as _;
 use anyhow::{Context as _, Result, bail};
@@ -34,15 +33,17 @@ pub(crate) use execution_lease::{
     refresh_environment_lease, release_environment,
 };
 pub use execution_lease::{EnvironmentLeaseInspect, inspect_environment_lease, unlock_environment};
-use execution_lease::{claim_execution_environment, run_mutation_command};
+use execution_lease::{claim_execution_environment, run_guarded_mutation, run_mutation_command};
 pub use outcome::{Outcome, StepOutcomeStatus};
 use release_content::{ReleaseContent, admit as admit_release, verify_integrity};
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct TargetAdapters<'a> {
     software: Option<&'a dyn crate::software_executor::SoftwareExecutor>,
+    model_runtime: Option<&'a dyn crate::model_runtime::ModelRuntimeExecutorFactory>,
     worker_lifecycle: Option<&'a dyn crate::worker_pool::WorkerLifecyclePort>,
     artifact_registry: Option<&'a dyn crate::oci_artifact::ArtifactRegistry>,
+    artifact_registry_handle: Option<std::sync::Arc<dyn crate::oci_artifact::ArtifactRegistry>>,
 }
 
 #[allow(deprecated)]
@@ -312,8 +313,10 @@ async fn execute_locked(
             &step,
             TargetAdapters {
                 software: options.software_executor,
+                model_runtime: options.model_runtime_executor,
                 worker_lifecycle: options.worker_lifecycle,
                 artifact_registry: options.artifact_registry,
+                artifact_registry_handle: options.artifact_registry_handle.clone(),
             },
             recalled_recovery,
         )

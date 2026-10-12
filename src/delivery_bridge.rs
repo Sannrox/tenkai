@@ -779,6 +779,7 @@ mod tests {
                 trust_roots: trust,
             },
             software_executor: None,
+            model_runtime_executor: None,
             worker_lifecycle: None,
             artifact_registry: None,
             delivery_adapter: Some(adapter),

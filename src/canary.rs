@@ -815,6 +815,7 @@ max_startup_seconds = 30
                     reason: "model_runtime canary e2e fixture",
                 },
                 software_executor: None,
+                model_runtime_executor: None,
                 worker_lifecycle: None,
                 artifact_registry: None,
                 delivery_adapter: None,

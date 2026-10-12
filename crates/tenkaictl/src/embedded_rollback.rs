@@ -62,6 +62,8 @@ pub(crate) async fn run(
                                 .expect("clap requires a development reason"),
                         },
                         software_executor: None,
+                        model_runtime_executor:
+                            tenkai::model_runtime::selected_model_runtime_executor_factory(),
                         worker_lifecycle: None,
                         artifact_registry: None,
                         delivery_adapter: None,
@@ -127,6 +129,8 @@ pub(crate) async fn run(
                         },
                         software_executor: tenkai::software_executor::selected_software_executor()
                             .map(std::sync::Arc::from),
+                        model_runtime_executor:
+                            tenkai::model_runtime::selected_model_runtime_executor_factory(),
                         worker_lifecycle: None,
                         artifact_registry: None,
                         delivery_adapter: None,

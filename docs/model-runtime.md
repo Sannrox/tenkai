@@ -50,6 +50,17 @@ Same as software and routing: publish → channel → subscribe → plan → app
 health → rollback. The local reference executor stages the **descriptor** only.
 Engine plugins that download multi-GB weights implement `ModelRuntimeExecutor`.
 
+Apply selects the executor by `runtime.engine`. `llama.cpp` keeps the
+reference executor. `vllm` uses the host-injected executor, only on an
+environment that carries `cluster_config_path`; without a cluster
+configuration or a host executor it fails closed, as does any unknown engine.
+The host registers its factory at process start (`tenkai-executor` installs
+the vLLM factory; serving image, weights claim, and the claim's host mount
+come from `TENKAI_VLLM_IMAGE` / `TENKAI_VLLM_WEIGHTS_CLAIM` /
+`TENKAI_VLLM_WEIGHTS_ROOT`). Model-runtime apply and
+remove run under the executor guard: the environment fence is refreshed and
+the mutation lock is held for the whole call.
+
 ## Separation from routing
 
 | Product | Meaning |

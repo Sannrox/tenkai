@@ -304,6 +304,7 @@ async fn execute_authorized(
             emergency_reason: None,
             authorization,
             software_executor: software,
+            model_runtime_executor: crate::model_runtime::selected_model_runtime_executor_factory(),
             worker_lifecycle,
             artifact_registry: crate::oci_artifact::selected_registry()?,
             delivery_adapter: None,

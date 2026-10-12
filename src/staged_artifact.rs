@@ -781,6 +781,7 @@ document = "agent.json"
                     reason: "staged product e2e",
                 },
                 software_executor: None,
+                model_runtime_executor: None,
                 worker_lifecycle: None,
                 artifact_registry: None,
                 delivery_adapter: None,

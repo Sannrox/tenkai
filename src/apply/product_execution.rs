@@ -57,15 +57,17 @@ pub(super) async fn activate(
         prepare_fenced_mutation(ctx, lease, content).await?;
         let descriptor =
             crate::model_runtime::ModelRuntimeDescriptor::from_manifest(&content.manifest)?;
-        // ReferenceLlamaCppExecutor: fake by default; real binary when
-        // TENKAI_LLAMA_SERVER / TENKAI_USE_REAL_LLAMA is set (see model-runtime.md).
-        let executor = crate::model_runtime::ReferenceLlamaCppExecutor::for_operator_host(
-            content.model_runtime_state.clone(),
-        );
-        return Ok(executor
-            .apply(&descriptor)
-            .map(|_| ())
-            .map_err(|error| error.to_string()));
+        // Engine selection: llama.cpp keeps the reference executor (fake by
+        // default; real binary when TENKAI_LLAMA_SERVER / TENKAI_USE_REAL_LLAMA
+        // is set, see model-runtime.md); other engines use the host-injected
+        // executor and fail closed without one.
+        let executor = match model_runtime_executor(ctx, content, adapters, &descriptor).await? {
+            Ok(executor) => executor,
+            Err(detail) => return Ok(Err(detail)),
+        };
+        let applied =
+            run_guarded_mutation(ctx, lease, content, move || executor.apply(&descriptor)).await?;
+        return Ok(applied.map(|_| ()));
     }
     if content.manifest.product.kind.policy().target() == ProductTarget::WorkerPool {
         prepare_fenced_mutation(ctx, lease, content).await?;
@@ -290,13 +292,14 @@ async fn deactivate_for(
     }
     if content.manifest.product.kind.policy().target() == ProductTarget::ModelRuntime {
         refresh_environment_lease(ctx, lease).await?;
-        return Ok(
-            crate::model_runtime::ReferenceLlamaCppExecutor::for_operator_host(
-                content.model_runtime_state.clone(),
-            )
-            .remove()
-            .map_err(|error| error.to_string()),
-        );
+        let descriptor =
+            crate::model_runtime::ModelRuntimeDescriptor::from_manifest(&content.manifest)?;
+        let executor = match model_runtime_executor(ctx, content, adapters, &descriptor).await? {
+            Ok(executor) => executor,
+            Err(detail) => return Ok(Err(detail)),
+        };
+        let removed = run_guarded_mutation(ctx, lease, content, move || executor.remove()).await?;
+        return Ok(removed);
     }
     if content.manifest.product.kind.policy().target() == ProductTarget::WorkerPool {
         refresh_environment_lease(ctx, lease).await?;
@@ -509,6 +512,52 @@ async fn admit_worker_pool(
         crate::worker_pool::WorkerPoolDecision::Degraded { reason }
         | crate::worker_pool::WorkerPoolDecision::Deny { reason } => Ok(Err(reason)),
     }
+}
+
+/// Select the model-runtime executor for one release by engine and by the
+/// environment's cluster configuration. Selection refusals are inner target
+/// failures; loading the environment stays an outer error.
+async fn model_runtime_executor(
+    ctx: &mut Ctx,
+    content: &ReleaseContent,
+    adapters: TargetAdapters<'_>,
+    descriptor: &crate::model_runtime::ModelRuntimeDescriptor,
+) -> Result<Result<std::sync::Arc<dyn crate::model_runtime::ModelRuntimeExecutor>, String>> {
+    // The reference path never consults cluster configuration.
+    if descriptor.runtime.engine == "llama.cpp" {
+        return Ok(crate::model_runtime::select_model_runtime_executor(
+            descriptor,
+            &content.environment,
+            None,
+            adapters.model_runtime,
+            &content.model_runtime_state,
+            None,
+        )
+        .map_err(|error| error.to_string()));
+    }
+    let env_obj = crate::environment::environment(ctx, &content.environment).await?;
+    let cluster_config =
+        crate::software_executor::cluster_config_path_from_properties(&env_obj.properties)
+            .map_err(|error| error.to_string());
+    let cluster_config = match cluster_config {
+        Ok(path) => path,
+        Err(detail) => return Ok(Err(detail)),
+    };
+    let artifacts = adapters.artifact_registry_handle.map(|registry| {
+        crate::model_runtime::ModelRuntimeArtifacts {
+            registry,
+            mirrors: crate::oci_artifact::mirrors_from_properties(&env_obj.properties),
+        }
+    });
+    Ok(crate::model_runtime::select_model_runtime_executor(
+        descriptor,
+        &content.environment,
+        cluster_config.as_deref(),
+        adapters.model_runtime,
+        &content.model_runtime_state,
+        artifacts,
+    )
+    .map_err(|error| error.to_string()))
 }
 
 fn software_phase_error(

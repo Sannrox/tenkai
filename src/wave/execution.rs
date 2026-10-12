@@ -789,6 +789,7 @@ async fn execute_plan(
             authorization,
             software_executor: crate::software_executor::selected_software_executor()
                 .map(std::sync::Arc::from),
+            model_runtime_executor: crate::model_runtime::selected_model_runtime_executor_factory(),
             worker_lifecycle: None,
             artifact_registry: crate::oci_artifact::selected_registry()?,
             delivery_adapter: None,
