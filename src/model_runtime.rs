@@ -354,8 +354,14 @@ impl WeightCache {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating weight cache {}", parent.display()))?;
         }
-        let temporary = destination.with_extension("partial");
-        let _ = std::fs::remove_file(&temporary);
+        // Per-invocation partial file: concurrent fetches of one digest never unlink or
+        // overwrite each other's download; promotion is an atomic rename of verified bytes.
+        let nonce = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default();
+        let temporary =
+            destination.with_extension(format!("partial-{}-{nonce}", std::process::id()));
         if let Err(error) = self.fetch_source_to(&source, &temporary) {
             let _ = std::fs::remove_file(&temporary);
             return Err(error);
@@ -1328,13 +1334,10 @@ mod tests {
         assert!(format!("{err:#}").contains("digest mismatch"), "{err:#}");
         server.join().unwrap();
         assert!(!cache.blob_path(&expected).unwrap().exists());
-        assert!(
-            !cache
-                .blob_path(&expected)
-                .unwrap()
-                .with_extension("partial")
-                .exists()
-        );
+        let leftovers = std::fs::read_dir(cache.blob_path(&expected).unwrap().parent().unwrap())
+            .map(|entries| entries.count())
+            .unwrap_or(0);
+        assert_eq!(leftovers, 0, "no partial download may remain");
         let _ = std::fs::remove_dir_all(root);
     }
 

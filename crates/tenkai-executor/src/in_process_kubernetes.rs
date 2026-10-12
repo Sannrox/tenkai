@@ -104,6 +104,14 @@ impl MemoryClusterApi {
         Self::default()
     }
 
+    pub fn object(&self, namespace: &str, kind: &str, name: &str) -> Option<Value> {
+        self.objects
+            .lock()
+            .expect("cluster mutex")
+            .get(&object_key(namespace, kind, name))
+            .map(|stored| stored.object.clone())
+    }
+
     pub fn set_conditions(
         &self,
         namespace: &str,
@@ -525,7 +533,7 @@ fn healthy_deployment_conditions() -> Vec<WorkloadCondition> {
     ]
 }
 
-fn disagreeing_condition(observation: &WorkloadObservation) -> Option<String> {
+pub(crate) fn disagreeing_condition(observation: &WorkloadObservation) -> Option<String> {
     if !is_workload(&observation.kind) {
         return None;
     }
@@ -563,7 +571,7 @@ fn disagreeing_condition(observation: &WorkloadObservation) -> Option<String> {
     })
 }
 
-fn block_on<T, F>(fut: F) -> Result<T>
+pub(crate) fn block_on<T, F>(fut: F) -> Result<T>
 where
     F: std::future::Future<Output = Result<T>>,
 {
