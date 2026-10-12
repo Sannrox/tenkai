@@ -947,8 +947,8 @@ version = "3.2.1"
 kind = "model_runtime"
 
 [model]
-source = "hf://org/qwen"
-revision = "abc"
+source = "hf://org/qwen/qwen-q4_k_m.gguf"
+revision = "abc0123456789abcdef0123456789abcdef01234"
 format = "gguf"
 quantization = "Q4_K_M"
 artifact_digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

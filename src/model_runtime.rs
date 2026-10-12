@@ -6,7 +6,7 @@
 //! payloads are never stored in Tenkai operational state—only content-addressed
 //! digests and descriptors.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -124,6 +124,9 @@ impl ModelRuntimeDescriptor {
         if self.model.source.starts_with("sqlite:") || self.model.source.starts_with("tenkai-db:") {
             bail!("model.source cannot address Tenkai operational storage");
         }
+        if self.model.source.starts_with("hf://") || self.model.source.starts_with("oci://") {
+            WeightSource::parse(&self.model)?;
+        }
         Ok(())
     }
 
@@ -139,6 +142,126 @@ fn validate_artifact_digest(value: &str) -> Result<()> {
     crate::signature_verification::validate_prefixed_digest("model.artifact_digest", value)
 }
 
+/// Media type of a model-weights OCI artifact: one blob holding the weights file.
+pub const MODEL_WEIGHTS_MEDIA_TYPE: &str = "application/vnd.tenkai.model.weights.v1";
+
+/// Hub endpoint `hf://` sources resolve against unless the cache overrides it.
+pub const DEFAULT_HUB_ENDPOINT: &str = "https://huggingface.co";
+
+/// Where a `model.source` fetches weights from.
+enum WeightSource<'a> {
+    /// `file://<absolute path>`
+    File(&'a Path),
+    /// `http://` or `https://` URL.
+    Http(&'a str),
+    /// `hf://<org>/<repo>/<path>` at a pinned 40-hex commit `revision`.
+    Hub {
+        repo: &'a str,
+        path: &'a str,
+        revision: &'a str,
+    },
+    /// `oci://<registry>/<repository>@sha256:<hex>`, the digest equal to `artifact_digest`.
+    Oci(crate::oci_artifact::OciArtifactRef),
+}
+
+impl<'a> WeightSource<'a> {
+    fn parse(model: &'a ModelSection) -> Result<Self> {
+        let source = model.source.as_str();
+        if let Some(path) = source.strip_prefix("file://") {
+            let path = Path::new(path);
+            if !path.is_absolute() {
+                bail!("file:// model.source must be an absolute path");
+            }
+            return Ok(Self::File(path));
+        }
+        if source.starts_with("http://") || source.starts_with("https://") {
+            return Ok(Self::Http(source));
+        }
+        if let Some(rest) = source.strip_prefix("hf://") {
+            let mut segments = rest.splitn(3, '/');
+            let (Some(org), Some(name), Some(path)) =
+                (segments.next(), segments.next(), segments.next())
+            else {
+                bail!("hf:// model.source must be hf://<org>/<repo>/<file path>, got {source}");
+            };
+            // Plain segments only, so the built URL cannot be re-normalized
+            // (for example a percent-encoded `..`) to another revision.
+            if [org, name]
+                .into_iter()
+                .chain(path.split('/'))
+                .any(|segment| {
+                    segment.is_empty()
+                        || segment == "."
+                        || segment == ".."
+                        || !segment
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+                })
+            {
+                bail!(
+                    "hf:// model.source segments must be non-empty [A-Za-z0-9._-] names: {source}"
+                );
+            }
+            let revision = model.revision.as_str();
+            if revision.len() != 40
+                || !revision
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || matches!(c, 'a'..='f'))
+            {
+                bail!(
+                    "hf:// model.source needs model.revision pinned to a 40-hex commit; floating refs are refused, got {revision:?}"
+                );
+            }
+            return Ok(Self::Hub {
+                repo: &rest[..org.len() + 1 + name.len()],
+                path,
+                revision,
+            });
+        }
+        if let Some(rest) = source.strip_prefix("oci://") {
+            let (location, digest) = rest
+                .split_once('@')
+                .with_context(|| format!("oci:// model.source must pin @sha256:<hex>: {source}"))?;
+            let (registry, repository) = location.split_once('/').with_context(|| {
+                format!(
+                    "oci:// model.source must be oci://<registry>/<repository>@<digest>: {source}"
+                )
+            })?;
+            if digest != model.artifact_digest {
+                bail!(
+                    "oci:// model.source digest {digest} must equal model.artifact_digest {}",
+                    model.artifact_digest
+                );
+            }
+            let reference = crate::oci_artifact::OciArtifactRef {
+                registry: registry.into(),
+                repository: repository.into(),
+                digest: digest.into(),
+                media_type: MODEL_WEIGHTS_MEDIA_TYPE.into(),
+            };
+            reference.validate()?;
+            return Ok(Self::Oci(reference));
+        }
+        bail!(
+            "unsupported model.source scheme (need file://, http(s)://, hf://, or oci://): {source}"
+        );
+    }
+}
+
+/// The OCI artifact a model's weights are pulled from, for offline bundle export
+/// (`offline_bundle::insert_artifact_layers`). `None` unless `model.source` is `oci://`.
+pub fn weight_artifact(
+    model: &ModelSection,
+) -> Result<Option<crate::oci_artifact::OciArtifactRef>> {
+    if !model.source.starts_with("oci://") {
+        return Ok(None);
+    }
+    match WeightSource::parse(model)? {
+        WeightSource::Oci(reference) => Ok(Some(reference)),
+        _ => unreachable!("oci:// source parses as Oci"),
+    }
+}
+
 fn artifact_digest_hex(value: &str) -> Result<&str> {
     validate_artifact_digest(value)?;
     Ok(value
@@ -147,14 +270,58 @@ fn artifact_digest_hex(value: &str) -> Result<&str> {
 }
 
 /// Content-addressed weight cache outside the operational SQLite database.
-#[derive(Debug, Clone)]
+///
+/// `hf://` sources resolve against the hub endpoint (default [`DEFAULT_HUB_ENDPOINT`]) with an
+/// optional bearer token the embedder supplies; `oci://` sources pull through an artifact
+/// registry and the environment's mirrors only. Neither credential lives in a manifest.
+#[derive(Clone)]
 pub struct WeightCache {
     root: PathBuf,
+    hub_endpoint: String,
+    hub_token: Option<String>,
+    artifacts: Option<(
+        Arc<dyn crate::oci_artifact::ArtifactRegistry>,
+        BTreeMap<String, String>,
+    )>,
+}
+
+impl std::fmt::Debug for WeightCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WeightCache")
+            .field("root", &self.root)
+            .field("hub_endpoint", &self.hub_endpoint)
+            .field("hub_token", &self.hub_token.as_ref().map(|_| "<redacted>"))
+            .field("artifact_registry", &self.artifacts.is_some())
+            .finish()
+    }
 }
 
 impl WeightCache {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            hub_endpoint: DEFAULT_HUB_ENDPOINT.into(),
+            hub_token: None,
+            artifacts: None,
+        }
+    }
+
+    /// Resolve `hf://` sources against `endpoint`, authenticating with `token` when set.
+    pub fn with_hub(mut self, endpoint: impl Into<String>, token: Option<String>) -> Self {
+        self.hub_endpoint = endpoint.into().trim_end_matches('/').to_string();
+        self.hub_token = token;
+        self
+    }
+
+    /// Pull `oci://` sources from `registry`, rewritten onto `mirrors` (origin registry ->
+    /// environment mirror). A source without a mirror is refused, as for release artifacts.
+    pub fn with_artifact_registry(
+        mut self,
+        registry: Arc<dyn crate::oci_artifact::ArtifactRegistry>,
+        mirrors: BTreeMap<String, String>,
+    ) -> Self {
+        self.artifacts = Some((registry, mirrors));
+        self
     }
 
     pub fn root(&self) -> &Path {
@@ -166,16 +333,15 @@ impl WeightCache {
         Ok(self.root.join("sha256").join(hex))
     }
 
-    /// Fetch weights from a supported source and verify `artifact_digest`.
+    /// Fetch `model` weights from its source and verify `model.artifact_digest`.
     ///
-    /// Supported sources for this release:
-    /// - `file://` absolute local path
-    /// - `http://` / `https://` URL (uses blocking reqwest)
-    ///
-    /// Unknown schemes fail closed. On digest mismatch the incomplete file is
-    /// removed and the model is not considered active.
-    pub fn fetch_and_verify(&self, source: &str, artifact_digest: &str) -> Result<PathBuf> {
+    /// Sources: `file://` absolute path, `http(s)://`, `hf://` at a pinned commit, and
+    /// `oci://` through the configured artifact registry. Unknown schemes fail closed. On
+    /// digest mismatch the incomplete file is removed and the model is not activated.
+    pub fn fetch_and_verify(&self, model: &ModelSection) -> Result<PathBuf> {
+        let artifact_digest = model.artifact_digest.as_str();
         validate_artifact_digest(artifact_digest)?;
+        let source = WeightSource::parse(model)?;
         let destination = self.blob_path(artifact_digest)?;
         if destination.is_file() {
             verify_file_digest(&destination, artifact_digest)?;
@@ -187,7 +353,10 @@ impl WeightCache {
         }
         let temporary = destination.with_extension("partial");
         let _ = std::fs::remove_file(&temporary);
-        fetch_source_to(source, &temporary)?;
+        if let Err(error) = self.fetch_source_to(&source, &temporary) {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error);
+        }
         match verify_file_digest(&temporary, artifact_digest) {
             Ok(()) => {
                 std::fs::rename(&temporary, &destination).with_context(|| {
@@ -198,6 +367,44 @@ impl WeightCache {
             Err(error) => {
                 let _ = std::fs::remove_file(&temporary);
                 Err(error).context("weight digest verification failed; model not activated")
+            }
+        }
+    }
+
+    fn fetch_source_to(&self, source: &WeightSource<'_>, destination: &Path) -> Result<()> {
+        match source {
+            WeightSource::File(path) => {
+                std::fs::copy(path, destination).with_context(|| {
+                    format!(
+                        "copying model weights from {} to {}",
+                        path.display(),
+                        destination.display()
+                    )
+                })?;
+                Ok(())
+            }
+            WeightSource::Http(url) => download_to(url, None, destination),
+            WeightSource::Hub {
+                repo,
+                path,
+                revision,
+            } => {
+                let url = format!("{}/{repo}/resolve/{revision}/{path}", self.hub_endpoint);
+                download_to(&url, self.hub_token.as_deref(), destination)
+            }
+            WeightSource::Oci(reference) => {
+                let (registry, mirrors) = self.artifacts.as_ref().with_context(|| {
+                    format!(
+                        "oci:// weights {} need an artifact registry on the weight cache",
+                        reference.digest
+                    )
+                })?;
+                let pull = crate::oci_artifact::pull_reference(reference, mirrors)?;
+                let bytes = registry.fetch(&pull).with_context(|| {
+                    format!("pulling weights {} from {}", pull.digest, pull.registry)
+                })?;
+                std::fs::write(destination, bytes)
+                    .with_context(|| format!("writing pulled weights to {}", destination.display()))
             }
         }
     }
@@ -279,44 +486,25 @@ struct CachedBlob {
     modified: SystemTime,
 }
 
-fn fetch_source_to(source: &str, destination: &Path) -> Result<()> {
-    if let Some(path) = source.strip_prefix("file://") {
-        let path = Path::new(path);
-        if !path.is_absolute() {
-            bail!("file:// model.source must be an absolute path");
-        }
-        std::fs::copy(path, destination).with_context(|| {
-            format!(
-                "copying model weights from {} to {}",
-                path.display(),
-                destination.display()
-            )
-        })?;
-        return Ok(());
+fn download_to(url: &str, bearer: Option<&str>, destination: &Path) -> Result<()> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .context("building weight download client")?;
+    let mut request = client.get(url);
+    if let Some(token) = bearer {
+        request = request.bearer_auth(token);
     }
-    if source.starts_with("http://") || source.starts_with("https://") {
-        let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
-            .build()
-            .context("building weight download client")?;
-        let mut response = client
-            .get(source)
-            .send()
-            .with_context(|| format!("downloading model weights from {source}"))?
-            .error_for_status()
-            .with_context(|| format!("weight download from {source} failed"))?;
-        let mut file = std::fs::File::create(destination)
-            .with_context(|| format!("creating {}", destination.display()))?;
-        std::io::copy(&mut response, &mut file)
-            .with_context(|| format!("writing downloaded weights to {}", destination.display()))?;
-        return Ok(());
-    }
-    if source.starts_with("hf://") || source.starts_with("oci://") {
-        bail!(
-            "model.source scheme is reserved but not implemented in this build: {source}; use file:// or http(s):// for verified fetch"
-        );
-    }
-    bail!("unsupported model.source scheme (need file:// or http(s)://): {source}");
+    let mut response = request
+        .send()
+        .with_context(|| format!("downloading model weights from {url}"))?
+        .error_for_status()
+        .with_context(|| format!("weight download from {url} failed"))?;
+    let mut file = std::fs::File::create(destination)
+        .with_context(|| format!("creating {}", destination.display()))?;
+    std::io::copy(&mut response, &mut file)
+        .with_context(|| format!("writing downloaded weights to {}", destination.display()))?;
+    Ok(())
 }
 
 fn verify_file_digest(path: &Path, artifact_digest: &str) -> Result<()> {
@@ -391,7 +579,7 @@ impl ModelRuntimeExecutor for LocalModelRuntimeExecutor {
         descriptor.validate()?;
         if let Some(cache) = &self.weight_cache {
             // Fail closed before descriptor activation when digest mismatches.
-            cache.fetch_and_verify(&descriptor.model.source, &descriptor.model.artifact_digest)?;
+            cache.fetch_and_verify(&descriptor.model)?;
         }
         let expected = descriptor.digest()?;
         crate::atomic_state::write_json_verified(
@@ -749,15 +937,11 @@ impl ModelRuntimeExecutor for ReferenceLlamaCppExecutor {
                 descriptor.runtime.engine
             );
         }
-        let weights_path =
-            if let Some(cache) = &self.weight_cache {
-                Some(cache.fetch_and_verify(
-                    &descriptor.model.source,
-                    &descriptor.model.artifact_digest,
-                )?)
-            } else {
-                None
-            };
+        let weights_path = if let Some(cache) = &self.weight_cache {
+            Some(cache.fetch_and_verify(&descriptor.model)?)
+        } else {
+            None
+        };
 
         let previous_active = Self::load_descriptor(&self.state_path)?;
         let previous_handle = Self::load_handle(&self.active_handle_path())?;
@@ -848,8 +1032,8 @@ mod tests {
             product_name: "qwen-coder".into(),
             product_version: "3.2.1".into(),
             model: ModelSection {
-                source: "hf://org/qwen-coder".into(),
-                revision: "9bcfabc".into(),
+                source: "hf://org/qwen-coder/qwen-coder-q4_k_m.gguf".into(),
+                revision: "9bcfabc0123456789abcdef0123456789abcdef0".into(),
                 format: "gguf".into(),
                 quantization: "Q4_K_M".into(),
                 artifact_digest: format!("sha256:{}", "ab".repeat(32)),
@@ -941,7 +1125,7 @@ mod tests {
         let previous = sample_descriptor();
         let mut next = sample_descriptor();
         next.product_version = "3.2.2".into();
-        next.model.revision = "newer".into();
+        next.model.revision = "1111111111111111111111111111111111111111".into();
         let previous_digest = executor.apply(&previous).unwrap();
         let next_digest = executor.apply(&next).unwrap();
         assert_ne!(previous_digest, next_digest);
@@ -960,19 +1144,20 @@ mod tests {
         std::fs::write(&source_file, payload).unwrap();
         let digest = format!("sha256:{:x}", Sha256::digest(payload));
         let cache = WeightCache::new(&cache_dir);
-        let stored = cache
-            .fetch_and_verify(&format!("file://{}", source_file.display()), &digest)
-            .unwrap();
+        let file_model = |artifact_digest: &str| ModelSection {
+            source: format!("file://{}", source_file.display()),
+            artifact_digest: artifact_digest.into(),
+            ..sample_descriptor().model
+        };
+        let stored = cache.fetch_and_verify(&file_model(&digest)).unwrap();
         assert!(stored.is_file());
         // Second fetch hits cache.
-        let again = cache
-            .fetch_and_verify(&format!("file://{}", source_file.display()), &digest)
-            .unwrap();
+        let again = cache.fetch_and_verify(&file_model(&digest)).unwrap();
         assert_eq!(stored, again);
 
         let bad = format!("sha256:{}", "00".repeat(32));
         let err = cache
-            .fetch_and_verify(&format!("file://{}", source_file.display()), &bad)
+            .fetch_and_verify(&file_model(&bad))
             .unwrap_err()
             .to_string();
         assert!(err.contains("digest mismatch") || err.contains("verification failed"));
@@ -989,6 +1174,185 @@ mod tests {
         descriptor.model.artifact_digest = format!("sha256:{}", "11".repeat(32));
         assert!(executor.apply(&descriptor).is_err());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    const COMMIT: &str = "9bcfabc0123456789abcdef0123456789abcdef0";
+
+    /// Serves one request with `body`, returning the request head it saw.
+    fn fake_hub(body: &'static [u8]) -> (String, std::thread::JoinHandle<String>) {
+        use std::io::{BufRead as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+            let mut head = String::new();
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+                head.push_str(&line);
+            }
+            let mut stream = stream;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(body).unwrap();
+            head
+        });
+        (endpoint, server)
+    }
+
+    fn hub_model(artifact_digest: String) -> ModelSection {
+        ModelSection {
+            source: "hf://org/qwen-coder/gguf/qwen-coder-q4_k_m.gguf".into(),
+            revision: COMMIT.into(),
+            artifact_digest,
+            ..sample_descriptor().model
+        }
+    }
+
+    #[test]
+    fn hub_source_downloads_the_pinned_commit_with_the_token() {
+        let root = std::env::temp_dir().join(format!("tenkai-hub-{}", uuid::Uuid::new_v4()));
+        let payload: &'static [u8] = b"hub-model-bytes";
+        let (endpoint, server) = fake_hub(payload);
+        let cache =
+            WeightCache::new(root.join("cache")).with_hub(&endpoint, Some("hub-test-token".into()));
+        let digest = format!("sha256:{:x}", Sha256::digest(payload));
+        let stored = cache.fetch_and_verify(&hub_model(digest)).unwrap();
+        assert_eq!(std::fs::read(stored).unwrap(), payload);
+        let head = server.join().unwrap();
+        assert!(
+            head.starts_with(&format!(
+                "GET /org/qwen-coder/resolve/{COMMIT}/gguf/qwen-coder-q4_k_m.gguf "
+            )),
+            "{head}"
+        );
+        assert!(
+            head.to_ascii_lowercase()
+                .contains("authorization: bearer hub-test-token"),
+            "{head}"
+        );
+        assert!(!format!("{cache:?}").contains("hub-test-token"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn hub_source_with_a_mismatched_digest_fails_closed() {
+        let root = std::env::temp_dir().join(format!("tenkai-hub-{}", uuid::Uuid::new_v4()));
+        let (endpoint, server) = fake_hub(b"tampered-bytes");
+        let cache = WeightCache::new(root.join("cache")).with_hub(&endpoint, None);
+        let expected = format!("sha256:{:x}", Sha256::digest(b"hub-model-bytes"));
+        let err = cache
+            .fetch_and_verify(&hub_model(expected.clone()))
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("digest mismatch"), "{err:#}");
+        server.join().unwrap();
+        assert!(!cache.blob_path(&expected).unwrap().exists());
+        assert!(
+            !cache
+                .blob_path(&expected)
+                .unwrap()
+                .with_extension("partial")
+                .exists()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unpinned_or_malformed_weight_sources_are_rejected_at_validation() {
+        let digest = format!("sha256:{}", "ab".repeat(32));
+        for (source, revision) in [
+            ("hf://org/qwen-coder/model.gguf", "main"),
+            ("hf://org/qwen-coder/model.gguf", "9bcfabc"),
+            ("hf://org/qwen-coder/model.gguf", &COMMIT.to_uppercase()),
+            ("hf://org/qwen-coder", COMMIT),
+            ("hf://org/qwen-coder/../secrets", COMMIT),
+            ("hf://org/qwen-coder/%2e%2e/main/model.gguf", COMMIT),
+            ("hf://org/qwen-coder/model.gguf?revision=main", COMMIT),
+            ("oci://registry.example/models/qwen", COMMIT),
+            (
+                "oci://registry.example/models/qwen@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                COMMIT,
+            ),
+        ] {
+            let mut descriptor = sample_descriptor();
+            descriptor.model.source = source.into();
+            descriptor.model.revision = revision.into();
+            descriptor.model.artifact_digest = digest.clone();
+            assert!(descriptor.validate().is_err(), "{source} @ {revision}");
+        }
+        let mut pinned = sample_descriptor();
+        pinned.model.source = format!("oci://registry.example/models/qwen@{digest}");
+        pinned.model.artifact_digest = digest;
+        pinned.validate().unwrap();
+    }
+
+    #[test]
+    fn oci_weights_pull_through_the_mirror_and_travel_in_offline_bundles() {
+        use crate::oci_artifact::{MemoryArtifactRegistry, OciArtifactRef};
+        let root = std::env::temp_dir().join(format!("tenkai-oci-{}", uuid::Uuid::new_v4()));
+        let payload = b"oci-model-bytes".to_vec();
+        let digest = format!("sha256:{:x}", Sha256::digest(&payload));
+        let model = ModelSection {
+            source: format!("oci://registry.example/models/qwen@{digest}"),
+            artifact_digest: digest.clone(),
+            ..sample_descriptor().model
+        };
+        let origin = weight_artifact(&model).unwrap().unwrap();
+        assert_eq!(origin.media_type, MODEL_WEIGHTS_MEDIA_TYPE);
+        let registry = Arc::new(MemoryArtifactRegistry::new());
+        registry
+            .put(
+                &OciArtifactRef {
+                    registry: "mirror.example".into(),
+                    ..origin.clone()
+                },
+                payload.clone(),
+            )
+            .unwrap();
+
+        let no_registry = WeightCache::new(root.join("none"));
+        assert!(no_registry.fetch_and_verify(&model).is_err());
+        let no_mirror = WeightCache::new(root.join("unmirrored"))
+            .with_artifact_registry(registry.clone(), BTreeMap::new());
+        let err = no_mirror.fetch_and_verify(&model).unwrap_err().to_string();
+        assert!(err.contains("origin pull is refused"), "{err}");
+
+        let cache = WeightCache::new(root.join("cache")).with_artifact_registry(
+            registry.clone(),
+            BTreeMap::from([("registry.example".into(), "mirror.example".into())]),
+        );
+        let stored = cache.fetch_and_verify(&model).unwrap();
+        assert_eq!(std::fs::read(&stored).unwrap(), payload);
+        // Fetched weights are ordinary cache entries for eviction.
+        assert_eq!(cache.evict(&[], 0).unwrap(), vec![digest.clone()]);
+        assert!(!stored.exists());
+
+        let mut payloads = BTreeMap::new();
+        let mirror_ref = OciArtifactRef {
+            registry: "mirror.example".into(),
+            ..origin
+        };
+        crate::offline_bundle::insert_artifact_layers(
+            &mut payloads,
+            std::slice::from_ref(&mirror_ref),
+            registry.as_ref(),
+        )
+        .unwrap();
+        assert_eq!(
+            payloads
+                .get(&mirror_ref.layer_entry_path().unwrap())
+                .map(|(_, bytes)| bytes),
+            Some(&payload)
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

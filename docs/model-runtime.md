@@ -15,8 +15,8 @@ version = "3.2.1"
 kind = "model_runtime"
 
 [model]
-source = "hf://org/model"
-revision = "9bcf..."
+source = "hf://org/model/model-q4_k_m.gguf"   # or oci://registry/repo@sha256:…
+revision = "9bcf…"             # hf://: the full 40-hex commit
 format = "gguf"
 quantization = "Q4_K_M"
 artifact_digest = "sha256:…"   # 64 hex chars
@@ -68,9 +68,24 @@ operational SQLite:
 <cache-root>/sha256/<64-hex>
 ```
 
-Supported fetch schemes today: `file://` (absolute), `http://`, `https://`.
-`hf://` and `oci://` are reserved and fail closed until implemented. Digest
-mismatch never activates the model.
+Fetch schemes: `file://` (absolute), `http://`, `https://`, `hf://`, and
+`oci://`. Digest mismatch never activates the model, and the partial download is
+removed.
+
+- `hf://<org>/<repo>/<file path>` downloads that file at `model.revision`, which
+  must be the full 40-hex commit. Branch and tag names are refused at manifest
+  validation. The cache resolves against `https://huggingface.co` unless the
+  embedder calls `WeightCache::with_hub(endpoint, token)`; the token is never in
+  a manifest and is redacted from `Debug`.
+- `oci://<registry>/<repository>@sha256:<hex>` names a single-blob artifact of
+  media type `application/vnd.tenkai.model.weights.v1`; the digest must equal
+  `model.artifact_digest`. The cache pulls through
+  `WeightCache::with_artifact_registry(registry, mirrors)`, rewritten onto the
+  environment mirror like release artifacts; origin pull is refused. The blob is
+  held in memory while it is written to the cache.
+- `model_runtime::weight_artifact(&model)` returns the `oci://` reference so
+  offline bundle export can carry the weights with
+  `offline_bundle::insert_artifact_layers`.
 
 Wire a cache into the local executor with
 `LocalModelRuntimeExecutor::with_weight_cache(...)`.

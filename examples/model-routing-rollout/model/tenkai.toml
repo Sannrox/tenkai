@@ -6,8 +6,8 @@ kind = "model_runtime"
 description = "Example open-weight model runtime descriptor (weights stay external)"
 
 [model]
-source = "hf://example/qwen-coder"
-revision = "demo-revision"
+source = "hf://example/qwen-coder/qwen-coder-q4_k_m.gguf"
+revision = "0123456789abcdef0123456789abcdef01234567"
 format = "gguf"
 quantization = "Q4_K_M"
 # Placeholder digest for schema/examples only — replace before production use.
