@@ -31,3 +31,4 @@
 - [0029 — Hub and spoke operational store, one port](0029-hub-spoke-operational-store.md)
 - [0030 — Versioned remote management lifecycle](0030-remote-management-lifecycle.md)
 - [0031 — Web console as a separate, pinned client](0031-web-console.md)
+- [0032 — Versioned two-way model-release evidence](0032-model-release-evidence.md)

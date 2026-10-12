@@ -89,6 +89,7 @@ will be split over time. Contributor and agent workflow live in
 | Runtime capabilities | [runtime-capabilities.md](runtime-capabilities.md) |
 | Provider contracts | [provider-contracts.md](provider-contracts.md) |
 | Evaluation gate evidence | [evaluation-gate-evidence.md](evaluation-gate-evidence.md) |
+| Model-release evidence | [model-release-evidence.md](model-release-evidence.md) |
 | Offline bundles | [offline-bundles.md](offline-bundles.md) |
 | Development fixtures | [development-fixtures.md](development-fixtures.md) |
 

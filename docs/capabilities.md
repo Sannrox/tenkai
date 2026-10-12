@@ -25,6 +25,7 @@ it ([ADR 0001](decisions/0001-standalone-core-and-service-evolution.md),
 | Maintenance windows | [Manage environments](manage-environments.md#maintenance-windows); `product maintenance` |
 | Canary cohort promotion evidence | #7; `src/canary.rs` |
 | Evaluation gate evidence projection | [Evaluation gate evidence](evaluation-gate-evidence.md); [ADR 0013](decisions/0013-evaluation-gate-evidence-projection.md) |
+| Versioned two-way model-release evidence schema | [Model-release evidence](model-release-evidence.md); [ADR 0032](decisions/0032-model-release-evidence.md); #603 |
 | Multi-environment rollout waves | [Rollout waves](rollout-waves.md); [ADR 0017](decisions/0017-executable-release-waves.md) |
 | Canary × model_runtime promote E2E | [Model runtime](model-runtime.md#canary-promotion-evidence-model_runtime); #108 |
 | Multi-environment list/inspect | `tenkaictl env list` / `env inspect`; #56 |
