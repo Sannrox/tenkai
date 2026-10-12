@@ -328,7 +328,13 @@ computation **orders** steps (it does not merge kinds):
 Unsafe orders are rejected (`validate_model_routing_rollout_order`). See
 [examples/model-routing-rollout](../examples/model-routing-rollout/README.md).
 
-### Follow-on
+## vLLM on Kubernetes
+
+`runtime.engine = "vllm"` uses the host-injected Kubernetes executor. Serving
+image, weights claim, node selectors, tolerations, and the smoke base URL are
+host configuration. See [vLLM Kubernetes executor](vllm-kubernetes.md).
+
+## Follow-on
 
 - Peer/regional caches
-- Additional engine plugins (MLX, vLLM, …)
+- Additional engine plugins (MLX, …)
