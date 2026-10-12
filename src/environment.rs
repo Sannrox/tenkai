@@ -904,8 +904,20 @@ pub struct EnvironmentListEntry {
 }
 
 /// Initial capability/inventory fact keys admitted for environments.
-pub const ENVIRONMENT_FACT_KEYS: &[&str] =
-    &["architecture", "memory_gib", "accelerator", "free_disk_gib"];
+pub const ENVIRONMENT_FACT_KEYS: &[&str] = &[
+    "architecture",
+    "memory_gib",
+    "accelerator",
+    "free_disk_gib",
+    "gpu_vendor",
+    "gpu_family",
+    "gpu_model",
+    "gpu_vram_gib",
+    "gpu_count",
+    "gpu_driver_version",
+    "gpu_runtime",
+    "gpu_runtime_version",
+];
 
 const ENVIRONMENT_FACT_PREFIX: &str = "fact.";
 
@@ -1456,13 +1468,23 @@ pub(crate) fn validate_fact_value(key: &str, value: &str) -> Result<()> {
             bail!("environment fact {key} must not contain credential material");
         }
     }
-    if matches!(key, "memory_gib" | "free_disk_gib") {
+    if matches!(key, "memory_gib" | "free_disk_gib" | "gpu_vram_gib") {
         let parsed: u64 = value
             .parse()
             .with_context(|| format!("environment fact {key} must be a non-negative integer"))?;
         if parsed == 0 {
             bail!("environment fact {key} must be greater than zero");
         }
+    }
+    if key == "gpu_count" {
+        value
+            .parse::<u64>()
+            .with_context(|| format!("environment fact {key} must be a non-negative integer"))?;
+    }
+    if matches!(key, "gpu_driver_version" | "gpu_runtime_version")
+        && crate::plan::dotted_version(value).is_none()
+    {
+        bail!("environment fact {key} must be a dotted numeric version");
     }
     Ok(())
 }

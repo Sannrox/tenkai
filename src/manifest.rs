@@ -240,6 +240,43 @@ pub struct ModelRequirementsSection {
     pub memory_gib: u32,
     #[serde(default)]
     pub accelerator: Vec<String>,
+    /// GPU fit requirements (`[requirements.gpu]`). Absent: no GPU fit check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<GpuRequirements>,
+}
+
+/// What a model-runtime variant needs from an Environment's GPUs. Each field is checked
+/// against the matching `gpu_*` Environment fact; a missing fact never fits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GpuRequirements {
+    /// Allowed `gpu_vendor` values (for example `nvidia`, `amd`). Empty: any.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vendor: Vec<String>,
+    /// Allowed `gpu_family` values (for example `hopper`, `ampere`). Empty: any.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub families: Vec<String>,
+    /// Minimum VRAM per device (`gpu_vram_gib`).
+    pub vram_gib: u32,
+    /// Minimum device count (`gpu_count`).
+    #[serde(default = "one")]
+    pub count: u32,
+    /// Tensor-parallel degree; needs at least this many devices.
+    #[serde(default = "one")]
+    pub tensor_parallel: u32,
+    /// Minimum `gpu_driver_version`, dotted numeric.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_min: Option<String>,
+    /// Required `gpu_runtime` (`cuda` or `rocm`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    /// Minimum `gpu_runtime_version`, dotted numeric. Needs `runtime`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_min: Option<String>,
+}
+
+fn one() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

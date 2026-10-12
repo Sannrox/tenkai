@@ -93,7 +93,7 @@ When planning a `model_runtime` subscription:
 2. Candidates are published releases of that product at or below the channel
    head, optionally filtered by `constraint.version_range.<product>`.
 3. A candidate fits when facts satisfy its requirements (architecture and
-   accelerator membership; `memory_gib` ≥ requirement).
+   accelerator membership; `memory_gib` ≥ requirement; GPU requirements below).
 4. Plan selects the **highest semver** among feasible candidates.
 5. `constraint.version_pin.<product>` forces that version and fails closed if
    it does not fit — no silent fallback.
@@ -101,6 +101,41 @@ When planning a `model_runtime` subscription:
    fact/requirement error (no unconstrained “latest”).
 
 Selection never bypasses signing, approval, or deployable-trust checks.
+
+### GPU requirements
+
+A variant that needs GPUs declares `[requirements.gpu]`:
+
+```toml
+[requirements.gpu]
+vendor = ["nvidia"]          # gpu_vendor; empty: any
+families = ["hopper"]        # gpu_family; empty: any
+vram_gib = 80                # gpu_vram_gib, per device
+count = 1                    # gpu_count minimum (default 1)
+tensor_parallel = 2          # needs gpu_count >= 2 (default 1)
+driver_min = "535"           # gpu_driver_version, dotted numeric
+runtime = "cuda"             # gpu_runtime: cuda or rocm
+runtime_min = "12.1"         # gpu_runtime_version; needs runtime
+```
+
+Each field is checked against the Environment fact named in the comment. A
+missing fact is unknown and never fits. Versions compare numerically per
+component (`12.10` > `12.2`). A refusal names a stable reason code in the plan
+error: `fact_missing`, `fact_invalid`, `fact_not_allowed`, or
+`fact_below_minimum`. `gpu_model` is recorded for operators and is not matched.
+Fractional sharing (MIG/MPS) and placement inside a cluster are out of scope.
+
+```bash
+tenkaictl env facts set gpu-a gpu_vendor=nvidia
+tenkaictl env facts set gpu-a gpu_family=hopper
+tenkaictl env facts set gpu-a gpu_vram_gib=80
+tenkaictl env facts set gpu-a gpu_count=2
+tenkaictl env facts set gpu-a gpu_driver_version=535.104.05
+tenkaictl env facts set gpu-a gpu_runtime=cuda
+tenkaictl env facts set gpu-a gpu_runtime_version=12.2
+```
+
+The local inventory probe does not detect GPUs yet; set these facts explicitly.
 
 Populate facts with a local inventory probe (dry-run by default):
 
