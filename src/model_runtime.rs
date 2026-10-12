@@ -117,6 +117,9 @@ impl ModelRuntimeDescriptor {
                 bail!("requirements.accelerator entries must not be empty");
             }
         }
+        if let Some(gpu) = &self.requirements.gpu {
+            validate_gpu_requirements(gpu)?;
+        }
         if self.health.max_startup_seconds == 0 {
             bail!("health.max_startup_seconds must be non-zero");
         }
@@ -837,6 +840,39 @@ impl ModelRuntimeExecutor for ReferenceLlamaCppExecutor {
     }
 }
 
+fn validate_gpu_requirements(gpu: &crate::manifest::GpuRequirements) -> Result<()> {
+    if gpu.vram_gib == 0 || gpu.count == 0 || gpu.tensor_parallel == 0 {
+        bail!("requirements.gpu vram_gib, count, and tensor_parallel must be non-zero");
+    }
+    if gpu
+        .vendor
+        .iter()
+        .chain(&gpu.families)
+        .any(|entry| entry.trim().is_empty())
+    {
+        bail!("requirements.gpu vendor and families entries must not be empty");
+    }
+    if let Some(runtime) = &gpu.runtime
+        && !matches!(runtime.as_str(), "cuda" | "rocm")
+    {
+        bail!("requirements.gpu.runtime must be cuda or rocm, got {runtime:?}");
+    }
+    if gpu.runtime_min.is_some() && gpu.runtime.is_none() {
+        bail!("requirements.gpu.runtime_min needs requirements.gpu.runtime");
+    }
+    for (field, version) in [
+        ("driver_min", &gpu.driver_min),
+        ("runtime_min", &gpu.runtime_min),
+    ] {
+        if let Some(version) = version
+            && crate::plan::dotted_version(version).is_none()
+        {
+            bail!("requirements.gpu.{field} must be a dotted numeric version, got {version:?}");
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -864,6 +900,7 @@ mod tests {
                 architecture: vec!["arm64".into()],
                 memory_gib: 32,
                 accelerator: vec!["apple-metal".into()],
+                gpu: None,
             },
             health: ModelHealthSection {
                 endpoint: "http://127.0.0.1:8080/v1/models".into(),
@@ -882,6 +919,42 @@ mod tests {
         descriptor = sample_descriptor();
         descriptor.model.source = "sqlite://weights".into();
         assert!(descriptor.validate().is_err());
+    }
+
+    #[test]
+    fn gpu_requirements_parse_and_validate() {
+        let requirements: ModelRequirementsSection = toml::from_str(
+            r#"
+            architecture = ["x86_64"]
+            memory_gib = 64
+
+            [gpu]
+            vendor = ["nvidia"]
+            vram_gib = 80
+            tensor_parallel = 2
+            runtime = "cuda"
+            runtime_min = "12.1"
+            "#,
+        )
+        .unwrap();
+        let gpu = requirements.gpu.clone().unwrap();
+        assert_eq!((gpu.count, gpu.tensor_parallel), (1, 2));
+        let mut descriptor = sample_descriptor();
+        descriptor.requirements = requirements;
+        descriptor.validate().unwrap();
+
+        for broken in [
+            r#"vram_gib = 0"#,
+            r#"vram_gib = 80
+            runtime_min = "12.1""#,
+            r#"vram_gib = 80
+            runtime = "metal""#,
+            r#"vram_gib = 80
+            driver_min = "535.x""#,
+        ] {
+            descriptor.requirements.gpu = Some(toml::from_str(broken).unwrap());
+            assert!(descriptor.validate().is_err(), "{broken}");
+        }
     }
 
     #[test]

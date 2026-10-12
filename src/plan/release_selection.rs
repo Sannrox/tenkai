@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use anyhow::{Context as _, Result, bail};
 
 use crate::client::Ctx;
-use crate::manifest::{ModelRequirementsSection, ProductKind};
+use crate::manifest::{GpuRequirements, ModelRequirementsSection, ProductKind};
 use crate::ontology::{REL_RELEASE_OF, product_id, release_id};
 use crate::pb::sekai::Object;
 
@@ -229,7 +229,177 @@ pub fn model_requirements_fit(
             );
         }
     }
+    if let Some(gpu) = &requirements.gpu {
+        gpu_requirements_fit(facts, gpu).map_err(|refusal| {
+            anyhow::anyhow!(
+                "model_runtime {product}@{version} does not fit environment {environment}: {refusal}"
+            )
+        })?;
+    }
     Ok(())
+}
+
+/// Why a variant's GPU requirements do not fit an Environment's `gpu_*` facts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FitRefusal {
+    /// The fact is not recorded; unknown never fits.
+    MissingFact { fact: &'static str },
+    /// The fact is recorded but unparseable.
+    InvalidFact { fact: &'static str, actual: String },
+    /// The fact is not one of the allowed values.
+    NotAllowed {
+        fact: &'static str,
+        actual: String,
+        allowed: Vec<String>,
+    },
+    /// The fact is below the required minimum.
+    BelowMinimum {
+        fact: &'static str,
+        actual: String,
+        minimum: String,
+    },
+}
+
+impl FitRefusal {
+    /// Stable machine-readable reason.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::MissingFact { .. } => "fact_missing",
+            Self::InvalidFact { .. } => "fact_invalid",
+            Self::NotAllowed { .. } => "fact_not_allowed",
+            Self::BelowMinimum { .. } => "fact_below_minimum",
+        }
+    }
+}
+
+impl std::fmt::Display for FitRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingFact { fact } => write!(
+                f,
+                "[{}] environment fact {fact} is unknown; set it with `tenkaictl env facts set`",
+                self.code()
+            ),
+            Self::InvalidFact { fact, actual } => {
+                write!(
+                    f,
+                    "[{}] environment fact {fact}={actual:?} is invalid",
+                    self.code()
+                )
+            }
+            Self::NotAllowed {
+                fact,
+                actual,
+                allowed,
+            } => write!(
+                f,
+                "[{}] environment fact {fact}={actual} is not one of {allowed:?}",
+                self.code()
+            ),
+            Self::BelowMinimum {
+                fact,
+                actual,
+                minimum,
+            } => write!(
+                f,
+                "[{}] environment fact {fact}={actual} is below the required {minimum}",
+                self.code()
+            ),
+        }
+    }
+}
+
+/// Match `[requirements.gpu]` against Environment facts. Every requirement needs its
+/// fact; a missing fact is a refusal, never a fit.
+pub fn gpu_requirements_fit(
+    facts: &BTreeMap<String, String>,
+    gpu: &GpuRequirements,
+) -> Result<(), FitRefusal> {
+    let fact = |name: &'static str| {
+        facts
+            .get(name)
+            .map(String::as_str)
+            .ok_or(FitRefusal::MissingFact { fact: name })
+    };
+    let one_of = |name: &'static str, allowed: &[String]| {
+        if allowed.is_empty() {
+            return Ok(());
+        }
+        let actual = fact(name)?;
+        if allowed.iter().any(|value| value == actual) {
+            Ok(())
+        } else {
+            Err(FitRefusal::NotAllowed {
+                fact: name,
+                actual: actual.into(),
+                allowed: allowed.to_vec(),
+            })
+        }
+    };
+    let at_least = |name: &'static str, minimum: u32| {
+        let actual = fact(name)?;
+        let parsed: u32 = actual.parse().map_err(|_| FitRefusal::InvalidFact {
+            fact: name,
+            actual: actual.into(),
+        })?;
+        if parsed >= minimum {
+            Ok(())
+        } else {
+            Err(FitRefusal::BelowMinimum {
+                fact: name,
+                actual: actual.into(),
+                minimum: minimum.to_string(),
+            })
+        }
+    };
+    let version_at_least = |name: &'static str, minimum: &Option<String>| {
+        let Some(minimum) = minimum else {
+            return Ok(());
+        };
+        let actual = fact(name)?;
+        let parsed = dotted_version(actual).ok_or_else(|| FitRefusal::InvalidFact {
+            fact: name,
+            actual: actual.into(),
+        })?;
+        let required = dotted_version(minimum).ok_or_else(|| FitRefusal::InvalidFact {
+            fact: name,
+            actual: minimum.clone(),
+        })?;
+        if parsed >= required {
+            Ok(())
+        } else {
+            Err(FitRefusal::BelowMinimum {
+                fact: name,
+                actual: actual.into(),
+                minimum: minimum.clone(),
+            })
+        }
+    };
+
+    one_of("gpu_vendor", &gpu.vendor)?;
+    one_of("gpu_family", &gpu.families)?;
+    at_least("gpu_count", gpu.count.max(gpu.tensor_parallel))?;
+    at_least("gpu_vram_gib", gpu.vram_gib)?;
+    version_at_least("gpu_driver_version", &gpu.driver_min)?;
+    if let Some(runtime) = &gpu.runtime {
+        one_of("gpu_runtime", std::slice::from_ref(runtime))?;
+        version_at_least("gpu_runtime_version", &gpu.runtime_min)?;
+    }
+    Ok(())
+}
+
+/// Dotted numeric version (`535.104.05`, `12.2`) as comparable components, with
+/// trailing zeros dropped so `12.2` equals `12.2.0`.
+pub fn dotted_version(value: &str) -> Option<Vec<u64>> {
+    let mut parts = value
+        .trim()
+        .split('.')
+        .map(|part| part.parse::<u64>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    while parts.last() == Some(&0) {
+        parts.pop();
+    }
+    Some(parts)
 }
 
 async fn ensure_model_runtime_fits(
@@ -307,11 +477,11 @@ async fn select_model_runtime_variant(
                 .await
         {
             bail!(
-                "no model_runtime variant of {product} fits environment {environment} facts (architecture/memory_gib/accelerator); channel head rejected: {head_error}"
+                "no model_runtime variant of {product} fits environment {environment} facts (architecture/memory_gib/accelerator/gpu); channel head rejected: {head_error}"
             );
         }
         bail!(
-            "no model_runtime variant of {product} fits environment {environment} facts (architecture/memory_gib/accelerator); publish a feasible variant or relax constraints"
+            "no model_runtime variant of {product} fits environment {environment} facts (architecture/memory_gib/accelerator/gpu); publish a feasible variant or relax constraints"
         );
     }
 
