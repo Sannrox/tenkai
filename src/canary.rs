@@ -743,8 +743,8 @@ kind = "model_runtime"
 description = "canary e2e fixture"
 
 [model]
-source = "hf://example/{product}"
-revision = "fixture"
+source = "hf://example/{product}/{product}.gguf"
+revision = "0123456789abcdef0123456789abcdef01234567"
 format = "gguf"
 quantization = "Q4_K_M"
 artifact_digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
