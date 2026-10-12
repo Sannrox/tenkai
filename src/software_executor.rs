@@ -610,12 +610,17 @@ pub fn k8s_label_value(raw: &str) -> String {
             }
         })
         .collect();
-    let trimmed = mapped.trim_matches('-');
+    // Label values are at most 63 chars and must start and end alphanumeric.
+    let truncated: String = mapped
+        .trim_matches(|c: char| !c.is_ascii_alphanumeric())
+        .chars()
+        .take(63)
+        .collect();
+    let trimmed = truncated.trim_end_matches(|c: char| !c.is_ascii_alphanumeric());
     if trimmed.is_empty() {
         "unknown".into()
     } else {
-        // Label values max 63 chars.
-        trimmed.chars().take(63).collect()
+        trimmed.into()
     }
 }
 
@@ -1211,5 +1216,15 @@ data:
         );
         executor.remove(&request).expect("remove");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn k8s_label_values_start_and_end_alphanumeric() {
+        assert_eq!(super::k8s_label_value("model_"), "model");
+        assert_eq!(super::k8s_label_value("1.0."), "1.0");
+        assert_eq!(super::k8s_label_value("_.-"), "unknown");
+        let long = format!("{}_tail", "a".repeat(62));
+        let value = super::k8s_label_value(&long);
+        assert!(value.len() <= 63 && value.ends_with('a'), "{value}");
     }
 }
