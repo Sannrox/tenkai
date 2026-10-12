@@ -337,4 +337,5 @@ host configuration. See [vLLM Kubernetes executor](vllm-kubernetes.md).
 ## Follow-on
 
 - Peer/regional caches
-- Additional engine plugins (MLX, …)
+- Additional engine plugins: MLX first, then TGI, then NVIDIA NIM
+  ([research](research/additional-model-serving-executors.md))

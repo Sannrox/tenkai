@@ -137,3 +137,4 @@ will be split over time. Contributor and agent workflow live in
 - [Embedded golden-path usability](research/embedded-golden-path-usability.md)
 - [Rollout-control simplification](research/rollout-control-simplification.md)
 - [Staged-document product kinds](research/staged-document-product-kinds.md)
+- [Additional model serving executors](research/additional-model-serving-executors.md)
