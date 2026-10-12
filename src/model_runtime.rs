@@ -1304,23 +1304,24 @@ mod tests {
     #[test]
     fn engine_selection_refuses_unknown_engines() {
         let mut descriptor = sample_descriptor();
-        descriptor.runtime.engine = "tensorrt".into();
-        let error = select_model_runtime_executor(
-            &descriptor,
-            "lab",
-            Some(Path::new("/etc/tenkai/kubeconfig")),
-            None,
-            Path::new("/tmp/model-runtime-state.json"),
-            None,
-        )
-        .err()
-        .unwrap();
-        assert!(
-            error
-                .to_string()
-                .contains("unknown model_runtime engine tensorrt"),
-            "{error}"
-        );
+        for engine in ["tensorrt", "mlx", "tgi", "nim"] {
+            descriptor.runtime.engine = engine.into();
+            let error = select_model_runtime_executor(
+                &descriptor,
+                "lab",
+                Some(Path::new("/etc/tenkai/kubeconfig")),
+                None,
+                Path::new("/tmp/model-runtime-state.json"),
+                None,
+            )
+            .err()
+            .unwrap();
+            let text = error.to_string();
+            assert!(
+                text.contains(&format!("unknown model_runtime engine {engine}")),
+                "{text}"
+            );
+        }
     }
 
     #[test]
