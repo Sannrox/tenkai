@@ -85,6 +85,7 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | `TENKAI_PLAN_PRIORS_FILE`, `TENKAI_PLAN_PRIORS_OUTCOME`, `TENKAI_PLAN_PRIORS_OUTCOME_FILE`, `TENKAI_PLAN_PRIORS_OUTCOME_REQUIRED` | [Plan priors](plan-priors.md) |
 | `TENKAI_PACKAGE_MIGRATION_APPROVAL_TRUST_ROOTS` | [Package migrations](package-migrations.md) |
 | `TENKAI_LLAMA_SERVER`, `TENKAI_USE_REAL_LLAMA` | [Model runtime](model-runtime.md) |
+| `TENKAI_VLLM_IMAGE`, `TENKAI_VLLM_WEIGHTS_CLAIM`, `TENKAI_VLLM_WEIGHTS_ROOT`, `TENKAI_VLLM_SMOKE_BASE_URL` | [vLLM Kubernetes executor](vllm-kubernetes.md) |
 | `TENKAI_DEVELOPMENT_FIXTURE_PRINCIPALS` (server refuses to start when set without `--with-development-fixtures`) | [Development fixtures](development-fixtures.md) |
 
 The `TENKAI_WORKER_*` variables are internal worker-lifecycle plumbing, not
@@ -120,6 +121,7 @@ binaries.
 | --- | --- | --- |
 | `TENKAI_DOGFOOD_MODE` | `scripts/dogfood-minikube.sh` | `local`, `signed-multi-env`, or `canary` ([minikube dogfood](local-dogfood-minikube.md)) |
 | `TENKAI_DEV_KEYS` | `scripts/dogfood-minikube.sh` | Directory of development-only Ed25519 seeds |
-| `TENKAI_CLUSTER_CONFIG` | `crates/tenkai-executor/tests/in_process_kubernetes_kind.rs` | Kubeconfig path for the kind in-process Kubernetes test |
+| `TENKAI_CLUSTER_CONFIG` | `crates/tenkai-executor/tests/in_process_kubernetes_kind.rs`, `crates/tenkai-executor/tests/vllm_kubernetes_live.rs` | Kubeconfig path for ignored in-process Kubernetes tests |
+| `TENKAI_VLLM_LIVE_TEST`, `TENKAI_VLLM_NAMESPACE`, `TENKAI_VLLM_MODEL_TAR`, `TENKAI_VLLM_NODE_SELECTOR`, `TENKAI_VLLM_TOLERATIONS` | `crates/tenkai-executor/tests/vllm_kubernetes_live.rs` | Opt-in GPU apply/rollback; namespace must already hold the weights claim |
 | `TENKAI_GATE_URL`, `TENKAI_GATE_TOKEN` | `crates/tenkaictl/tests/two_environment_closure_drill.rs` | Remote gate endpoint for the library-only HTTP gate adapter ([provider contracts](provider-contracts.md#remote-gate-http-json-contract-113)) |
 | `SEKAI_CHISEI_DIR`, `REPLAY_OUTPUT_DIR` | `scripts/capture-rollback-replay.sh` | Provider checkout and output directory for the replay capture |

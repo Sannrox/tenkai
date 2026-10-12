@@ -68,6 +68,7 @@ will be split over time. Contributor and agent workflow live in
 | Software executors (Helm, Kubernetes) | [software-executor.md](software-executor.md) |
 | Signed software compatibility preflight | [software-compatibility.md](software-compatibility.md) |
 | `model_runtime` products | [model-runtime.md](model-runtime.md) |
+| vLLM Kubernetes executor | [vllm-kubernetes.md](vllm-kubernetes.md) |
 | Policy, eval-suite, and agent products | [staged-products.md](staged-products.md) |
 | Worker pools | [worker-pool.md](worker-pool.md) |
 | Workshop modules | [workshop-modules.md](workshop-modules.md) |
