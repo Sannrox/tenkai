@@ -1,0 +1,19 @@
+{
+  "schema": "chisei.model_evaluation_evidence.v1",
+  "identity": {
+    "provider": "huggingface",
+    "model": "qwen-coder",
+    "profile_version": "v1",
+    "artifact_digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "endpoint": "served://qwen-coder"
+  },
+  "eval_suite_id": "model-quality",
+  "eval_run_id": "run-1",
+  "outcome": "passed",
+  "observed_at": 1700000000000,
+  "expires_at": 1700003600000,
+  "signer": {
+    "key_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "signature": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+  }
+}

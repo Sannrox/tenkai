@@ -79,6 +79,10 @@
 //! - [`runtime_delivery`] owns environment-runtime admission, work claims,
 //!   completion validation and ordering, durable Plan and Deployment effects,
 //!   heartbeat renewal, and inventory admission behind one interface.
+//! - [`model_release_evidence`] owns the versioned two-way model-release
+//!   evidence schema: runtime health and canary from Tenkai, evaluation
+//!   results from Chisei, and fail-closed promotion when evidence is missing,
+//!   stale, or invalid.
 //! - [`software_executor`], [`model_runtime`], [`routing`], [`staged_artifact`],
 //!   [`workshop_module`], and [`worker_pool`] adapt typed delivery products to
 //!   their target runtimes.
@@ -159,6 +163,7 @@ pub mod management_lifecycle;
 pub mod management_operations;
 pub mod manifest;
 pub mod metrics;
+pub mod model_release_evidence;
 pub mod model_runtime;
 pub mod oci_artifact;
 pub mod offline_bundle;

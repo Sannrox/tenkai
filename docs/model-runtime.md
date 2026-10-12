@@ -334,8 +334,16 @@ Unsafe orders are rejected (`validate_model_routing_rollout_order`). See
 image, weights claim, node selectors, tolerations, and the smoke base URL are
 host configuration. See [vLLM Kubernetes executor](vllm-kubernetes.md).
 
+## Model-release evidence
+
+Two-way promotion evidence for a model identity (provider, model, profile
+version, artifact digest, opaque serving endpoint) is defined in
+[model-release evidence](model-release-evidence.md) ([ADR 0032](decisions/0032-model-release-evidence.md)).
+Export and the promote-time gate are follow-on.
+
 ## Follow-on
 
 - Peer/regional caches
 - Additional engine plugins: MLX first, then TGI, then NVIDIA NIM
   ([research](research/additional-model-serving-executors.md))
+- Emit runtime evidence and refuse promote from the model-release schema
