@@ -15,8 +15,10 @@ mod convergence;
 mod lifecycle;
 mod release_selection;
 
-pub use release_selection::model_requirements_fit;
 pub(crate) use release_selection::resolve_subscription_selection;
+pub use release_selection::{
+    FitRefusal, dotted_version, gpu_requirements_fit, model_requirements_fit,
+};
 
 pub(crate) use crate::environment::update_runtime_deployments_object;
 pub use crate::environment::{
@@ -1459,6 +1461,7 @@ mod tests {
             architecture: vec!["arm64".into(), "x86_64".into()],
             memory_gib: 24,
             accelerator: vec!["apple-metal".into()],
+            gpu: None,
         };
         model_requirements_fit("local", "qwen", "1.0.0", &facts, &requirements).unwrap();
 
@@ -1474,5 +1477,124 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("architecture"), "{err}");
+    }
+
+    fn h100_facts() -> std::collections::BTreeMap<String, String> {
+        [
+            ("gpu_vendor", "nvidia"),
+            ("gpu_family", "hopper"),
+            ("gpu_model", "H100 80GB"),
+            ("gpu_vram_gib", "80"),
+            ("gpu_count", "2"),
+            ("gpu_driver_version", "535.104.05"),
+            ("gpu_runtime", "cuda"),
+            ("gpu_runtime_version", "12.2"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.into(), value.into()))
+        .collect()
+    }
+
+    fn two_gpu_variant() -> crate::manifest::GpuRequirements {
+        crate::manifest::GpuRequirements {
+            vendor: vec!["nvidia".into()],
+            families: vec!["hopper".into(), "ampere".into()],
+            vram_gib: 80,
+            count: 1,
+            tensor_parallel: 2,
+            driver_min: Some("535".into()),
+            runtime: Some("cuda".into()),
+            runtime_min: Some("12.1".into()),
+        }
+    }
+
+    #[test]
+    fn gpu_requirements_fit_and_refuse_with_a_reason() {
+        let gpu = two_gpu_variant();
+        gpu_requirements_fit(&h100_facts(), &gpu).unwrap();
+
+        let refused = |key: &str, value: Option<&str>| {
+            let mut facts = h100_facts();
+            match value {
+                Some(value) => facts.insert(key.into(), value.into()),
+                None => facts.remove(key),
+            };
+            gpu_requirements_fit(&facts, &gpu).unwrap_err()
+        };
+        assert_eq!(
+            refused("gpu_vram_gib", Some("40")),
+            FitRefusal::BelowMinimum {
+                fact: "gpu_vram_gib",
+                actual: "40".into(),
+                minimum: "80".into(),
+            }
+        );
+        assert_eq!(
+            refused("gpu_count", Some("1")),
+            FitRefusal::BelowMinimum {
+                fact: "gpu_count",
+                actual: "1".into(),
+                minimum: "2".into(),
+            }
+        );
+        assert_eq!(
+            refused("gpu_driver_version", Some("525.60.13")).code(),
+            "fact_below_minimum"
+        );
+        assert_eq!(
+            refused("gpu_runtime_version", Some("11.8")).code(),
+            "fact_below_minimum"
+        );
+        assert_eq!(
+            refused("gpu_runtime", Some("rocm")).code(),
+            "fact_not_allowed"
+        );
+        assert_eq!(
+            refused("gpu_family", Some("turing")).code(),
+            "fact_not_allowed"
+        );
+        for unknown in [
+            "gpu_vendor",
+            "gpu_family",
+            "gpu_vram_gib",
+            "gpu_count",
+            "gpu_driver_version",
+            "gpu_runtime",
+            "gpu_runtime_version",
+        ] {
+            assert_eq!(
+                refused(unknown, None),
+                FitRefusal::MissingFact { fact: unknown },
+                "unknown {unknown} must not fit"
+            );
+        }
+    }
+
+    #[test]
+    fn variant_with_gpu_requirements_reports_the_refusal() {
+        let mut facts = h100_facts();
+        facts.insert("architecture".into(), "x86_64".into());
+        facts.insert("memory_gib".into(), "512".into());
+        facts.insert("gpu_vram_gib".into(), "24".into());
+        let requirements = crate::manifest::ModelRequirementsSection {
+            architecture: vec!["x86_64".into()],
+            memory_gib: 64,
+            accelerator: vec![],
+            gpu: Some(two_gpu_variant()),
+        };
+        let err = model_requirements_fit("gpu-a", "llama-70b", "1.0.0", &facts, &requirements)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("[fact_below_minimum]"), "{err}");
+        assert!(err.contains("gpu_vram_gib"), "{err}");
+    }
+
+    #[test]
+    fn dotted_versions_compare_numerically() {
+        assert!(dotted_version("12.10").unwrap() > dotted_version("12.2").unwrap());
+        assert_eq!(dotted_version("12.2.0"), dotted_version("12.2"));
+        assert!(dotted_version("535.104.05").unwrap() > dotted_version("535").unwrap());
+        assert_eq!(dotted_version("12.x"), None);
+        assert_eq!(dotted_version(""), None);
     }
 }
