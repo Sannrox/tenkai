@@ -867,6 +867,12 @@ max_startup_seconds = 30
             .await
             .unwrap();
         publish_unsigned_model(&mut ctx, &manifest_dir).await;
+        crate::model_release_evidence::record_passing_evaluation_for_release(
+            &mut ctx,
+            "qwen-export@1.0.0",
+        )
+        .await
+        .unwrap();
         let actor = crate::auth_context::test_management_context("evidence-export");
         crate::catalog::promote(&mut ctx, &actor, "qwen-export@1.0.0", "canary")
             .await
@@ -968,6 +974,12 @@ max_startup_seconds = 30
             .unwrap();
 
         publish_unsigned_model(&mut ctx, &manifest_dir).await;
+        crate::model_release_evidence::record_passing_evaluation_for_release(
+            &mut ctx,
+            "qwen-canary@1.0.0",
+        )
+        .await
+        .unwrap();
         let actor = crate::auth_context::test_management_context("canary-e2e");
         // Canary channel is free of promotion policy so the cohort can apply first.
         crate::catalog::promote(&mut ctx, &actor, "qwen-canary@1.0.0", "canary")
@@ -1036,6 +1048,12 @@ max_startup_seconds = 30
         // Promote a second model version without canary evidence to exercise missing.
         write_model_runtime_manifest(&manifest_dir, "qwen-canary", "1.1.0");
         publish_unsigned_model(&mut ctx, &manifest_dir).await;
+        crate::model_release_evidence::record_passing_evaluation_for_release(
+            &mut ctx,
+            "qwen-canary@1.1.0",
+        )
+        .await
+        .unwrap();
         crate::catalog::promote(&mut ctx, &actor, "qwen-canary@1.1.0", "canary")
             .await
             .unwrap();
@@ -1095,6 +1113,12 @@ max_startup_seconds = 30
             .await
             .unwrap();
         publish_unsigned_model(&mut ctx, &manifest_dir).await;
+        crate::model_release_evidence::record_passing_evaluation_for_release(
+            &mut ctx,
+            "qwen-canary@1.0.0",
+        )
+        .await
+        .unwrap();
         let actor = crate::auth_context::test_management_context("canary-authz");
         crate::catalog::promote(&mut ctx, &actor, "qwen-canary@1.0.0", "canary")
             .await

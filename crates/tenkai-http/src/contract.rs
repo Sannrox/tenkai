@@ -197,6 +197,22 @@ pub fn http_contract() -> Value {
             response: lifecycle,
         },
         Route {
+            method: "POST",
+            path: "/v1/model-evaluation/trust",
+            auth: Auth::Management,
+            request: Some(schema::<tenkai::model_release_evidence::EvaluationTrustRoots>(&mut g)),
+            response: schema::<()>(&mut g),
+        },
+        Route {
+            method: "POST",
+            path: "/v1/model-evaluation/evidence",
+            auth: Auth::Publish,
+            request: Some(schema::<
+                tenkai::model_release_evidence::ModelEvaluationEvidence,
+            >(&mut g)),
+            response: schema::<()>(&mut g),
+        },
+        Route {
             method: "GET",
             path: "/v1/migrations/{name}",
             auth: Auth::Read,

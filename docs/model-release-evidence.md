@@ -6,8 +6,8 @@ evaluation result. Promotion of that identity refuses when either record is
 missing, stale, or invalid. This is the schema contract
 ([ADR 0032](decisions/0032-model-release-evidence.md)). Tenkai signs and
 exports the runtime record through the integration outbox when a
-`model_runtime` canary or smoke completes (pass or fail). The promotion
-gate remains follow-on work.
+`model_runtime` canary or smoke completes (pass or fail). Channel promotion
+of `model_runtime` consumes a stored evaluation record.
 
 This contract is distinct from [evaluation gate evidence](evaluation-gate-evidence.md)
 (ADR 0013), which still gates software releases on suite-case projections.
@@ -72,6 +72,35 @@ identity, validate, have not expired, and pass (`health=healthy`,
 | `stale` | `expires_at` is at or before now, or `observed_at` is more than 60 seconds ahead of now. |
 | `invalid` | Unknown schema, unknown fields, failed validation, identity mismatch, or a non-passing outcome. |
 
+## Channel promotion
+
+`catalog::promote` of a `model_runtime` release requires a stored
+`chisei.model_evaluation_evidence.v1` record, Ed25519-verified against
+installed evaluation trust roots, for the release identity derived from the
+published descriptor (provider from the weight source, `model=<product>`,
+`profile_version=<product version>`, the manifest artifact digest,
+`endpoint=served://<product>`). Missing, stale, or invalid (including failed)
+evidence blocks promotion as
+`model evaluation promotion blocked: missing|stale|invalid`. Other
+product kinds are unchanged.
+
+Install trusted evaluation signers, then record a signed evaluation JSON
+document, then promote:
+
+```bash
+tenkaictl eval-evidence trust --trust-roots eval-trust.toml
+tenkaictl eval-evidence record evaluation-result.json
+tenkaictl promote qwen-coder@0.1.0 stable
+```
+
+`eval-trust.toml` is versioned TOML with `version = 1` and one or more
+`[[signers]]` entries (`key_id` and Ed25519 `public_key`). The evidence file
+is `chisei.model_evaluation_evidence.v1` JSON. Remote mode uses the same
+commands against `POST /v1/model-evaluation/trust` (management) and
+`POST /v1/model-evaluation/evidence` (publish). Recording fails closed when
+trust roots are missing, the signer is untrusted, or the signature does not
+verify.
+
 ## Export
 
 When a `model_runtime` canary attempt is persisted, or when model-runtime
@@ -88,6 +117,5 @@ runs only when terminal-outcome export is enabled and that key is present.
 
 ## Follow-on
 
-- Consume Chisei evaluation evidence at promote time.
 - Chisei companion: persist and return `chisei.model_evaluation_evidence.v1`
   for the same identity.

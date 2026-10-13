@@ -1333,6 +1333,66 @@
       ],
       "type": "object"
     },
+    "EvaluationOutcome": {
+      "enum": [
+        "passed",
+        "failed"
+      ],
+      "type": "string"
+    },
+    "EvaluationTrustRoots": {
+      "additionalProperties": false,
+      "properties": {
+        "signers": {
+          "items": {
+            "$ref": "#/$defs/EvaluationTrustedSigner"
+          },
+          "type": "array"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "signers"
+      ],
+      "type": "object"
+    },
+    "EvaluationTrustedSigner": {
+      "additionalProperties": false,
+      "properties": {
+        "key_id": {
+          "type": "string"
+        },
+        "public_key": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key_id",
+        "public_key"
+      ],
+      "type": "object"
+    },
+    "EvidenceSigner": {
+      "additionalProperties": false,
+      "properties": {
+        "key_id": {
+          "type": "string"
+        },
+        "signature": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key_id",
+        "signature"
+      ],
+      "type": "object"
+    },
     "FleetEnvironmentRow": {
       "description": "One environment's row in a fleet posture table (no credentials).",
       "properties": {
@@ -1645,6 +1705,78 @@
         "recovery_required"
       ],
       "type": "string"
+    },
+    "ModelEvaluationEvidence": {
+      "additionalProperties": false,
+      "description": "Chisei → Tenkai evaluation result for the same identity.",
+      "properties": {
+        "eval_run_id": {
+          "type": "string"
+        },
+        "eval_suite_id": {
+          "type": "string"
+        },
+        "expires_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "identity": {
+          "$ref": "#/$defs/ModelReleaseIdentity"
+        },
+        "observed_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "outcome": {
+          "$ref": "#/$defs/EvaluationOutcome"
+        },
+        "schema": {
+          "type": "string"
+        },
+        "signer": {
+          "$ref": "#/$defs/EvidenceSigner"
+        }
+      },
+      "required": [
+        "schema",
+        "identity",
+        "eval_suite_id",
+        "eval_run_id",
+        "outcome",
+        "observed_at",
+        "expires_at",
+        "signer"
+      ],
+      "type": "object"
+    },
+    "ModelReleaseIdentity": {
+      "additionalProperties": false,
+      "description": "Shared model identity for both evidence directions.",
+      "properties": {
+        "artifact_digest": {
+          "type": "string"
+        },
+        "endpoint": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "profile_version": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "model",
+        "profile_version",
+        "artifact_digest",
+        "endpoint"
+      ],
+      "type": "object"
     },
     "ModuleActivationReceipt": {
       "additionalProperties": false,
@@ -2665,6 +2797,28 @@
       },
       "response": {
         "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/model-evaluation/trust",
+      "request": {
+        "$ref": "#/$defs/EvaluationTrustRoots"
+      },
+      "response": {
+        "type": "null"
+      }
+    },
+    {
+      "auth": "publish",
+      "method": "POST",
+      "path": "/v1/model-evaluation/evidence",
+      "request": {
+        "$ref": "#/$defs/ModelEvaluationEvidence"
+      },
+      "response": {
+        "type": "null"
       }
     },
     {

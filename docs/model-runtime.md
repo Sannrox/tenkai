@@ -239,6 +239,8 @@ export TENKAI_LLAMA_SERVER=/usr/local/bin/llama-server   # or TENKAI_USE_REAL_LL
 # 1. Publish / promote a model_runtime with loopback health and file:// weights
 export TENKAI_MANAGEMENT_TOKEN='replace-from-secret-store'
 tenkaictl publish examples/model-runtime-local/tenkai.toml --allow-unsigned-development
+tenkaictl eval-evidence trust --trust-roots eval-trust.toml
+tenkaictl eval-evidence record evaluation-result.json
 tenkaictl promote qwen-coder@0.1.0 stable
 tenkaictl env subscribe local qwen-coder=stable   # if not already subscribed
 
@@ -284,6 +286,8 @@ tenkaictl canary designate local
 
 # 1. Publish model_runtime and put it on a free "canary" channel first
 tenkaictl publish examples/model-runtime-local/tenkai.toml --allow-unsigned-development
+tenkaictl eval-evidence trust --trust-roots eval-trust.toml
+tenkaictl eval-evidence record evaluation-result.json
 tenkaictl promote qwen-coder@0.1.0 canary
 
 # 2. Require complete canary evidence before promoting to stable
@@ -339,11 +343,13 @@ host configuration. See [vLLM Kubernetes executor](vllm-kubernetes.md).
 Two-way promotion evidence for a model identity (provider, model, profile
 version, artifact digest, opaque serving endpoint) is defined in
 [model-release evidence](model-release-evidence.md) ([ADR 0032](decisions/0032-model-release-evidence.md)).
-Export and the promote-time gate are follow-on.
+Channel promotion requires a passing, fresh evaluation record for that
+identity; missing, stale, or invalid results block `promote`. Install
+signers and record the signed result with `tenkaictl eval-evidence`
+([model-release evidence](model-release-evidence.md#channel-promotion)).
 
 ## Follow-on
 
 - Peer/regional caches
 - Additional engine plugins: MLX first, then TGI, then NVIDIA NIM
   ([research](research/additional-model-serving-executors.md))
-- Emit runtime evidence and refuse promote from the model-release schema

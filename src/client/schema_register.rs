@@ -214,6 +214,32 @@ pub fn known_action(name: &str) -> Option<ActionTypeDef> {
 pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
     let types = vec![
         object_type(
+            crate::model_release_evidence::EVALUATION_TRUST_KIND,
+            "Trusted keys that may sign model evaluation evidence",
+            vec![prop(
+                "roots",
+                true,
+                "Versioned evaluation trust-root document",
+            )],
+        ),
+        object_type(
+            crate::model_release_evidence::EVALUATION_EVIDENCE_KIND,
+            "Latest Chisei evaluation record for one model-release identity",
+            vec![
+                prop("identity_digest", true, "Content-addressed model identity"),
+                prop(
+                    "observed_at_order",
+                    true,
+                    "Fixed-width observation-time ordering key",
+                ),
+                prop(
+                    "evidence",
+                    true,
+                    "Versioned chisei.model_evaluation_evidence.v1 JSON",
+                ),
+            ],
+        ),
+        object_type(
             crate::software_compatibility::EVIDENCE_KIND,
             "Immutable environment-scoped software compatibility observation",
             vec![

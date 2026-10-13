@@ -750,6 +750,18 @@ max_startup_seconds = 60
         crate::catalog::publish(&mut ctx, &q8_dir.join("tenkai.toml"), &options)
             .await
             .unwrap();
+        crate::model_release_evidence::record_passing_evaluation_for_release(
+            &mut ctx,
+            "qwen-coder@1.0.0",
+        )
+        .await
+        .unwrap();
+        crate::model_release_evidence::record_passing_evaluation_for_release(
+            &mut ctx,
+            "qwen-coder@1.1.0",
+        )
+        .await
+        .unwrap();
         let actor = crate::auth_context::test_management_context("convergence-promote");
         crate::catalog::promote(&mut ctx, &actor, "qwen-coder@1.0.0", "stable")
             .await
@@ -1005,6 +1017,12 @@ allowed_providers = ["local"]
         crate::catalog::publish(&mut ctx, &routing_dir.join("tenkai.toml"), &options)
             .await
             .unwrap();
+        crate::model_release_evidence::record_passing_evaluation_for_release(
+            &mut ctx,
+            &format!("{model}@1.0.0"),
+        )
+        .await
+        .unwrap();
         let actor = crate::auth_context::test_management_context("coordinated-hold");
         crate::catalog::promote(&mut ctx, &actor, &format!("{model}@1.0.0"), "stable")
             .await
@@ -1071,6 +1089,12 @@ allowed_providers = ["local"]
             .properties
             .insert(format!("deployed.{model}"), "1.0.0".into());
         ctx.put(environment).await.unwrap();
+        crate::model_release_evidence::record_passing_evaluation_for_release(
+            &mut ctx,
+            &format!("{model}@2.0.0"),
+        )
+        .await
+        .unwrap();
         crate::catalog::promote(&mut ctx, &actor, &format!("{model}@2.0.0"), "stable")
             .await
             .unwrap();

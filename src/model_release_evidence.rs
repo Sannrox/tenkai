@@ -4,8 +4,11 @@
 //! Chisei emits evaluation results for that same identity. Promotion refuses
 //! when either side is missing, stale, or invalid. Completed `model_runtime`
 //! canary and smoke results are signed and exported through the integration
-//! outbox. Promotion-gate wiring remains follow-on.
+//! outbox. Channel promotion consumes stored evaluation records; operators
+//! install evaluation trust roots and record signed Chisei results through
+//! the library, `tenkaictl eval-evidence`, or the HTTP ingest routes.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context as _, Result, bail};
@@ -13,7 +16,9 @@ use ed25519_dalek::{Signer as _, SigningKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
+use crate::auth_context::{AuthenticatedRequestContext, DeliveryCapability};
 use crate::client::{Ctx, block_embedded};
+use crate::manifest::ProductKind;
 use crate::model_runtime::ModelRuntimeDescriptor;
 use crate::ontology::validate_identifier;
 use crate::pb::sekai::Object;
@@ -31,7 +36,14 @@ pub const MODEL_RUNTIME_EVIDENCE_SIGNING_KEY_ENV: &str = "TENKAI_MODEL_EVIDENCE_
 pub const CLOCK_SKEW_ALLOWANCE_MS: i64 = 60_000;
 pub const RUNTIME_EVIDENCE_TTL_MS: i64 = 3_600_000;
 const RUNTIME_EVIDENCE_DOMAIN: &[u8] = b"TENKAI-MODEL-RUNTIME-EVIDENCE-V1\0";
+pub(crate) const EVALUATION_EVIDENCE_KIND: &str = "tenkai.model_evaluation_evidence";
+pub(crate) const EVALUATION_TRUST_KIND: &str = "tenkai.model_evaluation_trust";
+const EVALUATION_DOMAIN: &[u8] = b"TENKAI-MODEL-EVALUATION-V1\0";
+const EVALUATION_TRUST_ID: &str = "tenkai:model-evaluation-trust";
+const EVALUATION_TRUST_VERSION: u32 = 1;
 const MAX_ENDPOINT_BYTES: usize = 512;
+#[cfg(test)]
+const FIXTURE_SEED: [u8; 32] = [17; 32];
 
 /// Shared model identity for both evidence directions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -166,7 +178,21 @@ impl ModelEvaluationEvidence {
         Ok(parsed)
     }
 
+    pub fn load(path: &Path) -> Result<Self> {
+        let raw = std::fs::read_to_string(path)
+            .with_context(|| format!("reading model evaluation evidence {}", path.display()))?;
+        let evidence: Self = serde_json::from_str(&raw)
+            .with_context(|| format!("parsing model evaluation evidence {}", path.display()))?;
+        evidence.validate()?;
+        Ok(evidence)
+    }
+
     pub fn validate(&self) -> Result<()> {
+        self.validate_statement()?;
+        self.signer.validate()
+    }
+
+    fn validate_statement(&self) -> Result<()> {
         if self.schema != EVALUATION_EVIDENCE_SCHEMA {
             bail!(
                 "unsupported model evaluation evidence schema {}",
@@ -177,7 +203,7 @@ impl ModelEvaluationEvidence {
         validate_identifier("eval_suite_id", &self.eval_suite_id)?;
         validate_identifier("eval_run_id", &self.eval_run_id)?;
         validate_timestamps(self.observed_at, self.expires_at)?;
-        self.signer.validate()?;
+        validate_key_id("signer.key_id", &self.signer.key_id)?;
         Ok(())
     }
 
@@ -246,6 +272,417 @@ pub fn identity_from_descriptor(
 }
 
 /// Sign a runtime evidence record over the domain-separated canonical bytes.
+fn identity_digest(identity: &ModelReleaseIdentity) -> Result<String> {
+    identity.validate()?;
+    let canonical = serde_json::to_vec(identity).context("serializing model identity")?;
+    Ok(format!("{:x}", Sha256::digest(&canonical)))
+}
+
+fn evaluation_record_id(
+    identity: &ModelReleaseIdentity,
+    observed_at: i64,
+    eval_run_id: &str,
+) -> Result<String> {
+    Ok(format!(
+        "tenkai:model-evaluation:{}:{:020}:{eval_run_id}",
+        identity_digest(identity)?,
+        observed_at
+    ))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EvaluationTrustRoots {
+    pub version: u32,
+    pub signers: Vec<EvaluationTrustedSigner>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EvaluationTrustedSigner {
+    pub key_id: String,
+    pub public_key: String,
+}
+
+impl EvaluationTrustRoots {
+    pub fn load(path: &Path) -> Result<Self> {
+        let raw = std::fs::read_to_string(path)
+            .with_context(|| format!("reading model evaluation trust roots {}", path.display()))?;
+        let roots: Self = toml::from_str(&raw)
+            .with_context(|| format!("parsing model evaluation trust roots {}", path.display()))?;
+        roots.validate()?;
+        Ok(roots)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.version != EVALUATION_TRUST_VERSION {
+            bail!(
+                "unsupported model evaluation trust-root version {}; expected {EVALUATION_TRUST_VERSION}",
+                self.version
+            );
+        }
+        if self.signers.is_empty() {
+            bail!("model evaluation trust roots contain no signers");
+        }
+        let mut key_ids = std::collections::BTreeSet::new();
+        for signer in &self.signers {
+            crate::signature_verification::validate_key_id(
+                "model evaluation signer key id",
+                &signer.key_id,
+            )?;
+            if !key_ids.insert(&signer.key_id) {
+                bail!(
+                    "model evaluation trust roots contain duplicate key id {}",
+                    signer.key_id
+                );
+            }
+            crate::signature_verification::trusted_key(
+                "model evaluation public key",
+                &signer.public_key,
+                &signer.key_id,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+fn canonical_evaluation_bytes(evidence: &ModelEvaluationEvidence) -> Result<Vec<u8>> {
+    evidence.validate_statement()?;
+    let mut bytes = EVALUATION_DOMAIN.to_vec();
+    for value in [
+        evidence.schema.as_bytes(),
+        evidence.identity.provider.as_bytes(),
+        evidence.identity.model.as_bytes(),
+        evidence.identity.profile_version.as_bytes(),
+        evidence.identity.artifact_digest.as_bytes(),
+        evidence.identity.endpoint.as_bytes(),
+        evidence.eval_suite_id.as_bytes(),
+        evidence.eval_run_id.as_bytes(),
+        match evidence.outcome {
+            EvaluationOutcome::Passed => b"passed".as_slice(),
+            EvaluationOutcome::Failed => b"failed".as_slice(),
+        },
+        evidence.signer.key_id.as_bytes(),
+    ] {
+        push_len_prefixed(&mut bytes, value);
+    }
+    bytes.extend_from_slice(&evidence.observed_at.to_be_bytes());
+    bytes.extend_from_slice(&evidence.expires_at.to_be_bytes());
+    Ok(bytes)
+}
+
+#[cfg(test)]
+fn sign_evaluation(evidence: &mut ModelEvaluationEvidence, signing_key: &SigningKey) -> Result<()> {
+    let public = signing_key.verifying_key().to_bytes();
+    evidence.signer.key_id = key_id(&public);
+    let signature = signing_key.sign(&canonical_evaluation_bytes(evidence)?);
+    evidence.signer.signature = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        signature.to_bytes(),
+    );
+    Ok(())
+}
+
+fn verify_evaluation_signature(
+    evidence: &ModelEvaluationEvidence,
+    roots: &EvaluationTrustRoots,
+) -> Result<()> {
+    roots.validate()?;
+    let signer = roots
+        .signers
+        .iter()
+        .find(|signer| signer.key_id == evidence.signer.key_id)
+        .context("model evaluation signer is not currently trusted")?;
+    let key = crate::signature_verification::trusted_key(
+        "model evaluation public key",
+        &signer.public_key,
+        &signer.key_id,
+    )?;
+    crate::signature_verification::verify_strict(
+        &key,
+        "model evaluation signature",
+        &evidence.signer.signature,
+        &canonical_evaluation_bytes(evidence)?,
+    )
+}
+
+async fn load_evaluation_trust_roots(ctx: &mut Ctx) -> Result<Option<EvaluationTrustRoots>> {
+    let Some(record) = ctx.get(EVALUATION_TRUST_ID).await? else {
+        return Ok(None);
+    };
+    if record.kind != EVALUATION_TRUST_KIND {
+        bail!("model evaluation trust object has the wrong kind");
+    }
+    let raw = record
+        .properties
+        .get("roots")
+        .context("model evaluation trust object is missing roots")?;
+    let roots: EvaluationTrustRoots = serde_json::from_str(raw)?;
+    roots.validate()?;
+    Ok(Some(roots))
+}
+
+/// Install or replace the trusted Ed25519 signers for evaluation records.
+pub async fn install_evaluation_trust_roots(
+    ctx: &mut Ctx,
+    actor: &AuthenticatedRequestContext,
+    roots: &EvaluationTrustRoots,
+) -> Result<()> {
+    actor
+        .require_delivery_capability(DeliveryCapability::Management)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    roots.validate()?;
+    let now = crate::now_millis();
+    let record = Object {
+        id: EVALUATION_TRUST_ID.into(),
+        kind: EVALUATION_TRUST_KIND.into(),
+        namespace: crate::ontology::NS.into(),
+        name: EVALUATION_TRUST_ID.into(),
+        properties: HashMap::from([("roots".into(), serde_json::to_string(roots)?)]),
+        created: now,
+        updated: now,
+        ..Default::default()
+    };
+    match ctx.create_once(record.clone()).await {
+        Ok(_) => Ok(()),
+        Err(status) if crate::client::is_unique_conflict(&status) => {
+            ctx.put(record).await?;
+            Ok(())
+        }
+        Err(status) => Err(status.into()),
+    }
+}
+
+#[cfg(test)]
+async fn ensure_fixture_evaluation_trust(ctx: &mut Ctx) -> Result<SigningKey> {
+    let signing_key = SigningKey::from_bytes(&FIXTURE_SEED);
+    let public = signing_key.verifying_key().to_bytes();
+    let roots = EvaluationTrustRoots {
+        version: EVALUATION_TRUST_VERSION,
+        signers: vec![EvaluationTrustedSigner {
+            key_id: key_id(&public),
+            public_key: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, public),
+        }],
+    };
+    let actor = crate::auth_context::test_management_context("eval-trust-fixture");
+    install_evaluation_trust_roots(ctx, &actor, &roots).await?;
+    Ok(signing_key)
+}
+
+#[cfg(test)]
+fn signed_fixture_evaluation(
+    identity: ModelReleaseIdentity,
+    outcome: EvaluationOutcome,
+    observed_at: i64,
+    expires_at: i64,
+    signing_key: &SigningKey,
+) -> Result<ModelEvaluationEvidence> {
+    let mut evidence = ModelEvaluationEvidence {
+        schema: EVALUATION_EVIDENCE_SCHEMA.into(),
+        identity,
+        eval_suite_id: "model-quality".into(),
+        eval_run_id: "fixture-run".into(),
+        outcome,
+        observed_at,
+        expires_at,
+        signer: EvidenceSigner {
+            key_id: String::new(),
+            signature: String::new(),
+        },
+    };
+    sign_evaluation(&mut evidence, signing_key)?;
+    Ok(evidence)
+}
+
+/// Persist an immutable evaluation record for one model identity.
+pub async fn record_evaluation_evidence(
+    ctx: &mut Ctx,
+    actor: &AuthenticatedRequestContext,
+    evidence: ModelEvaluationEvidence,
+) -> Result<()> {
+    actor
+        .require_delivery_capability(DeliveryCapability::Publish)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    if !actor.product_bindings().is_empty()
+        && !actor.product_bindings().contains(&evidence.identity.model)
+    {
+        bail!("product is outside the publication grant");
+    }
+    evidence.validate()?;
+    let roots = load_evaluation_trust_roots(ctx)
+        .await?
+        .context("model evaluation trust roots are not installed")?;
+    verify_evaluation_signature(&evidence, &roots)?;
+    let raw = serde_json::to_string(&evidence)?;
+    if raw.len() > 64 * 1024 {
+        bail!("model evaluation evidence exceeds 64 KiB");
+    }
+    let digest = identity_digest(&evidence.identity)?;
+    let id = evaluation_record_id(
+        &evidence.identity,
+        evidence.observed_at,
+        &evidence.eval_run_id,
+    )?;
+    let now = crate::now_millis();
+    let record = Object {
+        id: id.clone(),
+        kind: EVALUATION_EVIDENCE_KIND.into(),
+        namespace: crate::ontology::NS.into(),
+        name: id.clone(),
+        properties: HashMap::from([
+            ("identity_digest".into(), digest),
+            (
+                "observed_at_order".into(),
+                format!("{:020}", evidence.observed_at),
+            ),
+            ("evidence".into(), raw.clone()),
+        ]),
+        created: now,
+        updated: now,
+        ..Default::default()
+    };
+    match ctx.create_once(record).await {
+        Ok(_) => Ok(()),
+        Err(status) if crate::client::is_unique_conflict(&status) => {
+            let existing = ctx
+                .get(&id)
+                .await?
+                .context("conflicting model evaluation evidence disappeared")?;
+            if existing.properties.get("evidence") == Some(&raw) {
+                Ok(())
+            } else {
+                bail!("conflicting model evaluation evidence at the same observation time");
+            }
+        }
+        Err(status) => Err(status.into()),
+    }
+}
+
+enum LoadedEvaluation {
+    Missing,
+    Invalid,
+    Record(Box<ModelEvaluationEvidence>),
+}
+
+async fn load_evaluation_for_promotion(
+    ctx: &mut Ctx,
+    identity: &ModelReleaseIdentity,
+) -> Result<LoadedEvaluation> {
+    let digest = identity_digest(identity)?;
+    let records = ctx
+        .find_by_property(EVALUATION_EVIDENCE_KIND, "identity_digest", &digest)
+        .await?;
+    if records.is_empty() {
+        return Ok(LoadedEvaluation::Missing);
+    }
+    let mut newest: Vec<ModelEvaluationEvidence> = Vec::new();
+    let mut newest_at = i64::MIN;
+    for record in records {
+        if record.kind != EVALUATION_EVIDENCE_KIND {
+            return Ok(LoadedEvaluation::Invalid);
+        }
+        let Some(raw) = record.properties.get("evidence") else {
+            return Ok(LoadedEvaluation::Invalid);
+        };
+        let Ok(evidence) = ModelEvaluationEvidence::parse_json(raw) else {
+            return Ok(LoadedEvaluation::Invalid);
+        };
+        if evidence.identity != *identity {
+            return Ok(LoadedEvaluation::Invalid);
+        }
+        match evidence.observed_at.cmp(&newest_at) {
+            std::cmp::Ordering::Greater => {
+                newest_at = evidence.observed_at;
+                newest = vec![evidence];
+            }
+            std::cmp::Ordering::Equal => newest.push(evidence),
+            std::cmp::Ordering::Less => {}
+        }
+    }
+    match newest.as_slice() {
+        [only] => Ok(LoadedEvaluation::Record(Box::new(only.clone()))),
+        [] => Ok(LoadedEvaluation::Missing),
+        _ => Ok(LoadedEvaluation::Invalid),
+    }
+}
+
+/// Admit a model-runtime channel promotion from the Chisei evaluation half.
+pub fn admit_model_evaluation_evidence(
+    evaluation: Option<&ModelEvaluationEvidence>,
+    expected: &ModelReleaseIdentity,
+    now_ms: i64,
+) -> std::result::Result<(), ModelReleaseEvidenceFailure> {
+    let Some(evaluation) = evaluation else {
+        return Err(ModelReleaseEvidenceFailure::Missing);
+    };
+    match evaluation.promotion_refusal(expected, now_ms) {
+        Some(failure) => Err(failure),
+        None => Ok(()),
+    }
+}
+
+/// Channel promotion of `model_runtime` requires a passing, fresh eval record.
+pub async fn require_published_model_evaluation(ctx: &mut Ctx, release: &Object) -> Result<()> {
+    let Some(raw) = release.properties.get("manifest") else {
+        return Ok(());
+    };
+    let manifest = crate::manifest::parse_raw(raw)?;
+    if manifest.product.kind != ProductKind::ModelRuntime {
+        return Ok(());
+    }
+    let descriptor = ModelRuntimeDescriptor::from_manifest(&manifest)?;
+    let expected = identity_from_descriptor(&descriptor)?;
+    let blocked = |failure: ModelReleaseEvidenceFailure| {
+        anyhow::anyhow!("model evaluation promotion blocked: {failure}")
+    };
+    let evidence = match load_evaluation_for_promotion(ctx, &expected).await? {
+        LoadedEvaluation::Missing => return Err(blocked(ModelReleaseEvidenceFailure::Missing)),
+        LoadedEvaluation::Invalid => return Err(blocked(ModelReleaseEvidenceFailure::Invalid)),
+        LoadedEvaluation::Record(evidence) => *evidence,
+    };
+    let Some(roots) = load_evaluation_trust_roots(ctx).await? else {
+        return Err(blocked(ModelReleaseEvidenceFailure::Invalid));
+    };
+    if verify_evaluation_signature(&evidence, &roots).is_err() {
+        return Err(blocked(ModelReleaseEvidenceFailure::Invalid));
+    }
+    admit_model_evaluation_evidence(Some(&evidence), &expected, crate::now_millis())
+        .map_err(blocked)
+}
+
+/// Test helper: store a passing, fresh eval for a published release.
+#[cfg(test)]
+pub async fn record_passing_evaluation_for_release(ctx: &mut Ctx, spec: &str) -> Result<()> {
+    let Some((product, version)) = spec.split_once('@') else {
+        bail!("expected <product>@<version>, got {spec:?}");
+    };
+    let release = ctx
+        .get(&crate::ontology::release_id(product, version))
+        .await?
+        .with_context(|| format!("release {spec} is not published"))?;
+    let raw = release
+        .properties
+        .get("manifest")
+        .context("published release is missing its manifest")?;
+    let descriptor = ModelRuntimeDescriptor::from_manifest(&crate::manifest::parse_raw(raw)?)?;
+    let identity = identity_from_descriptor(&descriptor)?;
+    let signing_key = ensure_fixture_evaluation_trust(ctx).await?;
+    let now = crate::now_millis();
+    let actor = crate::auth_context::test_management_context("eval-record-fixture");
+    record_evaluation_evidence(
+        ctx,
+        &actor,
+        signed_fixture_evaluation(
+            identity,
+            EvaluationOutcome::Passed,
+            now,
+            now.saturating_add(3_600_000),
+            &signing_key,
+        )?,
+    )
+    .await
+}
+
 pub fn sign_runtime_evidence(
     draft: RuntimeEvidenceDraft,
     key: &SigningKey,
@@ -847,5 +1284,359 @@ max_startup_seconds = 30
         assert_eq!(parsed[1].canary, RuntimeCanary::Failed);
         assert_eq!(parsed[0].schema, RUNTIME_EVIDENCE_SCHEMA);
         assert_eq!(parsed[1].identity, parsed[0].identity);
+    }
+    fn write_model(dir: &std::path::Path, product: &str, version: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("tenkai.toml"),
+            format!(
+                r#"[product]
+name = "{product}"
+version = "{version}"
+kind = "model_runtime"
+description = "eval-gate fixture"
+[model]
+source = "hf://example/{product}/{product}.gguf"
+revision = "0123456789abcdef0123456789abcdef01234567"
+format = "gguf"
+quantization = "Q4_K_M"
+artifact_digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+license = "apache-2.0"
+[runtime]
+engine = "llama.cpp"
+port = 18080
+context_length = 4096
+[requirements]
+architecture = ["arm64"]
+memory_gib = 8
+accelerator = ["cpu"]
+[health]
+endpoint = "http://127.0.0.1:18080/v1/models"
+max_startup_seconds = 30
+"#
+            ),
+        )
+        .unwrap();
+    }
+
+    fn write_software(dir: &std::path::Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("tenkai.toml"),
+            r#"[product]
+name = "edge-app"
+version = "1.0.0"
+kind = "software"
+[deploy]
+workdir = "."
+install = "true"
+uninstall = "true"
+"#,
+        )
+        .unwrap();
+    }
+
+    async fn published_ctx(root: &std::path::Path, product: &str, version: &str) -> Ctx {
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        write_model(&root.join("model"), product, version);
+        let options = crate::catalog::PublishOptions {
+            signature: None,
+            trust_roots: None,
+            allow_unsigned_development: true,
+            provenance: Vec::new(),
+            provenance_trust_roots: None,
+            change_set_evidence: None,
+            artifact_registry: None,
+        };
+        crate::catalog::publish(&mut ctx, &root.join("model/tenkai.toml"), &options)
+            .await
+            .unwrap();
+        ctx
+    }
+
+    #[tokio::test]
+    async fn model_runtime_promote_requires_fresh_passing_eval() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-model-eval-gate-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let mut ctx = published_ctx(&root, "qwen-eval", "1.0.0").await;
+        let actor = crate::auth_context::test_management_context("model-eval-gate");
+        let missing = crate::catalog::promote(&mut ctx, &actor, "qwen-eval@1.0.0", "stable")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            missing.contains("model evaluation promotion blocked: missing"),
+            "{missing}"
+        );
+
+        let release = ctx
+            .get(&crate::ontology::release_id("qwen-eval", "1.0.0"))
+            .await
+            .unwrap()
+            .unwrap();
+        let descriptor = ModelRuntimeDescriptor::from_manifest(
+            &crate::manifest::parse_raw(release.properties.get("manifest").unwrap()).unwrap(),
+        )
+        .unwrap();
+        let identity = identity_from_descriptor(&descriptor).unwrap();
+        let signing_key = ensure_fixture_evaluation_trust(&mut ctx).await.unwrap();
+        let now = crate::now_millis();
+        record_evaluation_evidence(
+            &mut ctx,
+            &actor,
+            signed_fixture_evaluation(
+                identity.clone(),
+                EvaluationOutcome::Passed,
+                now.saturating_sub(1_000),
+                now,
+                &signing_key,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let stale = crate::catalog::promote(&mut ctx, &actor, "qwen-eval@1.0.0", "stable")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            stale.contains("model evaluation promotion blocked: stale"),
+            "{stale}"
+        );
+
+        record_evaluation_evidence(
+            &mut ctx,
+            &actor,
+            signed_fixture_evaluation(
+                identity.clone(),
+                EvaluationOutcome::Failed,
+                now,
+                now + 3_600_000,
+                &signing_key,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let failed = crate::catalog::promote(&mut ctx, &actor, "qwen-eval@1.0.0", "stable")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            failed.contains("model evaluation promotion blocked: invalid"),
+            "{failed}"
+        );
+
+        let mut forged = signed_fixture_evaluation(
+            identity.clone(),
+            EvaluationOutcome::Passed,
+            now + 1,
+            now + 3_600_000,
+            &signing_key,
+        )
+        .unwrap();
+        forged.signer.signature =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [0u8; 64]);
+        assert!(
+            record_evaluation_evidence(&mut ctx, &actor, forged)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("model evaluation signature"),
+        );
+
+        record_passing_evaluation_for_release(&mut ctx, "qwen-eval@1.0.0")
+            .await
+            .unwrap();
+        let admitted = crate::catalog::promote(&mut ctx, &actor, "qwen-eval@1.0.0", "stable")
+            .await
+            .unwrap();
+        assert!(
+            admitted.contains("promoted") && admitted.contains("stable"),
+            "{admitted}"
+        );
+
+        write_software(&root.join("software"));
+        let options = crate::catalog::PublishOptions {
+            signature: None,
+            trust_roots: None,
+            allow_unsigned_development: true,
+            provenance: Vec::new(),
+            provenance_trust_roots: None,
+            change_set_evidence: None,
+            artifact_registry: None,
+        };
+        crate::catalog::publish(&mut ctx, &root.join("software/tenkai.toml"), &options)
+            .await
+            .unwrap();
+        let software = crate::catalog::promote(&mut ctx, &actor, "edge-app@1.0.0", "stable")
+            .await
+            .unwrap();
+        assert!(software.contains("promoted"), "{software}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn production_eval_ingest_admits_model_runtime_promote() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-model-eval-ingest-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let mut ctx = published_ctx(&root, "qwen-ingest", "1.0.0").await;
+        let signing_key = SigningKey::from_bytes(&[23u8; 32]);
+        let public = signing_key.verifying_key().to_bytes();
+        let roots = EvaluationTrustRoots {
+            version: EVALUATION_TRUST_VERSION,
+            signers: vec![EvaluationTrustedSigner {
+                key_id: crate::signature_verification::key_id(&public),
+                public_key: base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    public,
+                ),
+            }],
+        };
+        let trust_path = root.join("eval-trust.toml");
+        std::fs::write(&trust_path, toml::to_string(&roots).unwrap()).unwrap();
+        let loaded_roots = EvaluationTrustRoots::load(&trust_path).unwrap();
+        let actor = crate::auth_context::test_management_context("model-eval-ingest");
+        install_evaluation_trust_roots(&mut ctx, &actor, &loaded_roots)
+            .await
+            .unwrap();
+
+        let release = ctx
+            .get(&crate::ontology::release_id("qwen-ingest", "1.0.0"))
+            .await
+            .unwrap()
+            .unwrap();
+        let descriptor = ModelRuntimeDescriptor::from_manifest(
+            &crate::manifest::parse_raw(release.properties.get("manifest").unwrap()).unwrap(),
+        )
+        .unwrap();
+        let identity = identity_from_descriptor(&descriptor).unwrap();
+        let now = crate::now_millis();
+        let evidence = signed_fixture_evaluation(
+            identity,
+            EvaluationOutcome::Passed,
+            now,
+            now.saturating_add(3_600_000),
+            &signing_key,
+        )
+        .unwrap();
+        let evidence_path = root.join("evaluation-result.json");
+        std::fs::write(
+            &evidence_path,
+            serde_json::to_string_pretty(&evidence).unwrap(),
+        )
+        .unwrap();
+        record_evaluation_evidence(
+            &mut ctx,
+            &actor,
+            ModelEvaluationEvidence::load(&evidence_path).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let admitted = crate::catalog::promote(&mut ctx, &actor, "qwen-ingest@1.0.0", "stable")
+            .await
+            .unwrap();
+        assert!(admitted.contains("promoted"), "{admitted}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn evaluation_trust_install_requires_management() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-model-eval-trust-auth-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let signing_key = SigningKey::from_bytes(&[23u8; 32]);
+        let public = signing_key.verifying_key().to_bytes();
+        let roots = EvaluationTrustRoots {
+            version: EVALUATION_TRUST_VERSION,
+            signers: vec![EvaluationTrustedSigner {
+                key_id: crate::signature_verification::key_id(&public),
+                public_key: base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    public,
+                ),
+            }],
+        };
+        let publisher = crate::auth_context::AuthenticatedRequestContextBuilder::new(
+            "eval-trust-publish-only",
+            crate::auth_context::PrincipalIdentity {
+                id: "publisher".into(),
+                kind: crate::auth_context::PrincipalKind::Human,
+            },
+            "test-auth",
+        )
+        .with_delivery_capabilities([DeliveryCapability::Publish])
+        .build()
+        .unwrap();
+        let err = install_evaluation_trust_roots(&mut ctx, &publisher, &roots)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("insufficient delivery capability"), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn evaluation_record_requires_product_grant() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-model-eval-product-grant-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let mut ctx = published_ctx(&root, "qwen-grant", "1.0.0").await;
+        let signing_key = ensure_fixture_evaluation_trust(&mut ctx).await.unwrap();
+        let release = ctx
+            .get(&crate::ontology::release_id("qwen-grant", "1.0.0"))
+            .await
+            .unwrap()
+            .unwrap();
+        let descriptor = ModelRuntimeDescriptor::from_manifest(
+            &crate::manifest::parse_raw(release.properties.get("manifest").unwrap()).unwrap(),
+        )
+        .unwrap();
+        let identity = identity_from_descriptor(&descriptor).unwrap();
+        let now = crate::now_millis();
+        let evidence = signed_fixture_evaluation(
+            identity,
+            EvaluationOutcome::Passed,
+            now,
+            now.saturating_add(3_600_000),
+            &signing_key,
+        )
+        .unwrap();
+        let publisher = crate::auth_context::AuthenticatedRequestContextBuilder::new(
+            "eval-record-other-product",
+            crate::auth_context::PrincipalIdentity {
+                id: "publisher".into(),
+                kind: crate::auth_context::PrincipalKind::Human,
+            },
+            "test-auth",
+        )
+        .with_delivery_capabilities([DeliveryCapability::Publish])
+        .with_product_bindings(["other-product".into()])
+        .build()
+        .unwrap();
+        let err = record_evaluation_evidence(&mut ctx, &publisher, evidence)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("product is outside the publication grant"),
+            "{err}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

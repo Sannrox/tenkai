@@ -124,6 +124,30 @@ impl RemoteClient {
         .await
     }
 
+    pub async fn install_model_evaluation_trust(
+        &self,
+        roots: &tenkai::model_release_evidence::EvaluationTrustRoots,
+    ) -> anyhow::Result<()> {
+        self.request_json_body(
+            reqwest::Method::POST,
+            "/v1/model-evaluation/trust",
+            Some(roots),
+        )
+        .await
+    }
+
+    pub async fn record_model_evaluation_evidence(
+        &self,
+        evidence: &tenkai::model_release_evidence::ModelEvaluationEvidence,
+    ) -> anyhow::Result<()> {
+        self.request_json_body(
+            reqwest::Method::POST,
+            "/v1/model-evaluation/evidence",
+            Some(evidence),
+        )
+        .await
+    }
+
     pub async fn fleet_status(&self) -> anyhow::Result<tenkai::plan::FleetStatusReport> {
         self.request_json(reqwest::Method::GET, "/v1/fleet/status")
             .await

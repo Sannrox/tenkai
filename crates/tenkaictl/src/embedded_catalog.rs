@@ -4,7 +4,7 @@ use tenkai::{canary, catalog, client, maintenance, ontology, plan};
 
 use crate::args::{Command, OutputFormat};
 use crate::authorization::embedded_management_actor;
-use crate::catalog_args::{ApprovalCommand, CanaryCommand, ReleaseCommand};
+use crate::catalog_args::{ApprovalCommand, CanaryCommand, EvalEvidenceCommand, ReleaseCommand};
 use crate::output::print_machine_result;
 
 pub(crate) async fn run(
@@ -127,6 +127,35 @@ pub(crate) async fn run(
                     item.get("verified_at").and_then(serde_json::Value::as_i64)
                 });
                 println!("{}", serde_json::to_string_pretty(&evidence)?);
+            }
+        },
+        Command::EvalEvidence { command } => match command {
+            EvalEvidenceCommand::Trust { trust_roots } => {
+                let actor = embedded_management_actor()?;
+                let roots =
+                    tenkai::model_release_evidence::EvaluationTrustRoots::load(&trust_roots)?;
+                tenkai::model_release_evidence::install_evaluation_trust_roots(ctx, &actor, &roots)
+                    .await?;
+                println!(
+                    "installed model evaluation trust roots ({} signer{})",
+                    roots.signers.len(),
+                    if roots.signers.len() == 1 { "" } else { "s" }
+                );
+            }
+            EvalEvidenceCommand::Record { evidence } => {
+                let actor = embedded_management_actor()?;
+                let evidence =
+                    tenkai::model_release_evidence::ModelEvaluationEvidence::load(&evidence)?;
+                tenkai::model_release_evidence::record_evaluation_evidence(
+                    ctx,
+                    &actor,
+                    evidence.clone(),
+                )
+                .await?;
+                println!(
+                    "recorded model evaluation evidence for {}/{} run {}",
+                    evidence.identity.provider, evidence.identity.model, evidence.eval_run_id
+                );
             }
         },
         Command::Promote { spec, channel } => {

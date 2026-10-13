@@ -20,9 +20,9 @@ Chisei must tell Tenkai that the same identity passed evaluation. Promotion
 must fail closed when that evidence is missing, stale, or invalid.
 
 The identity is not a host inventory row. It is provider, model, profile
-version, artifact digest, and an opaque serving endpoint. Export into Chisei
-and the promotion-gate wiring are follow-on issues; they need this schema
-first so both sides serialize the same bytes.
+version, artifact digest, and an opaque serving endpoint. Export (#604) and
+channel promotion (#605) consume this schema so both sides serialize the same
+bytes. Chisei's companion persist remains follow-on.
 
 ## Decision
 
@@ -101,8 +101,8 @@ same digest.
 - `src/model_release_evidence.rs` is the schema source of truth.
   Example records live under `docs/examples/model-release-evidence/`.
 - Exporting runtime evidence through the integration outbox is #604. Refusing
-  `promote` from this contract remains follow-on. Those paths must not invent
-  a second identity or schema name.
+  `promote` of `model_runtime` without a passing evaluation record is #605.
+  Those paths must not invent a second identity or schema name.
 - Chisei's companion consumer binds `chisei.model_evaluation_evidence.v1`
   and the shared identity fields; it does not need this crate.
 

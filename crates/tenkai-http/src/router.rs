@@ -16,7 +16,8 @@ use super::inspect::{
     openmetrics, ready, reconcile,
 };
 use super::lifecycle::{
-    apply_plan, approve_plan, plan_environment, promote_release, publish_release, recall_release,
+    apply_plan, approve_plan, install_model_evaluation_trust, plan_environment, promote_release,
+    publish_release, recall_release, record_model_evaluation_evidence,
     record_software_compatibility_evidence, retire_environment, rollback_environment,
     software_compatibility_report, subscribe_environment,
 };
@@ -113,6 +114,14 @@ pub fn router(
         )
         .route("/v1/releases", post(publish_release))
         .route("/v1/channels/{channel}/promote", post(promote_release))
+        .route(
+            "/v1/model-evaluation/trust",
+            post(install_model_evaluation_trust),
+        )
+        .route(
+            "/v1/model-evaluation/evidence",
+            post(record_model_evaluation_evidence),
+        )
         .route("/v1/releases/{release}/recall", post(recall_release))
         .route(
             "/v1/environments/{environment}/subscriptions",

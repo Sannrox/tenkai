@@ -2,7 +2,7 @@ use anyhow::{Result, bail};
 use tenkai::command_result::{CommandName, CommandOutcome, CommandResultV1, RetryGuidance};
 
 use crate::args::{Command, OutputFormat};
-use crate::catalog_args::{ApprovalCommand, ReleaseCommand};
+use crate::catalog_args::{ApprovalCommand, EvalEvidenceCommand, ReleaseCommand};
 use crate::env_args::EnvCommand;
 use crate::output::{print_machine_result, reported_machine_failure, with_remote_resources};
 
@@ -51,6 +51,30 @@ pub(crate) async fn run(
                 );
             }
             println!("{}", result.message);
+            Ok(())
+        }
+        Command::EvalEvidence { command } => {
+            match command {
+                EvalEvidenceCommand::Trust { trust_roots } => {
+                    let roots =
+                        tenkai::model_release_evidence::EvaluationTrustRoots::load(&trust_roots)?;
+                    client.install_model_evaluation_trust(&roots).await?;
+                    println!(
+                        "installed model evaluation trust roots ({} signer{})",
+                        roots.signers.len(),
+                        if roots.signers.len() == 1 { "" } else { "s" }
+                    );
+                }
+                EvalEvidenceCommand::Record { evidence } => {
+                    let evidence =
+                        tenkai::model_release_evidence::ModelEvaluationEvidence::load(&evidence)?;
+                    client.record_model_evaluation_evidence(&evidence).await?;
+                    println!(
+                        "recorded model evaluation evidence for {}/{} run {}",
+                        evidence.identity.provider, evidence.identity.model, evidence.eval_run_id
+                    );
+                }
+            }
             Ok(())
         }
         Command::Promote { spec, channel } => {

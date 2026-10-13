@@ -13,6 +13,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         | Command::Release { .. }
         | Command::Approval { .. }
         | Command::Promote { .. }
+        | Command::EvalEvidence { .. }
         | Command::Canary { .. }) => crate::embedded_catalog::run(&mut ctx, command, output).await,
         Command::Channel {
             command:

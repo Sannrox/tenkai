@@ -54,6 +54,18 @@ pub(crate) enum ChannelCommand {
 }
 
 #[derive(Subcommand)]
+pub(crate) enum EvalEvidenceCommand {
+    /// Install trusted Ed25519 signers for Chisei model-evaluation records.
+    Trust {
+        /// Versioned TOML file containing trusted evaluation signers.
+        #[arg(long)]
+        trust_roots: PathBuf,
+    },
+    /// Record a signed chisei.model_evaluation_evidence.v1 JSON document.
+    Record { evidence: PathBuf },
+}
+
+#[derive(Subcommand)]
 pub(crate) enum ApprovalCommand {
     /// Show signer, policy, scope, expiry, and bypass evidence without credentials.
     Inspect { plan_id: String },
@@ -190,6 +202,38 @@ mod tests {
             Command::Release {
                 command: ReleaseCommand::Verify { spec, trust_roots }
             } if spec == "api@1.2.3" && trust_roots == std::path::Path::new("release-trust.toml")
+        ));
+    }
+
+    #[test]
+    fn parses_eval_evidence_trust_and_record() {
+        let trust = Cli::try_parse_from([
+            "tenkaictl",
+            "eval-evidence",
+            "trust",
+            "--trust-roots",
+            "eval-trust.toml",
+        ])
+        .unwrap();
+        assert!(matches!(
+            trust.command,
+            Command::EvalEvidence {
+                command: EvalEvidenceCommand::Trust { trust_roots }
+            } if trust_roots == std::path::Path::new("eval-trust.toml")
+        ));
+
+        let record = Cli::try_parse_from([
+            "tenkaictl",
+            "eval-evidence",
+            "record",
+            "evaluation-result.json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            record.command,
+            Command::EvalEvidence {
+                command: EvalEvidenceCommand::Record { evidence }
+            } if evidence == std::path::Path::new("evaluation-result.json")
         ));
     }
 }

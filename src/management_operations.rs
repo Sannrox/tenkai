@@ -304,6 +304,41 @@ impl ManagementOperations {
         Ok(())
     }
 
+    pub async fn install_model_evaluation_trust(
+        &self,
+        credential: &CredentialMaterial,
+        roots: crate::model_release_evidence::EvaluationTrustRoots,
+    ) -> Result<(), ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        self.require_community_catalog_host()?;
+        self.audit(context.principal_id(), "model_evaluation.trust.requested")?;
+        let mut ctx = self.application_ctx()?;
+        crate::model_release_evidence::install_evaluation_trust_roots(&mut ctx, &context, &roots)
+            .await
+            .map_err(map_catalog_error)?;
+        self.audit(context.principal_id(), "model_evaluation.trust.completed")?;
+        Ok(())
+    }
+
+    pub async fn record_model_evaluation_evidence(
+        &self,
+        credential: &CredentialMaterial,
+        evidence: crate::model_release_evidence::ModelEvaluationEvidence,
+    ) -> Result<(), ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Publish)?;
+        Self::require_product_grant(&context, &evidence.identity.model)?;
+        self.require_community_catalog_host()?;
+        self.audit(context.principal_id(), "model_evaluation.record.requested")?;
+        let mut ctx = self.application_ctx()?;
+        crate::model_release_evidence::record_evaluation_evidence(&mut ctx, &context, evidence)
+            .await
+            .map_err(map_catalog_error)?;
+        self.audit(context.principal_id(), "model_evaluation.record.completed")?;
+        Ok(())
+    }
+
     pub async fn retire_environment(
         &self,
         credential: &CredentialMaterial,
