@@ -685,6 +685,15 @@ async fn record_plan_outcomes(
                 )
                 .await?;
                 ctx.link(&existing.id, &plan.id, REL_PART_OF_PLAN).await?;
+                let serialized = object_property(&existing, "outcome")?;
+                let evidence: CanaryOutcome =
+                    serde_json::from_str(serialized).with_context(|| {
+                        format!(
+                            "canary outcome {} has invalid persisted evidence",
+                            existing.id
+                        )
+                    })?;
+                let _ = export_model_runtime_canary_evidence(ctx, plan, release, &evidence).await;
                 continue;
             }
             let deployment = deployments.iter().find(|deployment| {
@@ -796,8 +805,99 @@ async fn record_plan_outcomes(
             ctx.link(&id, &policy_record_id(active), REL_EVIDENCE_FOR_POLICY)
                 .await?;
             ctx.link(&id, &plan.id, REL_PART_OF_PLAN).await?;
+            let _ = export_model_runtime_canary_evidence(ctx, plan, release, &evidence).await;
         }
     }
+    Ok(())
+}
+
+fn runtime_labels(
+    evidence: &CanaryOutcome,
+) -> (
+    crate::model_release_evidence::RuntimeHealth,
+    crate::model_release_evidence::RuntimeCanary,
+) {
+    let passing = evidence.plan_state == EvidencePlanState::Succeeded
+        && evidence.gate == GateOutcome::Satisfied
+        && evidence.execution == ExecutionOutcome::Succeeded
+        && evidence.health == HealthOutcome::PassedOrNotConfigured
+        && evidence.rollback == RollbackOutcome::NotNeeded;
+    if passing {
+        return (
+            crate::model_release_evidence::RuntimeHealth::Healthy,
+            crate::model_release_evidence::RuntimeCanary::Passed,
+        );
+    }
+    let failed = evidence.plan_state == EvidencePlanState::Failed
+        || evidence.execution == ExecutionOutcome::Failed
+        || evidence.health == HealthOutcome::FailedOrUnknown
+        || evidence.rollback == RollbackOutcome::FailedOrUnknown
+        || evidence.gate == GateOutcome::Blocked;
+    if failed {
+        let health = if evidence.health == HealthOutcome::FailedOrUnknown
+            || evidence.execution == ExecutionOutcome::Failed
+        {
+            crate::model_release_evidence::RuntimeHealth::Unhealthy
+        } else if evidence.health == HealthOutcome::PassedOrNotConfigured {
+            crate::model_release_evidence::RuntimeHealth::Healthy
+        } else {
+            crate::model_release_evidence::RuntimeHealth::Unknown
+        };
+        return (health, crate::model_release_evidence::RuntimeCanary::Failed);
+    }
+    (
+        match evidence.health {
+            HealthOutcome::PassedOrNotConfigured => {
+                crate::model_release_evidence::RuntimeHealth::Healthy
+            }
+            HealthOutcome::FailedOrUnknown => {
+                crate::model_release_evidence::RuntimeHealth::Unhealthy
+            }
+            HealthOutcome::NotRun => crate::model_release_evidence::RuntimeHealth::Unknown,
+        },
+        crate::model_release_evidence::RuntimeCanary::Incomplete,
+    )
+}
+
+async fn export_model_runtime_canary_evidence(
+    ctx: &mut Ctx,
+    plan: &Plan,
+    release: &str,
+    evidence: &CanaryOutcome,
+) -> Result<()> {
+    if !ctx.outcome_export_enabled() {
+        return Ok(());
+    }
+    let Some(release_object) = ctx.get(release).await? else {
+        return Ok(());
+    };
+    let Some(descriptor) =
+        crate::model_release_evidence::descriptor_from_release_object(&release_object)?
+    else {
+        return Ok(());
+    };
+    let release_digest = release_object
+        .properties
+        .get("digest")
+        .cloned()
+        .filter(|value| !value.is_empty())
+        .with_context(|| format!("release {release} has no digest for runtime evidence export"))?;
+    let (health, canary) = runtime_labels(evidence);
+    let plan_digest = format!("sha256:{}", plan.executable_digest()?);
+    crate::model_release_evidence::export_completed_runtime_evidence(
+        ctx,
+        crate::model_release_evidence::CompletedRuntimeExport {
+            descriptor: &descriptor,
+            release_id: release,
+            release_digest: &release_digest,
+            environment: &plan.environment,
+            plan_digest: &plan_digest,
+            health,
+            canary,
+            observed_at: evidence.recorded_at,
+        },
+    )
+    .await?;
     Ok(())
 }
 
@@ -875,5 +975,58 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(database);
+    }
+
+    fn sample_outcome() -> CanaryOutcome {
+        CanaryOutcome {
+            release_id: "tenkai:release:qwen-coder@1.0.0".into(),
+            release_digest: "manifest".into(),
+            artifact_digest: "artifact".into(),
+            policy_digest: "policy".into(),
+            policy_activated_at: 1,
+            environment: "local".into(),
+            plan_id: "tenkai:plan:local:1:content".into(),
+            attempt_id: "attempt".into(),
+            step_order: 0,
+            plan_state: EvidencePlanState::Succeeded,
+            deployment_id: None,
+            executed_at: 2,
+            recorded_at: 3,
+            gate: GateOutcome::Satisfied,
+            execution: ExecutionOutcome::Succeeded,
+            health: HealthOutcome::PassedOrNotConfigured,
+            rollback: RollbackOutcome::NotNeeded,
+            detail: String::new(),
+        }
+    }
+
+    #[test]
+    fn runtime_labels_require_existing_canary_pass_qualification() {
+        let passing = sample_outcome();
+        assert_eq!(
+            runtime_labels(&passing),
+            (
+                crate::model_release_evidence::RuntimeHealth::Healthy,
+                crate::model_release_evidence::RuntimeCanary::Passed
+            )
+        );
+        let mut skipped = passing.clone();
+        skipped.gate = GateOutcome::Skipped;
+        assert_eq!(
+            runtime_labels(&skipped).1,
+            crate::model_release_evidence::RuntimeCanary::Incomplete
+        );
+        let mut failed_plan = passing.clone();
+        failed_plan.plan_state = EvidencePlanState::Failed;
+        assert_eq!(
+            runtime_labels(&failed_plan).1,
+            crate::model_release_evidence::RuntimeCanary::Failed
+        );
+        let mut rolled_back = passing;
+        rolled_back.rollback = RollbackOutcome::Succeeded;
+        assert_eq!(
+            runtime_labels(&rolled_back).1,
+            crate::model_release_evidence::RuntimeCanary::Incomplete
+        );
     }
 }

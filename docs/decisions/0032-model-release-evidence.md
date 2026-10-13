@@ -100,9 +100,9 @@ same digest.
 
 - `src/model_release_evidence.rs` is the schema source of truth.
   Example records live under `docs/examples/model-release-evidence/`.
-- Exporting runtime evidence to Chisei and refusing `promote` from this
-  contract are follow-on work. They must not invent a second identity or
-  schema name.
+- Exporting runtime evidence through the integration outbox is #604. Refusing
+  `promote` from this contract remains follow-on. Those paths must not invent
+  a second identity or schema name.
 - Chisei's companion consumer binds `chisei.model_evaluation_evidence.v1`
   and the shared identity fields; it does not need this crate.
 

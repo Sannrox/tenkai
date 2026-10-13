@@ -827,6 +827,119 @@ max_startup_seconds = 30
         plan_id
     }
 
+    static MODEL_EVIDENCE_KEY_ENV: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[tokio::test]
+    async fn model_runtime_canary_and_smoke_export_signed_outbox_records() {
+        let _env_guard = MODEL_EVIDENCE_KEY_ENV.lock().await;
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-model-evidence-export-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let database = root.join("tenkai.db");
+        let manifest_dir = root.join("model");
+        let key_path = root.join("model-evidence.ed25519");
+        std::fs::create_dir_all(&manifest_dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::io::Write as _;
+            use std::os::unix::fs::OpenOptionsExt as _;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&key_path)
+                .unwrap();
+            file.write_all(&[29_u8; 32]).unwrap();
+        }
+        unsafe {
+            std::env::set_var(
+                crate::model_release_evidence::MODEL_RUNTIME_EVIDENCE_SIGNING_KEY_ENV,
+                &key_path,
+            );
+        }
+        write_model_runtime_manifest(&manifest_dir, "qwen-export", "1.0.0");
+
+        let mut ctx = Ctx::embedded_with_outcome_export(&database, true).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::plan::env_add(&mut ctx, "local", "export host")
+            .await
+            .unwrap();
+        publish_unsigned_model(&mut ctx, &manifest_dir).await;
+        let actor = crate::auth_context::test_management_context("evidence-export");
+        crate::catalog::promote(&mut ctx, &actor, "qwen-export@1.0.0", "canary")
+            .await
+            .unwrap();
+        set_designated(&mut ctx, &actor, "local", true)
+            .await
+            .unwrap();
+        configure(
+            &mut ctx,
+            &actor,
+            "qwen-export@1.0.0",
+            "stable",
+            vec!["local".into()],
+            false,
+        )
+        .await
+        .unwrap();
+        apply_local_model_canary(&mut ctx, "qwen-export", "canary").await;
+
+        let store = ctx.embedded_arc().expect("embedded store");
+        let environment_id = crate::ontology::env_id("local");
+        let records = crate::client::block_embedded(store, move |store| {
+            Ok(crate::storage::OperationalStore::list_provider_events(
+                store,
+                crate::model_release_evidence::MODEL_RUNTIME_EVIDENCE_KIND,
+                &environment_id,
+                16,
+            )?)
+        })
+        .await
+        .unwrap();
+        unsafe {
+            std::env::remove_var(
+                crate::model_release_evidence::MODEL_RUNTIME_EVIDENCE_SIGNING_KEY_ENV,
+            );
+        }
+        assert!(
+            records.len() >= 2,
+            "expected smoke and canary outbox records, got {}",
+            records.len()
+        );
+        let parsed = records
+            .iter()
+            .map(|record| {
+                let event: crate::providers::ProviderEvent =
+                    serde_json::from_str(&record.payload_json).unwrap();
+                crate::model_release_evidence::ModelRuntimeEvidence::parse_json(&event.payload_json)
+                    .expect("part-1 schema")
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            parsed.iter().all(|evidence| {
+                evidence.health == crate::model_release_evidence::RuntimeHealth::Healthy
+                    && evidence.identity.endpoint == "served://qwen-export"
+                    && !evidence.identity.endpoint.contains("127.0.0.1")
+            }),
+            "{parsed:?}"
+        );
+        assert!(
+            parsed.iter().any(|evidence| {
+                evidence.canary == crate::model_release_evidence::RuntimeCanary::Incomplete
+            }),
+            "smoke completion should export incomplete canary: {parsed:?}"
+        );
+        assert!(
+            parsed.iter().any(|evidence| {
+                evidence.canary == crate::model_release_evidence::RuntimeCanary::Passed
+            }),
+            "terminal canary persist should export passed canary: {parsed:?}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// End-to-end: canary policy gates model_runtime promotion to a wider channel.
     ///
     /// Uses the built-in `local` environment (unsigned release + development apply
