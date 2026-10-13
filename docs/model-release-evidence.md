@@ -4,9 +4,10 @@ Tenkai and Chisei exchange two versioned JSON records for the same model
 identity. Tenkai emits runtime health and canary evidence. Chisei emits an
 evaluation result. Promotion of that identity refuses when either record is
 missing, stale, or invalid. This is the schema contract
-([ADR 0032](decisions/0032-model-release-evidence.md)). Export and the
-promotion gate are follow-on work; they consume these types rather than
-defining new ones.
+([ADR 0032](decisions/0032-model-release-evidence.md)). Tenkai signs and
+exports the runtime record through the integration outbox when a
+`model_runtime` canary or smoke completes (pass or fail). The promotion
+gate remains follow-on work.
 
 This contract is distinct from [evaluation gate evidence](evaluation-gate-evidence.md)
 (ADR 0013), which still gates software releases on suite-case projections.
@@ -71,9 +72,22 @@ identity, validate, have not expired, and pass (`health=healthy`,
 | `stale` | `expires_at` is at or before now, or `observed_at` is more than 60 seconds ahead of now. |
 | `invalid` | Unknown schema, unknown fields, failed validation, identity mismatch, or a non-passing outcome. |
 
+## Export
+
+When a `model_runtime` canary attempt is persisted, or when model-runtime
+apply finishes smoke, Tenkai signs `tenkai.model_runtime_evidence.v1` and
+enqueues it on the integration outbox as provider kind
+`model_runtime_evidence`. Failed and passing outcomes both export. Successful
+smoke sets `health=healthy` and `canary=incomplete`; `canary=passed` is
+reserved for a terminal canary outcome that satisfies the existing canary
+pass checks. Identity uses an opaque `served://<product>` URI, never a host
+or credential.
+
+Signing uses the 32-byte Ed25519 seed at `TENKAI_MODEL_EVIDENCE_KEY`. Export
+runs only when terminal-outcome export is enabled and that key is present.
+
 ## Follow-on
 
-- Emit and export Tenkai runtime evidence.
 - Consume Chisei evaluation evidence at promote time.
 - Chisei companion: persist and return `chisei.model_evaluation_evidence.v1`
   for the same identity.

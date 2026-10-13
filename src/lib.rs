@@ -81,8 +81,9 @@
 //!   heartbeat renewal, and inventory admission behind one interface.
 //! - [`model_release_evidence`] owns the versioned two-way model-release
 //!   evidence schema: runtime health and canary from Tenkai, evaluation
-//!   results from Chisei, and fail-closed promotion when evidence is missing,
-//!   stale, or invalid.
+//!   results from Chisei, signed outbox export when a `model_runtime` canary
+//!   or smoke completes, and fail-closed promotion when evidence is missing,
+//!   stale, or invalid. Promotion-gate wiring remains follow-on.
 //! - [`software_executor`], [`model_runtime`], [`routing`], [`staged_artifact`],
 //!   [`workshop_module`], and [`worker_pool`] adapt typed delivery products to
 //!   their target runtimes.

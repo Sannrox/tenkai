@@ -65,8 +65,39 @@ pub(super) async fn activate(
             Ok(executor) => executor,
             Err(detail) => return Ok(Err(detail)),
         };
+        let export_descriptor = descriptor.clone();
         let applied =
             run_guarded_mutation(ctx, lease, content, move || executor.apply(&descriptor)).await?;
+        let (health, canary) = match &applied {
+            Ok(_) => (
+                crate::model_release_evidence::RuntimeHealth::Healthy,
+                crate::model_release_evidence::RuntimeCanary::Incomplete,
+            ),
+            Err(_) => (
+                crate::model_release_evidence::RuntimeHealth::Unhealthy,
+                crate::model_release_evidence::RuntimeCanary::Failed,
+            ),
+        };
+        let release_id =
+            crate::ontology::release_id(&content.product, &content.manifest.product.version);
+        let plan_digest =
+            crate::model_release_evidence::smoke_plan_digest(&content.environment, &release_id);
+        // Export is optional integration. A signing or outbox failure must not
+        // turn a completed smoke into an activation error (and recovery).
+        let _ = crate::model_release_evidence::export_completed_runtime_evidence(
+            ctx,
+            crate::model_release_evidence::CompletedRuntimeExport {
+                descriptor: &export_descriptor,
+                release_id: &release_id,
+                release_digest: &content.manifest_digest,
+                environment: &content.environment,
+                plan_digest: &plan_digest,
+                health,
+                canary,
+                observed_at: crate::now_millis(),
+            },
+        )
+        .await;
         return Ok(applied.map(|_| ()));
     }
     if content.manifest.product.kind.policy().target() == ProductTarget::WorkerPool {
