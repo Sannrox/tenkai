@@ -82,8 +82,8 @@
 //! - [`model_release_evidence`] owns the versioned two-way model-release
 //!   evidence schema: runtime health and canary from Tenkai, evaluation
 //!   results from Chisei, signed outbox export when a `model_runtime` canary
-//!   or smoke completes, and fail-closed promotion when evidence is missing,
-//!   stale, or invalid. Promotion-gate wiring remains follow-on.
+//!   or smoke completes, and fail-closed promotion when evaluation evidence is
+//!   missing, stale, or invalid.
 //! - [`software_executor`], [`model_runtime`], [`routing`], [`staged_artifact`],
 //!   [`workshop_module`], and [`worker_pool`] adapt typed delivery products to
 //!   their target runtimes.

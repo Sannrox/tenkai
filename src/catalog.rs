@@ -554,6 +554,7 @@ pub async fn promote(
         bail!("release {name}@{version} is not published");
     };
     change_set_pin::require_stored_accepted(&release)?;
+    crate::model_release_evidence::require_published_model_evaluation(ctx, &release).await?;
     let owner = format!(
         "promotion:{}:{spec}:{}",
         actor.principal_id(),
@@ -568,6 +569,12 @@ pub async fn promote(
     let promoted_release = rid.clone();
     crate::canary::guarded_promotion(ctx, actor, &name, &version, &channel, &owner, move |ctx| {
         Box::pin(async move {
+            let Some(release) = ctx.get(&promoted_release).await? else {
+                anyhow::bail!("release {promotion_name}@{promotion_version} is not published");
+            };
+            crate::change_set_pin::require_stored_accepted(&release)?;
+            crate::model_release_evidence::require_published_model_evaluation(ctx, &release)
+                .await?;
             let cid = channel_id(&promotion_name, &promotion_channel);
             let channel_head = object(
                 cid.clone(),

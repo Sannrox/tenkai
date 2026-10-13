@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::catalog_args::{ApprovalCommand, CanaryCommand, ChannelCommand, ReleaseCommand};
+use crate::catalog_args::{
+    ApprovalCommand, CanaryCommand, ChannelCommand, EvalEvidenceCommand, ReleaseCommand,
+};
 use crate::dev_args::DevCommand;
 use crate::env_args::EnvCommand;
 use crate::flags::{ApprovalFileFlags, DevelopmentBypassFlags};
@@ -137,6 +139,11 @@ pub(crate) enum Command {
     },
     /// Point a channel at a published release, e.g. `promote hello@0.1.0 stable`.
     Promote { spec: String, channel: String },
+    /// Install evaluation trust roots or record a signed Chisei evaluation.
+    EvalEvidence {
+        #[command(subcommand)]
+        command: EvalEvidenceCommand,
+    },
     /// Manage canary designation, promotion policy, and evidence repair.
     Canary {
         #[command(subcommand)]
