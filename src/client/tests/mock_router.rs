@@ -174,6 +174,7 @@ pub(super) async fn remote_ctx(state: MockSekaiState) -> (Ctx, tokio::task::Join
             release_trust_roots: None,
             require_host_release_trust: false,
             plan_kind_list: Arc::new(PlanKindListTick::default()),
+            health_metrics: None,
         },
         server,
     )

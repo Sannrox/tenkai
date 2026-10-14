@@ -75,6 +75,7 @@ async fn remote_fenced_writes_use_canonical_rpc_and_reuse_request_id_on_retry() 
         release_trust_roots: None,
         require_host_release_trust: false,
         plan_kind_list: Arc::new(PlanKindListTick::default()),
+        health_metrics: None,
     };
     let object = Object {
         id: "tenkai:object:remote".into(),
@@ -147,6 +148,7 @@ async fn remote_create_reclassifies_existing_object_after_sanitized_internal_err
         release_trust_roots: None,
         require_host_release_trust: false,
         plan_kind_list: Arc::new(PlanKindListTick::default()),
+        health_metrics: None,
     };
 
     let object = Object {
@@ -197,6 +199,7 @@ async fn remote_graph_action_registration_uses_governed_rpc() {
         release_trust_roots: None,
         require_host_release_trust: false,
         plan_kind_list: Arc::new(PlanKindListTick::default()),
+        health_metrics: None,
     };
     let action = ActionTypeDef {
         name: "tenkai.replace_subscription".into(),

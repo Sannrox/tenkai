@@ -46,6 +46,10 @@
 //! - `apply::start_admission` hides evaluation-evidence validation, maintenance
 //!   authorization and timing races, emergency-override recording, and durable
 //!   blocked/running Plan transitions behind one private start interface.
+//! - [`health_gate`] evaluates post-apply Prometheus-compatible SLO queries
+//!   after activation succeeds and before recording Succeeded, persists release
+//!   evidence, and either halts or restores a previously signed pin without
+//!   rollback loops.
 //! - `apply::plan_completion` hides Step outcome classification, terminal Plan
 //!   state selection, execution-error persistence precedence, and ambiguous
 //!   durable transition confirmation behind one private completion interface.
@@ -157,6 +161,7 @@ pub mod fleet;
 pub mod fleet_budget;
 pub mod fleet_fairness;
 pub mod fleet_workload;
+pub mod health_gate;
 pub mod inventory;
 pub mod issuer_auth;
 pub mod maintenance;

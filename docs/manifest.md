@@ -18,6 +18,14 @@ inputs = ["compose.yaml"]          # immutable files/directories used by these c
 
 [gate]
 eval_suite = "my-suite"          # chisei eval suite; latest run must fully pass
+bake_window_seconds = 60         # optional SLO bake window; first breach halts
+on_fail = "halt"                 # or "rollback" to the previously signed pin
+
+[[gate.slo]]                     # optional; omit to keep today's apply behavior
+name = "error_rate"
+query = "sum(rate(http_requests_total{status=~\"5..\"}[5m])) / sum(rate(http_requests_total[5m]))"
+op = "lte"
+threshold = 0.01
 
 [delivery]
 has_migration = false            # schema or data migration; auto policy stays human
@@ -89,6 +97,13 @@ An embedded apply with `[gate].eval_suite` fails closed locally unless a remote
 provider host is explicitly configured; ungated solo deploys never open a
 network connection. The evidence format is in
 [evaluation gate evidence](evaluation-gate-evidence.md).
+
+Optional `[[gate.slo]]` queries are evaluated after activation succeeds and
+before the step is recorded as succeeded, against a Prometheus-compatible
+instant source.
+A failing sample inside `bake_window_seconds` halts the rollout, or restores
+the plan's previously signed pin when `on_fail = "rollback"`. See
+[health and SLO gate evidence](health-gate-evidence.md).
 
 ## Product kinds
 

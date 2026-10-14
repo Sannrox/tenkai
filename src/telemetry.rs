@@ -24,6 +24,7 @@ pub const METRIC_RECONCILE_LATENCY_MS: &str = "tenkai.reconcile.latency_ms";
 pub const METRIC_APPLY_OUTCOME: &str = "tenkai.apply.outcomes";
 pub const METRIC_LEASE_ACQUIRED: &str = "tenkai.lease.acquired";
 pub const METRIC_LEASE_RELEASED: &str = "tenkai.lease.released";
+pub const METRIC_HEALTH_GATE_OUTCOME: &str = "tenkai.health_gate.outcomes";
 
 const ENDPOINT_ENV: &str = "TENKAI_OTEL_ENDPOINT";
 const OPERATION_ENV: &str = "TENKAI_OPERATION_ID";

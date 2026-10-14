@@ -576,16 +576,27 @@ pub async fn promote(
             crate::model_release_evidence::require_published_model_evaluation(ctx, &release)
                 .await?;
             let cid = channel_id(&promotion_name, &promotion_channel);
+            let mut channel_properties = HashMap::from([
+                ("product".into(), promotion_name.clone()),
+                ("channel".into(), promotion_channel.clone()),
+                ("current_version".into(), promotion_version.clone()),
+                ("current_release".into(), promoted_release.clone()),
+            ]);
+            if let Some(existing) = ctx.get(&cid).await?
+                && let Some(overlay) = existing
+                    .properties
+                    .get(crate::health_gate::CHANNEL_HEALTH_GATES_PROPERTY)
+            {
+                channel_properties.insert(
+                    crate::health_gate::CHANNEL_HEALTH_GATES_PROPERTY.into(),
+                    overlay.clone(),
+                );
+            }
             let channel_head = object(
                 cid.clone(),
                 KIND_CHANNEL,
                 format!("{promotion_name}/{promotion_channel}"),
-                HashMap::from([
-                    ("product".into(), promotion_name.clone()),
-                    ("channel".into(), promotion_channel.clone()),
-                    ("current_version".into(), promotion_version.clone()),
-                    ("current_release".into(), promoted_release.clone()),
-                ]),
+                channel_properties,
             );
             if ctx.get(&cid).await?.is_none() {
                 ctx.create_once(object(

@@ -14,12 +14,14 @@ struct StepContext<'a> {
 pub(super) async fn execute(
     ctx: &mut Ctx,
     lease: &EnvironmentLease,
-    environment: &str,
-    plan_id: &str,
+    plan: &Plan,
     step: &Step,
     adapters: TargetAdapters<'_>,
     recalled_recovery: bool,
+    skip_gates: bool,
 ) -> Result<Outcome> {
+    let environment = plan.environment.as_str();
+    let plan_id = plan.id.as_str();
     let step_context = StepContext {
         lease,
         environment,
@@ -62,6 +64,12 @@ pub(super) async fn execute(
         &content.manifest_digest,
     )
     .await?;
+    if !skip_gates
+        && crate::health_gate::step_requires_slo_evaluation(ctx, environment, step).await?
+    {
+        crate::health_gate::resolve_spec(ctx, environment, &step.product, &content.manifest.gate)
+            .await?;
+    }
 
     let mut outgoing_removed = false;
     if step.action == Action::Rollback
@@ -129,6 +137,72 @@ pub(super) async fn execute(
     };
     let outcome = match activation {
         Ok(()) => {
+            match crate::health_gate::decide_after_success(
+                ctx,
+                lease,
+                plan,
+                step,
+                skip_gates,
+                &content.manifest.gate,
+            )
+            .await
+            {
+                Ok(None) => {}
+                Ok(Some(decision))
+                    if decision.action == crate::manifest::GateFailPolicy::Rollback =>
+                {
+                    return restore_after_health_gate(
+                        ctx,
+                        lease,
+                        environment,
+                        plan_id,
+                        step,
+                        adapters,
+                        decision.evidence.summary(),
+                    )
+                    .await;
+                }
+                Ok(Some(decision)) => {
+                    let outcome = decision.halted_outcome(step);
+                    let transition = if step.action == Action::Restart {
+                        crate::environment::DeploymentTransition::Refreshed
+                    } else {
+                        crate::environment::DeploymentTransition::Deployed {
+                            version: step.to.clone(),
+                            previous: step.from.clone(),
+                        }
+                    };
+                    if let Err(error) =
+                        record(ctx, lease, environment, plan_id, &outcome, transition).await
+                    {
+                        compensate_activation(
+                            ctx,
+                            lease,
+                            environment,
+                            step,
+                            &content,
+                            &error,
+                            adapters.clone(),
+                        )
+                        .await;
+                        return Err(error);
+                    }
+                    return Ok(outcome);
+                }
+                Err(error) => {
+                    compensate_activation(
+                        ctx,
+                        lease,
+                        environment,
+                        step,
+                        &content,
+                        &error,
+                        adapters.clone(),
+                    )
+                    .await;
+                    return Err(error);
+                }
+            }
             let outcome = Outcome::new(step.clone(), StepOutcomeStatus::Succeeded, String::new());
             let transition = if step.action == Action::Restart {
                 crate::environment::DeploymentTransition::Refreshed
@@ -376,6 +450,244 @@ async fn compensate_activation(
             crate::environment::record_unknown(ctx, lease, environment, &step.product, &failure)
                 .await;
     }
+}
+
+/// Restore the plan's previous signed pin after a failing SLO gate (#590).
+///
+/// Activation already succeeded, but this path runs before any success
+/// observation is recorded. It deactivates the new release, activates the
+/// restore pin, and records `RolledBack` so the same execution does not
+/// re-evaluate SLO gates (#549). Admission or pull failures leave the new
+/// release running, so bookkeeping records that live version and the failed
+/// target instead of returning with a stale prior deploy.
+pub(super) async fn restore_after_health_gate(
+    ctx: &mut Ctx,
+    lease: &EnvironmentLease,
+    environment: &str,
+    plan_id: &str,
+    step: &Step,
+    adapters: TargetAdapters<'_>,
+    detail: String,
+) -> Result<Outcome> {
+    let Some(pin) = step.restore.as_ref() else {
+        return record_live_restore_failure(
+            ctx,
+            lease,
+            environment,
+            plan_id,
+            step,
+            format!("{detail}; automatic rollback refused: no restore pin"),
+        )
+        .await;
+    };
+    let mut current = match admit_release(
+        ctx,
+        &ReleasePin {
+            release_id: step.release_id.clone(),
+            digest: step.release_digest.clone(),
+            artifact_digest: step.artifact_digest.clone(),
+            workdir: step.workdir.clone(),
+        },
+        environment,
+        &step.product,
+        false,
+    )
+    .await
+    {
+        Ok(content) => content,
+        Err(error) => {
+            return record_live_restore_failure(
+                ctx,
+                lease,
+                environment,
+                plan_id,
+                step,
+                format!("{detail}; automatic rollback blocked: {error}"),
+            )
+            .await;
+        }
+    };
+    let mut previous = match admit_release(ctx, pin, environment, &step.product, false).await {
+        Ok(content) => content,
+        Err(error) => {
+            return record_live_restore_failure(
+                ctx,
+                lease,
+                environment,
+                plan_id,
+                step,
+                format!("{detail}; automatic rollback blocked: {error}"),
+            )
+            .await;
+        }
+    };
+    if let Err(error) =
+        admit_artifact_pulls(ctx, environment, adapters.artifact_registry, &mut current).await
+    {
+        return record_live_restore_failure(
+            ctx,
+            lease,
+            environment,
+            plan_id,
+            step,
+            format!("{detail}; automatic rollback blocked: {error}"),
+        )
+        .await;
+    }
+    if let Err(error) =
+        admit_artifact_pulls(ctx, environment, adapters.artifact_registry, &mut previous).await
+    {
+        return record_live_restore_failure(
+            ctx,
+            lease,
+            environment,
+            plan_id,
+            step,
+            format!("{detail}; automatic rollback blocked: {error}"),
+        )
+        .await;
+    }
+    if let Err(error) = crate::software_compatibility::require_manifest(
+        ctx,
+        environment,
+        &previous.manifest,
+        &previous.manifest_digest,
+    )
+    .await
+    {
+        return record_live_restore_failure(
+            ctx,
+            lease,
+            environment,
+            plan_id,
+            step,
+            format!("{detail}; automatic rollback blocked: {error}"),
+        )
+        .await;
+    }
+    let software_shell_without_cleanup = current.manifest.product.kind.policy().target()
+        == crate::product_kind::ProductTarget::Software
+        && adapters.software.is_none()
+        && current
+            .manifest
+            .deploy
+            .uninstall
+            .as_deref()
+            .is_none_or(|command| command.is_empty());
+    if !software_shell_without_cleanup {
+        match product_execution::deactivate(ctx, lease, &current, adapters.clone()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(cleanup)) => {
+                let outcome = Outcome::new(
+                    step.clone(),
+                    StepOutcomeStatus::Failed,
+                    format!(
+                        "{detail}; automatic rollback blocked: outgoing release cleanup failed: {cleanup}"
+                    ),
+                );
+                record(
+                    ctx,
+                    lease,
+                    environment,
+                    plan_id,
+                    &outcome,
+                    crate::environment::DeploymentTransition::Unknown,
+                )
+                .await?;
+                return Ok(outcome);
+            }
+            Err(error) => {
+                let outcome = Outcome::new(
+                    step.clone(),
+                    StepOutcomeStatus::Failed,
+                    format!(
+                        "{detail}; automatic rollback blocked: outgoing release cleanup failed: {error}"
+                    ),
+                );
+                record(
+                    ctx,
+                    lease,
+                    environment,
+                    plan_id,
+                    &outcome,
+                    crate::environment::DeploymentTransition::Unknown,
+                )
+                .await?;
+                return Ok(outcome);
+            }
+        }
+    }
+    let version = step
+        .from
+        .as_deref()
+        .unwrap_or(&previous.manifest.product.version);
+    let (restored, detail) =
+        restore_previous(ctx, lease, &previous, version, detail, adapters).await?;
+    let outcome = Outcome::new(
+        step.clone(),
+        if restored {
+            StepOutcomeStatus::RolledBack
+        } else {
+            StepOutcomeStatus::Failed
+        },
+        detail,
+    );
+    record(
+        ctx,
+        lease,
+        environment,
+        plan_id,
+        &outcome,
+        if restored {
+            // Keep the environment's existing rollback history. The rejected
+            // release never recorded a successful deploy, so it must not become
+            // the next ordinary rollback destination.
+            crate::environment::DeploymentTransition::Unchanged
+        } else {
+            crate::environment::DeploymentTransition::Unknown
+        },
+    )
+    .await?;
+    Ok(outcome)
+}
+
+async fn record_live_restore_failure(
+    ctx: &mut Ctx,
+    lease: &EnvironmentLease,
+    environment: &str,
+    plan_id: &str,
+    step: &Step,
+    detail: String,
+) -> Result<Outcome> {
+    let outcome = Outcome::new(step.clone(), StepOutcomeStatus::Failed, detail);
+    record(
+        ctx,
+        lease,
+        environment,
+        plan_id,
+        &outcome,
+        crate::environment::DeploymentTransition::Deployed {
+            version: step.to.clone(),
+            previous: step.from.clone(),
+        },
+    )
+    .await?;
+    Ok(outcome)
+}
+
+async fn admit_artifact_pulls(
+    ctx: &mut Ctx,
+    environment: &str,
+    registry: Option<&dyn crate::oci_artifact::ArtifactRegistry>,
+    content: &mut ReleaseContent,
+) -> Result<()> {
+    let env_object = crate::environment::environment(ctx, environment).await?;
+    content.artifact_pulls = crate::oci_artifact::verify_environment_pull(
+        &content.manifest.artifacts,
+        &env_object.properties,
+        registry,
+    )?;
+    Ok(())
 }
 
 async fn record(

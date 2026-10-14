@@ -4,7 +4,8 @@
 
 Publish a new version, promote it, and `apply` the new plan to upgrade. If the
 health probe of a new release fails, the previous release is restored
-automatically.
+automatically. Optional SLO gates (#590) can also halt the rollout or restore
+that same previously signed pin after a bake-window breach.
 
 After a failed deployment or automatic rollback, the environment retains the
 failed release and originating plan identity. Automatic convergence holds that
@@ -17,6 +18,12 @@ approve its exact digest, and apply it. Explicit planning includes the held
 target; it does not clear the hold merely by computing a plan. Successful
 deployment clears the marker, while another failure retains it. Unknown
 deployment state still requires manual recovery before any new plan.
+
+SLO gates declared on a release or channel are evaluated after activation
+succeeds and before the step is recorded as succeeded. `on_fail = "halt"`
+stops further steps and leaves the new release deployed. `on_fail = "rollback"`
+restores the plan's previously signed pin and does not re-evaluate SLO gates
+on that restore. See [health and SLO gate evidence](health-gate-evidence.md).
 
 ## Roll back deliberately
 

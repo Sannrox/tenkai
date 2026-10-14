@@ -51,6 +51,7 @@ pub struct Ctx {
     outcome_export_enabled: bool,
     outcome_inspection_enabled: bool,
     plan_kind_list: Arc<PlanKindListTick>,
+    health_metrics: Option<Arc<dyn crate::health_gate::HealthMetricsSource>>,
 }
 
 #[derive(Clone)]
@@ -141,6 +142,7 @@ pub async fn connect() -> Result<Ctx> {
         outcome_export_enabled: false,
         outcome_inspection_enabled: false,
         plan_kind_list: Arc::new(PlanKindListTick::default()),
+        health_metrics: None,
     })
 }
 
