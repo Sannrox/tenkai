@@ -60,6 +60,19 @@ tenkaictl env approval-policy show lab
 tenkaictl env approval-policy clear lab
 ```
 
+## Post-deploy webhooks
+
+An environment may declare signed HTTPS endpoints that receive terminal apply
+outcomes. Tenkai stores the URL and the name of a process variable that holds
+the HMAC secret, never the secret itself. Delivery is asynchronous; a down
+endpoint does not fail apply. See [post-deploy webhooks](deploy-webhooks.md).
+
+```bash
+tenkaictl env webhooks set lab --url https://hooks.example.test/tenkai --secret-env TENKAI_WEBHOOK_SECRET
+tenkaictl env webhooks list lab
+tenkaictl env webhooks clear lab
+```
+
 ## Delivery hold
 
 Hold pauses new execution without unsubscribing, recalling, or opening a

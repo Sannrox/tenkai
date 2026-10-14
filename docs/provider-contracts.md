@@ -74,7 +74,25 @@ server unready.
 `tenkai.health_gate_evidence.v1`: each declared gate's name, query, threshold,
 observed value, and verdict, plus halt-or-rollback policy. The binding uses the
 gated release digest, plan content id, evidence digest, and environment.
-Webhook delivery of this event is #546.
+Webhook delivery of this event remains available on the `health_gate` outbox
+kind. Apply-lifecycle notifications (`apply.succeeded`, `apply.failed`,
+`apply.rolled_back`) use provider kind `deploy_webhook`; see
+[post-deploy webhooks](deploy-webhooks.md).
+
+### Deploy webhook event v1
+
+`ProviderEvent.payload_json` for provider kind `deploy_webhook` is an envelope
+(`tenkai.deploy_webhook.envelope.v1`) that names the destination URL and
+`secret_env`, plus the public body (`tenkai.deploy_webhook.v1`). Event identity
+is a digest of destination URL, plan id, step id, and event name, so replaying
+the same terminal step is idempotent. The worker POSTs only the public body,
+signed with HMAC-SHA256, and binds `observed_at` from the outbox collection
+timestamp on first delivery. Payloads contain environment, product, versions,
+release id/digest, optional source revision, artifact digests, plan id, step id,
+outcome, and that timestamp. They contain no secrets, command output, workdir
+paths, or the per-call deployment attempt id. A rollback body sets `alert` and
+includes both versions.
+Delivery retries use the durable outbox; apply does not wait.
 
 ### Terminal outcome event v1
 

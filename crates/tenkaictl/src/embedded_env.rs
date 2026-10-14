@@ -158,6 +158,9 @@ pub(crate) async fn run(
         EnvCommand::ApprovalPolicy { command } => {
             crate::embedded_env_config::approval_policy(ctx, command).await?;
         }
+        EnvCommand::Webhooks { command } => {
+            crate::embedded_env_config::webhooks(ctx, command).await?;
+        }
         EnvCommand::Hold { env, action } => {
             crate::embedded_hold::run(
                 ctx,

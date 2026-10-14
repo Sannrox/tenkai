@@ -31,6 +31,7 @@ will be split over time. Contributor and agent workflow live in
 | Run reconciliation, `tenkai-server`, and environment runtimes | [run-tenkai-server.md](run-tenkai-server.md) |
 | Configure server authentication (bearer tokens, enterprise JWT, OIDC) | [configure-server-authentication.md](configure-server-authentication.md) |
 | Manage environments and maintenance windows | [manage-environments.md](manage-environments.md) |
+| Notify an external system after apply | [deploy-webhooks.md](deploy-webhooks.md) |
 | Upgrade, roll back, and recover a product | [upgrade-and-rollback.md](upgrade-and-rollback.md) |
 | Deploy releases from GitHub | [deploy-from-github.md](deploy-from-github.md) |
 | Publish a signed release from CI | [examples/ci-publish](../examples/ci-publish/) |
@@ -90,6 +91,7 @@ will be split over time. Contributor and agent workflow live in
 | Provider contracts | [provider-contracts.md](provider-contracts.md) |
 | Evaluation gate evidence | [evaluation-gate-evidence.md](evaluation-gate-evidence.md) |
 | Health and SLO gate evidence | [health-gate-evidence.md](health-gate-evidence.md) |
+| Post-deploy webhooks | [deploy-webhooks.md](deploy-webhooks.md) |
 | Model-release evidence | [model-release-evidence.md](model-release-evidence.md) |
 | Offline bundles | [offline-bundles.md](offline-bundles.md) |
 | Development fixtures | [development-fixtures.md](development-fixtures.md) |

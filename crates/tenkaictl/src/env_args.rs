@@ -106,6 +106,11 @@ pub(crate) enum EnvCommand {
         #[command(subcommand)]
         command: ApprovalPolicyCommand,
     },
+    /// Manage signed post-deploy webhook endpoints. Never secret bytes.
+    Webhooks {
+        #[command(subcommand)]
+        command: WebhooksCommand,
+    },
     /// Pause delivery to an environment. The reconciler still plans.
     Hold {
         env: String,
@@ -157,6 +162,30 @@ pub(crate) enum HoldAction {
     Clear,
     /// Show the active hold and its set/clear history.
     Show,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum WebhooksCommand {
+    /// List configured webhook URLs and secret-env names (never secret bytes).
+    List { env: String },
+    /// Add or replace one endpoint, keyed by URL.
+    Set {
+        env: String,
+        #[arg(long)]
+        url: String,
+        /// Process environment variable that holds the HMAC secret.
+        #[arg(long)]
+        secret_env: String,
+        /// Comma-separated events. Default: every apply outcome.
+        #[arg(long)]
+        events: Option<String>,
+    },
+    /// Clear one URL, or every webhook on the environment.
+    Clear {
+        env: String,
+        #[arg(long)]
+        url: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]

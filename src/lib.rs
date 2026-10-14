@@ -50,6 +50,9 @@
 //!   after activation succeeds and before recording Succeeded, persists release
 //!   evidence, and either halts or restores a previously signed pin without
 //!   rollback loops.
+//! - [`deploy_webhook`] enqueues signed per-environment HTTPS notifications for
+//!   terminal apply outcomes on the durable provider-event outbox. Delivery
+//!   retries independently of apply.
 //! - `apply::plan_completion` hides Step outcome classification, terminal Plan
 //!   state selection, execution-error persistence precedence, and ambiguous
 //!   durable transition confirmation behind one private completion interface.
@@ -151,6 +154,7 @@ pub mod connectivity;
 pub mod delivery_bridge;
 pub mod delivery_hold;
 pub mod delivery_manifest;
+pub mod deploy_webhook;
 pub mod dev_sign;
 pub mod development_fixtures;
 pub mod embedded;

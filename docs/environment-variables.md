@@ -82,6 +82,7 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 
 | Variables | Page |
 | --- | --- |
+| Named webhook HMAC secrets (`secret_env` on `tenkaictl env webhooks set`, for example `TENKAI_WEBHOOK_SECRET`) | [Post-deploy webhooks](deploy-webhooks.md) |
 | `TENKAI_PLAN_PRIORS_FILE`, `TENKAI_PLAN_PRIORS_OUTCOME`, `TENKAI_PLAN_PRIORS_OUTCOME_FILE`, `TENKAI_PLAN_PRIORS_OUTCOME_REQUIRED` | [Plan priors](plan-priors.md) |
 | `TENKAI_PACKAGE_MIGRATION_APPROVAL_TRUST_ROOTS` | [Package migrations](package-migrations.md) |
 | `TENKAI_LLAMA_SERVER`, `TENKAI_USE_REAL_LLAMA` | [Model runtime](model-runtime.md) |
