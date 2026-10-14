@@ -36,6 +36,10 @@ pub use crate::environment::{
     subscription_state,
 };
 
+pub use crate::deploy_webhook::{
+    clear_environment_webhooks, list_environment_webhooks, set_environment_webhook,
+};
+
 pub use crate::fleet::{
     FleetDriftSummary, FleetEnvironmentRow, FleetPostureSnapshot, FleetStatusReport,
     compare_fleet_posture, fleet_posture_snapshot, fleet_status_from_inspects,

@@ -509,7 +509,7 @@ pub(crate) async fn record_deployment_observation(
     deployment.updated = crate::now_millis();
     let mut environment = if ctx.outcome_export_enabled()
         || observation.transition != DeploymentTransition::Unchanged
-        || matches!(observation.status, "failed" | "rolled_back")
+        || matches!(observation.status, "failed" | "rolled_back" | "succeeded")
     {
         Some(environment(ctx, observation.environment).await?)
     } else {
@@ -565,8 +565,18 @@ pub(crate) async fn record_deployment_observation(
             );
         }
     }
-    let provider_events = if ctx.outcome_export_enabled() {
-        let plan = crate::plan::load(ctx, observation.plan_id).await?;
+    let webhook_endpoints = environment
+        .as_ref()
+        .map(crate::deploy_webhook::configured_endpoints)
+        .unwrap_or_default();
+    let needs_plan = ctx.outcome_export_enabled() || !webhook_endpoints.is_empty();
+    let plan = if needs_plan {
+        Some(crate::plan::load(ctx, observation.plan_id).await?)
+    } else {
+        None
+    };
+    let mut provider_events = if ctx.outcome_export_enabled() {
+        let plan = plan.as_ref().expect("outcome export loads Plan");
         let environment = environment
             .as_ref()
             .expect("outcome export loads Environment");
@@ -580,7 +590,7 @@ pub(crate) async fn record_deployment_observation(
         )
         .map(|terminal_state| {
             crate::providers::terminal_outcome_record(
-                &plan,
+                plan,
                 observation.step,
                 &attempt_id,
                 terminal_state,
@@ -595,9 +605,21 @@ pub(crate) async fn record_deployment_observation(
     } else {
         Vec::new()
     };
+    if !webhook_endpoints.is_empty() {
+        let source_revision =
+            crate::deploy_webhook::source_revision(ctx, &observation.step.release_id).await;
+        provider_events.extend(crate::deploy_webhook::records_for_observation(
+            &webhook_endpoints,
+            plan.as_ref().expect("webhooks load Plan"),
+            observation.step,
+            observation.status,
+            deployment.updated,
+            &source_revision,
+        ));
+    }
     let environment_changed = observation.transition != DeploymentTransition::Unchanged
         || matches!(observation.status, "failed" | "rolled_back");
-    let update_result = if ctx.outcome_export_enabled() {
+    let update_result = if ctx.outcome_export_enabled() || !provider_events.is_empty() {
         let mut objects = vec![deployment];
         if environment_changed {
             objects.push(environment.expect("an Environment transition loads its object"));

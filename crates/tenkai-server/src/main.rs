@@ -12,6 +12,7 @@ use tenkai::assertion_verifier::{JwtAssertionVerifier, JwtEnterpriseAuthExtensio
 use tenkai::auth_context::{
     AUTH_CONTEXT_CONTRACT_VERSION, AuthHostConfig, EnterpriseAuthExtension,
 };
+use tenkai::deploy_webhook::{ProcessWebhookSecrets, deliver_webhook_batch};
 use tenkai::issuer_auth::{ISSUER_AUTH_EXTENSION_ID, IssuerAuthExtension};
 use tenkai::oidc_verifier::{
     JwksCache, OIDC_AUTH_EXTENSION_ID, OidcAuthExtension, OidcClientDiscovery, OidcConfig,
@@ -675,6 +676,46 @@ async fn main() -> Result<()> {
             }
         })
     });
+    let webhook_task = {
+        let webhook_store = store.clone();
+        let mut webhook_shutdown_rx = shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            let mut timer = tokio::time::interval(Duration::from_secs(5));
+            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    changed = webhook_shutdown_rx.changed() => {
+                        if changed.is_err() || *webhook_shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                    _ = timer.tick() => {
+                        match deliver_webhook_batch(
+                            &*webhook_store,
+                            &ProcessWebhookSecrets,
+                            Duration::from_secs(5),
+                            tenkai::now_millis(),
+                            10,
+                        ).await {
+                            Ok((delivered, deferred)) if delivered > 0 || deferred > 0 => {
+                                eprintln!(
+                                    "tenkai.deploy_webhook delivered={} deferred={}",
+                                    delivered, deferred
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                eprintln!(
+                                    "tenkai.deploy_webhook outcome=degraded detail={}",
+                                    error
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        })
+    };
     let reconcile_task = tokio::spawn(async move {
         let mut timer = tokio::time::interval(interval);
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -725,6 +766,9 @@ async fn main() -> Result<()> {
             .await
             .context("joining outcome delivery task during shutdown")?;
     }
+    webhook_task
+        .await
+        .context("joining webhook delivery task during shutdown")?;
     result.context("serving Tenkai API")
 }
 

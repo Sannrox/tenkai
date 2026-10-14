@@ -264,6 +264,36 @@ fn parses_env_list_and_inspect() {
             }
         } if env == "lab" && path == std::path::Path::new("/var/lib/tenkai/lab-secrets")
     ));
+    let webhooks = Cli::try_parse_from([
+        "tenkaictl",
+        "env",
+        "webhooks",
+        "set",
+        "lab",
+        "--url",
+        "https://hooks.example.test/tenkai",
+        "--secret-env",
+        "TENKAI_WEBHOOK_SECRET",
+        "--events",
+        "apply.succeeded,apply.rolled_back",
+    ])
+    .unwrap();
+    assert!(matches!(
+        webhooks.command,
+        Command::Env {
+            command: EnvCommand::Webhooks {
+                command: crate::env_args::WebhooksCommand::Set {
+                    ref env,
+                    ref url,
+                    ref secret_env,
+                    ref events,
+                }
+            }
+        } if env == "lab"
+            && url == "https://hooks.example.test/tenkai"
+            && secret_env == "TENKAI_WEBHOOK_SECRET"
+            && events.as_deref() == Some("apply.succeeded,apply.rolled_back")
+    ));
     let approval_policy = Cli::try_parse_from([
         "tenkaictl",
         "env",

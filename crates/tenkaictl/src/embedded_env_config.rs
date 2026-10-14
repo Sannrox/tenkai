@@ -3,7 +3,7 @@ use tenkai::{client, inventory, maintenance, plan};
 
 use crate::env_args::{
     ApprovalPolicyCommand, ArtifactMirrorCommand, ClusterConfigCommand, ConstraintsCommand,
-    DockerSecretsCommand, FactsCommand, MaintenanceCommand, OverlayCommand,
+    DockerSecretsCommand, FactsCommand, MaintenanceCommand, OverlayCommand, WebhooksCommand,
 };
 
 pub(crate) async fn maintenance(ctx: &mut client::Ctx, command: MaintenanceCommand) -> Result<()> {
@@ -230,6 +230,83 @@ pub(crate) async fn docker_secrets(
         }
     }
     Ok(())
+}
+
+pub(crate) async fn webhooks(ctx: &mut client::Ctx, command: WebhooksCommand) -> Result<()> {
+    match command {
+        WebhooksCommand::List { env } => {
+            let endpoints = tenkai::deploy_webhook::list_environment_webhooks(ctx, &env).await?;
+            if endpoints.is_empty() {
+                println!("{env} has no webhooks");
+                return Ok(());
+            }
+            for endpoint in endpoints {
+                let events = if endpoint.events.is_empty() {
+                    "apply.succeeded,apply.failed,apply.rolled_back".into()
+                } else {
+                    endpoint
+                        .events
+                        .iter()
+                        .map(|event| event.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                };
+                println!(
+                    "{} secret_env={} events={}",
+                    endpoint.url, endpoint.secret_env, events
+                );
+            }
+        }
+        WebhooksCommand::Set {
+            env,
+            url,
+            secret_env,
+            events,
+        } => {
+            let events = parse_webhook_events(events.as_deref())?;
+            println!(
+                "{}",
+                tenkai::deploy_webhook::set_environment_webhook(
+                    ctx,
+                    &env,
+                    tenkai::deploy_webhook::WebhookEndpoint {
+                        url,
+                        secret_env,
+                        events,
+                    },
+                )
+                .await?
+            );
+        }
+        WebhooksCommand::Clear { env, url } => {
+            println!(
+                "{}",
+                tenkai::deploy_webhook::clear_environment_webhooks(ctx, &env, url.as_deref())
+                    .await?
+            );
+        }
+    }
+    Ok(())
+}
+
+fn parse_webhook_events(raw: Option<&str>) -> Result<Vec<tenkai::deploy_webhook::WebhookEvent>> {
+    let Some(raw) = raw else {
+        return Ok(Vec::new());
+    };
+    let mut events = Vec::new();
+    for part in raw.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        events.push(match part {
+            "apply.succeeded" => tenkai::deploy_webhook::WebhookEvent::ApplySucceeded,
+            "apply.failed" => tenkai::deploy_webhook::WebhookEvent::ApplyFailed,
+            "apply.rolled_back" => tenkai::deploy_webhook::WebhookEvent::ApplyRolledBack,
+            other => bail!("unknown webhook event {other:?}"),
+        });
+    }
+    Ok(events)
 }
 
 pub(crate) async fn approval_policy(
