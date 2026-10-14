@@ -11,10 +11,10 @@ use crate::ontology::{
     ACTION_REPLACE_SUBSCRIPTION, ACTION_SUBSCRIBE, KIND_CANARY_ATTEMPT, KIND_CANARY_DESIGNATION,
     KIND_CANARY_OUTCOME, KIND_CANARY_POLICY, KIND_CANARY_POLICY_POINTER, KIND_CHANNEL,
     KIND_CONNECTIVITY_UPGRADE, KIND_DEPLOYMENT, KIND_ENVIRONMENT, KIND_ENVIRONMENT_EXECUTION,
-    KIND_MAINTENANCE_CONFIG, KIND_PACKAGE_MIGRATION, KIND_PACKAGE_MIGRATION_LOCK, KIND_PLAN,
-    KIND_PLAN_APPROVAL_VERIFICATION, KIND_PRODUCT, KIND_PRODUCT_MAINTENANCE_CONFIG,
-    KIND_PROMOTION_AUDIT, KIND_PROMOTION_LOCK, KIND_RELEASE, KIND_RELEASE_RECALL,
-    KIND_RELEASE_VERIFICATION, KIND_WAVE, REL_SUBSCRIBES,
+    KIND_HEALTH_GATE_EVIDENCE, KIND_MAINTENANCE_CONFIG, KIND_PACKAGE_MIGRATION,
+    KIND_PACKAGE_MIGRATION_LOCK, KIND_PLAN, KIND_PLAN_APPROVAL_VERIFICATION, KIND_PRODUCT,
+    KIND_PRODUCT_MAINTENANCE_CONFIG, KIND_PROMOTION_AUDIT, KIND_PROMOTION_LOCK, KIND_RELEASE,
+    KIND_RELEASE_RECALL, KIND_RELEASE_VERIFICATION, KIND_WAVE, REL_SUBSCRIBES,
 };
 use crate::pb::graph_action::{ActionOp, ActionParamDef, ActionTypeDef};
 use crate::pb::sekai::{ObjectType, PropertyDef};
@@ -373,6 +373,38 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
                     false,
                     "Release object id the channel points at",
                 ),
+                prop(
+                    "health_gates",
+                    false,
+                    "Optional JSON SLO/health gate overlay for this channel",
+                ),
+            ],
+        ),
+        object_type(
+            KIND_HEALTH_GATE_EVIDENCE,
+            "Post-apply health/SLO gate evidence bound to a plan step and release",
+            vec![
+                prop("schema", true, "tenkai.health_gate_evidence.v1"),
+                prop("plan_id", true, "Plan that evaluated the gates"),
+                prop(
+                    "step_id",
+                    true,
+                    "Plan step that completed before evaluation",
+                ),
+                prop("release_id", true, "Release whose apply was gated"),
+                prop(
+                    "release_digest",
+                    true,
+                    "Manifest digest of the gated release",
+                ),
+                prop("environment", true, "Environment that applied the step"),
+                prop("verdict", true, "pass, fail, or unavailable"),
+                prop(
+                    "evidence",
+                    true,
+                    "Versioned JSON listing each gate, value, and verdict",
+                ),
+                prop("observed_at", true, "Unix-ms timestamp of the evaluation"),
             ],
         ),
         object_type(

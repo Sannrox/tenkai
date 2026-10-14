@@ -58,7 +58,25 @@ impl Ctx {
             release_trust_roots: None,
             require_host_release_trust: false,
             plan_kind_list: Arc::new(PlanKindListTick::default()),
+            health_metrics: None,
         })
+    }
+
+    /// Inject a Prometheus-compatible instant-query source for SLO gates (#590).
+    pub fn with_health_metrics(
+        mut self,
+        source: Arc<dyn crate::health_gate::HealthMetricsSource>,
+    ) -> Self {
+        self.health_metrics = Some(source);
+        self
+    }
+
+    pub fn health_metrics(&self) -> Option<Arc<dyn crate::health_gate::HealthMetricsSource>> {
+        self.health_metrics.clone()
+    }
+
+    pub fn set_health_metrics(&mut self, source: Arc<dyn crate::health_gate::HealthMetricsSource>) {
+        self.health_metrics = Some(source);
     }
 
     pub fn is_embedded(&self) -> bool {

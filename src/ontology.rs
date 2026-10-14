@@ -20,6 +20,7 @@ pub const KIND_PLAN: &str = "tenkai.plan";
 pub const KIND_PLAN_APPROVAL_VERIFICATION: &str = "tenkai.plan_approval_verification";
 pub const KIND_ENVIRONMENT_EXECUTION: &str = "tenkai.environment_execution";
 pub const KIND_DEPLOYMENT: &str = "tenkai.deployment";
+pub const KIND_HEALTH_GATE_EVIDENCE: &str = "tenkai.health_gate_evidence";
 pub const KIND_CANARY_DESIGNATION: &str = "tenkai.canary_designation";
 pub const KIND_CANARY_POLICY: &str = "tenkai.canary_policy";
 pub const KIND_CANARY_POLICY_POINTER: &str = "tenkai.canary_policy_pointer";
@@ -129,6 +130,9 @@ pub fn plan_id(env: &str, ts: i64, content_id: &str) -> String {
 }
 pub fn deployment_id(env: &str, product: &str, ts: i64) -> String {
     format!("tenkai:deployment:{env}:{product}:{ts}")
+}
+pub fn health_gate_evidence_id(plan_id: &str, step_id: &str) -> String {
+    format!("{plan_id}:health-gate:{step_id}")
 }
 
 #[cfg(test)]

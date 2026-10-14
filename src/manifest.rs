@@ -294,6 +294,84 @@ pub struct GateSection {
     /// chisei eval suite id; the latest run must be fully passing before apply.
     #[serde(default)]
     pub eval_suite: Option<String>,
+    /// Post-apply Prometheus-compatible SLO/health gates (#590).
+    #[serde(default)]
+    pub slo: Vec<SloGate>,
+    /// Bound, in seconds, during which a failing sample halts the rollout.
+    /// Evaluation is fail-fast: the first breach does not wait out the window.
+    #[serde(default)]
+    pub bake_window_seconds: u32,
+    /// `halt` leaves the new release deployed; `rollback` restores the plan's
+    /// previously signed restore pin. Default is halt.
+    #[serde(default)]
+    pub on_fail: GateFailPolicy,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GateFailPolicy {
+    #[default]
+    Halt,
+    Rollback,
+}
+
+impl GateFailPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Halt => "halt",
+            Self::Rollback => "rollback",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SloComparator {
+    Lt,
+    #[default]
+    Lte,
+    Gt,
+    Gte,
+}
+
+impl SloComparator {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Lt => "lt",
+            Self::Lte => "lte",
+            Self::Gt => "gt",
+            Self::Gte => "gte",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SloGate {
+    pub name: String,
+    pub query: String,
+    #[serde(default)]
+    pub op: SloComparator,
+    pub threshold: f64,
+}
+
+impl GateSection {
+    pub fn validate_slo(&self) -> Result<()> {
+        let mut names = std::collections::BTreeSet::new();
+        for gate in &self.slo {
+            crate::ontology::validate_identifier("slo gate name", &gate.name)?;
+            if !names.insert(gate.name.as_str()) {
+                bail!("duplicate SLO gate name {}", gate.name);
+            }
+            if gate.query.trim().is_empty() {
+                bail!("SLO gate {} has an empty Prometheus query", gate.name);
+            }
+            if !gate.threshold.is_finite() {
+                bail!("SLO gate {} threshold must be finite", gate.name);
+            }
+        }
+        Ok(())
+    }
 }
 
 fn default_workdir() -> String {
@@ -326,6 +404,7 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
     let manifest: Manifest =
         toml::from_str(&raw).with_context(|| format!("parsing manifest {}", path.display()))?;
     validate_software_compatibility(&manifest)?;
+    manifest.gate.validate_slo()?;
     if manifest.product.name.is_empty() || manifest.product.version.is_empty() {
         bail!("manifest needs product.name and product.version");
     }
@@ -569,6 +648,7 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
 pub fn parse_raw(raw: &str) -> Result<Manifest> {
     let manifest = toml::from_str(raw)?;
     validate_software_compatibility(&manifest)?;
+    manifest.gate.validate_slo()?;
     Ok(manifest)
 }
 

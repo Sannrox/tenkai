@@ -74,7 +74,7 @@ is never needed to recover a deployment.
 
 | Concept | What it is |
 | --- | --- |
-| **Product** | The unit of delivery: a versioned manifest declaring artifacts (OCI images, binaries, bundles), configuration schema, dependencies on other products (semver ranges), required capabilities of the target, and health probes. Intelligence products declare governance artifacts instead of images. |
+| **Product** | The unit of delivery: a versioned manifest declaring artifacts (OCI images, binaries, bundles), configuration schema, dependencies on other products (semver ranges), required capabilities of the target, health probes, and optional post-apply SLO gates. Intelligence products declare governance artifacts instead of images. |
 | **Release** | An immutable, signed version of a product: artifact digests, SBOM, provenance, changelog. |
 | **Channel** | A named stream per product (`dev`, `canary`, `stable`, `hotfix`). Publishing = pointing a channel at a release. |
 | **Environment** | A managed target: k8s cluster, VM host, edge device, air-gapped enclave. Declares: subscribed channels, maintenance windows, compliance/policy constraints, capability facts (k8s version, GPU, region, data classification), connectivity class (connected / intermittent / isolated). |

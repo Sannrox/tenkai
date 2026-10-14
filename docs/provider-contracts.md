@@ -68,6 +68,14 @@ leave the attempt count, bounded retry time, and sanitized failure reason in
 the durable row and emit a bounded degraded diagnostic; they do not make the
 server unready.
 
+### Health/SLO gate event v1
+
+`ProviderEvent.payload_json` for provider kind `health_gate` contains
+`tenkai.health_gate_evidence.v1`: each declared gate's name, query, threshold,
+observed value, and verdict, plus halt-or-rollback policy. The binding uses the
+gated release digest, plan content id, evidence digest, and environment.
+Webhook delivery of this event is #546.
+
 ### Terminal outcome event v1
 
 `ProviderEvent.payload_json` contains `tenkai.terminal_outcome.v1` with:

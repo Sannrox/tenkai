@@ -32,3 +32,4 @@
 - [0030 — Versioned remote management lifecycle](0030-remote-management-lifecycle.md)
 - [0031 — Web console as a separate, pinned client](0031-web-console.md)
 - [0032 — Versioned two-way model-release evidence](0032-model-release-evidence.md)
+- [0033 — Post-apply health and SLO gates](0033-health-slo-gates.md)

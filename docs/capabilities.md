@@ -78,6 +78,7 @@ it ([ADR 0001](decisions/0001-standalone-core-and-service-evolution.md),
 | Software canary cohort drill on minikube dogfood | [ops note](local-dogfood-minikube.md#software-canary-cohort-drill-154); #154 |
 | Backup/restore drill and server reconcile diagnostics | [operational storage](operational-storage.md); [server diagnostics](server-diagnostics.md); #59, #60 |
 | Delivery OTLP traces and metrics keyed by operation identity | [telemetry](telemetry.md); #380 |
+| Post-apply health/SLO gates that halt or roll back | [health-gate-evidence](health-gate-evidence.md); #590 |
 | Release readiness checklist | [release readiness](release-readiness.md); #72 |
 
 Governance integrations remain optional. Required policy or gate decisions fail

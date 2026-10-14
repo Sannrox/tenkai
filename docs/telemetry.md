@@ -45,6 +45,7 @@ when a request does not carry one.
 | `tenkai.plan` | Plan create, including reconciler planning |
 | `tenkai.apply` | One authorized plan execution attempt |
 | `tenkai.health` | Post-apply health command or implicit healthy software apply |
+| `tenkai.health_gate` | Post-apply SLO/health gate evaluation (#590) |
 | `tenkai.rollback` | Rollback step computation and apply of a rollback plan |
 | `tenkai.reconcile` | One reconciler tick |
 
@@ -72,6 +73,7 @@ grant execution authority.
 | `tenkai.apply.outcomes` | `1` on apply success, `0` on apply failure |
 | `tenkai.lease.acquired` | Environment apply lease claimed |
 | `tenkai.lease.released` | Environment apply lease released |
+| `tenkai.health_gate.outcomes` | `1` on passing SLO gates, `0` on fail or unavailable |
 
 Metric attributes use the same allowlist. Dashboards, log shipping, and
 collector backends are out of scope.

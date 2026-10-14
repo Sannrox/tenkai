@@ -1,4 +1,4 @@
-//! Plan execution: eval gates, install commands, health probes, auto-rollback.
+//! Plan execution: eval gates, install commands, health probes, SLO gates, auto-rollback.
 //!
 //! Every execution writes durable plan and deployment objects so Tenkai can
 //! answer "what ran, when, gated by what, and what happened" after the fact.
@@ -233,7 +233,6 @@ async fn execute_locked(
     let skip_gates = options.skip_gates;
     execution_admission::admit(ctx, &stored_plan).await?;
     crate::delivery_hold::require_not_held(ctx, &stored_plan).await?;
-    let plan_id = stored_plan.id.clone();
     let env = stored_plan.environment.clone();
     let steps = stored_plan.steps.clone();
     if let Some(outcomes) = start_admission::admit(
@@ -255,6 +254,61 @@ async fn execute_locked(
     {
         plan_completion::fail(ctx, lease, &mut stored_plan, skip_gates, error.to_string()).await?;
         return Err(error);
+    }
+
+    if options.delivery_adapter.is_some() && !skip_gates {
+        for step in &steps {
+            let requires =
+                match crate::health_gate::step_requires_slo_evaluation(ctx, &env, step).await {
+                    Ok(requires) => requires,
+                    Err(error) => {
+                        plan_completion::fail(
+                            ctx,
+                            lease,
+                            &mut stored_plan,
+                            skip_gates,
+                            error.to_string(),
+                        )
+                        .await?;
+                        return Err(error);
+                    }
+                };
+            if !requires {
+                continue;
+            }
+            let spec = match async {
+                let release_gate = crate::health_gate::load_release_gate_section(
+                    ctx,
+                    &step.release_id,
+                    &step.release_digest,
+                )
+                .await?;
+                crate::health_gate::resolve_spec(ctx, &env, &step.product, &release_gate).await
+            }
+            .await
+            {
+                Ok(spec) => spec,
+                Err(error) => {
+                    plan_completion::fail(
+                        ctx,
+                        lease,
+                        &mut stored_plan,
+                        skip_gates,
+                        error.to_string(),
+                    )
+                    .await?;
+                    return Err(error);
+                }
+            };
+            if !spec.is_empty() {
+                let error = anyhow::anyhow!(
+                    "SLO health gates require built-in execution; delegated delivery cannot evaluate [[gate.slo]]"
+                );
+                plan_completion::fail(ctx, lease, &mut stored_plan, skip_gates, error.to_string())
+                    .await?;
+                return Err(error);
+            }
+        }
     }
 
     if let Some(adapter) = options.delivery_adapter.clone() {
@@ -305,20 +359,21 @@ async fn execute_locked(
             .recalled_recovery_reason
             .as_deref()
             .is_some_and(|reason| !reason.trim().is_empty());
+        let adapters = TargetAdapters {
+            software: options.software_executor,
+            model_runtime: options.model_runtime_executor,
+            worker_lifecycle: options.worker_lifecycle,
+            artifact_registry: options.artifact_registry,
+            artifact_registry_handle: options.artifact_registry_handle.clone(),
+        };
         let outcome = match step_lifecycle::execute(
             ctx,
             lease,
-            &env,
-            &plan_id,
+            &stored_plan,
             &step,
-            TargetAdapters {
-                software: options.software_executor,
-                model_runtime: options.model_runtime_executor,
-                worker_lifecycle: options.worker_lifecycle,
-                artifact_registry: options.artifact_registry,
-                artifact_registry_handle: options.artifact_registry_handle.clone(),
-            },
+            adapters,
             recalled_recovery,
+            skip_gates,
         )
         .await
         {
