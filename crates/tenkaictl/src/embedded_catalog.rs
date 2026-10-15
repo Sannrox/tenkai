@@ -42,6 +42,7 @@ pub(crate) async fn run(
                 change_set_evidence: change_set_evidence
                     .map(tenkai::change_set_pin::ChangeSetEvidenceInput::File),
                 artifact_registry: tenkai::oci_artifact::selected_registry().ok().flatten(),
+                state_dir: None,
             };
             if output == OutputFormat::JsonV1 {
                 let published = catalog::publish_with_result(ctx, &manifest, &options).await?;

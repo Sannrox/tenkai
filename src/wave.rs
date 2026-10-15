@@ -469,6 +469,7 @@ document = "suite.json"
                 provenance_trust_roots: None,
                 change_set_evidence: None,
                 artifact_registry: None,
+                state_dir: None,
             },
         )
         .await
@@ -494,6 +495,7 @@ document = "suite.json"
                 provenance_trust_roots: None,
                 change_set_evidence: None,
                 artifact_registry: None,
+                state_dir: None,
             },
         )
         .await

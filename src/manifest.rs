@@ -931,12 +931,31 @@ pub fn snapshot_workdir(
     manifest_digest: &str,
     expected_artifact_digest: &str,
 ) -> Result<PathBuf> {
-    let state_dir = match std::env::var_os("TENKAI_STATE_DIR") {
-        Some(path) => PathBuf::from(path),
-        None => source
-            .parent()
-            .map(|parent| parent.join(".tenkai-state"))
-            .unwrap_or_else(|| std::env::temp_dir().join("tenkai-state")),
+    snapshot_workdir_in(
+        source,
+        inputs,
+        manifest_digest,
+        expected_artifact_digest,
+        None,
+    )
+}
+
+pub(crate) fn snapshot_workdir_in(
+    source: &Path,
+    inputs: &[String],
+    manifest_digest: &str,
+    expected_artifact_digest: &str,
+    state_dir: Option<&Path>,
+) -> Result<PathBuf> {
+    let state_dir = match state_dir {
+        Some(path) if !path.as_os_str().is_empty() => path.to_path_buf(),
+        _ => match std::env::var_os("TENKAI_STATE_DIR") {
+            Some(path) if !path.is_empty() => PathBuf::from(path),
+            _ => source
+                .parent()
+                .map(|parent| parent.join(".tenkai-state"))
+                .unwrap_or_else(|| std::env::temp_dir().join("tenkai-state")),
+        },
     };
     let source = source.canonicalize()?;
     std::fs::create_dir_all(&state_dir)?;

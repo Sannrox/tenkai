@@ -18,7 +18,7 @@ use crate::ontology::{
     release_id, require_connectivity_upgrade_schema, validate_identifier,
 };
 use crate::pb::sekai::Object;
-use crate::plan::{self, Plan, PlanState};
+use crate::plan::{self, Action, Plan, PlanState};
 
 pub const UPGRADE_FORMAT_VERSION: u32 = 1;
 pub const CONNECTIVITY_CLASS_PROPERTY: &str = "connectivity_class";
@@ -116,6 +116,10 @@ pub struct TransferCheckpoint {
 pub struct IsolatedEvidence {
     pub bundle_digest: String,
     pub receipt_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -502,6 +506,9 @@ pub async fn bind_isolated_bundle(
             existing.bundle_digest
         );
     }
+    if crate::offline_bundle::stack_manifest(&verified)?.is_some() {
+        crate::offline_bundle::preflight_full_stack(&verified, bundle_path)?;
+    }
     let env = crate::environment::environment(ctx, environment).await?;
     crate::offline_bundle::import_artifact_layers(
         &verified,
@@ -520,9 +527,147 @@ pub async fn bind_isolated_bundle(
             .isolated
             .as_ref()
             .and_then(|evidence| evidence.receipt_digest.clone()),
+        plan_digest: Some(verified.statement().plan_digest.clone()),
+        approval_digest: Some(verified.statement().approval_digest.clone()),
     });
     record.environments[index].detail = "verified offline bundle bound".into();
     persist(ctx, &record).await?;
+    Ok(record)
+}
+
+/// First-install an empty isolated environment from one signed bundle.
+///
+/// Completeness, the authenticated plan, and catalog payload are checked
+/// before graph mutation. Artifact import happens before the upgrade record
+/// is created so a failed import can be retried.
+pub async fn install_isolated_stack(
+    ctx: &mut Ctx,
+    spec: &UpgradeSpec,
+    environment: &str,
+    bundle: &crate::offline_bundle::BundleEnvelope,
+    trust_roots: &crate::release_signing::TrustRoots,
+    bundle_path: Option<&Path>,
+) -> Result<UpgradeRecord> {
+    spec.validate()?;
+    if spec.environments.len() != 1 || spec.environments[0] != environment {
+        bail!("isolated first-install admits exactly one environment");
+    }
+    let verified = bundle.verify(
+        trust_roots,
+        crate::ontology::NS,
+        environment,
+        crate::now_millis(),
+    )?;
+    crate::offline_bundle::preflight_full_stack(&verified, bundle_path)?;
+    let expected_release = format!("{}@{}", spec.product, spec.version);
+    let sanitized = expected_release.replace([':', '@'], "-");
+    if !verified
+        .statement()
+        .release_ids
+        .iter()
+        .any(|id| id == &expected_release || id == &sanitized)
+    {
+        bail!("offline bundle does not include release {expected_release}");
+    }
+    let plan_path = format!("plans/{}.json", verified.statement().plan_id);
+    let plan = plan::parse_authenticated(
+        verified
+            .entry(&plan_path)
+            .with_context(|| format!("bundle is missing canonical plan entry {plan_path}"))?,
+        &verified.statement().plan_id,
+        environment,
+    )?;
+    require_first_install_plan(&plan, spec)?;
+    require_connectivity_upgrade_schema(ctx).await?;
+    let upgrade_id = connectivity_upgrade_id(&spec.name);
+    if ctx.get(&upgrade_id).await?.is_some() {
+        bail!("upgrade {} already exists", spec.name);
+    }
+    if let Some(existing) = ctx.get(&env_id(environment)).await? {
+        if existing.kind != crate::ontology::KIND_ENVIRONMENT {
+            bail!("object {} is not an environment", existing.id);
+        }
+        if let Ok(class) = connectivity_class(ctx, environment).await
+            && class != ConnectivityClass::Isolated
+        {
+            bail!(
+                "isolated first-install cannot take over {environment} ({})",
+                class.as_str()
+            );
+        }
+    }
+    let (_, pending_catalog) = admit_isolated_catalog(ctx, spec, &verified, &plan).await?;
+    let mirrors = bundle_layer_mirrors(&verified)?;
+    let imported = (|| {
+        crate::offline_bundle::import_artifact_layers(
+            &verified,
+            crate::oci_artifact::selected_registry()?.as_deref(),
+            &mirrors,
+        )?;
+        let weight_cache = crate::offline_chunk_store::weight_cache_from_env()?;
+        crate::offline_chunk_store::import_weight_chunks_for_bundle(
+            &verified,
+            bundle_path,
+            weight_cache.as_ref(),
+        )?;
+        Ok::<_, anyhow::Error>(())
+    })();
+    if let Err(error) = imported {
+        if let Some(pending) = pending_catalog {
+            let _ = std::fs::remove_dir_all(&pending.root);
+        }
+        return Err(error);
+    }
+    let pin = if let Some(pending) = pending_catalog {
+        commit_isolated_catalog(ctx, spec, &plan, pending).await?
+    } else {
+        crate::catalog::pin_isolated_channel(ctx, &spec.product, &spec.version, &spec.channel)
+            .await?;
+        let pin = resolve_release_pin(ctx, spec).await?;
+        require_plan_matches_pin(&plan, spec, &pin)?;
+        pin
+    };
+    crate::environment::env_add(ctx, environment, "isolated first install").await?;
+    set_connectivity_class(ctx, environment, ConnectivityClass::Isolated).await?;
+    for (registry, mirror) in &mirrors {
+        crate::environment::set_artifact_mirror(ctx, environment, registry, mirror).await?;
+    }
+    crate::environment::subscribe(ctx, environment, &spec.product, &spec.channel).await?;
+    plan::store(ctx, &plan).await?;
+    let identity = identity_digest(spec, &pin)?;
+    let now = crate::now_millis();
+    let record = UpgradeRecord {
+        format_version: UPGRADE_FORMAT_VERSION,
+        id: upgrade_id,
+        name: spec.name.clone(),
+        identity_digest: identity,
+        product: spec.product.clone(),
+        version: spec.version.clone(),
+        channel: spec.channel.clone(),
+        release_id: pin.release_id,
+        release_digest: pin.release_digest,
+        artifact_digest: pin.artifact_digest,
+        status: UpgradeStatus::Admitted,
+        environments: vec![UpgradeEnvironmentRecord {
+            name: environment.into(),
+            class: ConnectivityClass::Isolated,
+            status: UpgradeEnvironmentStatus::Pending,
+            plan_id: Some(verified.statement().plan_id.clone()),
+            detail: "verified offline bundle bound".into(),
+            transfer: None,
+            isolated: Some(IsolatedEvidence {
+                bundle_digest: verified.digest().to_string(),
+                receipt_digest: None,
+                plan_digest: Some(verified.statement().plan_digest.clone()),
+                approval_digest: Some(verified.statement().approval_digest.clone()),
+            }),
+        }],
+        created_at: now,
+        updated_at: now,
+    };
+    ctx.create_once(upgrade_object(&record)?)
+        .await
+        .map_err(|status| anyhow::anyhow!("{status}"))?;
     Ok(record)
 }
 
@@ -588,9 +733,16 @@ pub async fn import_isolated_receipt(
             bail!("{}", record.environments[index].detail);
         }
         None => {
+            let previous = record.environments[index].isolated.clone();
             record.environments[index].isolated = Some(IsolatedEvidence {
                 bundle_digest,
                 receipt_digest: Some(receipt_digest),
+                plan_digest: previous
+                    .as_ref()
+                    .and_then(|evidence| evidence.plan_digest.clone()),
+                approval_digest: previous
+                    .as_ref()
+                    .and_then(|evidence| evidence.approval_digest.clone()),
             });
             record.environments[index].detail = "isolated receipt accepted".into();
         }
@@ -700,11 +852,11 @@ struct ReleasePin {
     artifact_digest: String,
 }
 
-async fn resolve_release_pin(ctx: &mut Ctx, spec: &UpgradeSpec) -> Result<ReleasePin> {
+async fn published_release_pin(ctx: &mut Ctx, spec: &UpgradeSpec) -> Result<Option<ReleasePin>> {
     let rid = release_id(&spec.product, &spec.version);
-    let release = ctx.get(&rid).await?.ok_or_else(|| {
-        anyhow::anyhow!("release {}@{} is not published", spec.product, spec.version)
-    })?;
+    let Some(release) = ctx.get(&rid).await? else {
+        return Ok(None);
+    };
     if crate::catalog::release_is_recalled(ctx, &rid).await? {
         bail!("release {rid} is recalled and cannot admit an upgrade");
     }
@@ -720,6 +872,18 @@ async fn resolve_release_pin(ctx: &mut Ctx, spec: &UpgradeSpec) -> Result<Releas
         .cloned()
         .filter(|value| !value.is_empty())
         .ok_or_else(|| anyhow::anyhow!("release {rid} is missing its artifact digest"))?;
+    Ok(Some(ReleasePin {
+        release_id: rid,
+        release_digest,
+        artifact_digest,
+    }))
+}
+
+async fn resolve_release_pin(ctx: &mut Ctx, spec: &UpgradeSpec) -> Result<ReleasePin> {
+    let pin = published_release_pin(ctx, spec).await?.ok_or_else(|| {
+        anyhow::anyhow!("release {}@{} is not published", spec.product, spec.version)
+    })?;
+    let rid = pin.release_id.clone();
     let channel = ctx
         .get(&channel_id(&spec.product, &spec.channel))
         .await?
@@ -745,11 +909,7 @@ async fn resolve_release_pin(ctx: &mut Ctx, spec: &UpgradeSpec) -> Result<Releas
             spec.channel
         );
     }
-    Ok(ReleasePin {
-        release_id: rid,
-        release_digest,
-        artifact_digest,
-    })
+    Ok(pin)
 }
 
 async fn revalidate(record: &UpgradeRecord, ctx: &mut Ctx) -> Result<()> {
@@ -897,6 +1057,566 @@ fn record_from_object(object: &Object) -> Result<UpgradeRecord> {
         );
     }
     Ok(record)
+}
+
+fn require_first_install_plan(plan: &Plan, spec: &UpgradeSpec) -> Result<()> {
+    if !matches!(plan.state, PlanState::Computed | PlanState::Blocked) {
+        bail!(
+            "canonical plan {} is not executable ({})",
+            plan.id,
+            plan.state
+        );
+    }
+    let expected_release = release_id(&spec.product, &spec.version);
+    if plan.inputs.len() != 1 || plan.steps.len() != 1 {
+        bail!("canonical first-install plan must contain exactly one input and one step");
+    }
+    let Some(input) = plan
+        .inputs
+        .iter()
+        .find(|input| input.product == spec.product)
+    else {
+        bail!("canonical plan does not name product {}", spec.product);
+    };
+    if input.channel != spec.channel
+        || input.desired_version != spec.version
+        || input.release_id != expected_release
+    {
+        bail!(
+            "canonical plan does not target {}@{} on {}",
+            spec.product,
+            spec.version,
+            spec.channel
+        );
+    }
+    let Some(step) = plan.steps.iter().find(|step| step.product == spec.product) else {
+        bail!("canonical plan has no step for {}", spec.product);
+    };
+    if step.action != Action::Install
+        || step.from.is_some()
+        || step.to != spec.version
+        || step.release_id != expected_release
+    {
+        bail!(
+            "canonical plan does not install {}@{}",
+            spec.product,
+            spec.version
+        );
+    }
+    Ok(())
+}
+
+fn require_plan_matches_pin(plan: &Plan, spec: &UpgradeSpec, pin: &ReleasePin) -> Result<()> {
+    require_first_install_plan(plan, spec)?;
+    let matches_pin = |release_id: &str, release_digest: &str, artifact_digest: &str| {
+        release_id == pin.release_id
+            && release_digest == pin.release_digest
+            && artifact_digest == pin.artifact_digest
+    };
+    if plan
+        .inputs
+        .iter()
+        .filter(|input| input.product == spec.product)
+        .any(|input| {
+            !matches_pin(
+                &input.release_id,
+                &input.release_digest,
+                &input.artifact_digest,
+            )
+        })
+        || plan
+            .steps
+            .iter()
+            .filter(|step| step.product == spec.product)
+            .any(|step| {
+                !matches_pin(
+                    &step.release_id,
+                    &step.release_digest,
+                    &step.artifact_digest,
+                )
+            })
+    {
+        bail!(
+            "canonical plan does not match published release {}",
+            pin.release_id
+        );
+    }
+    Ok(())
+}
+
+fn bundle_release_prefixes(spec: &UpgradeSpec) -> Vec<String> {
+    let expected = format!("{}@{}", spec.product, spec.version);
+    let sanitized = expected.replace([':', '@'], "-");
+    vec![
+        format!("releases/{expected}/"),
+        format!("releases/{sanitized}/"),
+    ]
+}
+
+fn bundle_release_manifest_path(
+    verified: &crate::offline_bundle::VerifiedBundle,
+    spec: &UpgradeSpec,
+) -> Result<String> {
+    for prefix in bundle_release_prefixes(spec) {
+        let path = format!("{prefix}tenkai.toml");
+        if verified.entry(&path).is_some() {
+            return Ok(path);
+        }
+    }
+    bail!(
+        "offline bundle does not include a catalog manifest for {}@{}",
+        spec.product,
+        spec.version
+    )
+}
+
+fn bundle_release_verification_paths(
+    verified: &crate::offline_bundle::VerifiedBundle,
+    spec: &UpgradeSpec,
+) -> Result<(String, String)> {
+    let prefix = bundle_release_manifest_path(verified, spec)?
+        .rsplit_once('/')
+        .map(|(dir, _)| format!("{dir}/"))
+        .unwrap_or_default();
+    let signature = format!("{prefix}release.sig.json");
+    let trust = format!("{prefix}release-trust.toml");
+    if verified.entry(&signature).is_none() || verified.entry(&trust).is_none() {
+        bail!(
+            "offline bundle does not include signed release verification for {}@{}",
+            spec.product,
+            spec.version
+        );
+    }
+    Ok((signature, trust))
+}
+
+fn bundle_layer_mirrors(
+    verified: &crate::offline_bundle::VerifiedBundle,
+) -> Result<BTreeMap<String, String>> {
+    let mut mirrors = BTreeMap::new();
+    let Some(raw) = verified.entry(crate::offline_bundle::LAYER_INSTRUCTION_PATH) else {
+        return Ok(mirrors);
+    };
+    let layers: crate::offline_bundle::OfflineArtifactLayerManifest = serde_json::from_slice(raw)?;
+    for layer in &layers.layers {
+        mirrors.insert(layer.registry.clone(), layer.registry.clone());
+    }
+    Ok(mirrors)
+}
+
+async fn require_isolated_channel_available(ctx: &mut Ctx, spec: &UpgradeSpec) -> Result<()> {
+    let rid = release_id(&spec.product, &spec.version);
+    let cid = channel_id(&spec.product, &spec.channel);
+    let Some(existing) = ctx.get(&cid).await? else {
+        return Ok(());
+    };
+    if existing.kind != KIND_CHANNEL {
+        bail!(
+            "channel {}/{} has conflicting catalog identity",
+            spec.product,
+            spec.channel
+        );
+    }
+    let head = existing
+        .properties
+        .get("current_release")
+        .cloned()
+        .unwrap_or_default();
+    if !head.is_empty() && head != rid {
+        bail!(
+            "channel {}/{} no longer points at {rid}",
+            spec.product,
+            spec.channel
+        );
+    }
+    Ok(())
+}
+
+fn exclusive_private_dir() -> Result<std::path::PathBuf> {
+    let parent = std::env::temp_dir();
+    for _ in 0..16 {
+        let root = parent.join(format!("tenkai-offline-catalog-{}", uuid::Uuid::new_v4()));
+        match std::fs::create_dir(&root) {
+            Ok(()) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
+                }
+                return Ok(root);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    bail!("failed to create a private catalog staging directory")
+}
+
+fn create_private_ancestors(root: &std::path::Path, dest: &std::path::Path) -> Result<()> {
+    let relative = dest
+        .strip_prefix(root)
+        .context("catalog staging path escaped")?;
+    let mut current = root.to_path_buf();
+    if let Some(parent) = relative.parent() {
+        for component in parent.components() {
+            current.push(component);
+            if current.is_symlink() {
+                bail!("catalog staging path {} is a symlink", current.display());
+            }
+            match std::fs::create_dir(&current) {
+                Ok(()) => {}
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::AlreadyExists
+                        && current.is_dir()
+                        && !current.is_symlink() => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn materialize_bundle_release(
+    verified: &crate::offline_bundle::VerifiedBundle,
+    spec: &UpgradeSpec,
+    root: &std::path::Path,
+) -> Result<()> {
+    let manifest_path = bundle_release_manifest_path(verified, spec)?;
+    let prefix = manifest_path
+        .rsplit_once('/')
+        .map(|(dir, _)| format!("{dir}/"))
+        .unwrap_or_default();
+    match std::fs::create_dir(root) {
+        Ok(()) => {}
+        Err(error)
+            if error.kind() == std::io::ErrorKind::AlreadyExists
+                && root.is_dir()
+                && !root.is_symlink() => {}
+        Err(error) => return Err(error.into()),
+    }
+    for path in verified.paths() {
+        let Some(relative) = path.strip_prefix(&prefix) else {
+            continue;
+        };
+        if relative.is_empty()
+            || relative.contains("..")
+            || std::path::Path::new(relative).is_absolute()
+        {
+            bail!("offline catalog entry {path} is not a canonical relative path");
+        }
+        let dest = root.join(relative);
+        create_private_ancestors(root, &dest)?;
+        let Some(bytes) = verified.entry(path) else {
+            continue;
+        };
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&dest)
+            .with_context(|| format!("writing catalog staging file {}", dest.display()))?;
+        use std::io::Write as _;
+        file.write_all(bytes)
+            .with_context(|| format!("writing catalog staging file {}", dest.display()))?;
+    }
+    for name in ["file-modes.json", "change-set-evidence.json"] {
+        let Some(bytes) = verified.entry(name) else {
+            continue;
+        };
+        let dest = root.join(name);
+        if dest.exists() {
+            let existing = std::fs::read(&dest)?;
+            if existing != bytes {
+                bail!("offline {name} conflicts with the catalog copy");
+            }
+        } else {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&dest)
+                .with_context(|| format!("writing catalog staging file {}", dest.display()))?;
+            use std::io::Write as _;
+            file.write_all(bytes)
+                .with_context(|| format!("writing catalog staging file {}", dest.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn apply_offline_file_modes(source: &std::path::Path) -> Result<()> {
+    let path = source.join("file-modes.json");
+    if !path.is_file() {
+        return Ok(());
+    }
+    #[derive(Deserialize)]
+    struct OfflineFileModes {
+        schema: String,
+        files: BTreeMap<String, String>,
+    }
+    let modes: OfflineFileModes = serde_json::from_slice(&std::fs::read(&path)?)?;
+    if modes.schema != "tenkai.offline-file-modes.v1" {
+        bail!("unsupported offline file-mode schema {}", modes.schema);
+    }
+    for (relative, encoded) in modes.files {
+        if relative.is_empty()
+            || relative.contains("..")
+            || std::path::Path::new(&relative).is_absolute()
+        {
+            bail!("offline file mode path {relative} is not canonical");
+        }
+        let dest = source.join(&relative);
+        if dest.is_symlink() || !dest.exists() {
+            bail!("offline file mode path {relative} is missing or a symlink");
+        }
+        let mode = u32::from_str_radix(encoded.trim_start_matches("0o"), 8)
+            .with_context(|| format!("offline file mode {encoded} for {relative} is not octal"))?;
+        if mode & !0o7777 != 0 {
+            bail!("offline file mode {encoded} for {relative} is out of range");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(mode))?;
+        }
+    }
+    Ok(())
+}
+
+fn bundle_catalog_toml(
+    verified: &crate::offline_bundle::VerifiedBundle,
+    spec: &UpgradeSpec,
+) -> Result<String> {
+    let path = bundle_release_manifest_path(verified, spec)?;
+    let raw = verified
+        .entry(&path)
+        .with_context(|| format!("bundle is missing catalog manifest {path}"))?;
+    Ok(std::str::from_utf8(raw)?.to_string())
+}
+
+fn bundle_catalog_manifest(
+    verified: &crate::offline_bundle::VerifiedBundle,
+    spec: &UpgradeSpec,
+) -> Result<crate::manifest::Manifest> {
+    crate::manifest::parse_raw(&bundle_catalog_toml(verified, spec)?)
+}
+
+fn require_catalog_artifacts_in_bundle(
+    verified: &crate::offline_bundle::VerifiedBundle,
+    spec: &UpgradeSpec,
+) -> Result<()> {
+    let manifest = bundle_catalog_manifest(verified, spec)?;
+    if manifest.artifacts.is_empty() {
+        return Ok(());
+    }
+    let stack = crate::offline_bundle::stack_manifest(verified)?.ok_or_else(|| {
+        anyhow::anyhow!("first-install offline bundle requires stack/manifest.json")
+    })?;
+    let Some(raw) = verified.entry(crate::offline_bundle::LAYER_INSTRUCTION_PATH) else {
+        bail!("bundle is missing a required image instruction list");
+    };
+    let layers: crate::offline_bundle::OfflineArtifactLayerManifest = serde_json::from_slice(raw)?;
+    for artifact in &manifest.artifacts {
+        if !stack.images.iter().any(|image| image == &artifact.digest) {
+            bail!(
+                "offline stack manifest does not name catalog artifact {}",
+                artifact.digest
+            );
+        }
+        if !layers.layers.iter().any(|layer| {
+            layer.registry == artifact.registry
+                && layer.repository == artifact.repository
+                && layer.digest == artifact.digest
+                && layer.media_type == artifact.media_type
+        }) {
+            bail!(
+                "offline layer instructions do not name catalog artifact {}",
+                artifact.identity_key()
+            );
+        }
+        let path = artifact.layer_entry_path()?;
+        if verified.entry(&path).is_none() {
+            bail!(
+                "offline bundle is missing catalog artifact {}",
+                artifact.digest
+            );
+        }
+    }
+    Ok(())
+}
+
+fn prospective_release_pin(
+    spec: &UpgradeSpec,
+    manifest_path: &std::path::Path,
+) -> Result<ReleasePin> {
+    let loaded = crate::manifest::load(manifest_path)?;
+    if loaded.manifest.product.name != spec.product
+        || loaded.manifest.product.version != spec.version
+    {
+        bail!(
+            "offline catalog manifest is {}@{}, not {}@{}",
+            loaded.manifest.product.name,
+            loaded.manifest.product.version,
+            spec.product,
+            spec.version
+        );
+    }
+    Ok(ReleasePin {
+        release_id: release_id(&spec.product, &spec.version),
+        release_digest: crate::manifest::digest(&loaded.raw),
+        artifact_digest: crate::manifest::identity_digest(
+            &loaded.workdir,
+            &loaded.manifest.immutable_inputs(),
+            &loaded.manifest.artifacts,
+        )?,
+    })
+}
+
+struct IsolatedCatalogAdmission {
+    root: std::path::PathBuf,
+    source: std::path::PathBuf,
+    change_set_evidence: Option<std::path::PathBuf>,
+}
+
+async fn admit_isolated_catalog(
+    ctx: &mut Ctx,
+    spec: &UpgradeSpec,
+    verified: &crate::offline_bundle::VerifiedBundle,
+    plan: &Plan,
+) -> Result<(ReleasePin, Option<IsolatedCatalogAdmission>)> {
+    if let Some(existing) = published_release_pin(ctx, spec).await? {
+        require_plan_matches_pin(plan, spec, &existing)?;
+        require_isolated_channel_available(ctx, spec).await?;
+        let bundled = bundle_catalog_toml(verified, spec)?;
+        if crate::manifest::digest(&bundled) != existing.release_digest {
+            bail!(
+                "offline catalog manifest does not match published release {}",
+                existing.release_id
+            );
+        }
+        require_catalog_artifacts_in_bundle(verified, spec)?;
+        return Ok((existing, None));
+    }
+    bundle_release_manifest_path(verified, spec)?;
+    bundle_release_verification_paths(verified, spec)?;
+    require_isolated_channel_available(ctx, spec).await?;
+    let root = exclusive_private_dir()?;
+    let source = root.join("src");
+    if let Err(error) = materialize_bundle_release(verified, spec, &source) {
+        let _ = std::fs::remove_dir_all(&root);
+        return Err(error);
+    }
+    if let Err(error) = apply_offline_file_modes(&source) {
+        let _ = std::fs::remove_dir_all(&root);
+        return Err(error);
+    }
+    let manifest = source.join("tenkai.toml");
+    let signature = source.join("release.sig.json");
+    let trust = source.join("release-trust.toml");
+    let cleanup = |error: anyhow::Error| {
+        let _ = std::fs::remove_dir_all(&root);
+        Err(error)
+    };
+    if !signature.is_file() || !trust.is_file() {
+        return cleanup(anyhow::anyhow!(
+            "offline bundle does not include signed release verification for {}@{}",
+            spec.product,
+            spec.version
+        ));
+    }
+    let prospective = match prospective_release_pin(spec, &manifest) {
+        Ok(pin) => pin,
+        Err(error) => return cleanup(error),
+    };
+    if let Err(error) = require_catalog_artifacts_in_bundle(verified, spec) {
+        return cleanup(error);
+    }
+    let evidence_path = source.join("change-set-evidence.json");
+    let loaded = match crate::manifest::load(&manifest) {
+        Ok(loaded) => loaded,
+        Err(error) => return cleanup(error),
+    };
+    let evidence = evidence_path
+        .is_file()
+        .then(|| crate::change_set_pin::ChangeSetEvidenceInput::File(evidence_path.clone()));
+    if let Err(error) = crate::change_set_pin::admit_publication(
+        loaded.manifest.change_set_pin.as_ref(),
+        evidence.as_ref(),
+    ) {
+        return cleanup(error);
+    }
+    let envelope = match crate::release_signing::SignatureEnvelope::load(&signature) {
+        Ok(envelope) => envelope,
+        Err(error) => return cleanup(error),
+    };
+    let roots = match crate::release_signing::TrustRoots::load(&trust) {
+        Ok(roots) => roots,
+        Err(error) => return cleanup(error),
+    };
+    if let Err(error) = crate::release_signing::verify_release(
+        &envelope,
+        &roots,
+        &prospective.release_digest,
+        &prospective.artifact_digest,
+    ) {
+        return cleanup(error);
+    }
+    if let Err(error) = require_plan_matches_pin(plan, spec, &prospective) {
+        return cleanup(error);
+    }
+    Ok((
+        prospective,
+        Some(IsolatedCatalogAdmission {
+            root,
+            source,
+            change_set_evidence: evidence_path.is_file().then_some(evidence_path),
+        }),
+    ))
+}
+
+fn isolated_catalog_state_dir() -> Result<std::path::PathBuf> {
+    if let Ok(path) = std::env::var("TENKAI_STATE_DIR")
+        && !path.is_empty()
+    {
+        return Ok(std::path::PathBuf::from(path));
+    }
+    let dir = std::env::current_dir()?.join(".tenkai-state");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+async fn commit_isolated_catalog(
+    ctx: &mut Ctx,
+    spec: &UpgradeSpec,
+    plan: &Plan,
+    admission: IsolatedCatalogAdmission,
+) -> Result<ReleasePin> {
+    require_isolated_channel_available(ctx, spec).await?;
+    let published = crate::catalog::publish(
+        ctx,
+        &admission.source.join("tenkai.toml"),
+        &crate::catalog::PublishOptions {
+            signature: Some(admission.source.join("release.sig.json")),
+            trust_roots: Some(admission.source.join("release-trust.toml")),
+            allow_unsigned_development: false,
+            artifact_registry: crate::oci_artifact::selected_registry()?,
+            state_dir: Some(isolated_catalog_state_dir()?),
+            change_set_evidence: admission
+                .change_set_evidence
+                .map(crate::change_set_pin::ChangeSetEvidenceInput::File),
+            ..Default::default()
+        },
+    )
+    .await;
+    if published.is_err() {
+        let _ = std::fs::remove_dir_all(&admission.root);
+    }
+    published?;
+    let _ = std::fs::remove_dir_all(&admission.root);
+    // Releases are immutable, so a later channel-pin failure cannot unpublish.
+    // Retry reuses published_release_pin and completes the isolated channel bind.
+    crate::catalog::pin_isolated_channel(ctx, &spec.product, &spec.version, &spec.channel).await?;
+    let pin = resolve_release_pin(ctx, spec).await?;
+    require_plan_matches_pin(plan, spec, &pin)?;
+    Ok(pin)
 }
 
 async fn persist(ctx: &mut Ctx, record: &UpgradeRecord) -> Result<()> {
@@ -1561,6 +2281,1128 @@ install = "true"
             "{:?}",
             rolled.status
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn incomplete_first_install_bundle_is_refused_before_mutation() {
+        let root = temp_root("first-install-missing");
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        published_software(&mut ctx, &root, "1.0.0").await;
+        let actor = crate::auth_context::test_management_context("first-install");
+        crate::catalog::promote(&mut ctx, &actor, "edge-app@1.0.0", "stable")
+            .await
+            .unwrap();
+        let exporter = SigningKey::from_bytes(&[7; 32]);
+        let bundle = export_isolated_bundle(
+            "dark-1",
+            "first-install",
+            "edge-app@1.0.0",
+            b"payload",
+            &exporter,
+            crate::now_millis(),
+        )
+        .unwrap();
+        let roots = isolated_trust_roots(&exporter, None);
+        let spec = UpgradeSpec {
+            name: "first-1".into(),
+            product: "edge-app".into(),
+            version: "1.0.0".into(),
+            channel: "stable".into(),
+            environments: vec!["dark-1".into()],
+        };
+        let err = install_isolated_stack(&mut ctx, &spec, "dark-1", &bundle, &roots, None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("stack/manifest.json"), "{err}");
+        assert!(
+            crate::environment::environment(&mut ctx, "dark-1")
+                .await
+                .is_err()
+        );
+        assert!(load_upgrade(&mut ctx, "first-1").await.is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn sha256_digest(bytes: &[u8]) -> String {
+        format!("sha256:{:x}", Sha256::digest(bytes))
+    }
+
+    fn sample_layer(bytes: &[u8]) -> crate::oci_artifact::OciArtifactRef {
+        crate::oci_artifact::OciArtifactRef {
+            registry: "ghcr.io".into(),
+            repository: "edge/app".into(),
+            digest: sha256_digest(bytes),
+            media_type: "application/vnd.oci.image.manifest.v1+json".into(),
+        }
+    }
+
+    fn signed_first_install_plan(
+        environment: &str,
+        release_digest: &str,
+        artifact_digest: &str,
+        workdir: &str,
+    ) -> Plan {
+        let mut plan = Plan {
+            format_version: crate::plan::PLAN_FORMAT_VERSION,
+            id: String::new(),
+            content_id: String::new(),
+            environment: environment.into(),
+            created_at: 1,
+            inputs: vec![crate::plan::DesiredStateInput {
+                product: "edge-app".into(),
+                channel: "stable".into(),
+                channel_id: channel_id("edge-app", "stable"),
+                desired_version: "1.0.0".into(),
+                release_id: release_id("edge-app", "1.0.0"),
+                release_digest: release_digest.into(),
+                artifact_digest: artifact_digest.into(),
+                deployed_version: None,
+            }],
+            steps: vec![crate::plan::Step {
+                id: String::new(),
+                order: 0,
+                product: "edge-app".into(),
+                action: crate::plan::Action::Install,
+                from: None,
+                to: "1.0.0".into(),
+                release_id: release_id("edge-app", "1.0.0"),
+                release_digest: release_digest.into(),
+                artifact_digest: artifact_digest.into(),
+                workdir: workdir.into(),
+                restore: None,
+            }],
+            state: PlanState::Computed,
+            gates_skipped: None,
+            status_detail: String::new(),
+            maintenance_blocked: false,
+            prior_warnings: Vec::new(),
+            recalled_recovery_reason: None,
+        };
+        plan.bind_content_identity().unwrap();
+        plan
+    }
+
+    struct StoreEnvGuard {
+        previous_oci: Option<std::ffi::OsString>,
+        previous_weights: Option<std::ffi::OsString>,
+        previous_state: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for StoreEnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.previous_oci {
+                    Some(value) => std::env::set_var("TENKAI_OCI_STORE", value),
+                    None => std::env::remove_var("TENKAI_OCI_STORE"),
+                }
+                match &self.previous_weights {
+                    Some(value) => std::env::set_var("TENKAI_WEIGHT_CACHE", value),
+                    None => std::env::remove_var("TENKAI_WEIGHT_CACHE"),
+                }
+                match &self.previous_state {
+                    Some(value) => std::env::set_var("TENKAI_STATE_DIR", value),
+                    None => std::env::remove_var("TENKAI_STATE_DIR"),
+                }
+            }
+        }
+    }
+
+    fn lock_artifact_stores(root: &std::path::Path) -> StoreEnvGuard {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let lock = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let oci = root.join("oci");
+        let weights = root.join("weights");
+        let state = root.join("state");
+        std::fs::create_dir_all(&oci).unwrap();
+        std::fs::create_dir_all(&weights).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        let previous_oci = std::env::var_os("TENKAI_OCI_STORE");
+        let previous_weights = std::env::var_os("TENKAI_WEIGHT_CACHE");
+        let previous_state = std::env::var_os("TENKAI_STATE_DIR");
+        unsafe {
+            std::env::set_var("TENKAI_OCI_STORE", &oci);
+            std::env::set_var("TENKAI_WEIGHT_CACHE", &weights);
+            std::env::set_var("TENKAI_STATE_DIR", &state);
+        }
+        StoreEnvGuard {
+            previous_oci,
+            previous_weights,
+            previous_state,
+            _lock: lock,
+        }
+    }
+
+    fn sign_catalog_for_layer(
+        root: &std::path::Path,
+        artifact: &crate::oci_artifact::OciArtifactRef,
+        extra_toml: &str,
+    ) -> (Vec<u8>, Vec<u8>, Vec<u8>, String, String) {
+        let dir = root.join("catalog-src");
+        std::fs::create_dir_all(&dir).unwrap();
+        let toml = format!(
+            r#"
+[product]
+name = "edge-app"
+version = "1.0.0"
+
+[deploy]
+install = "true"
+
+[[artifacts]]
+registry = "{}"
+repository = "{}"
+digest = "{}"
+media_type = "{}"
+{extra_toml}
+"#,
+            artifact.registry,
+            artifact.repository,
+            artifact.digest,
+            artifact.media_type,
+            extra_toml = extra_toml
+        );
+        let manifest = dir.join("tenkai.toml");
+        std::fs::write(&manifest, &toml).unwrap();
+        let signature = dir.join("release.sig.json");
+        let trust = dir.join("release-trust.toml");
+        crate::dev_sign::sign_release(&root.join("keys"), &manifest, &signature, &trust).unwrap();
+        let loaded = crate::manifest::load(&manifest).unwrap();
+        let digest = crate::manifest::digest(&std::fs::read_to_string(&manifest).unwrap());
+        let artifact_digest = crate::manifest::identity_digest(
+            &loaded.workdir,
+            &loaded.manifest.immutable_inputs(),
+            &loaded.manifest.artifacts,
+        )
+        .unwrap();
+        (
+            toml.into_bytes(),
+            std::fs::read(&signature).unwrap(),
+            std::fs::read(&trust).unwrap(),
+            digest,
+            artifact_digest,
+        )
+    }
+
+    type CatalogPayload<'a> = Option<(&'a [u8], Option<&'a [u8]>, Option<&'a [u8]>)>;
+
+    fn complete_first_install_bundle(
+        environment: &str,
+        plan_bytes: &[u8],
+        catalog: CatalogPayload<'_>,
+        archive_path: &std::path::Path,
+        exporter: &SigningKey,
+    ) -> crate::offline_bundle::BundleEnvelope {
+        complete_first_install_bundle_with_layer(
+            environment,
+            plan_bytes,
+            catalog,
+            archive_path,
+            exporter,
+            &sample_layer(b"layer-a"),
+            BTreeMap::new(),
+        )
+    }
+
+    fn complete_first_install_bundle_with_layer(
+        environment: &str,
+        plan_bytes: &[u8],
+        catalog: CatalogPayload<'_>,
+        archive_path: &std::path::Path,
+        exporter: &SigningKey,
+        artifact: &crate::oci_artifact::OciArtifactRef,
+        extra: BTreeMap<String, (String, Vec<u8>)>,
+    ) -> crate::offline_bundle::BundleEnvelope {
+        let layer_bytes = b"layer-a";
+        let origin = crate::oci_artifact::MemoryArtifactRegistry::new();
+        origin.put(artifact, layer_bytes.to_vec()).unwrap();
+        let mut payloads = BTreeMap::new();
+        let approval = br#"{"approval":"first-install"}"#.to_vec();
+        payloads.insert(
+            format!(
+                "plans/{}.json",
+                serde_json::from_slice::<Plan>(plan_bytes)
+                    .map(|plan| plan.id)
+                    .unwrap_or_else(|_| "first-install".into())
+            ),
+            ("application/json".into(), plan_bytes.to_vec()),
+        );
+        let plan_id = payloads
+            .keys()
+            .find(|path| path.starts_with("plans/"))
+            .unwrap()
+            .clone();
+        let plan_id = plan_id
+            .trim_start_matches("plans/")
+            .trim_end_matches(".json")
+            .to_string();
+        payloads.insert(
+            format!("approvals/{plan_id}.json"),
+            ("application/json".into(), approval.clone()),
+        );
+        if let Some((toml, signature, trust)) = catalog {
+            payloads.insert(
+                "releases/edge-app@1.0.0/tenkai.toml".into(),
+                ("application/toml".into(), toml.to_vec()),
+            );
+            if let Some(signature) = signature {
+                payloads.insert(
+                    "releases/edge-app@1.0.0/release.sig.json".into(),
+                    ("application/json".into(), signature.to_vec()),
+                );
+            }
+            if let Some(trust) = trust {
+                payloads.insert(
+                    "releases/edge-app@1.0.0/release-trust.toml".into(),
+                    ("application/toml".into(), trust.to_vec()),
+                );
+            }
+        } else {
+            payloads.insert(
+                "releases/edge-app@1.0.0/payload.bin".into(),
+                ("application/octet-stream".into(), b"payload".to_vec()),
+            );
+        }
+        payloads.insert(
+            "schemas/edge.json".into(),
+            ("application/json".into(), b"{}".to_vec()),
+        );
+        payloads.insert(
+            "hub/tenkai-server".into(),
+            ("application/octet-stream".into(), b"hub-bin".to_vec()),
+        );
+        crate::offline_bundle::insert_artifact_layers(
+            &mut payloads,
+            std::slice::from_ref(artifact),
+            &origin,
+        )
+        .unwrap();
+        let source = archive_path.parent().unwrap().join("weight.bin");
+        std::fs::write(&source, b"weight-bytes").unwrap();
+        let chunks = crate::offline_chunk_store::chunk_dir_beside(archive_path).unwrap();
+        let artifact_chunks =
+            crate::offline_chunk_store::export_weight_chunks(&source, &chunks, 64).unwrap();
+        crate::offline_chunk_store::insert_chunk_manifest(
+            &mut payloads,
+            vec![artifact_chunks.clone()],
+        )
+        .unwrap();
+        crate::offline_bundle::insert_stack_manifest(
+            &mut payloads,
+            crate::offline_bundle::OfflineStackManifest {
+                schema: crate::offline_bundle::STACK_MANIFEST_SCHEMA.into(),
+                images: vec![artifact.digest.clone()],
+                weights: vec![artifact_chunks.digest],
+                schemas: vec!["schemas/edge.json".into()],
+                hub: vec!["hub/tenkai-server".into()],
+            },
+        )
+        .unwrap();
+        payloads.extend(extra);
+        crate::offline_bundle::BundleEnvelope::create(
+            crate::offline_bundle::BundleStatement {
+                tenant_id: crate::ontology::NS.into(),
+                environment_id: environment.into(),
+                plan_id,
+                plan_digest: sha256_digest(plan_bytes),
+                approval_digest: sha256_digest(&approval),
+                release_ids: vec!["edge-app@1.0.0".into()],
+                exporter_identity: "exporter".into(),
+                issued_at_unix_ms: crate::now_millis(),
+                expires_at_unix_ms: crate::now_millis().saturating_add(3_600_000),
+                entries: Vec::new(),
+            },
+            payloads,
+            exporter,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn first_install_rejects_non_executable_plan_before_mutation() {
+        let root = temp_root("first-install-stub-plan");
+        let _stores = lock_artifact_stores(&root);
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let exporter = SigningKey::from_bytes(&[7; 32]);
+        let archive = root.join("delivery.json");
+        let bundle = complete_first_install_bundle(
+            "dark-1",
+            br#"{"plan":"first-install"}"#,
+            Some((
+                br#"
+[product]
+name = "edge-app"
+version = "1.0.0"
+
+[deploy]
+install = "true"
+"#,
+                None,
+                None,
+            )),
+            &archive,
+            &exporter,
+        );
+        bundle.save(&archive).unwrap();
+        let roots = isolated_trust_roots(&exporter, None);
+        let spec = UpgradeSpec {
+            name: "first-stub".into(),
+            product: "edge-app".into(),
+            version: "1.0.0".into(),
+            channel: "stable".into(),
+            environments: vec!["dark-1".into()],
+        };
+        let err =
+            install_isolated_stack(&mut ctx, &spec, "dark-1", &bundle, &roots, Some(&archive))
+                .await
+                .unwrap_err()
+                .to_string();
+        assert!(
+            err.contains("executable plan") || err.contains("canonical plan"),
+            "{err}"
+        );
+        assert!(
+            crate::environment::environment(&mut ctx, "dark-1")
+                .await
+                .is_err()
+        );
+        assert!(load_upgrade(&mut ctx, "first-stub").await.is_err());
+        assert!(
+            ctx.get(&release_id("edge-app", "1.0.0"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn first_install_rejects_non_runnable_plan_before_mutation() {
+        let root = temp_root("first-install-succeeded-plan");
+        let _stores = lock_artifact_stores(&root);
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let exporter = SigningKey::from_bytes(&[7; 32]);
+        let mut plan = signed_first_install_plan(
+            "dark-1",
+            "sha256:plan-release",
+            "sha256:plan-artifact",
+            "/exporter/state/edge-app",
+        );
+        plan.state = PlanState::Succeeded;
+        let plan_bytes = serde_json::to_vec(&plan).unwrap();
+        let archive = root.join("delivery.json");
+        let (toml, signature, trust, _, _) =
+            sign_catalog_for_layer(&root, &sample_layer(b"layer-a"), "");
+        let bundle = complete_first_install_bundle(
+            "dark-1",
+            &plan_bytes,
+            Some((&toml, Some(&signature), Some(&trust))),
+            &archive,
+            &exporter,
+        );
+        bundle.save(&archive).unwrap();
+        let roots = isolated_trust_roots(&exporter, None);
+        let spec = UpgradeSpec {
+            name: "first-succeeded".into(),
+            product: "edge-app".into(),
+            version: "1.0.0".into(),
+            channel: "stable".into(),
+            environments: vec!["dark-1".into()],
+        };
+        let err =
+            install_isolated_stack(&mut ctx, &spec, "dark-1", &bundle, &roots, Some(&archive))
+                .await
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("not executable"), "{err}");
+        assert!(
+            crate::environment::environment(&mut ctx, "dark-1")
+                .await
+                .is_err()
+        );
+        assert!(load_upgrade(&mut ctx, "first-succeeded").await.is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn first_install_rejects_unsigned_catalog_manifest_before_mutation() {
+        let root = temp_root("first-install-unsigned");
+        let _stores = lock_artifact_stores(&root);
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let exporter = SigningKey::from_bytes(&[7; 32]);
+        let plan = signed_first_install_plan(
+            "dark-1",
+            "sha256:plan-release",
+            "sha256:plan-artifact",
+            "/exporter/state/edge-app",
+        );
+        let plan_bytes = serde_json::to_vec(&plan).unwrap();
+        let archive = root.join("delivery.json");
+        let unsigned = br#"
+[product]
+name = "edge-app"
+version = "1.0.0"
+
+[deploy]
+install = "true"
+"#;
+        let bundle = complete_first_install_bundle(
+            "dark-1",
+            &plan_bytes,
+            Some((unsigned, None, None)),
+            &archive,
+            &exporter,
+        );
+        bundle.save(&archive).unwrap();
+        let roots = isolated_trust_roots(&exporter, None);
+        let spec = UpgradeSpec {
+            name: "first-unsigned".into(),
+            product: "edge-app".into(),
+            version: "1.0.0".into(),
+            channel: "stable".into(),
+            environments: vec!["dark-1".into()],
+        };
+        let err =
+            install_isolated_stack(&mut ctx, &spec, "dark-1", &bundle, &roots, Some(&archive))
+                .await
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("signed release verification"), "{err}");
+        assert!(
+            crate::environment::environment(&mut ctx, "dark-1")
+                .await
+                .is_err()
+        );
+        assert!(load_upgrade(&mut ctx, "first-unsigned").await.is_err());
+        assert!(
+            ctx.get(&release_id("edge-app", "1.0.0"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn first_install_from_signed_bundle_bootstraps_catalog_and_authenticated_plan() {
+        let root = temp_root("first-install-success");
+        let _stores = lock_artifact_stores(&root);
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let exporter = SigningKey::from_bytes(&[7; 32]);
+        let artifact = sample_layer(b"layer-a");
+        let (toml, signature, trust, release_digest, artifact_digest) =
+            sign_catalog_for_layer(&root, &artifact, "");
+        let plan = signed_first_install_plan(
+            "dark-1",
+            &release_digest,
+            &artifact_digest,
+            "/exporter/state/edge-app",
+        );
+        let plan_bytes = serde_json::to_vec(&plan).unwrap();
+        let archive = root.join("delivery.json");
+        let bundle = complete_first_install_bundle(
+            "dark-1",
+            &plan_bytes,
+            Some((&toml, Some(&signature), Some(&trust))),
+            &archive,
+            &exporter,
+        );
+        bundle.save(&archive).unwrap();
+        let roots = isolated_trust_roots(&exporter, None);
+        let spec = UpgradeSpec {
+            name: "first-ok".into(),
+            product: "edge-app".into(),
+            version: "1.0.0".into(),
+            channel: "stable".into(),
+            environments: vec!["dark-1".into()],
+        };
+        let record =
+            install_isolated_stack(&mut ctx, &spec, "dark-1", &bundle, &roots, Some(&archive))
+                .await
+                .unwrap();
+        assert_eq!(record.status, UpgradeStatus::Admitted);
+        assert_eq!(
+            record.environments[0].plan_id.as_deref(),
+            Some(plan.id.as_str())
+        );
+        let evidence = record.environments[0].isolated.as_ref().unwrap();
+        assert_eq!(
+            evidence.plan_digest.as_deref(),
+            Some(bundle.statement.plan_digest.as_str())
+        );
+        assert_eq!(
+            evidence.approval_digest.as_deref(),
+            Some(bundle.statement.approval_digest.as_str())
+        );
+        let stored = plan::load(&mut ctx, &plan.id).await.unwrap();
+        assert_eq!(stored.id, plan.id);
+        assert_eq!(stored.steps[0].workdir, "/exporter/state/edge-app");
+        let release = ctx
+            .get(&release_id("edge-app", "1.0.0"))
+            .await
+            .unwrap()
+            .unwrap();
+        let snapshot = release
+            .properties
+            .get("workdir")
+            .cloned()
+            .unwrap_or_default();
+        let state = root.join("state").canonicalize().unwrap();
+        assert!(
+            std::path::Path::new(&snapshot).starts_with(&state),
+            "host snapshot {snapshot} was not stored under TENKAI_STATE_DIR"
+        );
+        assert_ne!(snapshot, stored.steps[0].workdir);
+        assert_eq!(
+            connectivity_class(&mut ctx, "dark-1").await.unwrap(),
+            ConnectivityClass::Isolated
+        );
+        assert!(
+            ctx.get(&release_id("edge-app", "1.0.0"))
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let channel = ctx
+            .get(&channel_id("edge-app", "stable"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            channel
+                .properties
+                .get("current_release")
+                .map(String::as_str),
+            Some(release_id("edge-app", "1.0.0").as_str())
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn first_install_rejects_mismatched_layer_reference_before_mutation() {
+        let root = temp_root("first-install-layer-ref");
+        let _stores = lock_artifact_stores(&root);
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let exporter = SigningKey::from_bytes(&[7; 32]);
+        let catalog_artifact = sample_layer(b"layer-a");
+        let import_artifact = crate::oci_artifact::OciArtifactRef {
+            registry: "registry.example".into(),
+            repository: "other/app".into(),
+            digest: catalog_artifact.digest.clone(),
+            media_type: catalog_artifact.media_type.clone(),
+        };
+        let (toml, signature, trust, release_digest, artifact_digest) =
+            sign_catalog_for_layer(&root, &catalog_artifact, "");
+        let plan = signed_first_install_plan(
+            "dark-1",
+            &release_digest,
+            &artifact_digest,
+            "/exporter/state/edge-app",
+        );
+        let plan_bytes = serde_json::to_vec(&plan).unwrap();
+        let archive = root.join("delivery.json");
+        let bundle = complete_first_install_bundle_with_layer(
+            "dark-1",
+            &plan_bytes,
+            Some((&toml, Some(&signature), Some(&trust))),
+            &archive,
+            &exporter,
+            &import_artifact,
+            BTreeMap::new(),
+        );
+        bundle.save(&archive).unwrap();
+        let roots = isolated_trust_roots(&exporter, None);
+        let spec = UpgradeSpec {
+            name: "first-layer-ref".into(),
+            product: "edge-app".into(),
+            version: "1.0.0".into(),
+            channel: "stable".into(),
+            environments: vec!["dark-1".into()],
+        };
+        let err =
+            install_isolated_stack(&mut ctx, &spec, "dark-1", &bundle, &roots, Some(&archive))
+                .await
+                .unwrap_err()
+                .to_string();
+        assert!(
+            err.contains("layer instructions do not name catalog artifact"),
+            "{err}"
+        );
+        assert!(
+            crate::environment::environment(&mut ctx, "dark-1")
+                .await
+                .is_err()
+        );
+        assert!(load_upgrade(&mut ctx, "first-layer-ref").await.is_err());
+        assert!(
+            ctx.get(&release_id("edge-app", "1.0.0"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let oci = std::path::PathBuf::from(std::env::var_os("TENKAI_OCI_STORE").unwrap());
+        assert!(
+            !oci.join("registry.example").exists(),
+            "layer import mutated the OCI store"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn first_install_rejects_recalled_release_before_mutation() {
+        let root = temp_root("first-install-recalled");
+        let _stores = lock_artifact_stores(&root);
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let rid = release_id("edge-app", "1.0.0");
+        ctx.create_once(Object {
+            id: rid.clone(),
+            kind: crate::ontology::KIND_RELEASE.into(),
+            name: "edge-app@1.0.0".into(),
+            namespace: NS.into(),
+            external_id: String::new(),
+            properties: HashMap::from([
+                ("product".into(), "edge-app".into()),
+                ("version".into(), "1.0.0".into()),
+                (
+                    "digest".into(),
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .into(),
+                ),
+                (
+                    "artifact_digest".into(),
+                    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        .into(),
+                ),
+                ("recalled_at".into(), "1".into()),
+            ]),
+            created: 1,
+            updated: 1,
+        })
+        .await
+        .unwrap();
+        let exporter = SigningKey::from_bytes(&[7; 32]);
+        let artifact = sample_layer(b"layer-a");
+        let (toml, signature, trust, release_digest, artifact_digest) =
+            sign_catalog_for_layer(&root, &artifact, "");
+        let plan = signed_first_install_plan(
+            "dark-1",
+            &release_digest,
+            &artifact_digest,
+            "/exporter/state/edge-app",
+        );
+        let plan_bytes = serde_json::to_vec(&plan).unwrap();
+        let archive = root.join("delivery.json");
+        let bundle = complete_first_install_bundle(
+            "dark-1",
+            &plan_bytes,
+            Some((&toml, Some(&signature), Some(&trust))),
+            &archive,
+            &exporter,
+        );
+        bundle.save(&archive).unwrap();
+        let roots = isolated_trust_roots(&exporter, None);
+        let spec = UpgradeSpec {
+            name: "first-recalled".into(),
+            product: "edge-app".into(),
+            version: "1.0.0".into(),
+            channel: "stable".into(),
+            environments: vec!["dark-1".into()],
+        };
+        let err =
+            install_isolated_stack(&mut ctx, &spec, "dark-1", &bundle, &roots, Some(&archive))
+                .await
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("recalled"), "{err}");
+        assert!(
+            crate::environment::environment(&mut ctx, "dark-1")
+                .await
+                .is_err()
+        );
+        assert!(load_upgrade(&mut ctx, "first-recalled").await.is_err());
+        let oci = std::path::PathBuf::from(std::env::var_os("TENKAI_OCI_STORE").unwrap());
+        assert!(
+            !oci.join("ghcr.io").exists(),
+            "recalled first-install imported layers"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn first_install_completes_channel_pin_for_existing_matching_release() {
+        let root = temp_root("first-install-resume-pin");
+        let _stores = lock_artifact_stores(&root);
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let exporter = SigningKey::from_bytes(&[7; 32]);
+        let artifact = sample_layer(b"layer-a");
+        crate::oci_artifact::FilesystemArtifactRegistry::from_env()
+            .unwrap()
+            .put(&artifact, b"layer-a".to_vec())
+            .unwrap();
+        let (toml, signature, trust, release_digest, artifact_digest) =
+            sign_catalog_for_layer(&root, &artifact, "");
+        crate::catalog::publish(
+            &mut ctx,
+            &root.join("catalog-src/tenkai.toml"),
+            &PublishOptions {
+                signature: Some(root.join("catalog-src/release.sig.json")),
+                trust_roots: Some(root.join("catalog-src/release-trust.toml")),
+                allow_unsigned_development: false,
+                artifact_registry: crate::oci_artifact::selected_registry().unwrap(),
+                state_dir: Some(root.join("state")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            ctx.get(&channel_id("edge-app", "stable"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let plan = signed_first_install_plan(
+            "dark-1",
+            &release_digest,
+            &artifact_digest,
+            "/exporter/state/edge-app",
+        );
+        let plan_bytes = serde_json::to_vec(&plan).unwrap();
+        let archive = root.join("delivery.json");
+        let bundle = complete_first_install_bundle(
+            "dark-1",
+            &plan_bytes,
+            Some((&toml, Some(&signature), Some(&trust))),
+            &archive,
+            &exporter,
+        );
+        bundle.save(&archive).unwrap();
+        let roots = isolated_trust_roots(&exporter, None);
+        let spec = UpgradeSpec {
+            name: "first-resume".into(),
+            product: "edge-app".into(),
+            version: "1.0.0".into(),
+            channel: "stable".into(),
+            environments: vec!["dark-1".into()],
+        };
+        let record =
+            install_isolated_stack(&mut ctx, &spec, "dark-1", &bundle, &roots, Some(&archive))
+                .await
+                .unwrap();
+        assert_eq!(record.status, UpgradeStatus::Admitted);
+        let channel = ctx
+            .get(&channel_id("edge-app", "stable"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            channel
+                .properties
+                .get("current_release")
+                .map(String::as_str),
+            Some(release_id("edge-app", "1.0.0").as_str())
+        );
+        let _ = toml;
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn first_install_applies_top_level_file_modes_before_mutation() {
+        let root = temp_root("first-install-file-modes");
+        let _stores = lock_artifact_stores(&root);
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let exporter = SigningKey::from_bytes(&[7; 32]);
+        let artifact = sample_layer(b"layer-a");
+        let (toml, signature, trust, release_digest, artifact_digest) =
+            sign_catalog_for_layer(&root, &artifact, "");
+        let plan = signed_first_install_plan(
+            "dark-1",
+            &release_digest,
+            &artifact_digest,
+            "/exporter/state/edge-app",
+        );
+        let plan_bytes = serde_json::to_vec(&plan).unwrap();
+        let archive = root.join("delivery.json");
+        let mut extra = BTreeMap::new();
+        extra.insert(
+            "file-modes.json".into(),
+            (
+                "application/json".into(),
+                br#"{"schema":"tenkai.offline-file-modes.v1","files":{"missing.sh":"0755"}}"#
+                    .to_vec(),
+            ),
+        );
+        let bundle = complete_first_install_bundle_with_layer(
+            "dark-1",
+            &plan_bytes,
+            Some((&toml, Some(&signature), Some(&trust))),
+            &archive,
+            &exporter,
+            &artifact,
+            extra,
+        );
+        bundle.save(&archive).unwrap();
+        let roots = isolated_trust_roots(&exporter, None);
+        let spec = UpgradeSpec {
+            name: "first-modes".into(),
+            product: "edge-app".into(),
+            version: "1.0.0".into(),
+            channel: "stable".into(),
+            environments: vec!["dark-1".into()],
+        };
+        let err =
+            install_isolated_stack(&mut ctx, &spec, "dark-1", &bundle, &roots, Some(&archive))
+                .await
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("file mode path missing.sh"), "{err}");
+        assert!(
+            crate::environment::environment(&mut ctx, "dark-1")
+                .await
+                .is_err()
+        );
+        assert!(load_upgrade(&mut ctx, "first-modes").await.is_err());
+        assert!(
+            ctx.get(&release_id("edge-app", "1.0.0"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn first_install_rejects_existing_release_with_mismatched_bundle_layers() {
+        let root = temp_root("first-install-existing-mismatch");
+        let _stores = lock_artifact_stores(&root);
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let exporter = SigningKey::from_bytes(&[7; 32]);
+        let catalog_artifact = sample_layer(b"layer-a");
+        crate::oci_artifact::FilesystemArtifactRegistry::from_env()
+            .unwrap()
+            .put(&catalog_artifact, b"layer-a".to_vec())
+            .unwrap();
+        let (toml, signature, trust, release_digest, artifact_digest) =
+            sign_catalog_for_layer(&root, &catalog_artifact, "");
+        crate::catalog::publish(
+            &mut ctx,
+            &root.join("catalog-src/tenkai.toml"),
+            &PublishOptions {
+                signature: Some(root.join("catalog-src/release.sig.json")),
+                trust_roots: Some(root.join("catalog-src/release-trust.toml")),
+                allow_unsigned_development: false,
+                artifact_registry: crate::oci_artifact::selected_registry().unwrap(),
+                state_dir: Some(root.join("state")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let import_artifact = crate::oci_artifact::OciArtifactRef {
+            registry: "registry.example".into(),
+            repository: "other/app".into(),
+            digest: catalog_artifact.digest.clone(),
+            media_type: catalog_artifact.media_type.clone(),
+        };
+        let plan = signed_first_install_plan(
+            "dark-1",
+            &release_digest,
+            &artifact_digest,
+            "/exporter/state/edge-app",
+        );
+        let plan_bytes = serde_json::to_vec(&plan).unwrap();
+        let archive = root.join("delivery.json");
+        let bundle = complete_first_install_bundle_with_layer(
+            "dark-1",
+            &plan_bytes,
+            Some((&toml, Some(&signature), Some(&trust))),
+            &archive,
+            &exporter,
+            &import_artifact,
+            BTreeMap::new(),
+        );
+        bundle.save(&archive).unwrap();
+        let roots = isolated_trust_roots(&exporter, None);
+        let spec = UpgradeSpec {
+            name: "first-existing-mismatch".into(),
+            product: "edge-app".into(),
+            version: "1.0.0".into(),
+            channel: "stable".into(),
+            environments: vec!["dark-1".into()],
+        };
+        let err =
+            install_isolated_stack(&mut ctx, &spec, "dark-1", &bundle, &roots, Some(&archive))
+                .await
+                .unwrap_err()
+                .to_string();
+        assert!(
+            err.contains("layer instructions do not name catalog artifact"),
+            "{err}"
+        );
+        assert!(
+            load_upgrade(&mut ctx, "first-existing-mismatch")
+                .await
+                .is_err()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn first_install_rejects_change_set_pin_without_evidence_before_mutation() {
+        let root = temp_root("first-install-changeset");
+        let _stores = lock_artifact_stores(&root);
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let exporter = SigningKey::from_bytes(&[7; 32]);
+        let artifact = sample_layer(b"layer-a");
+        let pin = crate::manifest::ChangeSetPinSection {
+            contract: crate::change_set_pin::PIN_CONTRACT.into(),
+            namespace: "acme".into(),
+            branch_id: "types".into(),
+            proposal_id: "prop-1".into(),
+            base_digest: format!("sha256:{}", "a".repeat(64)),
+            closure_digest: format!("sha256:{}", "b".repeat(64)),
+            receipt_digest: format!("sha256:{}", "c".repeat(64)),
+            members: vec![crate::manifest::ChangeSetMemberSection {
+                kind: "object_type".into(),
+                id: "widget".into(),
+                digest: format!("sha256:{}", "d".repeat(64)),
+            }],
+        };
+        let extra = crate::change_set_pin::render_pin_toml(&pin);
+        let (toml, signature, trust, release_digest, artifact_digest) =
+            sign_catalog_for_layer(&root, &artifact, &extra);
+        let plan = signed_first_install_plan(
+            "dark-1",
+            &release_digest,
+            &artifact_digest,
+            "/exporter/state/edge-app",
+        );
+        let plan_bytes = serde_json::to_vec(&plan).unwrap();
+        let archive = root.join("delivery.json");
+        let bundle = complete_first_install_bundle(
+            "dark-1",
+            &plan_bytes,
+            Some((&toml, Some(&signature), Some(&trust))),
+            &archive,
+            &exporter,
+        );
+        bundle.save(&archive).unwrap();
+        let roots = isolated_trust_roots(&exporter, None);
+        let spec = UpgradeSpec {
+            name: "first-changeset".into(),
+            product: "edge-app".into(),
+            version: "1.0.0".into(),
+            channel: "stable".into(),
+            environments: vec!["dark-1".into()],
+        };
+        let err =
+            install_isolated_stack(&mut ctx, &spec, "dark-1", &bundle, &roots, Some(&archive))
+                .await
+                .unwrap_err()
+                .to_string();
+        assert!(
+            err.contains("change-set publication evidence") || err.contains("change-set"),
+            "{err}"
+        );
+        assert!(
+            crate::environment::environment(&mut ctx, "dark-1")
+                .await
+                .is_err()
+        );
+        assert!(load_upgrade(&mut ctx, "first-changeset").await.is_err());
+        assert!(
+            ctx.get(&release_id("edge-app", "1.0.0"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn first_install_rejects_divergent_bundle_manifest_for_existing_release() {
+        let root = temp_root("first-install-divergent-manifest");
+        let _stores = lock_artifact_stores(&root);
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let exporter = SigningKey::from_bytes(&[7; 32]);
+        let artifact = sample_layer(b"layer-a");
+        crate::oci_artifact::FilesystemArtifactRegistry::from_env()
+            .unwrap()
+            .put(&artifact, b"layer-a".to_vec())
+            .unwrap();
+        let (_toml, _signature, _trust, release_digest, artifact_digest) =
+            sign_catalog_for_layer(&root, &artifact, "");
+        crate::catalog::publish(
+            &mut ctx,
+            &root.join("catalog-src/tenkai.toml"),
+            &PublishOptions {
+                signature: Some(root.join("catalog-src/release.sig.json")),
+                trust_roots: Some(root.join("catalog-src/release-trust.toml")),
+                allow_unsigned_development: false,
+                artifact_registry: crate::oci_artifact::selected_registry().unwrap(),
+                state_dir: Some(root.join("state")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let empty = br#"
+[product]
+name = "edge-app"
+version = "1.0.0"
+
+[deploy]
+install = "true"
+"#;
+        let plan = signed_first_install_plan(
+            "dark-1",
+            &release_digest,
+            &artifact_digest,
+            "/exporter/state/edge-app",
+        );
+        let plan_bytes = serde_json::to_vec(&plan).unwrap();
+        let archive = root.join("delivery.json");
+        let bundle = complete_first_install_bundle(
+            "dark-1",
+            &plan_bytes,
+            Some((empty, None, None)),
+            &archive,
+            &exporter,
+        );
+        bundle.save(&archive).unwrap();
+        let roots = isolated_trust_roots(&exporter, None);
+        let spec = UpgradeSpec {
+            name: "first-divergent".into(),
+            product: "edge-app".into(),
+            version: "1.0.0".into(),
+            channel: "stable".into(),
+            environments: vec!["dark-1".into()],
+        };
+        let err =
+            install_isolated_stack(&mut ctx, &spec, "dark-1", &bundle, &roots, Some(&archive))
+                .await
+                .unwrap_err()
+                .to_string();
+        assert!(
+            err.contains("does not match published release")
+                || err.contains("signed release verification"),
+            "{err}"
+        );
+        assert!(load_upgrade(&mut ctx, "first-divergent").await.is_err());
         let _ = std::fs::remove_dir_all(root);
     }
 }

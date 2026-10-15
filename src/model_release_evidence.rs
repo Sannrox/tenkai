@@ -1348,6 +1348,7 @@ uninstall = "true"
             provenance_trust_roots: None,
             change_set_evidence: None,
             artifact_registry: None,
+            state_dir: None,
         };
         crate::catalog::publish(&mut ctx, &root.join("model/tenkai.toml"), &options)
             .await
@@ -1469,6 +1470,7 @@ uninstall = "true"
             provenance_trust_roots: None,
             change_set_evidence: None,
             artifact_registry: None,
+            state_dir: None,
         };
         crate::catalog::publish(&mut ctx, &root.join("software/tenkai.toml"), &options)
             .await

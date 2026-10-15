@@ -52,6 +52,35 @@ pub(crate) async fn run(ctx: &mut client::Ctx, command: UpgradeCommand) -> Resul
             let record = connectivity::resume_transfer(ctx, &name, &env).await?;
             println!("{}", connectivity::format_upgrade(&record));
         }
+        UpgradeCommand::InstallBundle {
+            name,
+            env,
+            product,
+            version,
+            channel,
+            bundle,
+            trust_roots,
+        } => {
+            let envelope = offline_bundle::BundleEnvelope::load(&bundle)?;
+            let roots = release_signing::TrustRoots::load(&trust_roots)?;
+            let spec = connectivity::UpgradeSpec {
+                name,
+                product,
+                version,
+                channel,
+                environments: vec![env.clone()],
+            };
+            let record = connectivity::install_isolated_stack(
+                ctx,
+                &spec,
+                &env,
+                &envelope,
+                &roots,
+                Some(&bundle),
+            )
+            .await?;
+            println!("{}", connectivity::format_upgrade(&record));
+        }
         UpgradeCommand::BindBundle {
             name,
             env,

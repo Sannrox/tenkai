@@ -44,6 +44,59 @@ Isolated-bundle bind (`tenkaictl upgrade bind-bundle`) imports those chunks
 into `TENKAI_WEIGHT_CACHE` from `<bundle-stem>.chunks/` beside the archive.
 A chunked bundle without the archive path or that cache directory fails closed.
 
+First install of a dark site uses the same archive schema. A signed
+`stack/manifest.json` (`tenkai.offline-stack.v1`) lists the required product
+images, model weights, schemas, and hub payload. `tenkaictl upgrade
+install-bundle` verifies that index against the archive and companion chunk
+store before it creates the isolated environment or writes the OCI store,
+weight cache, or upgrade record. A bundle missing any required image, weight,
+schema, or hub entry is refused with no mutation. An already published or
+recalled catalog release is refused before import rather than bootstrapping
+over existing catalog state. Every layer and chunk the
+importer will consume must be named in that index. The archive also supplies
+the catalog manifest (`releases/<product>@<version>/tenkai.toml`) plus its
+release signature and trust roots used to bootstrap a fresh local pin.
+Each catalog OCI artifact must appear in `stack/manifest.json` images and in
+`oci-layers/mirrors.json` with the same registry, repository, digest, and
+media type, plus the matching layer bytes. Catalog snapshots are written to
+`TENKAI_STATE_DIR` or `./.tenkai-state` by passing that directory into
+publication, not by mutating process environment.
+Optional `file-modes.json` (`tenkai.offline-file-modes.v1`) may be a top-level
+archive entry or sit beside `tenkai.toml` under `releases/<product>@<version>/`.
+It restores signed filesystem modes for deploy inputs before the catalog digest
+is checked. A catalog with `[change_set_pin]` must include matching
+`change-set-evidence.json` beside `tenkai.toml` or as a top-level archive entry;
+missing evidence is refused before import. The
+upgrade binds the signed `plan_id`, plan digest, and approval digest
+instead of inventing a local plan. Artifact layers are imported before that
+catalog publication so digest-bound OCI artifacts verify against the local
+store. Execution uses the host-local snapshot path while keeping the signed
+plan identity. After
+the first install, a second bundle of the same format updates the site
+through the existing upgrade bind/receipt/advance path and rolls back with
+`tenkaictl upgrade rollback`.
+
+Rehearsal: `cargo test --locked incomplete_first_install_bundle_is_refused_before_mutation`
+starts from an environment that does not exist, presents a signed bundle
+without a stack index, and confirms the environment and upgrade record stay
+absent. `cargo test --locked missing_stack_schema_is_refused_before_layer_import`
+names a missing schema in an otherwise populated stack index and refuses
+before any layer import. `cargo test --locked unnamed_chunk_artifact_is_refused_before_import`
+refuses an extra chunk instruction that the stack index does not name.
+`cargo test --locked first_install_rejects_non_executable_plan_before_mutation`
+keeps the catalog, environment, and upgrade absent when the signed plan is
+not executable. `cargo test --locked first_install_from_signed_bundle_bootstraps_catalog_and_authenticated_plan`
+starts from an empty catalog, admits the signed release and plan from one
+bundle, and leaves an isolated environment pending that plan.
+`cargo test --locked first_install_rejects_recalled_release_before_mutation`
+and `cargo test --locked first_install_rejects_mismatched_layer_reference_before_mutation`
+keep OCI stores and catalog pins untouched when admission fails.
+`cargo test --locked first_install_completes_channel_pin_for_existing_matching_release`
+finishes an interrupted publish by pinning the matching isolated channel. Update and
+rollback stay the three-class upgrade drill
+(`connected_intermittent_and_isolated_complete_one_signed_upgrade`) plus
+`rollback_uses_tenkai_owned_plan`.
+
 Rehearsal: `cargo test --locked over_archive_limit_weight_stays_out_of_json_entries`
 exports and imports a generated weight larger than the 256 MiB JSON archive
 cap with process RSS well below artifact size. The 20 GiB model-scale run is
