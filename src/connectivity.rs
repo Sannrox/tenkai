@@ -5,6 +5,7 @@
 //! become a second executor, promoter, or recovery store.
 
 use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -466,6 +467,7 @@ pub async fn bind_isolated_bundle(
     environment: &str,
     bundle: &crate::offline_bundle::BundleEnvelope,
     trust_roots: &crate::release_signing::TrustRoots,
+    bundle_path: Option<&Path>,
 ) -> Result<UpgradeRecord> {
     let verified = bundle.verify(
         trust_roots,
@@ -505,6 +507,12 @@ pub async fn bind_isolated_bundle(
         &verified,
         crate::oci_artifact::selected_registry()?.as_deref(),
         &crate::oci_artifact::mirrors_from_properties(&env.properties),
+    )?;
+    let weight_cache = crate::offline_chunk_store::weight_cache_from_env()?;
+    crate::offline_chunk_store::import_weight_chunks_for_bundle(
+        &verified,
+        bundle_path,
+        weight_cache.as_ref(),
     )?;
     record.environments[index].isolated = Some(IsolatedEvidence {
         bundle_digest,
@@ -1241,7 +1249,7 @@ install = "true"
         )
         .unwrap();
         let roots = isolated_trust_roots(&exporter, Some(&runtime));
-        bind_isolated_bundle(&mut ctx, "fleet-1", "site-c", &bundle, &roots)
+        bind_isolated_bundle(&mut ctx, "fleet-1", "site-c", &bundle, &roots, None)
             .await
             .unwrap();
         let verified = bundle
@@ -1338,10 +1346,11 @@ install = "true"
         let roots = isolated_trust_roots(&exporter, Some(&runtime));
         let mut forged = bundle.clone();
         forged.signature = base64::engine::general_purpose::STANDARD.encode([0_u8; 64]);
-        let forged_err = bind_isolated_bundle(&mut ctx, "fleet-bogus", "site-c", &forged, &roots)
-            .await
-            .unwrap_err()
-            .to_string();
+        let forged_err =
+            bind_isolated_bundle(&mut ctx, "fleet-bogus", "site-c", &forged, &roots, None)
+                .await
+                .unwrap_err()
+                .to_string();
         assert!(
             forged_err.contains("signature")
                 || forged_err.contains("verify")
@@ -1360,16 +1369,17 @@ install = "true"
             crate::now_millis(),
         )
         .unwrap();
-        let scoped = bind_isolated_bundle(&mut ctx, "fleet-bogus", "site-c", &wrong_env, &roots)
-            .await
-            .unwrap_err()
-            .to_string();
+        let scoped =
+            bind_isolated_bundle(&mut ctx, "fleet-bogus", "site-c", &wrong_env, &roots, None)
+                .await
+                .unwrap_err()
+                .to_string();
         assert!(
             scoped.contains("tenant") || scoped.contains("environment") || scoped.contains("scope"),
             "{scoped}"
         );
 
-        bind_isolated_bundle(&mut ctx, "fleet-bogus", "site-c", &bundle, &roots)
+        bind_isolated_bundle(&mut ctx, "fleet-bogus", "site-c", &bundle, &roots, None)
             .await
             .unwrap();
         let verified = bundle
@@ -1454,10 +1464,11 @@ install = "true"
             crate::now_millis(),
         )
         .unwrap();
-        let plan_err = bind_isolated_bundle(&mut ctx, "fleet-bogus", "site-c", &other_plan, &roots)
-            .await
-            .unwrap_err()
-            .to_string();
+        let plan_err =
+            bind_isolated_bundle(&mut ctx, "fleet-bogus", "site-c", &other_plan, &roots, None)
+                .await
+                .unwrap_err()
+                .to_string();
         assert!(
             plan_err.contains("does not match upgrade plan"),
             "{plan_err}"

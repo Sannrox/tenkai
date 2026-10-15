@@ -60,8 +60,15 @@ pub(crate) async fn run(ctx: &mut client::Ctx, command: UpgradeCommand) -> Resul
         } => {
             let envelope = offline_bundle::BundleEnvelope::load(&bundle)?;
             let roots = release_signing::TrustRoots::load(&trust_roots)?;
-            let record =
-                connectivity::bind_isolated_bundle(ctx, &name, &env, &envelope, &roots).await?;
+            let record = connectivity::bind_isolated_bundle(
+                ctx,
+                &name,
+                &env,
+                &envelope,
+                &roots,
+                Some(&bundle),
+            )
+            .await?;
             println!("{}", connectivity::format_upgrade(&record));
         }
         UpgradeCommand::ImportReceipt {

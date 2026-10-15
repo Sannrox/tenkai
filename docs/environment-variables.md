@@ -86,6 +86,7 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | `TENKAI_PLAN_PRIORS_FILE`, `TENKAI_PLAN_PRIORS_OUTCOME`, `TENKAI_PLAN_PRIORS_OUTCOME_FILE`, `TENKAI_PLAN_PRIORS_OUTCOME_REQUIRED` | [Plan priors](plan-priors.md) |
 | `TENKAI_PACKAGE_MIGRATION_APPROVAL_TRUST_ROOTS` | [Package migrations](package-migrations.md) |
 | `TENKAI_LLAMA_SERVER`, `TENKAI_USE_REAL_LLAMA` | [Model runtime](model-runtime.md) |
+| `TENKAI_WEIGHT_CACHE` | [Offline bundles](offline-bundles.md) |
 | `TENKAI_VLLM_IMAGE`, `TENKAI_VLLM_WEIGHTS_CLAIM`, `TENKAI_VLLM_WEIGHTS_ROOT`, `TENKAI_VLLM_SMOKE_BASE_URL` | [vLLM Kubernetes executor](vllm-kubernetes.md) |
 | `TENKAI_DEVELOPMENT_FIXTURE_PRINCIPALS` (server refuses to start when set without `--with-development-fixtures`) | [Development fixtures](development-fixtures.md) |
 

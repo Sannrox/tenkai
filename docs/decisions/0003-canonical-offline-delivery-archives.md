@@ -51,3 +51,15 @@ An OCI image layout was rejected. Although it offers descriptor tooling, it
 introduces registry-oriented concepts and dependencies beyond the narrow
 offline transfer requirement and risks becoming the general artifact registry
 excluded by issue #8.
+
+## Amendment (Issue #585)
+
+Large model weights travel in a companion chunk store beside
+`tenkai.offline-bundle.v1`. The v1 JSON schema, per-entry (64 MiB), and
+decoded-total (256 MiB) limits are unchanged. Chunk payloads are not JSON
+entries. A signed `tenkai.offline-chunk-manifest.v1` entry lists per-chunk
+digests; chunk files live next to the archive. Interrupted export or import
+resumes from the last verified chunk. A corrupted, unsigned, or retargeted
+chunk is refused before admission to the weight cache. Removing the exporter
+key still prevents a not-yet-executed bundle from being trusted. First
+install of the full stack from one bundle remains a later issue.

@@ -31,6 +31,26 @@ interrupted import can resume. `TENKAI_OCI_STORE` is required to import
 layers. A layer larger than the v1 entry limit cannot be bundled; re-export
 after shrinking or splitting the release.
 
+Model weights larger than those v1 JSON limits travel beside the archive in a
+chunk store (`<bundle-stem>.chunks/`). The signed statement still uses
+`tenkai.offline-bundle.v1`; `chunks/manifest.json` is a small JSON entry of
+schema `tenkai.offline-chunk-manifest.v1` that lists per-chunk SHA-256
+digests and sizes. Chunk files are raw bytes named by digest, not JSON
+entries, so they do not count against the 64 MiB / 256 MiB caps. Export and
+import copy one megabyte at a time, resume from the last verified chunk, and
+refuse a corrupted or retargeted chunk before the weight cache blob is
+replaced. File-only v1 bundles without a manifest still verify and import.
+Isolated-bundle bind (`tenkaictl upgrade bind-bundle`) imports those chunks
+into `TENKAI_WEIGHT_CACHE` from `<bundle-stem>.chunks/` beside the archive.
+A chunked bundle without the archive path or that cache directory fails closed.
+
+Rehearsal: `cargo test --locked over_archive_limit_weight_stays_out_of_json_entries`
+exports and imports a generated weight larger than the 256 MiB JSON archive
+cap with process RSS well below artifact size. The 20 GiB model-scale run is
+`cargo test --locked model_scale_weight_exports_and_imports -- --ignored`.
+Results from the over-limit rehearsal are recorded with the crate tests;
+the ignored 20 GiB run is operator evidence, not CI.
+
 The offline runtime signs `tenkai.offline-receipt.v1` with a key authorized for
 exactly its environment. Receipt import verifies the exact bundle root and
 scope, then adapts it to the same application completion contract used by a

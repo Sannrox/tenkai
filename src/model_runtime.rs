@@ -336,6 +336,39 @@ impl WeightCache {
         Ok(self.root.join("sha256").join(hex))
     }
 
+    /// Admit a streaming-verified weight file. Matching cache hits are a no-op.
+    /// Digest mismatch leaves the cache blob unchanged.
+    pub fn admit_file(&self, artifact_digest: &str, source: &Path) -> Result<PathBuf> {
+        let destination = self.blob_path(artifact_digest)?;
+        if destination.is_file() {
+            verify_file_digest(&destination, artifact_digest)?;
+            return Ok(destination);
+        }
+        verify_file_digest(source, artifact_digest)
+            .context("weight digest verification failed; model not activated")?;
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating weight cache {}", parent.display()))?;
+        }
+        if source == destination.as_path() {
+            return Ok(destination);
+        }
+        match std::fs::rename(source, &destination) {
+            Ok(()) => Ok(destination),
+            Err(_) => {
+                std::fs::copy(source, &destination).with_context(|| {
+                    format!(
+                        "copying verified weights from {} to {}",
+                        source.display(),
+                        destination.display()
+                    )
+                })?;
+                let _ = std::fs::remove_file(source);
+                Ok(destination)
+            }
+        }
+    }
+
     /// Fetch `model` weights from its source and verify `model.artifact_digest`.
     ///
     /// Sources: `file://` absolute path, `http(s)://`, `hf://` at a pinned commit, and
