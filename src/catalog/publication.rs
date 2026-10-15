@@ -68,11 +68,12 @@ pub(super) async fn admit(
     )?;
     let verification = verify_publication(options, &digest, &artifact_digest)?;
     let verification_properties = verification.properties()?;
-    let versioned_workdir = manifest::snapshot_workdir(
+    let versioned_workdir = manifest::snapshot_workdir_in(
         &loaded.workdir,
         &loaded.manifest.immutable_inputs(),
         &digest,
         &file_digest,
+        options.state_dir.as_deref(),
     )?;
 
     let existing_release = if let Some(mut existing) = preexisting_release {

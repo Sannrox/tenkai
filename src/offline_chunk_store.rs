@@ -148,6 +148,112 @@ pub fn import_weight_chunks(
     Ok(admitted)
 }
 
+/// Confirm required weight chunks exist beside the archive without writing
+/// the weight cache.
+pub fn preflight_weight_chunks(
+    bundle: &VerifiedBundle,
+    bundle_path: Option<&Path>,
+    required: &[String],
+) -> Result<()> {
+    let Some(raw) = bundle.entry(CHUNK_MANIFEST_PATH) else {
+        bail!("bundle is missing a required weight chunk manifest");
+    };
+    let manifest: OfflineChunkManifest =
+        serde_json::from_slice(raw).context("parsing offline chunk manifest")?;
+    if manifest.schema != CHUNK_MANIFEST_SCHEMA {
+        bail!(
+            "unsupported offline chunk manifest schema {}",
+            manifest.schema
+        );
+    }
+    let path = bundle_path.context(
+        "chunked offline bundle requires the archive path so companion chunks can be verified",
+    )?;
+    let chunk_dir = chunk_dir_beside(path)?;
+    for artifact in &manifest.artifacts {
+        if !required.iter().any(|digest| digest == &artifact.digest) {
+            bail!(
+                "offline stack manifest does not name required weight {}",
+                artifact.digest
+            );
+        }
+        preflight_weight_artifact(artifact, &chunk_dir)?;
+    }
+    for digest in required {
+        if !manifest
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.digest == *digest)
+        {
+            bail!("bundle is missing a required weight {digest}");
+        }
+    }
+    Ok(())
+}
+
+fn preflight_weight_artifact(artifact: &OfflineChunkArtifact, chunk_dir: &Path) -> Result<()> {
+    if artifact.chunks.is_empty() {
+        bail!("offline weight {} has no chunks", artifact.digest);
+    }
+    let mut expected_prefix = 0_u64;
+    let mut whole = Sha256::new();
+    for (index, chunk) in artifact.chunks.iter().enumerate() {
+        if chunk.index as usize != index {
+            bail!(
+                "offline weight {} chunk index is not sequential",
+                artifact.digest
+            );
+        }
+        expected_prefix = expected_prefix
+            .checked_add(chunk.size)
+            .ok_or_else(|| anyhow::anyhow!("chunk size overflow"))?;
+        let file = chunk_path(chunk_dir, &chunk.digest)?;
+        let meta = fs::metadata(&file)
+            .with_context(|| format!("missing chunk {} ({})", chunk.digest, file.display()))?;
+        if meta.len() != chunk.size {
+            bail!(
+                "chunk {} does not match its signed digest (size {})",
+                chunk.digest,
+                meta.len()
+            );
+        }
+        let actual = digest_file(&file)?;
+        if actual != chunk.digest {
+            bail!(
+                "chunk {} does not match its signed digest {actual}",
+                chunk.digest
+            );
+        }
+        let mut input = File::open(&file)?;
+        let mut buffer = vec![0_u8; COPY_BUFFER];
+        let mut remaining = chunk.size;
+        while remaining > 0 {
+            let want = remaining.min(buffer.len() as u64) as usize;
+            let read = input.read(&mut buffer[..want])?;
+            if read == 0 {
+                bail!("chunk {} ended before its signed size", chunk.digest);
+            }
+            whole.update(&buffer[..read]);
+            remaining -= read as u64;
+        }
+    }
+    if expected_prefix != artifact.size {
+        bail!(
+            "offline weight {} chunk sizes do not sum to {}",
+            artifact.digest,
+            artifact.size
+        );
+    }
+    let actual = format!("sha256:{:x}", whole.finalize());
+    if actual != artifact.digest {
+        bail!(
+            "offline weight {} does not match reconstructed digest {actual}",
+            artifact.digest
+        );
+    }
+    Ok(())
+}
+
 /// Import companion chunks during isolated-bundle bind.
 ///
 /// Bundles without `chunks/manifest.json` stay file-only. A chunked bundle

@@ -22,6 +22,9 @@ pub const RECEIPT_SCHEMA: &str = "tenkai.offline-receipt.v1";
 pub const LAYER_INSTRUCTION_SCHEMA: &str = "tenkai.offline-artifact-layers.v1";
 pub const LAYER_INSTRUCTION_PATH: &str = "oci-layers/mirrors.json";
 pub const LAYER_INSTRUCTION_MEDIA: &str = "application/vnd.tenkai.offline-artifact-layers.v1+json";
+pub const STACK_MANIFEST_SCHEMA: &str = "tenkai.offline-stack.v1";
+pub const STACK_MANIFEST_PATH: &str = "stack/manifest.json";
+pub const STACK_MANIFEST_MEDIA: &str = "application/vnd.tenkai.offline-stack.v1+json";
 pub const MAX_ARCHIVE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_ENTRIES: usize = 1024;
@@ -442,6 +445,10 @@ impl VerifiedBundle {
     pub fn entry(&self, path: &str) -> Option<&[u8]> {
         self.entries.get(path).map(Vec::as_slice)
     }
+
+    pub fn paths(&self) -> impl Iterator<Item = &str> {
+        self.entries.keys().map(String::as_str)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -570,6 +577,141 @@ pub fn import_artifact_layers(
         pulled.push(pull);
     }
     Ok(pulled)
+}
+
+/// Required first-install contents inside `tenkai.offline-bundle.v1`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct OfflineStackManifest {
+    pub schema: String,
+    pub images: Vec<String>,
+    pub weights: Vec<String>,
+    pub schemas: Vec<String>,
+    pub hub: Vec<String>,
+}
+
+/// Insert the signed stack completeness index used by first-install preflight.
+pub fn insert_stack_manifest(
+    payloads: &mut BTreeMap<String, (String, Vec<u8>)>,
+    manifest: OfflineStackManifest,
+) -> Result<()> {
+    if manifest.schema != STACK_MANIFEST_SCHEMA {
+        bail!("unsupported offline stack schema {}", manifest.schema);
+    }
+    payloads.insert(
+        STACK_MANIFEST_PATH.into(),
+        (STACK_MANIFEST_MEDIA.into(), serde_json::to_vec(&manifest)?),
+    );
+    Ok(())
+}
+
+/// Parse the stack completeness index when present.
+pub fn stack_manifest(bundle: &VerifiedBundle) -> Result<Option<OfflineStackManifest>> {
+    let Some(raw) = bundle.entry(STACK_MANIFEST_PATH) else {
+        return Ok(None);
+    };
+    let manifest: OfflineStackManifest =
+        serde_json::from_slice(raw).context("parsing offline stack manifest")?;
+    if manifest.schema != STACK_MANIFEST_SCHEMA {
+        bail!("unsupported offline stack schema {}", manifest.schema);
+    }
+    Ok(Some(manifest))
+}
+
+/// Refuse a first-install bundle that is missing a required image, weight,
+/// schema, or hub entry. Does not write the OCI store, weight cache, or graph.
+pub fn preflight_full_stack(bundle: &VerifiedBundle, bundle_path: Option<&Path>) -> Result<()> {
+    let Some(manifest) = stack_manifest(bundle)? else {
+        bail!("first-install offline bundle requires {STACK_MANIFEST_PATH}");
+    };
+    if manifest.images.is_empty()
+        || manifest.weights.is_empty()
+        || manifest.schemas.is_empty()
+        || manifest.hub.is_empty()
+    {
+        bail!("offline stack manifest must name images, weights, schemas, and the hub");
+    }
+    let layers = layer_instruction_index(bundle)?;
+    for digest in layers.keys() {
+        if !manifest.images.iter().any(|image| image == digest) {
+            bail!("offline stack manifest does not name required image {digest}");
+        }
+    }
+    for digest in &manifest.images {
+        let Some(layer) = layers.get(digest) else {
+            bail!("bundle is missing a required image {digest}");
+        };
+        if layer.path != layer.reference.layer_entry_path()? {
+            bail!(
+                "offline layer path {} does not match artifact digest {}",
+                layer.path,
+                digest
+            );
+        }
+        layer.reference.validate()?;
+        let Some(bytes) = bundle.entry(&layer.path) else {
+            bail!("bundle is missing artifact layer for digest {digest}");
+        };
+        let actual = format!("sha256:{:x}", Sha256::digest(bytes));
+        if actual != *digest {
+            bail!("artifact digest {digest} does not match bundle layer {actual}");
+        }
+    }
+    crate::offline_chunk_store::preflight_weight_chunks(bundle, bundle_path, &manifest.weights)?;
+    for path in manifest.schemas.iter().chain(manifest.hub.iter()) {
+        if bundle.entry(path).is_none() {
+            let kind = if manifest.schemas.iter().any(|schema| schema == path) {
+                "schema"
+            } else {
+                "hub"
+            };
+            bail!("bundle is missing a required {kind} {path}");
+        }
+    }
+    match std::env::var("TENKAI_OCI_STORE") {
+        Ok(path) if !path.is_empty() => {}
+        _ => bail!("TENKAI_OCI_STORE is required to import offline artifact layers"),
+    }
+    match std::env::var_os("TENKAI_WEIGHT_CACHE") {
+        Some(path) if !path.is_empty() => {}
+        _ => bail!("TENKAI_WEIGHT_CACHE is required to import chunked weights"),
+    }
+    Ok(())
+}
+
+struct IndexedLayer {
+    path: String,
+    reference: OciArtifactRef,
+}
+
+fn layer_instruction_index(bundle: &VerifiedBundle) -> Result<BTreeMap<String, IndexedLayer>> {
+    let Some(raw) = bundle.entry(LAYER_INSTRUCTION_PATH) else {
+        bail!("bundle is missing a required image instruction list");
+    };
+    let manifest: OfflineArtifactLayerManifest =
+        serde_json::from_slice(raw).context("parsing offline artifact layer instructions")?;
+    if manifest.schema != LAYER_INSTRUCTION_SCHEMA {
+        bail!(
+            "unsupported offline artifact layer schema {}",
+            manifest.schema
+        );
+    }
+    let mut index = BTreeMap::new();
+    for layer in manifest.layers {
+        index.insert(
+            layer.digest.clone(),
+            IndexedLayer {
+                path: layer.path,
+                reference: OciArtifactRef {
+                    registry: layer.registry,
+                    repository: layer.repository,
+                    digest: layer.digest,
+                    media_type: layer.media_type,
+                },
+            },
+        );
+    }
+    Ok(index)
 }
 
 impl ReceiptStatement {
@@ -1283,5 +1425,175 @@ mod tests {
             .to_string();
         assert!(err.contains(&artifact.digest), "{err}");
         assert!(err.contains("missing"), "{err}");
+    }
+
+    #[test]
+    fn missing_stack_schema_is_refused_before_layer_import() {
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let artifact = sample_artifact(b"layer-a");
+        let origin = crate::oci_artifact::MemoryArtifactRegistry::new();
+        origin.put(&artifact, b"layer-a".to_vec()).unwrap();
+        let mut payloads = BTreeMap::new();
+        let plan = br#"{"plan":"plan-1"}"#.to_vec();
+        let approval = br#"{"approval":"plan-1"}"#.to_vec();
+        payloads.insert(
+            "plans/plan-1.json".into(),
+            ("application/json".into(), plan.clone()),
+        );
+        payloads.insert(
+            "approvals/plan-1.json".into(),
+            ("application/json".into(), approval.clone()),
+        );
+        payloads.insert(
+            "releases/app@1.0.0/payload.bin".into(),
+            ("application/octet-stream".into(), b"release".to_vec()),
+        );
+        payloads.insert(
+            "hub/tenkai-server".into(),
+            ("application/octet-stream".into(), b"hub-bin".to_vec()),
+        );
+        insert_artifact_layers(&mut payloads, std::slice::from_ref(&artifact), &origin).unwrap();
+        let weight = b"weight-bytes";
+        let tmp = std::env::temp_dir().join(format!("tenkai-stack-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let archive_path = tmp.join("delivery.json");
+        let source = tmp.join("weight.bin");
+        std::fs::write(&source, weight).unwrap();
+        let chunks = crate::offline_chunk_store::chunk_dir_beside(&archive_path).unwrap();
+        let artifact_chunks =
+            crate::offline_chunk_store::export_weight_chunks(&source, &chunks, 64).unwrap();
+        crate::offline_chunk_store::insert_chunk_manifest(
+            &mut payloads,
+            vec![artifact_chunks.clone()],
+        )
+        .unwrap();
+        insert_stack_manifest(
+            &mut payloads,
+            OfflineStackManifest {
+                schema: STACK_MANIFEST_SCHEMA.into(),
+                images: vec![artifact.digest.clone()],
+                weights: vec![artifact_chunks.digest],
+                schemas: vec!["schemas/missing.json".into()],
+                hub: vec!["hub/tenkai-server".into()],
+            },
+        )
+        .unwrap();
+        let envelope = BundleEnvelope::create(
+            BundleStatement {
+                tenant_id: "tenant-1".into(),
+                environment_id: "airgap-1".into(),
+                plan_id: "plan-1".into(),
+                plan_digest: digest(&plan),
+                approval_digest: digest(&approval),
+                release_ids: vec!["app@1.0.0".into()],
+                exporter_identity: "exporter".into(),
+                issued_at_unix_ms: 1_000,
+                expires_at_unix_ms: 10_000,
+                entries: Vec::new(),
+            },
+            payloads,
+            &key,
+        )
+        .unwrap();
+        envelope.save(&archive_path).unwrap();
+        let verified = envelope
+            .verify(&roots(&key, "exporter"), "tenant-1", "airgap-1", 2_000)
+            .unwrap();
+        let err = preflight_full_stack(&verified, Some(&archive_path))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("schema"), "{err}");
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn unnamed_chunk_artifact_is_refused_before_import() {
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let artifact = sample_artifact(b"layer-a");
+        let origin = crate::oci_artifact::MemoryArtifactRegistry::new();
+        origin.put(&artifact, b"layer-a".to_vec()).unwrap();
+        let mut payloads = BTreeMap::new();
+        let plan = br#"{"plan":"plan-1"}"#.to_vec();
+        let approval = br#"{"approval":"plan-1"}"#.to_vec();
+        payloads.insert(
+            "plans/plan-1.json".into(),
+            ("application/json".into(), plan.clone()),
+        );
+        payloads.insert(
+            "approvals/plan-1.json".into(),
+            ("application/json".into(), approval.clone()),
+        );
+        payloads.insert(
+            "releases/app@1.0.0/payload.bin".into(),
+            ("application/octet-stream".into(), b"release".to_vec()),
+        );
+        payloads.insert(
+            "schemas/edge.json".into(),
+            ("application/json".into(), b"{}".to_vec()),
+        );
+        payloads.insert(
+            "hub/tenkai-server".into(),
+            ("application/octet-stream".into(), b"hub-bin".to_vec()),
+        );
+        insert_artifact_layers(&mut payloads, std::slice::from_ref(&artifact), &origin).unwrap();
+        let weight = b"weight-bytes";
+        let tmp = std::env::temp_dir().join(format!("tenkai-stack-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let archive_path = tmp.join("delivery.json");
+        let source = tmp.join("weight.bin");
+        std::fs::write(&source, weight).unwrap();
+        let chunks = crate::offline_chunk_store::chunk_dir_beside(&archive_path).unwrap();
+        let artifact_chunks =
+            crate::offline_chunk_store::export_weight_chunks(&source, &chunks, 64).unwrap();
+        crate::offline_chunk_store::insert_chunk_manifest(
+            &mut payloads,
+            vec![
+                artifact_chunks.clone(),
+                crate::offline_chunk_store::OfflineChunkArtifact {
+                    digest: digest(b"extra-weight"),
+                    size: 1,
+                    media_type: "application/octet-stream".into(),
+                    chunks: Vec::new(),
+                },
+            ],
+        )
+        .unwrap();
+        insert_stack_manifest(
+            &mut payloads,
+            OfflineStackManifest {
+                schema: STACK_MANIFEST_SCHEMA.into(),
+                images: vec![artifact.digest.clone()],
+                weights: vec![artifact_chunks.digest],
+                schemas: vec!["schemas/edge.json".into()],
+                hub: vec!["hub/tenkai-server".into()],
+            },
+        )
+        .unwrap();
+        let envelope = BundleEnvelope::create(
+            BundleStatement {
+                tenant_id: "tenant-1".into(),
+                environment_id: "airgap-1".into(),
+                plan_id: "plan-1".into(),
+                plan_digest: digest(&plan),
+                approval_digest: digest(&approval),
+                release_ids: vec!["app@1.0.0".into()],
+                exporter_identity: "exporter".into(),
+                issued_at_unix_ms: 1_000,
+                expires_at_unix_ms: 10_000,
+                entries: Vec::new(),
+            },
+            payloads,
+            &key,
+        )
+        .unwrap();
+        envelope.save(&archive_path).unwrap();
+        let verified = envelope
+            .verify(&roots(&key, "exporter"), "tenant-1", "airgap-1", 2_000)
+            .unwrap();
+        let err = preflight_full_stack(&verified, Some(&archive_path))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not name required weight"), "{err}");
+        std::fs::remove_dir_all(tmp).unwrap();
     }
 }

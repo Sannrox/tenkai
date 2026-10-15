@@ -220,6 +220,43 @@ impl Plan {
     pub(crate) fn to_object(&self) -> Result<Object> {
         lifecycle::to_object(self)
     }
+
+    #[cfg(test)]
+    pub(crate) fn bind_content_identity(&mut self) -> Result<()> {
+        self.content_id = content_address(
+            &self.environment,
+            self.created_at,
+            &self.inputs,
+            &self.steps,
+            self.recalled_recovery_reason.as_deref(),
+        )?;
+        self.id = plan_id(&self.environment, self.created_at, &self.content_id);
+        for (order, step) in self.steps.iter_mut().enumerate() {
+            step.order = order as u32;
+            step.id = format!("{}:step:{order}", self.id);
+        }
+        Ok(())
+    }
+}
+
+/// Admit a plan whose bytes were authenticated by an offline bundle.
+pub fn parse_authenticated(bytes: &[u8], expected_id: &str, environment: &str) -> Result<Plan> {
+    let plan: Plan =
+        serde_json::from_slice(bytes).context("canonical plan entry is not an executable plan")?;
+    if plan.id != expected_id {
+        bail!(
+            "canonical plan id {} does not match signed plan {expected_id}",
+            plan.id
+        );
+    }
+    if plan.environment != environment {
+        bail!(
+            "canonical plan environment {} does not match {environment}",
+            plan.environment
+        );
+    }
+    lifecycle::from_object(&lifecycle::to_object(&plan)?)?;
+    Ok(plan)
 }
 
 pub async fn store(ctx: &mut Ctx, plan: &Plan) -> Result<()> {

@@ -85,7 +85,11 @@ pub(super) async fn admit(
     }
     let manifest = manifest::parse_raw(&raw)
         .with_context(|| format!("parsing stored manifest of {}", pin.release_id))?;
-    if descriptor.artifact_digest != pin.artifact_digest || descriptor.content_path != pin.workdir {
+    // `pin.workdir` / `step.workdir` keep the signed plan identity, including
+    // exporter-local locators. Isolated first-install snapshots the same
+    // digest-bound content onto a host-local path; execution uses that snapshot
+    // (`descriptor.content_path`) rather than rewriting the stored plan.
+    if descriptor.artifact_digest != pin.artifact_digest {
         bail!(
             "release {} descriptor no longer matches its plan pin",
             pin.release_id

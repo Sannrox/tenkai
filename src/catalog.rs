@@ -212,6 +212,9 @@ pub struct PublishOptions {
     pub change_set_evidence: Option<ChangeSetEvidenceInput>,
     /// Host-selected registry used to verify digest-bound artifacts at publish.
     pub artifact_registry: Option<std::sync::Arc<dyn crate::oci_artifact::ArtifactRegistry>>,
+    /// Durable snapshot directory for this publication. When unset,
+    /// `snapshot_workdir` uses `TENKAI_STATE_DIR` or a workdir sibling.
+    pub state_dir: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for PublishOptions {
@@ -228,6 +231,7 @@ impl std::fmt::Debug for PublishOptions {
             .field("provenance_trust_roots", &self.provenance_trust_roots)
             .field("change_set_evidence", &self.change_set_evidence)
             .field("artifact_registry", &self.artifact_registry.is_some())
+            .field("state_dir", &self.state_dir)
             .finish()
     }
 }
@@ -531,6 +535,78 @@ pub async fn publish_with_result(
         publication::ResultContract::Bounded,
     )
     .await
+}
+
+/// Point an isolated first-install channel at a release admitted from a bundle.
+///
+/// The signed archive is the promotion authority, so this path does not require
+/// a connected promoter, canary lock, or model-evaluation replay.
+pub(crate) async fn pin_isolated_channel(
+    ctx: &mut Ctx,
+    product: &str,
+    version: &str,
+    channel: &str,
+) -> Result<()> {
+    validate_identifier("product", product)?;
+    validate_identifier("version", version)?;
+    validate_identifier("channel", channel)?;
+    let rid = release_id(product, version);
+    if ctx.get(&rid).await?.is_none() {
+        bail!("release {product}@{version} is not published");
+    }
+    if release_is_recalled(ctx, &rid).await? {
+        bail!("release {rid} is recalled and cannot admit an upgrade");
+    }
+    let cid = channel_id(product, channel);
+    if let Some(existing) = ctx.get(&cid).await? {
+        if existing.kind != KIND_CHANNEL {
+            bail!("channel {product}/{channel} has conflicting catalog identity");
+        }
+        let head = existing
+            .properties
+            .get("current_release")
+            .cloned()
+            .unwrap_or_default();
+        if !head.is_empty() && head != rid {
+            bail!("channel {product}/{channel} no longer points at {rid}");
+        }
+    } else {
+        ctx.create_once(object(
+            cid.clone(),
+            KIND_CHANNEL,
+            format!("{product}/{channel}"),
+            HashMap::from([
+                ("product".into(), product.into()),
+                ("channel".into(), channel.into()),
+            ]),
+        ))
+        .await?;
+    }
+    let mut channel_properties = HashMap::from([
+        ("product".into(), product.into()),
+        ("channel".into(), channel.into()),
+        ("current_version".into(), version.into()),
+        ("current_release".into(), rid.clone()),
+    ]);
+    if let Some(existing) = ctx.get(&cid).await?
+        && let Some(overlay) = existing
+            .properties
+            .get(crate::health_gate::CHANNEL_HEALTH_GATES_PROPERTY)
+    {
+        channel_properties.insert(
+            crate::health_gate::CHANNEL_HEALTH_GATES_PROPERTY.into(),
+            overlay.clone(),
+        );
+    }
+    ctx.link(&cid, &rid, REL_PROMOTES).await?;
+    ctx.put(object(
+        cid,
+        KIND_CHANNEL,
+        format!("{product}/{channel}"),
+        channel_properties,
+    ))
+    .await?;
+    Ok(())
 }
 
 /// Point a channel of the product at an already-published release.

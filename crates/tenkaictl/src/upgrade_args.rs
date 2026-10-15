@@ -31,6 +31,23 @@ pub(crate) enum UpgradeCommand {
     Interrupt { name: String, env: String },
     /// Resume a verified intermittent transfer.
     Resume { name: String, env: String },
+    /// First-install an empty isolated environment from one signed bundle.
+    InstallBundle {
+        name: String,
+        env: String,
+        #[arg(long)]
+        product: String,
+        #[arg(long)]
+        version: String,
+        #[arg(long)]
+        channel: String,
+        /// Path to a tenkai.offline-bundle.v1 JSON archive.
+        #[arg(long)]
+        bundle: PathBuf,
+        /// Trust roots that must authenticate the bundle exporter.
+        #[arg(long)]
+        trust_roots: PathBuf,
+    },
     /// Bind a verified ADR 0003 isolated bundle.
     BindBundle {
         name: String,
@@ -123,6 +140,30 @@ mod tests {
                     ..
                 }
             } if name == "fleet-1" && approval.approval.as_deref() == Some(std::path::Path::new("site-a.json"))
+        ));
+        let install = Cli::try_parse_from([
+            "tenkaictl",
+            "upgrade",
+            "install-bundle",
+            "first-1",
+            "site-c",
+            "--product",
+            "edge-app",
+            "--version",
+            "1.0.0",
+            "--channel",
+            "stable",
+            "--bundle",
+            "site-c.bundle.json",
+            "--trust-roots",
+            "offline-trust.toml",
+        ])
+        .unwrap();
+        assert!(matches!(
+            install.command,
+            Command::Upgrade {
+                command: UpgradeCommand::InstallBundle { ref name, ref env, .. }
+            } if name == "first-1" && env == "site-c"
         ));
         let bind = Cli::try_parse_from([
             "tenkaictl",

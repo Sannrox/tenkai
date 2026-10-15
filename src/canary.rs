@@ -780,6 +780,7 @@ max_startup_seconds = 30
             provenance_trust_roots: None,
             change_set_evidence: None,
             artifact_registry: None,
+            state_dir: None,
         };
         crate::catalog::publish(ctx, &dir.join("tenkai.toml"), &options)
             .await
