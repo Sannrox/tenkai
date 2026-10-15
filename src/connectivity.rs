@@ -2487,10 +2487,12 @@ media_type = "{}"
         )
     }
 
+    type CatalogPayload<'a> = Option<(&'a [u8], Option<&'a [u8]>, Option<&'a [u8]>)>;
+
     fn complete_first_install_bundle(
         environment: &str,
         plan_bytes: &[u8],
-        catalog: Option<(&[u8], Option<&[u8]>, Option<&[u8]>)>,
+        catalog: CatalogPayload<'_>,
         archive_path: &std::path::Path,
         exporter: &SigningKey,
     ) -> crate::offline_bundle::BundleEnvelope {
@@ -2508,7 +2510,7 @@ media_type = "{}"
     fn complete_first_install_bundle_with_layer(
         environment: &str,
         plan_bytes: &[u8],
-        catalog: Option<(&[u8], Option<&[u8]>, Option<&[u8]>)>,
+        catalog: CatalogPayload<'_>,
         archive_path: &std::path::Path,
         exporter: &SigningKey,
         artifact: &crate::oci_artifact::OciArtifactRef,
