@@ -40,6 +40,9 @@ entries, so they do not count against the 64 MiB / 256 MiB caps. Export and
 import copy one megabyte at a time, resume from the last verified chunk, and
 refuse a corrupted or retargeted chunk before the weight cache blob is
 replaced. File-only v1 bundles without a manifest still verify and import.
+Isolated-bundle bind (`tenkaictl upgrade bind-bundle`) imports those chunks
+into `TENKAI_WEIGHT_CACHE` from `<bundle-stem>.chunks/` beside the archive.
+A chunked bundle without the archive path or that cache directory fails closed.
 
 Rehearsal: `cargo test --locked over_archive_limit_weight_stays_out_of_json_entries`
 exports and imports a generated weight larger than the 256 MiB JSON archive

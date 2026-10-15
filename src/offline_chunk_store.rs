@@ -148,6 +148,34 @@ pub fn import_weight_chunks(
     Ok(admitted)
 }
 
+/// Import companion chunks during isolated-bundle bind.
+///
+/// Bundles without `chunks/manifest.json` stay file-only. A chunked bundle
+/// requires the JSON archive path (so `<stem>.chunks/` can be found) and
+/// `TENKAI_WEIGHT_CACHE`.
+pub fn import_weight_chunks_for_bundle(
+    bundle: &VerifiedBundle,
+    bundle_path: Option<&Path>,
+    cache: Option<&WeightCache>,
+) -> Result<Vec<PathBuf>> {
+    if bundle.entry(CHUNK_MANIFEST_PATH).is_none() {
+        return Ok(Vec::new());
+    }
+    let path = bundle_path.context(
+        "chunked offline bundle requires the archive path so companion chunks can be imported",
+    )?;
+    let cache = cache.context("TENKAI_WEIGHT_CACHE is required to import chunked weights")?;
+    import_weight_chunks(bundle, &chunk_dir_beside(path)?, cache)
+}
+
+/// Weight cache selected by `TENKAI_WEIGHT_CACHE`.
+pub fn weight_cache_from_env() -> Result<Option<WeightCache>> {
+    match std::env::var_os("TENKAI_WEIGHT_CACHE") {
+        Some(root) => Ok(Some(WeightCache::new(root))),
+        None => Ok(None),
+    }
+}
+
 pub fn peak_rss_bytes() -> Result<u64> {
     // SAFETY: `usage` is a zeroed `rusage` written only by getrusage.
     unsafe {
@@ -531,6 +559,36 @@ mod tests {
         let cache = WeightCache::new(dir.join("cache"));
         let imported = import_weight_chunks(&verified, &dir.join("missing"), &cache).unwrap();
         assert!(imported.is_empty());
+        let skipped = import_weight_chunks_for_bundle(&verified, None, None).unwrap();
+        assert!(skipped.is_empty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn chunked_bundle_import_requires_archive_path_and_cache() {
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let dir = sandbox();
+        let source = dir.join("weight.bin");
+        write_pattern(&source, 2 * 1024 * 1024);
+        let archive_path = dir.join("delivery.json");
+        let chunks = chunk_dir_beside(&archive_path).unwrap();
+        let artifact = export_weight_chunks(&source, &chunks, 1024 * 1024).unwrap();
+        let archive = sample_bundle(&key, artifact.clone());
+        let verified = archive
+            .verify(&roots(&key, "exporter"), "tenant-1", "airgap-1", 2_000)
+            .unwrap();
+        let err = import_weight_chunks_for_bundle(&verified, None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("archive path"), "{err}");
+        let cache = WeightCache::new(dir.join("cache"));
+        let err = import_weight_chunks_for_bundle(&verified, Some(&archive_path), None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("TENKAI_WEIGHT_CACHE"), "{err}");
+        let imported =
+            import_weight_chunks_for_bundle(&verified, Some(&archive_path), Some(&cache)).unwrap();
+        assert_eq!(digest_file(&imported[0]).unwrap(), artifact.digest);
         fs::remove_dir_all(dir).unwrap();
     }
 

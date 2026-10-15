@@ -111,10 +111,24 @@ pub async fn rehearse(
             &exporter,
             crate::now_millis(),
         )?;
-        connectivity::bind_isolated_bundle(ctx, "offline-fifty", &target.name, &bundle, &roots)
-            .await?;
-        connectivity::bind_isolated_bundle(ctx, "offline-fifty", &target.name, &bundle, &roots)
-            .await?;
+        connectivity::bind_isolated_bundle(
+            ctx,
+            "offline-fifty",
+            &target.name,
+            &bundle,
+            &roots,
+            None,
+        )
+        .await?;
+        connectivity::bind_isolated_bundle(
+            ctx,
+            "offline-fifty",
+            &target.name,
+            &bundle,
+            &roots,
+            None,
+        )
+        .await?;
         let verified = bundle.verify(
             &roots,
             crate::ontology::NS,
@@ -213,7 +227,7 @@ pub async fn rehearse(
 
     if let Some((name, bundle)) = first_bundle {
         let again =
-            connectivity::bind_isolated_bundle(ctx, "offline-fifty", &name, &bundle, &roots)
+            connectivity::bind_isolated_bundle(ctx, "offline-fifty", &name, &bundle, &roots, None)
                 .await?;
         let spoke = again
             .environments
