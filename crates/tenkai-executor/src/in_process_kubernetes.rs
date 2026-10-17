@@ -18,8 +18,9 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use tenkai::software_executor::{
-    SoftwareApplyRequest, SoftwareExecutor, SoftwareObserveStatus, k8s_label_value,
-    kubernetes_manifests_dir, list_manifest_files, validate_cluster_config_path, validate_request,
+    RolloutPhaseTimes, SoftwareApplyRequest, SoftwareExecutor, SoftwareObserveStatus,
+    k8s_label_value, kubernetes_manifests_dir, list_manifest_files, validate_cluster_config_path,
+    validate_request,
 };
 
 pub const FIELD_MANAGER: &str = "tenkai";
@@ -277,7 +278,12 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
         Ok(path)
     }
 
-    fn apply_manifests(&self, request: &SoftwareApplyRequest) -> Result<Vec<WorkloadObservation>> {
+    fn apply_manifests_timed(
+        &self,
+        request: &SoftwareApplyRequest,
+    ) -> Result<(Vec<WorkloadObservation>, RolloutPhaseTimes)> {
+        let mut times = RolloutPhaseTimes::default();
+        let planned = Instant::now();
         validate_request(request)?;
         let cluster_config = Self::require_cluster_config(request)?;
         let manifests = kubernetes_manifests_dir(&request.workdir)?;
@@ -288,21 +294,35 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
                 manifests.display()
             );
         }
-        let mut observations = Vec::new();
+        let mut objects = Vec::new();
         for path in &files {
-            for mut object in parse_manifest_objects(path)? {
-                stamp_ownership(&mut object, request);
-                let observed = self.api.apply_server_side(
-                    cluster_config,
-                    &request.environment,
-                    FIELD_MANAGER,
-                    &object,
-                )?;
-                observations.push(observed);
+            for object in parse_manifest_objects(path)? {
+                objects.push(object);
             }
         }
+        times.plan_ms = planned.elapsed().as_millis() as u64;
+        let applied = Instant::now();
+        let mut observations = Vec::new();
+        for mut object in objects {
+            stamp_ownership(&mut object, request);
+            let observed = self.api.apply_server_side(
+                cluster_config,
+                &request.environment,
+                FIELD_MANAGER,
+                &object,
+            )?;
+            observations.push(observed);
+        }
+        times.apply_ms = applied.elapsed().as_millis() as u64;
+        let health = Instant::now();
         self.wait_for_health(request, cluster_config, &observations)?;
-        Ok(observations)
+        times.health_ms = health.elapsed().as_millis() as u64;
+        Ok((observations, times))
+    }
+
+    /// Apply one generation and return wall time per phase. `apply` drops the times.
+    pub fn apply_with_phases(&self, request: &SoftwareApplyRequest) -> Result<RolloutPhaseTimes> {
+        self.apply_manifests_timed(request).map(|(_, times)| times)
     }
 
     fn wait_for_health(
@@ -369,8 +389,7 @@ pub fn selected_in_process_executor() -> InProcessKubernetesExecutor<LiveKubeApi
 
 impl<A: ClusterApplyApi> SoftwareExecutor for InProcessKubernetesExecutor<A> {
     fn apply(&self, request: &SoftwareApplyRequest) -> Result<()> {
-        self.apply_manifests(request)?;
-        Ok(())
+        self.apply_with_phases(request).map(|_| ())
     }
 
     fn remove(&self, request: &SoftwareApplyRequest) -> Result<()> {

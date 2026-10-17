@@ -1,0 +1,78 @@
+{
+  "regression_ratio": 1.2,
+  "budgets": {
+    "noop_reapply_20_ms": 2000,
+    "upgrade_overhead_ms": 5000,
+    "reconcile_1000_ms": 1000
+  },
+  "docker": {
+    "fake": {
+      "1": {
+        "fresh_install": { "plan_ms": 20, "pull_ms": 200, "apply_ms": 1100, "health_ms": 100, "record_ms": 100 },
+        "noop_reapply": { "plan_ms": 20, "pull_ms": 100, "apply_ms": 600, "health_ms": 100, "record_ms": 100 },
+        "one_service_upgrade": { "plan_ms": 20, "pull_ms": 200, "apply_ms": 1200, "health_ms": 100, "record_ms": 100 },
+        "rollback": { "plan_ms": 20, "pull_ms": 100, "apply_ms": 1100, "health_ms": 100, "record_ms": 100 }
+      },
+      "5": {
+        "fresh_install": { "plan_ms": 20, "pull_ms": 100, "apply_ms": 2100, "health_ms": 500, "record_ms": 500 },
+        "noop_reapply": { "plan_ms": 20, "pull_ms": 100, "apply_ms": 1700, "health_ms": 500, "record_ms": 500 },
+        "one_service_upgrade": { "plan_ms": 20, "pull_ms": 200, "apply_ms": 4500, "health_ms": 500, "record_ms": 500 },
+        "rollback": { "plan_ms": 20, "pull_ms": 100, "apply_ms": 4500, "health_ms": 500, "record_ms": 500 }
+      },
+      "20": {
+        "fresh_install": { "plan_ms": 20, "pull_ms": 100, "apply_ms": 7600, "health_ms": 1900, "record_ms": 1900 },
+        "noop_reapply": { "plan_ms": 20, "pull_ms": 100, "apply_ms": 5800, "health_ms": 1900, "record_ms": 1900 },
+        "one_service_upgrade": { "plan_ms": 20, "pull_ms": 200, "apply_ms": 17000, "health_ms": 1900, "record_ms": 1900 },
+        "rollback": { "plan_ms": 20, "pull_ms": 100, "apply_ms": 17000, "health_ms": 1900, "record_ms": 1900 }
+      }
+    },
+    "live": {
+      "1": {
+        "fresh_install": { "plan_ms": 2000, "pull_ms": 30000, "apply_ms": 5000, "health_ms": 5000, "record_ms": 2000 },
+        "noop_reapply": { "plan_ms": 2000, "pull_ms": 2000, "apply_ms": 5000, "health_ms": 5000, "record_ms": 2000 },
+        "one_service_upgrade": { "plan_ms": 2000, "pull_ms": 30000, "apply_ms": 5000, "health_ms": 5000, "record_ms": 2000 },
+        "rollback": { "plan_ms": 2000, "pull_ms": 2000, "apply_ms": 5000, "health_ms": 5000, "record_ms": 2000 }
+      },
+      "5": {
+        "fresh_install": { "plan_ms": 2000, "pull_ms": 30000, "apply_ms": 15000, "health_ms": 10000, "record_ms": 2000 },
+        "noop_reapply": { "plan_ms": 2000, "pull_ms": 2000, "apply_ms": 15000, "health_ms": 10000, "record_ms": 2000 },
+        "one_service_upgrade": { "plan_ms": 2000, "pull_ms": 30000, "apply_ms": 15000, "health_ms": 10000, "record_ms": 2000 },
+        "rollback": { "plan_ms": 2000, "pull_ms": 2000, "apply_ms": 15000, "health_ms": 10000, "record_ms": 2000 }
+      },
+      "20": {
+        "fresh_install": { "plan_ms": 5000, "pull_ms": 30000, "apply_ms": 60000, "health_ms": 20000, "record_ms": 5000 },
+        "noop_reapply": { "plan_ms": 5000, "pull_ms": 5000, "apply_ms": 60000, "health_ms": 20000, "record_ms": 5000 },
+        "one_service_upgrade": { "plan_ms": 5000, "pull_ms": 30000, "apply_ms": 60000, "health_ms": 20000, "record_ms": 5000 },
+        "rollback": { "plan_ms": 5000, "pull_ms": 5000, "apply_ms": 60000, "health_ms": 20000, "record_ms": 5000 }
+      }
+    }
+  },
+  "kubernetes_inprocess": {
+    "1": {
+      "fresh_install": { "plan_ms": 2000, "pull_ms": 0, "apply_ms": 15000, "health_ms": 60000, "record_ms": 2000 },
+      "noop_reapply": { "plan_ms": 2000, "pull_ms": 0, "apply_ms": 15000, "health_ms": 60000, "record_ms": 2000 },
+      "one_service_upgrade": { "plan_ms": 2000, "pull_ms": 0, "apply_ms": 15000, "health_ms": 60000, "record_ms": 2000 },
+      "rollback": { "plan_ms": 2000, "pull_ms": 0, "apply_ms": 15000, "health_ms": 60000, "record_ms": 2000 }
+    },
+    "5": {
+      "fresh_install": { "plan_ms": 2000, "pull_ms": 0, "apply_ms": 30000, "health_ms": 90000, "record_ms": 2000 },
+      "noop_reapply": { "plan_ms": 2000, "pull_ms": 0, "apply_ms": 30000, "health_ms": 90000, "record_ms": 2000 },
+      "one_service_upgrade": { "plan_ms": 2000, "pull_ms": 0, "apply_ms": 30000, "health_ms": 90000, "record_ms": 2000 },
+      "rollback": { "plan_ms": 2000, "pull_ms": 0, "apply_ms": 30000, "health_ms": 90000, "record_ms": 2000 }
+    },
+    "20": {
+      "fresh_install": { "plan_ms": 5000, "pull_ms": 0, "apply_ms": 60000, "health_ms": 180000, "record_ms": 5000 },
+      "noop_reapply": { "plan_ms": 5000, "pull_ms": 0, "apply_ms": 60000, "health_ms": 180000, "record_ms": 5000 },
+      "one_service_upgrade": { "plan_ms": 5000, "pull_ms": 0, "apply_ms": 60000, "health_ms": 180000, "record_ms": 5000 },
+      "rollback": { "plan_ms": 5000, "pull_ms": 0, "apply_ms": 60000, "health_ms": 180000, "record_ms": 5000 }
+    }
+  },
+  "planner": {
+    "100": 50,
+    "1000": 200
+  },
+  "reconcile": {
+    "100": 150,
+    "1000": 700
+  }
+}

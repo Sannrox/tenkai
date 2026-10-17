@@ -53,6 +53,7 @@ will be split over time. Contributor and agent workflow live in
 | Tag a release | [release-readiness.md](release-readiness.md) |
 | Run the Postgres multi-replica hub lab | [multi-replica-hub-runbook.md](multi-replica-hub-runbook.md) |
 | Run the 1,000-environment scale drill | [fleet-workload.md](fleet-workload.md) |
+| Check rollout-time budgets | [software-executor.md](software-executor.md#rollout-time-budget) |
 
 ## Reference
 
