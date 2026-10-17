@@ -7,6 +7,7 @@ into the core crate by default.
 Software releases can declare [signed compatibility preflight requirements](software-compatibility.md) independently of executor health checks.
 
 Source: `src/software_executor.rs`. Apply wiring: `src/apply.rs`.
+Rollout-time harness: `src/rollout_time.rs`, baseline `perf/rollout-baseline.json`.
 
 ## Strategies
 
@@ -330,3 +331,23 @@ not inspect the live writable layer for missing or modified files. This is the
 supported verification boundary. Source changes cause replacement on apply or
 restart; upgrades and rollback install their own release's bytes before start.
 Secret material remains an environment-scoped `env_file`.
+
+## Rollout-time budget
+
+`src/rollout_time.rs` times Docker (and in-process Kubernetes) apply phases for
+fixtures of 1, 5, and 20 services: fresh install, no-op re-apply, one-service
+upgrade, and rollback. One-service upgrade changes one image under a new
+release identity; Docker recreates every container because version and
+release-id labels change. It also times planner compute and one reconcile tick
+at 100 and 1_000 environments. Default `cargo test` drives the fake Docker CLI
+and records planner and reconcile times at 100 and 1_000 environments.
+Published apply budgets gate live Docker daemon samples:
+
+- no-op re-apply of 20 services ≤ 2 s
+- one-service upgrade ≤ image pull + health wait + 5 s
+- reconcile tick ≤ 1 s at 1_000 environments
+
+The stored runner baseline is `perf/rollout-baseline.json`. The scheduled CI
+job (`scripts/check-rollout-time.sh`) runs the same harness against a live
+Docker daemon and a kind cluster, fails on those published budgets, and fails
+on a >20% regression versus that baseline.

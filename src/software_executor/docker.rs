@@ -8,15 +8,15 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use super::{
-    SoftwareApplyRequest, SoftwareDeployPhase, SoftwareExecutor, SoftwareObserveStatus,
-    diagnostics, validate_request,
+    RolloutPhaseTimes, SoftwareApplyRequest, SoftwareDeployPhase, SoftwareExecutor,
+    SoftwareObserveStatus, diagnostics, validate_request,
 };
 
 /// Directory under the release workdir that holds the Docker host topology.
@@ -294,17 +294,68 @@ impl DockerHostExecutor {
         }
     }
 
-    #[cfg(test)]
-    fn with_fake_env(mut self, state: &Path, forbid: &str, unhealthy: &[&str]) -> Self {
-        self.extra_env.insert(
-            "TENKAI_DOCKER_FAKE_STATE".into(),
-            state.to_string_lossy().into_owned(),
-        );
-        self.extra_env
-            .insert("TENKAI_DOCKER_FAKE_FORBID".into(), forbid.into());
-        self.extra_env
-            .insert("TENKAI_DOCKER_FAKE_UNHEALTHY".into(), unhealthy.join(","));
+    /// Overlay one extra environment variable onto docker CLI subprocesses.
+    pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.extra_env.insert(key.into(), value.into());
         self
+    }
+
+    #[cfg(test)]
+    fn with_fake_env(self, state: &Path, forbid: &str, unhealthy: &[&str]) -> Self {
+        self.with_env(
+            "TENKAI_DOCKER_FAKE_STATE",
+            state.to_string_lossy().into_owned(),
+        )
+        .with_env("TENKAI_DOCKER_FAKE_FORBID", forbid)
+        .with_env("TENKAI_DOCKER_FAKE_UNHEALTHY", unhealthy.join(","))
+    }
+
+    /// Apply one generation and return wall time per phase. `apply` drops the times.
+    pub fn apply_with_phases(&self, request: &SoftwareApplyRequest) -> Result<RolloutPhaseTimes> {
+        let mut times = RolloutPhaseTimes::default();
+        let planned = Instant::now();
+        validate_request(request)?;
+        let topology = self.topology(request)?;
+        validate_topology(&topology, request.secret_dir_path.as_deref())?;
+        for container in &topology.containers {
+            container_spec_digest(request, container)?;
+        }
+        let ordered = order_containers(&topology)?;
+        times.plan_ms = elapsed_ms(planned);
+        let networked = Instant::now();
+        ensure_networks(self, request, &topology)?;
+        ensure_volumes(self, request, &topology)?;
+        times.apply_ms = times.apply_ms.saturating_add(elapsed_ms(networked));
+        let pulled = Instant::now();
+        pull_missing_images(self, request, &topology)?;
+        times.pull_ms = elapsed_ms(pulled);
+        let desired: BTreeSet<String> = ordered
+            .iter()
+            .map(|container| managed_container_name(request, container))
+            .collect::<Result<_>>()?;
+        let mut journal = Vec::new();
+        for container in &ordered {
+            let replaced = Instant::now();
+            let check = check_dependencies(self, request, &topology, container).and_then(|()| {
+                replace_container(self, request, &topology, container, &mut journal)
+            });
+            times.apply_ms = times.apply_ms.saturating_add(elapsed_ms(replaced));
+            let waited = Instant::now();
+            let health = check.and_then(|()| wait_container(self, request, container));
+            times.health_ms = times.health_ms.saturating_add(elapsed_ms(waited));
+            if let Err(error) = health {
+                return Err(match roll_back(self, request, &journal) {
+                    Ok(()) => anyhow::anyhow!("{error:#}; restored the previous containers"),
+                    Err(restore) => anyhow::anyhow!(
+                        "{error:#}; restoring the previous containers also failed: {restore:#}"
+                    ),
+                });
+            }
+        }
+        let cleaned = Instant::now();
+        remove_unowned_containers(self, request, &desired, true)?;
+        times.apply_ms = times.apply_ms.saturating_add(elapsed_ms(cleaned));
+        Ok(times)
     }
 
     fn docker_command(&self) -> Command {
@@ -322,39 +373,7 @@ impl DockerHostExecutor {
 
 impl SoftwareExecutor for DockerHostExecutor {
     fn apply(&self, request: &SoftwareApplyRequest) -> Result<()> {
-        validate_request(request)?;
-        let topology = self.topology(request)?;
-        validate_topology(&topology, request.secret_dir_path.as_deref())?;
-        for container in &topology.containers {
-            container_spec_digest(request, container)?;
-        }
-        ensure_networks(self, request, &topology)?;
-        ensure_volumes(self, request, &topology)?;
-        pull_missing_images(self, request, &topology)?;
-        let ordered = order_containers(&topology)?;
-        let desired: BTreeSet<String> = ordered
-            .iter()
-            .map(|container| managed_container_name(request, container))
-            .collect::<Result<_>>()?;
-        let mut journal = Vec::new();
-        for container in &ordered {
-            let replaced = check_dependencies(self, request, &topology, container)
-                .and_then(|()| replace_container(self, request, &topology, container, &mut journal))
-                .and_then(|()| wait_container(self, request, container));
-            if let Err(error) = replaced {
-                // Return the product to the containers it ran before this apply.
-                return Err(match roll_back(self, request, &journal) {
-                    Ok(()) => anyhow::anyhow!("{error:#}; restored the previous containers"),
-                    Err(restore) => anyhow::anyhow!(
-                        "{error:#}; restoring the previous containers also failed: {restore:#}"
-                    ),
-                });
-            }
-        }
-        // Deletes the previous containers too. If this fails the caller still
-        // re-applies the previous release, which replaces whatever runs here.
-        remove_unowned_containers(self, request, &desired, true)?;
-        Ok(())
+        self.apply_with_phases(request).map(|_| ())
     }
 
     /// `apply` restores the previous containers itself when it fails, so the
@@ -466,6 +485,10 @@ impl SoftwareExecutor for DockerHostExecutor {
         }
         Ok(())
     }
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    started.elapsed().as_millis() as u64
 }
 
 /// Load `{workdir}/docker/host.json`.

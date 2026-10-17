@@ -44,6 +44,28 @@ pub use docker::{
     validate_topology,
 };
 
+/// Wall time of one software apply, split into the phases the rollout-time
+/// harness reports (plan, pull, apply, health wait, record).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RolloutPhaseTimes {
+    pub plan_ms: u64,
+    pub pull_ms: u64,
+    pub apply_ms: u64,
+    pub health_ms: u64,
+    pub record_ms: u64,
+}
+
+impl RolloutPhaseTimes {
+    /// Sum of the five phases. Saturating so a clock jump cannot wrap the report.
+    pub fn wall_ms(&self) -> u64 {
+        self.plan_ms
+            .saturating_add(self.pull_ms)
+            .saturating_add(self.apply_ms)
+            .saturating_add(self.health_ms)
+            .saturating_add(self.record_ms)
+    }
+}
+
 static IN_PROCESS_EXECUTOR: OnceLock<fn() -> Box<dyn SoftwareExecutor>> = OnceLock::new();
 
 /// Install the in-process Kubernetes adapter from `tenkai-executor`.
