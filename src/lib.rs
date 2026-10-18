@@ -175,6 +175,7 @@ pub mod inventory;
 pub mod issuer_auth;
 pub mod key_provider;
 pub mod key_revocation;
+pub mod kmip_provider;
 pub mod maintenance;
 pub mod management_lifecycle;
 pub mod management_operations;
