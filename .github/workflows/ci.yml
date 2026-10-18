@@ -24,6 +24,8 @@ jobs:
         with:
           toolchain: 1.96.1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Install PKCS#11 software token
+        run: sudo apt-get update && sudo apt-get install -y softhsm2
       - run: make test
       - run: make test-integration
       # Downloads the pinned console release and fails on a checksum mismatch.

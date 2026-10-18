@@ -192,6 +192,7 @@ pub mod ontology;
 pub mod package_migration;
 pub mod page;
 pub mod pb;
+pub mod pkcs11_provider;
 pub mod plan;
 pub mod plan_approval;
 pub mod plan_priors;
