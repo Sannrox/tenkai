@@ -307,6 +307,35 @@ async fn tenant_mode_management_apis_isolate_environments() {
     .unwrap();
     assert_eq!(retired_reconcile_body, "{\"environments\":[]}");
 
+    let env_hold = tenant_app
+        .clone()
+        .oneshot(
+            Request::get("/v1/environments/env-a/hold")
+                .header(
+                    "x-tenkai-assertion",
+                    r#"{"tenant":"tenant-a","principal":"user-a","capabilities":["read","management"]}"#,
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(env_hold.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let channel_hold = tenant_app
+        .clone()
+        .oneshot(
+            Request::get("/v1/products/api/channels/stable/hold")
+                .header(
+                    "x-tenkai-assertion",
+                    r#"{"tenant":"tenant-a","principal":"user-a","capabilities":["read","management"]}"#,
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(channel_hold.status(), StatusCode::SERVICE_UNAVAILABLE);
+
     // Community profile still starts without tenant mode.
     let (community_app, _) = app();
     let health = community_app

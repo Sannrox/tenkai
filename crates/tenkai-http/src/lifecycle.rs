@@ -263,6 +263,150 @@ pub(super) async fn record_model_evaluation_evidence(
     )
 }
 
+pub(super) async fn environment_hold(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .environment_hold(&credential, &environment)
+            .await,
+    )
+}
+
+pub(super) async fn set_environment_hold(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let request = match parse_management_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .set_environment_hold(&credential, &environment, request)
+            .await,
+    )
+}
+
+pub(super) async fn release_environment_hold(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let request = match parse_management_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .release_environment_hold(&credential, &environment, request)
+            .await,
+    )
+}
+
+pub(super) async fn retry_failed_target(
+    State(state): State<Arc<AppState>>,
+    Path((environment, product)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let request = match parse_management_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .retry_failed_target(&credential, &environment, &product, request)
+            .await,
+    )
+}
+
+pub(super) async fn channel_hold(
+    State(state): State<Arc<AppState>>,
+    Path((product, channel)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .channel_hold(&credential, &product, &channel)
+            .await,
+    )
+}
+
+pub(super) async fn set_channel_hold(
+    State(state): State<Arc<AppState>>,
+    Path((product, channel)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let request = match parse_management_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .set_channel_hold(&credential, &product, &channel, request)
+            .await,
+    )
+}
+
+pub(super) async fn release_channel_hold(
+    State(state): State<Arc<AppState>>,
+    Path((product, channel)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let request = match parse_management_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .release_channel_hold(&credential, &product, &channel, request)
+            .await,
+    )
+}
+
 pub(super) async fn software_compatibility_report(
     State(state): State<Arc<AppState>>,
     Path((environment, release)): Path<(String, String)>,

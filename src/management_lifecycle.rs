@@ -1,8 +1,9 @@
 //! Versioned remote management-lifecycle contract (ADR 0030).
 //!
 //! Admission for publish, promote, subscribe, plan, approve, apply, rollback,
-//! and recall lives here. HTTP adapters call this module; they do not invent
-//! a second protocol or reuse spoke runtime HTTP.
+//! recall, delivery holds, and failed-target retry lives here. HTTP adapters
+//! call this module; they do not invent a second protocol or reuse spoke
+//! runtime HTTP.
 
 use std::path::{Path, PathBuf};
 
@@ -32,6 +33,11 @@ pub enum ManagementLifecycleOperation {
     Rollback,
     Recall,
     Retire,
+    Hold,
+    Release,
+    Retry,
+    ChannelHold,
+    ChannelRelease,
 }
 
 impl ManagementLifecycleOperation {
@@ -46,13 +52,21 @@ impl ManagementLifecycleOperation {
             Self::Rollback => "rollback",
             Self::Recall => "recall",
             Self::Retire => "retire",
+            Self::Hold => "hold",
+            Self::Release => "release",
+            Self::Retry => "retry",
+            Self::ChannelHold => "channel_hold",
+            Self::ChannelRelease => "channel_release",
         }
     }
 
     /// Catalog-wide verbs have no request environment and cannot be called
     /// with an environment-scoped management credential.
     pub fn is_catalog_wide(self) -> bool {
-        matches!(self, Self::Publish | Self::Promote | Self::Recall)
+        matches!(
+            self,
+            Self::Publish | Self::Promote | Self::Recall | Self::ChannelHold | Self::ChannelRelease
+        )
     }
 
     /// Environment-bound verbs require `environment` on the envelope.
@@ -64,7 +78,14 @@ impl ManagementLifecycleOperation {
     pub fn requires_expected_generation(self) -> bool {
         matches!(
             self,
-            Self::Subscribe | Self::Plan | Self::Approve | Self::Apply | Self::Rollback
+            Self::Subscribe
+                | Self::Plan
+                | Self::Approve
+                | Self::Apply
+                | Self::Rollback
+                | Self::Hold
+                | Self::Release
+                | Self::Retry
         )
     }
 }
@@ -109,6 +130,11 @@ pub fn parse_management_lifecycle_operation(name: &str) -> Result<ManagementLife
         "rollback" => Ok(ManagementLifecycleOperation::Rollback),
         "recall" => Ok(ManagementLifecycleOperation::Recall),
         "retire" => Ok(ManagementLifecycleOperation::Retire),
+        "hold" => Ok(ManagementLifecycleOperation::Hold),
+        "release" => Ok(ManagementLifecycleOperation::Release),
+        "retry" => Ok(ManagementLifecycleOperation::Retry),
+        "channel_hold" => Ok(ManagementLifecycleOperation::ChannelHold),
+        "channel_release" => Ok(ManagementLifecycleOperation::ChannelRelease),
         other => bail!("unknown management lifecycle operation {other:?}"),
     }
 }
@@ -325,6 +351,38 @@ pub struct RollbackRequest {
     pub product: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DeliveryHoldRequest {
+    pub version: u32,
+    pub operation: String,
+    pub environment: String,
+    pub expected_generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelHoldRequest {
+    pub version: u32,
+    pub operation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RetryFailedTargetRequest {
+    pub version: u32,
+    pub operation: String,
+    pub environment: String,
+    pub expected_generation: u64,
+    pub product: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug)]
@@ -621,6 +679,103 @@ pub fn admit_rollback(
     )
 }
 
+pub fn admit_delivery_hold(
+    request: &DeliveryHoldRequest,
+    path_environment: &str,
+    expected: ManagementLifecycleOperation,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<AdmittedManagementLifecycle> {
+    require_path_environment(expected.as_str(), &request.environment, path_environment)?;
+    if expected == ManagementLifecycleOperation::Hold {
+        require_hold_reason(request.reason.as_deref())?;
+    } else if request
+        .reason
+        .as_ref()
+        .is_some_and(|reason| !reason.is_empty())
+    {
+        bail!("management operation {} forbids reason", expected.as_str());
+    }
+    admit_environment_operation(
+        request.version,
+        &request.operation,
+        &request.environment,
+        request.expected_generation,
+        expected,
+        kind,
+        granted_environment,
+    )
+}
+
+pub fn admit_channel_hold(
+    request: &ChannelHoldRequest,
+    expected: ManagementLifecycleOperation,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<AdmittedManagementLifecycle> {
+    if expected == ManagementLifecycleOperation::ChannelHold {
+        require_hold_reason(request.reason.as_deref())?;
+    } else if request
+        .reason
+        .as_ref()
+        .is_some_and(|reason| !reason.is_empty())
+    {
+        bail!("management operation {} forbids reason", expected.as_str());
+    }
+    let admitted = admit_management_lifecycle(
+        &ManagementLifecycleEnvelope {
+            version: request.version,
+            operation: request.operation.clone(),
+            environment: None,
+            expected_generation: None,
+        },
+        kind,
+        granted_environment,
+    )?;
+    require_route_operation(admitted.operation, expected)?;
+    Ok(admitted)
+}
+
+pub fn admit_retry_failed_target(
+    request: &RetryFailedTargetRequest,
+    path_environment: &str,
+    path_product: &str,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<AdmittedManagementLifecycle> {
+    require_path_environment("retry", &request.environment, path_environment)?;
+    if request.product != path_product {
+        bail!(
+            "retry product {} does not match path {path_product}",
+            request.product
+        );
+    }
+    if request.product.trim().is_empty() {
+        bail!("retry requires a product");
+    }
+    require_hold_reason(request.reason.as_deref())?;
+    admit_environment_operation(
+        request.version,
+        &request.operation,
+        &request.environment,
+        request.expected_generation,
+        ManagementLifecycleOperation::Retry,
+        kind,
+        granted_environment,
+    )
+}
+
+fn require_hold_reason(reason: Option<&str>) -> Result<()> {
+    let reason = reason.map(str::trim).unwrap_or("");
+    if reason.is_empty() {
+        bail!("delivery hold reason must not be empty");
+    }
+    if reason.len() > 1024 {
+        bail!("delivery hold reason exceeds 1024 bytes");
+    }
+    Ok(())
+}
+
 fn admit_environment_operation(
     version: u32,
     operation: &str,
@@ -907,6 +1062,65 @@ mod tests {
         assert!(err.contains("cannot complete"), "{err}");
         assert_eq!(environment_fence_generation(None), 0);
         assert_eq!(environment_fence_generation(Some(4)), 4);
+    }
+
+    #[test]
+    fn hold_and_retry_admit_and_refuse_empty_reason() {
+        let hold = DeliveryHoldRequest {
+            version: 1,
+            operation: "hold".into(),
+            environment: "stage".into(),
+            expected_generation: 0,
+            reason: Some("freeze".into()),
+        };
+        admit_delivery_hold(
+            &hold,
+            "stage",
+            ManagementLifecycleOperation::Hold,
+            PrincipalKind::Management,
+            Some("stage"),
+        )
+        .unwrap();
+        let mut empty = hold.clone();
+        empty.reason = Some("  ".into());
+        let err = admit_delivery_hold(
+            &empty,
+            "stage",
+            ManagementLifecycleOperation::Hold,
+            PrincipalKind::Management,
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("reason"), "{err}");
+
+        let retry = RetryFailedTargetRequest {
+            version: 1,
+            operation: "retry".into(),
+            environment: "stage".into(),
+            expected_generation: 0,
+            product: "api".into(),
+            reason: Some("retry".into()),
+        };
+        admit_retry_failed_target(&retry, "stage", "api", PrincipalKind::Management, None).unwrap();
+        let err =
+            admit_retry_failed_target(&retry, "stage", "web", PrincipalKind::Management, None)
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("does not match path"), "{err}");
+        let runtime = admit_channel_hold(
+            &ChannelHoldRequest {
+                version: 1,
+                operation: "channel_hold".into(),
+                reason: Some("pause".into()),
+            },
+            ManagementLifecycleOperation::ChannelHold,
+            PrincipalKind::Runtime,
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(runtime.contains("runtime credentials"), "{runtime}");
     }
 
     #[test]

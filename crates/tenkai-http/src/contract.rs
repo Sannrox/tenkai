@@ -14,11 +14,13 @@ use schemars::{JsonSchema, SchemaGenerator};
 use serde_json::{Value, json};
 
 use super::router::{ErrorBody, ServiceStatus};
+use tenkai::delivery_hold::DeliveryHoldView;
 use tenkai::environment::{EnvironmentInspectReport, EnvironmentListEntry, StatusRow};
 use tenkai::fleet::FleetStatusReport;
 use tenkai::management_lifecycle::{
-    ApplyRequest, ApproveRequest, ManagementLifecycleResult, PlanRequest, PromoteRequest,
-    PublishRequest, RecallRequest, RetireEnvironmentRequest, RollbackRequest, SubscribeRequest,
+    ApplyRequest, ApproveRequest, ChannelHoldRequest, DeliveryHoldRequest,
+    ManagementLifecycleResult, PlanRequest, PromoteRequest, PublishRequest, RecallRequest,
+    RetireEnvironmentRequest, RetryFailedTargetRequest, RollbackRequest, SubscribeRequest,
 };
 use tenkai::oidc_verifier::OidcClientDiscovery;
 use tenkai::package_migration::{
@@ -162,6 +164,55 @@ pub fn http_contract() -> Value {
             response: lifecycle.clone(),
         },
         Route {
+            method: "GET",
+            path: "/v1/environments/{environment}/hold",
+            auth: Auth::Read,
+            request: None,
+            response: schema::<DeliveryHoldView>(&mut g),
+        },
+        Route {
+            method: "POST",
+            path: "/v1/environments/{environment}/hold",
+            auth: Auth::Management,
+            request: Some(schema::<DeliveryHoldRequest>(&mut g)),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "POST",
+            path: "/v1/environments/{environment}/hold/release",
+            auth: Auth::Management,
+            request: Some(schema::<DeliveryHoldRequest>(&mut g)),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "POST",
+            path: "/v1/environments/{environment}/failed-targets/{product}/retry",
+            auth: Auth::Management,
+            request: Some(schema::<RetryFailedTargetRequest>(&mut g)),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "GET",
+            path: "/v1/products/{product}/channels/{channel}/hold",
+            auth: Auth::Read,
+            request: None,
+            response: schema::<DeliveryHoldView>(&mut g),
+        },
+        Route {
+            method: "POST",
+            path: "/v1/products/{product}/channels/{channel}/hold",
+            auth: Auth::Management,
+            request: Some(schema::<ChannelHoldRequest>(&mut g)),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "POST",
+            path: "/v1/products/{product}/channels/{channel}/hold/release",
+            auth: Auth::Management,
+            request: Some(schema::<ChannelHoldRequest>(&mut g)),
+            response: lifecycle.clone(),
+        },
+        Route {
             method: "POST",
             path: "/v1/plans/{plan_id}/approve",
             auth: Auth::Management,
@@ -295,6 +346,7 @@ mod tests {
             ("EnvironmentInspectReport", "delivery_hold"),
             ("EnvironmentSubscriptionView", "delivery_hold"),
             ("StatusRow", "delivery_hold"),
+            ("DeliveryHoldView", "hold"),
             ("EnvironmentMaintenanceInspect", "open_until_ms"),
             ("EnvironmentMaintenanceInspect", "next_opens_at_ms"),
             ("EnvironmentMaintenanceInspect", "detail"),

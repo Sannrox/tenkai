@@ -523,13 +523,14 @@ pub(crate) async fn record_deployment_observation(
             observation.detail,
             deployment.updated,
         );
-        let failed_target_key = format!("failed_target.{}", observation.step.product);
+        let failed_target_key = self::failed_target_key(&observation.step.product);
         if matches!(observation.status, "failed" | "rolled_back")
             && observation.step.action != crate::plan::Action::Rollback
         {
-            environment
-                .properties
-                .insert(failed_target_key, observation.step.release_id.clone());
+            environment.properties.insert(
+                failed_target_key.clone(),
+                observation.step.release_id.clone(),
+            );
             environment.properties.insert(
                 format!("failed_target_plan.{}", observation.step.product),
                 observation.plan_id.into(),
@@ -1138,7 +1139,7 @@ async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<Statu
         )
         .await;
         let held = selected_release.as_ref().is_ok_and(|(_, release)| {
-            env_obj.properties.get(&format!("failed_target.{product}")) == Some(release)
+            held_failed_target_release(&env_obj.properties, &product) == Some(release.as_str())
         });
         rows.push(StatusRow {
             deployed: env_obj
@@ -1833,6 +1834,32 @@ fn reject_credential_material(label: &str, key: &str, value: &str) -> Result<()>
         }
     }
     Ok(())
+}
+
+/// Environment property key for a held failed target of `product`.
+pub fn failed_target_key(product: &str) -> String {
+    format!("failed_target.{product}")
+}
+
+/// Release id of a held failed target, if automatic retry is paused for `product`.
+pub fn held_failed_target_release<'a>(
+    properties: &'a HashMap<String, String>,
+    product: &str,
+) -> Option<&'a str> {
+    properties
+        .get(&failed_target_key(product))
+        .map(String::as_str)
+        .filter(|release| !release.is_empty())
+}
+
+/// Release id of a held failed target in `environment`, if any.
+pub async fn held_failed_target(
+    ctx: &mut Ctx,
+    environment: &str,
+    product: &str,
+) -> Result<Option<String>> {
+    let env = self::environment(ctx, environment).await?;
+    Ok(held_failed_target_release(&env.properties, product).map(str::to_string))
 }
 
 /// Digest of one product's non-secret overlays. Empty overlays yield an empty digest.
