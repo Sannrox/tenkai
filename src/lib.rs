@@ -173,6 +173,7 @@ pub mod health_gate;
 pub mod host_preflight;
 pub mod inventory;
 pub mod issuer_auth;
+pub mod key_provider;
 pub mod key_revocation;
 pub mod maintenance;
 pub mod management_lifecycle;

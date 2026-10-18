@@ -144,6 +144,11 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: RevocationsCommand,
     },
+    /// On-site customer key-provider profile and ceremony.
+    Keys {
+        #[command(subcommand)]
+        command: KeysCommand,
+    },
     /// Inspect or reverify published release trust evidence.
     Release {
         #[command(subcommand)]
@@ -297,6 +302,31 @@ pub(crate) enum Command {
     Dev {
         #[command(subcommand)]
         command: DevCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum KeysCommand {
+    /// Create a root key reference and per-tenant data-key ids, then sign evidence.
+    Ceremony {
+        /// Version 1 deploy profile TOML (`class` plus `[key_provider].kind`).
+        #[arg(long)]
+        profile: PathBuf,
+        /// 32-byte Ed25519 seed (mode 0600) that signs the ceremony evidence.
+        #[arg(long)]
+        signing_key: PathBuf,
+        /// Named custodian present at the ceremony. Repeatable.
+        #[arg(long = "custodian", required = true)]
+        custodian: Vec<String>,
+        /// Tenant that receives a data-key id. Repeatable.
+        #[arg(long = "tenant", required = true)]
+        tenant: Vec<String>,
+        /// Lab software-provider directory. Owner-only; never a bundle or plan path.
+        #[arg(long)]
+        provider_dir: PathBuf,
+        /// Where to write the signed evidence JSON.
+        #[arg(long)]
+        out: PathBuf,
     },
 }
 
