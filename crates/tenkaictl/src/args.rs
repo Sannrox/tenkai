@@ -139,6 +139,11 @@ pub(crate) enum Command {
         #[arg(long)]
         signing_key: PathBuf,
     },
+    /// Sign, import, or show signed offline key revocation lists.
+    Revocations {
+        #[command(subcommand)]
+        command: RevocationsCommand,
+    },
     /// Inspect or reverify published release trust evidence.
     Release {
         #[command(subcommand)]
@@ -293,4 +298,27 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: DevCommand,
     },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum RevocationsCommand {
+    /// Sign a revocation list with a revocation authority seed.
+    Sign {
+        /// 32-byte Ed25519 seed (mode 0600) of a revocation authority.
+        #[arg(long)]
+        signing_key: PathBuf,
+        /// Higher than every list installed anywhere it will be imported.
+        #[arg(long)]
+        sequence: u64,
+        /// `<key_id>=<reason>`; repeat for each key. Keep earlier revocations.
+        #[arg(long = "revoke", required = true)]
+        revoke: Vec<String>,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Verify a list against TENKAI_KEY_REVOCATION_TRUST_ROOTS and install it
+    /// at TENKAI_KEY_REVOCATIONS.
+    Import { list: PathBuf },
+    /// Print the installed list.
+    Show,
 }

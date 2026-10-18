@@ -31,6 +31,7 @@ mod remote;
 mod remote_catalog;
 mod remote_delivery;
 mod remote_hold;
+mod revocations;
 #[cfg(test)]
 mod tests;
 mod token_cache;
@@ -114,6 +115,7 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    tenkai::key_revocation::load_configured()?;
     if let Some(operation_id) = cli
         .operation_id
         .as_deref()
@@ -163,6 +165,9 @@ async fn run(cli: Cli) -> Result<()> {
     }
     if matches!(cli.command, Command::Login { .. } | Command::Logout) {
         return login::run(cli).await;
+    }
+    if let Command::Revocations { command } = &cli.command {
+        return revocations::run(command);
     }
     if cli.target == Target::Remote {
         return remote::run(cli).await;

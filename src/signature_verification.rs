@@ -77,7 +77,23 @@ pub(crate) fn verifying_key(label: &str, value: &str) -> Result<VerifyingKey> {
     Ok(key)
 }
 
+/// Key to verify a signature with now: well formed and not revoked
+/// ([`crate::key_revocation`]).
 pub(crate) fn trusted_key(
+    label: &str,
+    public_key: &str,
+    expected_key_id: &str,
+) -> Result<VerifyingKey> {
+    if crate::key_revocation::is_revoked(expected_key_id) {
+        bail!("{label} {expected_key_id} is revoked");
+    }
+    well_formed_key(label, public_key, expected_key_id)
+}
+
+/// Structural check for loading trust roots: the id matches the key and the
+/// key is not weak. Revoked keys still load, so a trust file keeps working
+/// until rollover removes them.
+pub(crate) fn well_formed_key(
     label: &str,
     public_key: &str,
     expected_key_id: &str,

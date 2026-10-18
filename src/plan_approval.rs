@@ -164,7 +164,7 @@ impl TrustRoots {
                 );
             }
             validate_text("trusted signer identity", &signer.identity)?;
-            crate::signature_verification::trusted_key(
+            crate::signature_verification::well_formed_key(
                 "plan approval public key",
                 &signer.public_key,
                 &signer.key_id,

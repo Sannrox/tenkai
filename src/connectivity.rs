@@ -473,6 +473,8 @@ pub async fn bind_isolated_bundle(
     trust_roots: &crate::release_signing::TrustRoots,
     bundle_path: Option<&Path>,
 ) -> Result<UpgradeRecord> {
+    // A bundle may carry key revocations; apply them before trusting it.
+    crate::key_revocation::import_from_bundle(bundle)?;
     let verified = bundle.verify(
         trust_roots,
         crate::ontology::NS,
@@ -552,6 +554,8 @@ pub async fn install_isolated_stack(
     if spec.environments.len() != 1 || spec.environments[0] != environment {
         bail!("isolated first-install admits exactly one environment");
     }
+    // A bundle may carry key revocations; apply them before trusting it.
+    crate::key_revocation::import_from_bundle(bundle)?;
     let verified = bundle.verify(
         trust_roots,
         crate::ontology::NS,

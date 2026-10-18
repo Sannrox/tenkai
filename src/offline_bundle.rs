@@ -605,6 +605,19 @@ pub fn insert_stack_manifest(
     Ok(())
 }
 
+/// Carry a signed key revocation list in a bundle. Importers apply it before
+/// trusting the bundle ([`crate::key_revocation::import_from_bundle`]).
+pub fn insert_key_revocations(
+    payloads: &mut BTreeMap<String, (String, Vec<u8>)>,
+    list: &crate::key_revocation::RevocationList,
+) -> Result<()> {
+    payloads.insert(
+        crate::key_revocation::BUNDLE_ENTRY.into(),
+        ("application/json".into(), serde_json::to_vec(list)?),
+    );
+    Ok(())
+}
+
 /// Parse the stack completeness index when present.
 pub fn stack_manifest(bundle: &VerifiedBundle) -> Result<Option<OfflineStackManifest>> {
     let Some(raw) = bundle.entry(STACK_MANIFEST_PATH) else {
