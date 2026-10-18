@@ -11,6 +11,8 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::actor_chain::{Actor, ActorKind};
+
 /// Version of the authenticated-request-context contract.
 pub const AUTH_CONTEXT_CONTRACT_VERSION: u32 = 1;
 
@@ -165,6 +167,10 @@ pub struct AuthenticatedRequestContext {
     channel_bindings: BTreeSet<String>,
     #[serde(default)]
     product_bindings: BTreeSet<String>,
+    /// Verified `act` chain: who called on behalf of the principal, outermost
+    /// first. Empty when the principal called directly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    actor_chain: Vec<Actor>,
 }
 
 impl AuthenticatedRequestContext {
@@ -194,6 +200,31 @@ impl AuthenticatedRequestContext {
 
     pub fn channel_bindings(&self) -> &BTreeSet<String> {
         &self.channel_bindings
+    }
+
+    pub fn actor_chain(&self) -> &[Actor] {
+        &self.actor_chain
+    }
+
+    /// First actor in the chain that is not a person, if any.
+    pub fn acting_agent(&self) -> Option<&Actor> {
+        self.actor_chain
+            .iter()
+            .find(|actor| actor.kind == ActorKind::Agent)
+    }
+
+    /// Audit principal naming the subject and every delegating actor, for
+    /// example `user-1 (act: assistant-7)`.
+    pub fn audit_principal(&self) -> String {
+        if self.actor_chain.is_empty() {
+            return self.principal.id.clone();
+        }
+        let actors: Vec<&str> = self
+            .actor_chain
+            .iter()
+            .map(|actor| actor.id.as_str())
+            .collect();
+        format!("{} (act: {})", self.principal.id, actors.join(", "))
     }
 
     pub fn has_delivery_capability(&self, required: DeliveryCapability) -> bool {
@@ -291,6 +322,7 @@ pub struct AuthenticatedRequestContextBuilder {
     environment_binding: Option<String>,
     channel_bindings: BTreeSet<String>,
     product_bindings: BTreeSet<String>,
+    actor_chain: Vec<Actor>,
 }
 
 impl AuthenticatedRequestContextBuilder {
@@ -309,6 +341,7 @@ impl AuthenticatedRequestContextBuilder {
             environment_binding: None,
             channel_bindings: BTreeSet::new(),
             product_bindings: BTreeSet::new(),
+            actor_chain: Vec::new(),
         }
     }
 
@@ -368,6 +401,12 @@ impl AuthenticatedRequestContextBuilder {
         self
     }
 
+    /// Record the verified `act` chain (see [`crate::actor_chain::parse_actor_chain`]).
+    pub fn with_actor_chain(mut self, actor_chain: Vec<Actor>) -> Self {
+        self.actor_chain = actor_chain;
+        self
+    }
+
     pub fn build(self) -> Result<AuthenticatedRequestContext, AuthError> {
         let context = AuthenticatedRequestContext {
             contract_version: AUTH_CONTEXT_CONTRACT_VERSION,
@@ -379,6 +418,7 @@ impl AuthenticatedRequestContextBuilder {
             environment_binding: self.environment_binding,
             channel_bindings: self.channel_bindings,
             product_bindings: self.product_bindings,
+            actor_chain: self.actor_chain,
         };
         context.validate()?;
         Ok(context)

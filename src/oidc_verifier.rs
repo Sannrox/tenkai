@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use crate::actor_chain::{Actor, parse_actor_chain};
 use crate::assertion_verifier::{
     DEFAULT_CLOCK_SKEW_SECS, b64url_decode, now_unix_secs, parse_delivery_capabilities,
 };
@@ -652,6 +653,7 @@ struct Grants {
     channel_bindings: BTreeSet<String>,
     product_bindings: BTreeSet<String>,
     principal_kind: PrincipalKind,
+    actor_chain: Vec<Actor>,
 }
 
 /// Enterprise auth extension for OIDC access tokens.
@@ -815,6 +817,10 @@ impl OidcAuthExtension {
             },
             None => None,
         };
+        let actor_chain = match claims.rest.get("act") {
+            Some(act) => parse_actor_chain(act)?,
+            None => Vec::new(),
+        };
         Ok(Grants {
             subject: format!("{}@{}", claims.sub, claims.iss),
             tenant,
@@ -823,6 +829,7 @@ impl OidcAuthExtension {
             channel_bindings,
             product_bindings,
             principal_kind,
+            actor_chain,
         })
     }
 }
@@ -870,7 +877,8 @@ impl EnterpriseAuthExtension for OidcAuthExtension {
             },
             OIDC_AUTH_EXTENSION_ID,
         )
-        .with_delivery_capabilities(grants.capabilities);
+        .with_delivery_capabilities(grants.capabilities)
+        .with_actor_chain(grants.actor_chain);
         if let Some(environment) = grants.environment {
             builder = builder.with_environment_binding(environment);
         }

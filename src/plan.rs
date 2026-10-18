@@ -543,6 +543,27 @@ pub async fn create_for_reconcile(ctx: &mut Ctx, env: &str) -> Result<Plan> {
     }
 }
 
+/// Persist the plan the reconciler would compute, with held failed targets
+/// left held. Agent-initiated planning uses this so it cannot retry them.
+pub async fn create_holding_failed_targets(ctx: &mut Ctx, env: &str) -> Result<Plan> {
+    let mut span = crate::telemetry::start_span(
+        "tenkai.plan",
+        &crate::telemetry::DeliveryAttributes::new(crate::telemetry::Operation::Plan)
+            .environment(env),
+    );
+    match convergence::create_holding_failed_targets(ctx, env).await {
+        Ok(plan) => {
+            span.set_plan(&plan);
+            span.succeed();
+            Ok(plan)
+        }
+        Err(error) => {
+            span.fail();
+            Err(error)
+        }
+    }
+}
+
 pub fn model_routing_rollout_rank(kind: crate::manifest::ProductKind, action: Action) -> u8 {
     convergence::model_routing_rollout_rank(kind, action)
 }

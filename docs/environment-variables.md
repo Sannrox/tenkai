@@ -37,6 +37,7 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | `TENKAI_POSTGRES_URL` | unset | Hub tenant-store URL only; embedded `tenkaictl` and spoke `tenkai-server` fail closed when it is set. Non-loopback hosts require verified TLS |
 | `TENKAI_INSTANCE_ID` | random UUID per process | Replica identity used for multi-replica fencing; the server records it as `tenkai-server-<value>` |
 | `TENKAI_ENABLE_METRICS` | `false` | Enable the Prometheus scrape endpoint (`--enable-metrics`) |
+| `TENKAI_AGENT_ACTOR_POLICY` | `require_approval` | Mutations whose token `act` chain names an agent: `require_approval` allows only plans, which still need approval under the environment's policy; `forbid` refuses all ([auth request context](auth-request-context.md#delegated-calls-and-agent-actors)) |
 
 ### Optional providers
 

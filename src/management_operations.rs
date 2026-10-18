@@ -90,7 +90,36 @@ pub enum ManagementError {
     Internal(String),
 }
 
+/// What a mutating management call does when its token's actor chain names
+/// an agent (see [`AuthenticatedRequestContext::acting_agent`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AgentActorPolicy {
+    /// An agent may create plans and rollback plans. They go through the
+    /// environment's approval policy like any plan; rollback always needs a
+    /// human-signed envelope. Every other mutation, including apply and
+    /// approve, is refused.
+    #[default]
+    RequireApproval,
+    /// An agent may not mutate anything.
+    Forbid,
+}
+
+impl std::str::FromStr for AgentActorPolicy {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "require_approval" => Ok(Self::RequireApproval),
+            "forbid" => Ok(Self::Forbid),
+            other => Err(format!(
+                "unknown agent actor policy `{other}`: expected require_approval or forbid"
+            )),
+        }
+    }
+}
+
 pub struct ManagementOperations {
+    agent_actor_policy: AgentActorPolicy,
     auth: AuthStack,
     tenant_mode: bool,
     reconciler: Arc<dyn ReconcilePort>,
@@ -122,6 +151,7 @@ impl ManagementOperations {
             )
         });
         Self {
+            agent_actor_policy: AgentActorPolicy::default(),
             auth,
             tenant_mode,
             reconciler,
@@ -166,6 +196,41 @@ impl ManagementOperations {
                     "invalid management credential".into(),
                 ))
             }
+        }
+    }
+
+    pub fn with_agent_actor_policy(mut self, policy: AgentActorPolicy) -> Self {
+        self.agent_actor_policy = policy;
+        self
+    }
+
+    /// Refuse a mutation whose actor chain names an agent, and audit the
+    /// refusal under both the subject and the actors. HTTP handlers that
+    /// mutate outside these operations call it too.
+    pub fn refuse_agent(
+        &self,
+        context: &AuthenticatedRequestContext,
+        operation: &str,
+    ) -> Result<(), ManagementError> {
+        if context.acting_agent().is_none() {
+            return Ok(());
+        }
+        self.audit(&context.audit_principal(), &format!("{operation}.refused"))?;
+        Err(ManagementError::Forbidden(
+            "agent-initiated changes require a human principal".into(),
+        ))
+    }
+
+    /// A plan only waits for approval, so an agent may create one unless the
+    /// policy forbids agent-initiated changes.
+    fn admit_agent_plan(
+        &self,
+        context: &AuthenticatedRequestContext,
+        operation: &str,
+    ) -> Result<(), ManagementError> {
+        match self.agent_actor_policy {
+            AgentActorPolicy::RequireApproval => Ok(()),
+            AgentActorPolicy::Forbid => self.refuse_agent(context, operation),
         }
     }
 
@@ -414,6 +479,7 @@ impl ManagementOperations {
         evidence: crate::software_compatibility::CompatibilityEvidence,
     ) -> Result<(), ManagementError> {
         let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "software_compatibility.record")?;
         Self::require_capability(&context, DeliveryCapability::Management)?;
         self.require_community_catalog_host()?;
         management_lifecycle::authorize_management_lifecycle_scope(
@@ -424,7 +490,7 @@ impl ManagementOperations {
         )
         .map_err(map_lifecycle_error)?;
         self.audit(
-            context.principal_id(),
+            &context.audit_principal(),
             "software_compatibility.record.requested",
         )?;
         let mut ctx = self.application_ctx()?;
@@ -433,7 +499,7 @@ impl ManagementOperations {
             .await
             .map_err(map_catalog_error)?;
         self.audit(
-            context.principal_id(),
+            &context.audit_principal(),
             "software_compatibility.record.completed",
         )?;
         self.record_change(
@@ -450,14 +516,21 @@ impl ManagementOperations {
         roots: crate::model_release_evidence::EvaluationTrustRoots,
     ) -> Result<(), ManagementError> {
         let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "model_evaluation.trust")?;
         Self::require_capability(&context, DeliveryCapability::Management)?;
         self.require_community_catalog_host()?;
-        self.audit(context.principal_id(), "model_evaluation.trust.requested")?;
+        self.audit(
+            &context.audit_principal(),
+            "model_evaluation.trust.requested",
+        )?;
         let mut ctx = self.application_ctx()?;
         crate::model_release_evidence::install_evaluation_trust_roots(&mut ctx, &context, &roots)
             .await
             .map_err(map_catalog_error)?;
-        self.audit(context.principal_id(), "model_evaluation.trust.completed")?;
+        self.audit(
+            &context.audit_principal(),
+            "model_evaluation.trust.completed",
+        )?;
         Ok(())
     }
 
@@ -467,15 +540,22 @@ impl ManagementOperations {
         evidence: crate::model_release_evidence::ModelEvaluationEvidence,
     ) -> Result<(), ManagementError> {
         let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "model_evaluation.record")?;
         Self::require_capability(&context, DeliveryCapability::Publish)?;
         Self::require_product_grant(&context, &evidence.identity.model)?;
         self.require_community_catalog_host()?;
-        self.audit(context.principal_id(), "model_evaluation.record.requested")?;
+        self.audit(
+            &context.audit_principal(),
+            "model_evaluation.record.requested",
+        )?;
         let mut ctx = self.application_ctx()?;
         crate::model_release_evidence::record_evaluation_evidence(&mut ctx, &context, evidence)
             .await
             .map_err(map_catalog_error)?;
-        self.audit(context.principal_id(), "model_evaluation.record.completed")?;
+        self.audit(
+            &context.audit_principal(),
+            "model_evaluation.record.completed",
+        )?;
         Ok(())
     }
 
@@ -486,6 +566,7 @@ impl ManagementOperations {
         request: crate::management_lifecycle::RetireEnvironmentRequest,
     ) -> Result<ManagementLifecycleResult, ManagementError> {
         let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "environment.retire")?;
         Self::require_capability(&context, DeliveryCapability::Management)?;
         management_lifecycle::admit_retire_environment(
             &request,
@@ -496,7 +577,7 @@ impl ManagementOperations {
         .map_err(map_lifecycle_error)?;
         self.require_environment_visible(&context, environment)
             .await?;
-        let actor = context.principal_id();
+        let actor = &context.audit_principal();
         self.audit(actor, "environment.retire.requested")?;
         let result = if self.tenant_mode {
             let retirement = self
@@ -590,6 +671,7 @@ impl ManagementOperations {
         credential: &CredentialMaterial,
     ) -> Result<TickReport, ManagementError> {
         let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "reconcile")?;
         Self::require_capability(&context, DeliveryCapability::Management)?;
         self.require_environment_grant(credential, &context, None, "reconcile")?;
         let tenant_operations = if self.tenant_mode {
@@ -600,7 +682,7 @@ impl ManagementOperations {
         } else {
             None
         };
-        let actor = context.principal_id();
+        let actor = &context.audit_principal();
         self.audit(actor, "reconcile.requested")?;
         let result = crate::telemetry::scope_operation(context.request_id.clone(), async {
             if let Some(tenant_operations) = tenant_operations {
@@ -666,6 +748,7 @@ impl ManagementOperations {
         request: PackageMigrationApplyRequest,
     ) -> Result<PackageMigrationResult, ManagementError> {
         let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "package_migration.apply")?;
         Self::require_capability(&context, DeliveryCapability::Management)?;
         self.require_environment_grant(
             credential,
@@ -743,7 +826,7 @@ impl ManagementOperations {
                 }
             }
         }
-        let actor = context.principal_id();
+        let actor = &context.audit_principal();
         self.audit(actor, "package_migration.apply.requested")?;
         let record = package_migration::run_until_blocked_in(
             &mut ctx,
@@ -807,6 +890,12 @@ impl ManagementOperations {
         resume: bool,
     ) -> Result<PackageMigrationResult, ManagementError> {
         let context = self.authenticate(credential)?;
+        let op = if resume {
+            "package_migration.resume"
+        } else {
+            "package_migration.rollback"
+        };
+        self.refuse_agent(&context, op)?;
         Self::require_capability(&context, DeliveryCapability::Management)?;
         package_migration::require_migration_api_version(request.version)
             .map_err(map_migration_error)?;
@@ -836,12 +925,7 @@ impl ManagementOperations {
             approval: &files.approval,
             trust_roots: &files.trust_roots,
         };
-        let actor = context.principal_id();
-        let op = if resume {
-            "package_migration.resume"
-        } else {
-            "package_migration.rollback"
-        };
+        let actor = &context.audit_principal();
         self.audit(actor, &format!("{op}.requested"))?;
         let record = if resume {
             package_migration::resume_in(
@@ -918,6 +1002,7 @@ impl ManagementOperations {
         request: PublishRequest,
     ) -> Result<ManagementLifecycleResult, ManagementError> {
         let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "catalog.publish")?;
         Self::require_capability(&context, DeliveryCapability::Publish)?;
         let manifest = crate::manifest::parse_raw(&request.manifest).map_err(map_catalog_error)?;
         Self::require_product_grant(&context, &manifest.product.name)?;
@@ -941,7 +1026,7 @@ impl ManagementOperations {
             &trusted_roots,
         )
         .map_err(map_lifecycle_error)?;
-        let actor = context.principal_id();
+        let actor = &context.audit_principal();
         self.audit(actor, "catalog.publish.requested")?;
         let mut ctx = self.application_ctx()?;
         let published = crate::catalog::publish_with_result(
@@ -988,6 +1073,7 @@ impl ManagementOperations {
         request: PromoteRequest,
     ) -> Result<ManagementLifecycleResult, ManagementError> {
         let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "catalog.promote")?;
         Self::require_capability(&context, DeliveryCapability::Publish)?;
         Self::require_channel_binding(&context, channel)?;
         let product = request
@@ -1003,7 +1089,7 @@ impl ManagementOperations {
             self.granted_environment(credential, &context),
         )
         .map_err(map_lifecycle_error)?;
-        let actor = context.principal_id();
+        let actor = &context.audit_principal();
         self.audit(actor, "catalog.promote.requested")?;
         let mut ctx = self.application_ctx()?;
         let message = crate::catalog::promote(&mut ctx, &context, &request.spec, channel)
@@ -1029,6 +1115,7 @@ impl ManagementOperations {
         request: RecallRequest,
     ) -> Result<ManagementLifecycleResult, ManagementError> {
         let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "catalog.recall")?;
         Self::require_capability(&context, DeliveryCapability::Management)?;
         self.require_community_catalog_host()?;
         management_lifecycle::admit_recall(
@@ -1037,7 +1124,7 @@ impl ManagementOperations {
             self.granted_environment(credential, &context),
         )
         .map_err(map_lifecycle_error)?;
-        let actor = context.principal_id();
+        let actor = &context.audit_principal();
         self.audit(actor, "catalog.recall.requested")?;
         let mut ctx = self.application_ctx()?;
         let message = crate::catalog::recall(&mut ctx, &context, release)
@@ -1063,6 +1150,7 @@ impl ManagementOperations {
         request: SubscribeRequest,
     ) -> Result<ManagementLifecycleResult, ManagementError> {
         let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "catalog.subscribe")?;
         Self::require_capability(&context, DeliveryCapability::Management)?;
         self.require_community_catalog_host()?;
         management_lifecycle::admit_subscribe(
@@ -1087,7 +1175,7 @@ impl ManagementOperations {
                 "subscribe requires <product>=<channel>".into(),
             ));
         };
-        let actor = context.principal_id();
+        let actor = &context.audit_principal();
         self.audit(actor, "catalog.subscribe.requested")?;
         let mut ctx = self.application_ctx()?;
         let message = crate::environment::subscribe(&mut ctx, environment, product, channel)
@@ -1157,6 +1245,7 @@ impl ManagementOperations {
         operation: ManagementLifecycleOperation,
     ) -> Result<ManagementLifecycleResult, ManagementError> {
         let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, &format!("delivery.hold.{}", operation.as_str()))?;
         Self::require_capability(&context, DeliveryCapability::Management)?;
         self.require_community_catalog_host()?;
         management_lifecycle::admit_delivery_hold(
@@ -1170,7 +1259,7 @@ impl ManagementOperations {
         self.require_environment_visible(&context, environment)
             .await?;
         self.require_current_generation(environment, request.expected_generation)?;
-        let actor = context.principal_id();
+        let actor = &context.audit_principal();
         let verb = operation.as_str();
         self.audit(actor, &format!("delivery.hold.{verb}.requested"))?;
         let mut ctx = self.application_ctx()?;
@@ -1283,6 +1372,7 @@ impl ManagementOperations {
         operation: ManagementLifecycleOperation,
     ) -> Result<ManagementLifecycleResult, ManagementError> {
         let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, &format!("delivery.hold.{}", operation.as_str()))?;
         Self::require_capability(&context, DeliveryCapability::Management)?;
         Self::require_channel_binding(&context, channel)?;
         self.require_community_catalog_host()?;
@@ -1293,7 +1383,7 @@ impl ManagementOperations {
             self.granted_environment(credential, &context),
         )
         .map_err(map_lifecycle_error)?;
-        let actor = context.principal_id();
+        let actor = &context.audit_principal();
         let verb = operation.as_str();
         self.audit(actor, &format!("delivery.hold.{verb}.requested"))?;
         let mut ctx = self.application_ctx()?;
@@ -1352,6 +1442,7 @@ impl ManagementOperations {
         request: RetryFailedTargetRequest,
     ) -> Result<ManagementLifecycleResult, ManagementError> {
         let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "target.retry")?;
         Self::require_capability(&context, DeliveryCapability::Management)?;
         self.require_community_catalog_host()?;
         management_lifecycle::admit_retry_failed_target(
@@ -1365,7 +1456,7 @@ impl ManagementOperations {
         self.require_environment_visible(&context, environment)
             .await?;
         self.require_current_generation(environment, request.expected_generation)?;
-        let actor = context.principal_id();
+        let actor = &context.audit_principal();
         self.audit(actor, "delivery.failed_target.retry.requested")?;
         let mut ctx = self.application_ctx()?;
         let env_obj = crate::environment::environment(&mut ctx, environment)
@@ -1416,6 +1507,7 @@ impl ManagementOperations {
         request: PlanRequest,
     ) -> Result<ManagementLifecycleResult, ManagementError> {
         let context = self.authenticate(credential)?;
+        self.admit_agent_plan(&context, "plan")?;
         Self::require_capability(&context, DeliveryCapability::Management)?;
         self.require_community_catalog_host()?;
         management_lifecycle::admit_plan(
@@ -1428,12 +1520,17 @@ impl ManagementOperations {
         self.require_environment_visible(&context, environment)
             .await?;
         self.require_current_generation(environment, request.expected_generation)?;
-        let actor = context.principal_id();
+        let actor = &context.audit_principal();
         self.audit(actor, "plan.requested")?;
         let mut ctx = self.application_ctx()?;
-        let stored = crate::plan::create(&mut ctx, environment)
-            .await
-            .map_err(map_plan_lifecycle_error)?;
+        // An agent gets the reconciler's own plan: held failed targets stay
+        // held, so the plan authorizes nothing the reconciler would not run.
+        let stored = if context.acting_agent().is_some() {
+            crate::plan::create_holding_failed_targets(&mut ctx, environment).await
+        } else {
+            crate::plan::create(&mut ctx, environment).await
+        }
+        .map_err(map_plan_lifecycle_error)?;
         self.audit(actor, "plan.completed")?;
         self.record_change(
             crate::change_stream::ChangeEventKind::PlanCreated,
@@ -1466,6 +1563,7 @@ impl ManagementOperations {
         request: ApproveRequest,
     ) -> Result<ManagementLifecycleResult, ManagementError> {
         let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "plan.approve")?;
         Self::require_capability(&context, DeliveryCapability::Management)?;
         self.require_community_catalog_host()?;
         management_lifecycle::admit_approve(
@@ -1483,7 +1581,7 @@ impl ManagementOperations {
             &request.trust_roots,
         )
         .map_err(map_lifecycle_error)?;
-        let actor = context.principal_id();
+        let actor = &context.audit_principal();
         self.audit(actor, "plan.approve.requested")?;
         let mut ctx = self.application_ctx()?;
         let stored = crate::plan::load(&mut ctx, plan_id)
@@ -1529,6 +1627,7 @@ impl ManagementOperations {
         request: ApplyRequest,
     ) -> Result<ManagementLifecycleResult, ManagementError> {
         let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "plan.apply")?;
         Self::require_capability(&context, DeliveryCapability::Management)?;
         self.require_community_catalog_host()?;
         management_lifecycle::admit_apply(
@@ -1546,7 +1645,7 @@ impl ManagementOperations {
             &request.trust_roots,
         )
         .map_err(map_lifecycle_error)?;
-        let actor = context.principal_id();
+        let actor = &context.audit_principal();
         self.audit(actor, "plan.apply.requested")?;
         let mut ctx = self.application_ctx()?;
         let stored = crate::plan::load(&mut ctx, plan_id)
@@ -1628,6 +1727,7 @@ impl ManagementOperations {
         request: RollbackRequest,
     ) -> Result<ManagementLifecycleResult, ManagementError> {
         let context = self.authenticate(credential)?;
+        self.admit_agent_plan(&context, "plan.rollback")?;
         Self::require_capability(&context, DeliveryCapability::Management)?;
         self.require_community_catalog_host()?;
         management_lifecycle::admit_rollback(
@@ -1640,7 +1740,7 @@ impl ManagementOperations {
         self.require_environment_visible(&context, environment)
             .await?;
         self.require_current_generation(environment, request.expected_generation)?;
-        let actor = context.principal_id();
+        let actor = &context.audit_principal();
         self.audit(actor, "plan.rollback.requested")?;
         let mut ctx = self.application_ctx()?;
         let recovery = request.recovery_reason.as_deref();
@@ -2315,7 +2415,19 @@ mod tests {
             .with_delivery_capabilities(self.capabilities.clone())
             .with_channel_bindings(self.channels.clone())
             .with_product_bindings(["api".into()])
+            .with_actor_chain(agent_chain(credential))
             .build()
+        }
+    }
+
+    /// The bearer `agent` stands for a token whose `act` names an AI agent.
+    fn agent_chain(credential: &CredentialMaterial) -> Vec<crate::actor_chain::Actor> {
+        match credential.bearer_token.as_deref() {
+            Some("agent") => vec![crate::actor_chain::Actor {
+                id: "assistant-7".into(),
+                kind: crate::actor_chain::ActorKind::Agent,
+            }],
+            _ => Vec::new(),
         }
     }
 
@@ -2582,5 +2694,162 @@ mod tests {
         .await
         .unwrap();
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn agent_refused(error: ManagementError) {
+        assert!(
+            matches!(error, ManagementError::Forbidden(ref msg) if msg.contains("agent-initiated")),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_actor_plans_await_a_human_and_other_mutations_are_refused() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-agent-actor-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let ops = catalog_ops(
+            &root,
+            grant_auth(
+                [DeliveryCapability::Read, DeliveryCapability::Management],
+                [],
+            ),
+        )
+        .await;
+        let human = grant_credential();
+        let agent = CredentialMaterial {
+            request_id: "req-agent".into(),
+            bearer_token: Some("agent".into()),
+            assertion: None,
+        };
+        ops.publish_release(&human, signed_publish_request(&root, "1.0.0"))
+            .await
+            .unwrap();
+        ops.promote_release(
+            &human,
+            "stable",
+            PromoteRequest {
+                version: 1,
+                operation: "promote".into(),
+                spec: "api@1.0.0".into(),
+            },
+        )
+        .await
+        .unwrap();
+        ops.subscribe_environment(
+            &human,
+            "stage",
+            SubscribeRequest {
+                version: 1,
+                operation: "subscribe".into(),
+                environment: "stage".into(),
+                expected_generation: 0,
+                spec: "api=stable".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        ops.list_environments(&agent).await.unwrap();
+        let plan_request = PlanRequest {
+            version: 1,
+            operation: "plan".into(),
+            environment: "stage".into(),
+            expected_generation: 0,
+        };
+        let planned = ops
+            .plan_environment(&agent, "stage", plan_request.clone())
+            .await
+            .unwrap();
+        let plan_id = planned.resource.expect("plan id");
+        agent_refused(
+            ops.apply_plan(&agent, &plan_id, dummy_apply_request())
+                .await
+                .unwrap_err(),
+        );
+        agent_refused(
+            ops.publish_release(&agent, signed_publish_request(&root, "2.0.0"))
+                .await
+                .unwrap_err(),
+        );
+
+        let audit = ops.store.audit_events().unwrap();
+        let refused = audit
+            .iter()
+            .find(|record| record.operation == "plan.apply.refused")
+            .expect("refused apply is audited");
+        assert_eq!(refused.principal, "ci (act: assistant-7)");
+        assert!(
+            audit
+                .iter()
+                .all(|record| record.operation != "plan.apply.requested"),
+            "agent apply must not start execution: {audit:?}"
+        );
+        assert!(audit.iter().any(|record| {
+            record.operation == "plan.completed" && record.principal == "ci (act: assistant-7)"
+        }));
+
+        let mut ctx = ops.application_ctx().unwrap();
+        let mut stage = crate::environment::environment(&mut ctx, "stage")
+            .await
+            .unwrap();
+        stage.properties.insert(
+            "failed_target.api".into(),
+            crate::ontology::release_id("api", "1.0.0"),
+        );
+        ctx.put(stage).await.unwrap();
+        let held = ops
+            .plan_environment(&agent, "stage", plan_request.clone())
+            .await
+            .unwrap();
+        assert!(
+            held.message.contains("up to date"),
+            "agent plan must not retry a held failed target: {held:?}"
+        );
+        let mut ctx = ops.application_ctx().unwrap();
+        crate::plan::load(&mut ctx, held.resource.as_deref().unwrap())
+            .await
+            .expect("an empty agent plan is persisted");
+        let retry = ops
+            .plan_environment(&human, "stage", plan_request.clone())
+            .await
+            .unwrap();
+        assert!(
+            !retry.message.contains("up to date"),
+            "a human plan still retries the held target: {retry:?}"
+        );
+
+        let ops = ops.with_agent_actor_policy(AgentActorPolicy::Forbid);
+        agent_refused(
+            ops.plan_environment(&agent, "stage", plan_request)
+                .await
+                .unwrap_err(),
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn platform_jwt_act_claim_names_the_agent() {
+        let (signing, public_b64) = keypair();
+        let ops = enterprise_ops(&public_b64);
+        let now = crate::assertion_verifier::now_unix_secs();
+        let mut claims = human_claims(now, Some(vec!["read", "management"]));
+        claims.insert("act".into(), serde_json::json!({"sub": "assistant-7"}));
+        let credential = CredentialMaterial {
+            request_id: "req-agent-jwt".into(),
+            bearer_token: None,
+            assertion: Some(mint_jwt(&signing, &claims).into_bytes()),
+        };
+        let context = ops.authenticate(&credential).unwrap();
+        assert_eq!(context.principal_id(), "user-42");
+        assert_eq!(
+            context.acting_agent().map(|actor| actor.id.as_str()),
+            Some("assistant-7")
+        );
+        ops.fleet_status(&credential).await.unwrap();
+        agent_refused(ops.reconcile(&credential).await.unwrap_err());
     }
 }

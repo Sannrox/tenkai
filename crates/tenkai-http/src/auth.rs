@@ -19,10 +19,15 @@ use super::runtime::{bearer, error_response, management_error};
 fn authorize_development_fixture(
     state: &AppState,
     context: &AuthenticatedRequestContext,
+    operation: &str,
 ) -> Result<(), Box<Response>> {
     let Some(config) = &state.config.development_fixtures else {
         return Err(Box::new(error_response(StatusCode::NOT_FOUND, "not found")));
     };
+    state
+        .management
+        .refuse_agent(context, operation)
+        .map_err(|error| Box::new(management_error(error)))?;
     if context.tenant().is_none()
         || !matches!(
             context.principal.kind,
@@ -50,7 +55,9 @@ pub(super) async fn import_development_fixture(
     if let Err(response) = require_tenant_scope(&state, &context, None).await {
         return *response;
     }
-    if let Err(response) = authorize_development_fixture(&state, &context) {
+    if let Err(response) =
+        authorize_development_fixture(&state, &context, "development_fixture.import")
+    {
         return *response;
     }
     let prepared = match fixture.prepare() {
@@ -93,7 +100,9 @@ pub(super) async fn reset_development_fixture(
     if let Err(response) = require_tenant_scope(&state, &context, None).await {
         return *response;
     }
-    if let Err(response) = authorize_development_fixture(&state, &context) {
+    if let Err(response) =
+        authorize_development_fixture(&state, &context, "development_fixture.reset")
+    {
         return *response;
     }
     let Some(store) = state.tenant_store.clone() else {
