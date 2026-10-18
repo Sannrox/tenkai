@@ -49,6 +49,11 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
             crate::embedded_rollback::run(&mut ctx, command, output).await
         }
         Command::Product { command } => crate::embedded_product::run(&mut ctx, command).await,
+        Command::Preflight {
+            env,
+            config,
+            signing_key,
+        } => crate::embedded_preflight::run(&mut ctx, &env, &config, &signing_key).await,
         command @ Command::Reconcile { .. } => crate::embedded_reconcile::run(ctx, command).await,
         Command::Restore { .. }
         | Command::Dev { .. }

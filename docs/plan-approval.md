@@ -94,7 +94,14 @@ auto_signer_key = "/var/lib/tenkai/lab-auto-approver.ed25519"
 
 [[require_human]]
 product = "payments"
+
+# Optional: refuse execution without a fresh, passing host preflight.
+[require_preflight]
+max_age_ms = 86400000
 ```
+
+`require_preflight` applies to human and automatic approvals alike. See
+[host preflight](host-preflight.md).
 
 The signer key is a 32-byte Ed25519 seed, mode `0600`, not a symlink. Its
 public key must already be in `TENKAI_PLAN_APPROVAL_TRUST_ROOTS`. Tenkai

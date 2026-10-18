@@ -53,9 +53,21 @@ pub struct ApprovalPolicy {
     pub auto_signer_key: Option<PathBuf>,
     #[serde(default)]
     pub require_human: Vec<RequireHumanRule>,
+    /// Refuse to execute any plan here without a passing, fresh, signed host
+    /// preflight ([`crate::host_preflight`]). Applies to human and automatic
+    /// approvals alike.
+    #[serde(default)]
+    pub require_preflight: Option<PreflightRequirement>,
     /// SHA-256 of the TOML file bytes when loaded from disk.
     #[serde(skip)]
     source_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreflightRequirement {
+    /// Oldest acceptable preflight, in milliseconds.
+    pub max_age_ms: i64,
 }
 
 /// Signed release metadata (`[delivery]`) that forces a human approval.
@@ -144,6 +156,12 @@ impl ApprovalPolicy {
         }
         for rule in &self.require_human {
             crate::ontology::validate_identifier("require_human product", &rule.product)?;
+        }
+        if self
+            .require_preflight
+            .is_some_and(|preflight| preflight.max_age_ms <= 0)
+        {
+            bail!("plan approval policy require_preflight.max_age_ms must be positive");
         }
         Ok(())
     }
@@ -328,7 +346,7 @@ pub(crate) fn signer_key_id(policy: &ApprovalPolicy) -> Result<Option<String>> {
     let Some(path) = &policy.auto_signer_key else {
         return Ok(None);
     };
-    let seed = load_auto_signer_seed(path)?;
+    let seed = load_signer_seed(path)?;
     let public = SigningKey::from_bytes(&seed).verifying_key().to_bytes();
     Ok(Some(crate::signature_verification::key_id(&public)))
 }
@@ -733,7 +751,7 @@ fn auto_signer_present(policy: &ApprovalPolicy) -> bool {
     policy
         .auto_signer_key
         .as_deref()
-        .is_some_and(|path| load_auto_signer_seed(path).is_ok())
+        .is_some_and(|path| load_signer_seed(path).is_ok())
 }
 
 fn auto_signer_trusted(policy: &ApprovalPolicy, plan: &Plan, roots_path: &Path) -> bool {
@@ -756,7 +774,7 @@ fn auto_signer_trusted(policy: &ApprovalPolicy, plan: &Plan, roots_path: &Path) 
 
 fn signer_unavailable(error: &anyhow::Error) -> bool {
     let text = error.to_string();
-    text.contains("auto signer key") && (text.contains("not found") || text.contains("missing"))
+    text.contains("signer key") && (text.contains("not found") || text.contains("missing"))
 }
 
 fn sign_auto_approval(
@@ -771,7 +789,7 @@ fn sign_auto_approval(
         .auto_signer_key
         .as_deref()
         .context("auto plan approval policy requires auto_signer_key")?;
-    let seed = load_auto_signer_seed(key_path)?;
+    let seed = load_signer_seed(key_path)?;
     let signing_key = SigningKey::from_bytes(&seed);
     let expires_at = now
         .checked_add(policy.ttl_ms)
@@ -800,19 +818,20 @@ fn sign_auto_approval(
     Ok(())
 }
 
-fn load_auto_signer_seed(path: &Path) -> Result<[u8; 32]> {
+/// Read a 32-byte Ed25519 seed: a regular, owner-only file, not a symlink.
+pub(crate) fn load_signer_seed(path: &Path) -> Result<[u8; 32]> {
     let meta = fs::symlink_metadata(path).with_context(|| {
         if path.exists() {
-            format!("inspecting auto signer key {}", path.display())
+            format!("inspecting signer key {}", path.display())
         } else {
-            format!("auto signer key {} is missing", path.display())
+            format!("signer key {} is missing", path.display())
         }
     })?;
     if meta.file_type().is_symlink() {
-        bail!("auto signer key {} must not be a symlink", path.display());
+        bail!("signer key {} must not be a symlink", path.display());
     }
     if !meta.file_type().is_file() {
-        bail!("auto signer key {} must be a regular file", path.display());
+        bail!("signer key {} must be a regular file", path.display());
     }
     #[cfg(unix)]
     {
@@ -820,7 +839,7 @@ fn load_auto_signer_seed(path: &Path) -> Result<[u8; 32]> {
         let mode = meta.permissions().mode() & 0o777;
         if mode & 0o077 != 0 {
             bail!(
-                "auto signer key {} must be mode 0600 (or owner-only); found {:o}",
+                "signer key {} must be mode 0600 (or owner-only); found {:o}",
                 path.display(),
                 mode
             );
@@ -828,13 +847,12 @@ fn load_auto_signer_seed(path: &Path) -> Result<[u8; 32]> {
     }
     if meta.len() != 32 {
         bail!(
-            "auto signer key {} must be exactly 32 bytes (got {})",
+            "signer key {} must be exactly 32 bytes (got {})",
             path.display(),
             meta.len()
         );
     }
-    let bytes =
-        fs::read(path).with_context(|| format!("reading auto signer key {}", path.display()))?;
+    let bytes = fs::read(path).with_context(|| format!("reading signer key {}", path.display()))?;
     let mut seed = [0_u8; 32];
     seed.copy_from_slice(&bytes);
     Ok(seed)
@@ -1007,6 +1025,7 @@ mod tests {
 
     fn auto_policy(key: &Path, product: Option<&str>) -> ApprovalPolicy {
         ApprovalPolicy {
+            require_preflight: None,
             version: 1,
             mode: PolicyMode::Auto,
             ttl_ms: 60_000,
@@ -2303,6 +2322,141 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("file path"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn require_preflight_blocks_execution_until_a_fresh_passing_preflight() {
+        let dir = unique_dir(&format!("preflight-{}", uuid::Uuid::new_v4()));
+        let key = write_seed(&dir);
+        let policy = ApprovalPolicy {
+            require_preflight: Some(PreflightRequirement { max_age_ms: 60_000 }),
+            ..auto_policy(&key, None)
+        };
+        let policy_path = write_policy(&dir, &policy);
+        let mut ctx = crate::client::Ctx::embedded(dir.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::plan::env_add(&mut ctx, "lab", "fixture")
+            .await
+            .unwrap();
+        crate::environment::set_plan_approval_policy(&mut ctx, "lab", &policy_path)
+            .await
+            .unwrap();
+        let plan = sample_plan(Action::Install, "api");
+        let now = crate::now_millis();
+        let properties = crate::environment::environment(&mut ctx, "lab")
+            .await
+            .unwrap()
+            .properties;
+        let AutoEnvelope::Signed(envelope) = resolve_auto_envelope(
+            &properties,
+            &plan,
+            false,
+            DeliverySignals::default(),
+            &dir.join("approvals"),
+            now,
+        )
+        .unwrap() else {
+            panic!("expected automatic approval")
+        };
+
+        // Trust roots: the auto approver plus a preflight signer for lab.
+        let preflight_seed = [9_u8; 32];
+        let preflight_key = dir.join("preflight.ed25519");
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&preflight_key)
+                .unwrap();
+            file.write_all(&preflight_seed).unwrap();
+        }
+        let roots = write_trust_roots(&dir, &[7_u8; 32]);
+        let preflight_public = SigningKey::from_bytes(&preflight_seed)
+            .verifying_key()
+            .to_bytes();
+        let mut text = fs::read_to_string(&roots).unwrap();
+        text.push_str(&format!(
+            "\n[[signers]]\nkey_id = \"{}\"\nidentity = \"preflight@lab\"\npublic_key = \"{}\"\nenvironments = [\"lab\"]\nproviders = [\"preflight\"]\n",
+            crate::signature_verification::key_id(&preflight_public),
+            STANDARD.encode(preflight_public)
+        ));
+        fs::write(&roots, text).unwrap();
+
+        async fn execute(
+            ctx: &mut crate::client::Ctx,
+            plan: &Plan,
+            envelope: &Path,
+            roots: &Path,
+            now: i64,
+        ) -> Result<(), String> {
+            crate::plan_approval::verify_for_execution(ctx, plan, envelope, roots, now, false)
+                .await
+                .map(|_| ())
+                .map_err(|error| format!("{error:#}"))
+        }
+        let check = |passed: bool| crate::host_preflight::CheckResult {
+            check: "disk /".into(),
+            passed,
+            reason: "fixture".into(),
+        };
+        let record =
+            |checks, at, seed: &Path| crate::host_preflight::sign("lab", checks, at, seed).unwrap();
+
+        let missing = execute(&mut ctx, &plan, &envelope, &roots, now)
+            .await
+            .unwrap_err();
+        assert!(missing.contains("no host preflight"), "{missing}");
+
+        let failed = record(vec![check(true), check(false)], now, &preflight_key);
+        crate::host_preflight::record(&mut ctx, &failed)
+            .await
+            .unwrap();
+        let error = execute(&mut ctx, &plan, &envelope, &roots, now)
+            .await
+            .unwrap_err();
+        assert!(error.contains("host preflight failed: disk /"), "{error}");
+
+        let stale = record(vec![check(true)], now - 120_000, &preflight_key);
+        crate::host_preflight::record(&mut ctx, &stale)
+            .await
+            .unwrap();
+        let error = execute(&mut ctx, &plan, &envelope, &roots, now)
+            .await
+            .unwrap_err();
+        assert!(error.contains("older than"), "{error}");
+
+        let wrong_signer = record(vec![check(true)], now, &key);
+        crate::host_preflight::record(&mut ctx, &wrong_signer)
+            .await
+            .unwrap();
+        let error = execute(&mut ctx, &plan, &envelope, &roots, now)
+            .await
+            .unwrap_err();
+        assert!(
+            error.contains("not scoped to the preflight provider"),
+            "{error}"
+        );
+
+        let passing = record(vec![check(true)], now, &preflight_key);
+        crate::host_preflight::record(&mut ctx, &passing)
+            .await
+            .unwrap();
+        execute(&mut ctx, &plan, &envelope, &roots, now)
+            .await
+            .unwrap();
+
+        let mut tampered = passing;
+        tampered.statement.checks[0].reason = "edited".into();
+        crate::host_preflight::record(&mut ctx, &tampered)
+            .await
+            .unwrap();
+        let error = execute(&mut ctx, &plan, &envelope, &roots, now)
+            .await
+            .unwrap_err();
+        assert!(error.contains("signature"), "{error}");
         let _ = fs::remove_dir_all(&dir);
     }
 }

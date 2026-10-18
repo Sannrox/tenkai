@@ -92,13 +92,17 @@ pub(crate) async fn run(
                         stored.environment
                     );
                 }
-                let evidence = tenkai::plan_approval::verify(
+                // Same checks as execution, so the live policy (including
+                // `require_preflight`) applies to recorded approvals too.
+                let evidence = tenkai::plan_approval::verify_for_execution(
+                    ctx,
                     &stored,
                     &approval,
                     &approval_trust_roots,
                     tenkai::now_millis(),
                     false,
-                )?;
+                )
+                .await?;
                 tenkai::plan_approval::record(ctx, &evidence).await?;
                 if output == OutputFormat::JsonV1 {
                     print_machine_result(&crate::output::approve_result(

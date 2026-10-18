@@ -170,6 +170,7 @@ pub mod fleet_budget;
 pub mod fleet_fairness;
 pub mod fleet_workload;
 pub mod health_gate;
+pub mod host_preflight;
 pub mod inventory;
 pub mod issuer_auth;
 pub mod maintenance;

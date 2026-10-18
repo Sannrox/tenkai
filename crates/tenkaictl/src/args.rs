@@ -127,6 +127,18 @@ pub(crate) enum Command {
         #[arg(long)]
         change_set_evidence: Option<PathBuf>,
     },
+    /// Check this host for an environment and record signed preflight evidence.
+    Preflight {
+        env: String,
+        /// Version 1 TOML naming the disk, memory, port, clock, certificate,
+        /// registry, and identity-provider checks.
+        #[arg(long)]
+        config: PathBuf,
+        /// 32-byte Ed25519 seed (mode 0600) of a trust root scoped to the
+        /// `preflight` provider for this environment.
+        #[arg(long)]
+        signing_key: PathBuf,
+    },
     /// Inspect or reverify published release trust evidence.
     Release {
         #[command(subcommand)]

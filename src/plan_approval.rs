@@ -153,6 +153,16 @@ impl TrustRoots {
                     "automatic approval signers require explicit environments and only the builtin-auto provider"
                 );
             }
+            if signer
+                .providers
+                .iter()
+                .any(|provider| provider == crate::host_preflight::PREFLIGHT_PROVIDER)
+                && (signer.environments.is_empty() || signer.providers.len() != 1)
+            {
+                bail!(
+                    "preflight signers require explicit environments and only the preflight provider"
+                );
+            }
             validate_text("trusted signer identity", &signer.identity)?;
             crate::signature_verification::trusted_key(
                 "plan approval public key",
@@ -238,6 +248,27 @@ pub async fn verify_for_execution(
             }
         }
     }
+    let environment = crate::environment::environment(ctx, &plan.environment).await?;
+    let policy = crate::approval_policy::load_live_policy(&environment.properties)?;
+    if policy.is_none()
+        && let Some(path) =
+            crate::approval_policy::policy_path_from_properties(&environment.properties)?
+    {
+        // The missing file may have required a preflight; fail closed.
+        bail!(
+            "approval policy {} is configured but unavailable; cannot check its preflight requirement",
+            path.display()
+        );
+    }
+    if let Some(required) = policy.and_then(|policy| policy.require_preflight) {
+        crate::host_preflight::require_passing(
+            &environment.properties,
+            &plan.environment,
+            &roots,
+            now,
+            required.max_age_ms,
+        )?;
+    }
     Ok(evidence)
 }
 
@@ -281,6 +312,9 @@ pub fn verify(
             .contains(&envelope.statement.policy_provider)
     {
         bail!("plan approval signer is outside its provider scope");
+    }
+    if envelope.statement.policy_provider == crate::host_preflight::PREFLIGHT_PROVIDER {
+        bail!("a preflight signer cannot approve plans");
     }
     if envelope.statement.policy_provider == "builtin-auto"
         && (signer.environments.is_empty() || signer.providers != ["builtin-auto"])
