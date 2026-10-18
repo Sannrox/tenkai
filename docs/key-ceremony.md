@@ -23,11 +23,12 @@ kind = "pkcs11"
 `memory`. Those exist for labs and CI.
 
 The PKCS#11 adapter implements wrap, unwrap, KEK rotate, describe, and revoke
-against a customer HSM. Describe returns provider kind, key ids, and the
-algorithm name. It never returns key material. CI runs the same contract against
-a PKCS#11 software token. KMIP and cloud KMS adapters remain follow-up slices.
-A production profile may name those kinds today; the ceremony against them fails
-until those adapters land.
+against a customer HSM. The KMIP adapter implements the same operations against
+a KMIP endpoint. Describe returns provider kind, key ids, and the algorithm
+name. It never returns key material. CI runs the PKCS#11 contract against a
+software token and the KMIP contract against a loopback lab endpoint. A cloud
+KMS adapter remains a follow-up slice. Ceremony against on-site adapters remains
+a later slice.
 
 ## Lab ceremony
 
