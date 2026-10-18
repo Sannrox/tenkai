@@ -36,6 +36,7 @@ will be split over time. Contributor and agent workflow live in
 | Deploy releases from GitHub | [deploy-from-github.md](deploy-from-github.md) |
 | Publish a signed release from CI | [examples/ci-publish](../examples/ci-publish/) |
 | Back up and restore embedded state | [backup-restore.md](backup-restore.md) |
+| Run the on-site key ceremony | [key-ceremony.md](key-ceremony.md) |
 | Diagnose a server and watch fleet drift | [server-diagnostics.md](server-diagnostics.md) |
 | Observe and execute rollout waves | [rollout-waves.md](rollout-waves.md) |
 | Run a stateful package migration | [package-migrations.md](package-migrations.md) |
@@ -106,6 +107,7 @@ will be split over time. Contributor and agent workflow live in
 | Plan approval | [plan-approval.md](plan-approval.md) |
 | Host preflight | [host-preflight.md](host-preflight.md) |
 | Key rollover and offline revocation | [key-rollover.md](key-rollover.md) |
+| On-site key provider and ceremony | [key-ceremony.md](key-ceremony.md) |
 | Authenticated request context contract | [auth-request-context.md](auth-request-context.md) |
 | Federated identity | [federated-identity.md](federated-identity.md) |
 

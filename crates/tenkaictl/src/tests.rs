@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-use crate::args::{Cli, Command, Target};
+use crate::args::{Cli, Command, KeysCommand, Target};
 use crate::env_args::{EnvCommand, MaintenanceCommand, OverlayCommand};
 use crate::wave_args::WaveCommand;
 
@@ -81,6 +81,40 @@ fn parses_overlay_and_recalled_recovery() {
             recovery_reason: Some(ref reason),
             ..
         } if product == "api" && reason == "restore last known-good"
+    ));
+}
+
+#[test]
+fn parses_keys_ceremony() {
+    let cli = Cli::try_parse_from([
+        "tenkaictl",
+        "keys",
+        "ceremony",
+        "--profile",
+        "profile.toml",
+        "--signing-key",
+        "ceremony.ed25519",
+        "--custodian",
+        "alice",
+        "--custodian",
+        "bob",
+        "--tenant",
+        "acme",
+        "--provider-dir",
+        "provider",
+        "--out",
+        "evidence.json",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Keys {
+            command: KeysCommand::Ceremony {
+                ref custodian,
+                ref tenant,
+                ..
+            }
+        } if custodian.as_slice() == ["alice", "bob"] && tenant.as_slice() == ["acme"]
     ));
 }
 

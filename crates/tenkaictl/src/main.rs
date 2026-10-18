@@ -23,6 +23,7 @@ mod env_args;
 mod flags;
 mod fleet_args;
 mod fleet_watch;
+mod keys;
 mod login;
 mod migrate_args;
 mod output;
@@ -168,6 +169,9 @@ async fn run(cli: Cli) -> Result<()> {
     }
     if let Command::Revocations { command } = &cli.command {
         return revocations::run(command);
+    }
+    if let Command::Keys { command } = &cli.command {
+        return keys::run(command);
     }
     if cli.target == Target::Remote {
         return remote::run(cli).await;
