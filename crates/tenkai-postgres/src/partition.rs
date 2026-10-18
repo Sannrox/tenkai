@@ -94,6 +94,51 @@ impl PostgresTenantPartition {
         }
     }
 
+    pub fn append_change_event(
+        &self,
+        occurred_at: i64,
+        kind: &str,
+        resource: &str,
+        environment_id: &str,
+    ) -> Result<tenkai::change_stream::ChangeEvent> {
+        #[cfg(feature = "postgres")]
+        {
+            self.inner.append_change_event(
+                &self.schema,
+                occurred_at,
+                kind,
+                resource,
+                environment_id,
+            )
+        }
+        #[cfg(not(feature = "postgres"))]
+        {
+            let _ = (occurred_at, kind, resource, environment_id);
+            Err(StoreError::AdapterUnavailable(
+                "postgres feature disabled".into(),
+            ))
+        }
+    }
+
+    pub fn list_change_events_after(
+        &self,
+        cursor: i64,
+        limit: usize,
+    ) -> Result<Vec<tenkai::change_stream::ChangeEvent>> {
+        #[cfg(feature = "postgres")]
+        {
+            self.inner
+                .list_change_events_after(&self.schema, cursor, limit)
+        }
+        #[cfg(not(feature = "postgres"))]
+        {
+            let _ = (cursor, limit);
+            Err(StoreError::AdapterUnavailable(
+                "postgres feature disabled".into(),
+            ))
+        }
+    }
+
     pub fn import_development_fixture(
         &self,
         fixture: &tenkai::development_fixtures::PreparedDevelopmentFixture,

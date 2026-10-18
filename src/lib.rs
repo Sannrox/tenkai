@@ -73,6 +73,8 @@
 //!   plan with resume, rollback, and recovery-required state.
 //! - [`fleet`] owns pure fleet posture aggregation, drift comparison, and
 //!   baseline I/O so callers do not re-encode inspect→posture classification.
+//! - [`change_stream`] owns typed change-event kinds, cursor resume, and
+//!   bounded paging for the read-capability `GET /v1/events` log.
 //! - [`storage`] and [`tenant_store`] provide operational persistence adapters.
 //! - [`environment`] owns Environment identity, subscriptions, constraints,
 //!   facts, deployment observations, and operator readback behind one interface.
@@ -148,6 +150,7 @@ pub mod auth_context;
 pub mod canary;
 pub mod catalog;
 pub mod change_set_pin;
+pub mod change_stream;
 pub mod client;
 pub mod command_result;
 pub mod connectivity;

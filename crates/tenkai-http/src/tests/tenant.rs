@@ -177,6 +177,39 @@ async fn tenant_mode_management_apis_isolate_environments() {
     assert!(!fleet_body.contains("env-b"));
     assert!(!fleet_body.contains("tenant-b"));
 
+    tenant_store
+        .append_change_event_for(&ctx_a, 1, "plan_created", "plan-a", "env-a")
+        .unwrap();
+    tenant_store
+        .append_change_event_for(&ctx_b, 1, "plan_created", "plan-b", "env-b")
+        .unwrap();
+    let events_a = tenant_app
+        .clone()
+        .oneshot(
+            Request::get("/v1/events")
+                .header(
+                    "x-tenkai-assertion",
+                    r#"{"tenant":"tenant-a","principal":"user-a","capabilities":["read","management"]}"#,
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(events_a.status(), StatusCode::OK);
+    let events_body = String::from_utf8(
+        axum::body::to_bytes(events_a.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(events_body.contains("plan-a"));
+    assert!(events_body.contains("env-a"));
+    assert!(!events_body.contains("plan-b"));
+    assert!(!events_body.contains("env-b"));
+    assert!(!events_body.contains("tenant-b"));
+
     let reconcile_a = tenant_app
         .clone()
         .oneshot(

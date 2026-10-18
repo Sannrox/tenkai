@@ -35,6 +35,7 @@ it ([ADR 0001](decisions/0001-standalone-core-and-service-evolution.md),
 | Remote catalog publish / promote / subscribe / recall | [Management lifecycle](management-lifecycle.md); #394 |
 | Versioned remote management lifecycle contract | [Management lifecycle](management-lifecycle.md); [ADR 0030](decisions/0030-remote-management-lifecycle.md); #393 |
 | Fleet status (embedded and remote) | `tenkaictl fleet status`; [server diagnostics](server-diagnostics.md); #91 |
+| Change-event stream for plan, hold, and release updates | `GET /v1/events`; [server diagnostics](server-diagnostics.md#change-events); #610 |
 | Synthetic thousand-environment workload | `tenkaictl fleet generate`; [fleet workload](fleet-workload.md); #299 |
 | Fleet drift watch (baseline + exit codes) | `tenkaictl fleet watch`; [server diagnostics](server-diagnostics.md#fleet-drift-watch); #107 |
 | Environment capability facts + planner constraints | `env facts` / `env constraints`; #63, #57 |

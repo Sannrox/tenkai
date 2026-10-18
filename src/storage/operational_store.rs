@@ -95,6 +95,20 @@ pub trait OperationalStore: Send + Sync {
     ) -> Result<()>;
     fn append_audit(&self, event: &AuditRecord) -> Result<()>;
     fn audit_events(&self) -> Result<Vec<AuditRecord>>;
+    /// Append a typed change event and return it with the assigned cursor.
+    fn append_change_event(
+        &self,
+        occurred_at: i64,
+        kind: &str,
+        resource: &str,
+        environment_id: &str,
+    ) -> Result<crate::change_stream::ChangeEvent>;
+    /// Events after `cursor` (exclusive), oldest first, at most `limit` rows.
+    fn list_change_events_after(
+        &self,
+        cursor: i64,
+        limit: usize,
+    ) -> Result<Vec<crate::change_stream::ChangeEvent>>;
     fn check_health(&self) -> Result<()>;
     fn import_development_fixture(
         &self,

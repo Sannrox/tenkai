@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 
 use super::router::{ErrorBody, ServiceStatus};
 use tenkai::catalog::{ChannelPage, ReleasePage};
+use tenkai::change_stream::ChangeEventPage;
 use tenkai::delivery_hold::DeliveryHoldView;
 use tenkai::environment::{EnvironmentInspectReport, EnvironmentListEntry, StatusRow};
 use tenkai::fleet::FleetStatusReport;
@@ -115,6 +116,13 @@ pub fn http_contract() -> Value {
             auth: Auth::Read,
             request: None,
             response: schema::<FleetStatusReport>(&mut g),
+        },
+        Route {
+            method: "GET",
+            path: "/v1/events",
+            auth: Auth::Read,
+            request: None,
+            response: schema::<ChangeEventPage>(&mut g),
         },
         Route {
             method: "GET",
@@ -378,6 +386,7 @@ mod tests {
             ("EnvironmentPlanSummary", "digest"),
             ("ManagementLifecycleResult", "resource"),
             ("MigrationRecord", "pending_plan_id"),
+            ("ChangeEvent", "environment"),
             ("ReleasePage", "next_cursor"),
             ("ChannelPage", "next_cursor"),
             ("MigrationPage", "next_cursor"),
@@ -410,6 +419,33 @@ mod tests {
             defs["CheckpointDecl"]["properties"]["pre_admission"]
                 .to_string()
                 .contains("\"null\"")
+        );
+    }
+
+    #[test]
+    fn change_event_shapes_are_in_the_contract() {
+        let contract = http_contract();
+        let kinds = contract["$defs"]["ChangeEventKind"]["enum"]
+            .as_array()
+            .expect("ChangeEventKind enum");
+        for kind in tenkai::change_stream::ChangeEventKind::ALL {
+            assert!(
+                kinds.iter().any(|value| value == kind.as_str()),
+                "missing kind {}",
+                kind.as_str()
+            );
+        }
+        assert_eq!(
+            kinds.len(),
+            tenkai::change_stream::ChangeEventKind::ALL.len()
+        );
+        let routes = contract["routes"].as_array().expect("routes");
+        assert!(routes.iter().any(|route| {
+            route["method"] == "GET" && route["path"] == "/v1/events" && route["auth"] == "read"
+        }));
+        assert_eq!(
+            contract["$defs"]["ChangeEventPage"]["properties"]["events"]["items"]["$ref"],
+            "#/$defs/ChangeEvent"
         );
     }
 

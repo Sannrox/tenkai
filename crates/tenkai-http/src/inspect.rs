@@ -10,6 +10,38 @@ use super::config::ServerConfig;
 use super::router::{AppState, ServiceStatus};
 use super::runtime::error_response;
 
+pub(super) async fn change_events(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .list_change_events(
+                &credential,
+                query_param(&uri, "cursor").as_deref(),
+                query_param(&uri, "limit").as_deref(),
+            )
+            .await,
+    )
+}
+
+fn query_param(uri: &axum::http::Uri, key: &str) -> Option<String> {
+    let query = uri.query()?;
+    for pair in query.split('&') {
+        let mut parts = pair.splitn(2, '=');
+        if parts.next() == Some(key) {
+            return parts.next().map(|value| value.replace('+', " "));
+        }
+    }
+    None
+}
+
 pub(super) async fn fleet_status(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

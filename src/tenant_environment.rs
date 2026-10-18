@@ -88,6 +88,17 @@ impl TenantEnvironmentOperations {
         .await
     }
 
+    pub async fn list_change_events(
+        &self,
+        context: &AuthenticatedRequestContext,
+        cursor: i64,
+        limit: usize,
+    ) -> Result<Vec<crate::change_stream::ChangeEvent>, TenantEnvironmentError> {
+        let store = self.store.clone();
+        let context = context.clone();
+        run_store(move || store.list_change_events_for(&context, cursor, limit)).await
+    }
+
     pub async fn fleet_status(
         &self,
         context: &AuthenticatedRequestContext,

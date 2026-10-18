@@ -87,6 +87,22 @@ pub trait TenantOperationalStore: Send + Sync {
         Option<crate::development_fixtures::FixtureEnvironmentProjection>,
         IsolationError,
     >;
+
+    fn append_change_event_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        occurred_at: i64,
+        kind: &str,
+        resource: &str,
+        environment_id: &str,
+    ) -> std::result::Result<crate::change_stream::ChangeEvent, IsolationError>;
+
+    fn list_change_events_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        cursor: i64,
+        limit: usize,
+    ) -> std::result::Result<Vec<crate::change_stream::ChangeEvent>, IsolationError>;
 }
 
 /// Capability advertisement for the in-memory tenant-isolating store adapter.
@@ -290,6 +306,32 @@ impl InMemoryTenantOperationalStore {
             .map_err(|error| IsolationError::Contract(error.to_string()))
     }
 
+    pub fn append_change_event_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        occurred_at: i64,
+        kind: &str,
+        resource: &str,
+        environment_id: &str,
+    ) -> std::result::Result<crate::change_stream::ChangeEvent, IsolationError> {
+        self.partition_for(context)?
+            .store
+            .append_change_event(occurred_at, kind, resource, environment_id)
+            .map_err(|error| IsolationError::Contract(error.to_string()))
+    }
+
+    pub fn list_change_events_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        cursor: i64,
+        limit: usize,
+    ) -> std::result::Result<Vec<crate::change_stream::ChangeEvent>, IsolationError> {
+        self.partition_for(context)?
+            .store
+            .list_change_events_after(cursor, limit)
+            .map_err(|error| IsolationError::Contract(error.to_string()))
+    }
+
     /// Run the isolation harness plus store-partition isolation checks.
     pub fn run_conformance(&self) -> std::result::Result<(), IsolationError> {
         let harness = TenantIsolationHarness::new()
@@ -420,6 +462,33 @@ impl TenantOperationalStore for InMemoryTenantOperationalStore {
             context,
             environment_id,
         )
+    }
+
+    fn append_change_event_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        occurred_at: i64,
+        kind: &str,
+        resource: &str,
+        environment_id: &str,
+    ) -> std::result::Result<crate::change_stream::ChangeEvent, IsolationError> {
+        InMemoryTenantOperationalStore::append_change_event_for(
+            self,
+            context,
+            occurred_at,
+            kind,
+            resource,
+            environment_id,
+        )
+    }
+
+    fn list_change_events_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        cursor: i64,
+        limit: usize,
+    ) -> std::result::Result<Vec<crate::change_stream::ChangeEvent>, IsolationError> {
+        InMemoryTenantOperationalStore::list_change_events_for(self, context, cursor, limit)
     }
 }
 
@@ -603,6 +672,23 @@ impl OperationalStore for TenantPartition {
     }
     fn audit_events(&self) -> Result<Vec<AuditRecord>> {
         self.store.audit_events()
+    }
+    fn append_change_event(
+        &self,
+        occurred_at: i64,
+        kind: &str,
+        resource: &str,
+        environment_id: &str,
+    ) -> Result<crate::change_stream::ChangeEvent> {
+        self.store
+            .append_change_event(occurred_at, kind, resource, environment_id)
+    }
+    fn list_change_events_after(
+        &self,
+        cursor: i64,
+        limit: usize,
+    ) -> Result<Vec<crate::change_stream::ChangeEvent>> {
+        self.store.list_change_events_after(cursor, limit)
     }
     fn check_health(&self) -> Result<()> {
         self.store.check_health()

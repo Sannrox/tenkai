@@ -73,6 +73,14 @@ HTTP: `GET /v1/fleet/status` (management bearer). Domain type:
 `fleet::FleetStatusReport` (also re-exported as `plan::FleetStatusReport`). Complements `env list` / `env inspect` / per-env
 `status`. Does not include reconcile tick counters (this page).
 
+## Change events
+
+`GET /v1/events` is a read-capability page of typed change events (plan,
+hold, release, compatibility) with a resumable `cursor` and a bounded `limit`
+(default 50, max 100). Resume with the returned `next_cursor`. The stream is
+scoped to environments the caller may read. Outbound webhooks stay a separate
+integration surface.
+
 ## Fleet drift watch
 
 `tenkaictl fleet watch` repeatedly samples fleet posture (same rows as

@@ -193,6 +193,71 @@
       ],
       "type": "object"
     },
+    "ChangeEvent": {
+      "description": "One durable change. `cursor` is the opaque resume token (monotonic sequence).",
+      "properties": {
+        "cursor": {
+          "type": "string"
+        },
+        "environment": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/ChangeEventKind"
+        },
+        "occurred_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "resource": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "cursor",
+        "occurred_at",
+        "kind",
+        "resource"
+      ],
+      "type": "object"
+    },
+    "ChangeEventKind": {
+      "description": "Closed set of change-event kinds advertised on the HTTP contract.",
+      "enum": [
+        "plan_created",
+        "plan_approved",
+        "plan_applied",
+        "target_failed",
+        "target_held",
+        "target_retried",
+        "hold_set",
+        "hold_released",
+        "release_published",
+        "release_promoted",
+        "release_recalled",
+        "compatibility_result_recorded"
+      ],
+      "type": "string"
+    },
+    "ChangeEventPage": {
+      "description": "Bounded page of change events plus the cursor to resume from.",
+      "properties": {
+        "events": {
+          "items": {
+            "$ref": "#/$defs/ChangeEvent"
+          },
+          "type": "array"
+        },
+        "next_cursor": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "events",
+        "next_cursor"
+      ],
+      "type": "object"
+    },
     "ChannelHoldRequest": {
       "additionalProperties": false,
       "properties": {
@@ -2953,6 +3018,15 @@
       "request": null,
       "response": {
         "$ref": "#/$defs/FleetStatusReport"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/events",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/ChangeEventPage"
       }
     },
     {
