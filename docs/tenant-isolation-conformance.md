@@ -94,6 +94,7 @@ and are not registered.
 | `environment.list` | `GET /v1/environments` | List only tenant partition ids |
 | `environment.get` | `GET /v1/environments/{env}` | Non-disclosing deny on cross-tenant |
 | `environment.status` | `GET /v1/environments/{env}/status` | Same as get |
+| `environment.runtime` | `GET /v1/environments/{env}/runtime` | Same as get |
 | `event.list` | `GET /v1/events` | Page the caller tenant's change events; other partitions stay invisible |
 | `environment.retire` | `POST /v1/environments/{env}/retire` | Require management capability and tenant visibility; preserve tenant retirement evidence |
 | `runtime.work` / `complete` / `heartbeat` / `inventory` | `/v1/runtime/environments/{env}/…` | Runtime credential scoped to exactly one environment |

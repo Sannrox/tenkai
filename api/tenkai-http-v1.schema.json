@@ -1333,6 +1333,25 @@
       ],
       "type": "object"
     },
+    "EnvironmentRuntimeReport": {
+      "description": "GET `/v1/environments/{environment}/runtime` body.",
+      "properties": {
+        "components": {
+          "items": {
+            "$ref": "#/$defs/ObservedRuntimeComponent"
+          },
+          "type": "array"
+        },
+        "environment": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "environment",
+        "components"
+      ],
+      "type": "object"
+    },
     "EnvironmentStatus": {
       "oneOf": [
         {
@@ -2121,6 +2140,103 @@
         "closure_digest",
         "pin_digest",
         "receipt_digest"
+      ],
+      "type": "object"
+    },
+    "ObservedInitJob": {
+      "description": "Last completed one-shot init job for a Docker topology.",
+      "properties": {
+        "exit_code": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "status"
+      ],
+      "type": "object"
+    },
+    "ObservedModelRuntime": {
+      "description": "Observed model_runtime identity and accelerator fit facts.",
+      "properties": {
+        "accelerator": {
+          "type": "string"
+        },
+        "variant": {
+          "type": "string"
+        },
+        "verified_weight_digest": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "variant",
+        "verified_weight_digest"
+      ],
+      "type": "object"
+    },
+    "ObservedRuntimeComponent": {
+      "description": "Observed state of one deployed product on an environment.",
+      "properties": {
+        "executor_kind": {
+          "type": "string"
+        },
+        "health": {
+          "type": "string"
+        },
+        "last_init_job": {
+          "$ref": "#/$defs/ObservedInitJob"
+        },
+        "model_runtime": {
+          "$ref": "#/$defs/ObservedModelRuntime"
+        },
+        "product": {
+          "type": "string"
+        },
+        "units": {
+          "items": {
+            "$ref": "#/$defs/ObservedRuntimeUnit"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "product",
+        "executor_kind"
+      ],
+      "type": "object"
+    },
+    "ObservedRuntimeUnit": {
+      "description": "One running or declared Docker unit.",
+      "properties": {
+        "health": {
+          "type": "string"
+        },
+        "image_digest": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "restart_policy": {
+          "type": "string"
+        },
+        "running": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "image_digest",
+        "restart_policy",
+        "running"
       ],
       "type": "object"
     },
@@ -3162,6 +3278,15 @@
       "request": null,
       "response": {
         "$ref": "#/$defs/EffectiveApprovalPolicy"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/environments/{environment}/runtime",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/EnvironmentRuntimeReport"
       }
     },
     {

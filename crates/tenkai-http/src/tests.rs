@@ -7,6 +7,7 @@ mod delivery_hold;
 mod fixtures;
 mod health;
 mod lifecycle_support;
+mod observed_runtime;
 mod oidc;
 mod package_migration_closed;
 mod package_migration_preview;

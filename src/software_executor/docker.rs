@@ -457,6 +457,16 @@ impl SoftwareExecutor for DockerHostExecutor {
         }
     }
 
+    fn observed_runtime(
+        &self,
+        request: &SoftwareApplyRequest,
+    ) -> Result<Option<crate::observed_runtime::ObservedRuntimeComponent>> {
+        validate_request(request)?;
+        let topology = self.topology(request)?;
+        validate_topology(&topology, request.secret_dir_path.as_deref())?;
+        Ok(Some(snapshot_observed_runtime(self, request, &topology)?))
+    }
+
     fn restart(&self, request: &SoftwareApplyRequest) -> Result<()> {
         validate_request(request)?;
         let topology = self.topology(request)?;
@@ -1836,6 +1846,73 @@ struct InspectedContainer {
     health: String,
 }
 
+fn restart_policy_flag(policy: DockerRestartPolicy) -> String {
+    match policy {
+        DockerRestartPolicy::No => "no".into(),
+        DockerRestartPolicy::OnFailure { max_retries } => format!("on-failure:{max_retries}"),
+        DockerRestartPolicy::Always => "always".into(),
+        DockerRestartPolicy::UnlessStopped => "unless-stopped".into(),
+    }
+}
+
+fn snapshot_observed_runtime(
+    executor: &DockerHostExecutor,
+    request: &SoftwareApplyRequest,
+    topology: &DockerHostTopology,
+) -> Result<crate::observed_runtime::ObservedRuntimeComponent> {
+    let mut units = Vec::new();
+    let mut last_init_job = None;
+    for container in order_containers(topology)? {
+        let name = managed_container_name(request, container)?;
+        let inspected = inspect_container(executor, &name)?;
+        match container.mode {
+            DockerContainerMode::Service => {
+                let (image_digest, running, health) = match inspected {
+                    Some(inspected) => (
+                        if inspected.image.is_empty() {
+                            container.image.clone()
+                        } else {
+                            inspected.image
+                        },
+                        inspected.running,
+                        if inspected.health.is_empty() {
+                            None
+                        } else {
+                            Some(inspected.health)
+                        },
+                    ),
+                    None => (container.image.clone(), false, None),
+                };
+                units.push(crate::observed_runtime::ObservedRuntimeUnit {
+                    name: container.name.clone(),
+                    image_digest,
+                    restart_policy: restart_policy_flag(container.restart),
+                    running,
+                    health,
+                });
+            }
+            DockerContainerMode::OneShot { .. } => {
+                last_init_job = Some(crate::observed_runtime::ObservedInitJob {
+                    name: container.name.clone(),
+                    status: inspected
+                        .as_ref()
+                        .map(|inspected| inspected.status.clone())
+                        .unwrap_or_else(|| "absent".into()),
+                    exit_code: inspected.as_ref().and_then(|inspected| inspected.exit_code),
+                });
+            }
+        }
+    }
+    Ok(crate::observed_runtime::ObservedRuntimeComponent {
+        product: request.product.clone(),
+        executor_kind: "docker".into(),
+        health: None,
+        units,
+        last_init_job,
+        model_runtime: None,
+    })
+}
+
 fn inspect_container(
     executor: &DockerHostExecutor,
     name: &str,
@@ -2383,6 +2460,59 @@ inputs = ["docker"]
             assert!(!state.exists());
         }
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn observed_runtime_reports_service_units_and_last_init_job() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-docker-runtime-{}-{}-{}",
+            std::process::id(),
+            crate::now_millis(),
+            uuid::Uuid::new_v4()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut topology = write_job_release(&root, "1.0.0");
+        topology.containers[0].restart = DockerRestartPolicy::Always;
+        let mut post = topology.containers[1].clone();
+        post.name = "post".into();
+        post.depends_on = vec![DockerDependency::Conditional {
+            container: "init".into(),
+            condition: DockerDependencyCondition::CompletedSuccessfully,
+        }];
+        topology.containers.insert(0, post);
+        std::fs::write(
+            root.join("1.0.0").join("docker/host.json"),
+            serde_json::to_vec_pretty(&topology).unwrap(),
+        )
+        .unwrap();
+        let (script, state) = fake_docker(&root);
+        let executor = executor_for(&script, &state, &[]);
+        let request = request_for(&root, &root, "1.0.0");
+        executor.apply(&request).unwrap();
+        let snapshot = executor
+            .observed_runtime(&request)
+            .unwrap()
+            .expect("docker snapshot");
+        assert_eq!(snapshot.product, "edge-app");
+        assert_eq!(snapshot.executor_kind, "docker");
+        assert_eq!(
+            snapshot
+                .units
+                .iter()
+                .map(|unit| unit.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["db", "worker"]
+        );
+        assert_eq!(snapshot.units[0].image_digest, DIGEST_A);
+        assert_eq!(snapshot.units[0].restart_policy, "always");
+        assert!(snapshot.units[0].running);
+        assert_eq!(snapshot.units[1].image_digest, DIGEST_B);
+        assert!(snapshot.units[1].running);
+        let init = snapshot.last_init_job.expect("init job");
+        assert_eq!(init.name, "post");
+        assert_eq!(init.exit_code, Some(0));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn write_job_release(root: &Path, version: &str) -> DockerHostTopology {

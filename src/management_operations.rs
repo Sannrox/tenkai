@@ -16,6 +16,7 @@ use crate::management_lifecycle::{
     ManagementLifecycleOperation, ManagementLifecycleResult, PlanRequest, PromoteRequest,
     PublishRequest, RecallRequest, RetryFailedTargetRequest, RollbackRequest, SubscribeRequest,
 };
+use crate::observed_runtime::EnvironmentRuntimeReport;
 use crate::package_migration::{
     self, ApprovalTrustRoots, MigrationAuthorization, MigrationPage, PackageMigrationApplyRequest,
     PackageMigrationMutateRequest, PackageMigrationPreviewRequest, PackageMigrationResult,
@@ -555,6 +556,31 @@ impl ManagementOperations {
         }
         self.reconciler
             .environment_status(environment.to_string())
+            .await
+            .map_err(map_environment_error)
+    }
+
+    pub async fn observed_runtime(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+    ) -> Result<EnvironmentRuntimeReport, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        if self.tenant_mode {
+            self.tenant_operations()?
+                .inspect(&context, environment)
+                .await
+                .map_err(map_tenant_error)?;
+            // Tenant inspect already isolated the name. Snapshots live on the
+            // community apply store and must not be joined across partitions.
+            return Ok(EnvironmentRuntimeReport {
+                environment: environment.to_string(),
+                components: Vec::new(),
+            });
+        }
+        let mut ctx = self.application_ctx()?;
+        crate::observed_runtime::report(&mut ctx, environment)
             .await
             .map_err(map_environment_error)
     }

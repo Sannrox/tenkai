@@ -153,6 +153,58 @@ async fn tenant_mode_management_apis_isolate_environments() {
     assert!(!status_body.contains("tenant-b"));
     assert!(!status_body.contains("env-b"));
 
+    let runtime_cross = tenant_app
+        .clone()
+        .oneshot(
+            Request::get("/v1/environments/env-b/runtime")
+                .header(
+                    "x-tenkai-assertion",
+                    r#"{"tenant":"tenant-a","principal":"user-a","capabilities":["read","management"]}"#,
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(runtime_cross.status(), StatusCode::NOT_FOUND);
+    let runtime_body = String::from_utf8(
+        axum::body::to_bytes(runtime_cross.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(runtime_body.contains(NON_DISCLOSING_DENY));
+    assert!(!runtime_body.contains("tenant-b"));
+    assert!(!runtime_body.contains("env-b"));
+
+    let runtime_own = tenant_app
+        .clone()
+        .oneshot(
+            Request::get("/v1/environments/env-a/runtime")
+                .header(
+                    "x-tenkai-assertion",
+                    r#"{"tenant":"tenant-a","principal":"user-a","capabilities":["read","management"]}"#,
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(runtime_own.status(), StatusCode::OK);
+    let runtime_own_body = String::from_utf8(
+        axum::body::to_bytes(runtime_own.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(runtime_own_body.contains("env-a"));
+    assert!(!runtime_own_body.contains("tenant-b"));
+    assert!(!runtime_own_body.contains("env-b"));
+    let runtime_own_json: serde_json::Value = serde_json::from_str(&runtime_own_body).unwrap();
+    assert_eq!(runtime_own_json["components"], serde_json::json!([]));
+
     let fleet_a = tenant_app
         .clone()
         .oneshot(

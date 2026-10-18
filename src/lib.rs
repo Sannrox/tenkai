@@ -178,6 +178,7 @@ pub mod manifest;
 pub mod metrics;
 pub mod model_release_evidence;
 pub mod model_runtime;
+pub mod observed_runtime;
 pub mod oci_artifact;
 pub mod offline_bundle;
 pub mod offline_chunk_store;
