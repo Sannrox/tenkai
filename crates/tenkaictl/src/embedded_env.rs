@@ -161,13 +161,25 @@ pub(crate) async fn run(
         EnvCommand::Webhooks { command } => {
             crate::embedded_env_config::webhooks(ctx, command).await?;
         }
-        EnvCommand::Hold { env, action } => {
+        EnvCommand::Hold {
+            env,
+            generation: _,
+            action,
+        } => {
             crate::embedded_hold::run(
                 ctx,
                 tenkai::delivery_hold::HoldScope::environment(&env),
                 action,
             )
             .await?;
+        }
+        EnvCommand::Retry {
+            env,
+            product,
+            reason,
+            generation: _,
+        } => {
+            crate::embedded_hold::retry(ctx, &env, &product, &reason).await?;
         }
     }
     Ok(())

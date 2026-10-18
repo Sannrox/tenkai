@@ -98,8 +98,12 @@ tenkaictl channel hold hello-local stable clear
 Setting and clearing a hold require the management credential, like promote.
 The authenticated principal is recorded as the actor. Every set and clear
 appends an immutable audit event; `show` prints the active hold and that
-history. Promote, subscribe, and deploy do not touch a hold. A hold is an
-embedded operation; the v1 remote API does not expose it.
+history. Promote, subscribe, and deploy do not touch a hold. Remote
+`tenkaictl --target remote` uses the same HTTP routes; environment set,
+clear, and failed-target retry require `--generation`.
+
+A failed target stays held until an explicit retry. Remote and embedded
+operators plan that retry with `tenkaictl env retry <env> <product> --reason …`.
 
 ## Maintenance windows
 

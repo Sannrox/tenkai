@@ -185,6 +185,136 @@ impl RemoteClient {
         .await
     }
 
+    pub async fn environment_hold(
+        &self,
+        environment: &str,
+    ) -> anyhow::Result<tenkai::delivery_hold::DeliveryHoldView> {
+        self.request_json(
+            reqwest::Method::GET,
+            &format!("/v1/environments/{environment}/hold"),
+        )
+        .await
+    }
+
+    pub async fn set_environment_hold(
+        &self,
+        environment: &str,
+        reason: &str,
+        expected_generation: u64,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!("/v1/environments/{environment}/hold"),
+            Some(&tenkai::management_lifecycle::DeliveryHoldRequest {
+                version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Hold
+                    .as_str()
+                    .into(),
+                environment: environment.to_string(),
+                expected_generation,
+                reason: Some(reason.to_string()),
+            }),
+        )
+        .await
+    }
+
+    pub async fn release_environment_hold(
+        &self,
+        environment: &str,
+        expected_generation: u64,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!("/v1/environments/{environment}/hold/release"),
+            Some(&tenkai::management_lifecycle::DeliveryHoldRequest {
+                version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Release
+                    .as_str()
+                    .into(),
+                environment: environment.to_string(),
+                expected_generation,
+                reason: None,
+            }),
+        )
+        .await
+    }
+
+    pub async fn retry_failed_target(
+        &self,
+        environment: &str,
+        product: &str,
+        reason: &str,
+        expected_generation: u64,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!("/v1/environments/{environment}/failed-targets/{product}/retry"),
+            Some(&tenkai::management_lifecycle::RetryFailedTargetRequest {
+                version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Retry
+                    .as_str()
+                    .into(),
+                environment: environment.to_string(),
+                expected_generation,
+                product: product.to_string(),
+                reason: Some(reason.to_string()),
+            }),
+        )
+        .await
+    }
+
+    pub async fn channel_hold(
+        &self,
+        product: &str,
+        channel: &str,
+    ) -> anyhow::Result<tenkai::delivery_hold::DeliveryHoldView> {
+        self.request_json(
+            reqwest::Method::GET,
+            &format!("/v1/products/{product}/channels/{channel}/hold"),
+        )
+        .await
+    }
+
+    pub async fn set_channel_hold(
+        &self,
+        product: &str,
+        channel: &str,
+        reason: &str,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!("/v1/products/{product}/channels/{channel}/hold"),
+            Some(&tenkai::management_lifecycle::ChannelHoldRequest {
+                version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation: tenkai::management_lifecycle::ManagementLifecycleOperation::ChannelHold
+                    .as_str()
+                    .into(),
+                reason: Some(reason.to_string()),
+            }),
+        )
+        .await
+    }
+
+    pub async fn release_channel_hold(
+        &self,
+        product: &str,
+        channel: &str,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!("/v1/products/{product}/channels/{channel}/hold/release"),
+            Some(&tenkai::management_lifecycle::ChannelHoldRequest {
+                version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation:
+                    tenkai::management_lifecycle::ManagementLifecycleOperation::ChannelRelease
+                        .as_str()
+                        .into(),
+                reason: None,
+            }),
+        )
+        .await
+    }
+
     pub async fn rollback_environment(
         &self,
         environment: &str,

@@ -193,6 +193,30 @@
       ],
       "type": "object"
     },
+    "ChannelHoldRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "operation": {
+          "type": "string"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation"
+      ],
+      "type": "object"
+    },
     "CheckpointClass": {
       "enum": [
         "reversible",
@@ -693,6 +717,58 @@
         "reason",
         "actor",
         "held_at"
+      ],
+      "type": "object"
+    },
+    "DeliveryHoldRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "environment": {
+          "type": "string"
+        },
+        "expected_generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "environment",
+        "expected_generation"
+      ],
+      "type": "object"
+    },
+    "DeliveryHoldView": {
+      "description": "Active hold plus set/clear/retry history for one scope.",
+      "properties": {
+        "audit": {
+          "items": {
+            "$ref": "#/$defs/HoldAuditEvent"
+          },
+          "type": "array"
+        },
+        "hold": {
+          "$ref": "#/$defs/DeliveryHold"
+        }
+      },
+      "required": [
+        "audit"
       ],
       "type": "object"
     },
@@ -1511,6 +1587,31 @@
       ],
       "type": "object"
     },
+    "HoldAuditEvent": {
+      "description": "One immutable set, clear, or retry transition.",
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "actor": {
+          "type": "string"
+        },
+        "at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "reason",
+        "actor",
+        "at"
+      ],
+      "type": "object"
+    },
     "ManagementLifecycleResult": {
       "additionalProperties": false,
       "description": "Versioned result shared by catalog lifecycle routes.",
@@ -2305,6 +2406,44 @@
       ],
       "type": "object"
     },
+    "RetryFailedTargetRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "environment": {
+          "type": "string"
+        },
+        "expected_generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "product": {
+          "type": "string"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "environment",
+        "expected_generation",
+        "product"
+      ],
+      "type": "object"
+    },
     "RollbackRequest": {
       "additionalProperties": false,
       "properties": {
@@ -2739,6 +2878,79 @@
       "path": "/v1/environments/{environment}/rollback",
       "request": {
         "$ref": "#/$defs/RollbackRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/environments/{environment}/hold",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/DeliveryHoldView"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/environments/{environment}/hold",
+      "request": {
+        "$ref": "#/$defs/DeliveryHoldRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/environments/{environment}/hold/release",
+      "request": {
+        "$ref": "#/$defs/DeliveryHoldRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/environments/{environment}/failed-targets/{product}/retry",
+      "request": {
+        "$ref": "#/$defs/RetryFailedTargetRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/products/{product}/channels/{channel}/hold",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/DeliveryHoldView"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/products/{product}/channels/{channel}/hold",
+      "request": {
+        "$ref": "#/$defs/ChannelHoldRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/products/{product}/channels/{channel}/hold/release",
+      "request": {
+        "$ref": "#/$defs/ChannelHoldRequest"
       },
       "response": {
         "$ref": "#/$defs/ManagementLifecycleResult"

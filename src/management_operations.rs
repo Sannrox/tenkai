@@ -11,8 +11,9 @@ use crate::auth_context::{
 };
 use crate::client::Ctx;
 use crate::management_lifecycle::{
-    self, ApplyRequest, ApproveRequest, ManagementLifecycleOperation, ManagementLifecycleResult,
-    PlanRequest, PromoteRequest, PublishRequest, RecallRequest, RollbackRequest, SubscribeRequest,
+    self, ApplyRequest, ApproveRequest, ChannelHoldRequest, DeliveryHoldRequest,
+    ManagementLifecycleOperation, ManagementLifecycleResult, PlanRequest, PromoteRequest,
+    PublishRequest, RecallRequest, RetryFailedTargetRequest, RollbackRequest, SubscribeRequest,
 };
 use crate::package_migration::{
     self, ApprovalTrustRoots, MigrationAuthorization, PackageMigrationApplyRequest,
@@ -921,6 +922,289 @@ impl ManagementOperations {
         ))
     }
 
+    pub async fn environment_hold(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+    ) -> Result<crate::delivery_hold::DeliveryHoldView, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        self.require_community_catalog_host()?;
+        self.require_environment_grant(credential, &context, Some(environment), "delivery hold")?;
+        let mut ctx = self.application_ctx()?;
+        crate::delivery_hold::view(
+            &mut ctx,
+            &crate::delivery_hold::HoldScope::environment(environment),
+        )
+        .await
+        .map_err(map_catalog_error)
+    }
+
+    pub async fn set_environment_hold(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+        request: DeliveryHoldRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        self.mutate_environment_hold(
+            credential,
+            environment,
+            request,
+            ManagementLifecycleOperation::Hold,
+        )
+        .await
+    }
+
+    pub async fn release_environment_hold(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+        request: DeliveryHoldRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        self.mutate_environment_hold(
+            credential,
+            environment,
+            request,
+            ManagementLifecycleOperation::Release,
+        )
+        .await
+    }
+
+    async fn mutate_environment_hold(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+        request: DeliveryHoldRequest,
+        operation: ManagementLifecycleOperation,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        self.require_community_catalog_host()?;
+        management_lifecycle::admit_delivery_hold(
+            &request,
+            environment,
+            operation,
+            context.principal.kind,
+            self.granted_environment(credential, &context),
+        )
+        .map_err(map_lifecycle_error)?;
+        self.require_environment_visible(&context, environment)
+            .await?;
+        self.require_current_generation(environment, request.expected_generation)?;
+        let actor = context.principal_id();
+        let verb = operation.as_str();
+        self.audit(actor, &format!("delivery.hold.{verb}.requested"))?;
+        let mut ctx = self.application_ctx()?;
+        let scope = crate::delivery_hold::HoldScope::environment(environment);
+        let hold = match operation {
+            ManagementLifecycleOperation::Hold => {
+                crate::delivery_hold::set(
+                    &mut ctx,
+                    &scope,
+                    request.reason.as_deref().unwrap_or(""),
+                    actor,
+                )
+                .await
+            }
+            ManagementLifecycleOperation::Release => {
+                crate::delivery_hold::clear(&mut ctx, &scope, actor).await
+            }
+            _ => {
+                return Err(ManagementError::Internal(
+                    "unsupported delivery hold operation".into(),
+                ));
+            }
+        }
+        .map_err(map_catalog_error)?;
+        self.audit(actor, &format!("delivery.hold.{verb}.completed"))?;
+        let message = match operation {
+            ManagementLifecycleOperation::Hold => format!(
+                "held {environment} at {} by {}: {}",
+                hold.held_at, hold.actor, hold.reason
+            ),
+            _ => format!("cleared {environment} hold: {}", hold.reason),
+        };
+        Ok(ManagementLifecycleResult::new(
+            operation,
+            message,
+            Some(environment.to_string()),
+        ))
+    }
+
+    pub async fn channel_hold(
+        &self,
+        credential: &CredentialMaterial,
+        product: &str,
+        channel: &str,
+    ) -> Result<crate::delivery_hold::DeliveryHoldView, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        self.require_community_catalog_host()?;
+        self.require_environment_grant(credential, &context, None, "channel hold")?;
+        Self::require_channel_binding(&context, channel)?;
+        let mut ctx = self.application_ctx()?;
+        crate::delivery_hold::view(
+            &mut ctx,
+            &crate::delivery_hold::HoldScope::channel(product, channel),
+        )
+        .await
+        .map_err(map_catalog_error)
+    }
+
+    pub async fn set_channel_hold(
+        &self,
+        credential: &CredentialMaterial,
+        product: &str,
+        channel: &str,
+        request: ChannelHoldRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        self.mutate_channel_hold(
+            credential,
+            product,
+            channel,
+            request,
+            ManagementLifecycleOperation::ChannelHold,
+        )
+        .await
+    }
+
+    pub async fn release_channel_hold(
+        &self,
+        credential: &CredentialMaterial,
+        product: &str,
+        channel: &str,
+        request: ChannelHoldRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        self.mutate_channel_hold(
+            credential,
+            product,
+            channel,
+            request,
+            ManagementLifecycleOperation::ChannelRelease,
+        )
+        .await
+    }
+
+    async fn mutate_channel_hold(
+        &self,
+        credential: &CredentialMaterial,
+        product: &str,
+        channel: &str,
+        request: ChannelHoldRequest,
+        operation: ManagementLifecycleOperation,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        Self::require_channel_binding(&context, channel)?;
+        self.require_community_catalog_host()?;
+        management_lifecycle::admit_channel_hold(
+            &request,
+            operation,
+            context.principal.kind,
+            self.granted_environment(credential, &context),
+        )
+        .map_err(map_lifecycle_error)?;
+        let actor = context.principal_id();
+        let verb = operation.as_str();
+        self.audit(actor, &format!("delivery.hold.{verb}.requested"))?;
+        let mut ctx = self.application_ctx()?;
+        let scope = crate::delivery_hold::HoldScope::channel(product, channel);
+        let hold = match operation {
+            ManagementLifecycleOperation::ChannelHold => {
+                crate::delivery_hold::set(
+                    &mut ctx,
+                    &scope,
+                    request.reason.as_deref().unwrap_or(""),
+                    actor,
+                )
+                .await
+            }
+            ManagementLifecycleOperation::ChannelRelease => {
+                crate::delivery_hold::clear(&mut ctx, &scope, actor).await
+            }
+            _ => {
+                return Err(ManagementError::Internal(
+                    "unsupported delivery hold operation".into(),
+                ));
+            }
+        }
+        .map_err(map_catalog_error)?;
+        self.audit(actor, &format!("delivery.hold.{verb}.completed"))?;
+        let label = scope.key();
+        let message = match operation {
+            ManagementLifecycleOperation::ChannelHold => format!(
+                "held {label} at {} by {}: {}",
+                hold.held_at, hold.actor, hold.reason
+            ),
+            _ => format!("cleared {label} hold: {}", hold.reason),
+        };
+        Ok(ManagementLifecycleResult::new(
+            operation,
+            message,
+            Some(label),
+        ))
+    }
+
+    pub async fn retry_failed_target(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+        product: &str,
+        request: RetryFailedTargetRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        self.require_community_catalog_host()?;
+        management_lifecycle::admit_retry_failed_target(
+            &request,
+            environment,
+            product,
+            context.principal.kind,
+            self.granted_environment(credential, &context),
+        )
+        .map_err(map_lifecycle_error)?;
+        self.require_environment_visible(&context, environment)
+            .await?;
+        self.require_current_generation(environment, request.expected_generation)?;
+        let actor = context.principal_id();
+        self.audit(actor, "delivery.failed_target.retry.requested")?;
+        let mut ctx = self.application_ctx()?;
+        let env_obj = crate::environment::environment(&mut ctx, environment)
+            .await
+            .map_err(map_catalog_error)?;
+        let Some(release) =
+            crate::environment::held_failed_target_release(&env_obj.properties, product)
+        else {
+            return Err(ManagementError::Conflict(format!(
+                "environment {environment} has no held failed target for {product}"
+            )));
+        };
+        let release = release.to_string();
+        let reason = request.reason.as_deref().unwrap_or("");
+        let stored = crate::plan::create_for_held_target(&mut ctx, environment, product, &release)
+            .await
+            .map_err(map_plan_lifecycle_error)?;
+        crate::delivery_hold::record_retry(&mut ctx, environment, reason, actor)
+            .await
+            .map_err(map_catalog_error)?;
+        self.audit(actor, "delivery.failed_target.retry.completed")?;
+        let digest = format!(
+            "sha256:{}",
+            stored
+                .executable_digest()
+                .map_err(map_plan_lifecycle_error)?
+        );
+        Ok(ManagementLifecycleResult::new(
+            ManagementLifecycleOperation::Retry,
+            format!(
+                "planned retry of {product} ({release}) with {} step(s) for {environment}",
+                stored.steps.len()
+            ),
+            Some(stored.id),
+        )
+        .with_digest(digest))
+    }
+
     pub async fn plan_environment(
         &self,
         credential: &CredentialMaterial,
@@ -1323,7 +1607,10 @@ fn map_lifecycle_error(error: anyhow::Error) -> ManagementError {
 
 fn map_catalog_error(error: anyhow::Error) -> ManagementError {
     let message = format!("{error:#}");
-    if message.contains("already published") {
+    if message.contains("already published")
+        || message.contains("no delivery hold")
+        || message.contains("no held failed target")
+    {
         ManagementError::Conflict(message)
     } else if message.contains("insufficient delivery capability") {
         ManagementError::Forbidden(message)
@@ -1369,6 +1656,7 @@ fn map_plan_lifecycle_error(error: anyhow::Error) -> ManagementError {
     } else if message.contains("only computed or blocked")
         || message.contains("nothing to roll back")
         || message.contains("cannot roll back onto recalled")
+        || message.contains("did not include held failed target")
     {
         ManagementError::Conflict(message)
     } else {

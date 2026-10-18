@@ -84,7 +84,9 @@ changing failure semantics requires version `2` and an explicit migration
 window.
 
 Existing `/v1/reconcile`, `/v1/environments`, `/v1/fleet/status`, and
-`/v1/migrations/*` routes are unchanged.
+`/v1/migrations/*` routes are unchanged. Delivery-hold set, release, and
+failed-target retry are additive `tenkai.http.v1` routes that reuse this
+envelope's version, actor audit, and environment fencing generation.
 
 ## Machine-readable contract
 

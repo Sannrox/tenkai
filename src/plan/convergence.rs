@@ -395,6 +395,26 @@ pub(super) async fn create(ctx: &mut Ctx, env: &str) -> Result<Plan> {
     create_with_content(ctx, env, inputs, &mut steps, None).await
 }
 
+/// Persist a catalog-only plan only when it includes `product` at `release`.
+///
+/// Failed-target retry uses this so a moved channel head cannot store a plan
+/// for a different release.
+pub(super) async fn create_for_held_target(
+    ctx: &mut Ctx,
+    env: &str,
+    product: &str,
+    release: &str,
+) -> Result<Plan> {
+    let (inputs, mut steps) = compute_snapshot(ctx, env).await?;
+    if !steps
+        .iter()
+        .any(|step| step.product == product && step.release_id == release)
+    {
+        bail!("explicit retry did not include held failed target {product} ({release})");
+    }
+    create_with_content(ctx, env, inputs, &mut steps, None).await
+}
+
 /// Reconcile planning may emit Restart steps from live observe/health evidence.
 ///
 /// Zero-step output is ephemeral: it is not stored, has no priors annotation,

@@ -82,13 +82,59 @@ pub struct DeliveryHold {
     pub held_at: i64,
 }
 
-/// One immutable set or clear transition.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One immutable set, clear, or retry transition.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct HoldAuditEvent {
     pub action: String,
     pub reason: String,
     pub actor: String,
     pub at: i64,
+}
+
+/// Active hold plus set/clear/retry history for one scope.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct DeliveryHoldView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub hold: Option<DeliveryHold>,
+    pub audit: Vec<HoldAuditEvent>,
+}
+
+/// Active hold and history for `scope`.
+pub async fn view(ctx: &mut Ctx, scope: &HoldScope) -> Result<DeliveryHoldView> {
+    Ok(DeliveryHoldView {
+        hold: get(ctx, scope).await?,
+        audit: audit(ctx, scope).await?,
+    })
+}
+
+/// Record a failed-target retry on the environment scope without changing the hold object.
+pub async fn record_retry(
+    ctx: &mut Ctx,
+    environment: &str,
+    reason: &str,
+    actor: &str,
+) -> Result<()> {
+    require_embedded(ctx)?;
+    let reason = reason.trim();
+    anyhow::ensure!(!reason.is_empty(), "retry reason must not be empty");
+    anyhow::ensure!(reason.len() <= 1024, "retry reason exceeds 1024 bytes");
+    let actor = validate_actor(actor)?;
+    append_audit(
+        ctx,
+        &HoldScope::environment(environment),
+        "retry",
+        &DeliveryHold {
+            reason: reason.into(),
+            actor: actor.into(),
+            held_at: crate::now_millis(),
+        },
+    )
+    .await
 }
 
 /// Pause new execution for `scope`. In-flight applies are unchanged.
@@ -370,6 +416,132 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(get(&mut ctx, &scope).await.unwrap(), Some(hold));
+        let _ = std::fs::remove_file(&database);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn retry_plans_a_held_failed_target() {
+        let (database, mut ctx) = temp_ctx("retry").await;
+        let root = database.with_extension("manifest");
+        std::fs::create_dir_all(&root).unwrap();
+        crate::environment::env_add(&mut ctx, "local", "fixture")
+            .await
+            .unwrap();
+        let options = crate::catalog::PublishOptions {
+            allow_unsigned_development: true,
+            ..Default::default()
+        };
+        std::fs::write(
+            root.join("tenkai.toml"),
+            "[product]\nname = \"api\"\nversion = \"1.0.0\"\n\n[deploy]\ninstall = \"true\"\n",
+        )
+        .unwrap();
+        crate::catalog::publish(&mut ctx, &root.join("tenkai.toml"), &options)
+            .await
+            .unwrap();
+        let actor = crate::auth_context::test_management_context("hold-retry");
+        crate::catalog::promote(&mut ctx, &actor, "api@1.0.0", "stable")
+            .await
+            .unwrap();
+        crate::environment::subscribe(&mut ctx, "local", "api", "stable")
+            .await
+            .unwrap();
+        let channel = ctx
+            .get(&crate::ontology::channel_id("api", "stable"))
+            .await
+            .unwrap()
+            .unwrap();
+        let release = channel.properties["current_release"].clone();
+        let mut env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        env.properties
+            .insert("failed_target.api".into(), release.clone());
+        ctx.put(env).await.unwrap();
+
+        let plan = crate::plan::create_for_held_target(&mut ctx, "local", "api", &release)
+            .await
+            .unwrap();
+        record_retry(&mut ctx, "local", "retry after fix", "alice")
+            .await
+            .unwrap();
+        assert!(
+            plan.steps
+                .iter()
+                .any(|step| step.product == "api" && step.release_id == release),
+            "{plan:?}"
+        );
+        let history = audit(&mut ctx, &HoldScope::environment("local"))
+            .await
+            .unwrap();
+        assert_eq!(history.last().unwrap().action, "retry");
+        assert_eq!(history.last().unwrap().reason, "retry after fix");
+        let _ = std::fs::remove_file(&database);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn retry_excludes_a_held_target_after_the_channel_moves() {
+        let (database, mut ctx) = temp_ctx("retry-moved").await;
+        let root = database.with_extension("manifest");
+        std::fs::create_dir_all(&root).unwrap();
+        crate::environment::env_add(&mut ctx, "local", "fixture")
+            .await
+            .unwrap();
+        let options = crate::catalog::PublishOptions {
+            allow_unsigned_development: true,
+            ..Default::default()
+        };
+        let actor = crate::auth_context::test_management_context("hold-retry");
+        for version in ["1.0.0", "1.1.0"] {
+            std::fs::write(
+                root.join("tenkai.toml"),
+                format!(
+                    "[product]\nname = \"api\"\nversion = \"{version}\"\n\n[deploy]\ninstall = \"true\"\n"
+                ),
+            )
+            .unwrap();
+            crate::catalog::publish(&mut ctx, &root.join("tenkai.toml"), &options)
+                .await
+                .unwrap();
+        }
+        crate::catalog::promote(&mut ctx, &actor, "api@1.0.0", "stable")
+            .await
+            .unwrap();
+        crate::environment::subscribe(&mut ctx, "local", "api", "stable")
+            .await
+            .unwrap();
+        let channel = ctx
+            .get(&crate::ontology::channel_id("api", "stable"))
+            .await
+            .unwrap()
+            .unwrap();
+        let held = channel.properties["current_release"].clone();
+        let mut env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        env.properties
+            .insert("failed_target.api".into(), held.clone());
+        ctx.put(env).await.unwrap();
+        crate::catalog::promote(&mut ctx, &actor, "api@1.1.0", "stable")
+            .await
+            .unwrap();
+
+        let error = crate::plan::create_for_held_target(&mut ctx, "local", "api", &held)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("did not include held failed target"),
+            "{error}"
+        );
+        assert!(
+            audit(&mut ctx, &HoldScope::environment("local"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
         let _ = std::fs::remove_file(&database);
         let _ = std::fs::remove_dir_all(&root);
     }

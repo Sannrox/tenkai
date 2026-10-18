@@ -29,6 +29,7 @@ mod product_args;
 mod remote;
 mod remote_catalog;
 mod remote_delivery;
+mod remote_hold;
 #[cfg(test)]
 mod tests;
 mod token_cache;

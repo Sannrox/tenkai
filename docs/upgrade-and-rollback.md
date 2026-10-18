@@ -13,11 +13,12 @@ target instead of creating another attempt on every tick. Status and inspect
 report that the target failed and automatic retry is held; fleet status retains
 the failure posture. A different selected release can converge normally.
 
-To retry deliberately, create a new plan with `tenkaictl plan --env <env>`,
-approve its exact digest, and apply it. Explicit planning includes the held
-target; it does not clear the hold merely by computing a plan. Successful
-deployment clears the marker, while another failure retains it. Unknown
-deployment state still requires manual recovery before any new plan.
+To retry deliberately, run `tenkaictl env retry <env> <product> --reason …`
+(or `tenkaictl plan --env <env>`), approve the exact digest, and apply it.
+Explicit planning includes the held target; it does not clear the hold merely
+by computing a plan. Successful deployment clears the marker, while another
+failure retains it. Unknown deployment state still requires manual recovery
+before any new plan. Remote retry requires `--generation`.
 
 SLO gates declared on a release or channel are evaluated after activation
 succeeds and before the step is recorded as succeeded. `on_fail = "halt"`

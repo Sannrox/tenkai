@@ -16,10 +16,11 @@ use super::inspect::{
     openmetrics, ready, reconcile,
 };
 use super::lifecycle::{
-    apply_plan, approve_plan, install_model_evaluation_trust, plan_environment, promote_release,
-    publish_release, recall_release, record_model_evaluation_evidence,
-    record_software_compatibility_evidence, retire_environment, rollback_environment,
-    software_compatibility_report, subscribe_environment,
+    apply_plan, approve_plan, channel_hold, environment_hold, install_model_evaluation_trust,
+    plan_environment, promote_release, publish_release, recall_release,
+    record_model_evaluation_evidence, record_software_compatibility_evidence, release_channel_hold,
+    release_environment_hold, retire_environment, retry_failed_target, rollback_environment,
+    set_channel_hold, set_environment_hold, software_compatibility_report, subscribe_environment,
 };
 use super::package_migration::{
     apply_package_migration, package_migration_status, preview_package_migration,
@@ -140,6 +141,26 @@ pub fn router(
         .route(
             "/v1/environments/{environment}/rollback",
             post(rollback_environment),
+        )
+        .route(
+            "/v1/environments/{environment}/hold",
+            get(environment_hold).post(set_environment_hold),
+        )
+        .route(
+            "/v1/environments/{environment}/hold/release",
+            post(release_environment_hold),
+        )
+        .route(
+            "/v1/environments/{environment}/failed-targets/{product}/retry",
+            post(retry_failed_target),
+        )
+        .route(
+            "/v1/products/{product}/channels/{channel}/hold",
+            get(channel_hold).post(set_channel_hold),
+        )
+        .route(
+            "/v1/products/{product}/channels/{channel}/hold/release",
+            post(release_channel_hold),
         )
         .route(
             "/v1/runtime/environments/{environment}/work",

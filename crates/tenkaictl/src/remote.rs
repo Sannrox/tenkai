@@ -129,6 +129,40 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Env {
+            command:
+                EnvCommand::Hold {
+                    env,
+                    generation,
+                    action,
+                },
+        } => {
+            crate::remote_hold::environment(&client, &env, generation, action).await?;
+            Ok(())
+        }
+        Command::Env {
+            command:
+                EnvCommand::Retry {
+                    env,
+                    product,
+                    reason,
+                    generation,
+                },
+        } => {
+            crate::remote_hold::retry(&client, &env, &product, &reason, generation).await?;
+            Ok(())
+        }
+        Command::Channel {
+            command:
+                crate::catalog_args::ChannelCommand::Hold {
+                    product,
+                    channel,
+                    action,
+                },
+        } => {
+            crate::remote_hold::channel(&client, &product, &channel, action).await?;
+            Ok(())
+        }
+        Command::Env {
             command: EnvCommand::Compatibility { command },
         } => {
             match command {

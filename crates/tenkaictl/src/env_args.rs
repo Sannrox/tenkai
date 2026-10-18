@@ -114,8 +114,21 @@ pub(crate) enum EnvCommand {
     /// Pause delivery to an environment. The reconciler still plans.
     Hold {
         env: String,
+        /// Current fencing generation; required with --target remote.
+        #[arg(long)]
+        generation: Option<u64>,
         #[command(subcommand)]
         action: HoldAction,
+    },
+    /// Plan an explicit retry of a held failed target.
+    Retry {
+        env: String,
+        product: String,
+        #[arg(long)]
+        reason: String,
+        /// Current fencing generation; required with --target remote.
+        #[arg(long)]
+        generation: Option<u64>,
     },
 }
 
