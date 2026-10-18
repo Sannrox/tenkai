@@ -17,6 +17,7 @@ use base64::Engine as _;
 use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};
 
+use crate::actor_chain::{Actor, parse_actor_chain};
 use crate::auth_context::{
     AUTH_CONTEXT_CONTRACT_VERSION, AuthError, AuthHostConfig, AuthenticatedRequestContext,
     AuthenticatedRequestContextBuilder, CommunityTokenAuthenticator, CredentialMaterial,
@@ -52,6 +53,9 @@ pub struct VerifiedAssertionClaims {
     /// `None` means the claim was absent and defaults from `principal_kind`
     /// apply. `Some(empty)` means the claim was present but granted nothing.
     pub delivery_capabilities: Option<std::collections::BTreeSet<DeliveryCapability>>,
+    /// Verified `act` chain; empty when the subject called directly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actor_chain: Vec<Actor>,
 }
 
 /// Clock skew allowed when comparing `exp` / `nbf` (seconds).
@@ -240,6 +244,16 @@ struct JwtClaims {
     /// Explicit delivery RBAC claim: `read`, `management`, and/or `publish`.
     #[serde(default)]
     tenkai_capabilities: Option<Vec<String>>,
+    /// Delegating actor chain (string id or nested `{sub, kind, act}`).
+    /// An explicit `null` stays `Some` so the parser rejects it.
+    #[serde(default, deserialize_with = "present_claim")]
+    act: Option<serde_json::Value>,
+}
+
+fn present_claim<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error> {
+    serde_json::Value::deserialize(deserializer).map(Some)
 }
 
 fn validate_claims(
@@ -305,6 +319,10 @@ fn validate_claims(
         None => None,
         Some(values) => Some(parse_delivery_capabilities(values)?),
     };
+    let actor_chain = match &claims.act {
+        Some(act) => parse_actor_chain(act)?,
+        None => Vec::new(),
+    };
     Ok(VerifiedAssertionClaims {
         issuer: claims.iss.clone(),
         audience: claims.aud.clone(),
@@ -314,6 +332,7 @@ fn validate_claims(
         principal_kind,
         tenant_id,
         delivery_capabilities,
+        actor_chain,
     })
 }
 
@@ -503,7 +522,8 @@ impl EnterpriseAuthExtension for JwtEnterpriseAuthExtension {
                 kind: claims.principal_kind,
             },
             self.extension_id.clone(),
-        );
+        )
+        .with_actor_chain(claims.actor_chain);
         // Explicit claim wins (including empty → deny). Absent claim keeps the
         // principal-kind defaults from the builder (Human/Runtime → none).
         if let Some(capabilities) = claims.delivery_capabilities {
@@ -545,6 +565,7 @@ const CLI_JWT_EXTENSION_ID: &str = "auth.jwt.aldunis";
 /// Community: present `management_token` to `CommunityTokenAuthenticator`.
 /// Enterprise: present `jwt_assertion` verified by `jwt_trust_path`.
 /// Missing credentials fail closed; this never mints a privileged context.
+/// A JWT whose `act` chain names an agent is refused.
 pub fn authenticate_process_management(
     request_id: impl Into<String>,
     management_token: Option<String>,
@@ -604,11 +625,18 @@ pub fn authenticate_process_management(
     let stack = build_auth_stack(&host, extension, community).map_err(|error| {
         AuthError::InvalidCredential(format!("auth stack composition failed: {error}"))
     })?;
-    stack.authenticate(&CredentialMaterial {
+    let context = stack.authenticate(&CredentialMaterial {
         request_id,
         bearer_token: management_token,
         assertion: jwt_assertion,
-    })
+    })?;
+    // Every caller is a mutation, so an agent actor is refused (ADR 0034).
+    if context.acting_agent().is_some() {
+        return Err(AuthError::Forbidden(
+            "agent-initiated changes require a human principal".into(),
+        ));
+    }
+    Ok(context)
 }
 
 #[cfg(test)]
@@ -1004,5 +1032,49 @@ public_key = "{public_b64}"
         assert_eq!(context.principal_id(), "management");
         assert_eq!(context.principal.kind, PrincipalKind::Management);
         assert!(context.has_delivery_capability(DeliveryCapability::Management));
+    }
+
+    #[test]
+    fn process_management_refuses_an_agent_actor() {
+        let dir = std::env::temp_dir().join(format!(
+            "tenkai-jwt-agent-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("jwt-trust.toml");
+        let (signing, public_b64) = keypair();
+        std::fs::write(
+            &path,
+            format!(
+                "issuer = \"https://idp.example.test/\"\naudience = \"tenkai-control-plane\"\n\n[[keys]]\nkey_id = \"k1\"\npublic_key = \"{public_b64}\"\n"
+            ),
+        )
+        .unwrap();
+        let mut claims = base_claims(now_unix_secs());
+        claims.insert("act".into(), serde_json::json!("assistant-7"));
+        let token = mint_jwt(&signing, &claims, Some("k1"));
+        let error = authenticate_process_management(
+            "req-agent",
+            None,
+            Some(token.into_bytes()),
+            Some(&path),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, AuthError::Forbidden(ref message) if message.contains("agent-initiated")),
+            "{error:?}"
+        );
+        claims.insert("act".into(), serde_json::Value::Null);
+        let token = mint_jwt(&signing, &claims, Some("k1"));
+        let error = authenticate_process_management(
+            "req-null-act",
+            None,
+            Some(token.into_bytes()),
+            Some(&path),
+        )
+        .unwrap_err();
+        assert!(matches!(error, AuthError::Unauthorized(_)), "{error:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

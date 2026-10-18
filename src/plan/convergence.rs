@@ -429,6 +429,14 @@ pub(super) async fn create_for_reconcile(ctx: &mut Ctx, env: &str) -> Result<Pla
     create_with_content(ctx, env, inputs, &mut steps, None).await
 }
 
+/// Persist a reconcile-policy plan, even with zero steps. Held failed targets
+/// stay held, unlike operator `create`, which retries them.
+pub(super) async fn create_holding_failed_targets(ctx: &mut Ctx, env: &str) -> Result<Plan> {
+    let (inputs, mut steps) =
+        compute_snapshot_with_policy(ctx, env, ConvergencePolicy::reconcile()).await?;
+    create_with_content(ctx, env, inputs, &mut steps, None).await
+}
+
 /// Persist an explicitly constructed operation, such as a rollback, as a plan.
 pub(super) async fn create_from_steps(
     ctx: &mut Ctx,

@@ -142,6 +142,7 @@
 //!
 //! See ADR 0001 for the ownership and service-evolution rules.
 
+pub mod actor_chain;
 pub mod apply;
 pub mod approval_policy;
 pub mod assertion_verifier;

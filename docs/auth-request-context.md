@@ -173,6 +173,25 @@ Delivery authorization after JWT authentication:
 Community management tokens map to `PrincipalKind::Management` and therefore keep
 full delivery capabilities under dual-stack enterprise hosts.
 
+### Delegated calls and agent actors
+
+JWT assertions and OIDC access tokens may carry `act`, the actor calling on
+behalf of `sub`. It is a string actor id or a nested
+`{"sub": id, "kind"?: k, "act"?: ...}` object, and the context exposes it as
+`actor_chain()`. Only `kind: "human"` marks a person; a bare string or any
+other kind is an agent. Malformed, repeated, or over-deep chains (more than
+eight) are rejected as invalid credentials.
+
+When the chain names an agent ([ADR 0034](decisions/0034-agent-actor-mutations.md)):
+
+| Policy (`TENKAI_AGENT_ACTOR_POLICY`) | Reads | Plan, rollback plan | Every other mutation |
+| --- | --- | --- | --- |
+| `require_approval` (default) | Allowed | Allowed; the plan needs approval under the environment's policy, and rollback always needs a human-signed envelope | 403 |
+| `forbid` | Allowed | 403 | 403 |
+
+Management audit records name both identities, for example
+`user-1 (act: assistant-7)`. Refusals are audited as `<operation>.refused`.
+
 **Wire vs stub:**
 
 ```text

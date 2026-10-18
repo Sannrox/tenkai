@@ -70,16 +70,19 @@ pub fn router(
         Some(path) => Some(tenkai::package_migration::load_trust_roots(path)?),
         None => None,
     };
-    let management = Arc::new(ManagementOperations::new(
-        auth,
-        config.requirements.tenant_mode,
-        reconciler.clone(),
-        store.clone(),
-        config.tenant_store.clone(),
-        package_migration_trust_roots,
-        config.release_trust_roots.clone(),
-        config.environment_management_assignments.clone(),
-    ));
+    let management = Arc::new(
+        ManagementOperations::new(
+            auth,
+            config.requirements.tenant_mode,
+            reconciler.clone(),
+            store.clone(),
+            config.tenant_store.clone(),
+            package_migration_trust_roots,
+            config.release_trust_roots.clone(),
+            config.environment_management_assignments.clone(),
+        )
+        .with_agent_actor_policy(config.agent_actor_policy),
+    );
     let mut router = Router::new()
         .route("/healthz", get(health))
         .route("/readyz", get(ready))

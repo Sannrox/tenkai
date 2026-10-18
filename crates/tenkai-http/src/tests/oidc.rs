@@ -271,3 +271,42 @@ async fn rejected_tokens_are_401_and_missing_grants_are_403() {
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     assert!(response.headers().get("www-authenticate").is_none());
 }
+
+#[tokio::test]
+async fn agent_actor_reads_but_cannot_mutate() {
+    let signer = Signer::new("k1");
+    let app = oidc_app(&signer);
+    let now = tenkai::assertion_verifier::now_unix_secs();
+    let agent_token = |act: serde_json::Value| {
+        String::from_utf8(signer.sign(&serde_json::json!({
+            "iss": ISSUER, "sub": "user-1", "aud": "tenkai",
+            "exp": now + 300, "groups": ["prod-operators"], "act": act,
+        })))
+        .unwrap()
+    };
+    let token = agent_token(serde_json::json!({"sub": "assistant-7"}));
+    let (code, _) = status(&app, get("/v1/environments", &token)).await;
+    assert_eq!(code, StatusCode::OK, "reads are unaffected");
+
+    let retire = serde_json::to_vec(&tenkai::management_lifecycle::RetireEnvironmentRequest {
+        version: 1,
+        operation: "retire".into(),
+        reason: "service ended".into(),
+    })
+    .unwrap();
+    let (code, body) = status(
+        &app,
+        Request::post("/v1/environments/prod/retire")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(retire))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(code, StatusCode::FORBIDDEN, "{body}");
+    assert!(body.contains("agent-initiated"), "{body}");
+
+    let malformed = agent_token(serde_json::json!({"kind": "human"}));
+    let (code, _) = status(&app, get("/v1/environments", &malformed)).await;
+    assert_eq!(code, StatusCode::UNAUTHORIZED);
+}

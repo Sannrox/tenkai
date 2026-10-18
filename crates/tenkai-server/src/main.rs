@@ -106,6 +106,15 @@ struct Cli {
     /// bundle embedded by feature `ui`.
     #[arg(long)]
     ui_dir: Option<PathBuf>,
+    /// Mutations whose token actor chain names an agent: `require_approval`
+    /// lets agents only create plans, which still need approval under the
+    /// environment's policy; `forbid` refuses every agent mutation.
+    #[arg(
+        long,
+        env = "TENKAI_AGENT_ACTOR_POLICY",
+        default_value = "require_approval"
+    )]
+    agent_actor_policy: tenkai::management_operations::AgentActorPolicy,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -597,6 +606,7 @@ async fn main() -> Result<()> {
             .map(std::path::PathBuf::from),
             release_trust_roots: std::env::var_os("TENKAI_RELEASE_TRUST_ROOTS")
                 .map(std::path::PathBuf::from),
+            agent_actor_policy: cli.agent_actor_policy,
         },
         reconciler.clone(),
         store.clone(),

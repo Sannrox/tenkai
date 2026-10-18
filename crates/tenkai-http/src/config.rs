@@ -49,6 +49,8 @@ pub struct ServerConfig {
     pub package_migration_trust_roots: Option<std::path::PathBuf>,
     /// Host-owned release signing roots used by remote publication.
     pub release_trust_roots: Option<std::path::PathBuf>,
+    /// What mutations do when the token's actor chain names an agent.
+    pub agent_actor_policy: tenkai::management_operations::AgentActorPolicy,
 }
 
 #[derive(Clone, Debug)]
@@ -78,6 +80,7 @@ impl ServerConfig {
             development_fixtures: None,
             package_migration_trust_roots: None,
             release_trust_roots: None,
+            agent_actor_policy: Default::default(),
         }
     }
 
