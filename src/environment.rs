@@ -2117,9 +2117,9 @@ async fn latest_plan_for_environment(
             now,
             execution,
         )
-    } else if inspected.blocked_human {
-        crate::approval_policy::blocked_pending_human_view()
     } else if crate::approval_policy::plan_awaiting_execution(&plan) && policy.is_err() {
+        // Before the pending-human check: an unreadable policy also blocks
+        // human approvals (it may require a preflight), and is the cause.
         crate::approval_policy::PlanApprovalView {
             source: "required".into(),
             reason: Some("approval policy is unreadable".into()),
@@ -2128,6 +2128,8 @@ async fn latest_plan_for_environment(
                 .as_ref()
                 .map(|evidence| evidence.policy_provider.clone()),
         }
+    } else if inspected.blocked_human {
+        crate::approval_policy::blocked_pending_human_view()
     } else if crate::approval_policy::plan_awaiting_execution(&plan)
         && crate::approval_policy::reused_auto_envelope_is_unexecutable(
             ctx,
