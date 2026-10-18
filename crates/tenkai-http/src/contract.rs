@@ -14,6 +14,7 @@ use schemars::{JsonSchema, SchemaGenerator};
 use serde_json::{Value, json};
 
 use super::router::{ErrorBody, ServiceStatus};
+use tenkai::catalog::{ChannelPage, ReleasePage};
 use tenkai::delivery_hold::DeliveryHoldView;
 use tenkai::environment::{EnvironmentInspectReport, EnvironmentListEntry, StatusRow};
 use tenkai::fleet::FleetStatusReport;
@@ -24,9 +25,10 @@ use tenkai::management_lifecycle::{
 };
 use tenkai::oidc_verifier::OidcClientDiscovery;
 use tenkai::package_migration::{
-    PackageMigrationApplyRequest, PackageMigrationMutateRequest, PackageMigrationPreviewRequest,
-    PackageMigrationResult,
+    MigrationPage, PackageMigrationApplyRequest, PackageMigrationMutateRequest,
+    PackageMigrationPreviewRequest, PackageMigrationResult,
 };
+use tenkai::page::PageQuery;
 use tenkai::reconciler::TickReport;
 
 /// Contract id for this document; additive changes keep it.
@@ -120,6 +122,27 @@ pub fn http_contract() -> Value {
             auth: Auth::Read,
             request: None,
             response: schema::<Vec<EnvironmentListEntry>>(&mut g),
+        },
+        Route {
+            method: "GET",
+            path: "/v1/releases",
+            auth: Auth::Read,
+            request: Some(schema::<PageQuery>(&mut g)),
+            response: schema::<ReleasePage>(&mut g),
+        },
+        Route {
+            method: "GET",
+            path: "/v1/channels",
+            auth: Auth::Read,
+            request: Some(schema::<PageQuery>(&mut g)),
+            response: schema::<ChannelPage>(&mut g),
+        },
+        Route {
+            method: "GET",
+            path: "/v1/migrations",
+            auth: Auth::Read,
+            request: Some(schema::<PageQuery>(&mut g)),
+            response: schema::<MigrationPage>(&mut g),
         },
         Route {
             method: "GET",
@@ -347,6 +370,7 @@ mod tests {
             ("EnvironmentSubscriptionView", "delivery_hold"),
             ("StatusRow", "delivery_hold"),
             ("DeliveryHoldView", "hold"),
+            ("ChannelListEntry", "hold"),
             ("EnvironmentMaintenanceInspect", "open_until_ms"),
             ("EnvironmentMaintenanceInspect", "next_opens_at_ms"),
             ("EnvironmentMaintenanceInspect", "detail"),
@@ -354,6 +378,9 @@ mod tests {
             ("EnvironmentPlanSummary", "digest"),
             ("ManagementLifecycleResult", "resource"),
             ("MigrationRecord", "pending_plan_id"),
+            ("ReleasePage", "next_cursor"),
+            ("ChannelPage", "next_cursor"),
+            ("MigrationPage", "next_cursor"),
         ] {
             let property = &defs[def]["properties"][field];
             assert!(property.is_object(), "{def}.{field} missing");

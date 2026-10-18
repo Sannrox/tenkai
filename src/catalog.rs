@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::auth_context::{AuthenticatedRequestContext, DeliveryCapability};
@@ -23,6 +24,63 @@ pub(crate) use trust::{load_deployable_snapshot, load_recoverable_snapshot, rele
 
 /// Version of the transport-independent Catalog application contract.
 pub const CATALOG_CONTRACT_VERSION: u32 = 1;
+
+/// Identifying fields and current digest/version for one published release.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ReleaseListEntry {
+    pub id: String,
+    pub product: String,
+    pub version: String,
+    pub digest: String,
+}
+
+/// One page of [`ReleaseListEntry`] values.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ReleasePage {
+    pub items: Vec<ReleaseListEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub next_cursor: Option<String>,
+}
+
+impl From<crate::page::Page<ReleaseListEntry>> for ReleasePage {
+    fn from(page: crate::page::Page<ReleaseListEntry>) -> Self {
+        Self {
+            items: page.items,
+            next_cursor: page.next_cursor,
+        }
+    }
+}
+
+/// Identifying fields, current head, and active hold for one channel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ChannelListEntry {
+    pub id: String,
+    pub product: String,
+    pub name: String,
+    pub head: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub hold: Option<crate::delivery_hold::DeliveryHold>,
+}
+
+/// One page of [`ChannelListEntry`] values.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ChannelPage {
+    pub items: Vec<ChannelListEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub next_cursor: Option<String>,
+}
+
+impl From<crate::page::Page<ChannelListEntry>> for ChannelPage {
+    fn from(page: crate::page::Page<ChannelListEntry>) -> Self {
+        Self {
+            items: page.items,
+            next_cursor: page.next_cursor,
+        }
+    }
+}
 
 /// Immutable metadata returned to planners and other Catalog consumers.
 ///
@@ -505,6 +563,146 @@ fn validate_stored_release_content(
         );
     }
     Ok(())
+}
+
+/// List published releases with identifying fields and current digest/version.
+pub async fn list_releases(ctx: &mut Ctx) -> Result<Vec<ReleaseListEntry>> {
+    let mut items = ctx
+        .list_kind(KIND_RELEASE)
+        .await?
+        .into_iter()
+        .map(release_list_entry)
+        .collect::<Vec<_>>();
+    items.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(items)
+}
+
+/// List channels with current head and any active delivery hold.
+pub async fn list_channels(ctx: &mut Ctx) -> Result<Vec<ChannelListEntry>> {
+    let holds = channel_hold_index(ctx).await?;
+    let mut items = ctx
+        .list_kind(KIND_CHANNEL)
+        .await?
+        .into_iter()
+        .map(channel_list_entry)
+        .collect::<Vec<_>>();
+    for item in &mut items {
+        item.hold = holds
+            .get(&format!("channel:{}/{}", item.product, item.name))
+            .cloned();
+    }
+    items.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(items)
+}
+
+fn release_list_entry(object: Object) -> ReleaseListEntry {
+    let (product, version) = match (
+        object
+            .properties
+            .get("product")
+            .filter(|value| !value.is_empty()),
+        object
+            .properties
+            .get("version")
+            .filter(|value| !value.is_empty()),
+    ) {
+        (Some(product), Some(version)) => (product.clone(), version.clone()),
+        _ => object
+            .id
+            .strip_prefix("tenkai:release:")
+            .and_then(|spec| spec.split_once('@'))
+            .map(|(product, version)| (product.to_string(), version.to_string()))
+            .unwrap_or_default(),
+    };
+    let digest = object
+        .properties
+        .get("digest")
+        .or_else(|| object.properties.get("content_digest"))
+        .cloned()
+        .unwrap_or_default();
+    ReleaseListEntry {
+        id: object.id,
+        product,
+        version,
+        digest,
+    }
+}
+
+fn channel_list_entry(object: Object) -> ChannelListEntry {
+    let product = object
+        .properties
+        .get("product")
+        .filter(|value| !value.is_empty())
+        .cloned()
+        .or_else(|| {
+            object
+                .id
+                .strip_prefix("tenkai:channel:")
+                .and_then(|rest| rest.split_once('/'))
+                .map(|(product, _)| product.to_string())
+        })
+        .unwrap_or_default();
+    let name = object
+        .properties
+        .get("channel")
+        .or_else(|| object.properties.get("name"))
+        .filter(|value| !value.is_empty())
+        .cloned()
+        .or_else(|| {
+            object
+                .id
+                .strip_prefix("tenkai:channel:")
+                .and_then(|rest| rest.split_once('/'))
+                .map(|(_, name)| name.to_string())
+        })
+        .unwrap_or_default();
+    ChannelListEntry {
+        id: object.id,
+        product,
+        name,
+        head: object
+            .properties
+            .get("current_release")
+            .cloned()
+            .unwrap_or_default(),
+        hold: None,
+    }
+}
+
+async fn channel_hold_index(
+    ctx: &mut Ctx,
+) -> Result<HashMap<String, crate::delivery_hold::DeliveryHold>> {
+    let mut holds = HashMap::new();
+    for object in ctx.list_kind(crate::delivery_hold::HOLD_KIND).await? {
+        let Some(scope) = object.properties.get("scope") else {
+            continue;
+        };
+        if !scope.starts_with("channel:") {
+            continue;
+        }
+        let Some(reason) = object.properties.get("reason") else {
+            continue;
+        };
+        let Some(actor) = object.properties.get("actor") else {
+            continue;
+        };
+        let Some(held_at) = object
+            .properties
+            .get("held_at")
+            .and_then(|value| value.parse().ok())
+        else {
+            continue;
+        };
+        holds.insert(
+            scope.clone(),
+            crate::delivery_hold::DeliveryHold {
+                reason: reason.clone(),
+                actor: actor.clone(),
+                held_at,
+            },
+        );
+    }
+    Ok(holds)
 }
 
 /// Publish the manifest as an immutable release of its product.

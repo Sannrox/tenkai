@@ -1,4 +1,5 @@
 mod auth_support;
+mod catalog_list;
 mod config;
 mod delivery_hold;
 mod fixtures;

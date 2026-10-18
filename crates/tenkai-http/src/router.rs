@@ -12,8 +12,8 @@ use tenkai::tenant_store::TenantOperationalStore;
 use super::auth::{import_development_fixture, reset_development_fixture};
 use super::config::ServerConfig;
 use super::inspect::{
-    environment_status, fleet_status, health, inspect_environment, list_environments, oidc_client,
-    openmetrics, ready, reconcile,
+    environment_status, fleet_status, health, inspect_environment, list_channels,
+    list_environments, list_migrations, list_releases, oidc_client, openmetrics, ready, reconcile,
 };
 use super::lifecycle::{
     apply_plan, approve_plan, channel_hold, environment_hold, install_model_evaluation_trust,
@@ -86,6 +86,9 @@ pub fn router(
         .route("/v1/reconcile", post(reconcile))
         .route("/v1/fleet/status", get(fleet_status))
         .route("/v1/environments", get(list_environments))
+        .route("/v1/releases", get(list_releases).post(publish_release))
+        .route("/v1/channels", get(list_channels))
+        .route("/v1/migrations", get(list_migrations))
         .route(
             "/v1/environments/{environment}/compatibility/evidence",
             post(record_software_compatibility_evidence),
@@ -113,7 +116,6 @@ pub fn router(
             "/v1/migrations/{name}/rollback",
             post(rollback_package_migration),
         )
-        .route("/v1/releases", post(publish_release))
         .route("/v1/channels/{channel}/promote", post(promote_release))
         .route(
             "/v1/model-evaluation/trust",

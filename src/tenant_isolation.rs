@@ -134,6 +134,11 @@ pub fn tenant_visible_rpcs() -> &'static [TenantVisibleRpc] {
             surface: TenantVisibleSurface::Management,
         },
         TenantVisibleRpc {
+            id: "management.package_migration_list",
+            path_template: "GET /v1/migrations",
+            surface: TenantVisibleSurface::Management,
+        },
+        TenantVisibleRpc {
             id: "management.package_migration_resume",
             path_template: "POST /v1/migrations/{name}/resume",
             surface: TenantVisibleSurface::Management,
@@ -264,6 +269,7 @@ pub fn http_exposed_tenant_rpc_ids() -> &'static [&'static str] {
         "management.package_migration_preview",
         "management.package_migration_apply",
         "management.package_migration_status",
+        "management.package_migration_list",
         "management.package_migration_resume",
         "management.package_migration_rollback",
         "development.fixture_import",
