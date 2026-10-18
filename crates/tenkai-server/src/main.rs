@@ -331,6 +331,7 @@ async fn main() -> Result<()> {
         cli.listen.ip().is_loopback(),
         "tenkai-server currently accepts plaintext HTTP only and must bind to loopback; use an authenticated TLS reverse proxy for remote access"
     );
+    tenkai::key_revocation::load_configured()?;
     let management_token =
         std::env::var("TENKAI_MANAGEMENT_TOKEN").context("TENKAI_MANAGEMENT_TOKEN is required")?;
     let runtime_assignments = std::env::var("TENKAI_RUNTIME_TOKENS")

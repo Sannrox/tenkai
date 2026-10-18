@@ -105,6 +105,7 @@ will be split over time. Contributor and agent workflow live in
 | Release provenance | [release-provenance.md](release-provenance.md) |
 | Plan approval | [plan-approval.md](plan-approval.md) |
 | Host preflight | [host-preflight.md](host-preflight.md) |
+| Key rollover and offline revocation | [key-rollover.md](key-rollover.md) |
 | Authenticated request context contract | [auth-request-context.md](auth-request-context.md) |
 | Federated identity | [federated-identity.md](federated-identity.md) |
 

@@ -336,7 +336,7 @@ impl EvaluationTrustRoots {
                     signer.key_id
                 );
             }
-            crate::signature_verification::trusted_key(
+            crate::signature_verification::well_formed_key(
                 "model evaluation public key",
                 &signer.public_key,
                 &signer.key_id,

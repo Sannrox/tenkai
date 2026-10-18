@@ -35,3 +35,4 @@
 - [0033 — Post-apply health and SLO gates](0033-health-slo-gates.md)
 - [0034 — Agent actors cannot make delivery changes on their own](0034-agent-actor-mutations.md)
 - [0035 — Host preflight is signed environment evidence](0035-host-preflight-evidence.md)
+- [0036 — Signed offline key revocation](0036-offline-key-revocation.md)

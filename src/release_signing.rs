@@ -252,7 +252,7 @@ impl TrustRoots {
                     signer.identity
                 );
             }
-            crate::signature_verification::trusted_key(
+            crate::signature_verification::well_formed_key(
                 "trusted signer public_key",
                 &signer.public_key,
                 &signer.key_id,

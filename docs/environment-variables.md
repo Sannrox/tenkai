@@ -24,6 +24,8 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | `TENKAI_EXECUTOR_GUARD` | current `tenkaictl` binary | Optional explicit guard path for applications embedding the Tenkai library |
 | `TENKAI_PLAN_APPROVAL_DIR` | unset | Directory of signed plan-approval envelopes |
 | `TENKAI_PLAN_APPROVAL_TRUST_ROOTS` | unset | Trust-root file for plan-approval verification |
+| `TENKAI_KEY_REVOCATIONS` | unset | Installed signed key revocation list, applied at startup; set with `TENKAI_KEY_REVOCATION_TRUST_ROOTS` ([key rollover](key-rollover.md)) |
+| `TENKAI_KEY_REVOCATION_TRUST_ROOTS` | unset | Release-format trust roots naming the revocation authorities |
 | `TENKAI_PLAN_PRIORS` | unset | Set `1` to enable advisory planner priors; see [plan priors](plan-priors.md) |
 
 ## `tenkai-server`
