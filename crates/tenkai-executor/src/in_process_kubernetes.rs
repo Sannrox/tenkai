@@ -24,6 +24,10 @@ use tenkai::software_executor::{
 };
 
 pub const FIELD_MANAGER: &str = "tenkai";
+/// First readiness poll after apply. Keeps post-ready wait under 250 ms.
+const DEFAULT_HEALTH_POLL: Duration = Duration::from_millis(100);
+/// Backoff cap so a long rollout cannot reintroduce a 1 s post-ready stall.
+const MAX_HEALTH_POLL: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkloadCondition {
@@ -246,7 +250,7 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
         Self {
             api,
             timeout: Duration::from_secs(60),
-            poll_interval: Duration::from_secs(1),
+            poll_interval: DEFAULT_HEALTH_POLL,
         }
     }
 
@@ -332,6 +336,7 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
         applied: &[WorkloadObservation],
     ) -> Result<()> {
         let deadline = Instant::now() + self.timeout;
+        let mut interval = self.poll_interval;
         loop {
             let mut failed = Vec::new();
             for applied in applied {
@@ -372,7 +377,8 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
                     failed.join("; ")
                 );
             }
-            std::thread::sleep(self.poll_interval);
+            wait_poll(interval);
+            interval = next_health_poll(interval, self.poll_interval);
         }
     }
 }
@@ -588,6 +594,21 @@ pub(crate) fn disagreeing_condition(observation: &WorkloadObservation) -> Option
             None
         }
     })
+}
+
+fn next_health_poll(current: Duration, floor: Duration) -> Duration {
+    current
+        .saturating_mul(2)
+        .min(MAX_HEALTH_POLL.max(floor))
+        .max(floor)
+}
+
+/// Blocking poll. `SoftwareExecutor::apply` is a blocking API; callers on a
+/// Tokio runtime run it on `spawn_blocking` or `block_in_place`. Sleep here
+/// instead of queueing a nested blocking task, which can deadlock a saturated
+/// blocking pool.
+fn wait_poll(duration: Duration) {
+    std::thread::sleep(duration);
 }
 
 pub(crate) fn block_on<T, F>(fut: F) -> Result<T>
@@ -877,6 +898,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use std::path::PathBuf;
+    use std::sync::Mutex;
     use tenkai::software_executor::SoftwareApplyRequest;
 
     fn write_deployment(root: &Path, version: &str, replicas: u64) -> PathBuf {
@@ -1031,6 +1053,227 @@ mod tests {
             err.contains("implicit kubeconfig discovery is refused"),
             "{err}"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn unique_root(tag: &str) -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        std::env::temp_dir().join(format!(
+            "tenkai-k8s-{tag}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ))
+    }
+
+    fn unavailable_conditions() -> Vec<WorkloadCondition> {
+        vec![
+            WorkloadCondition {
+                type_name: "Progressing".into(),
+                status: "True".into(),
+                reason: "ReplicaSetUpdated".into(),
+            },
+            WorkloadCondition {
+                type_name: "Available".into(),
+                status: "False".into(),
+                reason: "MinimumReplicasUnavailable".into(),
+            },
+        ]
+    }
+
+    /// Apply stores the object as not ready; observe flips to healthy after `ready_after`.
+    /// `released` overrides the timer so a runtime test can hold readiness until it has
+    /// proven the current-thread executor still makes progress.
+    struct DelayedReadyApi {
+        inner: MemoryClusterApi,
+        ready_after: Duration,
+        applied_at: Mutex<Option<Instant>>,
+        identity: Mutex<Option<(String, String, String)>>,
+        entered_wait: Mutex<Option<std::sync::mpsc::SyncSender<()>>>,
+        released: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    }
+
+    impl DelayedReadyApi {
+        fn new(ready_after: Duration) -> Self {
+            Self {
+                inner: MemoryClusterApi::new(),
+                ready_after,
+                applied_at: Mutex::new(None),
+                identity: Mutex::new(None),
+                entered_wait: Mutex::new(None),
+                released: None,
+            }
+        }
+
+        fn gated() -> (
+            Self,
+            std::sync::Arc<std::sync::atomic::AtomicBool>,
+            std::sync::mpsc::Receiver<()>,
+        ) {
+            let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+            let released = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let api = Self {
+                inner: MemoryClusterApi::new(),
+                ready_after: Duration::from_secs(3600),
+                applied_at: Mutex::new(None),
+                identity: Mutex::new(None),
+                entered_wait: Mutex::new(Some(entered_tx)),
+                released: Some(released.clone()),
+            };
+            (api, released, entered_rx)
+        }
+
+        fn ready_at(&self) -> Instant {
+            self.applied_at
+                .lock()
+                .expect("applied_at")
+                .expect("apply before ready_at")
+                + self.ready_after
+        }
+
+        fn is_released(&self) -> bool {
+            self.released
+                .as_ref()
+                .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
+        }
+    }
+
+    impl ClusterApplyApi for DelayedReadyApi {
+        fn apply_server_side(
+            &self,
+            cluster_config: &Path,
+            namespace: &str,
+            field_manager: &str,
+            object: &Value,
+        ) -> Result<WorkloadObservation> {
+            let observed =
+                self.inner
+                    .apply_server_side(cluster_config, namespace, field_manager, object)?;
+            self.inner.set_conditions(
+                namespace,
+                &observed.name,
+                &observed.kind,
+                unavailable_conditions(),
+            );
+            *self.identity.lock().expect("identity") = Some((
+                namespace.into(),
+                observed.name.clone(),
+                observed.kind.clone(),
+            ));
+            *self.applied_at.lock().expect("applied_at") = Some(Instant::now());
+            Ok(WorkloadObservation {
+                conditions: unavailable_conditions(),
+                ..observed
+            })
+        }
+
+        fn observe(
+            &self,
+            cluster_config: &Path,
+            namespace: &str,
+            name: &str,
+            kind: &str,
+        ) -> Result<Option<WorkloadObservation>> {
+            if let Some(tx) = self.entered_wait.lock().expect("entered_wait").take() {
+                let _ = tx.send(());
+            }
+            if let Some(applied_at) = *self.applied_at.lock().expect("applied_at")
+                && (self.is_released() || applied_at.elapsed() >= self.ready_after)
+                && let Some((ns, stored_name, stored_kind)) =
+                    self.identity.lock().expect("identity").clone()
+            {
+                self.inner.set_conditions(
+                    &ns,
+                    &stored_name,
+                    &stored_kind,
+                    healthy_deployment_conditions(),
+                );
+            }
+            self.inner.observe(cluster_config, namespace, name, kind)
+        }
+
+        fn remove(
+            &self,
+            cluster_config: &Path,
+            namespace: &str,
+            name: &str,
+            kind: &str,
+        ) -> Result<()> {
+            self.inner.remove(cluster_config, namespace, name, kind)
+        }
+    }
+
+    fn percentile(mut samples: Vec<Duration>, q: f64) -> Duration {
+        samples.sort();
+        let index = ((samples.len() as f64 - 1.0) * q).round() as usize;
+        samples[index.min(samples.len().saturating_sub(1))]
+    }
+
+    #[test]
+    fn ready_workload_completes_apply_within_250ms_p95() {
+        let mut samples = Vec::new();
+        for _ in 0..8 {
+            let root = unique_root("ready");
+            let _ = std::fs::remove_dir_all(&root);
+            let kubeconfig = write_deployment(&root, "1.0.0", 1);
+            let api = DelayedReadyApi::new(Duration::from_millis(20));
+            let executor = InProcessKubernetesExecutor::new(&api);
+            executor
+                .apply(&request(&root, &kubeconfig, "1.0.0"))
+                .expect("apply after delayed ready");
+            let after_ready = Instant::now().saturating_duration_since(api.ready_at());
+            samples.push(after_ready);
+            let _ = std::fs::remove_dir_all(root);
+        }
+        let p95 = percentile(samples.clone(), 0.95);
+        assert!(
+            p95 <= Duration::from_millis(250),
+            "p95 ready-to-complete {p95:?} exceeds 250 ms; samples {samples:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn readiness_wait_does_not_block_current_thread_runtime() {
+        let root = unique_root("runtime");
+        let _ = std::fs::remove_dir_all(&root);
+        let kubeconfig = write_deployment(&root, "1.0.0", 1);
+        let (api, released, entered_rx) = DelayedReadyApi::gated();
+        let executor = InProcessKubernetesExecutor::new(api)
+            .with_timeout(Duration::from_secs(5))
+            .with_poll_interval(Duration::from_millis(20));
+        let req = request(&root, &kubeconfig, "1.0.0");
+        let apply = tokio::task::spawn_blocking(move || executor.apply(&req));
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if entered_rx.try_recv().is_ok() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("apply did not enter readiness wait");
+
+        let progressed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        tokio::spawn({
+            let progressed = progressed.clone();
+            async move {
+                progressed.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if progressed.load(std::sync::atomic::Ordering::SeqCst) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("current-thread runtime stalled while apply waited");
+
+        released.store(true, std::sync::atomic::Ordering::SeqCst);
+        apply.await.expect("join apply").expect("apply");
         let _ = std::fs::remove_dir_all(root);
     }
 }

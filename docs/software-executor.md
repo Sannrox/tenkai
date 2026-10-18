@@ -39,9 +39,10 @@ out of scope here. Custom-resource operators are refused.
 Hosts (`tenkaictl`, the reconciler) select the adapter from
 `TENKAI_SOFTWARE_EXECUTOR` and pass it into apply. Apply does not read that
 env var during activate/deactivate. Helm and kubectl failures capture sanitized
-stderr. The in-process path waits on workload conditions and fails closed when
-`Available` is not `True`, naming the condition. A foreign field manager is an
-explicit conflict, not a silent overwrite.
+stderr. The in-process path waits on workload conditions with a short backoff
+starting at 100 ms (capped at 200 ms) and fails closed when `Available` is not
+`True`, naming the condition. A foreign field manager is an explicit conflict,
+not a silent overwrite.
 
 Kubeconfig is never placed on CLI argv and is never stored as file bytes in
 SQLite. The in-process path requires an environment-scoped file path:
