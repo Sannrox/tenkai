@@ -273,12 +273,28 @@ impl Reconciler {
         self.ctx.clone()
     }
 
+    pub(crate) fn execution_policy(&self) -> crate::approval_policy::ExecutionPolicy {
+        crate::approval_policy::ExecutionPolicy {
+            skip_gates: self.config.skip_gates,
+            auto_signing: self.config.approval_directory.is_some()
+                && self.config.approval_trust_roots.is_some(),
+            trust_roots: self.config.approval_trust_roots.clone(),
+            approval_directory: self.config.approval_directory.clone(),
+            local_development_reason: self
+                .ctx
+                .is_embedded()
+                .then(|| self.config.unapproved_development_reason.clone())
+                .flatten(),
+        }
+    }
+
     pub(crate) async fn inspect_environment_without_outcome_export(
         &self,
         environment: String,
     ) -> Result<crate::plan::EnvironmentInspectReport> {
         let mut ctx = self.ctx.without_outcome_export();
-        crate::plan::inspect_environment_with_outcomes(&mut ctx, &environment).await
+        crate::plan::inspect_environment_for_policy(&mut ctx, &environment, self.execution_policy())
+            .await
     }
 
     pub(crate) async fn fleet_status_without_outcome_export(

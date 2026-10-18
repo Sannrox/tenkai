@@ -1,3 +1,4 @@
+mod approval_policy;
 mod auth_support;
 mod catalog_list;
 mod change_events;

@@ -206,6 +206,7 @@ impl FixtureEnvironmentProjection {
                     status_detail: "blocked development fixture; execution is disabled".into(),
                     steps: Vec::new(),
                     steps_truncated: false,
+                    approval: None,
                 }
             }),
             maintenance: None,

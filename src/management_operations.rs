@@ -366,6 +366,23 @@ impl ManagementOperations {
         Ok(report)
     }
 
+    pub async fn environment_approval_policy(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+    ) -> Result<crate::approval_policy::EffectiveApprovalPolicy, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        self.require_community_catalog_host()?;
+        self.require_environment_grant(credential, &context, Some(environment), "approval policy")?;
+        let mut ctx = self.application_ctx()?;
+        let env = crate::environment::environment(&mut ctx, environment)
+            .await
+            .map_err(map_catalog_error)?;
+        crate::approval_policy::effective_policy(&env.properties)
+            .map_err(|_| ManagementError::Unavailable("approval policy is unreadable".into()))
+    }
+
     pub async fn software_compatibility_report(
         &self,
         credential: &CredentialMaterial,

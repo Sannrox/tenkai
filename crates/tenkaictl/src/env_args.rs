@@ -203,7 +203,7 @@ pub(crate) enum WebhooksCommand {
 
 #[derive(Subcommand)]
 pub(crate) enum ApprovalPolicyCommand {
-    /// Show the stored plan approval policy file path (never key bytes).
+    /// Show the effective plan approval policy (never key bytes).
     Show { env: String },
     /// Set the environment-scoped plan approval policy file.
     Set { env: String, path: PathBuf },

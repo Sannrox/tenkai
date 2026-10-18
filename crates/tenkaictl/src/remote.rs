@@ -163,6 +163,23 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Env {
+            command: EnvCommand::ApprovalPolicy { command },
+        } => {
+            match command {
+                crate::env_args::ApprovalPolicyCommand::Show { env } => {
+                    let view = client.environment_approval_policy(&env).await?;
+                    println!("{}", serde_json::to_string_pretty(&view)?);
+                }
+                crate::env_args::ApprovalPolicyCommand::Set { .. }
+                | crate::env_args::ApprovalPolicyCommand::Clear { .. } => {
+                    bail!(
+                        "setting or clearing an approval policy is available only with --target embedded"
+                    );
+                }
+            }
+            Ok(())
+        }
+        Command::Env {
             command: EnvCommand::Compatibility { command },
         } => {
             match command {

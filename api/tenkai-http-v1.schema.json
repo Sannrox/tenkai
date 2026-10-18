@@ -882,6 +882,43 @@
       ],
       "type": "object"
     },
+    "EffectiveApprovalPolicy": {
+      "description": "Operator-facing policy: automatic signer key ids, human rules, and TTL.\nNever includes seed bytes or file contents.",
+      "properties": {
+        "auto_signers": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "configured": {
+          "type": "boolean"
+        },
+        "digest": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string"
+        },
+        "require_human": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "ttl_ms": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "configured",
+        "mode"
+      ],
+      "type": "object"
+    },
     "EnvironmentConstraint": {
       "description": "One environment constraint, as set by `tenkaictl env constraints set`.",
       "properties": {
@@ -1210,6 +1247,10 @@
     },
     "EnvironmentPlanSummary": {
       "properties": {
+        "approval": {
+          "$ref": "#/$defs/PlanApprovalView",
+          "description": "Whether the latest plan was approved by policy or still needs a human."
+        },
         "created_at": {
           "format": "int64",
           "type": "integer"
@@ -2334,6 +2375,25 @@
       ],
       "type": "object"
     },
+    "PlanApprovalView": {
+      "description": "Whether a plan was approved by policy or still needs a human, and why.",
+      "properties": {
+        "policy_provider": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "source": {
+          "description": "`policy`, `human`, `development`, or `required`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source"
+      ],
+      "type": "object"
+    },
     "PlanRequest": {
       "additionalProperties": false,
       "properties": {
@@ -3093,6 +3153,15 @@
           "$ref": "#/$defs/StatusRow"
         },
         "type": "array"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/environments/{environment}/approval-policy",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/EffectiveApprovalPolicy"
       }
     },
     {
