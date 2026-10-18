@@ -118,6 +118,14 @@ pub trait SoftwareExecutor: Send + Sync {
     fn consumes_admitted_artifact_pulls(&self) -> bool {
         false
     }
+    /// Snapshot of running units after a successful apply. Default is none.
+    fn observed_runtime(
+        &self,
+        request: &SoftwareApplyRequest,
+    ) -> Result<Option<crate::observed_runtime::ObservedRuntimeComponent>> {
+        let _ = request;
+        Ok(None)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

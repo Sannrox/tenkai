@@ -204,6 +204,11 @@ pub fn tenant_visible_rpcs() -> &'static [TenantVisibleRpc] {
             surface: TenantVisibleSurface::Environment,
         },
         TenantVisibleRpc {
+            id: "environment.runtime",
+            path_template: "GET /v1/environments/{environment}/runtime",
+            surface: TenantVisibleSurface::Environment,
+        },
+        TenantVisibleRpc {
             id: "plan.list",
             path_template: "LIST plans",
             surface: TenantVisibleSurface::Plan,
@@ -281,6 +286,7 @@ pub fn http_exposed_tenant_rpc_ids() -> &'static [&'static str] {
         "environment.list",
         "environment.get",
         "environment.status",
+        "environment.runtime",
         "event.list",
     ]
 }
@@ -1323,6 +1329,20 @@ mod tests {
         );
         assert_eq!(rpc.surface, TenantVisibleSurface::RuntimeAgent);
         assert!(http_exposed_tenant_rpc_ids().contains(&"runtime.inventory"));
+    }
+
+    #[test]
+    fn environment_runtime_is_registered_and_http_exposed() {
+        let rpc = tenant_visible_rpcs()
+            .iter()
+            .find(|rpc| rpc.id == "environment.runtime")
+            .expect("environment.runtime must be in tenant_visible_rpcs");
+        assert_eq!(
+            rpc.path_template,
+            "GET /v1/environments/{environment}/runtime"
+        );
+        assert_eq!(rpc.surface, TenantVisibleSurface::Environment);
+        assert!(http_exposed_tenant_rpc_ids().contains(&"environment.runtime"));
     }
 
     #[test]

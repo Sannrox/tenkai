@@ -98,6 +98,15 @@ pub(super) async fn activate(
             },
         )
         .await;
+        if applied.is_ok() {
+            // Observation is a read-view side effect. A store failure must not
+            // turn a completed activation into a product-target failure.
+            let facts = crate::environment::list_environment_facts(ctx, &content.environment)
+                .await
+                .unwrap_or_default();
+            let snapshot = crate::observed_runtime::from_model_runtime(&export_descriptor, &facts);
+            let _ = crate::observed_runtime::persist_under_lease(ctx, lease, &snapshot).await;
+        }
         return Ok(applied.map(|_| ()));
     }
     if content.manifest.product.kind.policy().target() == ProductTarget::WorkerPool {
@@ -185,6 +194,13 @@ pub(super) async fn activate(
             },
             Err(error) => Err(error),
         };
+        if result.is_ok() {
+            // Observation is a read-view side effect. A store or inspect failure
+            // must not turn a completed activation into a product-target failure.
+            if let Ok(Some(snapshot)) = software_blocking(|| executor.observed_runtime(&request)) {
+                let _ = crate::observed_runtime::persist_under_lease(ctx, lease, &snapshot).await;
+            }
+        }
         return Ok(result);
     }
     if let Err(detail) = require_artifact_pull_consumer(content, None) {
@@ -330,6 +346,9 @@ async fn deactivate_for(
             Err(detail) => return Ok(Err(detail)),
         };
         let removed = run_guarded_mutation(ctx, lease, content, move || executor.remove()).await?;
+        if removed.is_ok() {
+            let _ = crate::observed_runtime::clear_under_lease(ctx, lease, &content.product).await;
+        }
         return Ok(removed);
     }
     if content.manifest.product.kind.policy().target() == ProductTarget::WorkerPool {
@@ -374,7 +393,7 @@ async fn deactivate_for(
             return Ok(Err(detail));
         }
         let request = software_request(ctx, content).await?;
-        return Ok(software_blocking(|| match removal {
+        let removed = software_blocking(|| match removal {
             Removal::Release => executor.remove(&request),
             Removal::FailedApply => executor.cleanup_failed_apply(&request),
         })
@@ -384,7 +403,11 @@ async fn deactivate_for(
                 content,
                 &error.to_string(),
             )
-        }));
+        });
+        if removed.is_ok() {
+            let _ = crate::observed_runtime::clear_under_lease(ctx, lease, &content.product).await;
+        }
+        return Ok(removed);
     }
     if let Err(detail) = require_artifact_pull_consumer(content, None) {
         return Ok(Err(detail));

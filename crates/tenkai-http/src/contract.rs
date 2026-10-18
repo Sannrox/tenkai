@@ -25,6 +25,7 @@ use tenkai::management_lifecycle::{
     ManagementLifecycleResult, PlanRequest, PromoteRequest, PublishRequest, RecallRequest,
     RetireEnvironmentRequest, RetryFailedTargetRequest, RollbackRequest, SubscribeRequest,
 };
+use tenkai::observed_runtime::EnvironmentRuntimeReport;
 use tenkai::oidc_verifier::OidcClientDiscovery;
 use tenkai::package_migration::{
     MigrationPage, PackageMigrationApplyRequest, PackageMigrationMutateRequest,
@@ -173,6 +174,13 @@ pub fn http_contract() -> Value {
             auth: Auth::Read,
             request: None,
             response: schema::<EffectiveApprovalPolicy>(&mut g),
+        },
+        Route {
+            method: "GET",
+            path: "/v1/environments/{environment}/runtime",
+            auth: Auth::Read,
+            request: None,
+            response: schema::<EnvironmentRuntimeReport>(&mut g),
         },
         Route {
             method: "POST",
@@ -403,6 +411,12 @@ mod tests {
             ("ReleasePage", "next_cursor"),
             ("ChannelPage", "next_cursor"),
             ("MigrationPage", "next_cursor"),
+            ("ObservedRuntimeComponent", "health"),
+            ("ObservedRuntimeComponent", "last_init_job"),
+            ("ObservedRuntimeComponent", "model_runtime"),
+            ("ObservedRuntimeUnit", "health"),
+            ("ObservedInitJob", "exit_code"),
+            ("ObservedModelRuntime", "accelerator"),
         ] {
             let property = &defs[def]["properties"][field];
             assert!(property.is_object(), "{def}.{field} missing");
