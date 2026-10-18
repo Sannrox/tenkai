@@ -182,6 +182,7 @@ pub mod offline_fleet_drill;
 pub mod oidc_verifier;
 pub mod ontology;
 pub mod package_migration;
+pub mod page;
 pub mod pb;
 pub mod plan;
 pub mod plan_approval;

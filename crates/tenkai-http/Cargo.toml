@@ -13,7 +13,7 @@ ui = ["dep:reqwest", "dep:zip"]
 [dependencies]
 tenkai = { path = "../..", version = "0.5.0" }
 anyhow = "1"
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "matched-path", "tokio"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "matched-path", "query", "tokio"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }

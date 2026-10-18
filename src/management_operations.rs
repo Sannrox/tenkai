@@ -9,6 +9,7 @@ use std::sync::Arc;
 use crate::auth_context::{
     AuthMode, AuthStack, AuthenticatedRequestContext, CredentialMaterial, DeliveryCapability,
 };
+use crate::catalog::{ChannelPage, ReleasePage};
 use crate::client::Ctx;
 use crate::management_lifecycle::{
     self, ApplyRequest, ApproveRequest, ChannelHoldRequest, DeliveryHoldRequest,
@@ -16,10 +17,11 @@ use crate::management_lifecycle::{
     PublishRequest, RecallRequest, RetryFailedTargetRequest, RollbackRequest, SubscribeRequest,
 };
 use crate::package_migration::{
-    self, ApprovalTrustRoots, MigrationAuthorization, PackageMigrationApplyRequest,
+    self, ApprovalTrustRoots, MigrationAuthorization, MigrationPage, PackageMigrationApplyRequest,
     PackageMigrationMutateRequest, PackageMigrationPreviewRequest, PackageMigrationResult,
     RemoteApprovalFiles,
 };
+use crate::page::{PageQuery, page_items};
 use crate::plan::{EnvironmentInspectReport, EnvironmentListEntry, FleetStatusReport, StatusRow};
 use crate::providers::TerminalOutcomeProjection;
 use crate::reconciler::TickReport;
@@ -223,6 +225,84 @@ impl ManagementOperations {
                 .map_err(map_tenant_error);
         }
         self.reconciler.list_environments().await.map_err(internal)
+    }
+
+    pub async fn list_releases(
+        &self,
+        credential: &CredentialMaterial,
+        query: PageQuery,
+    ) -> Result<ReleasePage, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        self.require_community_catalog_host()?;
+        let limit = query.limit().map_err(ManagementError::BadRequest)?;
+        let mut ctx = self.application_ctx()?;
+        let mut items = crate::catalog::list_releases(&mut ctx)
+            .await
+            .map_err(internal)?;
+        if !context.product_bindings().is_empty() {
+            items.retain(|item| context.product_bindings().contains(&item.product));
+        }
+        Ok(page_items(items, limit, query.cursor.as_deref(), |item| {
+            item.id.as_str()
+        })
+        .into())
+    }
+
+    pub async fn list_channels(
+        &self,
+        credential: &CredentialMaterial,
+        query: PageQuery,
+    ) -> Result<ChannelPage, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        self.require_community_catalog_host()?;
+        let limit = query.limit().map_err(ManagementError::BadRequest)?;
+        let mut ctx = self.application_ctx()?;
+        let mut items = crate::catalog::list_channels(&mut ctx)
+            .await
+            .map_err(internal)?;
+        if !context.product_bindings().is_empty() {
+            items.retain(|item| context.product_bindings().contains(&item.product));
+        }
+        if !context.channel_bindings().is_empty() {
+            items.retain(|item| context.channel_bindings().contains(&item.name));
+        }
+        Ok(page_items(items, limit, query.cursor.as_deref(), |item| {
+            item.id.as_str()
+        })
+        .into())
+    }
+
+    pub async fn list_migrations(
+        &self,
+        credential: &CredentialMaterial,
+        query: PageQuery,
+    ) -> Result<MigrationPage, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        let limit = query.limit().map_err(ManagementError::BadRequest)?;
+        let partition = self.migration_partition(&context)?;
+        let mut ctx = self.application_ctx()?;
+        let mut items = package_migration::list_in(&mut ctx, partition)
+            .await
+            .map_err(map_migration_error)?;
+        if self.tenant_mode {
+            let visible = self
+                .tenant_operations()?
+                .list(&context)
+                .await
+                .map_err(map_tenant_error)?;
+            let names = visible
+                .into_iter()
+                .map(|entry| entry.name)
+                .collect::<std::collections::HashSet<_>>();
+            items.retain(|item| names.contains(&item.environment));
+        }
+        Ok(page_items(items, limit, query.cursor.as_deref(), |item| {
+            item.id.as_str()
+        })
+        .into())
     }
 
     pub async fn inspect_environment(

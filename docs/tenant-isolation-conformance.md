@@ -88,6 +88,7 @@ and are not registered.
 | `management.package_migration_preview` | `POST /v1/migrations/{name}/preview` | Require tenant context; non-disclosing deny on cross-tenant env |
 | `management.package_migration_apply` | `POST /v1/migrations/{name}/apply` | Same as preview; mutating verb |
 | `management.package_migration_status` | `GET /v1/migrations/{name}` | Non-disclosing deny when the stored env is not visible |
+| `management.package_migration_list` | `GET /v1/migrations` | List only migrations whose environment is visible to the tenant |
 | `management.package_migration_resume` | `POST /v1/migrations/{name}/resume` | Same as apply |
 | `management.package_migration_rollback` | `POST /v1/migrations/{name}/rollback` | Same as apply |
 | `environment.list` | `GET /v1/environments` | List only tenant partition ids |
@@ -98,14 +99,15 @@ and are not registered.
 | `development.fixture_import` | `POST /v1/development/fixtures/import` | Require tenant context and an allowlisted fixture principal; mounted only when fixtures are enabled |
 | `development.fixture_reset` | `DELETE /v1/development/fixtures/{fixture_id}` | Same as import; non-disclosing deny on cross-tenant |
 
-Community catalog and remote management lifecycle routes (`POST /v1/releases`,
-`POST /v1/channels/{channel}/promote`, `POST /v1/releases/{release}/recall`,
+Community catalog and remote management lifecycle routes (`GET /v1/releases`,
+`GET /v1/channels`, `POST /v1/releases`, `POST /v1/channels/{channel}/promote`,
+`POST /v1/releases/{release}/recall`,
 `POST /v1/environments/{environment}/subscriptions`,
 `POST /v1/environments/{environment}/plans`, `POST /v1/plans/{plan_id}/approve`,
 `POST /v1/plans/{plan_id}/apply`, `POST /v1/environments/{environment}/rollback`)
-are not tenant HTTP RPCs. Tenant-mode hosts refuse them rather than writing a
-shared catalog. The environment retirement route uses the isolated tenant
-operational registry and is supported in tenant mode.
+are not tenant HTTP RPCs. Tenant-mode hosts refuse them rather than reading or
+writing a shared catalog. The environment retirement route uses the isolated
+tenant operational registry and is supported in tenant mode.
 
 **Registered but not exposed on HTTP** (harness / in-process enterprise surfaces only; not advertised as public routes):
 

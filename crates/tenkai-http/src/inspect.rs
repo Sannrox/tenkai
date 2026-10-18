@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 
@@ -30,6 +30,42 @@ pub(super) async fn list_environments(
         Err(error) => return *error,
     };
     manage_result(state.management.list_environments(&credential).await)
+}
+
+pub(super) async fn list_releases(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<tenkai::page::PageQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    manage_result(state.management.list_releases(&credential, query).await)
+}
+
+pub(super) async fn list_channels(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<tenkai::page::PageQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    manage_result(state.management.list_channels(&credential, query).await)
+}
+
+pub(super) async fn list_migrations(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<tenkai::page::PageQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    manage_result(state.management.list_migrations(&credential, query).await)
 }
 
 pub(super) async fn inspect_environment(

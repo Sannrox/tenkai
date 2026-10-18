@@ -8,7 +8,30 @@ use crate::client::Ctx;
 use crate::ontology::{KIND_PACKAGE_MIGRATION, NS, require_package_migration_schema};
 use crate::pb::sekai::Object;
 
-use super::types::{MigrationRecord, record_catalog_id};
+use super::types::{MigrationListEntry, MigrationRecord, record_catalog_id};
+
+/// List stored package migrations in `partition` (community hosts pass `None`).
+pub async fn list_in(ctx: &mut Ctx, partition: Option<&str>) -> Result<Vec<MigrationListEntry>> {
+    let expected = partition.filter(|value| !value.is_empty());
+    let mut items = Vec::new();
+    for object in ctx.list_kind(KIND_PACKAGE_MIGRATION).await? {
+        let Some(raw) = object.properties.get("record") else {
+            continue;
+        };
+        let record: MigrationRecord = serde_json::from_str(raw)?;
+        if record.partition.as_deref() != expected {
+            continue;
+        }
+        items.push(MigrationListEntry {
+            id: object.id,
+            name: record.name,
+            environment: record.environment,
+            status: record.status,
+        });
+    }
+    items.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(items)
+}
 
 pub(super) async fn persist_new(ctx: &mut Ctx, record: &MigrationRecord) -> Result<()> {
     require_package_migration_schema(ctx).await?;

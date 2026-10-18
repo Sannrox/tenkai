@@ -141,6 +141,33 @@ pub struct MigrationRecord {
     pub pending_rollback_plan_id: Option<String>,
 }
 
+/// Identifying fields and current state for one stored package migration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct MigrationListEntry {
+    pub id: String,
+    pub name: String,
+    pub environment: String,
+    pub status: MigrationStatus,
+}
+
+/// One page of [`MigrationListEntry`] values.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct MigrationPage {
+    pub items: Vec<MigrationListEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub next_cursor: Option<String>,
+}
+
+impl From<crate::page::Page<MigrationListEntry>> for MigrationPage {
+    fn from(page: crate::page::Page<MigrationListEntry>) -> Self {
+        Self {
+            items: page.items,
+            next_cursor: page.next_cursor,
+        }
+    }
+}
+
 pub(super) fn catalog_id(partition: Option<&str>, name: &str) -> String {
     package_migration_id_in(partition, name)
 }

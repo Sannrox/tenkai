@@ -217,6 +217,51 @@
       ],
       "type": "object"
     },
+    "ChannelListEntry": {
+      "description": "Identifying fields, current head, and active hold for one channel.",
+      "properties": {
+        "head": {
+          "type": "string"
+        },
+        "hold": {
+          "$ref": "#/$defs/DeliveryHold"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "product": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "product",
+        "name",
+        "head"
+      ],
+      "type": "object"
+    },
+    "ChannelPage": {
+      "description": "One page of [`ChannelListEntry`] values.",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/ChannelListEntry"
+          },
+          "type": "array"
+        },
+        "next_cursor": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    },
     "CheckpointClass": {
       "enum": [
         "reversible",
@@ -1732,6 +1777,48 @@
       ],
       "type": "object"
     },
+    "MigrationListEntry": {
+      "description": "Identifying fields and current state for one stored package migration.",
+      "properties": {
+        "environment": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/MigrationStatus"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "environment",
+        "status"
+      ],
+      "type": "object"
+    },
+    "MigrationPage": {
+      "description": "One page of [`MigrationListEntry`] values.",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/MigrationListEntry"
+          },
+          "type": "array"
+        },
+        "next_cursor": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    },
     "MigrationRecord": {
       "additionalProperties": false,
       "properties": {
@@ -2109,6 +2196,26 @@
       ],
       "type": "object"
     },
+    "PageQuery": {
+      "description": "Query parameters for cursor-paged catalog lists.",
+      "properties": {
+        "cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "PlanApprovalTrustRoots": {
       "additionalProperties": false,
       "properties": {
@@ -2320,6 +2427,48 @@
       "required": [
         "version",
         "operation"
+      ],
+      "type": "object"
+    },
+    "ReleaseListEntry": {
+      "description": "Identifying fields and current digest/version for one published release.",
+      "properties": {
+        "digest": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "product": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "product",
+        "version",
+        "digest"
+      ],
+      "type": "object"
+    },
+    "ReleasePage": {
+      "description": "One page of [`ReleaseListEntry`] values.",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/ReleaseListEntry"
+          },
+          "type": "array"
+        },
+        "next_cursor": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "items"
       ],
       "type": "object"
     },
@@ -2816,6 +2965,39 @@
           "$ref": "#/$defs/EnvironmentListEntry"
         },
         "type": "array"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/releases",
+      "request": {
+        "$ref": "#/$defs/PageQuery"
+      },
+      "response": {
+        "$ref": "#/$defs/ReleasePage"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/channels",
+      "request": {
+        "$ref": "#/$defs/PageQuery"
+      },
+      "response": {
+        "$ref": "#/$defs/ChannelPage"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/migrations",
+      "request": {
+        "$ref": "#/$defs/PageQuery"
+      },
+      "response": {
+        "$ref": "#/$defs/MigrationPage"
       }
     },
     {
