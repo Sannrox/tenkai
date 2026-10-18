@@ -22,9 +22,12 @@ kind = "pkcs11"
 `pkcs11`, `kmip`, or `cloud_kms`. Production refuses `software`, `file`, and
 `memory`. Those exist for labs and CI.
 
-PKCS#11, KMIP, and cloud KMS adapters are follow-up slices. A production
-profile may name those kinds today; the ceremony against them fails until the
-adapter lands.
+The PKCS#11 adapter implements wrap, unwrap, KEK rotate, describe, and revoke
+against a customer HSM. Describe returns provider kind, key ids, and the
+algorithm name. It never returns key material. CI runs the same contract against
+a PKCS#11 software token. KMIP and cloud KMS adapters remain follow-up slices.
+A production profile may name those kinds today; the ceremony against them fails
+until those adapters land.
 
 ## Lab ceremony
 

@@ -58,6 +58,8 @@ tower = { version = "0.5", features = ["util"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 sekai-client = { git = "https://github.com/Sannrox/sekai-chisei", rev = "67157d1fa242ac2f133c88243ef23b56f88042e6", version = "0.1.2" }
 tar = { version = "0.4", default-features = false }
+cryptoki = "0.10"
+sekai-keys = { git = "https://github.com/Sannrox/sekai-chisei", rev = "40ab00a4954d435c67c6c12b560522ba5eaebb53", version = "1.0.0" }
 
 [features]
 default = []
