@@ -225,7 +225,7 @@ pub fn tenant_visible_rpcs() -> &'static [TenantVisibleRpc] {
         },
         TenantVisibleRpc {
             id: "event.list",
-            path_template: "LIST events",
+            path_template: "GET /v1/events",
             surface: TenantVisibleSurface::Event,
         },
         TenantVisibleRpc {
@@ -281,6 +281,7 @@ pub fn http_exposed_tenant_rpc_ids() -> &'static [&'static str] {
         "environment.list",
         "environment.get",
         "environment.status",
+        "event.list",
     ]
 }
 

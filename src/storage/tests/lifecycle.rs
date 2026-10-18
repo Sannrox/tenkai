@@ -25,6 +25,56 @@ fn schema_is_created_and_reopened_without_optional_provider() {
 }
 
 #[test]
+fn change_events_resume_from_cursor_without_gaps_or_duplicates() {
+    let path = std::env::temp_dir().join(format!(
+        "tenkai-change-events-{}-{}.db",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let store = SqliteStore::open(&path).unwrap();
+    let kinds = [
+        "plan_created",
+        "plan_approved",
+        "plan_applied",
+        "target_failed",
+        "hold_set",
+        "release_published",
+    ];
+    let mut appended = Vec::new();
+    for (index, kind) in kinds.iter().enumerate() {
+        appended.push(
+            store
+                .append_change_event(
+                    1_000 + index as i64,
+                    kind,
+                    &format!("resource-{index}"),
+                    if index % 2 == 0 { "prod" } else { "" },
+                )
+                .unwrap(),
+        );
+    }
+    let first_page = store.list_change_events_after(0, 3).unwrap();
+    assert_eq!(first_page, appended[..3]);
+    let resume_cursor: i64 = first_page.last().unwrap().cursor.parse().unwrap();
+    let second_page = store.list_change_events_after(resume_cursor, 3).unwrap();
+    assert_eq!(second_page, appended[3..]);
+    let mut seen = std::collections::BTreeSet::new();
+    for event in first_page.iter().chain(second_page.iter()) {
+        assert!(
+            seen.insert(event.cursor.clone()),
+            "duplicate {}",
+            event.cursor
+        );
+    }
+    assert_eq!(seen.len(), appended.len());
+    let empty = store
+        .list_change_events_after(appended.last().unwrap().cursor.parse().unwrap(), 10)
+        .unwrap();
+    assert!(empty.is_empty());
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn audit_events_are_durable_and_append_only() {
     let path = std::env::temp_dir().join(format!("tenkai-audit-{}.db", uuid::Uuid::new_v4()));
     let event = AuditRecord {

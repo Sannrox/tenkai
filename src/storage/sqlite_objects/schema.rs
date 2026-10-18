@@ -58,6 +58,13 @@ pub(in crate::storage) fn ensure_typed_schema_tables(connection: &Connection) ->
              resource TEXT NOT NULL, outcome TEXT NOT NULL
          );
          CREATE INDEX IF NOT EXISTS audit_events_time ON audit_events(occurred_at, id);
+         CREATE TABLE IF NOT EXISTS change_events (
+             seq INTEGER PRIMARY KEY AUTOINCREMENT,
+             occurred_at INTEGER NOT NULL,
+             kind TEXT NOT NULL,
+             resource TEXT NOT NULL,
+             environment_id TEXT NOT NULL DEFAULT ''
+         );
          CREATE TABLE IF NOT EXISTS runtime_claims (
              plan_id TEXT PRIMARY KEY, environment_id TEXT NOT NULL,
              owner TEXT NOT NULL, generation INTEGER NOT NULL,

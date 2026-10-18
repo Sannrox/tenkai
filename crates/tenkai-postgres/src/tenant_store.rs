@@ -93,6 +93,32 @@ impl TenantOperationalStore for PostgresTenantOperationalStore {
             environment_id,
         )
     }
+
+    fn append_change_event_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        occurred_at: i64,
+        kind: &str,
+        resource: &str,
+        environment_id: &str,
+    ) -> std::result::Result<tenkai::change_stream::ChangeEvent, IsolationError> {
+        let partition = self.partition_for(context)?;
+        partition
+            .append_change_event(occurred_at, kind, resource, environment_id)
+            .map_err(|error| IsolationError::Contract(error.to_string()))
+    }
+
+    fn list_change_events_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        cursor: i64,
+        limit: usize,
+    ) -> std::result::Result<Vec<tenkai::change_stream::ChangeEvent>, IsolationError> {
+        let partition = self.partition_for(context)?;
+        partition
+            .list_change_events_after(cursor, limit)
+            .map_err(|error| IsolationError::Contract(error.to_string()))
+    }
 }
 
 impl PostgresTenantOperationalStore {

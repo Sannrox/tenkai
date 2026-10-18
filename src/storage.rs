@@ -11,10 +11,11 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: u32 = 12;
+pub const SCHEMA_VERSION: u32 = 13;
 
 mod audit;
 mod catalog;
+mod change_events;
 mod error;
 mod fixture_matching;
 mod fixtures;

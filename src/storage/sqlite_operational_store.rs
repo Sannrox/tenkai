@@ -235,6 +235,24 @@ impl OperationalStore for SqliteStore {
         self.audit_events_sqlite()
     }
 
+    fn append_change_event(
+        &self,
+        occurred_at: i64,
+        kind: &str,
+        resource: &str,
+        environment_id: &str,
+    ) -> Result<crate::change_stream::ChangeEvent> {
+        self.append_change_event_sqlite(occurred_at, kind, resource, environment_id)
+    }
+
+    fn list_change_events_after(
+        &self,
+        cursor: i64,
+        limit: usize,
+    ) -> Result<Vec<crate::change_stream::ChangeEvent>> {
+        self.list_change_events_after_sqlite(cursor, limit)
+    }
+
     fn check_health(&self) -> Result<()> {
         let connection = self.connection()?;
         connection.query_row("SELECT 1", [], |_| Ok(()))?;

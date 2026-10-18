@@ -31,6 +31,13 @@ fn version_one_schema_migrates_provider_outbox_transactionally() {
             [],
         )
         .unwrap();
+    connection
+        .execute(
+            "INSERT INTO change_events(occurred_at, kind, resource, environment_id)
+             VALUES(1,'plan_created','plan-1','')",
+            [],
+        )
+        .unwrap();
 }
 
 #[test]

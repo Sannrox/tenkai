@@ -59,6 +59,7 @@ fn http_exposed_tenant_rpcs_are_subset_of_registry() {
     assert!(!http_exposed_tenant_rpc_ids().contains(&"plan.list"));
     assert!(!http_exposed_tenant_rpc_ids().contains(&"aggregate.audit_list"));
     assert!(http_exposed_tenant_rpc_ids().contains(&"runtime.inventory"));
+    assert!(http_exposed_tenant_rpc_ids().contains(&"event.list"));
 }
 
 #[test]

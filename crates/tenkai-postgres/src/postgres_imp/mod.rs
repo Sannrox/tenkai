@@ -145,6 +145,7 @@ pub(crate) fn ensure_environment_active(
 }
 
 mod catalog;
+mod change_events;
 mod channels;
 mod connect;
 mod fixtures;

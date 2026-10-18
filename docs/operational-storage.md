@@ -9,7 +9,7 @@ port, and retirement of the embedded object-graph schema. `SqliteStore` is the
 complete spoke and embedded adapter; the PostgreSQL adapter must pass the same
 immutability, lifecycle, idempotency, and generation-fencing contract.
 `Ctx::embedded` and community `tenkai-server` open only `SqliteStore`.
-Pre-0029 graph files migrate into typed schema 12 rows and drop `embedded_*`
+Pre-0029 graph files migrate into typed schema 13 rows and drop `embedded_*`
 tables so leftover objects cannot authorize apply. `TENKAI_POSTGRES_URL` is
 invalid on embedded and spoke hosts.
 
@@ -39,6 +39,10 @@ Server management requests and their terminal outcomes are appended to the
 `audit_events` table. Audit identifiers are immutable and survive server
 restart. The table contains principals, operation/resource identifiers, and
 outcomes only; bearer credentials and request secrets are never persisted.
+
+Typed operator-facing change events live in `change_events` (schema 13): a
+monotonic sequence cursor, kind, resource, and optional environment. `GET
+/v1/events` pages that log. The table is not the provider outbox.
 
 Remote runtime claims are durable, environment-scoped, expiring, and
 generation-fenced. Their completion payload retains per-step receipts and is

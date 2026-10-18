@@ -1,3 +1,4 @@
+use tenkai::change_stream::ChangeEvent;
 use tenkai::runtime_capabilities::ComponentCapabilities;
 use tenkai::storage::{
     AuditRecord, ChannelRecord, EnvironmentRecord, LeaseRecord, OfflineImportRecord,
@@ -193,6 +194,20 @@ impl OperationalStore for PostgresTenantPartition {
     }
     fn audit_events(&self) -> Result<Vec<AuditRecord>> {
         self.inner.audit_events(&self.schema)
+    }
+    fn append_change_event(
+        &self,
+        occurred_at: i64,
+        kind: &str,
+        resource: &str,
+        environment_id: &str,
+    ) -> Result<ChangeEvent> {
+        self.inner
+            .append_change_event(&self.schema, occurred_at, kind, resource, environment_id)
+    }
+    fn list_change_events_after(&self, cursor: i64, limit: usize) -> Result<Vec<ChangeEvent>> {
+        self.inner
+            .list_change_events_after(&self.schema, cursor, limit)
     }
     fn check_health(&self) -> Result<()> {
         self.inner.check_health()

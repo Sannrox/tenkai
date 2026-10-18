@@ -227,6 +227,41 @@ impl ManagementOperations {
         self.reconciler.list_environments().await.map_err(internal)
     }
 
+    pub async fn list_change_events(
+        &self,
+        credential: &CredentialMaterial,
+        cursor: Option<&str>,
+        limit: Option<&str>,
+    ) -> Result<crate::change_stream::ChangeEventPage, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        let parsed_cursor = crate::change_stream::parse_cursor(cursor)
+            .map_err(|_| ManagementError::BadRequest("change-event cursor is invalid".into()))?;
+        let parsed_limit = crate::change_stream::parse_limit(limit).map_err(|_| {
+            ManagementError::BadRequest("change-event page limit is invalid".into())
+        })?;
+        let mut events = if self.tenant_mode {
+            self.tenant_operations()?
+                .list_change_events(&context, parsed_cursor, parsed_limit)
+                .await
+                .map_err(map_tenant_error)?
+        } else {
+            self.store
+                .list_change_events_after(parsed_cursor, parsed_limit)
+                .map_err(|error| ManagementError::Unavailable(error.to_string()))?
+        };
+        // Advance through the durable log before environment-grant filtering so
+        // a scoped credential cannot stall on a page of other-environment rows.
+        let next_cursor = crate::change_stream::next_cursor(&events, parsed_cursor);
+        if let Some(granted) = self.granted_environment(credential, &context) {
+            events.retain(|event| event.environment.as_deref() == Some(granted));
+        }
+        Ok(crate::change_stream::ChangeEventPage {
+            next_cursor,
+            events,
+        })
+    }
+
     pub async fn list_releases(
         &self,
         credential: &CredentialMaterial,
@@ -375,12 +410,18 @@ impl ManagementOperations {
             "software_compatibility.record.requested",
         )?;
         let mut ctx = self.application_ctx()?;
+        let release_digest = evidence.release_digest.clone();
         crate::software_compatibility::record_evidence(&mut ctx, environment, evidence)
             .await
             .map_err(map_catalog_error)?;
         self.audit(
             context.principal_id(),
             "software_compatibility.record.completed",
+        )?;
+        self.record_change(
+            crate::change_stream::ChangeEventKind::CompatibilityResultRecorded,
+            &release_digest,
+            Some(environment),
         )?;
         Ok(())
     }
@@ -873,6 +914,11 @@ impl ManagementOperations {
         .await
         .map_err(map_catalog_error)?;
         self.audit(actor, "catalog.publish.completed")?;
+        self.record_change(
+            crate::change_stream::ChangeEventKind::ReleasePublished,
+            &published.release,
+            None,
+        )?;
         Ok(ManagementLifecycleResult::new(
             ManagementLifecycleOperation::Publish,
             published.message,
@@ -921,6 +967,11 @@ impl ManagementOperations {
             .await
             .map_err(map_catalog_error)?;
         self.audit(actor, "catalog.promote.completed")?;
+        self.record_change(
+            crate::change_stream::ChangeEventKind::ReleasePromoted,
+            &request.spec,
+            None,
+        )?;
         Ok(ManagementLifecycleResult::new(
             ManagementLifecycleOperation::Promote,
             message,
@@ -950,6 +1001,11 @@ impl ManagementOperations {
             .await
             .map_err(map_catalog_error)?;
         self.audit(actor, "catalog.recall.completed")?;
+        self.record_change(
+            crate::change_stream::ChangeEventKind::ReleaseRecalled,
+            release,
+            None,
+        )?;
         Ok(ManagementLifecycleResult::new(
             ManagementLifecycleOperation::Recall,
             message,
@@ -1097,6 +1153,16 @@ impl ManagementOperations {
         }
         .map_err(map_catalog_error)?;
         self.audit(actor, &format!("delivery.hold.{verb}.completed"))?;
+        self.record_change(
+            match operation {
+                ManagementLifecycleOperation::Hold => {
+                    crate::change_stream::ChangeEventKind::HoldSet
+                }
+                _ => crate::change_stream::ChangeEventKind::HoldReleased,
+            },
+            environment,
+            Some(environment),
+        )?;
         let message = match operation {
             ManagementLifecycleOperation::Hold => format!(
                 "held {environment} at {} by {}: {}",
@@ -1211,6 +1277,16 @@ impl ManagementOperations {
         .map_err(map_catalog_error)?;
         self.audit(actor, &format!("delivery.hold.{verb}.completed"))?;
         let label = scope.key();
+        self.record_change(
+            match operation {
+                ManagementLifecycleOperation::ChannelHold => {
+                    crate::change_stream::ChangeEventKind::HoldSet
+                }
+                _ => crate::change_stream::ChangeEventKind::HoldReleased,
+            },
+            &label,
+            None,
+        )?;
         let message = match operation {
             ManagementLifecycleOperation::ChannelHold => format!(
                 "held {label} at {} by {}: {}",
@@ -1268,6 +1344,11 @@ impl ManagementOperations {
             .await
             .map_err(map_catalog_error)?;
         self.audit(actor, "delivery.failed_target.retry.completed")?;
+        self.record_change(
+            crate::change_stream::ChangeEventKind::TargetRetried,
+            product,
+            Some(environment),
+        )?;
         let digest = format!(
             "sha256:{}",
             stored
@@ -1311,6 +1392,11 @@ impl ManagementOperations {
             .await
             .map_err(map_plan_lifecycle_error)?;
         self.audit(actor, "plan.completed")?;
+        self.record_change(
+            crate::change_stream::ChangeEventKind::PlanCreated,
+            &stored.id,
+            Some(environment),
+        )?;
         let digest = format!(
             "sha256:{}",
             stored
@@ -1380,6 +1466,11 @@ impl ManagementOperations {
             .await
             .map_err(map_plan_lifecycle_error)?;
         self.audit(actor, "plan.approve.completed")?;
+        self.record_change(
+            crate::change_stream::ChangeEventKind::PlanApproved,
+            plan_id,
+            Some(&request.environment),
+        )?;
         Ok(ManagementLifecycleResult::new(
             ManagementLifecycleOperation::Approve,
             format!("recorded approval for {plan_id}"),
@@ -1463,12 +1554,22 @@ impl ManagementOperations {
         }
         if failed > 0 {
             self.audit(actor, "plan.apply.failed")?;
+            self.record_change(
+                crate::change_stream::ChangeEventKind::TargetFailed,
+                plan_id,
+                Some(&request.environment),
+            )?;
             return Err(ManagementError::ExecutionFailed(format!(
                 "{failed} of {} step(s) for {plan_id} did not succeed",
                 outcomes.len()
             )));
         }
         self.audit(actor, "plan.apply.completed")?;
+        self.record_change(
+            crate::change_stream::ChangeEventKind::PlanApplied,
+            plan_id,
+            Some(&request.environment),
+        )?;
         Ok(ManagementLifecycleResult::new(
             ManagementLifecycleOperation::Apply,
             format!("applied {} step(s) for {plan_id}", outcomes.len()),
@@ -1634,6 +1735,26 @@ impl ManagementOperations {
                 resource: "*".into(),
                 outcome: operation.rsplit('.').next().unwrap_or(operation).into(),
             })
+            .map_err(|error| ManagementError::Unavailable(error.to_string()))
+    }
+
+    /// Append after a completed management mutation. Reconcile and runtime
+    /// completion write the same domain records without a second producer here;
+    /// those paths stay a follow-up so this slice owns the stream contract.
+    fn record_change(
+        &self,
+        kind: crate::change_stream::ChangeEventKind,
+        resource: &str,
+        environment: Option<&str>,
+    ) -> Result<(), ManagementError> {
+        self.store
+            .append_change_event(
+                crate::now_millis(),
+                kind.as_str(),
+                resource,
+                environment.unwrap_or(""),
+            )
+            .map(|_| ())
             .map_err(|error| ManagementError::Unavailable(error.to_string()))
     }
 }
