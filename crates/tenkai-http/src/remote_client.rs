@@ -96,6 +96,17 @@ impl RemoteClient {
         .await
     }
 
+    pub async fn environment_approval_policy(
+        &self,
+        environment: &str,
+    ) -> anyhow::Result<tenkai::approval_policy::EffectiveApprovalPolicy> {
+        self.request_json(
+            reqwest::Method::GET,
+            &format!("/v1/environments/{environment}/approval-policy"),
+        )
+        .await
+    }
+
     pub async fn software_compatibility_report(
         &self,
         environment: &str,

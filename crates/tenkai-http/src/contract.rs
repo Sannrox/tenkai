@@ -14,6 +14,7 @@ use schemars::{JsonSchema, SchemaGenerator};
 use serde_json::{Value, json};
 
 use super::router::{ErrorBody, ServiceStatus};
+use tenkai::approval_policy::EffectiveApprovalPolicy;
 use tenkai::catalog::{ChannelPage, ReleasePage};
 use tenkai::change_stream::ChangeEventPage;
 use tenkai::delivery_hold::DeliveryHoldView;
@@ -165,6 +166,13 @@ pub fn http_contract() -> Value {
             auth: Auth::Read,
             request: None,
             response: schema::<Vec<StatusRow>>(&mut g),
+        },
+        Route {
+            method: "GET",
+            path: "/v1/environments/{environment}/approval-policy",
+            auth: Auth::Read,
+            request: None,
+            response: schema::<EffectiveApprovalPolicy>(&mut g),
         },
         Route {
             method: "POST",
@@ -384,6 +392,11 @@ mod tests {
             ("EnvironmentMaintenanceInspect", "detail"),
             ("EnvironmentMaintenanceWindow", "next_opens_at_ms"),
             ("EnvironmentPlanSummary", "digest"),
+            ("EnvironmentPlanSummary", "approval"),
+            ("EffectiveApprovalPolicy", "ttl_ms"),
+            ("EffectiveApprovalPolicy", "digest"),
+            ("PlanApprovalView", "reason"),
+            ("PlanApprovalView", "policy_provider"),
             ("ManagementLifecycleResult", "resource"),
             ("MigrationRecord", "pending_plan_id"),
             ("ChangeEvent", "environment"),

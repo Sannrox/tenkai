@@ -368,6 +368,20 @@ async fn tenant_mode_management_apis_isolate_environments() {
         .await
         .unwrap();
     assert_eq!(channel_hold.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let approval_policy = tenant_app
+        .clone()
+        .oneshot(
+            Request::get("/v1/environments/env-a/approval-policy")
+                .header(
+                    "x-tenkai-assertion",
+                    r#"{"tenant":"tenant-a","principal":"user-a","capabilities":["read","management"]}"#,
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(approval_policy.status(), StatusCode::SERVICE_UNAVAILABLE);
 
     // Community profile still starts without tenant mode.
     let (community_app, _) = app();

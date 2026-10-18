@@ -1088,6 +1088,10 @@ pub struct EnvironmentPlanSummary {
     /// True when `step_count` exceeds the number of returned summaries.
     #[serde(default)]
     pub steps_truncated: bool,
+    /// Whether the latest plan was approved by policy or still needs a human.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub approval: Option<crate::approval_policy::PlanApprovalView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -1322,7 +1326,7 @@ pub async fn fleet_status(ctx: &mut Ctx) -> Result<FleetStatusReport> {
 
 /// Inspect one environment's subscriptions, lease/fence, and latest plan.
 pub async fn inspect_environment(ctx: &mut Ctx, env: &str) -> Result<EnvironmentInspectReport> {
-    inspect_environment_base(ctx, env).await
+    inspect_environment_base(ctx, env, crate::approval_policy::ExecutionPolicy::default()).await
 }
 
 /// Inspect one environment and, when the context permits it, include the
@@ -1331,19 +1335,36 @@ pub async fn inspect_environment_with_outcomes(
     ctx: &mut Ctx,
     env: &str,
 ) -> Result<EnvironmentInspectReport> {
-    let mut report = inspect_environment_base(ctx, env).await?;
+    inspect_environment_for_policy(
+        ctx,
+        env,
+        crate::approval_policy::ExecutionPolicy::from_host_env(),
+    )
+    .await
+}
+
+pub(crate) async fn inspect_environment_for_policy(
+    ctx: &mut Ctx,
+    env: &str,
+    execution: crate::approval_policy::ExecutionPolicy,
+) -> Result<EnvironmentInspectReport> {
+    let mut report = inspect_environment_base(ctx, env, execution).await?;
     report.terminal_outcomes = ctx.terminal_outcomes(env, crate::now_millis()).await?;
     Ok(report)
 }
 
-async fn inspect_environment_base(ctx: &mut Ctx, env: &str) -> Result<EnvironmentInspectReport> {
+async fn inspect_environment_base(
+    ctx: &mut Ctx,
+    env: &str,
+    execution: crate::approval_policy::ExecutionPolicy,
+) -> Result<EnvironmentInspectReport> {
     let env_obj = environment(ctx, env).await?;
     let rows = status_from_object(ctx, &env_obj).await?;
     let subscriptions = subscription_views_from_status(&env_obj, rows);
     let facts = environment_facts_from_object(&env_obj);
     let overlays = environment_overlays_from_object(&env_obj);
     let lease = crate::apply::inspect_environment_lease(ctx, env).await?;
-    let latest_plan = latest_plan_for_environment(ctx, env).await?;
+    let latest_plan = latest_plan_for_environment(ctx, env, &env_obj.properties, execution).await?;
     let observed = crate::workshop_module::observed_from_object(&env_obj)?;
     let module_activations = crate::workshop_module::activations_from_object(&env_obj)?;
     let preview = crate::preview::inspect_from_object(&env_obj)?;
@@ -2069,13 +2090,73 @@ pub async fn require_environment_fact(ctx: &mut Ctx, env: &str, key: &str) -> Re
 async fn latest_plan_for_environment(
     ctx: &mut Ctx,
     env: &str,
+    properties: &HashMap<String, String>,
+    execution: crate::approval_policy::ExecutionPolicy,
 ) -> Result<Option<EnvironmentPlanSummary>> {
     // Newest after checking every created_at index against its payload peek
     // so a depressed index cannot hide the true newest behind LIMIT 1.
-    crate::plan::latest_for_environment(ctx, env)
-        .await?
-        .map(environment_plan_summary)
-        .transpose()
+    let Some(plan) = crate::plan::latest_for_environment(ctx, env).await? else {
+        return Ok(None);
+    };
+    let recorded = crate::plan_approval::latest_for_plan(ctx, &plan.id).await?;
+    let now = crate::now_millis();
+    let inspected =
+        crate::approval_policy::inspect_approval_evidence(ctx, &plan, recorded, &execution, now)
+            .await;
+    let policy = crate::approval_policy::load_live_policy(properties);
+    let signals = crate::approval_policy::delivery_signals_for_plan(ctx, &plan).await?;
+    let live_policy = policy.as_ref().ok().and_then(|value| value.as_ref());
+    let approval = if crate::approval_policy::plan_awaiting_execution(&plan)
+        && crate::approval_policy::development_bypass_current(&plan, &execution)
+    {
+        crate::approval_policy::explain_plan_approval(
+            live_policy,
+            &plan,
+            signals,
+            inspected.evidence.as_ref(),
+            now,
+            execution,
+        )
+    } else if inspected.blocked_human {
+        crate::approval_policy::blocked_pending_human_view()
+    } else if crate::approval_policy::plan_awaiting_execution(&plan) && policy.is_err() {
+        crate::approval_policy::PlanApprovalView {
+            source: "required".into(),
+            reason: Some("approval policy is unreadable".into()),
+            policy_provider: inspected
+                .evidence
+                .as_ref()
+                .map(|evidence| evidence.policy_provider.clone()),
+        }
+    } else if crate::approval_policy::plan_awaiting_execution(&plan)
+        && crate::approval_policy::reused_auto_envelope_is_unexecutable(
+            ctx,
+            live_policy,
+            &plan,
+            signals,
+            &execution,
+            now,
+        )
+        .await
+    {
+        crate::approval_policy::PlanApprovalView {
+            source: "required".into(),
+            reason: Some("pending automatic approval is not executable".into()),
+            policy_provider: Some(crate::approval_policy::POLICY_PROVIDER.into()),
+        }
+    } else {
+        crate::approval_policy::explain_plan_approval(
+            live_policy,
+            &plan,
+            signals,
+            inspected.evidence.as_ref(),
+            now,
+            execution,
+        )
+    };
+    let mut summary = environment_plan_summary(plan)?;
+    summary.approval = Some(approval);
+    Ok(Some(summary))
 }
 
 pub(crate) fn environment_plan_summary(plan: Plan) -> Result<EnvironmentPlanSummary> {
@@ -2106,6 +2187,7 @@ pub(crate) fn environment_plan_summary(plan: Plan) -> Result<EnvironmentPlanSumm
         status_detail,
         steps_truncated: steps.len() < step_count,
         steps,
+        approval: None,
     })
 }
 
@@ -2636,5 +2718,359 @@ mod tests {
         assert!(err.contains("file path"), "{err}");
         let _ = std::fs::remove_file(&database);
         let _ = std::fs::remove_dir_all(&policy_dir);
+    }
+
+    #[tokio::test]
+    async fn inspect_plan_approval_covers_policy_downgrade_and_stale_refresh() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-inspect-approval-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let database = root.join("tenkai.db");
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        env_add(&mut ctx, "lab", "Lab").await.unwrap();
+
+        let mut install = crate::plan::Plan {
+            format_version: crate::plan::PLAN_FORMAT_VERSION,
+            id: String::new(),
+            content_id: String::new(),
+            environment: "lab".into(),
+            created_at: 100,
+            inputs: vec![crate::plan::DesiredStateInput {
+                product: "api".into(),
+                channel: "stable".into(),
+                channel_id: "tenkai:channel:api/stable".into(),
+                desired_version: "1.0.0".into(),
+                release_id: "tenkai:release:api@1.0.0".into(),
+                release_digest: "abc".into(),
+                artifact_digest: "abc".into(),
+                deployed_version: None,
+            }],
+            steps: vec![crate::plan::Step {
+                id: String::new(),
+                order: 0,
+                product: "api".into(),
+                action: crate::plan::Action::Install,
+                from: None,
+                to: "1.0.0".into(),
+                release_id: "tenkai:release:api@1.0.0".into(),
+                release_digest: "abc".into(),
+                artifact_digest: "abc".into(),
+                workdir: ".".into(),
+                restore: None,
+            }],
+            state: crate::plan::PlanState::Computed,
+            gates_skipped: None,
+            status_detail: String::new(),
+            maintenance_blocked: false,
+            prior_warnings: Vec::new(),
+            recalled_recovery_reason: None,
+        };
+        install.bind_content_identity().unwrap();
+        crate::plan::store(&mut ctx, &install).await.unwrap();
+
+        let missing = inspect_environment(&mut ctx, "lab")
+            .await
+            .unwrap()
+            .latest_plan
+            .unwrap()
+            .approval
+            .unwrap();
+        assert_eq!(missing.source, "required");
+        assert_eq!(
+            missing.reason.as_deref(),
+            Some("no environment approval policy")
+        );
+
+        let key = root.join("auto-approver.ed25519");
+        #[cfg(unix)]
+        {
+            use std::io::Write as _;
+            use std::os::unix::fs::OpenOptionsExt as _;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&key)
+                .unwrap();
+            file.write_all(&[7_u8; 32]).unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(&key, [7_u8; 32]).unwrap();
+        }
+        let policy = root.join("policy.toml");
+        std::fs::write(
+            &policy,
+            format!(
+                "version = 1\nmode = \"auto\"\nttl_ms = 60000\nauto_signer_key = \"{}\"\n",
+                key.display()
+            ),
+        )
+        .unwrap();
+        set_plan_approval_policy(&mut ctx, "lab", &policy)
+            .await
+            .unwrap();
+
+        let approved = inspect_environment(&mut ctx, "lab")
+            .await
+            .unwrap()
+            .latest_plan
+            .unwrap()
+            .approval
+            .unwrap();
+        assert_eq!(approved.source, "policy");
+        assert_eq!(approved.reason, None);
+
+        crate::plan_approval::record(
+            &mut ctx,
+            &crate::plan_approval::VerificationEvidence {
+                schema: crate::plan_approval::APPROVAL_SCHEMA.into(),
+                plan_id: install.id.clone(),
+                plan_digest: format!("sha256:{}", install.executable_digest().unwrap()),
+                environment: "lab".into(),
+                signer_identity: "auto".into(),
+                key_id: "kid".into(),
+                policy_provider: crate::approval_policy::POLICY_PROVIDER.into(),
+                policy_evidence_id: "auto".into(),
+                policy_digest: "sha256:old".into(),
+                issued_at: 1,
+                expires_at: 2,
+                verified_at: crate::now_millis(),
+                skip_gates: false,
+                bypass_reason: None,
+            },
+        )
+        .await
+        .unwrap();
+        let stale = inspect_environment(&mut ctx, "lab")
+            .await
+            .unwrap()
+            .latest_plan
+            .unwrap()
+            .approval
+            .unwrap();
+        assert_eq!(stale.source, "policy");
+        assert_eq!(
+            stale.reason.as_deref(),
+            Some("stale automatic approval will refresh")
+        );
+
+        let mut downgrade = install.clone();
+        downgrade.created_at = 200;
+        downgrade.steps[0].action = crate::plan::Action::Downgrade;
+        downgrade.steps[0].from = Some("1.0.0".into());
+        downgrade.steps[0].to = "0.9.0".into();
+        downgrade.bind_content_identity().unwrap();
+        crate::plan::store(&mut ctx, &downgrade).await.unwrap();
+        let human = inspect_environment(&mut ctx, "lab")
+            .await
+            .unwrap()
+            .latest_plan
+            .unwrap()
+            .approval
+            .unwrap();
+        assert_eq!(human.source, "required");
+        assert!(
+            human.reason.as_deref().unwrap().contains("downgrade"),
+            "{human:?}"
+        );
+
+        std::fs::write(&policy, "not toml").unwrap();
+        let broken = inspect_environment(&mut ctx, "lab").await.unwrap();
+        let approval = broken.latest_plan.unwrap().approval.unwrap();
+        assert_eq!(broken.name, "lab");
+        assert_eq!(approval.source, "required");
+        assert_eq!(
+            approval.reason.as_deref(),
+            Some("approval policy is unreadable")
+        );
+        assert!(
+            !approval
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains(&policy.display().to_string()),
+            "{approval:?}"
+        );
+        crate::plan_approval::record(
+            &mut ctx,
+            &crate::plan_approval::VerificationEvidence {
+                schema: crate::plan_approval::APPROVAL_SCHEMA.into(),
+                plan_id: downgrade.id.clone(),
+                plan_digest: format!("sha256:{}", downgrade.executable_digest().unwrap()),
+                environment: "lab".into(),
+                signer_identity: "alice".into(),
+                key_id: "kid".into(),
+                policy_provider: "alice".into(),
+                policy_evidence_id: "decision".into(),
+                policy_digest: "sha256:human".into(),
+                issued_at: 1,
+                expires_at: crate::now_millis() + 60_000,
+                verified_at: crate::now_millis(),
+                skip_gates: false,
+                bypass_reason: None,
+            },
+        )
+        .await
+        .unwrap();
+        let pending = inspect_environment(&mut ctx, "lab")
+            .await
+            .unwrap()
+            .latest_plan
+            .unwrap()
+            .approval
+            .unwrap();
+        assert_eq!(pending.source, "required");
+        downgrade.state = crate::plan::PlanState::Running;
+        crate::plan::store(&mut ctx, &downgrade).await.unwrap();
+        let preserved = inspect_environment(&mut ctx, "lab")
+            .await
+            .unwrap()
+            .latest_plan
+            .unwrap()
+            .approval
+            .unwrap();
+        assert_eq!(preserved.source, "human");
+        assert_eq!(preserved.policy_provider.as_deref(), Some("alice"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn inspect_reads_pending_human_envelope_before_execution() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-inspect-pending-envelope-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let database = root.join("tenkai.db");
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        env_add(&mut ctx, "lab", "Lab").await.unwrap();
+
+        let mut install = crate::plan::Plan {
+            format_version: crate::plan::PLAN_FORMAT_VERSION,
+            id: String::new(),
+            content_id: String::new(),
+            environment: "lab".into(),
+            created_at: 100,
+            inputs: vec![crate::plan::DesiredStateInput {
+                product: "api".into(),
+                channel: "stable".into(),
+                channel_id: "tenkai:channel:api/stable".into(),
+                desired_version: "1.0.0".into(),
+                release_id: "tenkai:release:api@1.0.0".into(),
+                release_digest: "abc".into(),
+                artifact_digest: "abc".into(),
+                deployed_version: None,
+            }],
+            steps: vec![crate::plan::Step {
+                id: String::new(),
+                order: 0,
+                product: "api".into(),
+                action: crate::plan::Action::Install,
+                from: None,
+                to: "1.0.0".into(),
+                release_id: "tenkai:release:api@1.0.0".into(),
+                release_digest: "abc".into(),
+                artifact_digest: "abc".into(),
+                workdir: ".".into(),
+                restore: None,
+            }],
+            state: crate::plan::PlanState::Computed,
+            gates_skipped: None,
+            status_detail: String::new(),
+            maintenance_blocked: false,
+            prior_warnings: Vec::new(),
+            recalled_recovery_reason: None,
+        };
+        install.bind_content_identity().unwrap();
+        crate::plan::store(&mut ctx, &install).await.unwrap();
+
+        let key = root.join("auto-approver.ed25519");
+        #[cfg(unix)]
+        {
+            use std::io::Write as _;
+            use std::os::unix::fs::OpenOptionsExt as _;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&key)
+                .unwrap();
+            file.write_all(&[7_u8; 32]).unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(&key, [7_u8; 32]).unwrap();
+        }
+        let policy = root.join("policy.toml");
+        std::fs::write(
+            &policy,
+            format!(
+                "version = 1\nmode = \"auto\"\nttl_ms = 60000\nauto_signer_key = \"{}\"\n",
+                key.display()
+            ),
+        )
+        .unwrap();
+        set_plan_approval_policy(&mut ctx, "lab", &policy)
+            .await
+            .unwrap();
+
+        let approvals = root.join("approvals");
+        std::fs::create_dir_all(&approvals).unwrap();
+        let envelope = approvals.join(format!("{}.json", install.id));
+        let human_roots = root.join("human-trust.toml");
+        crate::dev_sign::sign_plan_approval_for_digest(
+            &root.join("human-keys"),
+            &format!("sha256:{}", install.executable_digest().unwrap()),
+            "lab",
+            &envelope,
+            &human_roots,
+            3600,
+        )
+        .unwrap();
+        let eligibility = inspect_environment(&mut ctx, "lab")
+            .await
+            .unwrap()
+            .latest_plan
+            .unwrap()
+            .approval
+            .unwrap();
+        assert_eq!(eligibility.source, "policy");
+        let execution = crate::approval_policy::ExecutionPolicy {
+            trust_roots: Some(human_roots),
+            approval_directory: Some(approvals),
+            ..crate::approval_policy::ExecutionPolicy::default()
+        };
+        let human = inspect_environment_for_policy(&mut ctx, "lab", execution.clone())
+            .await
+            .unwrap()
+            .latest_plan
+            .unwrap()
+            .approval
+            .unwrap();
+        assert_eq!(human.source, "human");
+        assert_eq!(human.policy_provider.as_deref(), Some("builtin"));
+        std::fs::write(&policy, "not toml").unwrap();
+        let blocked = inspect_environment_for_policy(&mut ctx, "lab", execution)
+            .await
+            .unwrap()
+            .latest_plan
+            .unwrap()
+            .approval
+            .unwrap();
+        assert_eq!(blocked.source, "required");
+        assert_eq!(
+            blocked.reason.as_deref(),
+            Some("approval policy is unreadable")
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

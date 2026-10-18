@@ -117,6 +117,23 @@ pub(super) async fn inspect_environment(
     )
 }
 
+pub(super) async fn environment_approval_policy(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .environment_approval_policy(&credential, &environment)
+            .await,
+    )
+}
+
 pub(super) async fn environment_status(
     State(state): State<Arc<AppState>>,
     Path(environment): Path<String>,

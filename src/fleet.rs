@@ -454,6 +454,7 @@ mod tests {
                 status_detail: String::new(),
                 steps: Vec::new(),
                 steps_truncated: false,
+                approval: None,
             }),
             maintenance: None,
             constraints: Vec::new(),

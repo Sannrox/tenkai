@@ -123,6 +123,23 @@ tenkaictl env approval-policy show lab
 tenkaictl env approval-policy clear lab
 ```
 
+Remote operators read the effective policy with
+`tenkaictl --target remote env approval-policy show lab` or
+`GET /v1/environments/{environment}/approval-policy`. The response lists
+automatic signer key ids, the rules that still require a human, TTL, and
+the policy digest. It never includes seed bytes or file contents. Setting
+and clearing the policy path stay embedded-only. Environment inspect includes
+`latest_plan.approval`: `policy` when the live policy auto-signed, `human`
+when a person signed, `development` for the local unsigned bypass, or
+`required` with the reason a human signature is still needed. Inspect verifies a pending human envelope at
+`$TENKAI_PLAN_APPROVAL_DIR/<plan-id>.json` for computed and blocked plans.
+A present human envelope that cannot execute is `required`; it does not fall
+through to automatic approval. Automatic envelopes stay on the live policy
+path. A pending unsigned local bypass is `development` while this host
+permits unapproved local development, including before execution records
+evidence; otherwise inspect follows the live policy. Running and completed plans keep recorded provenance. A stale automatic envelope is `policy` with reason
+`stale automatic approval will refresh`.
+
 When `mode = "auto"` and the plan does not match a require-human rule, the
 next reconcile tick signs `$TENKAI_PLAN_APPROVAL_DIR/<plan-id>.json` with
 `policy_provider = "builtin-auto"`, `policy_evidence_id = "auto"`, and

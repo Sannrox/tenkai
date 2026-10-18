@@ -20,7 +20,6 @@ pub use release_selection::{
     FitRefusal, dotted_version, gpu_requirements_fit, model_requirements_fit,
 };
 
-pub(crate) use crate::environment::update_runtime_deployments_object;
 pub use crate::environment::{
     ENVIRONMENT_FACT_KEYS, EnvironmentInspectReport, EnvironmentListEntry,
     EnvironmentPlanStepSummary, EnvironmentPlanSummary, EnvironmentSubscriptionView, StatusRow,
@@ -34,6 +33,9 @@ pub use crate::environment::{
     set_cluster_config_path, set_docker_secret_dir, set_environment_constraint,
     set_environment_fact, set_environment_overlay, set_plan_approval_policy, status, subscribe,
     subscription_state,
+};
+pub(crate) use crate::environment::{
+    inspect_environment_for_policy, update_runtime_deployments_object,
 };
 
 pub use crate::deploy_webhook::{

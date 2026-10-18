@@ -74,6 +74,8 @@ pub struct VerificationEvidence {
     pub issued_at: i64,
     pub expires_at: i64,
     pub verified_at: i64,
+    #[serde(default)]
+    pub skip_gates: bool,
     pub bypass_reason: Option<String>,
 }
 
@@ -164,7 +166,7 @@ impl TrustRoots {
         Ok(roots)
     }
 
-    fn signer(&self, key_id: &str) -> Result<&TrustedSigner> {
+    pub(crate) fn signer(&self, key_id: &str) -> Result<&TrustedSigner> {
         self.signers
             .iter()
             .find(|signer| signer.key_id == key_id)
@@ -309,6 +311,7 @@ pub fn verify(
         issued_at: envelope.statement.issued_at,
         expires_at: envelope.statement.expires_at,
         verified_at: now,
+        skip_gates: envelope.statement.skip_gates,
         bypass_reason: None,
     })
 }
@@ -331,6 +334,7 @@ pub fn local_bypass(plan: &Plan, reason: &str, now: i64) -> Result<VerificationE
         issued_at: now,
         expires_at: now,
         verified_at: now,
+        skip_gates: false,
         bypass_reason: Some(reason.into()),
     })
 }
@@ -369,6 +373,34 @@ pub async fn record(ctx: &mut Ctx, evidence: &VerificationEvidence) -> Result<()
     .await
     .map_err(anyhow::Error::from)?;
     Ok(())
+}
+
+/// Newest recorded verification for `plan_id`, if any.
+pub async fn latest_for_plan(ctx: &mut Ctx, plan_id: &str) -> Result<Option<VerificationEvidence>> {
+    let mut objects = ctx
+        .find_by_property(
+            crate::ontology::KIND_PLAN_APPROVAL_VERIFICATION,
+            "plan_id",
+            plan_id,
+        )
+        .await?;
+    objects.sort_by_key(|object| {
+        object
+            .properties
+            .get("verified_at")
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(0)
+    });
+    let Some(object) = objects.pop() else {
+        return Ok(None);
+    };
+    let raw = object
+        .properties
+        .get("evidence")
+        .context("plan approval verification is missing evidence")?;
+    Ok(Some(serde_json::from_str(raw).context(
+        "plan approval verification evidence is not valid JSON",
+    )?))
 }
 
 impl VerificationEvidence {

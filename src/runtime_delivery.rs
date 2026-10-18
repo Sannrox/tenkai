@@ -154,7 +154,12 @@ impl ReconcilePort for Reconciler {
     fn inspect_environment(&self, environment: String) -> InspectEnvFuture<'_> {
         Box::pin(async move {
             let mut ctx = self.ctx_clone();
-            crate::plan::inspect_environment_with_outcomes(&mut ctx, &environment).await
+            crate::plan::inspect_environment_for_policy(
+                &mut ctx,
+                &environment,
+                self.execution_policy(),
+            )
+            .await
         })
     }
 

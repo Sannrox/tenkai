@@ -87,6 +87,9 @@ Existing `/v1/reconcile`, `/v1/environments`, `/v1/fleet/status`, and
 `/v1/migrations/*` routes are unchanged. Delivery-hold set, release, and
 failed-target retry are additive `tenkai.http.v1` routes that reuse this
 envelope's version, actor audit, and environment fencing generation.
+`GET /v1/environments/{environment}/approval-policy` is an additive
+`tenkai.http.v1` read of the effective plan-approval policy; it does not
+edit the policy file.
 
 ## Machine-readable contract
 

@@ -12,8 +12,9 @@ use tenkai::tenant_store::TenantOperationalStore;
 use super::auth::{import_development_fixture, reset_development_fixture};
 use super::config::ServerConfig;
 use super::inspect::{
-    change_events, environment_status, fleet_status, health, inspect_environment, list_channels,
-    list_environments, list_migrations, list_releases, oidc_client, openmetrics, ready, reconcile,
+    change_events, environment_approval_policy, environment_status, fleet_status, health,
+    inspect_environment, list_channels, list_environments, list_migrations, list_releases,
+    oidc_client, openmetrics, ready, reconcile,
 };
 use super::lifecycle::{
     apply_plan, approve_plan, channel_hold, environment_hold, install_model_evaluation_trust,
@@ -102,6 +103,10 @@ pub fn router(
         .route(
             "/v1/environments/{environment}/status",
             get(environment_status),
+        )
+        .route(
+            "/v1/environments/{environment}/approval-policy",
+            get(environment_approval_policy),
         )
         .route(
             "/v1/migrations/{name}/preview",

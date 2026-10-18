@@ -60,6 +60,10 @@ tenkaictl env approval-policy show lab
 tenkaictl env approval-policy clear lab
 ```
 
+Remote `show` reads `GET /v1/environments/{environment}/approval-policy`
+and prints the effective policy (signer key ids, human rules, TTL). Set
+and clear stay embedded-only. Inspect reports `latest_plan.approval`.
+
 ## Post-deploy webhooks
 
 An environment may declare signed HTTPS endpoints that receive terminal apply
