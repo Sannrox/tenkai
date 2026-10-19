@@ -30,6 +30,15 @@ software token and the KMIP contract against a loopback lab endpoint. A cloud
 KMS adapter remains a follow-up slice. Ceremony against on-site adapters remains
 a later slice.
 
+## Distribution as releases
+
+After the ceremony, components receive wrapped data keys and the provider
+endpoint in release configuration (`tenkai.customer-key-release.v1`). Plaintext
+keys never appear in that document, bundles, plans, or logs. Rotation and
+revocation are the same document: a new wrapping KEK, or a revoked KEK id.
+Preflight checks that every named component can unwrap. A revoked release fails
+closed. This is a migration of on-disk release configuration (GATE:mig).
+
 ## Lab ceremony
 
 ```sh
