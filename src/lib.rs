@@ -155,6 +155,7 @@ pub mod change_stream;
 pub mod client;
 pub mod command_result;
 pub mod connectivity;
+pub mod customer_key_release;
 pub mod delivery_bridge;
 pub mod delivery_hold;
 pub mod delivery_manifest;

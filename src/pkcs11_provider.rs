@@ -641,69 +641,99 @@ pub fn software_token_module() -> Option<PathBuf> {
 }
 
 #[cfg(test)]
+pub(crate) const TEST_USER_PIN: &str = "1234";
+#[cfg(test)]
+const TEST_SO_PIN: &str = "1234";
+
+#[cfg(test)]
+fn softhsm_conf() -> &'static PathBuf {
+    static CONF: OnceLock<PathBuf> = OnceLock::new();
+    CONF.get_or_init(|| {
+        let root = std::env::temp_dir().join(format!("tenkai-softhsm-{}", std::process::id()));
+        let tokens = root.join("tokens");
+        std::fs::create_dir_all(&tokens).expect("token dir");
+        let conf = root.join("softhsm2.conf");
+        std::fs::write(
+            &conf,
+            format!(
+                "directories.tokendir = {}\nobjectstore.backend = file\nlog.level = ERROR\n",
+                tokens.display()
+            ),
+        )
+        .expect("conf");
+        // SoftHSM reads this at C_Initialize. Set it before any PKCS#11 load.
+        // SAFETY: tests own this process environment and set the path once.
+        unsafe { std::env::set_var("SOFTHSM2_CONF", &conf) };
+        conf
+    })
+}
+
+#[cfg(test)]
+struct SoftwareTokenPool {
+    module: PathBuf,
+    labels: Vec<String>,
+    next: usize,
+}
+
+#[cfg(test)]
+pub(crate) fn next_software_token() -> Option<(PathBuf, String)> {
+    use std::process::Command;
+    static POOL: OnceLock<Mutex<SoftwareTokenPool>> = OnceLock::new();
+    let mut pool = POOL
+        .get_or_init(|| {
+            let module = software_token_module().unwrap_or_else(|| {
+                assert!(
+                    std::env::var_os("CI").is_none(),
+                    "PKCS#11 software token required in CI"
+                );
+                PathBuf::new()
+            });
+            let mut labels = Vec::new();
+            if !module.as_os_str().is_empty() {
+                let _ = softhsm_conf();
+                for _ in 0..4 {
+                    let label = uuid::Uuid::new_v4().simple().to_string();
+                    let status = Command::new("softhsm2-util")
+                        .args([
+                            "--init-token",
+                            "--free",
+                            "--label",
+                            &label,
+                            "--pin",
+                            TEST_USER_PIN,
+                            "--so-pin",
+                            TEST_SO_PIN,
+                        ])
+                        .status()
+                        .expect("softhsm2-util");
+                    assert!(status.success(), "softhsm2-util failed: {status}");
+                    labels.push(label);
+                }
+            }
+            Mutex::new(SoftwareTokenPool {
+                module,
+                labels,
+                next: 0,
+            })
+        })
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if pool.module.as_os_str().is_empty() {
+        return None;
+    }
+    let label = pool.labels.get(pool.next)?.clone();
+    pool.next += 1;
+    Some((pool.module.clone(), label))
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use std::process::Command;
-    use std::sync::Mutex;
-
-    const USER_PIN: &str = "1234";
-    const SO_PIN: &str = "1234";
-
-    fn softhsm_conf() -> &'static PathBuf {
-        static CONF: OnceLock<PathBuf> = OnceLock::new();
-        CONF.get_or_init(|| {
-            let root = std::env::temp_dir().join(format!("tenkai-softhsm-{}", std::process::id()));
-            let tokens = root.join("tokens");
-            fs::create_dir_all(&tokens).expect("token dir");
-            let conf = root.join("softhsm2.conf");
-            fs::write(
-                &conf,
-                format!(
-                    "directories.tokendir = {}\nobjectstore.backend = file\nlog.level = ERROR\n",
-                    tokens.display()
-                ),
-            )
-            .expect("conf");
-            // SoftHSM reads this at C_Initialize. Set it before any PKCS#11 load.
-            // SAFETY: tests own this process environment and set the path once.
-            unsafe { std::env::set_var("SOFTHSM2_CONF", &conf) };
-            conf
-        })
-    }
-
-    fn init_token(label: &str) {
-        static INIT: Mutex<()> = Mutex::new(());
-        let _guard = INIT.lock().unwrap_or_else(|poison| poison.into_inner());
-        let _ = softhsm_conf();
-        let status = Command::new("softhsm2-util")
-            .args([
-                "--init-token",
-                "--free",
-                "--label",
-                label,
-                "--pin",
-                USER_PIN,
-                "--so-pin",
-                SO_PIN,
-            ])
-            .status()
-            .expect("softhsm2-util");
-        assert!(status.success(), "softhsm2-util failed: {status}");
-    }
 
     fn provider() -> Option<Pkcs11KeyProvider> {
-        let Some(module) = software_token_module() else {
-            assert!(
-                std::env::var_os("CI").is_none(),
-                "PKCS#11 software token required in CI"
-            );
-            return None;
-        };
-        let label = uuid::Uuid::new_v4().simple().to_string();
-        init_token(&label);
+        let (module, label) = next_software_token()?;
         Some(
-            Pkcs11KeyProvider::open(&module, &label, USER_PIN, RuntimeProfile::Production)
+            Pkcs11KeyProvider::open(&module, &label, TEST_USER_PIN, RuntimeProfile::Production)
                 .expect("open pkcs11 provider"),
         )
     }
