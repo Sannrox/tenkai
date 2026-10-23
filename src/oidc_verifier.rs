@@ -177,6 +177,24 @@ pub enum JwksLocation {
 }
 
 impl OidcConfig {
+    /// Claim values whose rule grants fleet management: `management` with no
+    /// environment binding. Such a rule is how the first administrator acts
+    /// without the shared management token.
+    pub fn fleet_administrator_values(&self) -> Vec<&str> {
+        self.grants
+            .rules
+            .iter()
+            .filter(|rule| {
+                rule.environment.is_none()
+                    && rule
+                        .capabilities
+                        .iter()
+                        .any(|capability| capability == "management")
+            })
+            .map(|rule| rule.value.as_str())
+            .collect()
+    }
+
     pub fn load(path: &Path) -> Result<Self, AuthError> {
         let raw = std::fs::read_to_string(path).map_err(|error| {
             AuthError::InvalidCredential(format!(

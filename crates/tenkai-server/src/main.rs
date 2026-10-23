@@ -227,6 +227,16 @@ fn load_oidc_extension(
 )> {
     let config = OidcConfig::load(config_path)
         .with_context(|| format!("loading OIDC configuration from {}", config_path.display()))?;
+    match config.fleet_administrator_values().as_slice() {
+        [] => eprintln!(
+            "tenkai.auth first_administrator=missing detail=no OIDC grant rule gives fleet management; only TENKAI_MANAGEMENT_TOKEN can administer this server (see docs/configure-server-authentication.md#first-administrator)"
+        ),
+        values => eprintln!(
+            "tenkai.auth first_administrator=configured claim={} values={}",
+            config.grants.claim,
+            values.join(",")
+        ),
+    }
     if require_tenant
         && config
             .grants

@@ -162,6 +162,40 @@ Behavior:
   `[client] connect_origins` (https, or http on loopback, and no path); it is never served
   to clients.
 
+### First administrator
+
+Administrators are not records in Tenkai's store. A person administers the
+fleet when their token matches a grant rule with `management` and no
+`environment`, so the first administrator exists as soon as that rule is in
+the OIDC config and the person is in that group. Nothing has to be created
+on first start, and no long-lived token is handed out for it.
+
+1. Create the administrator group in the identity provider, for example
+   `tenkai-admins`, and add the first person.
+2. Map it in the config:
+
+   ```toml
+   [[grants.rules]]
+   value = "tenkai-admins"
+   capabilities = ["read", "management"]
+   ```
+
+3. Start the server and check the startup line:
+
+   ```text
+   tenkai.auth first_administrator=configured claim=groups values=tenkai-admins
+   ```
+
+   `first_administrator=missing` means no rule gives fleet management, so
+   only `TENKAI_MANAGEMENT_TOKEN` can administer the server.
+4. Sign in (`tenkaictl login`, or the web console) and confirm a management
+   read such as `tenkaictl --target remote fleet status`.
+
+Keep `TENKAI_MANAGEMENT_TOKEN` in the secret store as the break-glass
+credential, not for day-to-day administration. Every management mutation
+records the authenticated principal in the audit log, so the first
+administrator's actions are attributable from the first request.
+
 ### CLI sign-in
 
 `tenkaictl login` is an OIDC client of the same public `[client]` the console
