@@ -79,6 +79,32 @@ and rollback check fresh environment-scoped evidence before mutation;
 [software compatibility preflight](software-compatibility.md) for the contract,
 observation format, and CLI/API commands.
 
+## Topology
+
+A release can declare its replicas. A replica is an environment, and a
+topology names the environments that each run one replica and the placement
+fact they must not share:
+
+```toml
+[topology]
+name = "ledger-ha"
+environments = ["ledger-a", "ledger-b", "ledger-c"]
+anti_affinity = "host"   # or "zone"
+```
+
+The facts are the environments' `host` and `zone` facts, set by the operator
+(`tenkaictl env facts set ledger-a host node-1`) or reported by an environment
+runtime that knows its node. They are not probed: a container's host name is not
+the machine it runs on, so a replica without the fact is refused, not guessed. Planning the release for a replica is refused while two
+replicas share the fact (`replicas ledger-a and ledger-c both have host=h1`),
+while a replica has not reported it, or for an environment that is not one of
+the replicas. Apply checks again before it changes anything, for the release
+being deployed and the one a failure would restore, and runtime delivery checks
+before it hands out new work, so a stored plan cannot outlive a placement
+change. A topology needs at least two distinct replicas. Releases without
+a `[topology]` plan as before. Keeping a minimum of replicas available during a
+rolling upgrade and failover drills follow separately (#650).
+
 ## Gates
 
 If a release declares `gate.eval_suite`, `apply` blocks unless the suite's
