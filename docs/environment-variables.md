@@ -12,6 +12,10 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `TENKAI_DATABASE` | `.tenkai-state/tenkai.db` | Embedded or server-owned operational SQLite database |
+| `TENKAI_TIME_SOURCE` | unset | `tenkai-server` only: SNTP `host:port` for the runtime clock-drift check ([host preflight](host-preflight.md#keep-time-synchronized-after-install)) |
+| `TENKAI_CLOCK_WARN_MS` | `1000` | Skew above which health reports `clock.state` as `warn` |
+| `TENKAI_CLOCK_REFUSE_MS` | `30000` | Skew above which approvals, applies and runtime lease claims are refused |
+| `TENKAI_CLOCK_CHECK_SECS` | `60` | Seconds between clock measurements |
 | `TENKAI_CA_BUNDLE` | unset | PEM file of CA certificates every outbound TLS client trusts in addition to the built-in roots: registry and model downloads, OIDC, webhooks, telemetry, remote gates, the runtime agent, the remote CLI and its login, the gRPC outcome provider, the remote backend and PostgreSQL. Unreadable or empty fails closed. Kubernetes clients use their kubeconfig CA |
 | `TENKAI_TLS_SYSTEM_ROOTS` | `true` | `false` drops the built-in and platform roots, so only `TENKAI_CA_BUNDLE` is trusted; requires the bundle. A remote HTTPS backend (`TENKAI_SEKAI_URL`) is refused with `false` until its client can drop its built-in roots |
 | `TENKAI_BACKUP_DIR` | unset | `tenkai-server` only: directory for scheduled and on-demand backups ([backup and restore](backup-restore.md#server-mode-backups)). Refused in tenant mode |

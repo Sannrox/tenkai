@@ -1792,6 +1792,8 @@ impl ManagementOperations {
         self.refuse_agent(&context, "plan.approve")?;
         Self::require_capability(&context, DeliveryCapability::Management)?;
         self.require_community_catalog_host()?;
+        crate::clock_guard::require_trusted_time("plan approval")
+            .map_err(|error| ManagementError::Unavailable(error.to_string()))?;
         management_lifecycle::admit_approve(
             &request,
             plan_id,
@@ -1856,6 +1858,8 @@ impl ManagementOperations {
         self.refuse_agent(&context, "plan.apply")?;
         Self::require_capability(&context, DeliveryCapability::Management)?;
         self.require_community_catalog_host()?;
+        crate::clock_guard::require_trusted_time("plan apply")
+            .map_err(|error| ManagementError::Unavailable(error.to_string()))?;
         management_lifecycle::admit_apply(
             &request,
             plan_id,
@@ -2253,7 +2257,9 @@ fn map_environment_error(error: anyhow::Error) -> ManagementError {
 /// host could not carry out (for example an unreadable policy file).
 fn map_config_error(error: anyhow::Error) -> ManagementError {
     let message = format!("{error:#}");
-    if message.contains("not registered")
+    if crate::clock_guard::is_clock_refusal(&message) {
+        ManagementError::Unavailable(message)
+    } else if message.contains("not registered")
         || message.contains(" has no ")
         || message.contains("is not configured")
     {

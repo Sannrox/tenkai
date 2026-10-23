@@ -315,7 +315,7 @@ fn check_clock(rule: &ClockRule, timeout: Duration) -> Result<String, String> {
 
 /// Server time minus local time from the first resolved address that
 /// answers an SNTP v4 request.
-fn sntp_skew_ms(server: &str, timeout: Duration) -> Result<i64> {
+pub(crate) fn sntp_skew_ms(server: &str, timeout: Duration) -> Result<i64> {
     let mut last = None;
     for target in server
         .to_socket_addrs()
@@ -563,6 +563,35 @@ pub fn require_passing(
     Ok(())
 }
 
+/// One-shot SNTP server on loopback that answers `skew_ms` ahead of now.
+#[cfg(test)]
+pub(crate) fn fake_time_server(skew_ms: i64) -> String {
+    fake_time_server_replying(skew_ms, 0x24, 2)
+}
+
+/// `first` is the leap/version/mode byte; `stratum` the second byte.
+#[cfg(test)]
+pub(crate) fn fake_time_server_replying(skew_ms: i64, first: u8, stratum: u8) -> String {
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let address = socket.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let mut request = [0_u8; 48];
+        let (_, peer) = socket.recv_from(&mut request).unwrap();
+        let at = crate::now_millis() + skew_ms;
+        let seconds = (at.div_euclid(1_000) + NTP_UNIX_OFFSET_SECS) as u32;
+        let fraction = ((at.rem_euclid(1_000) << 32) / 1_000) as u32;
+        let mut reply = [0_u8; 48];
+        reply[0] = first;
+        reply[1] = stratum;
+        for at in [32, 40] {
+            reply[at..at + 4].copy_from_slice(&seconds.to_be_bytes());
+            reply[at + 4..at + 8].copy_from_slice(&fraction.to_be_bytes());
+        }
+        socket.send_to(&reply, peer).unwrap();
+    });
+    address
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -610,31 +639,12 @@ R8E4AqWXYHDgxQg+tAyEng==
         dir
     }
 
-    /// One-shot SNTP server on loopback that answers `skew_ms` ahead of now.
     fn fake_time_server(skew_ms: i64) -> String {
-        time_server(skew_ms, 0x24, 2)
+        super::fake_time_server(skew_ms)
     }
 
-    /// `first` is the leap/version/mode byte; `stratum` the second byte.
     fn time_server(skew_ms: i64, first: u8, stratum: u8) -> String {
-        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let address = socket.local_addr().unwrap().to_string();
-        std::thread::spawn(move || {
-            let mut request = [0_u8; 48];
-            let (_, peer) = socket.recv_from(&mut request).unwrap();
-            let at = crate::now_millis() + skew_ms;
-            let seconds = (at.div_euclid(1_000) + NTP_UNIX_OFFSET_SECS) as u32;
-            let fraction = ((at.rem_euclid(1_000) << 32) / 1_000) as u32;
-            let mut reply = [0_u8; 48];
-            reply[0] = first;
-            reply[1] = stratum;
-            for at in [32, 40] {
-                reply[at..at + 4].copy_from_slice(&seconds.to_be_bytes());
-                reply[at + 4..at + 8].copy_from_slice(&fraction.to_be_bytes());
-            }
-            socket.send_to(&reply, peer).unwrap();
-        });
-        address
+        super::fake_time_server_replying(skew_ms, first, stratum)
     }
 
     #[test]

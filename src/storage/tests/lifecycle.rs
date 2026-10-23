@@ -133,9 +133,30 @@ fn runtime_plan_claims_are_durable_and_exclusive() {
         .unwrap();
     assert_eq!(renewed.generation, 1);
     assert_eq!(renewed.expires_at, expiry + 2);
+    // Before completion there is nothing to replay read-only.
+    assert_eq!(
+        reopened
+            .durable_runtime_completion("plan-1", "runtime-a")
+            .unwrap(),
+        None
+    );
     reopened
         .complete_runtime_plan("plan-1", "runtime-a", 1, "{\"ok\":true}")
         .unwrap();
+    let replay = reopened
+        .durable_runtime_completion("plan-1", "runtime-a")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (replay.generation, replay.completion_json.as_deref()),
+        (1, Some("{\"ok\":true}"))
+    );
+    assert_eq!(
+        reopened
+            .durable_runtime_completion("plan-1", "runtime-b")
+            .unwrap(),
+        None
+    );
     assert_eq!(
         reopened
             .claim_runtime_plan("prod", "plan-1", "runtime-a", expiry + 2)

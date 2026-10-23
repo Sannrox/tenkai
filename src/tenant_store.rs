@@ -752,6 +752,13 @@ impl OperationalStore for TenantPartition {
         self.store
             .complete_runtime_plan(plan_id, owner, generation, completion_json)
     }
+    fn durable_runtime_completion(
+        &self,
+        plan_id: &str,
+        owner: &str,
+    ) -> Result<Option<RuntimeClaim>> {
+        self.store.durable_runtime_completion(plan_id, owner)
+    }
 }
 
 #[cfg(test)]

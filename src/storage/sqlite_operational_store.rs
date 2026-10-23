@@ -273,6 +273,31 @@ impl OperationalStore for SqliteStore {
         self.claim_runtime_plan_sqlite(environment, plan_id, owner, expires_at)
     }
 
+    fn durable_runtime_completion(
+        &self,
+        plan_id: &str,
+        owner: &str,
+    ) -> Result<Option<RuntimeClaim>> {
+        Ok(self
+            .connection()?
+            .query_row(
+                "SELECT environment_id,generation,expires_at,completion_json FROM runtime_claims
+                 WHERE plan_id=?1 AND owner=?2 AND completion_json IS NOT NULL",
+                params![plan_id, owner],
+                |row| {
+                    Ok(RuntimeClaim {
+                        plan_id: plan_id.into(),
+                        environment_id: row.get(0)?,
+                        owner: owner.into(),
+                        generation: row.get(1)?,
+                        expires_at: row.get(2)?,
+                        completion_json: row.get(3)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
     fn renew_runtime_plan(
         &self,
         plan_id: &str,

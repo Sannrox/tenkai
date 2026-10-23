@@ -145,6 +145,17 @@ pub trait OperationalStore: Send + Sync {
         owner: &str,
         expires_at: i64,
     ) -> Result<Option<RuntimeClaim>>;
+    /// `owner`'s claim on `plan_id` when it already holds a durable
+    /// completion. Read-only: nothing about the lease changes.
+    fn durable_runtime_completion(
+        &self,
+        _plan_id: &str,
+        _owner: &str,
+    ) -> Result<Option<RuntimeClaim>> {
+        Err(StoreError::AdapterUnavailable(
+            "durable completion lookup is not implemented by this store".into(),
+        ))
+    }
     fn renew_runtime_plan(
         &self,
         plan_id: &str,

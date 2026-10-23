@@ -55,6 +55,11 @@ pub(super) struct ServiceStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(transform = tenkai::schema_contract::omitted_when_none)]
     pub(super) backup: Option<tenkai::backup::BackupHealth>,
+    /// Clock skew against the configured time source. `refuse` blocks
+    /// approvals, applies and runtime lease claims; readiness stays up.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = tenkai::schema_contract::omitted_when_none)]
+    pub(super) clock: Option<tenkai::clock_guard::ClockHealth>,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]

@@ -519,6 +519,38 @@
       ],
       "type": "object"
     },
+    "ClockHealth": {
+      "description": "The last clock reading, as health reports it.",
+      "properties": {
+        "measured_at_ms": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "refuse_ms": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "skew_ms": {
+          "description": "Time-source time minus local time, from the last successful reading.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "state": {
+          "description": "`ok`, `warn`, `refuse`, or `unknown` (no successful reading yet, or the\nlast measurement failed).",
+          "type": "string"
+        },
+        "warn_ms": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "state",
+        "warn_ms",
+        "refuse_ms"
+      ],
+      "type": "object"
+    },
     "CompatibilityEvidence": {
       "additionalProperties": false,
       "properties": {
@@ -3577,6 +3609,10 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "clock": {
+          "$ref": "#/$defs/ClockHealth",
+          "description": "Clock skew against the configured time source. `refuse` blocks\napprovals, applies and runtime lease claims; readiness stays up."
         },
         "contracts": {
           "description": "API contract ids this server serves, for client compatibility checks.",

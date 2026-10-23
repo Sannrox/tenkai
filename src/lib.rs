@@ -154,6 +154,7 @@ pub mod catalog;
 pub mod change_set_pin;
 pub mod change_stream;
 pub mod client;
+pub mod clock_guard;
 pub mod command_result;
 pub mod connectivity;
 pub mod content_inventory;
