@@ -261,10 +261,14 @@ fn preflight_weight_artifact(artifact: &OfflineChunkArtifact, chunk_dir: &Path) 
 /// `TENKAI_WEIGHT_CACHE`.
 /// What [`import_weight_chunks_for_bundle`] checks, without writing: the
 /// archive path, a configured cache, and every chunk of every weight.
+/// `reuse` is false when every weight must come from the source (an import
+/// scanner is configured): cached and partial weights are then not counted,
+/// and every chunk must be present.
 pub fn preflight_weight_chunks_for_bundle(
     bundle: &VerifiedBundle,
     bundle_path: Option<&Path>,
     cache: Option<&WeightCache>,
+    reuse: bool,
 ) -> Result<()> {
     let Some(raw) = bundle.entry(CHUNK_MANIFEST_PATH) else {
         return Ok(());
@@ -284,6 +288,7 @@ pub fn preflight_weight_chunks_for_bundle(
         if cache
             .verify_cached(&artifact.digest)
             .with_context(|| format!("cached weight {} is damaged", artifact.digest))?
+            && reuse
         {
             continue;
         }
@@ -293,7 +298,11 @@ pub fn preflight_weight_chunks_for_bundle(
         // An interrupted import resumes after its verified prefix and needs
         // only the remaining chunks.
         let partial = cache.blob_path(&artifact.digest)?.with_extension("partial");
-        let skip = resume_verified_prefix(&partial, artifact, false)?;
+        let skip = if reuse {
+            resume_verified_prefix(&partial, artifact, false)?
+        } else {
+            0
+        };
         if skip == 0 {
             preflight_weight_artifact(artifact, &chunk_dir_beside(path)?)?;
         } else {
@@ -349,6 +358,29 @@ fn preflight_remaining_chunks(
             "offline weight {} does not match reconstructed digest {actual}",
             artifact.digest
         );
+    }
+    Ok(())
+}
+
+/// Remove any resumable partial weight for this bundle's weights, so the next
+/// import reads every chunk from its source. Used when a scanner must see
+/// all the bytes: a resumed prefix would skip the scanned source.
+pub fn discard_partial_weights(bundle: &VerifiedBundle, cache: Option<&WeightCache>) -> Result<()> {
+    let (Some(raw), Some(cache)) = (bundle.entry(CHUNK_MANIFEST_PATH), cache) else {
+        return Ok(());
+    };
+    let manifest: OfflineChunkManifest =
+        serde_json::from_slice(raw).context("parsing offline chunk manifest")?;
+    for artifact in &manifest.artifacts {
+        let partial = cache.blob_path(&artifact.digest)?.with_extension("partial");
+        match fs::remove_file(&partial) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("discarding partial weight {}", partial.display()));
+            }
+        }
     }
     Ok(())
 }
@@ -610,6 +642,60 @@ fn copy_verified_chunk(
         whole.update(&buffer[..read]);
         output.write_all(&buffer[..read])?;
         remaining -= read as u64;
+    }
+    Ok(())
+}
+
+/// Copy the chunks `bundle`'s signed chunk manifest names from `from` to
+/// `to`, each bounded to its declared size. Nothing else in `from` is read.
+pub fn copy_referenced_chunks(
+    bundle: &crate::offline_bundle::BundleEnvelope,
+    from: &Path,
+    to: &Path,
+) -> Result<()> {
+    use base64::Engine as _;
+    let Some(entry) = bundle
+        .entries
+        .iter()
+        .find(|entry| entry.path == CHUNK_MANIFEST_PATH)
+    else {
+        return Ok(());
+    };
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(&entry.content_base64)
+        .context("decoding the offline chunk manifest")?;
+    let manifest: OfflineChunkManifest =
+        serde_json::from_slice(&raw).context("parsing offline chunk manifest")?;
+    fs::create_dir_all(to).with_context(|| format!("creating {}", to.display()))?;
+    for chunk in manifest
+        .artifacts
+        .iter()
+        .flat_map(|artifact| &artifact.chunks)
+    {
+        let source = chunk_path(from, &chunk.digest)?;
+        let target = chunk_path(to, &chunk.digest)?;
+        if target.exists() {
+            continue;
+        }
+        // Non-blocking open, then a regular-file check on the open file: a
+        // FIFO or device in place of a chunk must not stall the import.
+        let input = {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&source)
+                .with_context(|| format!("missing chunk {} ({})", chunk.digest, source.display()))?
+        };
+        if !input.metadata()?.is_file() {
+            bail!("chunk {} is not a regular file", chunk.digest);
+        }
+        let mut output = File::create(&target)?;
+        // One byte past the declared size tells a longer file from a match.
+        let copied = std::io::copy(&mut input.take(chunk.size + 1), &mut output)?;
+        if copied != chunk.size {
+            bail!("chunk {} does not match its signed size", chunk.digest);
+        }
     }
     Ok(())
 }

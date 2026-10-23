@@ -311,6 +311,10 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "scan": {
+          "$ref": "#/$defs/ScanEvidence",
+          "description": "The import scanner's outcome, when one is configured."
         }
       },
       "required": [
@@ -3595,6 +3599,43 @@
         "environment",
         "expected_generation",
         "product"
+      ],
+      "type": "object"
+    },
+    "ScanEvidence": {
+      "additionalProperties": false,
+      "description": "What the scanner said about one import.",
+      "properties": {
+        "exit_code": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "scanned_at_ms": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "scanner": {
+          "type": "string"
+        },
+        "stderr_sha256": {
+          "type": "string"
+        },
+        "stdout_sha256": {
+          "description": "SHA-256 of the scanner's standard output and standard error, so the\nfull report can be matched to the scanner's own logs.",
+          "type": "string"
+        },
+        "summary": {
+          "description": "The first line of output (standard output, else standard error), at\nmost 200 bytes.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "scanner",
+        "exit_code",
+        "stdout_sha256",
+        "stderr_sha256",
+        "summary",
+        "scanned_at_ms"
       ],
       "type": "object"
     },

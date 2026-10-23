@@ -274,6 +274,12 @@ pub async fn run(
             plan_id: envelope.statement.plan_id.clone(),
             release_ids: envelope.statement.release_ids.clone(),
             carries_revocations: crate::key_revocation::bundle_carries_revocations(&envelope),
+            scan: record
+                .environments
+                .iter()
+                .find(|environment| environment.name == request.environment)
+                .and_then(|environment| environment.isolated.as_ref())
+                .and_then(|evidence| evidence.scan.clone()),
         };
         Ok::<_, anyhow::Error>(preview)
     }
