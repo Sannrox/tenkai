@@ -101,8 +101,7 @@ impl tenkai::model_runtime::ModelRuntimeExecutorFactory for VllmExecutorFactory 
                 tolerations: Vec::new(),
             },
             match artifacts {
-                Some(artifacts) => WeightCache::new(weights_root)
-                    .with_artifact_registry(artifacts.registry, artifacts.mirrors),
+                Some(artifacts) => WeightCache::new(weights_root).with_environment(artifacts),
                 None => WeightCache::new(weights_root),
             },
             state_path.to_path_buf(),

@@ -88,6 +88,14 @@ removed.
   validation. The cache resolves against `https://huggingface.co` unless the
   embedder calls `WeightCache::with_hub(endpoint, token)`; the token is never in
   a manifest and is redacted from `Debug`.
+- On apply, `WeightCache::with_environment` applies the environment's policy.
+  An `artifact_mirror.<hub host>` entry (`tenkaictl env artifact-mirror set
+  <env> huggingface.co=<mirror>`) moves `hf://` resolution onto
+  `https://<mirror>`; in an `isolated` environment a redirect that leaves the
+  mirror is refused. An `isolated` environment without that mirror refuses
+  `hf://` before any network attempt, naming the model and the missing mirror;
+  blobs already in the cache, such as weights imported from an offline bundle,
+  still resolve.
 - `oci://<registry>/<repository>@sha256:<hex>` names a single-blob artifact of
   media type `application/vnd.tenkai.model.weights.v1`; the digest must equal
   `model.artifact_digest`. The cache pulls through
