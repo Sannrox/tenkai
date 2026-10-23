@@ -545,3 +545,18 @@ fn console_connect_origins_start_with_the_issuer_and_stay_private() {
         assert!(config(&extra).validate().is_err(), "{origin}");
     }
 }
+
+#[test]
+fn fleet_administrators_are_unbound_management_rules() {
+    // Environment-bound management does not administer the fleet.
+    assert_eq!(
+        config("").fleet_administrator_values(),
+        vec!["tenkai-admins"]
+    );
+    let mut readers_only = config("");
+    readers_only
+        .grants
+        .rules
+        .retain(|rule| rule.value != "tenkai-admins");
+    assert!(readers_only.fleet_administrator_values().is_empty());
+}
