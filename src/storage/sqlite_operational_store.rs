@@ -235,6 +235,10 @@ impl OperationalStore for SqliteStore {
         self.audit_events_sqlite()
     }
 
+    fn audit_events_after(&self, cursor: i64, limit: usize) -> Result<Vec<(i64, AuditRecord)>> {
+        self.audit_events_after_sqlite(cursor, limit)
+    }
+
     fn append_change_event(
         &self,
         occurred_at: i64,

@@ -36,6 +36,7 @@ will be split over time. Contributor and agent workflow live in
 | Deploy releases from GitHub | [deploy-from-github.md](deploy-from-github.md) |
 | Publish a signed release from CI | [examples/ci-publish](../examples/ci-publish/) |
 | Back up and restore embedded state | [backup-restore.md](backup-restore.md) |
+| Export and verify signed audit records | [audit-export.md](audit-export.md) |
 | Run the on-site key ceremony | [key-ceremony.md](key-ceremony.md) |
 | Diagnose a server and watch fleet drift | [server-diagnostics.md](server-diagnostics.md) |
 | Observe and execute rollout waves | [rollout-waves.md](rollout-waves.md) |

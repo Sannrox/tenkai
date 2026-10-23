@@ -12,6 +12,10 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `TENKAI_DATABASE` | `.tenkai-state/tenkai.db` | Embedded or server-owned operational SQLite database |
+| `TENKAI_AUDIT_EXPORT_DIR` | unset | `tenkai-server` only: directory of the scheduled [audit export](audit-export.md) chain. Set with `TENKAI_AUDIT_SIGNING_KEY` |
+| `TENKAI_AUDIT_SIGNING_KEY` | unset | Ed25519 seed file that signs audit exports |
+| `TENKAI_AUDIT_EXPORT_INTERVAL_SECS` | `86400` | Seconds between scheduled audit exports |
+| `TENKAI_AUDIT_TRUST_ROOTS` | unset | Trust roots for exports in the chain signed before an audit key rotation |
 | `TENKAI_IMPORT_SCANNER` | unset | Absolute path of a scanner run on every offline bundle import after signature verification and before any write ([offline bundles](offline-bundles.md#content-scanner)) |
 | `TENKAI_IMPORT_SCANNER_TIMEOUT_SECS` | `600` | Seconds the import scanner may run before the import is refused |
 | `TENKAI_IMPORT_SCANNER_SNAPSHOT_DIR` | the temp directory | Writable directory for the private copy of a bundle the scanner reads and the import then uses |

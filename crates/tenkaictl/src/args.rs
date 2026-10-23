@@ -242,6 +242,11 @@ pub(crate) enum Command {
     Restore { source: PathBuf },
     /// Rehearse restoring a server backup into a scratch store and print the
     /// evidence. Never touches live state.
+    /// Export or verify signed, period-chained audit records.
+    Audit {
+        #[command(subcommand)]
+        command: AuditCommand,
+    },
     RestoreDrill {
         /// A `tenkai-backup-<ms>.db` backup with its manifest beside it.
         backup: PathBuf,
@@ -360,4 +365,30 @@ pub(crate) enum RevocationsCommand {
     Import { list: PathBuf },
     /// Print the installed list.
     Show,
+}
+
+#[derive(clap::Subcommand)]
+pub(crate) enum AuditCommand {
+    /// Write the next export of the chain in `dir`: everything written since
+    /// its newest export, signed with the Ed25519 seed. The existing chain
+    /// must verify first.
+    Export {
+        dir: PathBuf,
+        #[arg(long)]
+        signing_key: PathBuf,
+        /// Trust roots for exports in `dir` signed before a key rotation.
+        #[arg(long)]
+        trust_roots: Option<PathBuf>,
+    },
+    /// Verify exports in order: signatures, contiguous cursors, chaining.
+    Verify {
+        #[arg(required = true, num_args = 1..)]
+        exports: Vec<PathBuf>,
+        #[arg(long)]
+        trust_roots: PathBuf,
+        /// Digest of the export before the first one given, when the files
+        /// continue an earlier chain.
+        #[arg(long)]
+        anchor: Option<String>,
+    },
 }

@@ -57,6 +57,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         command @ Command::Reconcile { .. } => crate::embedded_reconcile::run(ctx, command).await,
         Command::Restore { .. }
         | Command::RestoreDrill { .. }
+        | Command::Audit { .. }
         | Command::Dev { .. }
         | Command::ExecutorGuard { .. }
         | Command::Login { .. }
