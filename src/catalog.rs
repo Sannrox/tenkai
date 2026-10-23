@@ -595,7 +595,7 @@ pub async fn list_channels(ctx: &mut Ctx) -> Result<Vec<ChannelListEntry>> {
     Ok(items)
 }
 
-fn release_list_entry(object: Object) -> ReleaseListEntry {
+pub(crate) fn release_list_entry(object: Object) -> ReleaseListEntry {
     let (product, version) = match (
         object
             .properties

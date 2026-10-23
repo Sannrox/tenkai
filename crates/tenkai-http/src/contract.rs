@@ -18,6 +18,7 @@ use tenkai::approval_policy::EffectiveApprovalPolicy;
 use tenkai::backup::{BackupManifest, BackupStatus};
 use tenkai::catalog::{ChannelPage, ReleasePage};
 use tenkai::change_stream::ChangeEventPage;
+use tenkai::content_inventory::ContentInventory;
 use tenkai::delivery_hold::DeliveryHoldView;
 use tenkai::environment::{EnvironmentInspectReport, EnvironmentListEntry, StatusRow};
 use tenkai::environment_config::{EnvironmentConfigRequest, RegisterEnvironmentRequest};
@@ -28,6 +29,7 @@ use tenkai::management_lifecycle::{
     RetireEnvironmentRequest, RetryFailedTargetRequest, RollbackRequest, SubscribeRequest,
 };
 use tenkai::observed_runtime::EnvironmentRuntimeReport;
+use tenkai::offline_import::{ImportJob, ImportRequest, StagedBundle};
 use tenkai::oidc_verifier::OidcClientDiscovery;
 use tenkai::package_migration::{
     MigrationPage, PackageMigrationApplyRequest, PackageMigrationMutateRequest,
@@ -135,6 +137,34 @@ pub fn http_contract() -> Value {
             auth: Auth::Management,
             request: None,
             response: schema::<BackupManifest>(&mut g),
+        },
+        Route {
+            method: "POST",
+            path: "/v1/imports",
+            auth: Auth::Management,
+            request: Some(schema::<ImportRequest>(&mut g)),
+            response: schema::<ImportJob>(&mut g),
+        },
+        Route {
+            method: "GET",
+            path: "/v1/imports/staged",
+            auth: Auth::Management,
+            request: None,
+            response: schema::<Vec<StagedBundle>>(&mut g),
+        },
+        Route {
+            method: "GET",
+            path: "/v1/imports/{id}",
+            auth: Auth::Management,
+            request: None,
+            response: schema::<ImportJob>(&mut g),
+        },
+        Route {
+            method: "GET",
+            path: "/v1/content/inventory",
+            auth: Auth::Read,
+            request: None,
+            response: schema::<ContentInventory>(&mut g),
         },
         Route {
             method: "GET",
@@ -481,6 +511,17 @@ mod tests {
         for (def, field) in [
             ("OidcClientDiscovery", "display_name"),
             ("ServiceStatus", "backup"),
+            ("StagedBundle", "environment"),
+            ("StagedBundle", "plan_id"),
+            ("StagedBundle", "expires_at_ms"),
+            ("StagedBundle", "unreadable"),
+            ("ImportJob", "finished_at_ms"),
+            ("ImportJob", "preview"),
+            ("ImportJob", "refusal"),
+            ("ContentInventory", "oci_store_bytes"),
+            ("ContentInventory", "weight_cache_bytes"),
+            ("ContentItem", "stored"),
+            ("ContentItem", "size_bytes"),
             ("BackupStatus", "last_success"),
             ("BackupStatus", "last_failure"),
             ("BackupStatus", "last_drill"),

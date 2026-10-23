@@ -382,6 +382,17 @@ impl WeightCache {
         Ok(self.root.join("sha256").join(hex))
     }
 
+    /// Whether `artifact_digest` is cached: `false` when absent, an error when
+    /// the cached blob does not match its digest.
+    pub fn verify_cached(&self, artifact_digest: &str) -> Result<bool> {
+        let path = self.blob_path(artifact_digest)?;
+        if !path.is_file() {
+            return Ok(false);
+        }
+        verify_file_digest(&path, artifact_digest)?;
+        Ok(true)
+    }
+
     /// Admit a streaming-verified weight file. Matching cache hits are a no-op.
     /// Digest mismatch leaves the cache blob unchanged.
     pub fn admit_file(&self, artifact_digest: &str, source: &Path) -> Result<PathBuf> {

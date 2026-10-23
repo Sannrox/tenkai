@@ -259,6 +259,100 @@ fn preflight_weight_artifact(artifact: &OfflineChunkArtifact, chunk_dir: &Path) 
 /// Bundles without `chunks/manifest.json` stay file-only. A chunked bundle
 /// requires the JSON archive path (so `<stem>.chunks/` can be found) and
 /// `TENKAI_WEIGHT_CACHE`.
+/// What [`import_weight_chunks_for_bundle`] checks, without writing: the
+/// archive path, a configured cache, and every chunk of every weight.
+pub fn preflight_weight_chunks_for_bundle(
+    bundle: &VerifiedBundle,
+    bundle_path: Option<&Path>,
+    cache: Option<&WeightCache>,
+) -> Result<()> {
+    let Some(raw) = bundle.entry(CHUNK_MANIFEST_PATH) else {
+        return Ok(());
+    };
+    let cache = cache.context("TENKAI_WEIGHT_CACHE is required to import chunked weights")?;
+    let manifest: OfflineChunkManifest =
+        serde_json::from_slice(raw).context("parsing offline chunk manifest")?;
+    if manifest.schema != CHUNK_MANIFEST_SCHEMA {
+        bail!(
+            "unsupported offline chunk manifest schema {}",
+            manifest.schema
+        );
+    }
+    for artifact in &manifest.artifacts {
+        // A verified cached blob is reused without its chunks, as the real
+        // import does; a damaged one would refuse the import.
+        if cache
+            .verify_cached(&artifact.digest)
+            .with_context(|| format!("cached weight {} is damaged", artifact.digest))?
+        {
+            continue;
+        }
+        let path = bundle_path.context(
+            "chunked offline bundle requires the archive path so companion chunks can be verified",
+        )?;
+        // An interrupted import resumes after its verified prefix and needs
+        // only the remaining chunks.
+        let partial = cache.blob_path(&artifact.digest)?.with_extension("partial");
+        let skip = resume_verified_prefix(&partial, artifact, false)?;
+        if skip == 0 {
+            preflight_weight_artifact(artifact, &chunk_dir_beside(path)?)?;
+        } else {
+            preflight_remaining_chunks(artifact, &chunk_dir_beside(path)?, &partial, skip)?;
+        }
+    }
+    Ok(())
+}
+
+/// What a resumed import checks, read-only: chunk order and sizes, each
+/// chunk it still reads from `skip` on, and the whole-weight digest of the
+/// verified prefix in `partial` followed by those chunks.
+fn preflight_remaining_chunks(
+    artifact: &OfflineChunkArtifact,
+    chunk_dir: &Path,
+    partial: &Path,
+    skip: usize,
+) -> Result<()> {
+    let mut total = 0_u64;
+    for (index, chunk) in artifact.chunks.iter().enumerate() {
+        if chunk.index as usize != index {
+            bail!(
+                "offline weight {} chunk index is not sequential",
+                artifact.digest
+            );
+        }
+        total = total
+            .checked_add(chunk.size)
+            .ok_or_else(|| anyhow::anyhow!("chunk size overflow"))?;
+    }
+    if total != artifact.size {
+        bail!(
+            "offline weight {} chunk sizes do not sum to {}",
+            artifact.digest,
+            artifact.size
+        );
+    }
+    let prefix: u64 = artifact.chunks[..skip].iter().map(|chunk| chunk.size).sum();
+    let mut whole = Sha256::new();
+    std::io::copy(&mut File::open(partial)?.take(prefix), &mut whole)?;
+    for chunk in &artifact.chunks[skip..] {
+        let file = chunk_path(chunk_dir, &chunk.digest)?;
+        let meta = fs::metadata(&file)
+            .with_context(|| format!("missing chunk {} ({})", chunk.digest, file.display()))?;
+        if meta.len() != chunk.size || digest_file(&file)? != chunk.digest {
+            bail!("chunk {} does not match its signed digest", chunk.digest);
+        }
+        std::io::copy(&mut File::open(&file)?, &mut whole)?;
+    }
+    let actual = format!("sha256:{:x}", whole.finalize());
+    if actual != artifact.digest {
+        bail!(
+            "offline weight {} does not match reconstructed digest {actual}",
+            artifact.digest
+        );
+    }
+    Ok(())
+}
+
 pub fn import_weight_chunks_for_bundle(
     bundle: &VerifiedBundle,
     bundle_path: Option<&Path>,
@@ -381,7 +475,7 @@ fn import_one_artifact(
     fs::create_dir_all(parent)
         .with_context(|| format!("creating weight cache {}", parent.display()))?;
     let partial = destination.with_extension("partial");
-    let skip = resume_verified_prefix(&partial, artifact)?;
+    let skip = resume_verified_prefix(&partial, artifact, true)?;
     let mut output = OpenOptions::new()
         .create(true)
         .write(true)
@@ -421,7 +515,19 @@ fn import_one_artifact(
     cache.admit_file(&artifact.digest, &partial)
 }
 
-fn resume_verified_prefix(partial: &Path, artifact: &OfflineChunkArtifact) -> Result<usize> {
+/// Chunks of `artifact` already verified at the start of `partial`. When the
+/// partial does not match, `discard` removes it (the import starts over); a
+/// preview passes `false` and leaves it alone.
+fn resume_verified_prefix(
+    partial: &Path,
+    artifact: &OfflineChunkArtifact,
+    discard: bool,
+) -> Result<usize> {
+    let remove = |partial: &Path| {
+        if discard {
+            let _ = fs::remove_file(partial);
+        }
+    };
     if !partial.is_file() {
         return Ok(0);
     }
@@ -448,14 +554,14 @@ fn resume_verified_prefix(partial: &Path, artifact: &OfflineChunkArtifact) -> Re
             let want = remaining.min(buffer.len() as u64) as usize;
             let read = input.read(&mut buffer[..want])?;
             if read == 0 {
-                let _ = fs::remove_file(partial);
+                remove(partial);
                 return Ok(0);
             }
             hasher.update(&buffer[..read]);
             remaining -= read as u64;
         }
         if format!("sha256:{:x}", hasher.finalize()) != chunk.digest {
-            let _ = fs::remove_file(partial);
+            remove(partial);
             return Ok(0);
         }
         acc = next;
@@ -463,7 +569,7 @@ fn resume_verified_prefix(partial: &Path, artifact: &OfflineChunkArtifact) -> Re
             return Ok(index + 1);
         }
     }
-    let _ = fs::remove_file(partial);
+    remove(partial);
     Ok(0)
 }
 

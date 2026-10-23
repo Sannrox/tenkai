@@ -76,6 +76,11 @@ impl OciArtifactRef {
 
 /// Verify and pull digest-bound artifacts. Implementors own transport.
 pub trait ArtifactRegistry: Send + Sync {
+    /// `None` when absent, `Some(true)` when stored with matching bytes,
+    /// `Some(false)` when stored with other bytes. Reads, never writes.
+    fn stored(&self, reference: &OciArtifactRef) -> Result<Option<bool>> {
+        Ok(self.verify(reference).ok().map(|_| true))
+    }
     fn verify(&self, reference: &OciArtifactRef) -> Result<OciArtifactRef>;
     fn fetch(&self, reference: &OciArtifactRef) -> Result<Vec<u8>>;
     fn store(&self, reference: &OciArtifactRef, bytes: Vec<u8>) -> Result<()>;
@@ -212,6 +217,17 @@ impl FilesystemArtifactRegistry {
 }
 
 impl ArtifactRegistry for FilesystemArtifactRegistry {
+    fn stored(&self, reference: &OciArtifactRef) -> Result<Option<bool>> {
+        reference.validate()?;
+        match std::fs::read(self.blob_path(reference)) {
+            Ok(bytes) => Ok(Some(
+                format!("sha256:{:x}", Sha256::digest(bytes)) == reference.digest,
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     fn verify(&self, reference: &OciArtifactRef) -> Result<OciArtifactRef> {
         reference.validate()?;
         let path = self.blob_path(reference);

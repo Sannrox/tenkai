@@ -610,6 +610,7 @@ async fn main() -> Result<()> {
                 .map(std::path::PathBuf::from),
             agent_actor_policy: cli.agent_actor_policy,
             backups: backups.as_ref().map(|(backups, _)| backups.clone()),
+            imports: import_settings()?,
         },
         reconciler.clone(),
         store.clone(),
@@ -822,6 +823,33 @@ async fn main() -> Result<()> {
             .context("joining backup task during shutdown")?;
     }
     result.context("serving Tenkai API")
+}
+
+/// Server-side bundle import from `TENKAI_IMPORT_STAGING_DIR` and
+/// `TENKAI_BUNDLE_TRUST_ROOTS`, which must be set together. Both are host
+/// configuration; an import request names a staged file only.
+fn import_settings() -> Result<Option<tenkai::offline_import::ImportSettings>> {
+    match (
+        std::env::var_os("TENKAI_IMPORT_STAGING_DIR"),
+        std::env::var_os("TENKAI_BUNDLE_TRUST_ROOTS"),
+    ) {
+        (None, None) => Ok(None),
+        (Some(staging), Some(trust_roots)) => {
+            let staging = std::path::PathBuf::from(staging);
+            anyhow::ensure!(
+                staging.is_dir(),
+                "TENKAI_IMPORT_STAGING_DIR {} is not a directory",
+                staging.display()
+            );
+            Ok(Some(tenkai::offline_import::ImportSettings {
+                staging,
+                trust_roots: trust_roots.into(),
+            }))
+        }
+        _ => anyhow::bail!(
+            "TENKAI_IMPORT_STAGING_DIR and TENKAI_BUNDLE_TRUST_ROOTS must be set together"
+        ),
+    }
 }
 
 /// Server-mode backups from `TENKAI_BACKUP_DIR` (unset: off) and, when set,
