@@ -163,20 +163,34 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Env {
-            command: EnvCommand::ApprovalPolicy { command },
+            command:
+                EnvCommand::Add {
+                    name,
+                    description,
+                    connectivity,
+                    reason,
+                },
         } => {
-            match command {
-                crate::env_args::ApprovalPolicyCommand::Show { env } => {
-                    let view = client.environment_approval_policy(&env).await?;
-                    println!("{}", serde_json::to_string_pretty(&view)?);
-                }
-                crate::env_args::ApprovalPolicyCommand::Set { .. }
-                | crate::env_args::ApprovalPolicyCommand::Clear { .. } => {
-                    bail!(
-                        "setting or clearing an approval policy is available only with --target embedded"
-                    );
-                }
-            }
+            crate::remote_env_config::register(
+                &client,
+                &name,
+                &description,
+                connectivity.as_deref(),
+                reason.as_deref(),
+            )
+            .await
+        }
+        Command::Env { command } if crate::remote_env_config::change(&command).is_some() => {
+            crate::remote_env_config::run(&client, &command).await
+        }
+        Command::Env {
+            command:
+                EnvCommand::ApprovalPolicy {
+                    command: crate::env_args::ApprovalPolicyCommand::Show { env },
+                },
+        } => {
+            let view = client.environment_approval_policy(&env).await?;
+            println!("{}", serde_json::to_string_pretty(&view)?);
             Ok(())
         }
         Command::Env {

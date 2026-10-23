@@ -155,7 +155,9 @@ console build (a directory with `index.html`) instead of the embedded one.
 ### Remote CLI
 
 Remote v1 CLI support covers `reconcile --once`, `fleet status`, `fleet watch`,
-`env list`, `env inspect`, `env subscribe`, `status`, `publish`, `promote`,
+`env list`, `env inspect`, `env subscribe`, `env add`, the `set`, `clear` and
+`remove` commands of `env facts`, `env constraints`, `env maintenance`,
+`env webhooks` and `env approval-policy`, `status`, `publish`, `promote`,
 `release recall`, `plan`, `approval submit`, `apply`, `rollback`, and the
 `migrate` family. Unsupported commands fail with an explicit instruction to use
 `--target embedded` instead of silently changing execution mode. The HTTP

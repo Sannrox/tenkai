@@ -11,8 +11,24 @@ pub(crate) async fn run(
     output: OutputFormat,
 ) -> Result<()> {
     match command {
-        EnvCommand::Add { name, description } => {
+        EnvCommand::Add {
+            name,
+            description,
+            connectivity,
+            ..
+        } => {
+            // Parsed first, so invalid input registers nothing.
+            let class = connectivity
+                .as_deref()
+                .map(connectivity::ConnectivityClass::parse)
+                .transpose()?;
             println!("{}", plan::env_add(ctx, &name, &description).await?);
+            if let Some(class) = class {
+                println!(
+                    "{}",
+                    connectivity::set_connectivity_class(ctx, &name, class).await?
+                );
+            }
         }
         EnvCommand::Preview {
             name,

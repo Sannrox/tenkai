@@ -1189,6 +1189,91 @@ impl ManagementOperations {
         ))
     }
 
+    /// `POST /v1/environments`: register an environment as `env add` does.
+    pub async fn register_environment(
+        &self,
+        credential: &CredentialMaterial,
+        request: crate::environment_config::RegisterEnvironmentRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "environment.register")?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        self.require_community_catalog_host()?;
+        management_lifecycle::admit_register_environment(
+            &request,
+            context.principal.kind,
+            self.granted_environment(credential, &context),
+        )
+        .map_err(map_lifecycle_error)?;
+        let actor = &context.audit_principal();
+        self.audit(actor, "environment.register.requested")?;
+        let mut ctx = self.application_ctx()?;
+        let message = crate::environment_config::register(&mut ctx, &request, actor)
+            .await
+            .map_err(map_config_error)?;
+        self.audit(actor, "environment.register.completed")?;
+        Ok(ManagementLifecycleResult::new(
+            ManagementLifecycleOperation::Register,
+            message,
+            Some(request.environment),
+        ))
+    }
+
+    /// Generation-fenced `PUT`/`DELETE` under `/v1/environments/{environment}/`.
+    /// `route` is the resource, whether the method is `DELETE`, and the
+    /// maintenance window named in the path.
+    pub async fn configure_environment(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+        route: (
+            crate::environment_config::ConfigResource,
+            bool,
+            Option<&str>,
+        ),
+        request: crate::environment_config::EnvironmentConfigRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "environment.configure")?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        self.require_community_catalog_host()?;
+        management_lifecycle::admit_environment_config(
+            &request,
+            environment,
+            route,
+            context.principal.kind,
+            self.granted_environment(credential, &context),
+        )
+        .map_err(map_lifecycle_error)?;
+        self.require_environment_visible(&context, environment)
+            .await?;
+        self.require_current_generation(environment, request.expected_generation)?;
+        let actor = &context.audit_principal();
+        let action = request.change.action();
+        self.audit(actor, &format!("environment.configure.{action}.requested"))?;
+        let mut ctx = self.application_ctx()?;
+        let expected = request.expected_generation;
+        let message = crate::environment_config::apply(
+            &mut ctx,
+            environment,
+            &request.change,
+            &request.reason,
+            actor,
+            || {
+                self.require_current_generation(environment, expected)
+                    .map_err(|error| anyhow::anyhow!("{error}"))
+            },
+        )
+        .await
+        .map_err(map_config_error)?;
+        self.audit(actor, &format!("environment.configure.{action}.completed"))?;
+        Ok(ManagementLifecycleResult::new(
+            ManagementLifecycleOperation::Configure,
+            message,
+            Some(environment.to_string()),
+        ))
+    }
+
     pub async fn environment_hold(
         &self,
         credential: &CredentialMaterial,
@@ -2019,6 +2104,26 @@ fn map_environment_error(error: anyhow::Error) -> ManagementError {
         ManagementError::Conflict(message)
     } else {
         ManagementError::Internal(message)
+    }
+}
+
+/// Errors after admission: requests are validated already, so what is left
+/// is a missing environment or entry, a busy environment, or a change the
+/// host could not carry out (for example an unreadable policy file).
+fn map_config_error(error: anyhow::Error) -> ManagementError {
+    let message = format!("{error:#}");
+    if message.contains("not registered")
+        || message.contains(" has no ")
+        || message.contains("is not configured")
+    {
+        ManagementError::NotFound(message)
+    } else if message.contains("apply in progress")
+        || message.contains("retired environment")
+        || message.contains("stale fencing generation")
+    {
+        ManagementError::Conflict(message)
+    } else {
+        ManagementError::ExecutionFailed(message)
     }
 }
 

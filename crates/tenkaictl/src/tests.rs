@@ -158,6 +158,50 @@ fn remote_target_is_explicit_and_carries_no_cli_secret() {
 }
 
 #[test]
+fn remote_configuration_commands_map_to_their_changes() {
+    let cli = Cli::try_parse_from([
+        "tenkaictl",
+        "env",
+        "maintenance",
+        "set",
+        "prod",
+        "nightly",
+        "--timezone",
+        "UTC",
+        "--weekdays",
+        "mon,tue",
+        "--start",
+        "02:00",
+        "--duration-minutes",
+        "60",
+        "--generation",
+        "7",
+        "--reason",
+        "night changes",
+    ])
+    .unwrap();
+    let Command::Env { command } = cli.command else {
+        panic!("expected env command");
+    };
+    let (env, change, remote) = crate::remote_env_config::change(&command).unwrap().unwrap();
+    assert_eq!(env, "prod");
+    assert_eq!(
+        change.path(env),
+        "/v1/environments/prod/maintenance-windows/nightly"
+    );
+    assert_eq!(
+        (remote.generation, remote.reason.as_deref()),
+        (Some(7), Some("night changes"))
+    );
+
+    let list = Cli::try_parse_from(["tenkaictl", "env", "facts", "list", "prod"]).unwrap();
+    let Command::Env { command } = list.command else {
+        panic!("expected env command");
+    };
+    assert!(crate::remote_env_config::change(&command).is_none());
+}
+
+#[test]
 fn parses_login_and_logout() {
     let login = Cli::try_parse_from([
         "tenkaictl",
@@ -321,6 +365,7 @@ fn parses_env_list_and_inspect() {
                     ref url,
                     ref secret_env,
                     ref events,
+                    ..
                 }
             }
         } if env == "lab"
@@ -341,7 +386,7 @@ fn parses_env_list_and_inspect() {
         approval_policy.command,
         Command::Env {
             command: EnvCommand::ApprovalPolicy {
-                command: crate::env_args::ApprovalPolicyCommand::Set { ref env, ref path }
+                command: crate::env_args::ApprovalPolicyCommand::Set { ref env, ref path, .. }
             }
         } if env == "lab" && path == std::path::Path::new("/etc/tenkai/lab-approval-policy.toml")
     ));

@@ -22,6 +22,26 @@ lease/fencing state, and the latest plan. Latest-plan inspection includes
 sanitized lifecycle detail and at most 256 ordered step summaries; executable
 digests, work directories, payloads, and bearer tokens are not returned.
 
+`env add --connectivity <class>` also sets the connectivity class.
+
+### Remote configuration
+
+With `tenkaictl --target remote`, `env add` needs `--reason`. `facts`,
+`constraints`, `maintenance`, `webhooks` and `approval-policy` `set`,
+`clear` and `remove` need `--generation` (the current environment lease
+generation, or `0` when no lease is held) and `--reason`. They call the
+management routes in [management lifecycle](management-lifecycle.md#operations)
+and run the same validation as the embedded commands. Every change is
+audited with the authenticated actor and the reason. An
+environment-scoped token can configure only its own environment and cannot
+register environments. The `list` and `show` commands stay embedded; remote
+`env inspect` shows the same configuration.
+
+```bash
+tenkaictl --target remote env add edge --connectivity isolated --reason "new site"
+tenkaictl --target remote env facts set edge architecture=arm64 --generation 0 --reason inventory
+```
+
 For a scripted two-environment walkthrough (list/inspect/status), run:
 
 ```bash
@@ -63,8 +83,9 @@ tenkaictl env approval-policy clear lab
 ```
 
 Remote `show` reads `GET /v1/environments/{environment}/approval-policy`
-and prints the effective policy (signer key ids, human rules, TTL). Set
-and clear stay embedded-only. Inspect reports `latest_plan.approval`.
+and prints the effective policy (signer key ids, human rules, TTL). Remote
+`set` and `clear` take `--generation` and `--reason`; the path names a file
+on the server host. Inspect reports `latest_plan.approval`.
 
 ## Post-deploy webhooks
 

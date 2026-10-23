@@ -15,6 +15,7 @@ pub(crate) async fn maintenance(ctx: &mut client::Ctx, command: MaintenanceComma
             weekdays,
             start,
             duration_minutes,
+            ..
         } => {
             let window = maintenance::Window::new(
                 identity,
@@ -42,7 +43,7 @@ pub(crate) async fn maintenance(ctx: &mut client::Ctx, command: MaintenanceComma
                 }
             }
         }
-        MaintenanceCommand::Remove { env, identity } => {
+        MaintenanceCommand::Remove { env, identity, .. } => {
             println!("{}", maintenance::remove(ctx, &env, &identity).await?);
         }
         MaintenanceCommand::Repair { env } => {
@@ -64,7 +65,7 @@ pub(crate) async fn facts(ctx: &mut client::Ctx, command: FactsCommand) -> Resul
                 }
             }
         }
-        FactsCommand::Set { env, spec } => {
+        FactsCommand::Set { env, spec, .. } => {
             let Some((key, value)) = spec.split_once('=') else {
                 bail!("expected <key>=<value>, got {spec:?}");
             };
@@ -73,7 +74,7 @@ pub(crate) async fn facts(ctx: &mut client::Ctx, command: FactsCommand) -> Resul
                 plan::set_environment_fact(ctx, &env, key, value).await?
             );
         }
-        FactsCommand::Clear { env, key } => {
+        FactsCommand::Clear { env, key, .. } => {
             println!("{}", plan::clear_environment_fact(ctx, &env, &key).await?);
         }
         FactsCommand::Probe { env, apply } => {
@@ -113,13 +114,16 @@ pub(crate) async fn constraints(ctx: &mut client::Ctx, command: ConstraintsComma
             kind,
             name,
             value,
+            ..
         } => {
             println!(
                 "{}",
                 plan::set_environment_constraint(ctx, &env, &kind, &name, &value).await?
             );
         }
-        ConstraintsCommand::Clear { env, kind, name } => {
+        ConstraintsCommand::Clear {
+            env, kind, name, ..
+        } => {
             println!(
                 "{}",
                 plan::clear_environment_constraint(ctx, &env, &kind, &name).await?
@@ -262,6 +266,7 @@ pub(crate) async fn webhooks(ctx: &mut client::Ctx, command: WebhooksCommand) ->
             url,
             secret_env,
             events,
+            ..
         } => {
             let events = parse_webhook_events(events.as_deref())?;
             println!(
@@ -278,7 +283,7 @@ pub(crate) async fn webhooks(ctx: &mut client::Ctx, command: WebhooksCommand) ->
                 .await?
             );
         }
-        WebhooksCommand::Clear { env, url } => {
+        WebhooksCommand::Clear { env, url, .. } => {
             println!(
                 "{}",
                 tenkai::deploy_webhook::clear_environment_webhooks(ctx, &env, url.as_deref())
@@ -289,7 +294,9 @@ pub(crate) async fn webhooks(ctx: &mut client::Ctx, command: WebhooksCommand) ->
     Ok(())
 }
 
-fn parse_webhook_events(raw: Option<&str>) -> Result<Vec<tenkai::deploy_webhook::WebhookEvent>> {
+pub(crate) fn parse_webhook_events(
+    raw: Option<&str>,
+) -> Result<Vec<tenkai::deploy_webhook::WebhookEvent>> {
     let Some(raw) = raw else {
         return Ok(Vec::new());
     };
@@ -318,13 +325,13 @@ pub(crate) async fn approval_policy(
             Some(path) => println!("{}", path.display()),
             None => println!("{env} has no plan_approval_policy"),
         },
-        ApprovalPolicyCommand::Set { env, path } => {
+        ApprovalPolicyCommand::Set { env, path, .. } => {
             println!(
                 "{}",
                 plan::set_plan_approval_policy(ctx, &env, &path).await?
             );
         }
-        ApprovalPolicyCommand::Clear { env } => {
+        ApprovalPolicyCommand::Clear { env, .. } => {
             println!("{}", plan::clear_plan_approval_policy(ctx, &env).await?);
         }
     }

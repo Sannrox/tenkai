@@ -748,21 +748,57 @@ pub async fn list(ctx: &mut Ctx, environment: &str) -> Result<Vec<Window>> {
 
 pub async fn set(ctx: &mut Ctx, environment: &str, window: Window) -> Result<String> {
     window.validate()?;
-    update(ctx, environment, |windows| {
-        windows.retain(|current| current.identity != window.identity);
-        windows.push(window.clone());
-        windows.sort_by(|left, right| left.identity.cmp(&right.identity));
-        Ok(format!(
-            "maintenance window {} configured for {environment}",
-            window.identity
-        ))
-    })
-    .await
+    update(ctx, environment, set_window(environment, window)).await
 }
 
 pub async fn remove(ctx: &mut Ctx, environment: &str, identity: &str) -> Result<String> {
     validate_identifier("maintenance-window identity", identity)?;
-    update(ctx, environment, |windows| {
+    update(ctx, environment, remove_window(environment, identity)).await
+}
+
+/// [`set`] for a caller that already holds the environment apply lease.
+pub(crate) async fn set_claimed(
+    ctx: &mut Ctx,
+    environment: &str,
+    window: Window,
+) -> Result<String> {
+    window.validate()?;
+    update_claimed(ctx, environment, set_window(environment, window)).await
+}
+
+/// [`remove`] for a caller that already holds the environment apply lease.
+pub(crate) async fn remove_claimed(
+    ctx: &mut Ctx,
+    environment: &str,
+    identity: &str,
+) -> Result<String> {
+    validate_identifier("maintenance-window identity", identity)?;
+    update_claimed(ctx, environment, remove_window(environment, identity)).await
+}
+
+fn set_window(
+    environment: &str,
+    window: Window,
+) -> impl FnOnce(&mut Vec<Window>) -> Result<String> {
+    let environment = environment.to_string();
+    move |windows| {
+        windows.retain(|current| current.identity != window.identity);
+        let message = format!(
+            "maintenance window {} configured for {environment}",
+            window.identity
+        );
+        windows.push(window);
+        windows.sort_by(|left, right| left.identity.cmp(&right.identity));
+        Ok(message)
+    }
+}
+
+fn remove_window(
+    environment: &str,
+    identity: &str,
+) -> impl FnOnce(&mut Vec<Window>) -> Result<String> {
+    let (environment, identity) = (environment.to_string(), identity.to_string());
+    move |windows| {
         let before = windows.len();
         windows.retain(|window| window.identity != identity);
         if windows.len() == before {
@@ -771,8 +807,7 @@ pub async fn remove(ctx: &mut Ctx, environment: &str, identity: &str) -> Result<
         Ok(format!(
             "maintenance window {identity} removed from {environment}"
         ))
-    })
-    .await
+    }
 }
 
 async fn update(
@@ -783,22 +818,7 @@ async fn update(
     validate_identifier("environment", environment)?;
     let owner = format!("maintenance-update:{}", crate::now_millis());
     let lease = crate::apply::claim_environment(ctx, environment, &owner).await?;
-    let result = async {
-        let config_id = config_id(environment);
-        let object = ctx
-            .get(&config_id)
-            .await?
-            .with_context(|| {
-                format!(
-                    "maintenance configuration for {environment} is not initialized; rerun `tenkaictl env add {environment}`"
-                )
-            })?;
-        let mut windows = decode_governed_configuration(ctx, &object, environment).await?;
-        let message = change(&mut windows)?;
-        replace_governed_configuration(ctx, environment, &config_id, &windows).await?;
-        Ok::<_, anyhow::Error>(message)
-    }
-    .await;
+    let result = update_claimed(ctx, environment, change).await;
     let unlock = crate::apply::release_environment(ctx, &lease).await;
     match (result, unlock) {
         (Ok(message), Ok(())) => Ok(message),
@@ -808,6 +828,23 @@ async fn update(
         ))),
         (Ok(_), Err(error)) => Err(error.context("releasing environment maintenance update lease")),
     }
+}
+
+async fn update_claimed(
+    ctx: &mut Ctx,
+    environment: &str,
+    change: impl FnOnce(&mut Vec<Window>) -> Result<String>,
+) -> Result<String> {
+    let config_id = config_id(environment);
+    let object = ctx.get(&config_id).await?.with_context(|| {
+        format!(
+            "maintenance configuration for {environment} is not initialized; rerun `tenkaictl env add {environment}`"
+        )
+    })?;
+    let mut windows = decode_governed_configuration(ctx, &object, environment).await?;
+    let message = change(&mut windows)?;
+    replace_governed_configuration(ctx, environment, &config_id, &windows).await?;
+    Ok(message)
 }
 
 pub fn weekday_values(value: &str) -> Result<Vec<u32>> {

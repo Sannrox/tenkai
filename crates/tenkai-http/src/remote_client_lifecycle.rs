@@ -117,6 +117,63 @@ impl RemoteClient {
         .await
     }
 
+    /// `POST /v1/environments`.
+    pub async fn register_environment(
+        &self,
+        environment: &str,
+        description: &str,
+        connectivity_class: Option<tenkai::connectivity::ConnectivityClass>,
+        reason: &str,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            "/v1/environments",
+            Some(&tenkai::environment_config::RegisterEnvironmentRequest {
+                version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Register
+                    .as_str()
+                    .into(),
+                environment: environment.to_string(),
+                description: description.to_string(),
+                connectivity_class,
+                reason: reason.to_string(),
+            }),
+        )
+        .await
+    }
+
+    /// One generation-fenced configuration change; the change picks the
+    /// route and whether it is a `PUT` or a `DELETE`.
+    pub async fn configure_environment(
+        &self,
+        environment: &str,
+        change: tenkai::environment_config::EnvironmentConfigChange,
+        reason: &str,
+        expected_generation: u64,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        let method = if change.clears() {
+            reqwest::Method::DELETE
+        } else {
+            reqwest::Method::PUT
+        };
+        let path = change.path(environment);
+        self.lifecycle_result(
+            method,
+            &path,
+            Some(&tenkai::environment_config::EnvironmentConfigRequest {
+                version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Configure
+                    .as_str()
+                    .into(),
+                environment: environment.to_string(),
+                expected_generation,
+                reason: reason.to_string(),
+                change,
+            }),
+        )
+        .await
+    }
+
     pub async fn subscribe_environment(
         &self,
         environment: &str,

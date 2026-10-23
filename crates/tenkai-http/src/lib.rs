@@ -3,6 +3,7 @@
 mod auth;
 mod config;
 pub mod contract;
+mod environment_config;
 mod inspect;
 mod lifecycle;
 mod opening;
