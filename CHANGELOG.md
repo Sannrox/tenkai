@@ -475,7 +475,7 @@ Postgres (hub) store. No schema change in this patch.
 
 Crate version: **`0.3.1`**. Tag: **`v0.3.1`**.
 
-Pair with [release readiness](../release-readiness.md). Contributor credits
+Pair with [release readiness](https://github.com/Sannrox/tenkai/blob/v0.3.1/docs/release-readiness.md). Contributor credits
 belong on the GitHub Release generated notes.
 
 ### Scope
@@ -845,7 +845,7 @@ secret store. Recovery never depends on sekai-chisei.
 
 Crate version: **`0.2.0`**. Tag: **`v0.2.0`**.
 
-Pair with [release readiness](../release-readiness.md).
+Pair with [release readiness](https://github.com/Sannrox/tenkai/blob/v0.2.0/docs/release-readiness.md).
 
 ### Scope
 
@@ -873,10 +873,10 @@ Open release-blocking issues at tag time: **none**.
 1. **Embedded / SQLite:** rebuild binaries; existing `.tenkai-state` continues
    if schema version still matches. Run `tenkaictl backup` before major upgrades.
 2. **Optional multi-tenant hub:** enable `postgres`, set `TENKAI_POSTGRES_URL`,
-   follow [postgres-tenant-store.md](../postgres-tenant-store.md). Do not
+   follow [postgres-tenant-store.md](https://github.com/Sannrox/tenkai/blob/v0.2.0/docs/postgres-tenant-store.md). Do not
    co-locate IdP databases.
 3. **Multi-replica hubs:** follow
-   [multi-replica-hub-runbook.md](../multi-replica-hub-runbook.md). Prefer
+   [multi-replica-hub-runbook.md](https://github.com/Sannrox/tenkai/blob/v0.2.0/docs/multi-replica-hub-runbook.md). Prefer
    single active writer + shared durable fence; do not share community SQLite files.
 4. **Development bypasses** (`--allow-unsigned-development`,
    `--allow-unapproved-development`) remain explicit and audited — not
