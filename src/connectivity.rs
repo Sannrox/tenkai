@@ -120,6 +120,9 @@ pub struct IsolatedEvidence {
     pub plan_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_digest: Option<String>,
+    /// The import scanner's outcome, when `TENKAI_IMPORT_SCANNER` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan: Option<crate::import_scanner::ScanEvidence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -465,6 +468,32 @@ pub async fn advance(
     Ok(record)
 }
 
+/// The configured import scanner's verdict on a bundle whose signature
+/// verifies, before anything is written. A refusal stops the import here.
+fn scan_before_mutation(
+    bundle: &crate::offline_bundle::BundleEnvelope,
+    trust_roots: &crate::release_signing::TrustRoots,
+    environment: &str,
+    bundle_path: Option<&Path>,
+) -> Result<
+    Option<(
+        crate::import_scanner::ScanEvidence,
+        crate::import_scanner::ScanSnapshot,
+    )>,
+> {
+    if crate::import_scanner::configured().is_none() {
+        return Ok(None);
+    }
+    // Scan only media whose signature verifies against the current state.
+    bundle.verify(
+        trust_roots,
+        crate::ontology::NS,
+        environment,
+        crate::now_millis(),
+    )?;
+    crate::import_scanner::scan_from_env(bundle, bundle_path)
+}
+
 /// The bundle digest bound to `environment` in upgrade `name`, if any.
 pub async fn bound_bundle_digest(
     ctx: &mut Ctx,
@@ -489,6 +518,10 @@ pub struct BindPreview {
     pub already_bound: bool,
     /// True when the bundle carries a key revocation list to install.
     pub carries_revocations: bool,
+    /// The import scanner's outcome, when one is configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub scan: Option<crate::import_scanner::ScanEvidence>,
 }
 
 /// Check a bundle against an upgrade as [`bind_isolated_bundle`] does, with
@@ -539,8 +572,12 @@ pub async fn preview_isolated_bundle(
         &verified,
         bundle_path,
         crate::offline_chunk_store::weight_cache_from_env()?.as_ref(),
+        // A scanned import discards partial weights and reads every chunk.
+        crate::import_scanner::configured().is_none(),
     )?;
     crate::key_revocation::preflight_bundle_revocations(bundle)?;
+    let scan = crate::import_scanner::scan_from_env(bundle, bundle_path)?
+        .map(|(evidence, _snapshot)| evidence);
     Ok(BindPreview {
         already_bound: record.environments[index]
             .isolated
@@ -550,6 +587,7 @@ pub async fn preview_isolated_bundle(
         plan_id: verified.statement().plan_id.clone(),
         release_ids: verified.statement().release_ids.clone(),
         carries_revocations: crate::key_revocation::bundle_carries_revocations(bundle),
+        scan,
     })
 }
 
@@ -600,6 +638,13 @@ pub async fn bind_isolated_bundle(
     trust_roots: &crate::release_signing::TrustRoots,
     bundle_path: Option<&Path>,
 ) -> Result<UpgradeRecord> {
+    let scanned = scan_before_mutation(bundle, trust_roots, environment, bundle_path)?;
+    // With a scanner, the import reads the snapshot it scanned.
+    let bundle_path = match &scanned {
+        Some((_, snapshot)) => Some(snapshot.archive()),
+        None => bundle_path,
+    };
+    let scan = scanned.as_ref().map(|(evidence, _)| evidence.clone());
     // A bundle may carry key revocations; apply them before trusting it.
     crate::key_revocation::import_from_bundle(bundle)?;
     let verified = bundle.verify(
@@ -620,6 +665,16 @@ pub async fn bind_isolated_bundle(
         &crate::oci_artifact::mirrors_from_properties(&env.properties),
     )?;
     let weight_cache = crate::offline_chunk_store::weight_cache_from_env()?;
+    if scan.is_some() {
+        // Every weight must be in the scanned snapshot, even one cached.
+        crate::offline_chunk_store::preflight_weight_chunks_for_bundle(
+            &verified,
+            bundle_path,
+            weight_cache.as_ref(),
+            false,
+        )?;
+        crate::offline_chunk_store::discard_partial_weights(&verified, weight_cache.as_ref())?;
+    }
     crate::offline_chunk_store::import_weight_chunks_for_bundle(
         &verified,
         bundle_path,
@@ -633,6 +688,7 @@ pub async fn bind_isolated_bundle(
             .and_then(|evidence| evidence.receipt_digest.clone()),
         plan_digest: Some(verified.statement().plan_digest.clone()),
         approval_digest: Some(verified.statement().approval_digest.clone()),
+        scan,
     });
     record.environments[index].detail = "verified offline bundle bound".into();
     persist(ctx, &record).await?;
@@ -656,6 +712,13 @@ pub async fn install_isolated_stack(
     if spec.environments.len() != 1 || spec.environments[0] != environment {
         bail!("isolated first-install admits exactly one environment");
     }
+    let scanned = scan_before_mutation(bundle, trust_roots, environment, bundle_path)?;
+    // With a scanner, the import reads the snapshot it scanned.
+    let bundle_path = match &scanned {
+        Some((_, snapshot)) => Some(snapshot.archive()),
+        None => bundle_path,
+    };
+    let scan = scanned.as_ref().map(|(evidence, _)| evidence.clone());
     // A bundle may carry key revocations; apply them before trusting it.
     crate::key_revocation::import_from_bundle(bundle)?;
     let verified = bundle.verify(
@@ -711,6 +774,16 @@ pub async fn install_isolated_stack(
             &mirrors,
         )?;
         let weight_cache = crate::offline_chunk_store::weight_cache_from_env()?;
+        if scan.is_some() {
+            // Every weight must be in the scanned snapshot, even one cached.
+            crate::offline_chunk_store::preflight_weight_chunks_for_bundle(
+                &verified,
+                bundle_path,
+                weight_cache.as_ref(),
+                false,
+            )?;
+            crate::offline_chunk_store::discard_partial_weights(&verified, weight_cache.as_ref())?;
+        }
         crate::offline_chunk_store::import_weight_chunks_for_bundle(
             &verified,
             bundle_path,
@@ -766,6 +839,7 @@ pub async fn install_isolated_stack(
                 receipt_digest: None,
                 plan_digest: Some(verified.statement().plan_digest.clone()),
                 approval_digest: Some(verified.statement().approval_digest.clone()),
+                scan,
             }),
         }],
         created_at: now,
@@ -849,6 +923,7 @@ pub async fn import_isolated_receipt(
                 approval_digest: previous
                     .as_ref()
                     .and_then(|evidence| evidence.approval_digest.clone()),
+                scan: previous.and_then(|evidence| evidence.scan),
             });
             record.environments[index].detail = "isolated receipt accepted".into();
         }
@@ -2265,6 +2340,96 @@ install = "true"
             "{:?}",
             release.referenced_by
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A configured scanner runs after the signature verifies and before any
+    /// write: a refusal leaves the upgrade unbound, a pass is recorded.
+    #[tokio::test(flavor = "current_thread")]
+    async fn import_scanner_refuses_before_mutation_and_records_a_pass() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = temp_root("scanner");
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        published_software(&mut ctx, &root, "1.0.0").await;
+        let actor = crate::auth_context::test_management_context("scanner");
+        crate::catalog::promote(&mut ctx, &actor, "edge-app@1.0.0", "stable")
+            .await
+            .unwrap();
+        prepare_env(&mut ctx, "site-c", ConnectivityClass::Isolated, &actor).await;
+        let spec = UpgradeSpec {
+            name: "fleet-scan".into(),
+            product: "edge-app".into(),
+            version: "1.0.0".into(),
+            channel: "stable".into(),
+            environments: vec!["site-c".into()],
+        };
+        let started = start_or_resume(&mut ctx, &spec).await.unwrap();
+        let exporter = SigningKey::from_bytes(&[7; 32]);
+        let bundle = export_isolated_bundle(
+            "site-c",
+            started.environments[0].plan_id.as_deref().unwrap(),
+            &started.release_id,
+            b"immutable payload",
+            &exporter,
+            crate::now_millis(),
+        )
+        .unwrap();
+        let roots = isolated_trust_roots(&exporter, None);
+        let path = root.join("site-c.json");
+        bundle.save(&path).unwrap();
+        let scanner = |name: &str, body: &str| {
+            let script = root.join(name);
+            std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::import_scanner::TEST_SCANNER.with(|slot| *slot.borrow_mut() = Some(script));
+        };
+
+        scanner("infected", "echo 'FOUND: test-signature'; exit 3");
+        let refused = bind_isolated_bundle(
+            &mut ctx,
+            "fleet-scan",
+            "site-c",
+            &bundle,
+            &roots,
+            Some(&path),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            refused.contains("refused the bundle (exit 3): FOUND"),
+            "{refused}"
+        );
+        assert!(
+            load_upgrade(&mut ctx, "fleet-scan")
+                .await
+                .unwrap()
+                .environments[0]
+                .isolated
+                .is_none()
+        );
+
+        scanner("clean", "echo clean");
+        let bound = bind_isolated_bundle(
+            &mut ctx,
+            "fleet-scan",
+            "site-c",
+            &bundle,
+            &roots,
+            Some(&path),
+        )
+        .await
+        .unwrap();
+        let scan = bound.environments[0]
+            .isolated
+            .as_ref()
+            .unwrap()
+            .scan
+            .as_ref()
+            .unwrap();
+        assert_eq!((scan.exit_code, scan.summary.as_str()), (0, "clean"));
+        crate::import_scanner::TEST_SCANNER.with(|slot| *slot.borrow_mut() = None);
         let _ = std::fs::remove_dir_all(root);
     }
 

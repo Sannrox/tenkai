@@ -176,6 +176,7 @@ pub mod fleet_fairness;
 pub mod fleet_workload;
 pub mod health_gate;
 pub mod host_preflight;
+pub mod import_scanner;
 pub mod inventory;
 pub mod issuer_auth;
 pub mod key_provider;

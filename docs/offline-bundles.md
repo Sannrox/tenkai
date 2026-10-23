@@ -117,6 +117,39 @@ media is damaged or lost, create a new export; do not repair signed bytes.
 Operational recovery uses Tenkai state plus the signed archive and receipt and
 does not require Sekai Chisei.
 
+## Content scanner
+
+Set `TENKAI_IMPORT_SCANNER` to the absolute path of a scanner executable to
+scan incoming media before anything is unpacked. On `upgrade bind-bundle`,
+`upgrade install-bundle` and server-side import (including dry runs), the
+order is:
+
+1. Tenkai checks the bundle signature against the current trust roots.
+2. It copies the archive, and the chunks its signed manifest names (each
+   bounded to its signed size), into a private snapshot, and runs the scanner with the snapshot
+   archive and snapshot chunk store as its two arguments. The import then
+   reads that same snapshot, so the bytes scanned are the bytes imported
+   even if the staged files change. The snapshot archive is written from the
+   bundle already verified in memory, so the staged file is not read again. The snapshot goes in
+   `TENKAI_IMPORT_SCANNER_SNAPSHOT_DIR` (default: the temp directory), so
+   the media may be read-only. It needs free space equal to the bundle and
+   is removed afterwards. With a scanner, every weight must be in the
+   scanned chunk store, even one already in the cache, and an interrupted
+   weight import does not resume from its cached prefix.
+3. Only then does it install revocations or write any layer, weight or
+   record.
+
+The scanner runs without a shell, with an empty environment except `PATH`,
+and must finish within `TENKAI_IMPORT_SCANNER_TIMEOUT_SECS` (default 600),
+including any process it leaves holding its output; on timeout its whole
+process group is killed.
+Exit 0 admits the import. Any other exit, a timeout or a launch failure
+refuses it with the scanner's first output line, and nothing is changed.
+An admitted scan is recorded with the isolated evidence of the upgrade
+(`scan`: scanner, exit code, SHA-256 of its standard output and standard
+error, first output line, time) and in
+the server import job's preview.
+
 ## One-way transfer
 
 Some sites accept media inbound only. No import step waits for a reply:

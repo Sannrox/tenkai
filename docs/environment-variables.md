@@ -12,6 +12,9 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `TENKAI_DATABASE` | `.tenkai-state/tenkai.db` | Embedded or server-owned operational SQLite database |
+| `TENKAI_IMPORT_SCANNER` | unset | Absolute path of a scanner run on every offline bundle import after signature verification and before any write ([offline bundles](offline-bundles.md#content-scanner)) |
+| `TENKAI_IMPORT_SCANNER_TIMEOUT_SECS` | `600` | Seconds the import scanner may run before the import is refused |
+| `TENKAI_IMPORT_SCANNER_SNAPSHOT_DIR` | the temp directory | Writable directory for the private copy of a bundle the scanner reads and the import then uses |
 | `TENKAI_TIME_SOURCE` | unset | `tenkai-server` only: SNTP `host:port` for the runtime clock-drift check ([host preflight](host-preflight.md#keep-time-synchronized-after-install)) |
 | `TENKAI_CLOCK_WARN_MS` | `1000` | Skew above which health reports `clock.state` as `warn` |
 | `TENKAI_CLOCK_REFUSE_MS` | `30000` | Skew above which approvals, applies and runtime lease claims are refused |
