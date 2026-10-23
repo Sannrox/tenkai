@@ -12,6 +12,10 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `TENKAI_DATABASE` | `.tenkai-state/tenkai.db` | Embedded or server-owned operational SQLite database |
+| `TENKAI_BACKUP_DIR` | unset | `tenkai-server` only: directory for scheduled and on-demand backups ([backup and restore](backup-restore.md#server-mode-backups)). Refused in tenant mode |
+| `TENKAI_BACKUP_INTERVAL_SECS` | `86400` | Seconds between scheduled backups; `0` takes backups only on demand |
+| `TENKAI_BACKUP_RETAIN` | `7` | Backups kept; older ones are removed after each backup |
+| `TENKAI_BACKUP_MAX_AGE_SECS` | twice the interval, else `172800` | Backup age after which health reports `backup.state` as `stale` |
 | `TENKAI_STATE_DIR` | `<workdir-parent>/.tenkai-state` | Immutable deploy-input snapshots and per-environment runtime directories; must be outside the source workdir |
 | `TENKAI_PRINCIPAL` | `tenkai` (`local-operator` for embedded `env retire`) | Embedded audit principal or remote provider caller identity |
 | `TENKAI_MANAGEMENT_TOKEN` | unset | Community management bearer for server management requests, remote CLI mode, and embedded `promote` / canary mutations including `canary repair`. When set, remote `tenkaictl` uses it instead of a saved OIDC login |

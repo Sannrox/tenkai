@@ -148,6 +148,7 @@ pub mod approval_policy;
 pub mod assertion_verifier;
 pub mod atomic_state;
 pub mod auth_context;
+pub mod backup;
 pub mod canary;
 pub mod catalog;
 pub mod change_set_pin;

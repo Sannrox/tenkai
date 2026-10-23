@@ -174,6 +174,17 @@ async fn run(cli: Cli) -> Result<()> {
     if let Command::Keys { command } = &cli.command {
         return keys::run(command);
     }
+    // Local only: a drill reads backup files and never contacts a hub.
+    if let Command::RestoreDrill {
+        backup,
+        scratch_dir,
+    } = &cli.command
+    {
+        let scratch = scratch_dir.clone().unwrap_or_else(std::env::temp_dir);
+        let evidence = tenkai::backup::drill(backup, &scratch, tenkai::now_millis())?;
+        println!("{}", serde_json::to_string_pretty(&evidence)?);
+        return Ok(());
+    }
     if cli.target == Target::Remote {
         return remote::run(cli).await;
     }

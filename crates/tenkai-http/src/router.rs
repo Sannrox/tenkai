@@ -16,9 +16,9 @@ use super::environment_config::{
     configure_maintenance_window, configure_webhooks, register_environment,
 };
 use super::inspect::{
-    change_events, environment_approval_policy, environment_status, fleet_status, health,
-    inspect_environment, list_channels, list_environments, list_migrations, list_releases,
-    observed_runtime, oidc_client, openmetrics, ready, reconcile,
+    backup_status, change_events, environment_approval_policy, environment_status, fleet_status,
+    health, inspect_environment, list_channels, list_environments, list_migrations, list_releases,
+    observed_runtime, oidc_client, openmetrics, ready, reconcile, take_backup,
 };
 use super::lifecycle::{
     apply_plan, approve_plan, channel_hold, environment_hold, install_model_evaluation_trust,
@@ -49,6 +49,11 @@ pub(super) struct ServiceStatus {
     pub(super) capabilities: Vec<String>,
     /// API contract ids this server serves, for client compatibility checks.
     pub(super) contracts: Vec<&'static str>,
+    /// Backup age when backups are configured. `stale` or `missing` degrades
+    /// health without failing readiness: the server can still do its work.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = tenkai::schema_contract::omitted_when_none)]
+    pub(super) backup: Option<tenkai::backup::BackupHealth>,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -93,6 +98,7 @@ pub fn router(
         .route("/v1/auth/oidc", get(oidc_client))
         .route("/v1/reconcile", post(reconcile))
         .route("/v1/fleet/status", get(fleet_status))
+        .route("/v1/backups", get(backup_status).post(take_backup))
         .route("/v1/events", get(change_events))
         .route(
             "/v1/environments",

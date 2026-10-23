@@ -277,6 +277,42 @@ impl ManagementOperations {
         self.reconciler.fleet_status().await.map_err(internal)
     }
 
+    /// `POST /v1/backups`: take one backup now. Hub-wide, so it needs fleet
+    /// management; an environment-scoped credential is refused.
+    pub async fn take_backup(
+        &self,
+        credential: &CredentialMaterial,
+        backups: Arc<crate::backup::Backups>,
+    ) -> Result<crate::backup::BackupManifest, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "backup.take")?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        self.require_environment_grant(credential, &context, None, "backup")?;
+        let actor = &context.audit_principal();
+        self.audit(actor, "backup.take.requested")?;
+        let manifest = tokio::task::spawn_blocking(move || backups.take(crate::now_millis()))
+            .await
+            .map_err(|error| ManagementError::Internal(error.to_string()))?
+            .map_err(|error| ManagementError::ExecutionFailed(format!("{error:#}")))?;
+        self.audit(actor, "backup.take.completed")?;
+        Ok(manifest)
+    }
+
+    /// `GET /v1/backups`: last success, last failure and last drill.
+    pub async fn backup_status(
+        &self,
+        credential: &CredentialMaterial,
+        backups: Arc<crate::backup::Backups>,
+    ) -> Result<crate::backup::BackupStatus, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        self.require_environment_grant(credential, &context, None, "backup status")?;
+        tokio::task::spawn_blocking(move || backups.status())
+            .await
+            .map_err(|error| ManagementError::Internal(error.to_string()))?
+            .map_err(internal)
+    }
+
     pub async fn list_environments(
         &self,
         credential: &CredentialMaterial,
