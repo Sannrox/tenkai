@@ -308,10 +308,17 @@ impl OtlpHttpTelemetry {
         let url = format!("{}{path}", self.endpoint);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
-                let client = reqwest::Client::new();
+                // Export is best effort; a client that cannot be built drops it.
+                let Ok(client) =
+                    crate::outbound_tls::client().and_then(|builder| Ok(builder.build()?))
+                else {
+                    return;
+                };
                 let _ = client.post(url).json(&body).send().await;
             });
-        } else if let Ok(client) = reqwest::blocking::Client::builder().build() {
+        } else if let Ok(client) =
+            crate::outbound_tls::blocking_client().and_then(|builder| Ok(builder.build()?))
+        {
             let _ = client.post(url).json(&body).send();
         }
     }

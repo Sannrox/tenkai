@@ -58,7 +58,7 @@ impl RemoteClient {
         Ok(Self {
             base_url,
             token,
-            http: reqwest::Client::new(),
+            http: tenkai::outbound_tls::client()?.build()?,
         })
     }
 

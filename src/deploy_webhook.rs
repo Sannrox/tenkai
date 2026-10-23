@@ -435,7 +435,8 @@ where
         &claim_token,
         claim_until,
     )?;
-    let client = reqwest::Client::builder()
+    let client = crate::outbound_tls::client()
+        .map_err(|error| ProviderError::Unavailable(format!("webhook client: {error:#}")))?
         .timeout(timeout)
         .redirect(reqwest::redirect::Policy::none())
         .user_agent("tenkai-webhook/1")

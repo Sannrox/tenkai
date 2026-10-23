@@ -123,6 +123,18 @@ pub async fn connect() -> Result<Ctx> {
     if let Some(token) = token {
         config = config.with_token(token).map_err(anyhow::Error::new)?;
     }
+    let trust = crate::outbound_tls::OutboundTrust::from_env()?;
+    if crate::outbound_tls::is_tls_url(&url) && !trust.system_roots {
+        // The backend SDK always trusts its built-in roots; refuse rather
+        // than trust more than TENKAI_TLS_SYSTEM_ROOTS=false allows.
+        anyhow::bail!(
+            "{}=false cannot be honored for the remote backend at {url} yet: its client always trusts the built-in roots",
+            crate::outbound_tls::SYSTEM_ROOTS_ENV
+        );
+    }
+    if let Some(pem) = trust.bundle_pem {
+        config = config.with_tls_ca_certificate(pem);
+    }
     let client = RemoteClient::connect(config)
         .await
         .map_err(anyhow::Error::new)

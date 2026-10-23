@@ -59,13 +59,29 @@ fn is_loopback_only(config: &Config) -> bool {
 }
 
 /// Verifying rustls connector with an explicit ring provider and PostgreSQL
-/// ALPN, trusting the platform store (which honors `SSL_CERT_FILE`/`SSL_CERT_DIR`
-/// for private CAs) plus the Mozilla roots.
+/// ALPN. It trusts `TENKAI_CA_BUNDLE` plus, unless
+/// `TENKAI_TLS_SYSTEM_ROOTS=false`, the platform store (which honors
+/// `SSL_CERT_FILE`/`SSL_CERT_DIR`) and the Mozilla roots.
 fn verified_tls() -> Result<MakeRustlsConnect> {
-    let mut roots = rustls::RootCertStore {
-        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-    };
-    roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
+    use rustls::pki_types::CertificateDer;
+    use rustls::pki_types::pem::PemObject as _;
+    let trust = tenkai::outbound_tls::OutboundTrust::from_env()
+        .map_err(|err| StoreError::AdapterUnavailable(format!("postgres TLS setup: {err:#}")))?;
+    let mut roots = rustls::RootCertStore::empty();
+    if trust.system_roots {
+        roots.roots = webpki_roots::TLS_SERVER_ROOTS.to_vec();
+        roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
+    }
+    if let Some(pem) = &trust.bundle_pem {
+        for certificate in CertificateDer::pem_slice_iter(pem) {
+            let certificate = certificate.map_err(|err| {
+                StoreError::AdapterUnavailable(format!("postgres TLS setup: {err}"))
+            })?;
+            roots.add(certificate).map_err(|err| {
+                StoreError::AdapterUnavailable(format!("postgres TLS setup: {err}"))
+            })?;
+        }
+    }
     let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
     ))

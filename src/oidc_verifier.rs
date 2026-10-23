@@ -488,7 +488,8 @@ impl KeySource for HttpKeySource {
 }
 
 fn http_client() -> Result<reqwest::blocking::Client, AuthError> {
-    reqwest::blocking::Client::builder()
+    crate::outbound_tls::blocking_client()
+        .map_err(|error| AuthError::InvalidCredential(format!("OIDC HTTP client: {error:#}")))?
         .timeout(HTTP_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
         .build()

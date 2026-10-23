@@ -159,7 +159,7 @@ impl SmokeProbe for HttpSmokeProbe {
         // predicate is a non-empty completion, which proves the inference path end to
         // end; exact text is not required because base models do not follow
         // instructions. This is stricter than the llama.cpp path's HTTP-success check.
-        let response: Value = reqwest::blocking::Client::builder()
+        let response: Value = tenkai::outbound_tls::blocking_client()?
             .timeout(timeout.min(self.timeout))
             .build()
             .context("building smoke probe client")?
