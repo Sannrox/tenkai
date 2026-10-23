@@ -35,6 +35,9 @@ pub(super) async fn activate(
         &content.manifest_digest,
     )
     .await?;
+    // Every activation, a restore included, lands only in an allowed placement.
+    crate::topology::require_manifest_placement(ctx, &content.environment, &content.manifest)
+        .await?;
     if content.manifest.product.kind.policy().target() == ProductTarget::RoutingConfig {
         prepare_fenced_mutation(ctx, lease, content).await?;
         let routing = content
@@ -263,6 +266,9 @@ pub(super) async fn restart(
         &content.manifest_digest,
     )
     .await?;
+    // Every activation, a restore included, lands only in an allowed placement.
+    crate::topology::require_manifest_placement(ctx, &content.environment, &content.manifest)
+        .await?;
     if content.manifest.product.kind.policy().target() == ProductTarget::WorkerPool {
         prepare_fenced_mutation(ctx, lease, content).await?;
         return admit_worker_pool(ctx, lease, content, adapters.worker_lifecycle, false, true)

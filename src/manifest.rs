@@ -58,6 +58,9 @@ pub struct Manifest {
     /// Signed delivery signals used by unattended approval policy.
     #[serde(default)]
     pub delivery: DeliverySection,
+    /// Replica environments and their anti-affinity (`[topology]`, #689).
+    #[serde(default)]
+    pub topology: Option<crate::topology::TopologySection>,
 }
 
 /// Optional release metadata covered by the content digest.
@@ -405,6 +408,9 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
         toml::from_str(&raw).with_context(|| format!("parsing manifest {}", path.display()))?;
     validate_software_compatibility(&manifest)?;
     manifest.gate.validate_slo()?;
+    if let Some(topology) = &manifest.topology {
+        topology.validate()?;
+    }
     if manifest.product.name.is_empty() || manifest.product.version.is_empty() {
         bail!("manifest needs product.name and product.version");
     }
@@ -646,9 +652,12 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
 }
 
 pub fn parse_raw(raw: &str) -> Result<Manifest> {
-    let manifest = toml::from_str(raw)?;
+    let manifest: Manifest = toml::from_str(raw)?;
     validate_software_compatibility(&manifest)?;
     manifest.gate.validate_slo()?;
+    if let Some(topology) = &manifest.topology {
+        topology.validate()?;
+    }
     Ok(manifest)
 }
 
@@ -1070,6 +1079,7 @@ mod tests {
             artifacts: Vec::new(),
             gate: GateSection::default(),
             delivery: Default::default(),
+            topology: None,
         };
         assert_eq!(manifest.immutable_inputs(), vec!["routing.json"]);
     }

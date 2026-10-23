@@ -45,7 +45,9 @@ tenkaictl env constraints set prod require_fact architecture arm64
 Admitted fact keys: `architecture`, `memory_gib`, `accelerator`,
 `free_disk_gib`, and the GPU facts `gpu_vendor`, `gpu_family`, `gpu_model`,
 `gpu_vram_gib`, `gpu_count`, `gpu_driver_version`, `gpu_runtime`, and
-`gpu_runtime_version` (see [model runtime](model-runtime.md#gpu-requirements)).
+`gpu_runtime_version` (see [model runtime](model-runtime.md#gpu-requirements)),
+and the placement facts `host` and `zone` that replica topologies check (see
+[manifest](manifest.md#topology)).
 
 ## Plan approval policy
 

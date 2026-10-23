@@ -940,6 +940,9 @@ pub const ENVIRONMENT_FACT_KEYS: &[&str] = &[
     "gpu_driver_version",
     "gpu_runtime",
     "gpu_runtime_version",
+    // Placement facts for replica topologies (#689).
+    "host",
+    "zone",
 ];
 
 const ENVIRONMENT_FACT_PREFIX: &str = "fact.";

@@ -64,6 +64,13 @@ pub(super) async fn execute(
         &content.manifest_digest,
     )
     .await?;
+    // Replica facts may have moved since the plan was made (#689). The
+    // release a failure would restore is checked too, before anything is
+    // removed, so neither outcome lands in a placement its manifest forbids.
+    crate::topology::require_manifest_placement(ctx, environment, &content.manifest).await?;
+    if let Some(restore) = restore_content.as_ref() {
+        crate::topology::require_manifest_placement(ctx, environment, &restore.manifest).await?;
+    }
     if !skip_gates
         && crate::health_gate::step_requires_slo_evaluation(ctx, environment, step).await?
     {
@@ -113,10 +120,14 @@ pub(super) async fn execute(
         product_execution::activate(ctx, lease, &content, adapters.clone()).await
     } {
         Ok(result) => result,
+        // Admission refusals before any mutation: nothing to clean up.
         Err(error)
             if error
                 .downcast_ref::<crate::software_compatibility::CompatibilityBlocked>()
-                .is_some() =>
+                .is_some()
+                || error
+                    .downcast_ref::<crate::topology::PlacementRefused>()
+                    .is_some() =>
         {
             if outgoing_removed {
                 let outcome =
@@ -554,6 +565,21 @@ pub(super) async fn restore_after_health_gate(
         &previous.manifest_digest,
     )
     .await
+    {
+        return record_live_restore_failure(
+            ctx,
+            lease,
+            environment,
+            plan_id,
+            step,
+            format!("{detail}; automatic rollback blocked: {error}"),
+        )
+        .await;
+    }
+    // Checked before the current release is deactivated, so a refused
+    // placement leaves it in place instead of half-rolled-back.
+    if let Err(error) =
+        crate::topology::require_manifest_placement(ctx, environment, &previous.manifest).await
     {
         return record_live_restore_failure(
             ctx,

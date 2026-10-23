@@ -1431,6 +1431,7 @@ mod tests {
             artifacts: Vec::new(),
             gate: GateSection::default(),
             delivery: Default::default(),
+            topology: None,
         };
         let descriptor = ModelRuntimeDescriptor::from_manifest(&manifest).unwrap();
         assert_eq!(descriptor.product_name, "qwen-coder");

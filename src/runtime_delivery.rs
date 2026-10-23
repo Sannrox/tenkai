@@ -208,6 +208,28 @@ impl ReconcilePort for Reconciler {
     }
 }
 
+/// Refuses runtime work whose releases' topologies the replicas' placement
+/// facts now violate (#689).
+async fn require_runtime_placement(
+    ctx: &mut Ctx,
+    environment: &str,
+    plan: &crate::plan::Plan,
+) -> Result<(), RuntimeDeliveryError> {
+    for step in &plan.steps {
+        crate::topology::require_placement(ctx, environment, &step.release_id)
+            .await
+            .map_err(
+                |error| match error.downcast_ref::<crate::topology::PlacementRefused>() {
+                    Some(refused) => RuntimeDeliveryError::InvalidRequest(refused.to_string()),
+                    None => RuntimeDeliveryError::Unavailable(
+                        "topology placement preflight unavailable".into(),
+                    ),
+                },
+            )?;
+    }
+    Ok(())
+}
+
 pub(crate) async fn complete_runtime_work(
     ctx: &mut Ctx,
     environment: &str,
@@ -594,11 +616,18 @@ impl RuntimeDeliveryOperations {
             .claim_runtime_plan(environment, &plan.id, &identity.owner, expires_at)
             .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))?;
         match claim {
-            Some(claim) => Ok(RuntimeWork {
-                environment: environment.into(),
-                plan: Some(plan),
-                claim: Some(claim),
-            }),
+            Some(claim) => {
+                // Placement admits new execution only: a claim holding a
+                // durable completion is replayed whatever the facts say now.
+                if claim.completion_json.is_none() {
+                    require_runtime_placement(&mut ctx, environment, &plan).await?;
+                }
+                Ok(RuntimeWork {
+                    environment: environment.into(),
+                    plan: Some(plan),
+                    claim: Some(claim),
+                })
+            }
             None => Ok(RuntimeWork {
                 environment: environment.into(),
                 plan: None,
@@ -673,7 +702,8 @@ impl RuntimeDeliveryOperations {
                 })?;
         }
         let expires_at = crate::now_millis().saturating_add(2 * 60 * 1000);
-        self.store
+        let claim = self
+            .store
             .renew_runtime_plan(
                 &heartbeat.plan_id,
                 &identity.owner,
@@ -683,7 +713,13 @@ impl RuntimeDeliveryOperations {
             .map_err(|error| RuntimeDeliveryError::Conflict(error.to_string()))?
             .ok_or_else(|| {
                 RuntimeDeliveryError::Conflict("runtime claim is no longer active".into())
-            })
+            })?;
+        // A placement change during execution withdraws permission for the
+        // remaining steps; a recorded completion still replays.
+        if claim.completion_json.is_none() {
+            require_runtime_placement(&mut ctx, environment, &plan).await?;
+        }
+        Ok(claim)
     }
 
     pub async fn report_inventory(

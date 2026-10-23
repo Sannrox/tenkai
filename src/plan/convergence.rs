@@ -155,6 +155,7 @@ async fn compute_snapshot_with_policy(
         }
         let target = pin_release(ctx, &release, env).await?;
         crate::software_compatibility::require_release(ctx, env, &release).await?;
+        crate::topology::require_placement(ctx, env, &release).await?;
         if env_obj
             .properties
             .get(&format!("deployment_health.{product}"))
@@ -744,6 +745,102 @@ max_startup_seconds = 60
 "#
         );
         std::fs::write(dir.join("tenkai.toml"), body).unwrap();
+    }
+
+    /// #689: a release declaring a topology plans only while its replicas
+    /// sit on distinct hosts; the refusal names the shared fact.
+    #[tokio::test]
+    async fn plan_refuses_replicas_that_share_a_host() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-topology-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let product = root.join("product");
+        std::fs::create_dir_all(&product).unwrap();
+        std::fs::write(
+            product.join("tenkai.toml"),
+            r#"[product]
+name = "ledger"
+version = "1.0.0"
+
+[deploy]
+workdir = "."
+install = "true"
+
+[topology]
+name = "ledger-ha"
+environments = ["ledger-a", "ledger-b"]
+anti_affinity = "host"
+"#,
+        )
+        .unwrap();
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        // Replicas are not `local`, so the release must be signed.
+        let keys = root.join("keys");
+        crate::dev_sign::init_dev_keys(&keys).unwrap();
+        let manifest = product.join("tenkai.toml");
+        let signature = product.join("release.sig.json");
+        let trust = product.join("release-trust.toml");
+        crate::dev_sign::sign_release(&keys, &manifest, &signature, &trust).unwrap();
+        let options = crate::catalog::PublishOptions {
+            signature: Some(signature),
+            trust_roots: Some(trust),
+            allow_unsigned_development: false,
+            provenance: Vec::new(),
+            provenance_trust_roots: None,
+            change_set_evidence: None,
+            artifact_registry: None,
+            state_dir: None,
+        };
+        crate::catalog::publish(&mut ctx, &manifest, &options)
+            .await
+            .unwrap();
+        let actor = crate::auth_context::test_management_context("topology-promote");
+        crate::catalog::promote(&mut ctx, &actor, "ledger@1.0.0", "stable")
+            .await
+            .unwrap();
+        for env in ["ledger-a", "ledger-b"] {
+            env_add(&mut ctx, env, "replica").await.unwrap();
+            subscribe(&mut ctx, env, "ledger", "stable").await.unwrap();
+        }
+        set_environment_fact(&mut ctx, "ledger-a", "host", "h1")
+            .await
+            .unwrap();
+        set_environment_fact(&mut ctx, "ledger-b", "host", "h1")
+            .await
+            .unwrap();
+
+        let err = create(&mut ctx, "ledger-a").await.unwrap_err();
+        let err = format!("{err:#}");
+        assert!(
+            err.contains("replicas ledger-a and ledger-b both have host=h1"),
+            "{err}"
+        );
+
+        set_environment_fact(&mut ctx, "ledger-b", "host", "h2")
+            .await
+            .unwrap();
+        let plan = create(&mut ctx, "ledger-a").await.unwrap();
+        assert_eq!(plan.steps.len(), 1);
+        assert_eq!(plan.steps[0].product, "ledger");
+
+        // The stored plan is re-checked before mutation: a replica that moved
+        // onto the same host after planning blocks it.
+        set_environment_fact(&mut ctx, "ledger-b", "host", "h1")
+            .await
+            .unwrap();
+        let err =
+            crate::topology::require_placement(&mut ctx, "ledger-a", &plan.steps[0].release_id)
+                .await
+                .unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::topology::PlacementRefused>()
+                .is_some(),
+            "{err:#}"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
