@@ -523,16 +523,14 @@ pub fn insert_artifact_layers(
 
 /// Verify signed layer entries and load them onto the environment mirror.
 /// Missing mirrors refuse origin pull. Replay of matching bytes is a no-op.
-pub fn import_artifact_layers(
-    bundle: &VerifiedBundle,
-    dest: Option<&dyn ArtifactRegistry>,
+/// Every layer the bundle's layer instructions name, checked against the
+/// bundle bytes and rewritten onto `mirrors`, without storing anything.
+pub fn plan_artifact_layers<'a>(
+    bundle: &'a VerifiedBundle,
     mirrors: &BTreeMap<String, String>,
-) -> Result<Vec<OciArtifactRef>> {
+) -> Result<Vec<(OciArtifactRef, &'a [u8])>> {
     let Some(raw) = bundle.entry(LAYER_INSTRUCTION_PATH) else {
         return Ok(Vec::new());
-    };
-    let Some(dest) = dest else {
-        bail!("TENKAI_OCI_STORE is required to import offline artifact layers");
     };
     let manifest: OfflineArtifactLayerManifest =
         serde_json::from_slice(raw).context("parsing offline artifact layer instructions")?;
@@ -542,7 +540,7 @@ pub fn import_artifact_layers(
             manifest.schema
         );
     }
-    let mut pulled = Vec::with_capacity(manifest.layers.len());
+    let mut planned = Vec::with_capacity(manifest.layers.len());
     for layer in &manifest.layers {
         let reference = OciArtifactRef {
             registry: layer.registry.clone(),
@@ -571,7 +569,25 @@ pub fn import_artifact_layers(
                 layer.digest
             );
         }
-        let pull = oci_artifact::pull_reference(&reference, mirrors)?;
+        planned.push((oci_artifact::pull_reference(&reference, mirrors)?, bytes));
+    }
+    Ok(planned)
+}
+
+pub fn import_artifact_layers(
+    bundle: &VerifiedBundle,
+    dest: Option<&dyn ArtifactRegistry>,
+    mirrors: &BTreeMap<String, String>,
+) -> Result<Vec<OciArtifactRef>> {
+    let planned = plan_artifact_layers(bundle, mirrors)?;
+    if planned.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Some(dest) = dest else {
+        bail!("TENKAI_OCI_STORE is required to import offline artifact layers");
+    };
+    let mut pulled = Vec::with_capacity(planned.len());
+    for (pull, bytes) in planned {
         dest.store(&pull, bytes.to_vec())?;
         dest.verify(&pull)?;
         pulled.push(pull);

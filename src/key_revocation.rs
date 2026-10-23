@@ -156,27 +156,32 @@ pub fn install(list: &RevocationList, authorities: &TrustRoots, installed: &Path
     )?
 }
 
+/// `list` may replace `current`: a higher sequence that keeps every revoked key.
+fn require_supersedes(current: &RevocationList, list: &RevocationList) -> Result<()> {
+    if list.statement.sequence <= current.statement.sequence {
+        bail!(
+            "key revocation sequence {} does not supersede installed sequence {}",
+            list.statement.sequence,
+            current.statement.sequence
+        );
+    }
+    let dropped: Vec<String> = current
+        .revoked_ids()
+        .difference(&list.revoked_ids())
+        .cloned()
+        .collect();
+    if !dropped.is_empty() {
+        bail!(
+            "key revocation list would un-revoke {}; a newer list must keep every revoked key",
+            dropped.join(", ")
+        );
+    }
+    Ok(())
+}
+
 fn replace_installed(list: &RevocationList, installed: &Path) -> Result<()> {
     if installed.exists() {
-        let current = RevocationList::load(installed)?;
-        if list.statement.sequence <= current.statement.sequence {
-            bail!(
-                "key revocation sequence {} does not supersede installed sequence {}",
-                list.statement.sequence,
-                current.statement.sequence
-            );
-        }
-        let dropped: Vec<String> = current
-            .revoked_ids()
-            .difference(&list.revoked_ids())
-            .cloned()
-            .collect();
-        if !dropped.is_empty() {
-            bail!(
-                "key revocation list would un-revoke {}; a newer list must keep every revoked key",
-                dropped.join(", ")
-            );
-        }
+        require_supersedes(&RevocationList::load(installed)?, list)?;
     }
     let staged = installed.with_extension(format!(
         "{}.{}.tmp",
@@ -235,6 +240,59 @@ pub fn load_configured() -> Result<()> {
 /// itself is verified, so a bundle signed by a key it revokes is refused.
 /// The list is authenticated by its own signature. Returns whether one was
 /// installed.
+/// True when `bundle` carries a key revocation list.
+pub fn bundle_carries_revocations(bundle: &crate::offline_bundle::BundleEnvelope) -> bool {
+    bundle
+        .entries
+        .iter()
+        .any(|entry| entry.path == BUNDLE_ENTRY)
+}
+
+/// What [`import_from_bundle`] admits, without installing anything: the
+/// same installed-list rules (an older or equal list is covered by the
+/// installed one; a newer one must verify and keep every revoked key), and
+/// the list that would be in force does not revoke the bundle's signer.
+pub fn preflight_bundle_revocations(bundle: &crate::offline_bundle::BundleEnvelope) -> Result<()> {
+    let Some(entry) = bundle
+        .entries
+        .iter()
+        .find(|entry| entry.path == BUNDLE_ENTRY)
+    else {
+        return Ok(());
+    };
+    let Some((installed, authorities)) = configured()? else {
+        bail!(
+            "offline bundle carries key revocations, but {REVOCATIONS_ENV} and {REVOCATION_TRUST_ROOTS_ENV} are not set"
+        );
+    };
+    let raw = STANDARD
+        .decode(&entry.content_base64)
+        .context("decoding bundled key revocations")?;
+    let list: RevocationList =
+        serde_json::from_slice(&raw).context("parsing bundled key revocations")?;
+    let in_force = match installed.exists() {
+        true => {
+            let current = RevocationList::load(&installed)?;
+            if list.statement.sequence <= current.statement.sequence {
+                current.verify(&authorities)?;
+                current
+            } else {
+                list.verify(&authorities)?;
+                require_supersedes(&current, &list)?;
+                list
+            }
+        }
+        false => {
+            list.verify(&authorities)?;
+            list
+        }
+    };
+    if in_force.revoked_ids().contains(&bundle.key_id) {
+        bail!("offline bundle signer {} is revoked", bundle.key_id);
+    }
+    Ok(())
+}
+
 pub fn import_from_bundle(bundle: &crate::offline_bundle::BundleEnvelope) -> Result<bool> {
     let Some(entry) = bundle
         .entries

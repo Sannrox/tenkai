@@ -465,24 +465,105 @@ pub async fn advance(
     Ok(record)
 }
 
-pub async fn bind_isolated_bundle(
+/// The bundle digest bound to `environment` in upgrade `name`, if any.
+pub async fn bound_bundle_digest(
+    ctx: &mut Ctx,
+    name: &str,
+    environment: &str,
+) -> Result<Option<String>> {
+    let record = load_upgrade(ctx, name).await?;
+    let index = env_index(&record, environment)?;
+    Ok(record.environments[index]
+        .isolated
+        .as_ref()
+        .map(|evidence| evidence.bundle_digest.clone()))
+}
+
+/// What binding a bundle would do, without writing anything.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct BindPreview {
+    pub bundle_digest: String,
+    pub plan_id: String,
+    pub release_ids: Vec<String>,
+    /// True when the environment already has this bundle bound (a replay).
+    pub already_bound: bool,
+    /// True when the bundle carries a key revocation list to install.
+    pub carries_revocations: bool,
+}
+
+/// Check a bundle against an upgrade as [`bind_isolated_bundle`] does, with
+/// no side effects: trust, scope and plan, every layer and weight chunk it
+/// would import and the stores they need, and any revocation list it
+/// carries, which is verified but not installed.
+pub async fn preview_isolated_bundle(
     ctx: &mut Ctx,
     name: &str,
     environment: &str,
     bundle: &crate::offline_bundle::BundleEnvelope,
     trust_roots: &crate::release_signing::TrustRoots,
     bundle_path: Option<&Path>,
-) -> Result<UpgradeRecord> {
-    // A bundle may carry key revocations; apply them before trusting it.
-    crate::key_revocation::import_from_bundle(bundle)?;
+) -> Result<BindPreview> {
     let verified = bundle.verify(
         trust_roots,
         crate::ontology::NS,
         environment,
         crate::now_millis(),
     )?;
+    let (record, index, bundle_digest) =
+        admit_isolated_bind(ctx, name, environment, &verified).await?;
+    if crate::offline_bundle::stack_manifest(&verified)?.is_some() {
+        crate::offline_bundle::preflight_full_stack(&verified, bundle_path)?;
+    }
+    // The content checks of the real bind, without storing anything.
+    let env = crate::environment::environment(ctx, environment).await?;
+    let layers = crate::offline_bundle::plan_artifact_layers(
+        &verified,
+        &crate::oci_artifact::mirrors_from_properties(&env.properties),
+    )?;
+    if !layers.is_empty() {
+        let registry = crate::oci_artifact::selected_registry()?.ok_or_else(|| {
+            anyhow::anyhow!("TENKAI_OCI_STORE is required to import offline artifact layers")
+        })?;
+        // A layer already stored with other bytes would refuse the real import.
+        for (pull, _) in &layers {
+            if let Some(stored) = registry.stored(pull)? {
+                anyhow::ensure!(
+                    stored,
+                    "artifact digest {} is already stored with different bytes",
+                    pull.digest
+                );
+            }
+        }
+    }
+    crate::offline_chunk_store::preflight_weight_chunks_for_bundle(
+        &verified,
+        bundle_path,
+        crate::offline_chunk_store::weight_cache_from_env()?.as_ref(),
+    )?;
+    crate::key_revocation::preflight_bundle_revocations(bundle)?;
+    Ok(BindPreview {
+        already_bound: record.environments[index]
+            .isolated
+            .as_ref()
+            .is_some_and(|evidence| evidence.bundle_digest == bundle_digest),
+        bundle_digest,
+        plan_id: verified.statement().plan_id.clone(),
+        release_ids: verified.statement().release_ids.clone(),
+        carries_revocations: crate::key_revocation::bundle_carries_revocations(bundle),
+    })
+}
+
+/// The upgrade, environment index and bundle digest for a verified bundle,
+/// once the environment is isolated, the plan matches, and no other bundle
+/// is bound.
+async fn admit_isolated_bind(
+    ctx: &mut Ctx,
+    name: &str,
+    environment: &str,
+    verified: &crate::offline_bundle::VerifiedBundle,
+) -> Result<(UpgradeRecord, usize, String)> {
     let bundle_digest = verified.digest().to_string();
-    let mut record = load_upgrade(ctx, name).await?;
+    let record = load_upgrade(ctx, name).await?;
     revalidate(&record, ctx).await?;
     let index = env_index(&record, environment)?;
     if record.environments[index].class != ConnectivityClass::Isolated {
@@ -508,6 +589,27 @@ pub async fn bind_isolated_bundle(
             existing.bundle_digest
         );
     }
+    Ok((record, index, bundle_digest))
+}
+
+pub async fn bind_isolated_bundle(
+    ctx: &mut Ctx,
+    name: &str,
+    environment: &str,
+    bundle: &crate::offline_bundle::BundleEnvelope,
+    trust_roots: &crate::release_signing::TrustRoots,
+    bundle_path: Option<&Path>,
+) -> Result<UpgradeRecord> {
+    // A bundle may carry key revocations; apply them before trusting it.
+    crate::key_revocation::import_from_bundle(bundle)?;
+    let verified = bundle.verify(
+        trust_roots,
+        crate::ontology::NS,
+        environment,
+        crate::now_millis(),
+    )?;
+    let (mut record, index, bundle_digest) =
+        admit_isolated_bind(ctx, name, environment, &verified).await?;
     if crate::offline_bundle::stack_manifest(&verified)?.is_some() {
         crate::offline_bundle::preflight_full_stack(&verified, bundle_path)?;
     }
@@ -2030,6 +2132,138 @@ install = "true"
         assert!(
             conflict.contains("conflicting isolated receipt"),
             "{conflict}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A staged bundle imported through the server path binds exactly as the
+    /// CLI does; a dry run writes nothing; refusals are recorded on the job.
+    #[tokio::test]
+    async fn staged_bundle_import_previews_binds_and_records_refusals() {
+        use crate::offline_import::{ImportRequest, ImportState};
+        let root = temp_root("staged-import");
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        published_software(&mut ctx, &root, "1.0.0").await;
+        let actor = crate::auth_context::test_management_context("staged");
+        crate::catalog::promote(&mut ctx, &actor, "edge-app@1.0.0", "stable")
+            .await
+            .unwrap();
+        prepare_env(&mut ctx, "site-c", ConnectivityClass::Isolated, &actor).await;
+        let spec = UpgradeSpec {
+            name: "fleet-staged".into(),
+            product: "edge-app".into(),
+            version: "1.0.0".into(),
+            channel: "stable".into(),
+            environments: vec!["site-c".into()],
+        };
+        let started = start_or_resume(&mut ctx, &spec).await.unwrap();
+        let exporter = SigningKey::from_bytes(&[7; 32]);
+        let bundle = export_isolated_bundle(
+            "site-c",
+            started.environments[0].plan_id.as_deref().unwrap(),
+            &started.release_id,
+            b"immutable payload",
+            &exporter,
+            crate::now_millis(),
+        )
+        .unwrap();
+        let roots = isolated_trust_roots(&exporter, None);
+        let staging = root.join("staging");
+        std::fs::create_dir_all(&staging).unwrap();
+        bundle.save(&staging.join("site-c.json")).unwrap();
+        let request = |dry_run: bool, environment: &str| ImportRequest {
+            version: 1,
+            operation: "import".into(),
+            bundle: "site-c.json".into(),
+            upgrade: "fleet-staged".into(),
+            environment: environment.into(),
+            dry_run,
+        };
+
+        let preview = crate::offline_import::run(
+            &mut ctx,
+            &staging,
+            &request(true, "site-c"),
+            &roots,
+            "operator",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            preview.state,
+            ImportState::Previewed,
+            "{:?}",
+            preview.refusal
+        );
+        assert!(!preview.preview.as_ref().unwrap().already_bound);
+        assert!(
+            load_upgrade(&mut ctx, "fleet-staged")
+                .await
+                .unwrap()
+                .environments[0]
+                .isolated
+                .is_none()
+        );
+
+        let imported = crate::offline_import::run(
+            &mut ctx,
+            &staging,
+            &request(false, "site-c"),
+            &roots,
+            "operator",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            imported.state,
+            ImportState::Succeeded,
+            "{:?}",
+            imported.refusal
+        );
+        let bound = load_upgrade(&mut ctx, "fleet-staged").await.unwrap();
+        assert_eq!(
+            bound.environments[0]
+                .isolated
+                .as_ref()
+                .unwrap()
+                .bundle_digest,
+            imported.preview.as_ref().unwrap().bundle_digest
+        );
+        // The CLI path on the same bundle is a replay of the same state.
+        bind_isolated_bundle(&mut ctx, "fleet-staged", "site-c", &bundle, &roots, None)
+            .await
+            .unwrap();
+        assert_eq!(load_upgrade(&mut ctx, "fleet-staged").await.unwrap(), bound);
+        assert_eq!(
+            crate::offline_import::job(&staging, &imported.id).unwrap(),
+            imported
+        );
+
+        let refused = crate::offline_import::run(
+            &mut ctx,
+            &staging,
+            &request(false, "site-d"),
+            &roots,
+            "operator",
+        )
+        .await
+        .unwrap();
+        assert_eq!(refused.state, ImportState::Failed);
+        assert!(refused.refusal.unwrap().contains("scope"));
+
+        let inventory = crate::content_inventory::inventory(&mut ctx).await.unwrap();
+        let release = inventory
+            .releases
+            .iter()
+            .find(|release| release.product == "edge-app" && release.version == "1.0.0")
+            .unwrap();
+        assert!(
+            release
+                .referenced_by
+                .contains(&"channel edge-app/stable".to_string()),
+            "{:?}",
+            release.referenced_by
         );
         let _ = std::fs::remove_dir_all(root);
     }

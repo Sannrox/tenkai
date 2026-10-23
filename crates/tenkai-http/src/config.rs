@@ -53,6 +53,8 @@ pub struct ServerConfig {
     pub agent_actor_policy: tenkai::management_operations::AgentActorPolicy,
     /// Server-mode backups (#672): `/v1/backups` and backup age in health.
     pub backups: Option<Arc<tenkai::backup::Backups>>,
+    /// Server-side bundle import (#680): staging directory and bundle trust roots.
+    pub imports: Option<tenkai::offline_import::ImportSettings>,
 }
 
 #[derive(Clone, Debug)]
@@ -84,6 +86,7 @@ impl ServerConfig {
             release_trust_roots: None,
             agent_actor_policy: Default::default(),
             backups: None,
+            imports: None,
         }
     }
 

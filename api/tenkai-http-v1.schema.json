@@ -289,6 +289,39 @@
       ],
       "type": "object"
     },
+    "BindPreview": {
+      "description": "What binding a bundle would do, without writing anything.",
+      "properties": {
+        "already_bound": {
+          "description": "True when the environment already has this bundle bound (a replay).",
+          "type": "boolean"
+        },
+        "bundle_digest": {
+          "type": "string"
+        },
+        "carries_revocations": {
+          "description": "True when the bundle carries a key revocation list to install.",
+          "type": "boolean"
+        },
+        "plan_id": {
+          "type": "string"
+        },
+        "release_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "bundle_digest",
+        "plan_id",
+        "release_ids",
+        "already_bound",
+        "carries_revocations"
+      ],
+      "type": "object"
+    },
     "ChangeEvent": {
       "description": "One durable change. `cursor` is the opaque resume token (monotonic sequence).",
       "properties": {
@@ -912,6 +945,65 @@
         "isolated"
       ],
       "type": "string"
+    },
+    "ContentInventory": {
+      "properties": {
+        "missing": {
+          "description": "Referenced content this host holds no bytes for, as `<release> <digest>`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "oci_store_bytes": {
+          "description": "Bytes under the OCI store; absent when no store is configured.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "releases": {
+          "items": {
+            "$ref": "#/$defs/ReleaseContent"
+          },
+          "type": "array"
+        },
+        "weight_cache_bytes": {
+          "description": "Bytes under the weight cache; absent when no cache is configured.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "releases",
+        "missing"
+      ],
+      "type": "object"
+    },
+    "ContentItem": {
+      "properties": {
+        "digest": {
+          "type": "string"
+        },
+        "kind": {
+          "description": "`layer` or `weights`.",
+          "type": "string"
+        },
+        "size_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "stored": {
+          "description": "Whether this host holds a file named for this digest: a layer under\nany registry path of the OCI store, a weight in the cache. Files are\nfound by name and not re-hashed here; import, apply and fetch verify\nthe bytes. An environment still pulls a layer through its own mirror\npath. Absent when the store that would hold it is not configured.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "digest",
+        "kind"
+      ],
+      "type": "object"
     },
     "DeliveryHold": {
       "description": "Durable evidence that delivery is paused for a scope.",
@@ -2197,6 +2289,118 @@
       ],
       "type": "object"
     },
+    "ImportJob": {
+      "additionalProperties": false,
+      "description": "`GET /v1/imports/{id}` and the job file.",
+      "properties": {
+        "actor": {
+          "type": "string"
+        },
+        "bundle": {
+          "type": "string"
+        },
+        "dry_run": {
+          "type": "boolean"
+        },
+        "environment": {
+          "type": "string"
+        },
+        "finished_at_ms": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "preview": {
+          "$ref": "#/$defs/BindPreview",
+          "description": "What the bind does (or did); present once the bundle verified."
+        },
+        "refusal": {
+          "description": "The exact refusal, for example a missing layer digest or an expired interval.",
+          "type": "string"
+        },
+        "schema": {
+          "type": "string"
+        },
+        "started_at_ms": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "state": {
+          "$ref": "#/$defs/ImportState"
+        },
+        "upgrade": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema",
+        "id",
+        "bundle",
+        "upgrade",
+        "environment",
+        "dry_run",
+        "state",
+        "actor",
+        "started_at_ms"
+      ],
+      "type": "object"
+    },
+    "ImportRequest": {
+      "additionalProperties": false,
+      "description": "Body of `POST /v1/imports`.",
+      "properties": {
+        "bundle": {
+          "description": "File name inside the staging directory.",
+          "type": "string"
+        },
+        "dry_run": {
+          "default": false,
+          "type": "boolean"
+        },
+        "environment": {
+          "type": "string"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "upgrade": {
+          "description": "The isolated upgrade the bundle binds to.",
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "bundle",
+        "upgrade",
+        "environment"
+      ],
+      "type": "object"
+    },
+    "ImportState": {
+      "oneOf": [
+        {
+          "enum": [
+            "running",
+            "succeeded",
+            "failed"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "previewed",
+          "description": "A dry run that would succeed.",
+          "type": "string"
+        }
+      ]
+    },
     "ManagementLifecycleResult": {
       "additionalProperties": false,
       "description": "Versioned result shared by catalog lifecycle routes.",
@@ -3127,6 +3331,40 @@
       ],
       "type": "object"
     },
+    "ReleaseContent": {
+      "properties": {
+        "content": {
+          "items": {
+            "$ref": "#/$defs/ContentItem"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "product": {
+          "type": "string"
+        },
+        "referenced_by": {
+          "description": "`channel <product>/<channel>` heads and `deployed <environment>`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "product",
+        "version",
+        "content",
+        "referenced_by"
+      ],
+      "type": "object"
+    },
     "ReleaseListEntry": {
       "description": "Identifying fields and current digest/version for one published release.",
       "properties": {
@@ -3383,6 +3621,44 @@
         "key_id",
         "statement",
         "signature"
+      ],
+      "type": "object"
+    },
+    "StagedBundle": {
+      "description": "One archive in the staging directory.",
+      "properties": {
+        "chunked": {
+          "description": "True when a `<stem>.chunks/` store sits beside the archive.",
+          "type": "boolean"
+        },
+        "environment": {
+          "description": "Present when the file parses as a bundle; signatures are not checked here.",
+          "type": "string"
+        },
+        "expires_at_ms": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "file": {
+          "type": "string"
+        },
+        "plan_id": {
+          "type": "string"
+        },
+        "size_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unreadable": {
+          "description": "Why the file is not a readable bundle.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "file",
+        "size_bytes",
+        "chunked"
       ],
       "type": "object"
     },
@@ -3681,6 +3957,47 @@
       "request": null,
       "response": {
         "$ref": "#/$defs/BackupManifest"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/imports",
+      "request": {
+        "$ref": "#/$defs/ImportRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ImportJob"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "GET",
+      "path": "/v1/imports/staged",
+      "request": null,
+      "response": {
+        "items": {
+          "$ref": "#/$defs/StagedBundle"
+        },
+        "type": "array"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "GET",
+      "path": "/v1/imports/{id}",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/ImportJob"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/content/inventory",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/ContentInventory"
       }
     },
     {

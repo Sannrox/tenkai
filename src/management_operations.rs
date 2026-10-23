@@ -313,6 +313,111 @@ impl ManagementOperations {
             .map_err(internal)
     }
 
+    /// `GET /v1/imports/staged`: bundles in the host's staging directory.
+    pub async fn staged_imports(
+        &self,
+        credential: &CredentialMaterial,
+        settings: &crate::offline_import::ImportSettings,
+    ) -> Result<Vec<crate::offline_import::StagedBundle>, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        self.require_environment_grant(credential, &context, None, "import listing")?;
+        self.require_community_catalog_host()?;
+        crate::offline_import::list_staged(&settings.staging).map_err(internal)
+    }
+
+    /// `POST /v1/imports`: verify a staged bundle with the host trust roots
+    /// and bind it, or preview the bind. A refusal is a `failed` job.
+    pub async fn import_bundle(
+        &self,
+        credential: &CredentialMaterial,
+        settings: &crate::offline_import::ImportSettings,
+        request: crate::offline_import::ImportRequest,
+    ) -> Result<crate::offline_import::ImportJob, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "offline.import")?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        self.require_community_catalog_host()?;
+        self.require_environment_grant(credential, &context, Some(&request.environment), "import")?;
+        management_lifecycle::require_management_lifecycle_api_version(request.version)
+            .map_err(|error| ManagementError::BadRequest(error.to_string()))?;
+        if request.operation != "import" {
+            return Err(ManagementError::BadRequest(format!(
+                "operation {} is not valid on this route; expected import",
+                request.operation
+            )));
+        }
+        let trust_roots = crate::release_signing::TrustRoots::load(&settings.trust_roots)
+            .map_err(|error| ManagementError::Unavailable(format!("{error:#}")))?;
+        let actor = &context.audit_principal();
+        self.audit(actor, "offline.import.requested")?;
+        let mut ctx = self.application_ctx()?;
+        let (staging, owner) = (settings.staging.clone(), actor.clone());
+        // Verification hashes and copies whole bundles: keep it off the
+        // request workers, on the bounded blocking pool with its own runtime.
+        let job = tokio::task::spawn_blocking(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(crate::offline_import::run(
+                    &mut ctx,
+                    &staging,
+                    &request,
+                    &trust_roots,
+                    &owner,
+                ))
+        })
+        .await
+        .map_err(|error| ManagementError::Internal(error.to_string()))?
+        .map_err(|error| {
+            let message = format!("{error:#}");
+            if message.contains("already running") {
+                ManagementError::Conflict(message)
+            } else {
+                ManagementError::Internal(message)
+            }
+        })?;
+        self.audit(actor, "offline.import.completed")?;
+        Ok(job)
+    }
+
+    /// `GET /v1/imports/{id}`.
+    pub async fn import_job(
+        &self,
+        credential: &CredentialMaterial,
+        settings: &crate::offline_import::ImportSettings,
+        id: &str,
+    ) -> Result<crate::offline_import::ImportJob, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        self.require_community_catalog_host()?;
+        let job = crate::offline_import::job(&settings.staging, id)
+            .map_err(|error| ManagementError::NotFound(format!("{error:#}")))?;
+        self.require_environment_grant(credential, &context, Some(&job.environment), "import")?;
+        Ok(job)
+    }
+
+    /// `GET /v1/content/inventory`: release content present and missing here.
+    pub async fn content_inventory(
+        &self,
+        credential: &CredentialMaterial,
+    ) -> Result<crate::content_inventory::ContentInventory, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        self.require_environment_grant(credential, &context, None, "content inventory")?;
+        self.require_community_catalog_host()?;
+        let mut ctx = self.application_ctx()?;
+        let mut inventory = crate::content_inventory::inventory(&mut ctx)
+            .await
+            .map_err(internal)?;
+        // Product-bound credentials see only their products, as for releases.
+        let products = context.product_bindings();
+        if !products.is_empty() {
+            inventory.retain_products(|product| products.contains(product));
+        }
+        Ok(inventory)
+    }
+
     pub async fn list_environments(
         &self,
         credential: &CredentialMaterial,

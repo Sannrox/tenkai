@@ -116,3 +116,49 @@ be removed. Keep the source plan pending until a valid receipt imports. If
 media is damaged or lost, create a new export; do not repair signed bytes.
 Operational recovery uses Tenkai state plus the signed archive and receipt and
 does not require Sekai Chisei.
+
+## Server-side import
+
+`tenkai-server` can verify and import bundles itself, so an isolated site
+needs no shell on the hub. Set `TENKAI_IMPORT_STAGING_DIR` to a directory the
+server owns and `TENKAI_BUNDLE_TRUST_ROOTS` to the trust roots that must
+authenticate the bundle exporter
+([environment variables](environment-variables.md)). Operators place an
+archive and its `<stem>.chunks/` store in the staging directory through
+their transfer process. The server never accepts bundle bytes over HTTP.
+
+- `GET /v1/imports/staged` lists the staged archives with size, target
+  environment, plan, expiry, whether a chunk store sits beside them, and why
+  a file is not a readable bundle.
+- `POST /v1/imports` takes `{version, operation: "import", bundle, upgrade,
+  environment, dry_run}`. `bundle` is a file name in the staging directory.
+  Paths, hidden files and links are refused. The import binds the bundle to
+  the isolated upgrade exactly as `tenkaictl upgrade bind-bundle` does, with
+  the same verification: signature, validity interval, revocations, scope,
+  plan and digests. With `dry_run` it also checks every layer and weight
+  chunk it would import, the stores they need, and any revocation list it
+  carries (verified, and it may not revoke the bundle's signer). It reports
+  what the bind would do and writes no content and no revocations. A real
+  import, like the CLI, installs a bundle's authenticated revocations before
+  it trusts the bundle, even when the bundle is then refused.
+- Every request is a job under `<staging>/imports/<id>.json`, readable at
+  `GET /v1/imports/{id}`. The job records its state (`succeeded`, `failed`
+  or `previewed` for a dry run) and the exact refusal, for example the
+  missing layer digest or an expired interval. The id follows the bundle
+  file, upgrade and environment, so retrying a failed or interrupted import
+  continues it: layer import is a no-op for matching bytes, and chunked
+  weights resume from the last verified chunk. One import runs at a time
+  per host; a second request while one runs gets `409`.
+- `GET /v1/content/inventory` lists, for each release, the layers and model
+  weights it names. For each one it shows whether the host holds those bytes
+  (`stored`) and their size: a layer under any registry path of
+  `TENKAI_OCI_STORE`, or a weight in `TENKAI_WEIGHT_CACHE`. An environment
+  still pulls a layer through its own mirror path. Files are found by their
+  digest names and not re-hashed for the listing; import, apply and fetch
+  verify the bytes. It also shows what
+  references the release (channel heads and deployed versions), the
+  referenced content that is missing, and the bytes each store uses.
+
+Import needs the management capability. An environment-scoped credential
+can import only for its own environment and cannot list the staging
+directory. Tenant-mode hubs refuse import.
