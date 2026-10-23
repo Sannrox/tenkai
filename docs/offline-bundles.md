@@ -117,6 +117,70 @@ media is damaged or lost, create a new export; do not repair signed bytes.
 Operational recovery uses Tenkai state plus the signed archive and receipt and
 does not require Sekai Chisei.
 
+## One-way transfer
+
+Some sites accept media inbound only. No import step waits for a reply:
+verification uses the trust roots and revocation lists carried with the
+bundle, never a network call. Whether completion needs a return path
+depends on where the upgrade record lives.
+
+| Step | How | Direction |
+| --- | --- | --- |
+| Carry the archive, its `<stem>.chunks/` store, the exporter trust roots and, if used, the revocation authorities | Transfer media | Inbound only |
+| First install of an empty isolated environment | `tenkaictl upgrade install-bundle` at the site | Inbound only |
+| Bind an update bundle | `tenkaictl upgrade bind-bundle`, or `POST /v1/imports` on the site's server | Inbound only |
+| Install bundled key revocations | Part of bind and install | Inbound only |
+| Execute the bound plan | The site's offline runtime, which signs a `tenkai.offline-receipt.v1` for the environment | Inbound only |
+| Record completion | `tenkaictl upgrade import-receipt`, then `tenkaictl upgrade advance`, on the Tenkai that holds the upgrade | Inbound only when that Tenkai is at the site (as after `install-bundle`); needs return when it is at the connected source |
+
+`upgrade advance` leaves an isolated environment `interrupted` until a
+signed receipt is imported. The receipt contract is ADR 0003. Tenkai
+verifies and imports receipts; producing one is the offline runtime's job,
+and `tenkaictl` has no command that runs a plan and signs a receipt today.
+
+When the receipt must reach a connected source, it leaves on separate media.
+Import is idempotent and a conflicting receipt cannot overwrite the first
+accepted one, so it can be carried twice without harm. It must be imported
+before the bundle expires: import re-verifies the bundle at the current
+time, and an expired bundle refuses its receipts. Plan the bundle's validity
+interval around the slowest expected return trip.
+
+With no return path to the source:
+
+- The site's own state is the record of what runs there.
+- At the source, that environment stays `interrupted` with its plan pending.
+  It never shows as applied without a signed receipt, which is intended:
+  the source does not claim what it cannot verify.
+- Do not re-export a bundle to prompt a reply. A different bundle for the
+  same upgrade and environment is refused as a digest conflict. Ship the next
+  release as a new upgrade.
+- Keep the signed archive. With the site's own state, it is everything
+  recovery needs there.
+
+### Rehearsal: one-way first install
+
+1. On the connected side, export the bundle and its chunk store for an
+   environment that does not exist yet at the site, and copy the exporter
+   trust roots beside it.
+2. Carry them to a host with no route out, for example a Linux network
+   namespace with only loopback (`unshare -n`), with `TENKAI_OCI_STORE` and
+   `TENKAI_WEIGHT_CACHE` set.
+3. Run `tenkaictl upgrade install-bundle` there. It must finish without any
+   outbound attempt; a refusal names what is missing, for example a layer
+   digest or a chunk.
+4. Check `tenkaictl env inspect <env>` and `tenkaictl upgrade status <name>`:
+   the environment exists, the content is in the local stores, and the
+   upgrade waits on the signed plan carried in.
+5. Execute the plan with the site's offline runtime and import its receipt at
+   the site (`upgrade import-receipt`, then `upgrade advance`). Nothing has
+   gone back out.
+
+CI covers the admission side
+(`first_install_from_signed_bundle_bootstraps_catalog_and_authenticated_plan`
+and the refusal tests listed above) and the receipt path
+(`connected_intermittent_and_isolated_complete_one_signed_upgrade`). The
+zero-outbound-call conformance test is tracked in #628.
+
 ## Server-side import
 
 `tenkai-server` can verify and import bundles itself, so an isolated site
