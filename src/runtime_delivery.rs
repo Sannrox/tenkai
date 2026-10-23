@@ -610,6 +610,22 @@ impl RuntimeDeliveryOperations {
                 claim: None,
             });
         }
+        // A drifted clock must not touch leases: it could expire or take
+        // over another runtime's claim. Only a durable completion this owner
+        // already holds may replay, which reads and grants nothing.
+        if let Err(refusal) = crate::clock_guard::require_trusted_time("runtime lease claim") {
+            return match self
+                .store
+                .durable_runtime_completion(&plan.id, &identity.owner)
+            {
+                Ok(Some(claim)) => Ok(RuntimeWork {
+                    environment: environment.into(),
+                    plan: Some(plan),
+                    claim: Some(claim),
+                }),
+                _ => Err(RuntimeDeliveryError::Unavailable(refusal.to_string())),
+            };
+        }
         let expires_at = crate::now_millis().saturating_add(2 * 60 * 1000);
         let claim = self
             .store

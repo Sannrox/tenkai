@@ -152,6 +152,9 @@ async fn claim_environment_with_options(
     ttl_ms: i64,
     automatic_takeover: bool,
 ) -> Result<EnvironmentLease> {
+    // Every new environment lease, whether from reconcile, an API apply or
+    // a configuration change, needs a trusted clock.
+    crate::clock_guard::require_trusted_time("environment lease grant")?;
     let now = crate::now_millis();
     if crate::environment::environment_retirement(ctx, environment)
         .await?

@@ -107,3 +107,30 @@ verify. The error names the failed checks. Execution is also refused when
 an environment's configured policy file is missing, because Tenkai cannot
 tell whether it required a preflight. Policies without `require_preflight`
 behave as before.
+
+## Keep time synchronized after install
+
+Preflight checks the clock once. Signatures, plan approvals and leases need
+a correct clock for as long as the host runs: tokens allow 60 seconds of
+skew, approvals and bundles carry validity intervals, and leases expire by
+wall-clock time. Run a time-sync daemon against a time source inside the
+site, and keep every Tenkai host within one second of it.
+
+`tenkai-server` checks this at runtime when `TENKAI_TIME_SOURCE` names that
+SNTP server (`host:port`; a server inside the site, so the check works
+offline):
+
+| Skew | Effect |
+| --- | --- |
+| At most `TENKAI_CLOCK_WARN_MS` (default 1000) | `ok` |
+| Above the warn threshold | `warn` in `/healthz` and `/readyz` and the server log |
+| Above `TENKAI_CLOCK_REFUSE_MS` (default 30000) | `refuse`: plan approvals, every new environment lease (applies from reconcile or the API, configuration changes) and runtime lease claims are refused until the clock is back in range; API calls get `503` |
+
+The server measures every `TENKAI_CLOCK_CHECK_SECS` (default 60) and reports
+the reading as `clock` in health. A failed measurement reports `unknown`.
+It does not start refusing, because an unreachable time server is not
+evidence of drift, but it never lifts a refusal either: that takes a good
+reading. Readiness stays up in every state, because reads, plans and
+in-flight work are unaffected. Renewal of a lease already held continues, so
+running applies are not cut off mid-step. Signing happens in `tenkaictl` and
+external signers; check those hosts with preflight.

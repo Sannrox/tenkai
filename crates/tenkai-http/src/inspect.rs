@@ -178,6 +178,7 @@ fn service_status(status: &'static str, config: &ServerConfig) -> ServiceStatus 
             .backups
             .as_ref()
             .map(|backups| backups.health(tenkai::now_millis())),
+        clock: tenkai::clock_guard::installed().map(|guard| guard.health()),
     }
 }
 

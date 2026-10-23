@@ -511,6 +511,9 @@ mod tests {
         for (def, field) in [
             ("OidcClientDiscovery", "display_name"),
             ("ServiceStatus", "backup"),
+            ("ServiceStatus", "clock"),
+            ("ClockHealth", "skew_ms"),
+            ("ClockHealth", "measured_at_ms"),
             ("StagedBundle", "environment"),
             ("StagedBundle", "plan_id"),
             ("StagedBundle", "expires_at_ms"),

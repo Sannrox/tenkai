@@ -586,6 +586,7 @@ async fn main() -> Result<()> {
         .map(|client| client.connect_origins.clone())
         .unwrap_or_default();
     let backups = backup_settings(cli.tenant_mode, &store)?;
+    let clock_every = clock_settings()?;
     let app = router(
         ServerConfig {
             management_token,
@@ -734,6 +735,34 @@ async fn main() -> Result<()> {
             }
         }))
     });
+    let clock_task = clock_every.and_then(|every| {
+        let guard = tenkai::clock_guard::installed()?;
+        let mut clock_shutdown_rx = shutdown_tx.subscribe();
+        Some(tokio::spawn(async move {
+            let mut timer = tokio::time::interval(every);
+            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    changed = clock_shutdown_rx.changed() => {
+                        if changed.is_err() || *clock_shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                    _ = timer.tick() => {
+                        let guard = guard.clone();
+                        if let Ok(health) = tokio::task::spawn_blocking(move || guard.measure()).await
+                            && health.state != "ok"
+                        {
+                            eprintln!(
+                                "tenkai.clock state={} skew_ms={:?} warn_ms={} refuse_ms={}",
+                                health.state, health.skew_ms, health.warn_ms, health.refuse_ms
+                            );
+                        }
+                    }
+                }
+            }
+        }))
+    });
     let webhook_task = {
         let webhook_store = store.clone();
         let mut webhook_shutdown_rx = shutdown_tx.subscribe();
@@ -827,12 +856,47 @@ async fn main() -> Result<()> {
     webhook_task
         .await
         .context("joining webhook delivery task during shutdown")?;
+    if let Some(clock_task) = clock_task {
+        clock_task
+            .await
+            .context("joining clock check task during shutdown")?;
+    }
     if let Some(backup_task) = backup_task {
         backup_task
             .await
             .context("joining backup task during shutdown")?;
     }
     result.context("serving Tenkai API")
+}
+
+/// Clock-drift guard from `TENKAI_TIME_SOURCE` (an SNTP `host:port`; unset:
+/// off), `TENKAI_CLOCK_WARN_MS` (default 1000), `TENKAI_CLOCK_REFUSE_MS`
+/// (default 30000, below the 60 s token skew) and `TENKAI_CLOCK_CHECK_SECS`
+/// (default 60). Installs the guard and returns how often to measure.
+fn clock_settings() -> Result<Option<Duration>> {
+    let Some(server) = std::env::var("TENKAI_TIME_SOURCE")
+        .ok()
+        .filter(|server| !server.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    let number = |name: &str, default: i64| -> Result<i64> {
+        std::env::var(name)
+            .ok()
+            .map(|value| value.parse::<i64>())
+            .transpose()
+            .with_context(|| format!("{name} must be a whole number"))
+            .map(|value| value.unwrap_or(default))
+    };
+    let guard = tenkai::clock_guard::ClockGuard::new(tenkai::clock_guard::ClockPolicy {
+        server,
+        warn_ms: number("TENKAI_CLOCK_WARN_MS", 1_000)?,
+        refuse_ms: number("TENKAI_CLOCK_REFUSE_MS", 30_000)?,
+    })?;
+    let every = number("TENKAI_CLOCK_CHECK_SECS", 60)?;
+    anyhow::ensure!(every > 0, "TENKAI_CLOCK_CHECK_SECS must be positive");
+    tenkai::clock_guard::install(std::sync::Arc::new(guard));
+    Ok(Some(Duration::from_secs(every as u64)))
 }
 
 /// Server-side bundle import from `TENKAI_IMPORT_STAGING_DIR` and
