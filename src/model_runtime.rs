@@ -622,7 +622,7 @@ fn download_to(
     } else {
         reqwest::redirect::Policy::default()
     };
-    let client = reqwest::blocking::Client::builder()
+    let client = crate::outbound_tls::blocking_client()?
         .timeout(std::time::Duration::from_secs(60))
         .redirect(redirects)
         .build()
@@ -974,7 +974,7 @@ impl InferenceEngineProcess for LlamaCppProcessLauncher {
 
     fn smoke(&self, handle: &EngineHandle, health: &ModelHealthSection) -> Result<()> {
         require_loopback_health_endpoint(&health.endpoint)?;
-        let client = reqwest::blocking::Client::builder()
+        let client = crate::outbound_tls::blocking_client()?
             .timeout(std::time::Duration::from_secs(u64::from(
                 health.max_startup_seconds.clamp(1, 60),
             )))

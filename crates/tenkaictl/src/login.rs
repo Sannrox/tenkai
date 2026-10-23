@@ -36,7 +36,7 @@ pub(crate) struct LoginRuntime {
 }
 
 fn http_client() -> Result<Client> {
-    Ok(Client::builder()
+    Ok(tenkai::outbound_tls::client()?
         .timeout(HTTP_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
         .build()?)

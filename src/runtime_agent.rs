@@ -70,7 +70,7 @@ impl RuntimeClient {
             instance_id: uuid::Uuid::new_v4().to_string(),
             token,
             executor,
-            http: reqwest::Client::builder()
+            http: crate::outbound_tls::client()?
                 .timeout(Duration::from_secs(10))
                 .build()?,
             inventory_report,

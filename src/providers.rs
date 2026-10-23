@@ -606,7 +606,8 @@ impl HttpRemoteGateProvider {
                 "remote gate bearer token must not be empty when set".into(),
             ));
         }
-        let client = reqwest::Client::builder()
+        let client = crate::outbound_tls::client()
+            .map_err(|error| ProviderError::Unavailable(format!("gate HTTP client: {error:#}")))?
             .timeout(timeout)
             .user_agent("tenkai-gate-provider/1")
             .build()
@@ -760,13 +761,21 @@ impl ChiseiOutcomeProvider {
                 "outcome provider endpoints require HTTPS or loopback HTTP".into(),
             ));
         }
-        let channel = Endpoint::from_shared(endpoint)
-            .map_err(|_| {
-                ProviderError::InvalidEvidence(
-                    "outcome provider endpoint is not a valid absolute URL".into(),
-                )
-            })?
-            .connect_lazy();
+        let secure = crate::outbound_tls::is_tls_url(&endpoint);
+        let mut channel = Endpoint::from_shared(endpoint).map_err(|_| {
+            ProviderError::InvalidEvidence(
+                "outcome provider endpoint is not a valid absolute URL".into(),
+            )
+        })?;
+        if secure {
+            let trust = crate::outbound_tls::OutboundTrust::from_env().map_err(|error| {
+                ProviderError::Unavailable(format!("outcome provider TLS: {error:#}"))
+            })?;
+            channel = channel.tls_config(trust.tonic()).map_err(|error| {
+                ProviderError::Unavailable(format!("outcome provider TLS: {error}"))
+            })?;
+        }
+        let channel = channel.connect_lazy();
         Ok(Self {
             namespace,
             principal,
