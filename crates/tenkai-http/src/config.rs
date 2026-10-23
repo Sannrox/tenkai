@@ -51,6 +51,8 @@ pub struct ServerConfig {
     pub release_trust_roots: Option<std::path::PathBuf>,
     /// What mutations do when the token's actor chain names an agent.
     pub agent_actor_policy: tenkai::management_operations::AgentActorPolicy,
+    /// Server-mode backups (#672): `/v1/backups` and backup age in health.
+    pub backups: Option<Arc<tenkai::backup::Backups>>,
 }
 
 #[derive(Clone, Debug)]
@@ -81,6 +83,7 @@ impl ServerConfig {
             package_migration_trust_roots: None,
             release_trust_roots: None,
             agent_actor_policy: Default::default(),
+            backups: None,
         }
     }
 

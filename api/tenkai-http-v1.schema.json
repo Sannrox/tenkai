@@ -193,6 +193,102 @@
       ],
       "type": "object"
     },
+    "BackupFailure": {
+      "additionalProperties": false,
+      "properties": {
+        "at_ms": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "at_ms",
+        "error"
+      ],
+      "type": "object"
+    },
+    "BackupHealth": {
+      "description": "Backup age as health reports it.",
+      "properties": {
+        "age_seconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_age_seconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "description": "`ok`, `stale` (older than the threshold), `missing` (none taken yet)\nor `unreadable` (the status file cannot be read).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "state",
+        "max_age_seconds"
+      ],
+      "type": "object"
+    },
+    "BackupManifest": {
+      "additionalProperties": false,
+      "description": "One completed backup, as its manifest records it.",
+      "properties": {
+        "file": {
+          "description": "File name inside the backup directory.",
+          "type": "string"
+        },
+        "schema": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "size_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "taken_at_ms": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema",
+        "file",
+        "sha256",
+        "size_bytes",
+        "taken_at_ms"
+      ],
+      "type": "object"
+    },
+    "BackupStatus": {
+      "additionalProperties": false,
+      "description": "`GET /v1/backups`: `status.json` plus the newest drill.",
+      "properties": {
+        "last_drill": {
+          "$ref": "#/$defs/DrillEvidence"
+        },
+        "last_failure": {
+          "$ref": "#/$defs/BackupFailure"
+        },
+        "last_success": {
+          "$ref": "#/$defs/BackupManifest"
+        },
+        "schema": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema"
+      ],
+      "type": "object"
+    },
     "ChangeEvent": {
       "description": "One durable change. `cursor` is the opaque resume token (monotonic sequence).",
       "properties": {
@@ -887,6 +983,55 @@
       },
       "required": [
         "audit"
+      ],
+      "type": "object"
+    },
+    "DrillEvidence": {
+      "additionalProperties": false,
+      "description": "Evidence that one backup restored into a scratch store and opened.",
+      "properties": {
+        "environments": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "file": {
+          "type": "string"
+        },
+        "integrity": {
+          "description": "`PRAGMA integrity_check` of the restored store.",
+          "type": "string"
+        },
+        "plans": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "releases": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "restored_at_ms": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "schema": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema",
+        "file",
+        "sha256",
+        "restored_at_ms",
+        "integrity",
+        "environments",
+        "releases",
+        "plans"
       ],
       "type": "object"
     },
@@ -3185,6 +3330,10 @@
     },
     "ServiceStatus": {
       "properties": {
+        "backup": {
+          "$ref": "#/$defs/BackupHealth",
+          "description": "Backup age when backups are configured. `stale` or `missing` degrades\nhealth without failing readiness: the server can still do its work."
+        },
         "capabilities": {
           "items": {
             "type": "string"
@@ -3514,6 +3663,24 @@
       "request": null,
       "response": {
         "$ref": "#/$defs/FleetStatusReport"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/backups",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/BackupStatus"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/backups",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/BackupManifest"
       }
     },
     {

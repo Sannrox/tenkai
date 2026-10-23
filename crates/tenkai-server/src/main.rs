@@ -575,6 +575,7 @@ async fn main() -> Result<()> {
         .as_ref()
         .map(|client| client.connect_origins.clone())
         .unwrap_or_default();
+    let backups = backup_settings(cli.tenant_mode, &store)?;
     let app = router(
         ServerConfig {
             management_token,
@@ -608,6 +609,7 @@ async fn main() -> Result<()> {
             release_trust_roots: std::env::var_os("TENKAI_RELEASE_TRUST_ROOTS")
                 .map(std::path::PathBuf::from),
             agent_actor_policy: cli.agent_actor_policy,
+            backups: backups.as_ref().map(|(backups, _)| backups.clone()),
         },
         reconciler.clone(),
         store.clone(),
@@ -686,6 +688,40 @@ async fn main() -> Result<()> {
                 }
             }
         })
+    });
+    let backup_task = backups.and_then(|(backups, every)| {
+        let every = every?;
+        let mut backup_shutdown_rx = shutdown_tx.subscribe();
+        Some(tokio::spawn(async move {
+            let mut timer = tokio::time::interval(every);
+            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    changed = backup_shutdown_rx.changed() => {
+                        if changed.is_err() || *backup_shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                    _ = timer.tick() => {
+                        let backups = backups.clone();
+                        let taken = tokio::task::spawn_blocking(move || {
+                            backups.take(tenkai::now_millis())
+                        })
+                        .await;
+                        match taken {
+                            Ok(Ok(manifest)) => eprintln!(
+                                "tenkai.backup outcome=ok file={} sha256={}",
+                                manifest.file, manifest.sha256
+                            ),
+                            Ok(Err(error)) => {
+                                eprintln!("tenkai.backup outcome=failed detail={error:#}")
+                            }
+                            Err(error) => eprintln!("tenkai.backup outcome=failed detail={error}"),
+                        }
+                    }
+                }
+            }
+        }))
     });
     let webhook_task = {
         let webhook_store = store.clone();
@@ -780,7 +816,54 @@ async fn main() -> Result<()> {
     webhook_task
         .await
         .context("joining webhook delivery task during shutdown")?;
+    if let Some(backup_task) = backup_task {
+        backup_task
+            .await
+            .context("joining backup task during shutdown")?;
+    }
     result.context("serving Tenkai API")
+}
+
+/// Server-mode backups from `TENKAI_BACKUP_DIR` (unset: off) and, when set,
+/// `TENKAI_BACKUP_INTERVAL_SECS` (default 86400; 0 takes backups only on
+/// demand), `TENKAI_BACKUP_RETAIN` (default 7) and
+/// `TENKAI_BACKUP_MAX_AGE_SECS` (default twice the interval, else 172800).
+/// Tenant-mode hubs keep their state in PostgreSQL and refuse the setting.
+fn backup_settings(
+    tenant_mode: bool,
+    store: &Arc<SqliteStore>,
+) -> Result<Option<(Arc<tenkai::backup::Backups>, Option<Duration>)>> {
+    let Some(dir) = std::env::var_os("TENKAI_BACKUP_DIR") else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        !tenant_mode,
+        "TENKAI_BACKUP_DIR backs up the SQLite store; tenant-mode hubs back up PostgreSQL with its own tools"
+    );
+    let number = |name: &str, default: u64| -> Result<u64> {
+        std::env::var(name)
+            .ok()
+            .map(|value| value.parse::<u64>())
+            .transpose()
+            .with_context(|| format!("{name} must be a whole number"))
+            .map(|value| value.unwrap_or(default))
+    };
+    let interval = number("TENKAI_BACKUP_INTERVAL_SECS", 86_400)?;
+    let max_age = number(
+        "TENKAI_BACKUP_MAX_AGE_SECS",
+        if interval == 0 { 172_800 } else { interval * 2 },
+    )?;
+    let retain = number("TENKAI_BACKUP_RETAIN", 7)?;
+    let backups = tenkai::backup::Backups::new(
+        store.clone(),
+        tenkai::backup::BackupPolicy {
+            dir: dir.into(),
+            retain: usize::try_from(retain)?,
+            max_age_ms: i64::try_from(max_age.saturating_mul(1000))?,
+        },
+    )?;
+    let every = (interval > 0).then(|| Duration::from_secs(interval));
+    Ok(Some((Arc::new(backups), every)))
 }
 
 #[cfg(test)]

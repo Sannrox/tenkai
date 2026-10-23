@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 
 use super::router::{ErrorBody, ServiceStatus};
 use tenkai::approval_policy::EffectiveApprovalPolicy;
+use tenkai::backup::{BackupManifest, BackupStatus};
 use tenkai::catalog::{ChannelPage, ReleasePage};
 use tenkai::change_stream::ChangeEventPage;
 use tenkai::delivery_hold::DeliveryHoldView;
@@ -120,6 +121,20 @@ pub fn http_contract() -> Value {
             auth: Auth::Read,
             request: None,
             response: schema::<FleetStatusReport>(&mut g),
+        },
+        Route {
+            method: "GET",
+            path: "/v1/backups",
+            auth: Auth::Read,
+            request: None,
+            response: schema::<BackupStatus>(&mut g),
+        },
+        Route {
+            method: "POST",
+            path: "/v1/backups",
+            auth: Auth::Management,
+            request: None,
+            response: schema::<BackupManifest>(&mut g),
         },
         Route {
             method: "GET",
@@ -465,6 +480,11 @@ mod tests {
         let defs = &contract["$defs"];
         for (def, field) in [
             ("OidcClientDiscovery", "display_name"),
+            ("ServiceStatus", "backup"),
+            ("BackupStatus", "last_success"),
+            ("BackupStatus", "last_failure"),
+            ("BackupStatus", "last_drill"),
+            ("BackupHealth", "age_seconds"),
             ("EnvironmentInspectReport", "maintenance"),
             ("EnvironmentInspectReport", "observed_type_digest"),
             ("EnvironmentInspectReport", "preview"),

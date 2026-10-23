@@ -174,7 +174,39 @@ fn service_status(status: &'static str, config: &ServerConfig) -> ServiceStatus 
         profile: config.capabilities.profile.clone(),
         capabilities: config.capabilities.diagnostic_names(),
         contracts: super::contract::SERVED_CONTRACTS.to_vec(),
+        backup: config
+            .backups
+            .as_ref()
+            .map(|backups| backups.health(tenkai::now_millis())),
     }
+}
+
+pub(super) async fn take_backup(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let Some(backups) = state.config.backups.clone() else {
+        return error_response(StatusCode::NOT_FOUND, "backups are not configured");
+    };
+    manage_result(state.management.take_backup(&credential, backups).await)
+}
+
+pub(super) async fn backup_status(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let Some(backups) = state.config.backups.clone() else {
+        return error_response(StatusCode::NOT_FOUND, "backups are not configured");
+    };
+    manage_result(state.management.backup_status(&credential, backups).await)
 }
 
 /// Unauthenticated OpenMetrics scrape when `metrics_enabled` (#137).

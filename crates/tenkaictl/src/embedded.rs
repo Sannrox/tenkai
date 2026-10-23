@@ -56,6 +56,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         } => crate::embedded_preflight::run(&mut ctx, &env, &config, &signing_key).await,
         command @ Command::Reconcile { .. } => crate::embedded_reconcile::run(ctx, command).await,
         Command::Restore { .. }
+        | Command::RestoreDrill { .. }
         | Command::Dev { .. }
         | Command::ExecutorGuard { .. }
         | Command::Login { .. }

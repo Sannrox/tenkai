@@ -145,3 +145,76 @@ async fn forged_tenant_header_does_not_select_authority() {
     assert!(!encoded.contains("forged-tenant"));
     assert!(!encoded.contains("management-secret"));
 }
+
+#[tokio::test]
+async fn backups_are_fleet_management_and_their_age_shows_in_health() {
+    let root = std::env::temp_dir().join(format!(
+        "tenkai-http-backup-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let store = Arc::new(tenkai::storage::SqliteStore::open(root.join("tenkai.db")).unwrap());
+    let backups = Arc::new(
+        tenkai::backup::Backups::new(
+            store.clone(),
+            tenkai::backup::BackupPolicy {
+                dir: root.join("backups"),
+                retain: 3,
+                max_age_ms: 3_600_000,
+            },
+        )
+        .unwrap(),
+    );
+    let mut config = ServerConfig::community("management-secret", HashMap::new());
+    config
+        .environment_management_assignments
+        .insert("prod-secret".into(), "prod".into());
+    config.backups = Some(backups);
+    let app = router(
+        config,
+        Arc::new(super::support::FixedReconciler::default()),
+        store,
+    )
+    .unwrap();
+    let call = |method: &str, path: &str, token: Option<&str>| {
+        let mut request = Request::builder().method(method).uri(path);
+        if let Some(token) = token {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        let app = app.clone();
+        let request = request.body(Body::empty()).unwrap();
+        async move {
+            let response = app.oneshot(request).await.unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (
+                status,
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+            )
+        }
+    };
+
+    let (_, health) = call("GET", "/readyz", None).await;
+    assert_eq!(health["backup"]["state"], "missing");
+    assert_eq!(
+        call("POST", "/v1/backups", None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    // Backups cover the whole hub: an environment-scoped token is refused.
+    assert_eq!(
+        call("POST", "/v1/backups", Some("prod-secret")).await.0,
+        StatusCode::FORBIDDEN
+    );
+    let (status, manifest) = call("POST", "/v1/backups", Some("management-secret")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(manifest["sha256"].as_str().unwrap().starts_with("sha256:"));
+    let (_, backup_status) = call("GET", "/v1/backups", Some("management-secret")).await;
+    assert_eq!(backup_status["last_success"]["file"], manifest["file"]);
+    let (status, health) = call("GET", "/healthz", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(health["backup"]["state"], "ok");
+    let _ = std::fs::remove_dir_all(root);
+}
