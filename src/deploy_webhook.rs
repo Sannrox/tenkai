@@ -35,7 +35,7 @@ const MAX_ENDPOINTS: usize = 8;
 const MAX_SECRET_BYTES: usize = 256;
 
 /// Stable apply-lifecycle events a webhook endpoint may subscribe to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub enum WebhookEvent {
     #[serde(rename = "apply.succeeded")]
     ApplySucceeded,

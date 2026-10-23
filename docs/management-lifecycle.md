@@ -46,8 +46,12 @@ call it before the Catalog, planner, or apply core.
 | `apply` | Environment | `POST /v1/plans/{plan_id}/apply` | Implemented (#395) |
 | `rollback` | Environment | `POST /v1/environments/{environment}/rollback` | Implemented (#395) |
 | `retire` | Environment | `POST /v1/environments/{environment}/retire` | Implemented ([#451](https://github.com/Sannrox/tenkai/issues/451)) |
+| `register` | Catalog-wide | `POST /v1/environments` | Implemented ([#679](https://github.com/Sannrox/tenkai/issues/679)) |
+| `configure` | Environment | `PUT`/`DELETE /v1/environments/{environment}/facts`, `constraints`, `maintenance-windows/{window}`, `webhooks`, `approval-policy` | Implemented (#679) |
 
 `tenkaictl --target remote` publish, promote, `release recall`, `env subscribe`, `env retire`, `plan`, `approval submit`, `apply`, and `rollback` map onto the implemented routes. Retirement requires a non-empty reason and records the authenticated actor and server timestamp. It is idempotent, refuses an active apply lease, and leaves environment history inspectable. Retirement requires the Tenkai server to own the operational store; remote catalog-provider mode fails closed because it cannot atomically fence retirement against apply admission. Remote publish requires a signature and trust roots; `--allow-unsigned-development` stays embedded-only. Remote subscribe, plan, approve, apply, and rollback require `--generation` matching the current environment lease generation, or `0` when no lease is held. Remote apply and approval submit require a signed `tenkai.plan-approval.v1` envelope; `--allow-unapproved-development` stays embedded-only. `tenkaictl dev sign-approval --plan-digest --env` signs that envelope without a local hub database. Rollback creates the rollback plan only; the operator approves and applies it with the same evidence as an embedded drill.
+
+`register` and `configure` back remote `env add`, `env facts set|clear`, `env constraints set|clear`, `env maintenance set|remove`, `env webhooks set|clear`, and `env approval-policy set|clear`. Each request carries a non-empty `reason`, and `configure` also carries `expected_generation` (`--generation`). The body's `change.kind` decides the route: a `set_*` kind is a `PUT` and a `clear_*` or `remove_*` kind is a `DELETE` on its resource, and any other pairing is refused. Validation is the CLI's own, so a refusal carries the same message. A change runs under the environment apply lease, so concurrent changes and an active apply are serialized, and the generation is checked again inside that lease. It appends an immutable `tenkai.environment_config_audit` event with the action, actor, reason, and time before the write (`requested`) and another after it (`completed` or `failed`). An approval-policy file that cannot be loaded is refused with a fixed message; the parser detail goes only to the server log. Registration is catalog-wide, so an environment-scoped credential cannot create environments. An approval-policy path names a file on the server host, never key material.
 
 Community and spoke hosts serve these routes. Tenant-mode hubs support `retire` through the tenant operational registry. They continue to refuse the other lifecycle routes until a tenant-scoped catalog adapter exists; they do not write a shared catalog.
 
@@ -89,7 +93,9 @@ failed-target retry are additive `tenkai.http.v1` routes that reuse this
 envelope's version, actor audit, and environment fencing generation.
 `GET /v1/environments/{environment}/approval-policy` is an additive
 `tenkai.http.v1` read of the effective plan-approval policy; it does not
-edit the policy file.
+edit the policy file. Environment registration and the configuration
+`PUT`/`DELETE` routes are additive `tenkai.http.v1` routes on the same
+envelope.
 
 ## Machine-readable contract
 

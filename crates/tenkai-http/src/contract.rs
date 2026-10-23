@@ -19,6 +19,7 @@ use tenkai::catalog::{ChannelPage, ReleasePage};
 use tenkai::change_stream::ChangeEventPage;
 use tenkai::delivery_hold::DeliveryHoldView;
 use tenkai::environment::{EnvironmentInspectReport, EnvironmentListEntry, StatusRow};
+use tenkai::environment_config::{EnvironmentConfigRequest, RegisterEnvironmentRequest};
 use tenkai::fleet::FleetStatusReport;
 use tenkai::management_lifecycle::{
     ApplyRequest, ApproveRequest, ChannelHoldRequest, DeliveryHoldRequest,
@@ -65,6 +66,7 @@ fn schema<T: JsonSchema>(generator: &mut SchemaGenerator) -> Value {
 pub fn http_contract() -> Value {
     let mut g = SchemaSettings::draft2020_12().into_generator();
     let lifecycle = schema::<ManagementLifecycleResult>(&mut g);
+    let config = schema::<EnvironmentConfigRequest>(&mut g);
     let migration = schema::<PackageMigrationResult>(&mut g);
     let status = schema::<ServiceStatus>(&mut g);
     let routes = vec![
@@ -134,6 +136,13 @@ pub fn http_contract() -> Value {
             response: schema::<Vec<EnvironmentListEntry>>(&mut g),
         },
         Route {
+            method: "POST",
+            path: "/v1/environments",
+            auth: Auth::Management,
+            request: Some(schema::<RegisterEnvironmentRequest>(&mut g)),
+            response: lifecycle.clone(),
+        },
+        Route {
             method: "GET",
             path: "/v1/releases",
             auth: Auth::Read,
@@ -174,6 +183,76 @@ pub fn http_contract() -> Value {
             auth: Auth::Read,
             request: None,
             response: schema::<EffectiveApprovalPolicy>(&mut g),
+        },
+        Route {
+            method: "PUT",
+            path: "/v1/environments/{environment}/approval-policy",
+            auth: Auth::Management,
+            request: Some(config.clone()),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "DELETE",
+            path: "/v1/environments/{environment}/approval-policy",
+            auth: Auth::Management,
+            request: Some(config.clone()),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "PUT",
+            path: "/v1/environments/{environment}/facts",
+            auth: Auth::Management,
+            request: Some(config.clone()),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "DELETE",
+            path: "/v1/environments/{environment}/facts",
+            auth: Auth::Management,
+            request: Some(config.clone()),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "PUT",
+            path: "/v1/environments/{environment}/constraints",
+            auth: Auth::Management,
+            request: Some(config.clone()),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "DELETE",
+            path: "/v1/environments/{environment}/constraints",
+            auth: Auth::Management,
+            request: Some(config.clone()),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "PUT",
+            path: "/v1/environments/{environment}/maintenance-windows/{window}",
+            auth: Auth::Management,
+            request: Some(config.clone()),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "DELETE",
+            path: "/v1/environments/{environment}/maintenance-windows/{window}",
+            auth: Auth::Management,
+            request: Some(config.clone()),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "PUT",
+            path: "/v1/environments/{environment}/webhooks",
+            auth: Auth::Management,
+            request: Some(config.clone()),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "DELETE",
+            path: "/v1/environments/{environment}/webhooks",
+            auth: Auth::Management,
+            request: Some(config.clone()),
+            response: lifecycle.clone(),
         },
         Route {
             method: "GET",

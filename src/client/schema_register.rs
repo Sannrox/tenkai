@@ -287,6 +287,18 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
             ],
         ),
         object_type(
+            crate::environment_config::CONFIG_AUDIT_KIND,
+            "An immutable environment registration or configuration change",
+            vec![
+                prop("environment", true, "Environment name"),
+                prop("action", true, "register or the configuration change kind"),
+                prop("outcome", true, "requested, completed or failed"),
+                prop("actor", true, "Principal that made the change"),
+                prop("reason", true, "Why the change was made"),
+                prop("at", true, "Unix-ms timestamp of the change"),
+            ],
+        ),
+        object_type(
             KIND_PRODUCT,
             "A deliverable unit of software or intelligence artifacts",
             vec![prop("description", false, "What this product is")],

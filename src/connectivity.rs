@@ -23,7 +23,7 @@ use crate::plan::{self, Action, Plan, PlanState};
 pub const UPGRADE_FORMAT_VERSION: u32 = 1;
 pub const CONNECTIVITY_CLASS_PROPERTY: &str = "connectivity_class";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectivityClass {
     Connected,

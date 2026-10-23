@@ -38,6 +38,8 @@ pub enum ManagementLifecycleOperation {
     Retry,
     ChannelHold,
     ChannelRelease,
+    Register,
+    Configure,
 }
 
 impl ManagementLifecycleOperation {
@@ -57,6 +59,8 @@ impl ManagementLifecycleOperation {
             Self::Retry => "retry",
             Self::ChannelHold => "channel_hold",
             Self::ChannelRelease => "channel_release",
+            Self::Register => "register",
+            Self::Configure => "configure",
         }
     }
 
@@ -65,7 +69,12 @@ impl ManagementLifecycleOperation {
     pub fn is_catalog_wide(self) -> bool {
         matches!(
             self,
-            Self::Publish | Self::Promote | Self::Recall | Self::ChannelHold | Self::ChannelRelease
+            Self::Publish
+                | Self::Promote
+                | Self::Recall
+                | Self::ChannelHold
+                | Self::ChannelRelease
+                | Self::Register
         )
     }
 
@@ -86,6 +95,7 @@ impl ManagementLifecycleOperation {
                 | Self::Hold
                 | Self::Release
                 | Self::Retry
+                | Self::Configure
         )
     }
 }
@@ -135,6 +145,8 @@ pub fn parse_management_lifecycle_operation(name: &str) -> Result<ManagementLife
         "retry" => Ok(ManagementLifecycleOperation::Retry),
         "channel_hold" => Ok(ManagementLifecycleOperation::ChannelHold),
         "channel_release" => Ok(ManagementLifecycleOperation::ChannelRelease),
+        "register" => Ok(ManagementLifecycleOperation::Register),
+        "configure" => Ok(ManagementLifecycleOperation::Configure),
         other => bail!("unknown management lifecycle operation {other:?}"),
     }
 }
@@ -760,6 +772,58 @@ pub fn admit_retry_failed_target(
         &request.environment,
         request.expected_generation,
         ManagementLifecycleOperation::Retry,
+        kind,
+        granted_environment,
+    )
+}
+
+/// Admit `POST /v1/environments`. Registration is catalog-wide: an
+/// environment-scoped credential cannot create environments.
+pub fn admit_register_environment(
+    request: &crate::environment_config::RegisterEnvironmentRequest,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<AdmittedManagementLifecycle> {
+    crate::ontology::validate_identifier("environment", &request.environment)?;
+    crate::environment_config::require_reason(&request.reason)?;
+    let admitted = admit_management_lifecycle(
+        &ManagementLifecycleEnvelope {
+            version: request.version,
+            operation: request.operation.clone(),
+            environment: None,
+            expected_generation: None,
+        },
+        kind,
+        granted_environment,
+    )?;
+    require_route_operation(admitted.operation, ManagementLifecycleOperation::Register)?;
+    Ok(admitted)
+}
+
+/// Admit one configuration route: the path environment, the route's
+/// resource, method and window name, and the generation-fenced envelope.
+pub fn admit_environment_config(
+    request: &crate::environment_config::EnvironmentConfigRequest,
+    path_environment: &str,
+    route: (
+        crate::environment_config::ConfigResource,
+        bool,
+        Option<&str>,
+    ),
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<AdmittedManagementLifecycle> {
+    require_path_environment("configure", &request.environment, path_environment)?;
+    let (resource, clears, window) = route;
+    crate::environment_config::require_route(&request.change, resource, clears, window)?;
+    crate::environment_config::require_reason(&request.reason)?;
+    crate::environment_config::validate(&request.change)?;
+    admit_environment_operation(
+        request.version,
+        &request.operation,
+        &request.environment,
+        request.expected_generation,
+        ManagementLifecycleOperation::Configure,
         kind,
         granted_environment,
     )

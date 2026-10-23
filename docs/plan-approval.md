@@ -134,8 +134,9 @@ Remote operators read the effective policy with
 `tenkaictl --target remote env approval-policy show lab` or
 `GET /v1/environments/{environment}/approval-policy`. The response lists
 automatic signer key ids, the rules that still require a human, TTL, and
-the policy digest. It never includes seed bytes or file contents. Setting
-and clearing the policy path stay embedded-only. Environment inspect includes
+the policy digest. It never includes seed bytes or file contents. Remote
+`set` and `clear` take `--generation` and `--reason`, and the path names a
+file on the server host. Environment inspect includes
 `latest_plan.approval`: `policy` when the live policy auto-signed, `human`
 when a person signed, `development` for the local unsigned bypass, or
 `required` with the reason a human signature is still needed. Inspect verifies a pending human envelope at

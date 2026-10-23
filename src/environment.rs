@@ -802,10 +802,20 @@ pub async fn set_environment_constraint(
     value: &str,
 ) -> Result<String> {
     validate_identifier("environment", env)?;
+    let property = constraint_property(kind, name, value)?;
+    let mut env_obj = environment(ctx, env).await?;
+    env_obj.properties.insert(property.clone(), value.into());
+    env_obj.updated = crate::now_millis();
+    ctx.put(env_obj).await?;
+    Ok(format!("set {env} constraint {property}={value}"))
+}
+
+/// Validate one constraint and return the environment property it is stored in.
+pub(crate) fn constraint_property(kind: &str, name: &str, value: &str) -> Result<String> {
     if value.trim().is_empty() {
         bail!("constraint value must not be empty");
     }
-    let property = match kind {
+    Ok(match kind {
         "version_pin" => {
             validate_identifier("product", name)?;
             semver::Version::parse(value)
@@ -836,12 +846,7 @@ pub async fn set_environment_constraint(
         other => bail!(
             "unknown constraint kind {other:?}; expected version_pin, version_range, or require_fact"
         ),
-    };
-    let mut env_obj = environment(ctx, env).await?;
-    env_obj.properties.insert(property.clone(), value.into());
-    env_obj.updated = crate::now_millis();
-    ctx.put(env_obj).await?;
-    Ok(format!("set {env} constraint {property}={value}"))
+    })
 }
 
 pub async fn clear_environment_constraint(

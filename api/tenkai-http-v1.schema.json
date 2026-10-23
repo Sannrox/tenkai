@@ -809,6 +809,14 @@
         }
       ]
     },
+    "ConnectivityClass": {
+      "enum": [
+        "connected",
+        "intermittent",
+        "isolated"
+      ],
+      "type": "string"
+    },
     "DeliveryHold": {
       "description": "Durable evidence that delivery is paused for a scope.",
       "properties": {
@@ -916,6 +924,268 @@
       "required": [
         "configured",
         "mode"
+      ],
+      "type": "object"
+    },
+    "EnvironmentConfigChange": {
+      "description": "One configuration change. The variant decides the route: its resource\npath and whether it is a `PUT` or a `DELETE`.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "set_fact",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "key",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "clear_fact",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "key"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "constraint": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "set_constraint",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "constraint",
+            "name",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "constraint": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "clear_constraint",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "constraint",
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "duration_minutes": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "set_maintenance_window",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "start": {
+              "type": "string"
+            },
+            "timezone": {
+              "type": "string"
+            },
+            "weekdays": {
+              "items": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "name",
+            "timezone",
+            "weekdays",
+            "start",
+            "duration_minutes"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "remove_maintenance_window",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "events": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/WebhookEvent"
+              },
+              "type": "array"
+            },
+            "kind": {
+              "const": "set_webhook",
+              "type": "string"
+            },
+            "secret_env": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "url",
+            "secret_env"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Clears one URL, or every webhook when `url` is absent.",
+          "properties": {
+            "kind": {
+              "const": "clear_webhooks",
+              "type": "string"
+            },
+            "url": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "`path` names a policy file on the server host. Never key material.",
+          "properties": {
+            "kind": {
+              "const": "set_approval_policy",
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "clear_approval_policy",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "EnvironmentConfigRequest": {
+      "additionalProperties": false,
+      "description": "Body of every `PUT`/`DELETE` configuration route.",
+      "properties": {
+        "change": {
+          "$ref": "#/$defs/EnvironmentConfigChange"
+        },
+        "environment": {
+          "type": "string"
+        },
+        "expected_generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "environment",
+        "expected_generation",
+        "reason",
+        "change"
       ],
       "type": "object"
     },
@@ -2671,6 +2941,47 @@
       ],
       "type": "object"
     },
+    "RegisterEnvironmentRequest": {
+      "additionalProperties": false,
+      "description": "Body of `POST /v1/environments`.",
+      "properties": {
+        "connectivity_class": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConnectivityClass"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "description": {
+          "default": "",
+          "type": "string"
+        },
+        "environment": {
+          "type": "string"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "environment",
+        "reason"
+      ],
+      "type": "object"
+    },
     "ReleaseListEntry": {
       "description": "Identifying fields and current digest/version for one published release.",
       "properties": {
@@ -3115,6 +3426,15 @@
         "environments"
       ],
       "type": "object"
+    },
+    "WebhookEvent": {
+      "description": "Stable apply-lifecycle events a webhook endpoint may subscribe to.",
+      "enum": [
+        "apply.succeeded",
+        "apply.failed",
+        "apply.rolled_back"
+      ],
+      "type": "string"
     }
   },
   "$id": "tenkai.http.v1",
@@ -3218,6 +3538,17 @@
       }
     },
     {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/environments",
+      "request": {
+        "$ref": "#/$defs/RegisterEnvironmentRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
       "auth": "read",
       "method": "GET",
       "path": "/v1/releases",
@@ -3278,6 +3609,116 @@
       "request": null,
       "response": {
         "$ref": "#/$defs/EffectiveApprovalPolicy"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "PUT",
+      "path": "/v1/environments/{environment}/approval-policy",
+      "request": {
+        "$ref": "#/$defs/EnvironmentConfigRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "DELETE",
+      "path": "/v1/environments/{environment}/approval-policy",
+      "request": {
+        "$ref": "#/$defs/EnvironmentConfigRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "PUT",
+      "path": "/v1/environments/{environment}/facts",
+      "request": {
+        "$ref": "#/$defs/EnvironmentConfigRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "DELETE",
+      "path": "/v1/environments/{environment}/facts",
+      "request": {
+        "$ref": "#/$defs/EnvironmentConfigRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "PUT",
+      "path": "/v1/environments/{environment}/constraints",
+      "request": {
+        "$ref": "#/$defs/EnvironmentConfigRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "DELETE",
+      "path": "/v1/environments/{environment}/constraints",
+      "request": {
+        "$ref": "#/$defs/EnvironmentConfigRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "PUT",
+      "path": "/v1/environments/{environment}/maintenance-windows/{window}",
+      "request": {
+        "$ref": "#/$defs/EnvironmentConfigRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "DELETE",
+      "path": "/v1/environments/{environment}/maintenance-windows/{window}",
+      "request": {
+        "$ref": "#/$defs/EnvironmentConfigRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "PUT",
+      "path": "/v1/environments/{environment}/webhooks",
+      "request": {
+        "$ref": "#/$defs/EnvironmentConfigRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "DELETE",
+      "path": "/v1/environments/{environment}/webhooks",
+      "request": {
+        "$ref": "#/$defs/EnvironmentConfigRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
       }
     },
     {

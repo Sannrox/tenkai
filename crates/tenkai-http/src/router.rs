@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::Router;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use serde::Serialize;
 
 use tenkai::management_operations::ManagementOperations;
@@ -11,6 +11,10 @@ use tenkai::tenant_store::TenantOperationalStore;
 
 use super::auth::{import_development_fixture, reset_development_fixture};
 use super::config::ServerConfig;
+use super::environment_config::{
+    configure_approval_policy, configure_constraints, configure_facts,
+    configure_maintenance_window, configure_webhooks, register_environment,
+};
 use super::inspect::{
     change_events, environment_approval_policy, environment_status, fleet_status, health,
     inspect_environment, list_channels, list_environments, list_migrations, list_releases,
@@ -90,7 +94,10 @@ pub fn router(
         .route("/v1/reconcile", post(reconcile))
         .route("/v1/fleet/status", get(fleet_status))
         .route("/v1/events", get(change_events))
-        .route("/v1/environments", get(list_environments))
+        .route(
+            "/v1/environments",
+            get(list_environments).post(register_environment),
+        )
         .route("/v1/releases", get(list_releases).post(publish_release))
         .route("/v1/channels", get(list_channels))
         .route("/v1/migrations", get(list_migrations))
@@ -109,7 +116,25 @@ pub fn router(
         )
         .route(
             "/v1/environments/{environment}/approval-policy",
-            get(environment_approval_policy),
+            get(environment_approval_policy)
+                .put(configure_approval_policy)
+                .delete(configure_approval_policy),
+        )
+        .route(
+            "/v1/environments/{environment}/facts",
+            put(configure_facts).delete(configure_facts),
+        )
+        .route(
+            "/v1/environments/{environment}/constraints",
+            put(configure_constraints).delete(configure_constraints),
+        )
+        .route(
+            "/v1/environments/{environment}/maintenance-windows/{window}",
+            put(configure_maintenance_window).delete(configure_maintenance_window),
+        )
+        .route(
+            "/v1/environments/{environment}/webhooks",
+            put(configure_webhooks).delete(configure_webhooks),
         )
         .route(
             "/v1/environments/{environment}/runtime",

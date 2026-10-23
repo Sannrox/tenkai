@@ -2,6 +2,18 @@ use std::path::PathBuf;
 
 use clap::Subcommand;
 
+/// Fence and reason for a configuration change. Both are required with
+/// `--target remote`; the embedded target does not use them.
+#[derive(clap::Args, Debug, Default)]
+pub(crate) struct RemoteChange {
+    /// Current fencing generation; required with --target remote.
+    #[arg(long)]
+    pub(crate) generation: Option<u64>,
+    /// Why the change is made, recorded in the audit; required with --target remote.
+    #[arg(long)]
+    pub(crate) reason: Option<String>,
+}
+
 #[derive(Subcommand)]
 pub(crate) enum EnvCommand {
     /// Record or inspect software compatibility preflight evidence.
@@ -14,6 +26,12 @@ pub(crate) enum EnvCommand {
         name: String,
         #[arg(long, default_value = "")]
         description: String,
+        /// Connectivity class to set on registration (connected, intermittent, isolated).
+        #[arg(long)]
+        connectivity: Option<String>,
+        /// Why the environment is registered; required with --target remote.
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// Register a non-promotable preview environment from a branch pin.
     Preview {
@@ -192,12 +210,16 @@ pub(crate) enum WebhooksCommand {
         /// Comma-separated events. Default: every apply outcome.
         #[arg(long)]
         events: Option<String>,
+        #[command(flatten)]
+        remote: RemoteChange,
     },
     /// Clear one URL, or every webhook on the environment.
     Clear {
         env: String,
         #[arg(long)]
         url: Option<String>,
+        #[command(flatten)]
+        remote: RemoteChange,
     },
 }
 
@@ -205,10 +227,20 @@ pub(crate) enum WebhooksCommand {
 pub(crate) enum ApprovalPolicyCommand {
     /// Show the effective plan approval policy (never key bytes).
     Show { env: String },
-    /// Set the environment-scoped plan approval policy file.
-    Set { env: String, path: PathBuf },
+    /// Set the environment-scoped plan approval policy file. With
+    /// --target remote the path is on the server host.
+    Set {
+        env: String,
+        path: PathBuf,
+        #[command(flatten)]
+        remote: RemoteChange,
+    },
     /// Clear the stored plan approval policy path.
-    Clear { env: String },
+    Clear {
+        env: String,
+        #[command(flatten)]
+        remote: RemoteChange,
+    },
 }
 
 #[derive(Subcommand)]
@@ -237,9 +269,19 @@ pub(crate) enum FactsCommand {
     /// List capability facts for an environment.
     List { env: String },
     /// Set a fact, e.g. `set prod architecture=arm64`.
-    Set { env: String, spec: String },
+    Set {
+        env: String,
+        spec: String,
+        #[command(flatten)]
+        remote: RemoteChange,
+    },
     /// Clear one fact key.
-    Clear { env: String, key: String },
+    Clear {
+        env: String,
+        key: String,
+        #[command(flatten)]
+        remote: RemoteChange,
+    },
     /// Probe local hardware inventory (dry-run by default).
     Probe {
         env: String,
@@ -260,12 +302,16 @@ pub(crate) enum ConstraintsCommand {
         kind: String,
         name: String,
         value: String,
+        #[command(flatten)]
+        remote: RemoteChange,
     },
     /// Clear a constraint.
     Clear {
         env: String,
         kind: String,
         name: String,
+        #[command(flatten)]
+        remote: RemoteChange,
     },
 }
 #[derive(Subcommand)]
@@ -282,11 +328,18 @@ pub(crate) enum MaintenanceCommand {
         start: String,
         #[arg(long)]
         duration_minutes: u32,
+        #[command(flatten)]
+        remote: RemoteChange,
     },
     /// List recurring windows for an environment.
     List { env: String },
     /// Remove a named recurring window.
-    Remove { env: String, identity: String },
+    Remove {
+        env: String,
+        identity: String,
+        #[command(flatten)]
+        remote: RemoteChange,
+    },
     /// Replace an invalid configuration with an empty governed schedule.
     Repair { env: String },
 }
