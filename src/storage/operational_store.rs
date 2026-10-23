@@ -95,6 +95,14 @@ pub trait OperationalStore: Send + Sync {
     ) -> Result<()>;
     fn append_audit(&self, event: &AuditRecord) -> Result<()>;
     fn audit_events(&self) -> Result<Vec<AuditRecord>>;
+    /// Audit records after insertion `cursor` (exclusive), in insertion order,
+    /// at most `limit`, each with its cursor. Insertion order, not time, is
+    /// what a reader can resume from without missing a late commit.
+    fn audit_events_after(&self, _cursor: i64, _limit: usize) -> Result<Vec<(i64, AuditRecord)>> {
+        Err(StoreError::AdapterUnavailable(
+            "ordered audit reads are not implemented by this store".into(),
+        ))
+    }
     /// Append a typed change event and return it with the assigned cursor.
     fn append_change_event(
         &self,

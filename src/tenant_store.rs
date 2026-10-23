@@ -673,6 +673,9 @@ impl OperationalStore for TenantPartition {
     fn audit_events(&self) -> Result<Vec<AuditRecord>> {
         self.store.audit_events()
     }
+    fn audit_events_after(&self, cursor: i64, limit: usize) -> Result<Vec<(i64, AuditRecord)>> {
+        self.store.audit_events_after(cursor, limit)
+    }
     fn append_change_event(
         &self,
         occurred_at: i64,

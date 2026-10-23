@@ -587,6 +587,7 @@ async fn main() -> Result<()> {
         .unwrap_or_default();
     let backups = backup_settings(cli.tenant_mode, &store)?;
     let clock_every = clock_settings()?;
+    let audit_export = audit_export_settings(cli.tenant_mode)?;
     let app = router(
         ServerConfig {
             management_token,
@@ -763,6 +764,53 @@ async fn main() -> Result<()> {
             }
         }))
     });
+    let audit_task = audit_export.map(|(dir, seed, every)| {
+        let audit_store = store.clone();
+        let mut audit_shutdown_rx = shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            let mut timer = tokio::time::interval(every);
+            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // The first tick is immediate; the first export waits one period.
+            timer.tick().await;
+            loop {
+                tokio::select! {
+                    changed = audit_shutdown_rx.changed() => {
+                        if changed.is_err() || *audit_shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                    _ = timer.tick() => {
+                        let (store, dir, seed) = (audit_store.clone(), dir.clone(), seed.clone());
+                        let exported = tokio::task::spawn_blocking(move || {
+                            // Earlier exports may be signed by a rotated key.
+                            let rotated = std::env::var_os("TENKAI_AUDIT_TRUST_ROOTS")
+                                .map(|path| tenkai::release_signing::TrustRoots::load(std::path::Path::new(&path)))
+                                .transpose()?;
+                            tenkai::audit_export::export_next(
+                                &*store,
+                                &dir,
+                                tenkai::now_millis(),
+                                &seed,
+                                rotated.as_ref(),
+                            )
+                        })
+                        .await;
+                        match exported {
+                            Ok(Ok(export)) => eprintln!(
+                                "tenkai.audit_export outcome=ok sequence={} entries={}",
+                                export.statement.sequence,
+                                export.statement.entries.len()
+                            ),
+                            Ok(Err(error)) => {
+                                eprintln!("tenkai.audit_export outcome=failed detail={error:#}")
+                            }
+                            Err(error) => eprintln!("tenkai.audit_export outcome=failed detail={error}"),
+                        }
+                    }
+                }
+            }
+        })
+    });
     let webhook_task = {
         let webhook_store = store.clone();
         let mut webhook_shutdown_rx = shutdown_tx.subscribe();
@@ -856,6 +904,11 @@ async fn main() -> Result<()> {
     webhook_task
         .await
         .context("joining webhook delivery task during shutdown")?;
+    if let Some(audit_task) = audit_task {
+        audit_task
+            .await
+            .context("joining audit export task during shutdown")?;
+    }
     if let Some(clock_task) = clock_task {
         clock_task
             .await
@@ -867,6 +920,42 @@ async fn main() -> Result<()> {
             .context("joining backup task during shutdown")?;
     }
     result.context("serving Tenkai API")
+}
+
+/// Scheduled audit export from `TENKAI_AUDIT_EXPORT_DIR` and
+/// `TENKAI_AUDIT_SIGNING_KEY` (an Ed25519 seed file), which must be set
+/// together, every `TENKAI_AUDIT_EXPORT_INTERVAL_SECS` (default 86400).
+/// Tenant-mode hubs keep tenant records in PostgreSQL and refuse it.
+fn audit_export_settings(
+    tenant_mode: bool,
+) -> Result<Option<(std::path::PathBuf, std::path::PathBuf, Duration)>> {
+    if tenant_mode && std::env::var_os("TENKAI_AUDIT_EXPORT_DIR").is_some() {
+        anyhow::bail!(
+            "TENKAI_AUDIT_EXPORT_DIR exports the SQLite operational store; tenant-mode hubs keep tenant records in PostgreSQL"
+        );
+    }
+    match (
+        std::env::var_os("TENKAI_AUDIT_EXPORT_DIR"),
+        std::env::var_os("TENKAI_AUDIT_SIGNING_KEY"),
+    ) {
+        (None, None) => Ok(None),
+        (Some(dir), Some(seed)) => {
+            let every = std::env::var("TENKAI_AUDIT_EXPORT_INTERVAL_SECS")
+                .ok()
+                .map(|value| value.parse::<u64>())
+                .transpose()
+                .context("TENKAI_AUDIT_EXPORT_INTERVAL_SECS must be a whole number")?
+                .unwrap_or(86_400);
+            anyhow::ensure!(
+                every > 0,
+                "TENKAI_AUDIT_EXPORT_INTERVAL_SECS must be positive"
+            );
+            Ok(Some((dir.into(), seed.into(), Duration::from_secs(every))))
+        }
+        _ => anyhow::bail!(
+            "TENKAI_AUDIT_EXPORT_DIR and TENKAI_AUDIT_SIGNING_KEY must be set together"
+        ),
+    }
 }
 
 /// Clock-drift guard from `TENKAI_TIME_SOURCE` (an SNTP `host:port`; unset:

@@ -147,6 +147,7 @@ pub mod apply;
 pub mod approval_policy;
 pub mod assertion_verifier;
 pub mod atomic_state;
+pub mod audit_export;
 pub mod auth_context;
 pub mod backup;
 pub mod canary;

@@ -174,6 +174,53 @@ async fn run(cli: Cli) -> Result<()> {
     if let Command::Keys { command } = &cli.command {
         return keys::run(command);
     }
+    // Local only: audit exports read the embedded store and verify offline.
+    if let Command::Audit { command } = &cli.command {
+        return match command {
+            args::AuditCommand::Export {
+                dir,
+                signing_key,
+                trust_roots,
+            } => {
+                tenkai::storage::refuse_postgres_on_embedded()?;
+                let store = tenkai::storage::SqliteStore::open(&cli.database)?;
+                let rotated = trust_roots
+                    .as_deref()
+                    .map(tenkai::release_signing::TrustRoots::load)
+                    .transpose()?;
+                let export = tenkai::audit_export::export_next(
+                    &store,
+                    dir,
+                    tenkai::now_millis(),
+                    signing_key,
+                    rotated.as_ref(),
+                )?;
+                println!(
+                    "audit export {} ({} to {}) holds {} entries, digest {}",
+                    export.statement.sequence,
+                    export.statement.period_start_ms,
+                    export.statement.period_end_ms,
+                    export.statement.entries.len(),
+                    export.digest()?
+                );
+                Ok(())
+            }
+            args::AuditCommand::Verify {
+                exports,
+                trust_roots,
+                anchor,
+            } => {
+                let roots = tenkai::release_signing::TrustRoots::load(trust_roots)?;
+                let loaded = exports
+                    .iter()
+                    .map(|path| tenkai::audit_export::AuditExport::load(path))
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                tenkai::audit_export::verify_chain(&loaded, &roots, anchor.as_deref())?;
+                println!("{} audit exports verify as one chain", loaded.len());
+                Ok(())
+            }
+        };
+    }
     // Local only: a drill reads backup files and never contacts a hub.
     if let Command::RestoreDrill {
         backup,

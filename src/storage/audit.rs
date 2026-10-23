@@ -28,6 +28,32 @@ impl SqliteStore {
         Ok(())
     }
 
+    pub(super) fn audit_events_after_sqlite(
+        &self,
+        cursor: i64,
+        limit: usize,
+    ) -> Result<Vec<(i64, AuditRecord)>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT rowid,id,occurred_at,principal,operation,resource,outcome
+             FROM audit_events WHERE rowid > ?1 ORDER BY rowid LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![cursor, limit as i64], |row| {
+            Ok((
+                row.get(0)?,
+                AuditRecord {
+                    id: row.get(1)?,
+                    occurred_at: row.get(2)?,
+                    principal: row.get(3)?,
+                    operation: row.get(4)?,
+                    resource: row.get(5)?,
+                    outcome: row.get(6)?,
+                },
+            ))
+        })?;
+        rows.map(|row| row.map_err(StoreError::from)).collect()
+    }
+
     pub(super) fn audit_events_sqlite(&self) -> Result<Vec<AuditRecord>> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
