@@ -265,6 +265,25 @@ pub fn weight_artifact(
     }
 }
 
+/// How `hf://` cache misses may reach the hub, from the environment's connectivity class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HubOrigin {
+    /// Connected or intermittent: fetch from the hub endpoint, following any redirect.
+    Open,
+    /// Isolated with a hub mirror: fetch from the mirror, refusing off-mirror redirects.
+    MirrorOnly,
+    /// Isolated without a mirror: refuse before any network attempt.
+    Refused,
+}
+
+/// Host (and port) of a hub endpoint URL: the key its `artifact_mirror.<host>` entry uses.
+fn endpoint_host(endpoint: &str) -> &str {
+    let rest = endpoint
+        .split_once("://")
+        .map_or(endpoint, |(_, rest)| rest);
+    rest.split('/').next().unwrap_or(rest)
+}
+
 fn artifact_digest_hex(value: &str) -> Result<&str> {
     validate_artifact_digest(value)?;
     Ok(value
@@ -277,11 +296,13 @@ fn artifact_digest_hex(value: &str) -> Result<&str> {
 /// `hf://` sources resolve against the hub endpoint (default [`DEFAULT_HUB_ENDPOINT`]) with an
 /// optional bearer token the embedder supplies; `oci://` sources pull through an artifact
 /// registry and the environment's mirrors only. Neither credential lives in a manifest.
+/// [`WeightCache::with_environment`] applies an environment's mirrors and isolation.
 #[derive(Clone)]
 pub struct WeightCache {
     root: PathBuf,
     hub_endpoint: String,
     hub_token: Option<String>,
+    hub_origin: HubOrigin,
     artifacts: Option<(
         Arc<dyn crate::oci_artifact::ArtifactRegistry>,
         BTreeMap<String, String>,
@@ -294,6 +315,7 @@ impl std::fmt::Debug for WeightCache {
             .field("root", &self.root)
             .field("hub_endpoint", &self.hub_endpoint)
             .field("hub_token", &self.hub_token.as_ref().map(|_| "<redacted>"))
+            .field("hub_origin", &self.hub_origin)
             .field("artifact_registry", &self.artifacts.is_some())
             .finish()
     }
@@ -305,6 +327,7 @@ impl WeightCache {
             root: root.into(),
             hub_endpoint: DEFAULT_HUB_ENDPOINT.into(),
             hub_token: None,
+            hub_origin: HubOrigin::Open,
             artifacts: None,
         }
     }
@@ -324,6 +347,29 @@ impl WeightCache {
         mirrors: BTreeMap<String, String>,
     ) -> Self {
         self.artifacts = Some((registry, mirrors));
+        self
+    }
+
+    /// Apply one environment's weight-origin policy. An `artifact_mirror.<hub host>` entry
+    /// moves `hf://` resolution onto `https://<mirror>`; an isolated environment without
+    /// one refuses hub origin pulls, so only cached (bundle-imported) blobs resolve. The
+    /// registry, when present, serves `oci://` sources through the same mirrors.
+    pub fn with_environment(mut self, environment: ModelRuntimeArtifacts) -> Self {
+        let hub_host = endpoint_host(&self.hub_endpoint).to_string();
+        if let Some(mirror) = environment.mirrors.get(&hub_host) {
+            self.hub_endpoint = format!("https://{mirror}");
+        }
+        self.hub_origin = match (
+            environment.isolated,
+            environment.mirrors.contains_key(&hub_host),
+        ) {
+            (false, _) => HubOrigin::Open,
+            (true, true) => HubOrigin::MirrorOnly,
+            (true, false) => HubOrigin::Refused,
+        };
+        if let Some(registry) = environment.registry {
+            self.artifacts = Some((registry, environment.mirrors));
+        }
         self
     }
 
@@ -383,6 +429,13 @@ impl WeightCache {
             verify_file_digest(&destination, artifact_digest)?;
             return Ok(destination);
         }
+        if self.hub_origin == HubOrigin::Refused && matches!(source, WeightSource::Hub { .. }) {
+            bail!(
+                "model {} is not in the weight cache and this isolated environment has no artifact mirror for {}; hub origin pull is refused (import an offline bundle carrying {artifact_digest} or set the mirror)",
+                model.source,
+                endpoint_host(&self.hub_endpoint)
+            );
+        }
         if let Some(parent) = destination.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating weight cache {}", parent.display()))?;
@@ -425,14 +478,15 @@ impl WeightCache {
                 })?;
                 Ok(())
             }
-            WeightSource::Http(url) => download_to(url, None, destination),
+            WeightSource::Http(url) => download_to(url, None, false, destination),
             WeightSource::Hub {
                 repo,
                 path,
                 revision,
             } => {
                 let url = format!("{}/{repo}/resolve/{revision}/{path}", self.hub_endpoint);
-                download_to(&url, self.hub_token.as_deref(), destination)
+                let pinned = self.hub_origin == HubOrigin::MirrorOnly;
+                download_to(&url, self.hub_token.as_deref(), pinned, destination)
             }
             WeightSource::Oci(reference) => {
                 let (registry, mirrors) = self.artifacts.as_ref().with_context(|| {
@@ -528,9 +582,38 @@ struct CachedBlob {
     modified: SystemTime,
 }
 
-fn download_to(url: &str, bearer: Option<&str>, destination: &Path) -> Result<()> {
+/// Download `url` to `destination`. `same_origin` refuses redirects that leave the
+/// starting scheme, host, and port, so an isolated environment's mirror cannot bounce a
+/// fetch out to the public origin.
+fn download_to(
+    url: &str,
+    bearer: Option<&str>,
+    same_origin: bool,
+    destination: &Path,
+) -> Result<()> {
+    let redirects = if same_origin {
+        let start = reqwest::Url::parse(url)
+            .with_context(|| format!("parsing weight download URL {url}"))?
+            .origin();
+        reqwest::redirect::Policy::custom(move |attempt| {
+            let target = attempt.url().origin();
+            if target != start {
+                attempt.error(format!(
+                    "redirect to {} leaves the environment mirror; origin pull is refused",
+                    target.ascii_serialization()
+                ))
+            } else if attempt.previous().len() >= 10 {
+                attempt.error("too many redirects")
+            } else {
+                attempt.follow()
+            }
+        })
+    } else {
+        reqwest::redirect::Policy::default()
+    };
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
+        .redirect(redirects)
         .build()
         .context("building weight download client")?;
     let mut request = client.get(url);
@@ -606,12 +689,14 @@ pub trait ModelRuntimeExecutorFactory: Send + Sync {
     ) -> Result<Arc<dyn ModelRuntimeExecutor>>;
 }
 
-/// Registry access for `oci://` model weights: the admitted registry plus the
-/// environment's origin-to-mirror rewrites. Origin pull is refused.
+/// One environment's weight-origin policy, applied with [`WeightCache::with_environment`]:
+/// the admitted registry for `oci://` weights (when the host has one), the environment's
+/// origin-to-mirror rewrites, and whether the environment is isolated.
 #[derive(Clone)]
 pub struct ModelRuntimeArtifacts {
-    pub registry: Arc<dyn crate::oci_artifact::ArtifactRegistry>,
+    pub registry: Option<Arc<dyn crate::oci_artifact::ArtifactRegistry>>,
     pub mirrors: BTreeMap<String, String>,
+    pub isolated: bool,
 }
 
 static MODEL_RUNTIME_EXECUTOR_FACTORY: std::sync::OnceLock<Arc<dyn ModelRuntimeExecutorFactory>> =
@@ -1597,6 +1682,101 @@ mod tests {
             .unwrap_or(0);
         assert_eq!(leftovers, 0, "no partial download may remain");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn isolated(mirrors: BTreeMap<String, String>) -> ModelRuntimeArtifacts {
+        ModelRuntimeArtifacts {
+            registry: None,
+            mirrors,
+            isolated: true,
+        }
+    }
+
+    #[test]
+    fn isolated_environment_refuses_hub_origin_and_serves_cached_blobs() {
+        let root = std::env::temp_dir().join(format!("tenkai-hub-{}", uuid::Uuid::new_v4()));
+        // A hub that must never be dialed: any accepted connection fails the test.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let hub_host = listener.local_addr().unwrap().to_string();
+        let cache = WeightCache::new(root.join("cache"))
+            .with_hub(format!("http://{hub_host}"), None)
+            .with_environment(isolated(BTreeMap::new()));
+        let payload = b"bundle-model-bytes";
+        let digest = format!("sha256:{:x}", Sha256::digest(payload));
+        let model = hub_model(digest.clone());
+
+        let err = cache.fetch_and_verify(&model).unwrap_err().to_string();
+        assert!(err.contains(&model.source), "{err}");
+        assert!(
+            err.contains(&format!("no artifact mirror for {hub_host}")),
+            "{err}"
+        );
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "refusal must not reach the network"
+        );
+
+        // A blob imported from an offline bundle resolves without any mirror.
+        let staged = root.join("staged");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&staged, payload).unwrap();
+        cache.admit_file(&digest, &staged).unwrap();
+        let stored = cache.fetch_and_verify(&model).unwrap();
+        assert_eq!(std::fs::read(stored).unwrap(), payload);
+        assert!(listener.accept().is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pinned_download_refuses_a_redirect_off_the_mirror() {
+        use std::io::{BufRead as _, Write as _};
+        let origin = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        origin.set_nonblocking(true).unwrap();
+        let origin_url = format!("http://{}/blob", origin.local_addr().unwrap());
+        let mirror = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mirror_url = format!("http://{}/blob", mirror.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (stream, _) = mirror.accept().unwrap();
+            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            while reader.read_line(&mut line).unwrap() > 2 {
+                line.clear();
+            }
+            let mut stream = stream;
+            write!(
+                stream,
+                "HTTP/1.1 302 Found\r\nlocation: {origin_url}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+            )
+            .unwrap();
+        });
+        let destination =
+            std::env::temp_dir().join(format!("tenkai-redirect-{}", uuid::Uuid::new_v4()));
+        let err = download_to(&mirror_url, None, true, &destination).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("leaves the environment mirror"),
+            "{err:#}"
+        );
+        server.join().unwrap();
+        assert!(origin.accept().is_err(), "origin must not be dialed");
+        let _ = std::fs::remove_file(destination);
+    }
+
+    #[test]
+    fn hub_mirror_replaces_the_origin_endpoint() {
+        let cache = WeightCache::new("unused").with_environment(isolated(BTreeMap::from([(
+            "huggingface.co".into(),
+            "hub-mirror.internal".into(),
+        )])));
+        assert_eq!(cache.hub_endpoint, "https://hub-mirror.internal");
+        assert_eq!(cache.hub_origin, HubOrigin::MirrorOnly);
+        let connected = WeightCache::new("unused").with_environment(ModelRuntimeArtifacts {
+            isolated: false,
+            ..isolated(BTreeMap::new())
+        });
+        assert_eq!(connected.hub_endpoint, DEFAULT_HUB_ENDPOINT);
+        assert_eq!(connected.hub_origin, HubOrigin::Open);
     }
 
     #[test]

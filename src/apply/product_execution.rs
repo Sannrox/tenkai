@@ -603,11 +603,21 @@ async fn model_runtime_executor(
         Ok(path) => path,
         Err(detail) => return Ok(Err(detail)),
     };
-    let artifacts = adapters.artifact_registry_handle.map(|registry| {
-        crate::model_runtime::ModelRuntimeArtifacts {
-            registry,
-            mirrors: crate::oci_artifact::mirrors_from_properties(&env_obj.properties),
-        }
+    let isolated = env_obj
+        .properties
+        .get(crate::connectivity::CONNECTIVITY_CLASS_PROPERTY)
+        .map(String::as_str)
+        .map(crate::connectivity::ConnectivityClass::parse)
+        .transpose()
+        .map_err(|error| error.to_string());
+    let isolated = match isolated {
+        Ok(class) => class == Some(crate::connectivity::ConnectivityClass::Isolated),
+        Err(detail) => return Ok(Err(detail)),
+    };
+    let artifacts = Some(crate::model_runtime::ModelRuntimeArtifacts {
+        registry: adapters.artifact_registry_handle,
+        mirrors: crate::oci_artifact::mirrors_from_properties(&env_obj.properties),
+        isolated,
     });
     Ok(crate::model_runtime::select_model_runtime_executor(
         descriptor,
