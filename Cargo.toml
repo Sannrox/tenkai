@@ -71,3 +71,9 @@ axum = { version = "0.8", default-features = false, features = ["http1", "json",
 tokio-stream = "0.1"
 ed25519-dalek = "2"
 base64 = "0.22"
+
+# Dependencies build without debug info in dev and test builds: backtraces
+# and debuggers keep full detail for workspace crates, and build directories
+# stay a fraction of the size.
+[profile.dev.package."*"]
+debug = false
