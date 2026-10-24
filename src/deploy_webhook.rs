@@ -188,13 +188,16 @@ pub trait WebhookSecrets: Send + Sync {
     fn get(&self, name: &str) -> Option<String>;
 }
 
-/// Process-environment secret source used by `tenkai-server`.
+/// Process secret source used by `tenkai-server`: the variable, its `_FILE`
+/// path, or the secret directory ([`crate::secret_source`]), read on every
+/// delivery so a rotated file applies without a restart. A source that
+/// fails to read counts as missing; the delivery records that, not the cause.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ProcessWebhookSecrets;
 
 impl WebhookSecrets for ProcessWebhookSecrets {
     fn get(&self, name: &str) -> Option<String> {
-        std::env::var(name).ok().filter(|value| !value.is_empty())
+        crate::secret_source::read(name).ok().flatten()
     }
 }
 

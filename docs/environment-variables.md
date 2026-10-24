@@ -2,8 +2,33 @@
 
 Operator settings read by the shipped binaries, grouped by the host that reads
 them. Feature-specific settings are listed at the end with the page that
-explains them. Secrets belong in the environment or a secret store, never on a
+explains them. Secrets belong in the environment or a secret file, never on a
 command line.
+
+## Secret files
+
+Every secret setting below (management and runtime tokens, the token maps,
+`TENKAI_POSTGRES_URL`, `TENKAI_OUTCOME_PROVIDER_TOKEN`, `SEKAI_AUTH_TOKEN`,
+`TENKAI_OIDC_CLIENT_SECRET`, `TENKAI_JWT_ASSERTION`, and the webhook secrets
+named by `secret_env`) is read, in order, from:
+
+1. the variable itself, `X`;
+2. `X_FILE`, the path of a file holding the value;
+3. `TENKAI_SECRET_DIR/X`, a file named after the setting in a secret
+   directory.
+
+Setting both `X` and `X_FILE` is refused. A secret file must be a regular file
+owned by the user running Tenkai, with no group or world access (mode `0600`
+or `0400`). Symlinks are followed, so a mounted secret volume works. One
+trailing newline is dropped. Errors name the setting and path, never the value.
+
+Webhook secrets are read again on every delivery, so a rotated file applies
+without a restart. The other settings are read at startup; restart the
+process after rotating them.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `TENKAI_SECRET_DIR` | unset | Directory holding one secret file per setting, named after it. |
 
 ## Shared by the hosts
 

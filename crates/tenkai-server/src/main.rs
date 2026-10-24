@@ -342,10 +342,8 @@ async fn main() -> Result<()> {
         "tenkai-server currently accepts plaintext HTTP only and must bind to loopback; use an authenticated TLS reverse proxy for remote access"
     );
     tenkai::key_revocation::load_configured()?;
-    let management_token =
-        std::env::var("TENKAI_MANAGEMENT_TOKEN").context("TENKAI_MANAGEMENT_TOKEN is required")?;
-    let runtime_assignments = std::env::var("TENKAI_RUNTIME_TOKENS")
-        .ok()
+    let management_token = tenkai::secret_source::require("TENKAI_MANAGEMENT_TOKEN")?;
+    let runtime_assignments = tenkai::secret_source::read("TENKAI_RUNTIME_TOKENS")?
         .map(|value| serde_json::from_str::<HashMap<String, String>>(&value))
         .transpose()
         .context("TENKAI_RUNTIME_TOKENS must be a JSON object mapping tokens to environments")?
@@ -436,7 +434,7 @@ async fn main() -> Result<()> {
             anyhow::ensure!(
                 cli.outcome_namespace.is_none()
                     && std::env::var_os("TENKAI_OUTCOME_PROVIDER_URL").is_none()
-                    && std::env::var_os("TENKAI_OUTCOME_PROVIDER_TOKEN").is_none()
+                    && tenkai::secret_source::read("TENKAI_OUTCOME_PROVIDER_TOKEN")?.is_none()
                     && std::env::var_os(OUTCOME_PROVIDER_REGISTRATION_ENV).is_none(),
                 "outcome provider configuration requires --outcome-provider chisei"
             );
@@ -455,7 +453,7 @@ async fn main() -> Result<()> {
                 .context("TENKAI_OUTCOME_NAMESPACE is required for Chisei outcome export")?;
             let principal = std::env::var("TENKAI_OUTCOME_PROVIDER_PRINCIPAL")
                 .unwrap_or_else(|_| "tenkai.outcome".into());
-            let token = std::env::var("TENKAI_OUTCOME_PROVIDER_TOKEN").ok();
+            let token = tenkai::secret_source::read("TENKAI_OUTCOME_PROVIDER_TOKEN")?;
             let registration = std::env::var(OUTCOME_PROVIDER_REGISTRATION_ENV).with_context(|| {
                 format!(
                     "{OUTCOME_PROVIDER_REGISTRATION_ENV} is required after the Sekai producer capability and terminal-outcome schema are registered"
@@ -594,8 +592,7 @@ async fn main() -> Result<()> {
         ServerConfig {
             management_token,
             runtime_assignments,
-            environment_management_assignments: std::env::var("TENKAI_ENVIRONMENT_MANAGEMENT_TOKENS")
-                .ok()
+            environment_management_assignments: tenkai::secret_source::read("TENKAI_ENVIRONMENT_MANAGEMENT_TOKENS")?
                 .map(|value| serde_json::from_str::<std::collections::HashMap<String, String>>(&value))
                 .transpose()
                 .context("TENKAI_ENVIRONMENT_MANAGEMENT_TOKENS must be a JSON object mapping tokens to environments")?

@@ -7,13 +7,8 @@ use tenkai::{apply, assertion_verifier, package_migration, wave};
 pub(crate) const JWT_VERIFIER_CONFIG_ENV: &str = "TENKAI_JWT_VERIFIER_CONFIG";
 pub(crate) const JWT_ASSERTION_ENV: &str = "TENKAI_JWT_ASSERTION";
 pub(crate) fn embedded_management_actor() -> Result<AuthenticatedRequestContext> {
-    let token = std::env::var("TENKAI_MANAGEMENT_TOKEN")
-        .ok()
-        .filter(|value| !value.trim().is_empty());
-    let assertion = std::env::var(JWT_ASSERTION_ENV)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .map(String::into_bytes);
+    let token = tenkai::secret_source::read("TENKAI_MANAGEMENT_TOKEN")?;
+    let assertion = tenkai::secret_source::read(JWT_ASSERTION_ENV)?.map(String::into_bytes);
     let jwt_path = std::env::var_os(JWT_VERIFIER_CONFIG_ENV).map(PathBuf::from);
     assertion_verifier::authenticate_process_management(
         uuid::Uuid::new_v4().to_string(),

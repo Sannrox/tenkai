@@ -57,7 +57,9 @@ second notification.
 ## Signature
 
 Every POST is HMAC-SHA256 over the exact JSON body, using the secret from
-`secret_env`. Headers:
+`secret_env`: that variable, its `_FILE` path, or the secret directory (see
+[secret files](environment-variables.md#secret-files)), read again on every
+delivery so a rotated secret applies without a restart. Headers:
 
 | Header | Value |
 | --- | --- |

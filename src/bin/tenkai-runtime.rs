@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use clap::Parser;
 use tenkai::runtime_agent::RuntimeClient;
 
@@ -29,8 +29,7 @@ struct Cli {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let token =
-        std::env::var("TENKAI_RUNTIME_TOKEN").context("TENKAI_RUNTIME_TOKEN is required")?;
+    let token = tenkai::secret_source::require("TENKAI_RUNTIME_TOKEN")?;
     let inventory_report = !cli.no_inventory_report && env_inventory_enabled();
     let client = RuntimeClient::new_with_options(
         cli.server_url,

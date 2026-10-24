@@ -14,11 +14,13 @@ pub struct PostgresTenantConfig {
 impl PostgresTenantConfig {
     /// Load from `TENKAI_POSTGRES_URL`. Missing/empty → configuration error.
     pub fn from_env() -> Result<Self> {
-        let url = std::env::var("TENKAI_POSTGRES_URL").map_err(|_| {
-            StoreError::AdapterUnavailable(
-                "TENKAI_POSTGRES_URL is not set (postgres://user:pass@host/db)".into(),
-            )
-        })?;
+        let url = tenkai::secret_source::read("TENKAI_POSTGRES_URL")
+            .map_err(|error| StoreError::AdapterUnavailable(format!("{error:#}")))?
+            .ok_or_else(|| {
+                StoreError::AdapterUnavailable(
+                    "TENKAI_POSTGRES_URL is not set (postgres://user:pass@host/db, or TENKAI_POSTGRES_URL_FILE)".into(),
+                )
+            })?;
         Self::new(url)
     }
 
