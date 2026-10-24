@@ -1,6 +1,6 @@
 //! Governed action type and parameter encoding helpers.
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, anyhow};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
@@ -24,8 +24,9 @@ pub(super) fn resolve_remote_action_def(
 
 pub(super) fn governed_action_type(
     action: &ActionTypeDef,
-) -> std::result::Result<GovernedActionType, tonic::Status> {
-    let schema = parameter_schema_json(action).map_err(tonic::Status::invalid_argument)?;
+) -> std::result::Result<GovernedActionType, super::ClientError> {
+    let schema = parameter_schema_json(action)
+        .map_err(|error| super::ClientError::Failed(anyhow!(error)))?;
     Ok(GovernedActionType {
         namespace: GOVERNED_ACTION_NAMESPACE.into(),
         type_id: action.name.clone(),

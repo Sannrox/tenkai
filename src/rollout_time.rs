@@ -22,8 +22,7 @@ use crate::client::Ctx;
 use crate::plan;
 use crate::reconciler::{self, EnvironmentStatus, Reconciler, TickReport};
 use crate::software_executor::{
-    DockerHostExecutor, RolloutPhaseTimes, SoftwareApplyRequest, SoftwareExecutor,
-    request_from_parts,
+    RolloutPhaseTimes, SoftwareApplyRequest, SoftwareExecutor, request_from_parts,
 };
 
 /// Checked-in runner baseline relative to the tenkai crate root.
@@ -256,7 +255,7 @@ pub fn format_report(report: &RolloutReport) -> String {
 
 /// Time Docker apply phases for 1/5/20 services across the four scenarios.
 pub fn measure_docker(
-    executor: &DockerHostExecutor,
+    executor: &dyn SoftwareExecutor,
     executor_label: &str,
     image_a: &str,
     image_b: &str,
@@ -276,8 +275,9 @@ pub fn measure_docker(
     Ok(samples)
 }
 
-fn measure_docker_count(
-    executor: &DockerHostExecutor,
+/// Time Docker apply phases for one service count across the four scenarios.
+pub fn measure_docker_count(
+    executor: &dyn SoftwareExecutor,
     executor_label: &str,
     services: u32,
     image_a: &str,
@@ -311,7 +311,7 @@ fn measure_docker_count(
 }
 
 fn time_docker(
-    executor: &DockerHostExecutor,
+    executor: &dyn SoftwareExecutor,
     executor_label: &str,
     scenario: &str,
     services: u32,
@@ -389,14 +389,6 @@ pub fn install_fake_docker(root: &Path) -> Result<(PathBuf, PathBuf)> {
         fs::set_permissions(&script, permissions)?;
     }
     Ok((script, root.join("fake-state.json")))
-}
-
-/// Fake-CLI executor with isolated state.
-pub fn fake_docker_executor(script: &Path, state: &Path) -> DockerHostExecutor {
-    DockerHostExecutor::for_binary(script.to_path_buf()).with_env(
-        "TENKAI_DOCKER_FAKE_STATE",
-        state.to_string_lossy().into_owned(),
-    )
 }
 
 /// Digest-pinned pause image for live Docker, pulling the tag if needed.
@@ -551,9 +543,6 @@ mod tests {
         }
     }
 
-    const FAKE_IMAGE_A: &str = "registry.example/rollout/svc@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const FAKE_IMAGE_B: &str = "registry.example/rollout/svc@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-
     fn sample(scenario: &str, services: u32, executor: &str, wall_split: u64) -> ScenarioSample {
         ScenarioSample {
             scenario: scenario.into(),
@@ -678,68 +667,6 @@ mod tests {
     }
 
     #[test]
-    fn one_service_upgrade_recreates_on_new_release_identity() {
-        let root = std::env::temp_dir().join(format!(
-            "tenkai-rollout-one-{}-{}",
-            std::process::id(),
-            crate::now_millis()
-        ));
-        fs::create_dir_all(&root).unwrap();
-        let (script, state) = install_fake_docker(&root).unwrap();
-        let executor = fake_docker_executor(&script, &state);
-        let samples = measure_docker_count(
-            &executor,
-            "docker-fake",
-            5,
-            FAKE_IMAGE_A,
-            FAKE_IMAGE_B,
-            &root,
-        )
-        .unwrap();
-        let log = fs::read_to_string(root.join("argv.log")).unwrap();
-        let runs: Vec<&str> = log
-            .lines()
-            .filter(|line| line.starts_with(r#"["run""#))
-            .collect();
-        assert_eq!(
-            runs.len(),
-            15,
-            "fresh 5 + upgrade 5 + rollback 5, got {}: {runs:?}",
-            runs.len()
-        );
-        assert!(
-            samples
-                .iter()
-                .any(|sample| sample.scenario == "one_service_upgrade"),
-            "{samples:?}"
-        );
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn docker_fake_runs_all_scenarios() {
-        let root = std::env::temp_dir().join(format!(
-            "tenkai-rollout-docker-{}-{}",
-            std::process::id(),
-            crate::now_millis()
-        ));
-        fs::create_dir_all(&root).unwrap();
-        let (script, state) = install_fake_docker(&root).unwrap();
-        let executor = fake_docker_executor(&script, &state);
-        let samples =
-            measure_docker(&executor, "docker-fake", FAKE_IMAGE_A, FAKE_IMAGE_B, &root).unwrap();
-        assert_eq!(samples.len(), SERVICE_COUNTS.len() * 4);
-        let baseline = load_baseline(&baseline_path()).unwrap();
-        let report = RolloutReport {
-            samples,
-            reconcile: Vec::new(),
-        };
-        println!("{}", format_report(&report));
-        evaluate(&report, &baseline, Gate::Absolute).unwrap();
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
     fn reconcile_measurement_rejects_deferred_environments() {
         let report = TickReport {
             environments: vec![reconciler::EnvironmentResult {
@@ -819,32 +746,5 @@ mod tests {
             Gate::Absolute,
         )
         .unwrap();
-    }
-
-    #[test]
-    #[ignore = "requires a Docker daemon"]
-    fn docker_live_against_runner_baseline() {
-        assert!(
-            docker_daemon_available(),
-            "docker info must succeed for the live rollout-time job"
-        );
-        let root = std::env::temp_dir().join(format!(
-            "tenkai-rollout-live-{}-{}",
-            std::process::id(),
-            crate::now_millis()
-        ));
-        fs::create_dir_all(&root).unwrap();
-        let image_a = live_pause_image("3.9").unwrap();
-        let image_b = live_pause_image("3.10").unwrap();
-        let executor = DockerHostExecutor::for_binary(PathBuf::from("docker"));
-        let samples = measure_docker(&executor, "docker-live", &image_a, &image_b, &root).unwrap();
-        let baseline = load_baseline(&baseline_path()).unwrap();
-        let report = RolloutReport {
-            samples,
-            reconcile: Vec::new(),
-        };
-        println!("{}", format_report(&report));
-        evaluate(&report, &baseline, Gate::from_env()).unwrap();
-        let _ = fs::remove_dir_all(root);
     }
 }

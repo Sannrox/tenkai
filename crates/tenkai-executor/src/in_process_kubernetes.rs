@@ -326,6 +326,10 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
 
     /// Apply one generation and return wall time per phase. `apply` drops the times.
     pub fn apply_with_phases(&self, request: &SoftwareApplyRequest) -> Result<RolloutPhaseTimes> {
+        self.apply_timed(request)
+    }
+
+    fn apply_timed(&self, request: &SoftwareApplyRequest) -> Result<RolloutPhaseTimes> {
         self.apply_manifests_timed(request).map(|(_, times)| times)
     }
 
@@ -395,7 +399,11 @@ pub fn selected_in_process_executor() -> InProcessKubernetesExecutor<LiveKubeApi
 
 impl<A: ClusterApplyApi> SoftwareExecutor for InProcessKubernetesExecutor<A> {
     fn apply(&self, request: &SoftwareApplyRequest) -> Result<()> {
-        self.apply_with_phases(request).map(|_| ())
+        self.apply_timed(request).map(|_| ())
+    }
+
+    fn apply_with_phases(&self, request: &SoftwareApplyRequest) -> Result<RolloutPhaseTimes> {
+        self.apply_timed(request)
     }
 
     fn remove(&self, request: &SoftwareApplyRequest) -> Result<()> {

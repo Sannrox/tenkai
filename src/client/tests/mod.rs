@@ -1,5 +1,7 @@
 use tonic::Status;
 
+use super::ClientError;
+
 mod action_lifecycle;
 mod helper_units;
 mod lease_lifecycle;
@@ -16,17 +18,19 @@ mod remote;
 
 #[test]
 fn unique_conflict_treats_already_exists_and_internal_unique_as_the_same() {
-    assert!(super::is_unique_conflict(&Status::already_exists(
-        "object exists"
+    assert!(super::is_unique_conflict(&ClientError::from_status(
+        Status::already_exists("object exists")
     )));
-    assert!(super::is_unique_conflict(&Status::internal(
-        "UNIQUE constraint failed: objects.id"
+    assert!(super::is_unique_conflict(&ClientError::from_status(
+        Status::internal("UNIQUE constraint failed: objects.id")
     )));
-    assert!(!super::is_unique_conflict(&Status::internal(
-        "object IDs with audit history cannot be reused"
+    assert!(!super::is_unique_conflict(&ClientError::from_status(
+        Status::internal("object IDs with audit history cannot be reused")
     )));
-    assert!(!super::is_unique_conflict(&Status::internal(
-        "storage unavailable"
+    assert!(!super::is_unique_conflict(&ClientError::from_status(
+        Status::internal("storage unavailable")
     )));
-    assert!(!super::is_unique_conflict(&Status::not_found("missing")));
+    assert!(!super::is_unique_conflict(&ClientError::from_status(
+        Status::not_found("missing")
+    )));
 }

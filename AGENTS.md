@@ -10,8 +10,8 @@ operable and recoverable without it unless an operation's policy explicitly
 requires provider evidence.
 
 Source code lives in `src/` (application core) and `crates/` (`tenkai-wire`,
-`tenkai-http`, `tenkai-server`, `tenkaictl`, `tenkai-executor`, and optional
-`tenkai-postgres`). `src/lib.rs` exports the application core. Shipped binaries
+`tenkai-http`, `tenkai-server`, `tenkaictl`, `tenkai-executor`, `tenkai-runtime`,
+and optional `tenkai-postgres`). `src/lib.rs` exports the application core. Shipped binaries
 are `tenkaictl` (embedded and remote CLI), `tenkai-server` (network service),
 `tenkai-executor-guard` (local process fencing), `tenkai-runtime` and
 `tenkai-runtime-guard` (pull-only environment runtime), and

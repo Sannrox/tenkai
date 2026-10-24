@@ -6,7 +6,7 @@
 //! then applies the same mutation plan through ordinary graph RPCs after
 //! admission. Missing, disabled, denied, or unauthorized definitions fail closed.
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, anyhow};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -42,7 +42,7 @@ impl ActionLifecycle<'_> {
     pub(super) async fn register(
         &self,
         action: ActionTypeDef,
-    ) -> std::result::Result<(), tonic::Status> {
+    ) -> std::result::Result<(), super::ClientError> {
         match self {
             Self::Embedded(store) => {
                 let store = Arc::clone(store);
@@ -68,9 +68,9 @@ impl ActionLifecycle<'_> {
                 match response {
                     Ok(response) => {
                         if response.r#type.is_none() {
-                            return Err(tonic::Status::internal(
-                                "Sekai PutGovernedActionType returned no type",
-                            ));
+                            return Err(super::ClientError::Failed(anyhow!(
+                                "Sekai PutGovernedActionType returned no type"
+                            )));
                         }
                     }
                     Err(status) if status.code() == tonic::Code::AlreadyExists => {}
@@ -80,7 +80,7 @@ impl ActionLifecycle<'_> {
                     {
                         // Idempotent bootstrap against hosts that surface conflicts as Internal.
                     }
-                    Err(status) => return Err(status),
+                    Err(status) => return Err(status.into()),
                 }
                 action_defs
                     .lock()

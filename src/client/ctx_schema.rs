@@ -64,7 +64,7 @@ impl Ctx {
     pub(crate) async fn register_schema(
         &mut self,
         schema: ObjectType,
-    ) -> std::result::Result<(), tonic::Status> {
+    ) -> std::result::Result<(), super::ClientError> {
         if let Some(store) = self.embedded_arc() {
             return block_embedded_status(store, move |store| store.register_schema(schema)).await;
         }
@@ -84,9 +84,9 @@ impl Ctx {
                 if status.code() == tonic::Code::Internal
                     && self.remote_schema_exists(&kind).await =>
             {
-                Err(tonic::Status::already_exists("schema type already exists"))
+                Err(super::ClientError::UniqueConflict)
             }
-            Err(status) => Err(status),
+            Err(status) => Err(status.into()),
         }
     }
 
@@ -107,7 +107,7 @@ impl Ctx {
     pub(crate) async fn register_action(
         &mut self,
         action: ActionTypeDef,
-    ) -> std::result::Result<(), tonic::Status> {
+    ) -> std::result::Result<(), super::ClientError> {
         self.backend.action_lifecycle().register(action).await
     }
 

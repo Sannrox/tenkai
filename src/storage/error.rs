@@ -3,7 +3,7 @@ use super::*;
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error("operational store failure: {0}")]
-    Database(#[from] rusqlite::Error),
+    Database(String),
     #[error("{kind} {id} is immutable and already has different content")]
     ImmutableConflict { kind: &'static str, id: String },
     #[error("{kind} {id} was not found")]
@@ -73,6 +73,12 @@ pub enum StoreError {
     /// Feature or configuration required for an optional store adapter is missing.
     #[error("optional store adapter unavailable: {0}")]
     AdapterUnavailable(String),
+}
+
+impl From<rusqlite::Error> for StoreError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Database(error.to_string())
+    }
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;

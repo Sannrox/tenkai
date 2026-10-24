@@ -158,10 +158,62 @@ pub async fn connect() -> Result<Ctx> {
     })
 }
 
+/// Application-level client failure. Transport adapters map `tonic::Status` here
+/// so domain code does not name gRPC types.
+#[derive(Debug)]
+pub enum ClientError {
+    UniqueConflict,
+    NotFound,
+    Failed(anyhow::Error),
+}
+
+impl ClientError {
+    pub(crate) fn from_status(status: Status) -> Self {
+        match status.code() {
+            tonic::Code::AlreadyExists => Self::UniqueConflict,
+            tonic::Code::NotFound => Self::NotFound,
+            tonic::Code::Internal if status.message().contains("UNIQUE") => Self::UniqueConflict,
+            _ => Self::Failed(status.into()),
+        }
+    }
+
+    /// True when create reused a deleted id whose audit history is still stored.
+    pub(crate) fn is_retired_identity(&self) -> bool {
+        match self {
+            Self::Failed(error) => error.to_string().contains("object IDs with audit history"),
+            _ => false,
+        }
+    }
+}
+
+impl From<Status> for ClientError {
+    fn from(status: Status) -> Self {
+        Self::from_status(status)
+    }
+}
+
+impl std::fmt::Display for ClientError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UniqueConflict => write!(f, "identity already exists"),
+            Self::NotFound => write!(f, "object not found"),
+            Self::Failed(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for ClientError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::UniqueConflict | Self::NotFound => None,
+            Self::Failed(error) => Some(error.as_ref()),
+        }
+    }
+}
+
 /// True when create-once (or register) failed because the identity already exists.
-pub(crate) fn is_unique_conflict(status: &Status) -> bool {
-    status.code() == tonic::Code::AlreadyExists
-        || (status.code() == tonic::Code::Internal && status.message().contains("UNIQUE"))
+pub(crate) fn is_unique_conflict(error: &ClientError) -> bool {
+    matches!(error, ClientError::UniqueConflict)
 }
 
 /// Typed lease admission failure. The client translates tonic already-exists

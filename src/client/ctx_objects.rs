@@ -19,7 +19,7 @@ impl Ctx {
     pub async fn create_once(
         &mut self,
         object: Object,
-    ) -> std::result::Result<Object, tonic::Status> {
+    ) -> std::result::Result<Object, super::ClientError> {
         self.backend.object_lifecycle().create_once(object).await
     }
 

@@ -156,7 +156,7 @@ async fn remote_create_reclassifies_existing_object_after_sanitized_internal_err
         ..Default::default()
     };
     let error = ctx.create_once(object.clone()).await.unwrap_err();
-    assert_eq!(error.code(), tonic::Code::AlreadyExists);
+    assert!(crate::client::is_unique_conflict(&error), "{error}");
     assert_eq!(ctx.get(&object.id).await.unwrap().unwrap(), object);
 
     server.abort();

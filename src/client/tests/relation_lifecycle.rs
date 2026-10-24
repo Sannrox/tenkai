@@ -67,7 +67,7 @@ async fn assert_relation_lifecycle(mut ctx: Ctx) {
     };
     ctx.create_link_once(strict.clone()).await.unwrap();
     let error = ctx.create_link_once(strict).await.unwrap_err();
-    assert_eq!(error.code(), tonic::Code::AlreadyExists);
+    assert!(crate::client::is_unique_conflict(&error), "{error}");
 
     ctx.unlink(&source.id, &target.id, "depends_on")
         .await

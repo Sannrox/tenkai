@@ -22,7 +22,7 @@ impl Ctx {
     pub(crate) async fn create_link_once(
         &mut self,
         link: Link,
-    ) -> std::result::Result<(), tonic::Status> {
+    ) -> std::result::Result<(), super::ClientError> {
         self.backend
             .relation_lifecycle()
             .create_link_once(link)

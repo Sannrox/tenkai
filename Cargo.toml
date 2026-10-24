@@ -12,30 +12,13 @@ license = "Apache-2.0"
 readme = "README.md"
 description = "Local-first, constraint-based delivery control plane backed by sekai-chisei."
 
-[[bin]]
-name = "tenkai-executor-guard"
-path = "src/bin/tenkai-executor-guard.rs"
-
-[[bin]]
-name = "tenkai-runtime"
-path = "src/bin/tenkai-runtime.rs"
-
-[[bin]]
-name = "tenkai-runtime-guard"
-path = "src/bin/tenkai-runtime-guard.rs"
-
-[[bin]]
-name = "tenkai-worker-lifecycle-fixture"
-path = "src/bin/tenkai-worker-lifecycle-fixture.rs"
-
 [dependencies]
 tenkai-wire = { path = "crates/tenkai-wire", version = "0.5.0" }
-tonic = { version = "0.14", features = ["tls-webpki-roots", "tls-ring"] }
+tonic = { version = "0.14", default-features = false, features = ["channel", "codegen", "router", "server", "tls-ring", "tls-webpki-roots", "transport"] }
 tonic-prost = "0.14"
-prost = "0.14"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "signal", "io-util", "io-std", "net"] }
-clap = { version = "4", features = ["derive", "env"] }
-serde = { version = "1", features = ["derive"] }
+prost = { version = "0.14", default-features = false, features = ["derive", "std"] }
+tokio = { version = "1", default-features = false, features = ["io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+serde = { version = "1", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1", features = ["raw_value"] }
 toml = "0.8"
 sha2 = "0.10"
@@ -44,7 +27,7 @@ ed25519-dalek = "2"
 # RS256/ES256 verification for OIDC access tokens (#468); already in the tree via rustls.
 ring = "0.17"
 # JSON Schema for the published HTTP API contract (#471).
-schemars = "1"
+schemars = { version = "1", default-features = false, features = ["derive", "std"] }
 semver = "1"
 anyhow = "1"
 libc = "0.2"
@@ -52,7 +35,7 @@ url = "2"
 chrono = "0.4"
 chrono-tz = "0.10"
 uuid = { version = "1", features = ["v4"] }
-rusqlite = { version = "0.32", features = ["backup", "bundled"] }
+rusqlite = { version = "0.32", default-features = false, features = ["backup", "bundled"] }
 thiserror = "2"
 tower = { version = "0.5", features = ["util"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
