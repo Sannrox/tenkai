@@ -242,6 +242,11 @@ pub(crate) enum Command {
     Restore { source: PathBuf },
     /// Rehearse restoring a server backup into a scratch store and print the
     /// evidence. Never touches live state.
+    /// Export or verify a redacted, signed support bundle.
+    SupportBundle {
+        #[command(subcommand)]
+        command: SupportBundleCommand,
+    },
     /// Export or verify signed, period-chained audit records.
     Audit {
         #[command(subcommand)]
@@ -390,5 +395,27 @@ pub(crate) enum AuditCommand {
         /// continue an earlier chain.
         #[arg(long)]
         anchor: Option<String>,
+    },
+}
+
+#[derive(clap::Subcommand)]
+pub(crate) enum SupportBundleCommand {
+    /// Collect version, redacted configuration, store and executor status
+    /// and recovery diagnostics from the embedded store, signed with the seed.
+    Export {
+        /// New file to write; an existing file is never replaced.
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long)]
+        signing_key: PathBuf,
+        /// A server log to take `tenkai.*` events from (allowlisted fields only).
+        #[arg(long)]
+        log_file: Option<PathBuf>,
+    },
+    /// Verify a bundle after transfer.
+    Verify {
+        bundle: PathBuf,
+        #[arg(long)]
+        trust_roots: PathBuf,
     },
 }

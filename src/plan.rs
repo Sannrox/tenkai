@@ -1358,7 +1358,9 @@ mod tests {
 
         let window = crate::maintenance::Window::new(
             "nightly",
-            "Europe/Berlin",
+            // No DST: a next opening that lands in a repeated or skipped
+            // hour is unresolved by design, which would make this flaky.
+            "Asia/Tokyo",
             vec![1, 2, 3, 4, 5, 6, 7],
             "02:00",
             60,
@@ -1395,7 +1397,7 @@ mod tests {
         assert_eq!(maintenance.windows.len(), 1);
         let nightly = &maintenance.windows[0];
         assert_eq!(nightly.identity, "nightly");
-        assert_eq!(nightly.timezone, "Europe/Berlin");
+        assert_eq!(nightly.timezone, "Asia/Tokyo");
         assert_eq!(nightly.weekdays, vec![1, 2, 3, 4, 5, 6, 7]);
         assert_eq!(nightly.start, "02:00");
         assert_eq!(nightly.duration_minutes, 60);

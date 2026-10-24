@@ -202,6 +202,28 @@ fn remote_configuration_commands_map_to_their_changes() {
 }
 
 #[test]
+fn support_bundle_export_parses_beside_the_global_output_format() {
+    let cli = Cli::try_parse_from([
+        "tenkaictl",
+        "--output",
+        "json-v1",
+        "support-bundle",
+        "export",
+        "--out",
+        "support.json",
+        "--signing-key",
+        "support.seed",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::SupportBundle {
+            command: crate::args::SupportBundleCommand::Export { ref out, .. }
+        } if out == std::path::Path::new("support.json")
+    ));
+}
+
+#[test]
 fn parses_login_and_logout() {
     let login = Cli::try_parse_from([
         "tenkaictl",

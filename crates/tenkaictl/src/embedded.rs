@@ -6,6 +6,49 @@ use crate::args::{Cli, Command};
 pub(crate) async fn run(cli: Cli) -> Result<()> {
     let output = cli.output;
     let database = cli.database.clone();
+    // A support bundle is most needed when the store cannot open, so it
+    // reads a copy of the store itself and reports it unreadable instead of
+    // failing; the live database is never opened for writing.
+    if let Command::SupportBundle {
+        command:
+            crate::args::SupportBundleCommand::Export {
+                out,
+                signing_key,
+                log_file,
+            },
+    } = cli.command
+    {
+        let mut log = log_file
+            .map(std::fs::File::open)
+            .transpose()
+            .map_err(|error| anyhow::anyhow!("reading the log file: {error}"))?
+            .map(std::io::BufReader::new);
+        let bundle = tenkai::support_bundle::export_from_database(
+            &database,
+            log.as_mut().map(|log| log as &mut dyn std::io::BufRead),
+            &signing_key,
+            tenkai::now_millis(),
+        )
+        .await?;
+        // A new file only: the output can never replace the database, the
+        // seed or the log it was collected from.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&out)
+            .and_then(|mut file| {
+                std::io::Write::write_all(&mut file, &serde_json::to_vec_pretty(&bundle)?)
+            })
+            .map_err(|error| anyhow::anyhow!("writing {}: {error}", out.display()))?;
+        println!(
+            "wrote support bundle {} ({} settings, {} recovery diagnostics, {} log events)",
+            out.display(),
+            bundle.statement.config.len(),
+            bundle.statement.recovery.len(),
+            bundle.statement.log_events.len()
+        );
+        return Ok(());
+    }
     let mut ctx = client::Ctx::embedded(&database)?;
     match cli.command {
         command @ (Command::Init
@@ -56,6 +99,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         } => crate::embedded_preflight::run(&mut ctx, &env, &config, &signing_key).await,
         command @ Command::Reconcile { .. } => crate::embedded_reconcile::run(ctx, command).await,
         Command::Restore { .. }
+        | Command::SupportBundle { .. }
         | Command::RestoreDrill { .. }
         | Command::Audit { .. }
         | Command::Dev { .. }

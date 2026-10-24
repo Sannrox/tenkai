@@ -174,6 +174,23 @@ async fn run(cli: Cli) -> Result<()> {
     if let Command::Keys { command } = &cli.command {
         return keys::run(command);
     }
+    // Local only: verifying a support bundle needs only the file.
+    if let Command::SupportBundle {
+        command:
+            args::SupportBundleCommand::Verify {
+                bundle,
+                trust_roots,
+            },
+    } = &cli.command
+    {
+        let roots = tenkai::release_signing::TrustRoots::load(trust_roots)?;
+        tenkai::support_bundle::verify(
+            &tenkai::support_bundle::SupportBundle::load(bundle)?,
+            &roots,
+        )?;
+        println!("support bundle {} verifies", bundle.display());
+        return Ok(());
+    }
     // Local only: audit exports read the embedded store and verify offline.
     if let Command::Audit { command } = &cli.command {
         return match command {
