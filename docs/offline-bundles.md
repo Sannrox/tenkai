@@ -212,7 +212,7 @@ CI covers the admission side
 (`first_install_from_signed_bundle_bootstraps_catalog_and_authenticated_plan`
 and the refusal tests listed above) and the receipt path
 (`connected_intermittent_and_isolated_complete_one_signed_upgrade`). The
-zero-outbound-call conformance test is tracked in #628.
+zero-outbound-call check is the [isolated-network conformance](#isolated-network-conformance) job.
 
 ## Server-side import
 
@@ -259,3 +259,18 @@ their transfer process. The server never accepts bundle bytes over HTTP.
 Import needs the management capability. An environment-scoped credential
 can import only for its own environment and cannot list the staging
 directory. Tenant-mode hubs refuse import.
+
+## Isolated-network conformance
+
+`scripts/egress-conformance.sh` proves the install, first deploy, upgrade and
+rollback drills make no outbound call, including the offline first install
+into an empty catalog. It builds the drills normally, then
+runs each test binary in a fresh network namespace that has only loopback,
+under `strace`. Any `connect()` or addressed send (as unconnected UDP uses)
+to a non-loopback address, and any DNS lookup
+to any address, is an outbound attempt. The report lists every attempted
+destination with the process that made it, and the expected list is `none`.
+CI runs it as the "Isolated-network conformance" job on pull requests that
+touch executors, server configuration or the build, and on every push to
+`main`. It needs Linux with `strace`, `unshare`, `ip` and root or
+passwordless `sudo`.

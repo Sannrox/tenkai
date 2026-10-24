@@ -105,6 +105,38 @@ jobs:
           TENKAI_CLUSTER_CONFIG="$scoped/config" \
             cargo test --locked -p tenkai-executor --test in_process_kubernetes_kind -- --ignored --nocapture --test-threads=1
 
+  egress-conformance:
+    name: Isolated-network conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      # Pull requests run this only when they touch executors, server
+      # configuration or the build; pushes to main and the schedule always do.
+      - name: Scope
+        id: scope
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [[ "${{ github.event_name }}" != "pull_request" ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          elif git diff --name-only "$BASE"...HEAD | grep -qE '^(crates/tenkai-executor/|crates/tenkai-server/|crates/tenkaictl/|crates/tenkai-http/src/config\.rs|src/(software_executor|model_runtime|offline_|connectivity|outbound_tls|oci_artifact|oidc_verifier|telemetry|deploy_webhook|runtime_agent)|Cargo\.(toml|lock)|build\.rs|crates/[^/]+/build\.rs|crates/[^/]+/Cargo\.toml|scripts/egress-conformance\.sh|\.github/workflows/)'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.scope.outputs.run == 'true'
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.96.1
+      - if: steps.scope.outputs.run == 'true'
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - if: steps.scope.outputs.run == 'true'
+        run: sudo apt-get update && sudo apt-get install -y strace
+      - if: steps.scope.outputs.run == 'true'
+        run: bash scripts/egress-conformance.sh
+
   rollout-time:
     name: Rollout-time budget
     if: github.event_name == 'schedule'
