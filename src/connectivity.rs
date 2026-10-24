@@ -548,17 +548,23 @@ pub async fn preview_isolated_bundle(
         crate::offline_bundle::preflight_full_stack(&verified, bundle_path)?;
     }
     // The content checks of the real bind, without storing anything.
+    crate::offline_bundle::preflight_image_chunks(&verified, bundle_path)?;
     let env = crate::environment::environment(ctx, environment).await?;
-    let layers = crate::offline_bundle::plan_artifact_layers(
-        &verified,
-        &crate::oci_artifact::mirrors_from_properties(&env.properties),
-    )?;
+    let mirrors = crate::oci_artifact::mirrors_from_properties(&env.properties);
+    let layers: Vec<crate::oci_artifact::OciArtifactRef> =
+        crate::offline_bundle::plan_artifact_layers(&verified, &mirrors)?
+            .into_iter()
+            .map(|(pull, _)| pull)
+            .chain(crate::offline_bundle::plan_chunked_layers(
+                &verified, &mirrors,
+            )?)
+            .collect();
     if !layers.is_empty() {
         let registry = crate::oci_artifact::selected_registry()?.ok_or_else(|| {
             anyhow::anyhow!("TENKAI_OCI_STORE is required to import offline artifact layers")
         })?;
         // A layer already stored with other bytes would refuse the real import.
-        for (pull, _) in &layers {
+        for pull in &layers {
             if let Some(stored) = registry.stored(pull)? {
                 anyhow::ensure!(
                     stored,
@@ -661,6 +667,7 @@ pub async fn bind_isolated_bundle(
     let env = crate::environment::environment(ctx, environment).await?;
     crate::offline_bundle::import_artifact_layers(
         &verified,
+        bundle_path,
         crate::oci_artifact::selected_registry()?.as_deref(),
         &crate::oci_artifact::mirrors_from_properties(&env.properties),
     )?;
@@ -770,6 +777,7 @@ pub async fn install_isolated_stack(
     let imported = (|| {
         crate::offline_bundle::import_artifact_layers(
             &verified,
+            bundle_path,
             crate::oci_artifact::selected_registry()?.as_deref(),
             &mirrors,
         )?;
@@ -1602,18 +1610,25 @@ fn require_catalog_artifacts_in_bundle(
                 artifact.digest
             );
         }
-        if !layers.layers.iter().any(|layer| {
+        let Some(layer) = layers.layers.iter().find(|layer| {
             layer.registry == artifact.registry
                 && layer.repository == artifact.repository
                 && layer.digest == artifact.digest
                 && layer.media_type == artifact.media_type
-        }) {
+        }) else {
             bail!(
                 "offline layer instructions do not name catalog artifact {}",
                 artifact.identity_key()
             );
-        }
-        let path = artifact.layer_entry_path()?;
+        };
+        // A layer over the entry limit is in the chunk store; its signed
+        // index entry stands in for the layer entry (#684), and the stack
+        // preflight has verified its chunks.
+        let path = if layer.path == crate::offline_bundle::IMAGE_CHUNKS_PATH {
+            crate::offline_bundle::IMAGE_CHUNKS_PATH.to_string()
+        } else {
+            artifact.layer_entry_path()?
+        };
         if verified.entry(&path).is_none() {
             bail!(
                 "offline bundle is missing catalog artifact {}",

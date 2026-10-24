@@ -28,8 +28,23 @@ verifies every layer against the signed instruction digest, names that digest
 when bytes are missing or wrong, and stores the layer on the environment
 mirror only. Origin pull is refused. A matching replay is a no-op, so an
 interrupted import can resume. `TENKAI_OCI_STORE` is required to import
-layers. A layer larger than the v1 entry limit cannot be bundled; re-export
-after shrinking or splitting the release.
+layers.
+
+A layer larger than the v1 entry limit (64 MiB) travels in the chunk store
+beside the archive instead (#684), next to model weights:
+
+- **Index:** a signed `chunks/images.json` entry
+  (`tenkai.offline-image-chunks.v1`) lists the layer's chunks by digest and
+  size. Its `oci-layers/mirrors.json` instruction points at that entry.
+- **Before any change:** first install, bind and preview verify every chunk
+  and the reassembled digest. A tampered or missing chunk is refused, naming
+  the image and the layer.
+- **Import:** the layer is streamed from its chunks into the OCI store. The
+  digest is checked before the blob becomes visible.
+- **Older Tenkai:** it refuses such a bundle rather than skipping the layer,
+  because the instruction's path is not the layer's own entry.
+- **Unchanged:** bundles that carry only weights, and layers within the
+  limit, are unchanged.
 
 Model weights larger than those v1 JSON limits travel beside the archive in a
 chunk store (`<bundle-stem>.chunks/`). The signed statement still uses

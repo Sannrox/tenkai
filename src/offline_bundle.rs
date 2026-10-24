@@ -22,6 +22,13 @@ pub const RECEIPT_SCHEMA: &str = "tenkai.offline-receipt.v1";
 pub const LAYER_INSTRUCTION_SCHEMA: &str = "tenkai.offline-artifact-layers.v1";
 pub const LAYER_INSTRUCTION_PATH: &str = "oci-layers/mirrors.json";
 pub const LAYER_INSTRUCTION_MEDIA: &str = "application/vnd.tenkai.offline-artifact-layers.v1+json";
+/// Signed index of image blobs too large for an archive entry, carried in
+/// the companion chunk store (#684). A layer instruction whose path is this
+/// entry names such a blob; an older Tenkai refuses it, since the path is
+/// not the blob's own entry.
+pub const IMAGE_CHUNKS_PATH: &str = "chunks/images.json";
+pub const IMAGE_CHUNKS_SCHEMA: &str = "tenkai.offline-image-chunks.v1";
+pub const IMAGE_CHUNKS_MEDIA: &str = "application/vnd.tenkai.offline-image-chunks.v1+json";
 pub const STACK_MANIFEST_SCHEMA: &str = "tenkai.offline-stack.v1";
 pub const STACK_MANIFEST_PATH: &str = "stack/manifest.json";
 pub const STACK_MANIFEST_MEDIA: &str = "application/vnd.tenkai.offline-stack.v1+json";
@@ -475,9 +482,23 @@ pub fn insert_artifact_layers(
     artifacts: &[OciArtifactRef],
     registry: &dyn ArtifactRegistry,
 ) -> Result<()> {
+    insert_artifact_layers_chunked(payloads, artifacts, registry, None)
+}
+
+/// [`insert_artifact_layers`], with blobs larger than an archive entry may
+/// hold written to the companion chunk store at `chunks = (dir, chunk size)`
+/// and indexed in [`IMAGE_CHUNKS_PATH`] (#684). Without `chunks`, such a blob
+/// fails the archive limit as before.
+pub fn insert_artifact_layers_chunked(
+    payloads: &mut BTreeMap<String, (String, Vec<u8>)>,
+    artifacts: &[OciArtifactRef],
+    registry: &dyn ArtifactRegistry,
+    chunks: Option<(&Path, u64)>,
+) -> Result<()> {
     if artifacts.is_empty() {
         return Ok(());
     }
+    let mut chunked: Vec<crate::offline_chunk_store::OfflineChunkArtifact> = Vec::new();
     oci_artifact::validate_all(artifacts)?;
     let mut layers = Vec::with_capacity(artifacts.len());
     let mut seen_paths = BTreeSet::new();
@@ -497,8 +518,27 @@ pub fn insert_artifact_layers(
                     artifact.digest
                 );
             }
-            payloads.insert(path.clone(), (artifact.media_type.clone(), bytes));
+            match chunks {
+                Some((dir, chunk_size)) if bytes.len() as u64 > MAX_ENTRY_BYTES => {
+                    let exported = crate::offline_chunk_store::export_chunks(
+                        &mut bytes.as_slice(),
+                        bytes.len() as u64,
+                        &artifact.media_type,
+                        dir,
+                        chunk_size,
+                    )?;
+                    chunked.push(exported);
+                }
+                _ => {
+                    payloads.insert(path.clone(), (artifact.media_type.clone(), bytes));
+                }
+            }
         }
+        let path = if chunked.iter().any(|blob| blob.digest == artifact.digest) {
+            IMAGE_CHUNKS_PATH.to_string()
+        } else {
+            path
+        };
         layers.push(OfflineArtifactLayer {
             path,
             registry: artifact.registry.clone(),
@@ -518,7 +558,118 @@ pub fn insert_artifact_layers(
             serde_json::to_vec(&manifest)?,
         ),
     );
+    if !chunked.is_empty() {
+        let index = crate::offline_chunk_store::OfflineChunkManifest {
+            schema: IMAGE_CHUNKS_SCHEMA.into(),
+            artifacts: chunked,
+        };
+        payloads.insert(
+            IMAGE_CHUNKS_PATH.into(),
+            (IMAGE_CHUNKS_MEDIA.into(), serde_json::to_vec(&index)?),
+        );
+    }
     Ok(())
+}
+
+/// The signed index of chunked image blobs, by digest; empty when the
+/// bundle carries none.
+fn image_chunk_index(
+    bundle: &VerifiedBundle,
+) -> Result<BTreeMap<String, crate::offline_chunk_store::OfflineChunkArtifact>> {
+    let Some(raw) = bundle.entry(IMAGE_CHUNKS_PATH) else {
+        return Ok(BTreeMap::new());
+    };
+    let index: crate::offline_chunk_store::OfflineChunkManifest =
+        serde_json::from_slice(raw).context("parsing offline image chunk index")?;
+    if index.schema != IMAGE_CHUNKS_SCHEMA {
+        bail!("unsupported offline image chunk schema {}", index.schema);
+    }
+    Ok(index
+        .artifacts
+        .into_iter()
+        .map(|artifact| (artifact.digest.clone(), artifact))
+        .collect())
+}
+
+/// Every chunked image layer the bundle names, checked against its signed
+/// chunks beside the archive, without storing anything. Errors name the
+/// image and the layer.
+pub fn preflight_image_chunks(bundle: &VerifiedBundle, bundle_path: Option<&Path>) -> Result<()> {
+    for (reference, artifact) in chunked_layers(bundle)? {
+        let path = bundle_path.context(
+            "a bundle with chunked image layers requires the archive path to verify them",
+        )?;
+        let chunk_dir = crate::offline_chunk_store::chunk_dir_beside(path)?;
+        crate::offline_chunk_store::preflight_chunked_artifact(&artifact, &chunk_dir)
+            .with_context(|| {
+                format!(
+                    "image {}/{} layer {} failed verification",
+                    reference.registry, reference.repository, reference.digest
+                )
+            })?;
+    }
+    Ok(())
+}
+
+/// The mirror references the chunked layers would be stored under.
+pub fn plan_chunked_layers(
+    bundle: &VerifiedBundle,
+    mirrors: &BTreeMap<String, String>,
+) -> Result<Vec<OciArtifactRef>> {
+    chunked_layers(bundle)?
+        .iter()
+        .map(|(reference, _)| oci_artifact::pull_reference(reference, mirrors))
+        .collect()
+}
+
+/// The layer instructions that point at [`IMAGE_CHUNKS_PATH`], each with
+/// its signed chunk list; every indexed blob must be named by one.
+fn chunked_layers(
+    bundle: &VerifiedBundle,
+) -> Result<
+    Vec<(
+        OciArtifactRef,
+        crate::offline_chunk_store::OfflineChunkArtifact,
+    )>,
+> {
+    let index = image_chunk_index(bundle)?;
+    let Some(raw) = bundle.entry(LAYER_INSTRUCTION_PATH) else {
+        if !index.is_empty() {
+            bail!("bundle indexes chunked image layers without layer instructions");
+        }
+        return Ok(Vec::new());
+    };
+    let manifest: OfflineArtifactLayerManifest =
+        serde_json::from_slice(raw).context("parsing offline artifact layer instructions")?;
+    let mut layers = Vec::new();
+    let mut named = BTreeSet::new();
+    for layer in manifest
+        .layers
+        .iter()
+        .filter(|layer| layer.path == IMAGE_CHUNKS_PATH)
+    {
+        let reference = OciArtifactRef {
+            registry: layer.registry.clone(),
+            repository: layer.repository.clone(),
+            digest: layer.digest.clone(),
+            media_type: layer.media_type.clone(),
+        };
+        reference.validate()?;
+        let Some(artifact) = index.get(&layer.digest) else {
+            bail!(
+                "bundle is missing chunked layer {} of image {}/{}",
+                layer.digest,
+                layer.registry,
+                layer.repository
+            );
+        };
+        named.insert(layer.digest.clone());
+        layers.push((reference, artifact.clone()));
+    }
+    if let Some(unnamed) = index.keys().find(|digest| !named.contains(*digest)) {
+        bail!("offline image chunk index lists layer {unnamed} no instruction names");
+    }
+    Ok(layers)
 }
 
 /// Verify signed layer entries and load them onto the environment mirror.
@@ -541,7 +692,12 @@ pub fn plan_artifact_layers<'a>(
         );
     }
     let mut planned = Vec::with_capacity(manifest.layers.len());
-    for layer in &manifest.layers {
+    // Chunked layers are planned by `chunked_layers`, from the chunk store.
+    for layer in manifest
+        .layers
+        .iter()
+        .filter(|layer| layer.path != IMAGE_CHUNKS_PATH)
+    {
         let reference = OciArtifactRef {
             registry: layer.registry.clone(),
             repository: layer.repository.clone(),
@@ -574,23 +730,54 @@ pub fn plan_artifact_layers<'a>(
     Ok(planned)
 }
 
+/// Load the bundle's layers onto the environment mirror: inline entries,
+/// and chunked layers streamed from the chunk store beside `bundle_path`.
+/// Every chunked layer is verified before any layer is stored.
 pub fn import_artifact_layers(
     bundle: &VerifiedBundle,
+    bundle_path: Option<&Path>,
     dest: Option<&dyn ArtifactRegistry>,
     mirrors: &BTreeMap<String, String>,
 ) -> Result<Vec<OciArtifactRef>> {
     let planned = plan_artifact_layers(bundle, mirrors)?;
-    if planned.is_empty() {
+    // Every mirror is resolved, and every chunked layer verified, before
+    // anything is stored.
+    let chunked = chunked_layers(bundle)?
+        .into_iter()
+        .map(|(reference, artifact)| {
+            Ok((
+                oci_artifact::pull_reference(&reference, mirrors)?,
+                reference,
+                artifact,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if planned.is_empty() && chunked.is_empty() {
         return Ok(Vec::new());
     }
+    preflight_image_chunks(bundle, bundle_path)?;
     let Some(dest) = dest else {
         bail!("TENKAI_OCI_STORE is required to import offline artifact layers");
     };
-    let mut pulled = Vec::with_capacity(planned.len());
+    let mut pulled = Vec::with_capacity(planned.len() + chunked.len());
     for (pull, bytes) in planned {
         dest.store(&pull, bytes.to_vec())?;
         dest.verify(&pull)?;
         pulled.push(pull);
+    }
+    if let Some(path) = bundle_path.filter(|_| !chunked.is_empty()) {
+        let chunk_dir = crate::offline_chunk_store::chunk_dir_beside(path)?;
+        for (pull, reference, artifact) in chunked {
+            let mut reader = crate::offline_chunk_store::chunk_reader(&artifact, &chunk_dir)?;
+            dest.store_reader(&pull, &mut reader).with_context(|| {
+                format!(
+                    "importing layer {} of image {}/{}",
+                    reference.digest, reference.registry, reference.repository
+                )
+            })?;
+            dest.verify(&pull)?;
+            pulled.push(pull);
+        }
     }
     Ok(pulled)
 }
@@ -670,6 +857,10 @@ pub fn preflight_full_stack(bundle: &VerifiedBundle, bundle_path: Option<&Path>)
         let Some(layer) = layers.get(digest) else {
             bail!("bundle is missing a required image {digest}");
         };
+        if layer.path == IMAGE_CHUNKS_PATH {
+            // Verified from the chunk store by `preflight_image_chunks`.
+            continue;
+        }
         if layer.path != layer.reference.layer_entry_path()? {
             bail!(
                 "offline layer path {} does not match artifact digest {}",
@@ -686,6 +877,7 @@ pub fn preflight_full_stack(bundle: &VerifiedBundle, bundle_path: Option<&Path>)
             bail!("artifact digest {digest} does not match bundle layer {actual}");
         }
     }
+    preflight_image_chunks(bundle, bundle_path)?;
     crate::offline_chunk_store::preflight_weight_chunks(bundle, bundle_path, &manifest.weights)?;
     for path in manifest.schemas.iter().chain(manifest.hub.iter()) {
         if bundle.entry(path).is_none() {
@@ -1373,6 +1565,128 @@ mod tests {
         .unwrap()
     }
 
+    /// A bundle whose layer is larger than an archive entry may hold, its
+    /// blob in the chunk store beside `archive` (#684).
+    fn chunked_layer_bundle(
+        key: &SigningKey,
+        artifact: &OciArtifactRef,
+        bytes: &[u8],
+        archive: &Path,
+    ) -> BundleEnvelope {
+        let origin = crate::oci_artifact::MemoryArtifactRegistry::new();
+        origin.put(artifact, bytes.to_vec()).unwrap();
+        let mut payloads = BTreeMap::new();
+        let approval = br#"{"approval":"plan-1"}"#.to_vec();
+        payloads.insert(
+            "approvals/plan-1.json".into(),
+            ("application/json".into(), approval.clone()),
+        );
+        let plan = br#"{"plan":"plan-1"}"#.to_vec();
+        payloads.insert(
+            "plans/plan-1.json".into(),
+            ("application/json".into(), plan.clone()),
+        );
+        payloads.insert(
+            "releases/app@1.0.0/payload.bin".into(),
+            (
+                "application/octet-stream".into(),
+                b"immutable payload".to_vec(),
+            ),
+        );
+        let chunks = crate::offline_chunk_store::chunk_dir_beside(archive).unwrap();
+        insert_artifact_layers_chunked(
+            &mut payloads,
+            std::slice::from_ref(artifact),
+            &origin,
+            Some((&chunks, 16 * 1024 * 1024)),
+        )
+        .unwrap();
+        assert!(!payloads.contains_key(&artifact.layer_entry_path().unwrap()));
+        assert!(payloads.contains_key(IMAGE_CHUNKS_PATH));
+        BundleEnvelope::create(
+            BundleStatement {
+                tenant_id: "tenant-1".into(),
+                environment_id: "airgap-1".into(),
+                plan_id: "plan-1".into(),
+                plan_digest: digest(&plan),
+                approval_digest: digest(&approval),
+                release_ids: vec!["app@1.0.0".into()],
+                exporter_identity: "exporter".into(),
+                issued_at_unix_ms: 1_000,
+                expires_at_unix_ms: 10_000,
+                entries: Vec::new(),
+            },
+            payloads,
+            key,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_layer_over_the_entry_limit_travels_in_chunks_and_is_verified_before_import() {
+        let dir = std::env::temp_dir().join(format!(
+            "tenkai-chunked-layer-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let archive = dir.join("bundle.json");
+        let bytes: Vec<u8> = (0..MAX_ENTRY_BYTES + 1)
+            .map(|index| (index % 251) as u8)
+            .collect();
+        let artifact = sample_artifact(&bytes);
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let bundle = chunked_layer_bundle(&key, &artifact, &bytes, &archive);
+        let verified = bundle
+            .verify(&roots(&key, "exporter"), "tenant-1", "airgap-1", 2_000)
+            .unwrap();
+        let mut mirrors = BTreeMap::new();
+        mirrors.insert("ghcr.io".into(), "mirror.internal".into());
+        preflight_image_chunks(&verified, Some(&archive)).unwrap();
+
+        // A tampered chunk is refused before any layer is stored, naming
+        // the image and the layer.
+        let chunk_dir = crate::offline_chunk_store::chunk_dir_beside(&archive).unwrap();
+        let first = std::fs::read_dir(&chunk_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.is_file())
+            .unwrap();
+        let original = std::fs::read(&first).unwrap();
+        let mut tampered = original.clone();
+        tampered[0] ^= 0xff;
+        std::fs::write(&first, &tampered).unwrap();
+        let store = dir.join("store");
+        let dest = crate::oci_artifact::FilesystemArtifactRegistry::new(store.clone());
+        let error = format!(
+            "{:#}",
+            import_artifact_layers(&verified, Some(&archive), Some(&dest), &mirrors).unwrap_err()
+        );
+        assert!(error.contains("edge/app"), "{error}");
+        assert!(error.contains(&artifact.digest), "{error}");
+        assert!(!store.exists(), "nothing stored before the refusal");
+
+        // A missing chunk is refused the same way.
+        std::fs::remove_file(&first).unwrap();
+        let error = format!(
+            "{:#}",
+            import_artifact_layers(&verified, Some(&archive), Some(&dest), &mirrors).unwrap_err()
+        );
+        assert!(error.contains(&artifact.digest), "{error}");
+        assert!(!store.exists());
+
+        // Intact, it imports onto the mirror and verifies.
+        std::fs::write(&first, &original).unwrap();
+        let pulled =
+            import_artifact_layers(&verified, Some(&archive), Some(&dest), &mirrors).unwrap();
+        assert_eq!(pulled.len(), 1);
+        assert_eq!(pulled[0].registry, "mirror.internal");
+        assert_eq!(dest.stored(&pulled[0]).unwrap(), Some(true));
+        // Importing again is a no-op.
+        import_artifact_layers(&verified, Some(&archive), Some(&dest), &mirrors).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn tampered_layer_fails_import_with_the_digest_named() {
         let key = SigningKey::from_bytes(&[7; 32]);
@@ -1401,7 +1715,7 @@ mod tests {
         let dest = crate::oci_artifact::MemoryArtifactRegistry::new();
         let mut mirrors = BTreeMap::new();
         mirrors.insert("ghcr.io".into(), "mirror.internal".into());
-        let err = import_artifact_layers(&verified, Some(&dest), &mirrors)
+        let err = import_artifact_layers(&verified, None, Some(&dest), &mirrors)
             .unwrap_err()
             .to_string();
         assert!(err.contains(&artifact.digest), "{err}");
@@ -1415,7 +1729,7 @@ mod tests {
             .verify(&roots(&key, "exporter"), "tenant-1", "airgap-1", 2_000)
             .unwrap();
         let dest = crate::oci_artifact::MemoryArtifactRegistry::new();
-        let missing = import_artifact_layers(&verified, Some(&dest), &BTreeMap::new())
+        let missing = import_artifact_layers(&verified, None, Some(&dest), &BTreeMap::new())
             .unwrap_err()
             .to_string();
         assert!(missing.contains("origin pull is refused"), "{missing}");
@@ -1423,8 +1737,8 @@ mod tests {
 
         let mut mirrors = BTreeMap::new();
         mirrors.insert("ghcr.io".into(), "mirror.internal".into());
-        let first = import_artifact_layers(&verified, Some(&dest), &mirrors).unwrap();
-        let replay = import_artifact_layers(&verified, Some(&dest), &mirrors).unwrap();
+        let first = import_artifact_layers(&verified, None, Some(&dest), &mirrors).unwrap();
+        let replay = import_artifact_layers(&verified, None, Some(&dest), &mirrors).unwrap();
         assert_eq!(first, replay);
         assert_eq!(first[0].digest, artifact.digest);
         assert_eq!(first[0].registry, "mirror.internal");
@@ -1449,7 +1763,7 @@ mod tests {
         let dest = crate::oci_artifact::MemoryArtifactRegistry::new();
         let mut mirrors = BTreeMap::new();
         mirrors.insert("ghcr.io".into(), "mirror.internal".into());
-        let err = import_artifact_layers(&verified, Some(&dest), &mirrors)
+        let err = import_artifact_layers(&verified, None, Some(&dest), &mirrors)
             .unwrap_err()
             .to_string();
         assert!(err.contains(&artifact.digest), "{err}");

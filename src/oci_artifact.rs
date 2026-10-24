@@ -4,7 +4,8 @@
 //! A registry is not a second catalog. Pull uses the environment mirror only.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::{Result, bail};
@@ -84,6 +85,22 @@ pub trait ArtifactRegistry: Send + Sync {
     fn verify(&self, reference: &OciArtifactRef) -> Result<OciArtifactRef>;
     fn fetch(&self, reference: &OciArtifactRef) -> Result<Vec<u8>>;
     fn store(&self, reference: &OciArtifactRef, bytes: Vec<u8>) -> Result<()>;
+    /// Store the blob read from `reader`, for blobs too large to hold in
+    /// memory (#684). The digest is checked before the blob is visible.
+    /// Default: read it whole and [`Self::store`] it.
+    fn store_reader(&self, reference: &OciArtifactRef, reader: &mut dyn Read) -> Result<()> {
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes)?;
+        self.store(reference, bytes)
+    }
+}
+
+/// The `sha256:` digest of the file at `path`, read in a stream.
+fn file_digest(path: &Path) -> std::io::Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
 /// In-memory registry for deterministic tests.
@@ -219,10 +236,8 @@ impl FilesystemArtifactRegistry {
 impl ArtifactRegistry for FilesystemArtifactRegistry {
     fn stored(&self, reference: &OciArtifactRef) -> Result<Option<bool>> {
         reference.validate()?;
-        match std::fs::read(self.blob_path(reference)) {
-            Ok(bytes) => Ok(Some(
-                format!("sha256:{:x}", Sha256::digest(bytes)) == reference.digest,
-            )),
+        match file_digest(&self.blob_path(reference)) {
+            Ok(digest) => Ok(Some(digest == reference.digest)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error.into()),
         }
@@ -231,7 +246,7 @@ impl ArtifactRegistry for FilesystemArtifactRegistry {
     fn verify(&self, reference: &OciArtifactRef) -> Result<OciArtifactRef> {
         reference.validate()?;
         let path = self.blob_path(reference);
-        let bytes = std::fs::read(&path).map_err(|_| {
+        let actual = file_digest(&path).map_err(|_| {
             anyhow::anyhow!(
                 "artifact digest {} is unresolvable at {}/{}",
                 reference.digest,
@@ -239,7 +254,6 @@ impl ArtifactRegistry for FilesystemArtifactRegistry {
                 reference.repository
             )
         })?;
-        let actual = format!("sha256:{:x}", Sha256::digest(bytes));
         if actual != reference.digest {
             bail!(
                 "artifact digest {} does not match stored bytes {actual}",
@@ -256,6 +270,99 @@ impl ArtifactRegistry for FilesystemArtifactRegistry {
 
     fn store(&self, reference: &OciArtifactRef, bytes: Vec<u8>) -> Result<()> {
         self.put(reference, bytes)
+    }
+
+    /// Streams into a temporary file beside the blob, hashing as it goes,
+    /// and renames it into place only when the digest matches.
+    fn store_reader(&self, reference: &OciArtifactRef, reader: &mut dyn Read) -> Result<()> {
+        reference.validate()?;
+        // Absolute, so the walk over created directories below never runs
+        // into the empty ancestor of a relative store root.
+        let path = std::path::absolute(self.blob_path(reference))?;
+        if path.exists() {
+            let existing = file_digest(&path)?;
+            if existing == reference.digest {
+                return Ok(());
+            }
+            bail!(
+                "artifact digest {} already exists with different bytes {existing}",
+                reference.digest
+            );
+        }
+        // The highest directory this write creates: its parent is the last
+        // directory whose entries must be made durable.
+        let mut first_created = None;
+        if let Some(parent) = path.parent() {
+            let mut missing = parent;
+            while !missing.exists() {
+                first_created = Some(missing.to_path_buf());
+                match missing.parent() {
+                    Some(up) => missing = up,
+                    None => break,
+                }
+            }
+            std::fs::create_dir_all(parent)?;
+        }
+        // A temporary of its own, so concurrent writers never share one.
+        let tmp = path.with_file_name(format!(
+            ".{}.{}.part",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| anyhow::anyhow!("artifact blob path is not UTF-8"))?,
+            uuid::Uuid::new_v4().simple()
+        ));
+        let written = (|| -> Result<String> {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)?;
+            let mut hasher = Sha256::new();
+            let mut buffer = vec![0_u8; 1024 * 1024];
+            loop {
+                let read = reader.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..read]);
+                std::io::Write::write_all(&mut file, &buffer[..read])?;
+            }
+            file.sync_all()?;
+            Ok(format!("sha256:{:x}", hasher.finalize()))
+        })();
+        let digest = match written {
+            Ok(digest) => digest,
+            Err(error) => {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(error);
+            }
+        };
+        if digest != reference.digest {
+            let _ = std::fs::remove_file(&tmp);
+            bail!(
+                "stored artifact digest {digest} does not match declared {}",
+                reference.digest
+            );
+        }
+        if let Err(error) = std::fs::rename(&tmp, &path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(error.into());
+        }
+        // The rename, and every directory created for it, survive a crash
+        // before the blob is reported stored: sync up to the parent of the
+        // highest directory created, or the blob's own directory.
+        let stop = first_created
+            .as_deref()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf);
+        let mut dir = path.parent();
+        while let Some(current) = dir {
+            std::fs::File::open(current)?.sync_all()?;
+            if stop.as_deref().is_none_or(|stop| current == stop) {
+                break;
+            }
+            dir = current.parent();
+        }
+        Ok(())
     }
 }
 
