@@ -4,7 +4,7 @@
 //! `{workdir}/docker/host.json`. Images must be digest-pinned. Secret values
 //! stay in operator-managed env files; Tenkai stores only the directory path.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -14,47 +14,20 @@ use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
-use super::{
+use tenkai::now_millis;
+use tenkai::observed_runtime;
+use tenkai::software_executor::{
     RolloutPhaseTimes, SoftwareApplyRequest, SoftwareDeployPhase, SoftwareExecutor,
-    SoftwareObserveStatus, diagnostics, validate_request,
+    SoftwareObserveStatus, format_software_phase_error, run_captured_command,
+    sanitize_diagnostic_text, validate_request, validate_secret_dir_path,
 };
 
 /// Directory under the release workdir that holds the Docker host topology.
 pub const DOCKER_TOPOLOGY_DIR: &str = "docker";
 /// Topology filename inside [`DOCKER_TOPOLOGY_DIR`].
 pub const DOCKER_TOPOLOGY_FILE: &str = "host.json";
-/// Environment property that stores the secret-file directory path.
-pub const DOCKER_SECRET_DIR_PROPERTY: &str = "docker_secret_dir";
-
 const IMAGE_DIGEST_PREFIX: &str = "sha256:";
 const IMAGE_DIGEST_HEX_LEN: usize = 64;
-
-/// Environment-scoped directory of secret env files. Credential bytes are refused.
-pub fn validate_secret_dir_path(path: &Path) -> Result<()> {
-    let raw = path.to_string_lossy();
-    if raw.is_empty() || raw.contains('\0') || raw.contains('\n') {
-        bail!("docker_secret_dir must be a single filesystem path");
-    }
-    let lower = raw.to_ascii_lowercase();
-    for needle in ["-----begin ", "bearer ", "token=", "password=", "secret="] {
-        if lower.contains(needle) {
-            bail!("docker_secret_dir must be a directory path, not credential material");
-        }
-    }
-    Ok(())
-}
-
-/// Read and admit `docker_secret_dir` from Environment properties.
-pub fn secret_dir_from_properties(properties: &HashMap<String, String>) -> Result<Option<PathBuf>> {
-    match properties.get(DOCKER_SECRET_DIR_PROPERTY) {
-        None => Ok(None),
-        Some(value) => {
-            let path = PathBuf::from(value);
-            validate_secret_dir_path(&path)?;
-            Ok(Some(path))
-        }
-    }
-}
 
 /// Digest-pinned Docker host topology declared by a software release.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -300,6 +273,14 @@ impl DockerHostExecutor {
         self
     }
 
+    /// Fake-CLI executor with isolated state.
+    pub fn for_fake_cli(script: &Path, state: &Path) -> Self {
+        Self::for_binary(script.to_path_buf()).with_env(
+            "TENKAI_DOCKER_FAKE_STATE",
+            state.to_string_lossy().into_owned(),
+        )
+    }
+
     #[cfg(test)]
     fn with_fake_env(self, state: &Path, forbid: &str, unhealthy: &[&str]) -> Self {
         self.with_env(
@@ -312,6 +293,10 @@ impl DockerHostExecutor {
 
     /// Apply one generation and return wall time per phase. `apply` drops the times.
     pub fn apply_with_phases(&self, request: &SoftwareApplyRequest) -> Result<RolloutPhaseTimes> {
+        self.apply_timed(request)
+    }
+
+    fn apply_timed(&self, request: &SoftwareApplyRequest) -> Result<RolloutPhaseTimes> {
         let mut times = RolloutPhaseTimes::default();
         let planned = Instant::now();
         validate_request(request)?;
@@ -373,7 +358,11 @@ impl DockerHostExecutor {
 
 impl SoftwareExecutor for DockerHostExecutor {
     fn apply(&self, request: &SoftwareApplyRequest) -> Result<()> {
-        self.apply_with_phases(request).map(|_| ())
+        self.apply_timed(request).map(|_| ())
+    }
+
+    fn apply_with_phases(&self, request: &SoftwareApplyRequest) -> Result<RolloutPhaseTimes> {
+        self.apply_timed(request)
     }
 
     /// `apply` restores the previous containers itself when it fails, so the
@@ -460,7 +449,7 @@ impl SoftwareExecutor for DockerHostExecutor {
     fn observed_runtime(
         &self,
         request: &SoftwareApplyRequest,
-    ) -> Result<Option<crate::observed_runtime::ObservedRuntimeComponent>> {
+    ) -> Result<Option<observed_runtime::ObservedRuntimeComponent>> {
         validate_request(request)?;
         let topology = self.topology(request)?;
         validate_topology(&topology, request.secret_dir_path.as_deref())?;
@@ -1444,7 +1433,7 @@ fn replace_container(
         args.push("--label".into());
         args.push("tenkai.job=true".into());
         args.push("--label".into());
-        args.push(format!("tenkai.job-started-at-ms={}", crate::now_millis()));
+        args.push(format!("tenkai.job-started-at-ms={}", now_millis()));
     }
     for (key, value) in &request.overlays {
         args.push("--label".into());
@@ -1813,7 +1802,7 @@ fn wait_container(
             status => {
                 bail!(
                     "{}",
-                    diagnostics::format_software_phase_error(
+                    format_software_phase_error(
                         SoftwareDeployPhase::Health,
                         &request.product,
                         &request.version,
@@ -1826,7 +1815,7 @@ fn wait_container(
     }
     bail!(
         "{}",
-        diagnostics::format_software_phase_error(
+        format_software_phase_error(
             SoftwareDeployPhase::Health,
             &request.product,
             &request.version,
@@ -1859,7 +1848,7 @@ fn snapshot_observed_runtime(
     executor: &DockerHostExecutor,
     request: &SoftwareApplyRequest,
     topology: &DockerHostTopology,
-) -> Result<crate::observed_runtime::ObservedRuntimeComponent> {
+) -> Result<observed_runtime::ObservedRuntimeComponent> {
     let mut units = Vec::new();
     let mut last_init_job = None;
     for container in order_containers(topology)? {
@@ -1883,7 +1872,7 @@ fn snapshot_observed_runtime(
                     ),
                     None => (container.image.clone(), false, None),
                 };
-                units.push(crate::observed_runtime::ObservedRuntimeUnit {
+                units.push(observed_runtime::ObservedRuntimeUnit {
                     name: container.name.clone(),
                     image_digest,
                     restart_policy: restart_policy_flag(container.restart),
@@ -1892,7 +1881,7 @@ fn snapshot_observed_runtime(
                 });
             }
             DockerContainerMode::OneShot { .. } => {
-                last_init_job = Some(crate::observed_runtime::ObservedInitJob {
+                last_init_job = Some(observed_runtime::ObservedInitJob {
                     name: container.name.clone(),
                     status: inspected
                         .as_ref()
@@ -1903,7 +1892,7 @@ fn snapshot_observed_runtime(
             }
         }
     }
-    Ok(crate::observed_runtime::ObservedRuntimeComponent {
+    Ok(observed_runtime::ObservedRuntimeComponent {
         product: request.product.clone(),
         executor_kind: "docker".into(),
         health: None,
@@ -1938,7 +1927,7 @@ fn inspect_container(
         }
         bail!(
             "docker inspect {name} failed: {}",
-            diagnostics::sanitize_diagnostic_text(&String::from_utf8_lossy(&output.stderr))
+            sanitize_diagnostic_text(&String::from_utf8_lossy(&output.stderr))
         );
     }
     parse_inspect_json(&String::from_utf8_lossy(&output.stdout))
@@ -2182,7 +2171,7 @@ fn docker_create_idempotent(
         let name = args.last().map(String::as_str).unwrap_or("");
         return require_existing_owned(executor, request, name);
     }
-    let detail = diagnostics::sanitize_diagnostic_text(stderr.trim());
+    let detail = sanitize_diagnostic_text(stderr.trim());
     bail!(
         "software deploy phase={} product={} environment/namespace={}: docker {hint} failed: {detail}",
         SoftwareDeployPhase::Apply.as_str(),
@@ -2200,7 +2189,7 @@ fn docker_ok(
 ) -> Result<()> {
     let mut command = executor.docker_command();
     command.args(args);
-    diagnostics::run_captured_command(
+    run_captured_command(
         &mut command,
         phase,
         hint,
@@ -2227,12 +2216,14 @@ fn docker_output(executor: &DockerHostExecutor, args: &[&str]) -> Result<Output>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth_context::test_management_context;
-    use crate::catalog::{PublishOptions, publish};
-    use crate::client::Ctx;
-    use crate::plan;
     use std::os::unix::fs::PermissionsExt as _;
     use std::sync::Arc;
+    use tenkai::auth_context::{
+        AuthenticatedRequestContextBuilder, PrincipalIdentity, PrincipalKind,
+    };
+    use tenkai::catalog::{PublishOptions, publish};
+    use tenkai::client::Ctx;
+    use tenkai::plan;
 
     const DIGEST_A: &str = "registry.example:5000/edge/db@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const DIGEST_B: &str = "registry.example:5000/edge/api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -2240,8 +2231,8 @@ mod tests {
     const SECRET: &str = "super-secret-token-value";
 
     fn fake_docker(root: &Path) -> (PathBuf, PathBuf) {
-        let fixture =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/docker/fake-docker.py");
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/docker/fake-docker.py");
         let script = root.join("fake-docker");
         std::fs::copy(&fixture, &script).unwrap();
         let mut permissions = std::fs::metadata(&script).unwrap().permissions();
@@ -2338,7 +2329,7 @@ inputs = ["docker"]
     }
 
     fn request_for(root: &Path, secret_dir: &Path, version: &str) -> SoftwareApplyRequest {
-        let mut request = super::super::request_from_parts(
+        let mut request = tenkai::software_executor::request_from_parts(
             "edge-app",
             version,
             "local",
@@ -2467,7 +2458,7 @@ inputs = ["docker"]
         let root = std::env::temp_dir().join(format!(
             "tenkai-docker-runtime-{}-{}-{}",
             std::process::id(),
-            crate::now_millis(),
+            now_millis(),
             uuid::Uuid::new_v4()
         ));
         let _ = std::fs::remove_dir_all(&root);
@@ -2887,7 +2878,7 @@ inputs = ["docker"]
         let root = std::env::temp_dir().join(format!(
             "tenkai-docker-exec-{}-{}",
             std::process::id(),
-            crate::now_millis()
+            now_millis()
         ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
@@ -2992,14 +2983,14 @@ inputs = ["docker"]
 
     #[test]
     fn hyphenated_environment_and_product_pairs_do_not_share_runtime_names() {
-        let left = super::super::request_from_parts(
+        let left = tenkai::software_executor::request_from_parts(
             "edge-app",
             "1.0.0",
             "prod",
             ".",
             "tenkai:release:edge-app@1.0.0",
         );
-        let right = super::super::request_from_parts(
+        let right = tenkai::software_executor::request_from_parts(
             "app",
             "1.0.0",
             "prod-edge",
@@ -3026,7 +3017,7 @@ inputs = ["docker"]
         let root = std::env::temp_dir().join(format!(
             "tenkai-docker-collide-{}-{}",
             std::process::id(),
-            crate::now_millis()
+            now_millis()
         ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
@@ -3069,7 +3060,7 @@ inputs = ["docker"]
         let root = std::env::temp_dir().join(format!(
             "tenkai-docker-foreign-{}-{}",
             std::process::id(),
-            crate::now_millis()
+            now_millis()
         ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
@@ -3120,7 +3111,7 @@ inputs = ["docker"]
         let root = std::env::temp_dir().join(format!(
             "tenkai-docker-unhealthy-{}-{}",
             std::process::id(),
-            crate::now_millis()
+            now_millis()
         ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
@@ -3157,7 +3148,7 @@ inputs = ["docker"]
         let root = std::env::temp_dir().join(format!(
             "tenkai-docker-restore-{}-{}",
             std::process::id(),
-            crate::now_millis()
+            now_millis()
         ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
@@ -3206,7 +3197,7 @@ inputs = ["docker"]
         let root = std::env::temp_dir().join(format!(
             "tenkai-docker-rotate-{}-{}",
             std::process::id(),
-            crate::now_millis()
+            now_millis()
         ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
@@ -3265,7 +3256,7 @@ inputs = ["docker"]
         let root = std::env::temp_dir().join(format!(
             "tenkai-docker-unhealthy-skip-{}-{}",
             std::process::id(),
-            crate::now_millis()
+            now_millis()
         ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
@@ -3294,7 +3285,7 @@ inputs = ["docker"]
         let root = std::env::temp_dir().join(format!(
             "tenkai-docker-drill-{}-{}",
             std::process::id(),
-            crate::now_millis()
+            now_millis()
         ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
@@ -3306,7 +3297,7 @@ inputs = ["docker"]
         let (script, state) = fake_docker(&root);
         let executor = Arc::new(executor_for(&script, &state, &[DIGEST_C]));
         let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
-        crate::ontology::register(&mut ctx).await.unwrap();
+        tenkai::ontology::register(&mut ctx).await.unwrap();
         let options = PublishOptions {
             allow_unsigned_development: true,
             ..Default::default()
@@ -3317,12 +3308,21 @@ inputs = ["docker"]
         publish(&mut ctx, &root.join("2.0.0").join("tenkai.toml"), &options)
             .await
             .unwrap();
-        let actor = test_management_context("docker-drill");
-        crate::catalog::promote(&mut ctx, &actor, "edge-app@1.0.0", "stable")
+        let actor = AuthenticatedRequestContextBuilder::new(
+            "docker-drill",
+            PrincipalIdentity {
+                id: "management".into(),
+                kind: PrincipalKind::Management,
+            },
+            "test-auth",
+        )
+        .build()
+        .expect("management context");
+        tenkai::catalog::promote(&mut ctx, &actor, "edge-app@1.0.0", "stable")
             .await
             .unwrap();
         plan::env_add(&mut ctx, "local", "fixture").await.unwrap();
-        crate::environment::set_docker_secret_dir(&mut ctx, "local", &secret_dir)
+        tenkai::environment::set_docker_secret_dir(&mut ctx, "local", &secret_dir)
             .await
             .unwrap();
         plan::subscribe(&mut ctx, "local", "edge-app", "stable")
@@ -3330,13 +3330,13 @@ inputs = ["docker"]
             .unwrap();
 
         let first = plan::create(&mut ctx, "local").await.unwrap();
-        let installed = crate::apply::execute_with_options(
+        let installed = tenkai::apply::execute_with_options(
             &mut ctx,
             &first.id,
-            crate::apply::ExecutionOptions {
+            tenkai::apply::ExecutionOptions {
                 skip_gates: false,
                 emergency_reason: None,
-                authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
+                authorization: tenkai::apply::ExecutionAuthorization::LocalDevelopment {
                     reason: "docker host executor drill",
                 },
                 software_executor: Some(executor.clone()),
@@ -3363,17 +3363,17 @@ inputs = ["docker"]
         );
         executor.restart(&observe).unwrap();
 
-        crate::catalog::promote(&mut ctx, &actor, "edge-app@2.0.0", "stable")
+        tenkai::catalog::promote(&mut ctx, &actor, "edge-app@2.0.0", "stable")
             .await
             .unwrap();
         let upgrade = plan::create(&mut ctx, "local").await.unwrap();
-        let rolled = crate::apply::execute_with_options(
+        let rolled = tenkai::apply::execute_with_options(
             &mut ctx,
             &upgrade.id,
-            crate::apply::ExecutionOptions {
+            tenkai::apply::ExecutionOptions {
                 skip_gates: false,
                 emergency_reason: None,
-                authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
+                authorization: tenkai::apply::ExecutionAuthorization::LocalDevelopment {
                     reason: "docker host executor drill",
                 },
                 software_executor: Some(executor.clone()),
@@ -3419,7 +3419,7 @@ inputs = ["docker"]
         let root = std::env::temp_dir().join(format!(
             "tenkai-docker-live-{}-{}",
             std::process::id(),
-            crate::now_millis()
+            now_millis()
         ));
         std::fs::create_dir_all(root.join("1.0.0/docker")).unwrap();
         let port = std::net::TcpListener::bind("127.0.0.1:0")

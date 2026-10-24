@@ -65,7 +65,7 @@ impl RelationLifecycle<'_> {
     pub(super) async fn create_link_once(
         &self,
         link: Link,
-    ) -> std::result::Result<(), tonic::Status> {
+    ) -> std::result::Result<(), super::ClientError> {
         match self {
             Self::Embedded(store) => {
                 let store = Arc::clone(store);
@@ -93,9 +93,9 @@ impl RelationLifecycle<'_> {
                             && remote_link_exists(client, &from_id, &relation_name, &link_id)
                                 .await =>
                     {
-                        Err(tonic::Status::already_exists("link already exists"))
+                        Err(super::ClientError::UniqueConflict)
                     }
-                    Err(status) => Err(status),
+                    Err(status) => Err(status.into()),
                 }
             }
         }

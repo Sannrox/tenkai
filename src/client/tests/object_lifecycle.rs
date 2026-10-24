@@ -23,7 +23,7 @@ async fn assert_object_lifecycle(mut ctx: Ctx) {
     let mut conflicting = original.clone();
     conflicting.name = "must-not-replace".into();
     let error = ctx.create_once(conflicting).await.unwrap_err();
-    assert_eq!(error.code(), tonic::Code::AlreadyExists);
+    assert!(crate::client::is_unique_conflict(&error), "{error}");
     assert_eq!(ctx.get(id).await.unwrap(), Some(original.clone()));
 
     let mut updated = original;

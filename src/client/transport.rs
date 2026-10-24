@@ -25,7 +25,7 @@ where
 pub(crate) async fn block_embedded_status<T, F>(
     store: Arc<crate::storage::SqliteStore>,
     operation: F,
-) -> std::result::Result<T, tonic::Status>
+) -> std::result::Result<T, super::ClientError>
 where
     T: Send + 'static,
     F: FnOnce(&crate::storage::SqliteStore) -> std::result::Result<T, tonic::Status>
@@ -39,6 +39,7 @@ where
                 "embedded store blocking task failed: {error}"
             )))
         })
+        .map_err(super::ClientError::from)
 }
 
 pub(crate) async fn remote_unary<Req, Resp>(

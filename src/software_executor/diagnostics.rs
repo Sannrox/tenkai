@@ -55,7 +55,7 @@ pub fn rollback_channel_note(product: &str, restored_version: &str) -> String {
 }
 
 /// Run an external software-deploy binary, capturing and sanitizing stderr.
-pub(super) fn run_captured_command(
+pub fn run_captured_command(
     command: &mut Command,
     phase: SoftwareDeployPhase,
     phase_hint: &str,

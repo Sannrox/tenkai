@@ -184,7 +184,7 @@ impl Inner {
                 &[&id, &lease_gen, &checkpoint_json, &status.as_str(), &detail],
             )
             .map_err(pg)?;
-            rollback_in(tx, &id)?.ok_or_else(|| StoreError::NotFound {
+            rollback_in(tx, &id)?.ok_or(StoreError::NotFound {
                 kind: "rollback",
                 id,
             })

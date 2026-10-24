@@ -263,9 +263,7 @@ async fn claim_environment_with_options(
     match ctx.create_once(available).await {
         Ok(_) => {}
         Err(status)
-            if crate::client::is_unique_conflict(&status)
-                || (status.code() == tonic::Code::Internal
-                    && status.message().contains("object IDs with audit history")) => {}
+            if crate::client::is_unique_conflict(&status) || status.is_retired_identity() => {}
         Err(status) => {
             let _ = release_environment_lease(ctx, &environment_lease).await;
             return Err(status.into());

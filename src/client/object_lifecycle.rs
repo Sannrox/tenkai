@@ -46,7 +46,7 @@ impl ObjectLifecycle<'_> {
     pub(super) async fn create_once(
         &self,
         object: Object,
-    ) -> std::result::Result<Object, tonic::Status> {
+    ) -> std::result::Result<Object, super::ClientError> {
         match self {
             Self::Embedded(store) => {
                 let store = Arc::clone(store);
@@ -68,9 +68,9 @@ impl ObjectLifecycle<'_> {
                         if status.code() == tonic::Code::Internal
                             && remote_object_conflict(client, &object_id).await =>
                     {
-                        return Err(tonic::Status::already_exists("object already exists"));
+                        return Err(super::ClientError::UniqueConflict);
                     }
-                    Err(status) => return Err(status),
+                    Err(status) => return Err(status.into()),
                 };
                 Ok(response.object.unwrap_or_default())
             }

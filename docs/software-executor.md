@@ -6,8 +6,11 @@ into the core crate by default.
 
 Software releases can declare [signed compatibility preflight requirements](software-compatibility.md) independently of executor health checks.
 
-Source: `src/software_executor.rs`. Apply wiring: `src/apply.rs`.
-Rollout-time harness: `src/rollout_time.rs`, baseline `perf/rollout-baseline.json`.
+Source: `src/software_executor.rs` (port, fake, selector) and
+`crates/tenkai-executor` (Helm, kubectl, Docker CLI, in-process Kubernetes).
+Apply wiring: `src/apply.rs`. Rollout-time harness: `src/rollout_time.rs`,
+baseline `perf/rollout-baseline.json`. Hosts call `tenkai_executor::install()`
+before `selected_software_executor`.
 
 ## Strategies
 
@@ -31,18 +34,18 @@ out of scope here. Custom-resource operators are refused.
 | --- | --- |
 | `SoftwareExecutor` | apply / remove / observe / restart, plus `cleanup_failed_apply` (defaults to remove) |
 | `FakeSoftwareExecutor` | CI without cluster |
-| `HelmSoftwareExecutor` | Helm chart path |
-| `KubernetesSoftwareExecutor` | Native manifests path (`kubectl`) |
-| `InProcessKubernetesExecutor` | Native manifests with server-side apply |
-| `DockerHostExecutor` | Digest-pinned host containers, networks, and volumes |
+| `HelmSoftwareExecutor` | Helm chart path (`tenkai-executor`) |
+| `KubernetesSoftwareExecutor` | Native manifests path (`kubectl`, `tenkai-executor`) |
+| `InProcessKubernetesExecutor` | Native manifests with server-side apply (`tenkai-executor`) |
+| `DockerHostExecutor` | Digest-pinned host containers, networks, and volumes (`tenkai-executor`) |
 
-Hosts (`tenkaictl`, the reconciler) select the adapter from
-`TENKAI_SOFTWARE_EXECUTOR` and pass it into apply. Apply does not read that
-env var during activate/deactivate. Helm and kubectl failures capture sanitized
-stderr. The in-process path waits on workload conditions with a short backoff
-starting at 100 ms (capped at 200 ms) and fails closed when `Available` is not
-`True`, naming the condition. A foreign field manager is an explicit conflict,
-not a silent overwrite.
+Hosts (`tenkaictl`, the reconciler) call `tenkai_executor::install()`, then
+select the adapter from `TENKAI_SOFTWARE_EXECUTOR` and pass it into apply.
+Apply does not read that env var during activate/deactivate. Helm and kubectl
+failures capture sanitized stderr. The in-process path waits on workload
+conditions with a short backoff starting at 100 ms (capped at 200 ms) and fails
+closed when `Available` is not `True`, naming the condition. A foreign field
+manager is an explicit conflict, not a silent overwrite.
 
 Kubeconfig is never placed on CLI argv and is never stored as file bytes in
 SQLite. The in-process path requires an environment-scoped file path:

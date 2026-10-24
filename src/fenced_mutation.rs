@@ -63,8 +63,23 @@ pub fn executor_guard_executable() -> Result<PathBuf> {
     {
         return Ok(current);
     }
-    for directory in current.ancestors().skip(1).take(2) {
-        let candidate = directory.join("tenkai-executor-guard");
+    let mut candidates = Vec::new();
+    for directory in current.ancestors().skip(1).take(3) {
+        candidates.push(directory.join("tenkai-executor-guard"));
+    }
+    if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
+        let profile = if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        };
+        candidates.push(
+            PathBuf::from(target_dir)
+                .join(profile)
+                .join("tenkai-executor-guard"),
+        );
+    }
+    for candidate in candidates {
         if is_executable_file(&candidate) {
             return Ok(candidate);
         }
