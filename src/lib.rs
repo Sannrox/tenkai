@@ -228,6 +228,7 @@ pub mod software_compatibility;
 pub mod software_executor;
 pub mod staged_artifact;
 pub mod storage;
+pub mod support_bundle;
 pub mod telemetry;
 pub mod tenant_environment;
 pub mod tenant_isolation;
