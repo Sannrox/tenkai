@@ -268,7 +268,7 @@ pub(crate) async fn webhooks(ctx: &mut client::Ctx, command: WebhooksCommand) ->
             events,
             ..
         } => {
-            let events = parse_webhook_events(events.as_deref())?;
+            let (events, operational) = parse_webhook_events(events.as_deref())?;
             println!(
                 "{}",
                 tenkai::deploy_webhook::set_environment_webhook(
@@ -278,6 +278,7 @@ pub(crate) async fn webhooks(ctx: &mut client::Ctx, command: WebhooksCommand) ->
                         url,
                         secret_env,
                         events,
+                        operational,
                     },
                 )
                 .await?
@@ -294,26 +295,36 @@ pub(crate) async fn webhooks(ctx: &mut client::Ctx, command: WebhooksCommand) ->
     Ok(())
 }
 
+/// `--events` split into apply outcomes and operational events, which an
+/// endpoint stores in separate fields.
 pub(crate) fn parse_webhook_events(
     raw: Option<&str>,
-) -> Result<Vec<tenkai::deploy_webhook::WebhookEvent>> {
+) -> Result<(
+    Vec<tenkai::deploy_webhook::WebhookEvent>,
+    Vec<tenkai::deploy_webhook::OperationalEvent>,
+)> {
     let Some(raw) = raw else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     };
-    let mut events = Vec::new();
+    let (mut events, mut operational) = (Vec::new(), Vec::new());
     for part in raw.split(',') {
         let part = part.trim();
         if part.is_empty() {
             continue;
         }
-        events.push(match part {
-            "apply.succeeded" => tenkai::deploy_webhook::WebhookEvent::ApplySucceeded,
-            "apply.failed" => tenkai::deploy_webhook::WebhookEvent::ApplyFailed,
-            "apply.rolled_back" => tenkai::deploy_webhook::WebhookEvent::ApplyRolledBack,
-            other => bail!("unknown webhook event {other:?}"),
-        });
+        match part {
+            "apply.succeeded" => events.push(tenkai::deploy_webhook::WebhookEvent::ApplySucceeded),
+            "apply.failed" => events.push(tenkai::deploy_webhook::WebhookEvent::ApplyFailed),
+            "apply.rolled_back" => {
+                events.push(tenkai::deploy_webhook::WebhookEvent::ApplyRolledBack)
+            }
+            other => match tenkai::deploy_webhook::OperationalEvent::parse(other) {
+                Some(event) => operational.push(event),
+                None => bail!("unknown webhook event {other:?}"),
+            },
+        }
     }
-    Ok(events)
+    Ok((events, operational))
 }
 
 pub(crate) async fn approval_policy(

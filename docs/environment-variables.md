@@ -12,6 +12,7 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `TENKAI_DATABASE` | `.tenkai-state/tenkai.db` | Embedded or server-owned operational SQLite database |
+| `TENKAI_HOST_WEBHOOKS` | unset | `tenkai-server` only: JSON list of webhook endpoints for host events (`backup.stale`, `clock.drift`) ([operational events](deploy-webhooks.md#operational-events)) |
 | `TENKAI_AUDIT_EXPORT_DIR` | unset | `tenkai-server` only: directory of the scheduled [audit export](audit-export.md) chain. Set with `TENKAI_AUDIT_SIGNING_KEY` |
 | `TENKAI_AUDIT_SIGNING_KEY` | unset | Ed25519 seed file that signs audit exports |
 | `TENKAI_AUDIT_EXPORT_INTERVAL_SECS` | `86400` | Seconds between scheduled audit exports |

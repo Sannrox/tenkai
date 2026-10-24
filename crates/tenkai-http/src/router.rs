@@ -15,7 +15,10 @@ use super::environment_config::{
     configure_approval_policy, configure_constraints, configure_facts,
     configure_maintenance_window, configure_webhooks, register_environment,
 };
-use super::imports::{content_inventory, import_bundle, import_job, staged_imports};
+use super::imports::{
+    content_inventory, environment_webhook_deliveries, host_webhook_deliveries, import_bundle,
+    import_job, staged_imports,
+};
 use super::inspect::{
     backup_status, change_events, environment_approval_policy, environment_status, fleet_status,
     health, inspect_environment, list_channels, list_environments, list_migrations, list_releases,
@@ -109,6 +112,11 @@ pub fn router(
         .route("/v1/imports/staged", get(staged_imports))
         .route("/v1/imports/{id}", get(import_job))
         .route("/v1/content/inventory", get(content_inventory))
+        .route("/v1/webhooks/deliveries", get(host_webhook_deliveries))
+        .route(
+            "/v1/environments/{environment}/webhooks/deliveries",
+            get(environment_webhook_deliveries),
+        )
         .route("/v1/events", get(change_events))
         .route(
             "/v1/environments",

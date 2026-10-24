@@ -1358,6 +1358,13 @@
               "const": "set_webhook",
               "type": "string"
             },
+            "operational": {
+              "description": "Operational events the endpoint also receives (#724).",
+              "items": {
+                "$ref": "#/$defs/OperationalEvent"
+              },
+              "type": "array"
+            },
             "secret_env": {
               "type": "string"
             },
@@ -2925,6 +2932,17 @@
       ],
       "type": "object"
     },
+    "OperationalEvent": {
+      "description": "Operational events of [`crate::operational_events`] (#724). They live in\ntheir own endpoint field, `operational`, so a version that does not know\nthem ignores the field and keeps the endpoint's apply subscriptions.",
+      "enum": [
+        "plan.held",
+        "plan.awaiting_approval",
+        "import.failed",
+        "backup.stale",
+        "clock.drift"
+      ],
+      "type": "string"
+    },
     "PackageMigrationApplyRequest": {
       "additionalProperties": false,
       "properties": {
@@ -3929,6 +3947,50 @@
       ],
       "type": "object"
     },
+    "WebhookDelivery": {
+      "description": "One webhook delivery as `GET .../webhooks/deliveries` reports it.",
+      "properties": {
+        "attempts": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "delivered_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "event": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "last_error": {
+          "description": "The last failure, as the worker recorded it.",
+          "type": "string"
+        },
+        "next_attempt_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "state": {
+          "description": "`pending`, `retrying` or `delivered`.",
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "event",
+        "url",
+        "state",
+        "attempts",
+        "next_attempt_at"
+      ],
+      "type": "object"
+    },
     "WebhookEvent": {
       "description": "Stable apply-lifecycle events a webhook endpoint may subscribe to.",
       "enum": [
@@ -4066,6 +4128,30 @@
       "request": null,
       "response": {
         "$ref": "#/$defs/ImportJob"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/webhooks/deliveries",
+      "request": null,
+      "response": {
+        "items": {
+          "$ref": "#/$defs/WebhookDelivery"
+        },
+        "type": "array"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/environments/{environment}/webhooks/deliveries",
+      "request": null,
+      "response": {
+        "items": {
+          "$ref": "#/$defs/WebhookDelivery"
+        },
+        "type": "array"
       }
     },
     {

@@ -31,6 +31,7 @@ use tenkai::management_lifecycle::{
 use tenkai::observed_runtime::EnvironmentRuntimeReport;
 use tenkai::offline_import::{ImportJob, ImportRequest, StagedBundle};
 use tenkai::oidc_verifier::OidcClientDiscovery;
+use tenkai::operational_events::WebhookDelivery;
 use tenkai::package_migration::{
     MigrationPage, PackageMigrationApplyRequest, PackageMigrationMutateRequest,
     PackageMigrationPreviewRequest, PackageMigrationResult,
@@ -158,6 +159,20 @@ pub fn http_contract() -> Value {
             auth: Auth::Management,
             request: None,
             response: schema::<ImportJob>(&mut g),
+        },
+        Route {
+            method: "GET",
+            path: "/v1/webhooks/deliveries",
+            auth: Auth::Read,
+            request: None,
+            response: schema::<Vec<WebhookDelivery>>(&mut g),
+        },
+        Route {
+            method: "GET",
+            path: "/v1/environments/{environment}/webhooks/deliveries",
+            auth: Auth::Read,
+            request: None,
+            response: schema::<Vec<WebhookDelivery>>(&mut g),
         },
         Route {
             method: "GET",
@@ -525,6 +540,7 @@ mod tests {
             ("ContentInventory", "weight_cache_bytes"),
             ("ContentItem", "stored"),
             ("ContentItem", "size_bytes"),
+            ("WebhookDelivery", "delivered_at"),
             ("BackupStatus", "last_success"),
             ("BackupStatus", "last_failure"),
             ("BackupStatus", "last_drill"),

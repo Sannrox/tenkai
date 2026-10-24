@@ -27,6 +27,8 @@ use crate::release_signing::TrustRoots;
 
 pub const IMPORT_JOB_SCHEMA: &str = "tenkai.offline-import.v1";
 const JOB_DIR: &str = "imports";
+/// Unannounced failures a retry moved aside, under the job directory.
+const PENDING_DIR: &str = "pending";
 
 /// Host-owned import settings: the staging directory and the trust roots
 /// that must authenticate a bundle exporter. Neither is request input.
@@ -215,6 +217,29 @@ pub async fn run(
     if lock.try_lock().is_err() {
         bail!("another import is already running");
     }
+    // A retry replaces the job file; a failure not yet announced moves aside
+    // first, so its `import.failed` event is not lost.
+    let previous = self::job(staging, &id).ok();
+    // Each attempt of a job starts strictly after the last, even within one
+    // millisecond or after the clock steps back: `<id>@<started>` names it.
+    let started_at_ms = previous
+        .as_ref()
+        .map_or(0, |previous| previous.started_at_ms.saturating_add(1))
+        .max(crate::now_millis());
+    if let Some(previous) = previous
+        && previous.state == ImportState::Failed
+        && !is_announced(&jobs, &previous)
+    {
+        let pending = jobs.join(PENDING_DIR);
+        std::fs::create_dir_all(&pending)?;
+        write_job(
+            &pending,
+            &ImportJob {
+                id: format!("{id}@{}", previous.started_at_ms),
+                ..previous
+            },
+        )?;
+    }
     let mut job = ImportJob {
         schema: IMPORT_JOB_SCHEMA.into(),
         id: id.clone(),
@@ -224,7 +249,7 @@ pub async fn run(
         dry_run: request.dry_run,
         state: ImportState::Running,
         actor: actor.into(),
-        started_at_ms: crate::now_millis(),
+        started_at_ms,
         finished_at_ms: None,
         preview: None,
         refusal: None,
@@ -301,6 +326,70 @@ pub async fn run(
     job.finished_at_ms = Some(crate::now_millis());
     write_job(&jobs, &job)?;
     Ok(job)
+}
+
+/// Failed jobs not yet handed to the `import.failed` webhooks: current jobs,
+/// and earlier attempts a retry moved aside.
+pub fn unannounced_failures(staging: &Path) -> Result<Vec<ImportJob>> {
+    let jobs = staging.join(JOB_DIR);
+    let mut failures = Vec::new();
+    for dir in [jobs.clone(), jobs.join(PENDING_DIR)] {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("reading {}", dir.display()));
+            }
+        };
+        for entry in entries {
+            let path = entry?.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(job) = serde_json::from_slice::<ImportJob>(&std::fs::read(&path)?) else {
+                continue;
+            };
+            if job.state == ImportState::Failed && !is_announced(&jobs, &job) {
+                failures.push(job);
+            }
+        }
+    }
+    Ok(failures)
+}
+
+/// Record that `job`'s failure was announced, with a marker file beside the
+/// job. Takes the import lock, so it never races an import rewriting the same
+/// job. A moved-aside attempt is removed; a current job is reread and marked
+/// only if it is still the same failed attempt. While an import holds the lock this defers, returning
+/// `false`.
+pub fn mark_announced(staging: &Path, job: &ImportJob) -> Result<bool> {
+    let jobs = staging.join(JOB_DIR);
+    let lock = std::fs::File::create(jobs.join(".lock"))?;
+    if lock.try_lock().is_err() {
+        return Ok(false);
+    }
+    if job.id.contains('@') {
+        let path = jobs.join(PENDING_DIR).join(format!("{}.json", job.id));
+        std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+        return Ok(true);
+    }
+    let current = self::job(staging, &job.id)?;
+    if current.started_at_ms != job.started_at_ms || current.state != ImportState::Failed {
+        return Ok(false);
+    }
+    std::fs::write(announced_marker(&jobs, &current), b"")
+        .context("recording an announced import failure")?;
+    Ok(true)
+}
+
+/// The marker recording that one failed attempt was announced. It sits
+/// beside the job, so the job file keeps the format earlier versions read.
+fn announced_marker(jobs: &Path, job: &ImportJob) -> PathBuf {
+    jobs.join(format!("{}@{}.announced", job.id, job.started_at_ms))
+}
+
+fn is_announced(jobs: &Path, job: &ImportJob) -> bool {
+    announced_marker(jobs, job).exists()
 }
 
 fn write_job(jobs: &Path, job: &ImportJob) -> Result<()> {

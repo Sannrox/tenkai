@@ -88,3 +88,53 @@ sanitized error (`webhook endpoint unreachable` or the HTTP status), and
 schedule bounded exponential backoff. Restarting Tenkai does not drop pending
 events. Adapters may see a delivery more than once and must deduplicate by
 idempotency key.
+
+## Operational events
+
+Endpoints may also subscribe to operational events. They are listed in the
+endpoint's separate `operational` field, so `events` keeps meaning apply
+outcomes, and a version that does not know operational events ignores the
+field and keeps delivering the apply outcomes. An endpoint receives an
+operational event only when `operational` lists it. An endpoint whose
+`events` is empty receives every apply outcome, unless it lists operational
+events only: then it receives no apply outcome. With `tenkaictl env
+webhooks set --events`, apply and operational names may be mixed; each is
+stored in its field.
+
+| Event | Scope | Fires when |
+| --- | --- | --- |
+| `plan.held` | Environment webhooks | A reconcile tick finds the environment's plan paused by a delivery hold. `code` is the hold scope |
+| `plan.awaiting_approval` | Environment webhooks | A reconcile tick finds the plan waiting for a signed approval |
+| `import.failed` | Environment webhooks | A server-side bundle import is refused. `resource` is the import job id |
+| `backup.stale` | Host webhooks | Backup age turns `stale`, `missing` or `unreadable` |
+| `clock.drift` | Host webhooks | The clock guard turns `warn` or `refuse` |
+
+Host webhooks are configured with `TENKAI_HOST_WEBHOOKS`, a JSON list of
+endpoints with the same shape as environment webhooks:
+`[{"url": "...", "secret_env": "...", "operational": ["backup.stale", "clock.drift"]}]`.
+
+Each event fires once per transition. A held plan is announced once, however
+many ticks see it held, and again for each new hold: at another scope, or a
+hold cleared and set again. A backup that recovers and turns stale again is
+announced again. A host announcement the outbox could not take is kept in
+`<database>.host-alerts.json` and retried at every check, across restarts,
+even if the condition has recovered by then. Servers sharing a database merge
+that file under a lock, so an overlapping restart loses no announcement. After a restart, a condition
+that is still bad is announced once. A failed import is marked with a file beside its job once announced (the job
+file keeps its format); the
+server retries unannounced failures every minute, so a crash or a full outbox
+only delays it. After a restart, a host condition that is still bad is announced once
+more.
+
+The body is `tenkai.operational_event.v1`, with `event`, `environment` (empty
+for host events), `resource`, `code` and `observed_at`. It carries
+identities and codes only, never a hold reason or an error message. It is
+signed and retried exactly like apply outcomes, on its own outbox kind, so a
+down sink never blocks reconcile, apply or import.
+
+Delivery status, for apply outcomes and operational events, is at
+`GET /v1/environments/{environment}/webhooks/deliveries` and, for host
+webhooks, at `GET /v1/webhooks/deliveries`: apply outcomes, then operational
+events, each newest recorded first. Each
+delivery shows its state (`pending`, `retrying`, `delivered`), attempts, next attempt, delivery
+time and the last error.

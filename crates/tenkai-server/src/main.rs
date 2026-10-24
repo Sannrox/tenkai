@@ -586,6 +586,8 @@ async fn main() -> Result<()> {
         .map(|client| client.connect_origins.clone())
         .unwrap_or_default();
     let backups = backup_settings(cli.tenant_mode, &store)?;
+    let imports = import_settings()?;
+    let import_staging = imports.as_ref().map(|settings| settings.staging.clone());
     let clock_every = clock_settings()?;
     let audit_export = audit_export_settings(cli.tenant_mode)?;
     let app = router(
@@ -622,7 +624,7 @@ async fn main() -> Result<()> {
                 .map(std::path::PathBuf::from),
             agent_actor_policy: cli.agent_actor_policy,
             backups: backups.as_ref().map(|(backups, _)| backups.clone()),
-            imports: import_settings()?,
+            imports: imports.clone(),
         },
         reconciler.clone(),
         store.clone(),
@@ -702,6 +704,7 @@ async fn main() -> Result<()> {
             }
         })
     });
+    let host_backups = backups.as_ref().map(|(backups, _)| backups.clone());
     let backup_task = backups.and_then(|(backups, every)| {
         let every = every?;
         let mut backup_shutdown_rx = shutdown_tx.subscribe();
@@ -811,6 +814,55 @@ async fn main() -> Result<()> {
             }
         })
     });
+    // Host events: backup age and clock drift, announced when they turn bad.
+    let host_endpoints = tenkai::operational_events::host_endpoints_from_env()?;
+    let host_staging = import_staging.clone();
+    // Host alerts the outbox has not taken survive a restart beside the store.
+    let host_alert_state = cli.database.with_extension("host-alerts.json");
+    let host_reconciler = reconciler.clone();
+    let host_task = (!host_endpoints.is_empty() || host_staging.is_some()).then(|| {
+        let host_store = store.clone();
+        let host_backups = host_backups.clone();
+        let mut host_shutdown_rx = shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            let mut timer = tokio::time::interval(Duration::from_secs(60));
+            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut watch =
+                tenkai::operational_events::HostWatch::with_state_file(host_alert_state);
+            loop {
+                tokio::select! {
+                    changed = host_shutdown_rx.changed() => {
+                        if changed.is_err() || *host_shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                    _ = timer.tick() => {
+                        let now = tenkai::now_millis();
+                        let backup = host_backups.as_ref().map(|backups| backups.health(now));
+                        let clock = tenkai::clock_guard::installed().map(|guard| guard.health());
+                        watch.observe(
+                            &*host_store,
+                            &host_endpoints,
+                            backup.as_ref(),
+                            clock.as_ref(),
+                            now,
+                        );
+                        // Failed imports the import request could not announce.
+                        if let Some(staging) = &host_staging {
+                            let mut ctx = host_reconciler.ctx_clone();
+                            tenkai::operational_events::announce_failed_imports(
+                                &mut ctx,
+                                &*host_store,
+                                staging,
+                                now,
+                            )
+                            .await;
+                        }
+                    }
+                }
+            }
+        })
+    });
     let webhook_task = {
         let webhook_store = store.clone();
         let mut webhook_shutdown_rx = shutdown_tx.subscribe();
@@ -846,11 +898,33 @@ async fn main() -> Result<()> {
                                 );
                             }
                         }
+                        match tenkai::operational_events::deliver_batch(
+                            &*webhook_store,
+                            &ProcessWebhookSecrets,
+                            Duration::from_secs(5),
+                            tenkai::now_millis(),
+                            10,
+                        ).await {
+                            Ok((delivered, deferred)) if delivered > 0 || deferred > 0 => {
+                                eprintln!(
+                                    "tenkai.operational_event delivered={} deferred={}",
+                                    delivered, deferred
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                eprintln!(
+                                    "tenkai.operational_event outcome=degraded detail={}",
+                                    error
+                                );
+                            }
+                        }
                     }
                 }
             }
         })
     };
+    let tick_store = store.clone();
     let reconcile_task = tokio::spawn(async move {
         let mut timer = tokio::time::interval(interval);
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -864,6 +938,15 @@ async fn main() -> Result<()> {
                 _ = timer.tick() => {
                     match reconciler.run_once().await {
                         Ok(report) => {
+                            // Held and approval-waiting plans, once per transition.
+                            let mut ctx = reconciler.ctx_clone();
+                            tenkai::operational_events::announce_tick(
+                                &mut ctx,
+                                &*tick_store,
+                                &report,
+                                tenkai::now_millis(),
+                            )
+                            .await;
                             let diag = report.diagnostics();
                             // Structured diagnostics: stable field names, no secrets.
                             eprintln!(
@@ -904,6 +987,11 @@ async fn main() -> Result<()> {
     webhook_task
         .await
         .context("joining webhook delivery task during shutdown")?;
+    if let Some(host_task) = host_task {
+        host_task
+            .await
+            .context("joining host event task during shutdown")?;
+    }
     if let Some(audit_task) = audit_task {
         audit_task
             .await

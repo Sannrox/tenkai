@@ -378,6 +378,18 @@ impl ManagementOperations {
             }
         })?;
         self.audit(actor, "offline.import.completed")?;
+        if job.state == crate::offline_import::ImportState::Failed
+            && let Ok(mut ctx) = self.application_ctx()
+        {
+            // Best effort here; the server retries unannounced failures.
+            crate::operational_events::announce_failed_imports(
+                &mut ctx,
+                &*self.store,
+                &settings.staging,
+                crate::now_millis(),
+            )
+            .await;
+        }
         Ok(job)
     }
 
@@ -395,6 +407,21 @@ impl ManagementOperations {
             .map_err(|error| ManagementError::NotFound(format!("{error:#}")))?;
         self.require_environment_grant(credential, &context, Some(&job.environment), "import")?;
         Ok(job)
+    }
+
+    /// `GET /v1/environments/{environment}/webhooks/deliveries`, or for the
+    /// host webhooks `GET /v1/webhooks/deliveries` (`environment` `None`).
+    pub async fn webhook_deliveries(
+        &self,
+        credential: &CredentialMaterial,
+        environment: Option<&str>,
+    ) -> Result<Vec<crate::operational_events::WebhookDelivery>, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        self.require_community_catalog_host()?;
+        self.require_environment_grant(credential, &context, environment, "webhook deliveries")?;
+        let scope = environment.unwrap_or(crate::operational_events::HOST_SCOPE);
+        crate::operational_events::deliveries(&*self.store, scope, 100).map_err(internal)
     }
 
     /// `GET /v1/content/inventory`: release content present and missing here.

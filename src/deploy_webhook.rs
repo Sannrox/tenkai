@@ -45,6 +45,46 @@ pub enum WebhookEvent {
     ApplyRolledBack,
 }
 
+/// Operational events of [`crate::operational_events`] (#724). They live in
+/// their own endpoint field, `operational`, so a version that does not know
+/// them ignores the field and keeps the endpoint's apply subscriptions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub enum OperationalEvent {
+    #[serde(rename = "plan.held")]
+    PlanHeld,
+    #[serde(rename = "plan.awaiting_approval")]
+    PlanAwaitingApproval,
+    #[serde(rename = "import.failed")]
+    ImportFailed,
+    #[serde(rename = "backup.stale")]
+    BackupStale,
+    #[serde(rename = "clock.drift")]
+    ClockDrift,
+}
+
+impl OperationalEvent {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PlanHeld => "plan.held",
+            Self::PlanAwaitingApproval => "plan.awaiting_approval",
+            Self::ImportFailed => "import.failed",
+            Self::BackupStale => "backup.stale",
+            Self::ClockDrift => "clock.drift",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "plan.held" => Some(Self::PlanHeld),
+            "plan.awaiting_approval" => Some(Self::PlanAwaitingApproval),
+            "import.failed" => Some(Self::ImportFailed),
+            "backup.stale" => Some(Self::BackupStale),
+            "clock.drift" => Some(Self::ClockDrift),
+            _ => None,
+        }
+    }
+}
+
 impl WebhookEvent {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -76,20 +116,33 @@ pub struct WebhookEndpoint {
     pub secret_env: String,
     #[serde(default)]
     pub events: Vec<WebhookEvent>,
+    /// Operational events this endpoint also receives; none unless listed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operational: Vec<OperationalEvent>,
 }
 
 impl WebhookEndpoint {
     pub fn validate(&self) -> Result<()> {
         validate_webhook_url(&self.url)?;
         validate_secret_env(&self.secret_env)?;
-        if self.events.len() > 8 {
+        if self.events.len() > 8 || self.operational.len() > 8 {
             bail!("webhook event list is oversized");
         }
         Ok(())
     }
 
+    /// No `events` means every apply outcome, unless the endpoint lists
+    /// only operational events: then it receives no apply outcome.
     fn subscribed(&self, event: WebhookEvent) -> bool {
-        self.events.is_empty() || self.events.contains(&event)
+        if self.events.is_empty() {
+            self.operational.is_empty()
+        } else {
+            self.events.contains(&event)
+        }
+    }
+
+    pub(crate) fn notifies(&self, event: OperationalEvent) -> bool {
+        self.operational.contains(&event)
     }
 }
 
@@ -476,13 +529,38 @@ async fn deliver_one<K: WebhookSecrets>(
             "deploy webhook envelope schema is unsupported".into(),
         ));
     }
-    validate_webhook_url(&envelope.url).map_err(|error| {
-        ProviderError::InvalidEvidence(format!("deploy webhook URL is not deliverable: {error}"))
+    let mut body = envelope.body.clone();
+    body.observed_at = event.collected_at_ms.filter(|timestamp| *timestamp > 0);
+    post_signed(
+        client,
+        secrets,
+        &envelope.url,
+        &envelope.secret_env,
+        &envelope.event,
+        &event.id,
+        serde_json::to_vec(&body)?,
+    )
+    .await
+}
+
+/// POST `body` to `url`, signed with the secret named `secret_env`, with the
+/// event name and idempotency key headers. Any non-2xx answer is a failure.
+pub(crate) async fn post_signed<K: WebhookSecrets + ?Sized>(
+    client: &reqwest::Client,
+    secrets: &K,
+    url: &str,
+    secret_env: &str,
+    event: &str,
+    idempotency_key: &str,
+    body: Vec<u8>,
+) -> Result<(), ProviderError> {
+    validate_webhook_url(url).map_err(|error| {
+        ProviderError::InvalidEvidence(format!("webhook URL is not deliverable: {error}"))
     })?;
-    validate_secret_env(&envelope.secret_env).map_err(|error| {
-        ProviderError::InvalidEvidence(format!("deploy webhook secret_env is invalid: {error}"))
+    validate_secret_env(secret_env).map_err(|error| {
+        ProviderError::InvalidEvidence(format!("webhook secret_env is invalid: {error}"))
     })?;
-    let secret = secrets.get(&envelope.secret_env).ok_or_else(|| {
+    let secret = secrets.get(secret_env).ok_or_else(|| {
         ProviderError::Unavailable("webhook signing secret is not configured".into())
     })?;
     if secret.len() > MAX_SECRET_BYTES {
@@ -490,17 +568,14 @@ async fn deliver_one<K: WebhookSecrets>(
             "webhook signing secret exceeds the bounded contract".into(),
         ));
     }
-    let mut body = envelope.body.clone();
-    body.observed_at = event.collected_at_ms.filter(|timestamp| *timestamp > 0);
-    let body = serde_json::to_vec(&body)?;
     let signature = sign_payload(secret.as_bytes(), &body);
     let response = client
-        .post(&envelope.url)
+        .post(url)
         .header("content-type", "application/json")
         .header(HEADER_SIGNATURE, &signature)
         .header(HEADER_SIGNATURE_ALG, SIGNATURE_ALG)
-        .header(HEADER_EVENT, &envelope.event)
-        .header(HEADER_IDEMPOTENCY, &event.id)
+        .header(HEADER_EVENT, event)
+        .header(HEADER_IDEMPOTENCY, idempotency_key)
         .body(body)
         .send()
         .await
@@ -655,6 +730,7 @@ mod tests {
             url: "https://hooks.example.test/tenkai".into(),
             secret_env: "TENKAI_WEBHOOK_SECRET".into(),
             events: Vec::new(),
+            operational: Vec::new(),
         };
         endpoint.validate().unwrap();
         assert!(endpoint.subscribed(WebhookEvent::ApplySucceeded));
@@ -677,6 +753,7 @@ mod tests {
                 url: fixture.url.clone(),
                 secret_env: "TENKAI_WEBHOOK_SECRET".into(),
                 events: vec![WebhookEvent::ApplySucceeded],
+                operational: Vec::new(),
             },
         )
         .await
@@ -774,6 +851,7 @@ mod tests {
                 url: "http://127.0.0.1:1/missing".into(),
                 secret_env: "TENKAI_WEBHOOK_SECRET".into(),
                 events: vec![WebhookEvent::ApplySucceeded],
+                operational: Vec::new(),
             },
         )
         .await
@@ -829,6 +907,7 @@ mod tests {
                 url: fixture.url.clone(),
                 secret_env: "TENKAI_WEBHOOK_SECRET".into(),
                 events: vec![WebhookEvent::ApplySucceeded, WebhookEvent::ApplyRolledBack],
+                operational: Vec::new(),
             },
         )
         .await
@@ -905,6 +984,7 @@ mod tests {
                 url: "https://hooks.example.test/tenkai".into(),
                 secret_env: "TENKAI_WEBHOOK_SECRET".into(),
                 events: vec![WebhookEvent::ApplySucceeded],
+                operational: Vec::new(),
             },
         )
         .await
