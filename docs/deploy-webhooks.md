@@ -140,3 +140,36 @@ webhooks, at `GET /v1/webhooks/deliveries`: apply outcomes, then operational
 events, each newest recorded first. Each
 delivery shows its state (`pending`, `retrying`, `delivered`), attempts, next attempt, delivery
 time and the last error.
+
+## SMTP digests
+
+Sites whose on-call staff are reachable only through an internal mail relay
+can receive operational events as plain-text digests (#725).
+`TENKAI_SMTP_SINKS` is a JSON list of sinks:
+
+```json
+[{"id": "oncall", "relay": "mail.internal:587",
+  "from": "tenkai@site.example", "to": ["oncall@site.example"],
+  "operational": ["plan.held", "backup.stale", "clock.drift"],
+  "window_seconds": 900,
+  "username_secret": "TENKAI_SMTP_USER",
+  "password_secret": "TENKAI_SMTP_PASSWORD"}]
+```
+
+- **Batching:** each event a sink lists is queued for the end of the current
+  window, so the sink gets one message per window listing that window's
+  events. Each sink's due lines are claimed in one transaction, so one
+  worker sends a whole window and replicas never split it; only a window of
+  more than 10,000 events spills into a second message.
+- **Deduplication:** an event announced again is not listed twice.
+- **Payload:** like webhooks, lines carry identities and codes only.
+- **TLS:** STARTTLS is required, trusting `TENKAI_CA_BUNDLE` and the built-in
+  roots as other outbound clients do. A relay on loopback may set
+  `"starttls": false`.
+- **Authentication:** credentials are secret settings named by the sink, read
+  through [secret files](environment-variables.md#secret-files), and sent
+  with `AUTH PLAIN` after STARTTLS.
+- **Failure:** a relay that is down or refuses defers the digest for five
+  minutes. It never blocks reconcile, apply or import.
+- **Delivery status:** digest lines appear in the delivery status above with
+  the URL `smtp:<id>`.

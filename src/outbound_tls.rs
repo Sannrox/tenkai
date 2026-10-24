@@ -98,6 +98,35 @@ impl OutboundTrust {
         Ok(builder.tls_built_in_root_certs(self.system_roots))
     }
 
+    /// A rustls client with the same trust, for protocols reqwest does not
+    /// speak (SMTP STARTTLS): the bundle plus, unless system roots are off,
+    /// the platform store and the Mozilla roots.
+    pub fn rustls_client_config(&self) -> Result<rustls::ClientConfig> {
+        use rustls::pki_types::CertificateDer;
+        use rustls::pki_types::pem::PemObject as _;
+        let mut roots = rustls::RootCertStore::empty();
+        if self.system_roots {
+            roots.roots = webpki_roots::TLS_SERVER_ROOTS.to_vec();
+            roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
+        }
+        if let Some(pem) = &self.bundle_pem {
+            for certificate in CertificateDer::pem_slice_iter(pem) {
+                roots
+                    .add(certificate.with_context(|| format!("parsing {CA_BUNDLE_ENV}"))?)
+                    .with_context(|| format!("{CA_BUNDLE_ENV} holds an unusable certificate"))?;
+            }
+        }
+        Ok(
+            rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .context("TLS client setup")?
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+        )
+    }
+
     /// gRPC client TLS with the same trust.
     pub fn tonic(&self) -> tonic::transport::ClientTlsConfig {
         let mut config = tonic::transport::ClientTlsConfig::new();

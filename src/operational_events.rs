@@ -158,7 +158,11 @@ pub fn announce(
     now: i64,
 ) -> bool {
     let mut enqueued = true;
-    for record in records(endpoints, transition, now) {
+    let digests = crate::smtp_digest::records(crate::smtp_digest::installed(), transition, now);
+    for record in records(endpoints, transition, now)
+        .into_iter()
+        .chain(digests)
+    {
         if let Err(error) = store.enqueue_provider_event(&record) {
             eprintln!(
                 "tenkai.operational_event outcome=enqueue_failed event={} detail={error}",
@@ -262,7 +266,8 @@ pub async fn announce_tick(
         else {
             continue;
         };
-        if endpoints.is_empty() {
+        // Nothing to tell when no webhook and no SMTP sink listens.
+        if endpoints.is_empty() && crate::smtp_digest::installed().is_empty() {
             continue;
         }
         // A hold cleared and set again is a new occurrence: key it by when
@@ -600,11 +605,18 @@ pub fn deliveries(
     limit: usize,
 ) -> Result<Vec<WebhookDelivery>> {
     let mut deliveries = Vec::new();
-    for kind in [
-        crate::deploy_webhook::DEPLOY_WEBHOOK_KIND,
-        OPERATIONAL_WEBHOOK_KIND,
-    ] {
-        for record in store.list_provider_events(kind, scope, limit)? {
+    let kinds = [
+        crate::deploy_webhook::DEPLOY_WEBHOOK_KIND.to_string(),
+        OPERATIONAL_WEBHOOK_KIND.to_string(),
+    ]
+    .into_iter()
+    .chain(
+        crate::smtp_digest::installed()
+            .iter()
+            .map(|sink| crate::smtp_digest::digest_kind(&sink.id)),
+    );
+    for kind in kinds {
+        for record in store.list_provider_events(&kind, scope, limit)? {
             #[derive(Deserialize)]
             struct Addressed {
                 url: String,
