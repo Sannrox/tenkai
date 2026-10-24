@@ -171,6 +171,7 @@ async fn remote_configuration_matches_embedded_and_refuses_like_the_cli() {
             url: "https://hooks.example/deploy".into(),
             secret_env: "DEPLOY_HOOK_SECRET".into(),
             events: vec![tenkai::deploy_webhook::WebhookEvent::ApplyFailed],
+            operational: Vec::new(),
         },
     ];
 
@@ -317,6 +318,7 @@ async fn remote_configuration_matches_embedded_and_refuses_like_the_cli() {
                 url: "http://hooks.example/deploy".into(),
                 secret_env: "DEPLOY_HOOK_SECRET".into(),
                 events: Vec::new(),
+                operational: Vec::new(),
             },
             "webhook URL must use HTTPS".into(),
         ),

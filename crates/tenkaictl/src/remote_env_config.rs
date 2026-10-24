@@ -98,16 +98,17 @@ pub(crate) fn change(command: &EnvCommand) -> Option<Result<(&str, Change, &Remo
                 secret_env,
                 events,
                 remote,
-            } => {
-                crate::embedded_env_config::parse_webhook_events(events.as_deref()).map(|events| {
+            } => crate::embedded_env_config::parse_webhook_events(events.as_deref()).map(
+                |(events, operational)| {
                     let change = Change::SetWebhook {
                         url: url.clone(),
                         secret_env: secret_env.clone(),
                         events,
+                        operational,
                     };
                     (env.as_str(), change, remote)
-                })
-            }
+                },
+            ),
             WebhooksCommand::Clear { env, url, remote } => Ok((
                 env.as_str(),
                 Change::ClearWebhooks { url: url.clone() },

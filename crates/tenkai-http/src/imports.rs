@@ -85,3 +85,31 @@ pub(super) async fn content_inventory(
     };
     manage_result(state.management.content_inventory(&credential).await)
 }
+
+pub(super) async fn environment_webhook_deliveries(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .webhook_deliveries(&credential, Some(&environment))
+            .await,
+    )
+}
+
+pub(super) async fn host_webhook_deliveries(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    manage_result(state.management.webhook_deliveries(&credential, None).await)
+}

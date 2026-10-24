@@ -83,6 +83,9 @@ pub enum EnvironmentConfigChange {
         secret_env: String,
         #[serde(default)]
         events: Vec<WebhookEvent>,
+        /// Operational events the endpoint also receives (#724).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        operational: Vec<crate::deploy_webhook::OperationalEvent>,
     },
     /// Clears one URL, or every webhook when `url` is absent.
     ClearWebhooks {
@@ -253,10 +256,12 @@ pub fn validate(change: &EnvironmentConfigChange) -> Result<()> {
             url,
             secret_env,
             events,
+            operational,
         } => WebhookEndpoint {
             url: url.clone(),
             secret_env: secret_env.clone(),
             events: events.clone(),
+            operational: operational.clone(),
         }
         .validate(),
         Change::ClearWebhooks { .. } | Change::ClearApprovalPolicy => Ok(()),
@@ -439,6 +444,7 @@ async fn mutate(
             url,
             secret_env,
             events,
+            operational,
         } => {
             crate::deploy_webhook::set_environment_webhook(
                 ctx,
@@ -447,6 +453,7 @@ async fn mutate(
                     url: url.clone(),
                     secret_env: secret_env.clone(),
                     events: events.clone(),
+                    operational: operational.clone(),
                 },
             )
             .await?
