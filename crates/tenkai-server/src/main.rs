@@ -811,13 +811,20 @@ async fn main() -> Result<()> {
             }
         })
     });
+    // SMTP digest sinks (#725) get every operational event they list.
+    let smtp_sinks = tenkai::smtp_digest::sinks_from_env()?;
+    let smtp_trust = tenkai::outbound_tls::OutboundTrust::from_env()?;
+    tenkai::smtp_digest::install(smtp_sinks.clone());
     // Host events: backup age and clock drift, announced when they turn bad.
     let host_endpoints = tenkai::operational_events::host_endpoints_from_env()?;
     let host_staging = import_staging.clone();
     // Host alerts the outbox has not taken survive a restart beside the store.
     let host_alert_state = cli.database.with_extension("host-alerts.json");
     let host_reconciler = reconciler.clone();
-    let host_task = (!host_endpoints.is_empty() || host_staging.is_some()).then(|| {
+    let host_task = (!host_endpoints.is_empty()
+        || !smtp_sinks.is_empty()
+        || host_staging.is_some())
+    .then(|| {
         let host_store = store.clone();
         let host_backups = host_backups.clone();
         let mut host_shutdown_rx = shutdown_tx.subscribe();
@@ -921,6 +928,48 @@ async fn main() -> Result<()> {
             }
         })
     };
+    // SMTP digests run apart from webhook delivery, so a slow relay never
+    // delays webhooks.
+    let digest_task = (!smtp_sinks.is_empty()).then(|| {
+        let digest_store = store.clone();
+        let mut digest_shutdown_rx = shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            let mut timer = tokio::time::interval(Duration::from_secs(30));
+            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    changed = digest_shutdown_rx.changed() => {
+                        if changed.is_err() || *digest_shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                    _ = timer.tick() => {
+                        match tenkai::smtp_digest::deliver_due(
+                            &*digest_store,
+                            &smtp_sinks,
+                            &smtp_trust,
+                            Duration::from_secs(30),
+                            tenkai::now_millis,
+                        ).await {
+                            Ok((delivered, deferred)) if delivered > 0 || deferred > 0 => {
+                                eprintln!(
+                                    "tenkai.operational_digest delivered={} deferred={}",
+                                    delivered, deferred
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                eprintln!(
+                                    "tenkai.operational_digest outcome=degraded detail={}",
+                                    error
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        })
+    });
     let tick_store = store.clone();
     let reconcile_task = tokio::spawn(async move {
         let mut timer = tokio::time::interval(interval);
@@ -984,6 +1033,11 @@ async fn main() -> Result<()> {
     webhook_task
         .await
         .context("joining webhook delivery task during shutdown")?;
+    if let Some(digest_task) = digest_task {
+        digest_task
+            .await
+            .context("joining SMTP digest task during shutdown")?;
+    }
     if let Some(host_task) = host_task {
         host_task
             .await
