@@ -48,12 +48,19 @@ impl LoginRuntime {
             http: http_client()?,
             open_browser: Arc::new(open_system_browser),
             config_dir: config_dir_from_env()?,
-            env_token: env_nonempty("TENKAI_MANAGEMENT_TOKEN"),
+            env_token: secret_nonempty("TENKAI_MANAGEMENT_TOKEN")?,
             oidc_client_id: env_nonempty("TENKAI_OIDC_CLIENT_ID"),
             client_id: env_nonempty("TENKAI_CLIENT_ID"),
-            client_secret: env_nonempty("TENKAI_OIDC_CLIENT_SECRET"),
+            client_secret: secret_nonempty("TENKAI_OIDC_CLIENT_SECRET")?,
         })
     }
+}
+
+/// A secret setting from its variable, `_FILE` path or the secret directory.
+fn secret_nonempty(name: &str) -> Result<Option<String>> {
+    Ok(tenkai::secret_source::read(name)?
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty()))
 }
 
 fn env_nonempty(name: &str) -> Option<String> {

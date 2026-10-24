@@ -130,10 +130,11 @@ impl SqliteStore {
 }
 
 pub fn refuse_postgres_on_embedded() -> Result<()> {
-    match std::env::var("TENKAI_POSTGRES_URL") {
-        Ok(value) if !value.trim().is_empty() => Err(StoreError::AdapterUnavailable(
+    // Any source of the URL counts: inline, `_FILE`, or the secret directory.
+    if crate::secret_source::is_configured("TENKAI_POSTGRES_URL") {
+        return Err(StoreError::AdapterUnavailable(
             "TENKAI_POSTGRES_URL is not valid on embedded or spoke hosts; SQLite is the sole operational store (ADR 0029)".into(),
-        )),
-        _ => Ok(()),
+        ));
     }
+    Ok(())
 }

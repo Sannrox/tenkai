@@ -107,7 +107,7 @@ pub async fn connect() -> Result<Ctx> {
     let port = std::env::var("GRPC_PORT").unwrap_or_else(|_| "50051".into());
     let url =
         std::env::var("TENKAI_SEKAI_URL").unwrap_or_else(|_| format!("http://127.0.0.1:{port}"));
-    let token = std::env::var("SEKAI_AUTH_TOKEN").ok();
+    let token = crate::secret_source::read("SEKAI_AUTH_TOKEN")?;
     if token.is_some() && !token_transport_is_safe(&url) {
         anyhow::bail!(
             "refusing to send SEKAI_AUTH_TOKEN to non-loopback plaintext endpoint {url}; use HTTPS"
