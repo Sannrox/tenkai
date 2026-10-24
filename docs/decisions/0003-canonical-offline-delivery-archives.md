@@ -68,3 +68,14 @@ A missing required image, weight, schema, or hub entry is refused before
 mutation. The archive bootstraps the local catalog pin and binds the signed
 plan identity. Catalog artifacts must match stack image digests and the
 complete layer-instruction reference before import. Updates reuse the same format.
+
+## Amendment (Issue #684)
+
+OCI layers larger than the 64 MiB entry limit share the companion chunk store
+with weights. A signed `tenkai.offline-image-chunks.v1` entry
+(`chunks/images.json`) lists each such layer's chunks, and its layer
+instruction points at that entry. Every chunked layer is verified before any
+change and streamed into the OCI store by digest. A Tenkai without this
+amendment refuses the bundle, because the instruction path is not the
+layer's entry. The v1 archive limits, weights-only bundles, and inline layers
+are unchanged.

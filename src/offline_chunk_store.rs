@@ -80,28 +80,47 @@ pub fn export_weight_chunks(
     chunk_dir: &Path,
     chunk_size: u64,
 ) -> Result<OfflineChunkArtifact> {
+    let meta =
+        fs::metadata(source).with_context(|| format!("reading weight {}", source.display()))?;
+    let mut input =
+        File::open(source).with_context(|| format!("opening weight {}", source.display()))?;
+    export_chunks(
+        &mut input,
+        meta.len(),
+        "application/octet-stream",
+        chunk_dir,
+        chunk_size,
+    )
+    .with_context(|| format!("chunking weight {}", source.display()))
+}
+
+/// Stream `len` bytes of `input` into verified chunk files under
+/// `chunk_dir`: weights, and image blobs too large for an archive entry
+/// (#684). Existing matching chunks are kept so an interrupted export can
+/// resume.
+pub fn export_chunks(
+    input: &mut dyn Read,
+    len: u64,
+    media_type: &str,
+    chunk_dir: &Path,
+    chunk_size: u64,
+) -> Result<OfflineChunkArtifact> {
     if chunk_size == 0 {
         bail!("chunk size must be greater than zero");
     }
     fs::create_dir_all(chunk_dir)
         .with_context(|| format!("creating chunk directory {}", chunk_dir.display()))?;
-    let meta =
-        fs::metadata(source).with_context(|| format!("reading weight {}", source.display()))?;
-    let mut input =
-        File::open(source).with_context(|| format!("opening weight {}", source.display()))?;
     let mut hasher = Sha256::new();
     let mut chunks = Vec::new();
-    let mut remaining = meta.len();
+    let mut remaining = len;
     let mut index = 0_u32;
     while remaining > 0 {
         let take = remaining.min(chunk_size);
-        let (digest, written) = write_chunk(&mut input, chunk_dir, take, &mut hasher)?;
+        let (digest, written) = write_chunk(input, chunk_dir, take, &mut hasher)?;
         if written != take {
             bail!(
-                "weight {} ended after {} bytes, expected {}",
-                source.display(),
-                meta.len() - remaining + written,
-                meta.len()
+                "input ended after {} bytes, expected {len}",
+                len - remaining + written
             );
         }
         chunks.push(OfflineChunk {
@@ -116,10 +135,50 @@ pub fn export_weight_chunks(
     }
     Ok(OfflineChunkArtifact {
         digest: format!("sha256:{:x}", hasher.finalize()),
-        size: meta.len(),
-        media_type: "application/octet-stream".into(),
+        size: len,
+        media_type: media_type.into(),
         chunks,
     })
+}
+
+/// A reader over `artifact`'s chunks in order, for streaming it into a
+/// store. Each chunk file is opened only when the reader reaches it, so a
+/// layer of many chunks holds one descriptor at a time. Callers verify the
+/// chunks first and the store checks the whole digest before the blob is
+/// visible.
+pub fn chunk_reader(artifact: &OfflineChunkArtifact, chunk_dir: &Path) -> Result<Box<dyn Read>> {
+    let pending = artifact
+        .chunks
+        .iter()
+        .map(|chunk| Ok((chunk_path(chunk_dir, &chunk.digest)?, chunk.size)))
+        .collect::<Result<std::collections::VecDeque<_>>>()?;
+    Ok(Box::new(ChunkReader {
+        pending,
+        current: None,
+    }))
+}
+
+struct ChunkReader {
+    pending: std::collections::VecDeque<(PathBuf, u64)>,
+    current: Option<std::io::Take<File>>,
+}
+
+impl Read for ChunkReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            if let Some(current) = &mut self.current {
+                let read = current.read(buffer)?;
+                if read > 0 || buffer.is_empty() {
+                    return Ok(read);
+                }
+                self.current = None;
+            }
+            let Some((path, size)) = self.pending.pop_front() else {
+                return Ok(0);
+            };
+            self.current = Some(File::open(path)?.take(size));
+        }
+    }
 }
 
 /// Copy verified chunks into the weight cache. Matching cache hits and a
@@ -189,6 +248,15 @@ pub fn preflight_weight_chunks(
         }
     }
     Ok(())
+}
+
+/// Checks `artifact`'s chunks without writing: sequential indexes, each
+/// chunk's size and digest, and the reassembled digest.
+pub(crate) fn preflight_chunked_artifact(
+    artifact: &OfflineChunkArtifact,
+    chunk_dir: &Path,
+) -> Result<()> {
+    preflight_weight_artifact(artifact, chunk_dir)
 }
 
 fn preflight_weight_artifact(artifact: &OfflineChunkArtifact, chunk_dir: &Path) -> Result<()> {
@@ -424,7 +492,7 @@ pub fn peak_rss_bytes() -> Result<u64> {
 }
 
 fn write_chunk(
-    input: &mut File,
+    input: &mut dyn Read,
     chunk_dir: &Path,
     take: u64,
     whole: &mut Sha256,
@@ -654,24 +722,32 @@ pub fn copy_referenced_chunks(
     to: &Path,
 ) -> Result<()> {
     use base64::Engine as _;
-    let Some(entry) = bundle
-        .entries
-        .iter()
-        .find(|entry| entry.path == CHUNK_MANIFEST_PATH)
-    else {
+    // Weight chunks and chunked image layers (#684) share the chunk store.
+    let mut chunks = Vec::new();
+    for path in [
+        CHUNK_MANIFEST_PATH,
+        crate::offline_bundle::IMAGE_CHUNKS_PATH,
+    ] {
+        let Some(entry) = bundle.entries.iter().find(|entry| entry.path == path) else {
+            continue;
+        };
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(&entry.content_base64)
+            .with_context(|| format!("decoding {path}"))?;
+        let manifest: OfflineChunkManifest =
+            serde_json::from_slice(&raw).with_context(|| format!("parsing {path}"))?;
+        chunks.extend(
+            manifest
+                .artifacts
+                .into_iter()
+                .flat_map(|artifact| artifact.chunks),
+        );
+    }
+    if chunks.is_empty() {
         return Ok(());
-    };
-    let raw = base64::engine::general_purpose::STANDARD
-        .decode(&entry.content_base64)
-        .context("decoding the offline chunk manifest")?;
-    let manifest: OfflineChunkManifest =
-        serde_json::from_slice(&raw).context("parsing offline chunk manifest")?;
+    }
     fs::create_dir_all(to).with_context(|| format!("creating {}", to.display()))?;
-    for chunk in manifest
-        .artifacts
-        .iter()
-        .flat_map(|artifact| &artifact.chunks)
-    {
+    for chunk in &chunks {
         let source = chunk_path(from, &chunk.digest)?;
         let target = chunk_path(to, &chunk.digest)?;
         if target.exists() {

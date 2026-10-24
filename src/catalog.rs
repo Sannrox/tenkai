@@ -1657,7 +1657,7 @@ media_type = "{}"
         let mirror = std::sync::Arc::new(crate::oci_artifact::MemoryArtifactRegistry::new());
         let mut mirrors = std::collections::BTreeMap::new();
         mirrors.insert("ghcr.io".into(), "mirror.internal".into());
-        import_artifact_layers(&verified, Some(mirror.as_ref()), &mirrors).unwrap();
+        import_artifact_layers(&verified, None, Some(mirror.as_ref()), &mirrors).unwrap();
         let plan = crate::plan::create(&mut ctx, "local").await.unwrap();
         let software = std::sync::Arc::new(crate::software_executor::FakeSoftwareExecutor::new());
         let outcomes = crate::apply::execute_with_options(
