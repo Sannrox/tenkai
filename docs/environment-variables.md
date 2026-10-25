@@ -72,6 +72,11 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | `TENKAI_PLAN_APPROVAL_TRUST_ROOTS` | unset | Trust-root file for plan-approval verification |
 | `TENKAI_KEY_REVOCATIONS` | unset | Installed signed key revocation list, applied at startup; set with `TENKAI_KEY_REVOCATION_TRUST_ROOTS` ([key rollover](key-rollover.md)) |
 | `TENKAI_KEY_REVOCATION_TRUST_ROOTS` | unset | Release-format trust roots naming the revocation authorities |
+| `TENKAI_SIGNER_MODULE` | unset | PKCS#11 module path for the production content signer ([release signing](release-signing.md#production-signer)) |
+| `TENKAI_SIGNER_TOKEN` | unset | PKCS#11 token label for the production content signer |
+| `TENKAI_SIGNER_PIN` | unset | PKCS#11 user PIN for the production content signer (secret setting) |
+| `TENKAI_SIGNER_KEY_LABEL` | `tenkai-signer` | PKCS#11 object label of the Ed25519 signing key pair |
+| `TENKAI_SIGNER_KEY` | unset | Lab-only path of a 32-byte Ed25519 seed. A production profile refuses it |
 | `TENKAI_PLAN_PRIORS` | unset | Set `1` to enable advisory planner priors; see [plan priors](plan-priors.md) |
 
 ## `tenkai-server`

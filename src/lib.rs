@@ -230,6 +230,7 @@ pub mod schema_contract;
 pub mod secret_source;
 pub mod shutdown;
 mod signature_verification;
+pub mod signer;
 pub mod smtp_digest;
 pub mod software_compatibility;
 pub mod software_executor;
