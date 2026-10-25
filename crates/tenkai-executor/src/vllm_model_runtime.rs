@@ -1039,6 +1039,7 @@ mod tests {
                 quantization: "bf16".into(),
                 artifact_digest: fixture.digest.clone(),
                 license: "llama3".into(),
+                registry_descriptor: String::new(),
             },
             runtime: ModelRuntimeSection {
                 engine: "vllm".into(),

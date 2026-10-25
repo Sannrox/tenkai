@@ -19,6 +19,13 @@ use crate::manifest::{
     Manifest, ModelHealthSection, ModelRequirementsSection, ModelRuntimeSection, ModelSection,
 };
 
+mod onnx;
+
+pub use onnx::{
+    ClassicalOnnxExecutor, FakeOnnxEngine, OnnxEngineRequest, OnnxResources, OnnxScoringEngine,
+    PredictionSummarySink, RecordingSummarySink, RegistryTrust,
+};
+
 /// Version of the model-runtime descriptor contract.
 pub const MODEL_RUNTIME_CONTRACT_VERSION: u32 = 1;
 
@@ -100,6 +107,17 @@ impl ModelRuntimeDescriptor {
         }
         if self.runtime.context_length == 0 {
             bail!("runtime.context_length must be non-zero");
+        }
+        if self.runtime.engine == "onnx" {
+            if self.model.format != "onnx" {
+                bail!("model_runtime engine onnx requires model.format=onnx");
+            }
+            crate::manifest::validate_input_path(
+                "model.registry_descriptor",
+                &self.model.registry_descriptor,
+            )?;
+        } else if !self.model.registry_descriptor.is_empty() {
+            bail!("model.registry_descriptor is only valid for runtime.engine=onnx");
         }
         if self.requirements.architecture.is_empty() {
             bail!("requirements.architecture must not be empty");
@@ -708,6 +726,8 @@ pub struct ModelRuntimeArtifacts {
     pub registry: Option<Arc<dyn crate::oci_artifact::ArtifactRegistry>>,
     pub mirrors: BTreeMap<String, String>,
     pub isolated: bool,
+    /// Release workdir holding `model.registry_descriptor` for `runtime.engine=onnx`.
+    pub workdir: Option<PathBuf>,
 }
 
 static MODEL_RUNTIME_EXECUTOR_FACTORY: std::sync::OnceLock<Arc<dyn ModelRuntimeExecutorFactory>> =
@@ -726,10 +746,12 @@ pub fn selected_model_runtime_executor_factory() -> Option<Arc<dyn ModelRuntimeE
 
 /// Select the executor for one descriptor by `runtime.engine`.
 ///
-/// `llama.cpp` always keeps the reference executor. `vllm` uses the injected
-/// host executor, and only on an environment that carries a cluster
-/// configuration. Every other case fails closed with a named error: an engine
-/// must never fall back to an executor that does not implement it.
+/// `llama.cpp` always keeps the reference executor. `onnx` uses the classical
+/// scoring executor (fake engine in CI) and needs the release workdir so it
+/// can read the signed registry descriptor. `vllm` uses the injected host
+/// executor, and only on an environment that carries a cluster configuration.
+/// Every other case fails closed with a named error: an engine must never
+/// fall back to an executor that does not implement it.
 pub fn select_model_runtime_executor(
     descriptor: &ModelRuntimeDescriptor,
     environment: &str,
@@ -742,6 +764,21 @@ pub fn select_model_runtime_executor(
         "llama.cpp" => Ok(Arc::new(ReferenceLlamaCppExecutor::for_operator_host(
             state_path.to_path_buf(),
         ))),
+        "onnx" => {
+            let workdir = artifacts
+                .as_ref()
+                .and_then(|artifacts| artifacts.workdir.clone())
+                .with_context(|| {
+                    format!(
+                        "model_runtime engine onnx requires the release workdir for environment {environment}"
+                    )
+                })?;
+            Ok(Arc::new(ClassicalOnnxExecutor::for_operator_host(
+                state_path.to_path_buf(),
+                workdir,
+                artifacts,
+            )?))
+        }
         "vllm" => {
             let cluster_config = cluster_config.with_context(|| {
                 format!(
@@ -1018,7 +1055,7 @@ impl InferenceEngineProcess for LlamaCppProcessLauncher {
     }
 }
 
-fn require_loopback_bind(host: &str, port: u16) -> Result<()> {
+pub(super) fn require_loopback_bind(host: &str, port: u16) -> Result<()> {
     if port == 0 {
         bail!("model runtime port must not be zero");
     }
@@ -1029,7 +1066,7 @@ fn require_loopback_bind(host: &str, port: u16) -> Result<()> {
     Ok(())
 }
 
-fn require_loopback_health_endpoint(endpoint: &str) -> Result<()> {
+pub(super) fn require_loopback_health_endpoint(endpoint: &str) -> Result<()> {
     let endpoint = endpoint.trim();
     if !(endpoint.starts_with("http://127.0.0.1")
         || endpoint.starts_with("http://localhost")
@@ -1040,7 +1077,7 @@ fn require_loopback_health_endpoint(endpoint: &str) -> Result<()> {
     Ok(())
 }
 
-fn bind_host_from_health_endpoint(endpoint: &str) -> Result<String> {
+pub(super) fn bind_host_from_health_endpoint(endpoint: &str) -> Result<String> {
     require_loopback_health_endpoint(endpoint)?;
     if endpoint.contains("[::1]") {
         Ok("::1".into())
@@ -1285,6 +1322,7 @@ mod tests {
                 quantization: "Q4_K_M".into(),
                 artifact_digest: format!("sha256:{}", "ab".repeat(32)),
                 license: "apache-2.0".into(),
+                registry_descriptor: String::new(),
             },
             runtime: ModelRuntimeSection {
                 engine: "llama.cpp".into(),
@@ -1363,6 +1401,46 @@ mod tests {
         assert!(
             state.exists(),
             "reference executor must stage the descriptor"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn engine_selection_uses_classical_executor_for_onnx() {
+        let mut descriptor = sample_descriptor();
+        descriptor.runtime.engine = "onnx".into();
+        descriptor.model.format = "onnx".into();
+        descriptor.model.registry_descriptor = "signed-descriptor.json".into();
+        descriptor.health.endpoint = "http://127.0.0.1:18080/readyz".into();
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-select-onnx-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let state = root.join("active.json");
+        let missing_workdir =
+            match select_model_runtime_executor(&descriptor, "lab", None, None, &state, None) {
+                Ok(_) => panic!("onnx without a workdir must be refused"),
+                Err(error) => error.to_string(),
+            };
+        assert!(
+            missing_workdir.contains("release workdir"),
+            "{missing_workdir}"
+        );
+        let artifacts = ModelRuntimeArtifacts {
+            registry: None,
+            mirrors: BTreeMap::new(),
+            isolated: false,
+            workdir: Some(root.clone()),
+        };
+        let selected =
+            select_model_runtime_executor(&descriptor, "lab", None, None, &state, Some(artifacts))
+                .unwrap();
+        let err = selected.apply(&descriptor).unwrap_err().to_string();
+        assert!(
+            err.contains("trusted registry keys") || err.contains("signed registry descriptor"),
+            "{err}"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1700,6 +1778,7 @@ mod tests {
             registry: None,
             mirrors,
             isolated: true,
+            workdir: None,
         }
     }
 
