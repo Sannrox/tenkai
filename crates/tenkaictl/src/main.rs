@@ -174,6 +174,26 @@ async fn run(cli: Cli) -> Result<()> {
     if let Command::Keys { command } = &cli.command {
         return keys::run(command);
     }
+    // Local only: host install needs the archive, trust roots, and dest.
+    if let Command::Upgrade {
+        command:
+            upgrade_args::UpgradeCommand::InstallHosts {
+                env,
+                bundle,
+                trust_roots,
+                dest,
+                platform,
+            },
+    } = &cli.command
+    {
+        return embedded_upgrade::install_hosts(
+            env,
+            bundle,
+            trust_roots,
+            dest,
+            platform.as_deref(),
+        );
+    }
     // Local only: verifying a support bundle needs only the file.
     if let Command::SupportBundle {
         command:

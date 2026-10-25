@@ -79,3 +79,15 @@ change and streamed into the OCI store by digest. A Tenkai without this
 amendment refuses the bundle, because the instruction path is not the
 layer's entry. The v1 archive limits, weights-only bundles, and inline layers
 are unchanged.
+
+## Amendment (Issue #640)
+
+Tenkai host binaries (CLI, server, executor) travel as v1 archive entries
+under `hosts/<platform>/<name>`. A signed `tenkai.offline-host-binaries.v1`
+index (`hosts/manifest.json`) and `hosts/SHA256SUMS` list each file, digest,
+size, and release provenance. Verification uses the bundle signature and the
+same out-of-band trust roots as the rest of the archive. A tampered host file
+is refused before any destination write, and the refusal names that file.
+Release binaries fit the 64 MiB entry limit, so they do not use the chunk
+store. Bundles without a host index stay valid. Replacing an already installed
+host is a later operation.
