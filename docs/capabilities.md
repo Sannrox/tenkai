@@ -43,6 +43,7 @@ it ([ADR 0001](decisions/0001-standalone-core-and-service-evolution.md),
 | Ordered model_runtime → routing_config rollout | [examples/model-routing-rollout](../examples/model-routing-rollout/); #67 |
 | Governed `routing_config` products | [ADR 0002](decisions/0002-tenkai-owned-routing-configuration.md) |
 | `model_runtime` product kind + weight cache/eviction | [Model runtime](model-runtime.md); [ADR 0007](decisions/0007-model-runtime-fleet-control-plane.md); #48, #62, #65 |
+| Classical ONNX scoring + registry promotion attestation | [Model runtime](model-runtime.md#classical-onnx-scoring); #651, #727, #728 |
 | Reference llama.cpp engine plugin (fake for CI) | [Model runtime](model-runtime.md); #64 |
 | Self-verifying offline bundles | [Offline bundles](offline-bundles.md); [ADR 0003](decisions/0003-canonical-offline-delivery-archives.md) |
 | Optional governance/intelligence provider ports | [Provider contracts](provider-contracts.md) |
