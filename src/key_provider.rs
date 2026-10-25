@@ -77,6 +77,13 @@ pub struct KeyProviderSection {
     pub kind: KeyProviderKind,
 }
 
+/// Optional content-signer named in the same deploy profile (#642).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignerSection {
+    pub kind: crate::signer::SignerKind,
+}
+
 /// Version 1 deploy profile. Production plus a lab-only provider fails closed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -84,6 +91,10 @@ pub struct DeployProfile {
     pub version: u32,
     pub class: ProfileClass,
     pub key_provider: KeyProviderSection,
+    /// Release, bundle, and approval signer. Absent means the profile does
+    /// not name a production signer.
+    #[serde(default)]
+    pub signer: Option<SignerSection>,
 }
 
 impl DeployProfile {
@@ -104,6 +115,15 @@ impl DeployProfile {
             bail!(
                 "production profile refuses lab-only key provider {}",
                 self.key_provider.kind
+            );
+        }
+        if self.class == ProfileClass::Production
+            && let Some(signer) = &self.signer
+            && signer.kind.is_lab_only()
+        {
+            bail!(
+                "production profile refuses file-based signing keys ({})",
+                signer.kind
             );
         }
         Ok(())
@@ -649,6 +669,34 @@ mod tests {
     }
 
     #[test]
+    fn production_profile_refuses_file_and_lab_signers() {
+        let dir = temp_dir();
+        for kind in ["file", "lab"] {
+            let path = write_profile(
+                &dir,
+                &format!(
+                    "version = 1\nclass = \"production\"\n[key_provider]\nkind = \"pkcs11\"\n[signer]\nkind = \"{kind}\"\n"
+                ),
+            );
+            let error = DeployProfile::load(&path).unwrap_err().to_string();
+            assert!(
+                error.contains("production profile refuses file-based signing keys"),
+                "{kind}: {error}"
+            );
+            fs::remove_file(path).unwrap();
+        }
+        let path = write_profile(
+            &dir,
+            "version = 1\nclass = \"production\"\n[key_provider]\nkind = \"pkcs11\"\n[signer]\nkind = \"pkcs11\"\n",
+        );
+        let profile = DeployProfile::load(&path).unwrap();
+        assert_eq!(
+            profile.signer.unwrap().kind,
+            crate::signer::SignerKind::Pkcs11
+        );
+    }
+
+    #[test]
     fn production_profile_accepts_on_site_kinds() {
         let dir = temp_dir();
         for kind in ["pkcs11", "kmip", "cloud_kms"] {
@@ -737,6 +785,7 @@ mod tests {
             key_provider: KeyProviderSection {
                 kind: KeyProviderKind::Software,
             },
+            signer: None,
         }
     }
 
@@ -948,6 +997,7 @@ mod tests {
             key_provider: KeyProviderSection {
                 kind: KeyProviderKind::Pkcs11,
             },
+            signer: None,
         };
         let dir = temp_dir();
         let error = run_ceremony(CeremonyRequest {

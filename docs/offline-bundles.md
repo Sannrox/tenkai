@@ -11,6 +11,10 @@ backslashes, duplicate paths or identities, extra entries, invalid base64, and
 content that differs from its signed digest or size. Producers sort entry
 descriptors by path. Unknown schemas fail closed.
 
+Bundle export signs the root through the same content signer as releases and
+plan approvals. A production deploy profile refuses file-based signing keys;
+see [release signing](release-signing.md#production-signer).
+
 Bundle verification requires current Ed25519 trust roots, the configured tenant
 and environment identities, and a time inside the signed validity interval.
 Removing an exporter key prevents a not-yet-executed bundle from being trusted.

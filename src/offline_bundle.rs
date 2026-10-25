@@ -271,9 +271,22 @@ impl BundleStatement {
 
 impl BundleEnvelope {
     pub fn create(
-        mut statement: BundleStatement,
+        statement: BundleStatement,
         payloads: BTreeMap<String, (String, Vec<u8>)>,
         signing_key: &SigningKey,
+    ) -> Result<Self> {
+        Self::create_with(
+            statement,
+            payloads,
+            &crate::signer::LabSigner::from_seed(signing_key.to_bytes()),
+        )
+    }
+
+    /// Sign a bundle with any [`crate::signer::ContentSigner`].
+    pub fn create_with(
+        mut statement: BundleStatement,
+        payloads: BTreeMap<String, (String, Vec<u8>)>,
+        signer: &dyn crate::signer::ContentSigner,
     ) -> Result<Self> {
         statement.entries = payloads
             .iter()
@@ -284,10 +297,10 @@ impl BundleEnvelope {
                 size: content.len() as u64,
             })
             .collect();
-        let signature = signing_key.sign(&statement.canonical_bytes()?);
+        let signature = signer.sign(&statement.canonical_bytes()?)?;
         Ok(Self {
             schema: BUNDLE_SCHEMA.into(),
-            key_id: signing_key_id(signing_key),
+            key_id: signer.key_id().to_string(),
             statement,
             entries: payloads
                 .into_iter()
@@ -296,7 +309,7 @@ impl BundleEnvelope {
                     content_base64: STANDARD.encode(content),
                 })
                 .collect(),
-            signature: STANDARD.encode(signature.to_bytes()),
+            signature: STANDARD.encode(signature),
         })
     }
 

@@ -78,6 +78,7 @@ it ([ADR 0001](decisions/0001-standalone-core-and-service-evolution.md),
 | Durable Postgres tick fence + inventory heartbeat + OpenMetrics + outcome priors | #135–#138; [tick fencing](reconcile-tick-fencing.md), [plan priors](plan-priors.md) |
 | Local minikube dogfood (embedded, no remote server) | [ops note](local-dogfood-minikube.md); #145–#146, #152 |
 | Dogfood `tenkaictl dev` release/plan signing (not production KMS) | [ops note](local-dogfood-minikube.md#first-class-dogfood-signing-149); #149 |
+| Production content signer (PKCS#11 or lab; production refuses file seeds) | [release signing](release-signing.md#production-signer); #642 |
 | K8s software phase diagnostics (apply/health/restore/remove) | [software executor](software-executor.md); [ops note](local-dogfood-minikube.md#apply--health--restore-diagnostics-150); #150 |
 | Software canary cohort drill on minikube dogfood | [ops note](local-dogfood-minikube.md#software-canary-cohort-drill-154); #154 |
 | Backup/restore drill and server reconcile diagnostics | [operational storage](operational-storage.md); [server diagnostics](server-diagnostics.md); #59, #60 |

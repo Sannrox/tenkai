@@ -92,3 +92,30 @@ signer, content digests, statement digest, and provenance. Use
 the manifest and declared-artifact digests, strictly verify the retained
 envelope with the current trust roots, and require the resulting signer,
 digests, statement digest, and provenance to equal the stored evidence.
+
+## Production signer
+
+Release, offline-bundle, and plan-approval signatures share one signer
+interface. A deploy profile names the backend:
+
+```toml
+version = 1
+class = "production"
+[key_provider]
+kind = "pkcs11"
+[signer]
+kind = "pkcs11"
+```
+
+`kind` is `lab`, `file`, or `pkcs11`. Production refuses `lab` and `file`, so
+a supported production profile never keeps a signing seed on disk. PKCS#11
+holds the Ed25519 private key on the token (a software token stands in for CI)
+and never exports it. Opening a PKCS#11 signer restores a previously
+provisioned key and refuses a missing or ambiguous label. Provisioning mints
+the labeled pair when the token has none. The module, token label, PIN, and
+object label come from `TENKAI_SIGNER_MODULE`, `TENKAI_SIGNER_TOKEN`,
+`TENKAI_SIGNER_PIN`, and optional `TENKAI_SIGNER_KEY_LABEL`. The PIN is a
+secret setting; see [environment variables](environment-variables.md#secret-files).
+
+`tenkaictl dev` signing remains laptop dogfood. It writes owner-only seed
+files and is not a production signer.

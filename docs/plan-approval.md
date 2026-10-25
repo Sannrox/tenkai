@@ -41,6 +41,11 @@ includes the plan id, content id, environment, creation time, desired-state
 inputs, and ordered executable steps. Lifecycle status and other mutable audit
 fields are excluded.
 
+Production signing uses the same PKCS#11 (or lab) signer as releases and
+offline bundles. A production deploy profile refuses file-based signing keys;
+see [release signing](release-signing.md#production-signer).
+`tenkaictl dev sign-approval` remains laptop dogfood.
+
 Trust roots use the same strict Ed25519 key representation as release signing:
 
 ```toml

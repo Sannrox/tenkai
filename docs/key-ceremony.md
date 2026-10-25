@@ -6,6 +6,9 @@ per-tenant data-key ids. The root never leaves the provider. Evidence records
 ids and custodians only. See sekai-chisei ADR 0113.
 
 Signing-key rollover is a different key class. Use [key rollover](key-rollover.md).
+Release, bundle, and approval signatures go through the content signer
+([release signing](release-signing.md#production-signer)). Production refuses
+file-based signing keys.
 
 ## Deploy profile
 

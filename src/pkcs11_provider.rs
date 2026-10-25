@@ -44,7 +44,7 @@ struct ProviderInner {
     dek_revoked: HashSet<String>,
 }
 
-struct TokenClaim {
+pub(crate) struct TokenClaim {
     key: String,
 }
 
@@ -61,10 +61,19 @@ fn held_tokens() -> &'static Mutex<HashSet<String>> {
     HELD.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-fn claim_token(module: &Path, token_label: &str) -> Result<TokenClaim, KeyError> {
-    // One ceremony process owns a token. Cross-process HSM locking is out of scope.
+pub(crate) fn claim_token(module: &Path, token_label: &str) -> Result<TokenClaim, KeyError> {
+    claim_token_for(module, token_label, "key-provider")
+}
+
+pub(crate) fn claim_token_for(
+    module: &Path,
+    token_label: &str,
+    purpose: &str,
+) -> Result<TokenClaim, KeyError> {
+    // Exclusive per (module, token, purpose) in this process so wrap and sign
+    // can share a token. Cross-process HSM locking is out of scope.
     let module = std::fs::canonicalize(module).unwrap_or_else(|_| module.to_path_buf());
-    let key = format!("{}:{token_label}", module.display());
+    let key = format!("{}:{token_label}:{purpose}", module.display());
     let mut held = held_tokens().lock().map_err(|_| KeyError::WrapFailed)?;
     if !held.insert(key.clone()) {
         return Err(KeyError::WrapFailed);
@@ -591,7 +600,7 @@ fn random_bytes<const N: usize>() -> Result<[u8; N], KeyError> {
     Ok(bytes)
 }
 
-fn load_pkcs11(module: &Path) -> Result<Pkcs11, KeyError> {
+pub(crate) fn load_pkcs11(module: &Path) -> Result<Pkcs11, KeyError> {
     static LIBRARY: OnceLock<Mutex<HashMap<PathBuf, Pkcs11>>> = OnceLock::new();
     let key = std::fs::canonicalize(module).unwrap_or_else(|_| module.to_path_buf());
     let mut guard = LIBRARY
@@ -610,7 +619,7 @@ fn load_pkcs11(module: &Path) -> Result<Pkcs11, KeyError> {
     Ok(pkcs11)
 }
 
-fn slot_with_label(pkcs11: &Pkcs11, token_label: &str) -> Result<Slot, KeyError> {
+pub(crate) fn slot_with_label(pkcs11: &Pkcs11, token_label: &str) -> Result<Slot, KeyError> {
     let slots = pkcs11
         .get_slots_with_token()
         .map_err(|_| KeyError::WrapFailed)?;
