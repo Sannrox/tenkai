@@ -230,6 +230,10 @@ pub struct ModelSection {
     /// (`hinagata.signed-descriptor/v1`). Required for `runtime.engine = "onnx"`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub registry_descriptor: String,
+    /// Relative path of a signed registry promotion attestation
+    /// (`hinagata.signed-attestation/v1`). Required to promote `runtime.engine = "onnx"`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub registry_attestation: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -708,14 +712,12 @@ impl Manifest {
         {
             inputs.push(module.document.clone());
         }
-        if let Some(path) = self
-            .model
-            .as_ref()
-            .map(|model| model.registry_descriptor.as_str())
-            .filter(|path| !path.is_empty())
-            && !inputs.iter().any(|input| input == path)
-        {
-            inputs.push(path.to_string());
+        if let Some(model) = self.model.as_ref() {
+            for path in [&model.registry_descriptor, &model.registry_attestation] {
+                if !path.is_empty() && !inputs.iter().any(|input| input == path) {
+                    inputs.push(path.clone());
+                }
+            }
         }
         inputs
     }
@@ -1134,6 +1136,45 @@ max_startup_seconds = 60
         with_inputs.deploy.inputs = vec!["weights.gguf".into()];
         // load() enforces the empty-inputs rule; simulate the check:
         assert!(!with_inputs.deploy.inputs.is_empty());
+    }
+
+    #[test]
+    fn onnx_registry_files_are_immutable_inputs() {
+        let raw = r#"
+[product]
+name = "churn-scorer"
+version = "1.0.0"
+kind = "model_runtime"
+
+[model]
+source = "file:///tmp/churn.onnx"
+revision = "1.0.0"
+format = "onnx"
+quantization = "none"
+artifact_digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+license = "proprietary"
+registry_descriptor = "signed-descriptor.json"
+registry_attestation = "promotion-attestation.json"
+
+[runtime]
+engine = "onnx"
+port = 18080
+context_length = 1
+
+[requirements]
+architecture = ["arm64"]
+memory_gib = 1
+accelerator = ["cpu"]
+
+[health]
+endpoint = "http://127.0.0.1:18080/readyz"
+max_startup_seconds = 30
+"#;
+        let manifest: Manifest = toml::from_str(raw).unwrap();
+        assert_eq!(
+            manifest.immutable_inputs(),
+            vec!["signed-descriptor.json", "promotion-attestation.json"]
+        );
     }
 
     #[test]

@@ -24,6 +24,7 @@ mod onnx;
 pub use onnx::{
     ClassicalOnnxExecutor, FakeOnnxEngine, OnnxEngineRequest, OnnxResources, OnnxScoringEngine,
     PredictionSummarySink, RecordingSummarySink, RegistryTrust,
+    require_classical_promotion_attestation,
 };
 
 /// Version of the model-runtime descriptor contract.
@@ -116,8 +117,16 @@ impl ModelRuntimeDescriptor {
                 "model.registry_descriptor",
                 &self.model.registry_descriptor,
             )?;
+            if !self.model.registry_attestation.is_empty() {
+                crate::manifest::validate_input_path(
+                    "model.registry_attestation",
+                    &self.model.registry_attestation,
+                )?;
+            }
         } else if !self.model.registry_descriptor.is_empty() {
             bail!("model.registry_descriptor is only valid for runtime.engine=onnx");
+        } else if !self.model.registry_attestation.is_empty() {
+            bail!("model.registry_attestation is only valid for runtime.engine=onnx");
         }
         if self.requirements.architecture.is_empty() {
             bail!("requirements.architecture must not be empty");
@@ -157,6 +166,59 @@ impl ModelRuntimeDescriptor {
             Sha256::digest(serde_json::to_vec(self)?)
         ))
     }
+}
+
+/// Channel promotion of classical (`onnx`) model_runtime releases requires a
+/// signed registry promotion attestation matching the deployed version and
+/// artifact digest. Other product kinds are unchanged.
+pub fn require_classical_registry_attestation(release: &crate::pb::sekai::Object) -> Result<()> {
+    let Some(raw) = release.properties.get("manifest") else {
+        return Ok(());
+    };
+    let manifest = crate::manifest::parse_raw(raw)?;
+    if manifest.product.kind != crate::manifest::ProductKind::ModelRuntime {
+        return Ok(());
+    }
+    let descriptor = ModelRuntimeDescriptor::from_manifest(&manifest)?;
+    if descriptor.runtime.engine != "onnx" {
+        return Ok(());
+    }
+    let workdir = release
+        .properties
+        .get("workdir")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty());
+    let Some(workdir) = workdir else {
+        bail!(
+            "classical model promotion blocked: registry promotion attestation missing (release workdir)"
+        );
+    };
+    let expected_artifact = release
+        .properties
+        .get("artifact_digest")
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "classical model promotion blocked: registry promotion attestation missing (artifact_digest)"
+            )
+        })?;
+    let actual_artifact = crate::manifest::identity_digest(
+        &workdir,
+        &manifest.immutable_inputs(),
+        &manifest.artifacts,
+    )
+    .map_err(|error| {
+        anyhow::anyhow!(
+            "classical model promotion blocked: registry promotion attestation invalid ({error})"
+        )
+    })?;
+    if actual_artifact != *expected_artifact {
+        bail!(
+            "classical model promotion blocked: registry promotion attestation mismatch: snapshot artifact_digest expected {expected_artifact} got {actual_artifact}"
+        );
+    }
+    let trust = RegistryTrust::from_env()?;
+    require_classical_promotion_attestation(&descriptor, &workdir, &trust)
 }
 
 fn validate_artifact_digest(value: &str) -> Result<()> {
@@ -1323,6 +1385,7 @@ mod tests {
                 artifact_digest: format!("sha256:{}", "ab".repeat(32)),
                 license: "apache-2.0".into(),
                 registry_descriptor: String::new(),
+                registry_attestation: String::new(),
             },
             runtime: ModelRuntimeSection {
                 engine: "llama.cpp".into(),

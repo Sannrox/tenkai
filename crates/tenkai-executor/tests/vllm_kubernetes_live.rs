@@ -117,6 +117,7 @@ fn descriptor(
             artifact_digest: digest.into(),
             license: "apache-2.0".into(),
             registry_descriptor: String::new(),
+            registry_attestation: String::new(),
         },
         runtime: ModelRuntimeSection {
             engine: "vllm".into(),

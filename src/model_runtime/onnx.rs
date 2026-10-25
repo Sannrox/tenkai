@@ -28,6 +28,8 @@ pub const ONLINE_DESCRIPTOR_FORMAT: &str = "hinagata.online-descriptor/v1";
 pub const VERSION_MANIFEST_FORMAT: &str = "hinagata.version-manifest/v1";
 pub const SIGNATURE_ENVELOPE_FORMAT: &str = "hinagata.signature/v1";
 pub const PREDICTION_SUMMARY_FORMAT: &str = "hinagata.prediction-summary/v1";
+pub const SIGNED_ATTESTATION_FORMAT: &str = "hinagata.signed-attestation/v1";
+pub const PROMOTION_ATTESTATION_FORMAT: &str = "hinagata.promotion-attestation/v1";
 pub const TRUSTED_KEYS_ENV: &str = "TENKAI_MODEL_REGISTRY_TRUSTED_KEYS";
 pub const MONITORING_BASE_ENV: &str = "TENKAI_MODEL_REGISTRY_URL";
 
@@ -120,6 +122,26 @@ struct SignedEnvelope {
 }
 
 #[derive(Debug, Deserialize)]
+struct SignedAttestationEnvelope {
+    format: String,
+    key_id: String,
+    attestation: String,
+    signature: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PromotionAttestation {
+    format: String,
+    namespace: String,
+    model: String,
+    version: u64,
+    stage: String,
+    approver: String,
+    reference: String,
+    artifact_digest: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct OnlineDescriptor {
     format: String,
     namespace: String,
@@ -184,6 +206,10 @@ struct MonitoringEndpoint {
 /// Verified registry online descriptor used to start scoring.
 #[derive(Debug, Clone)]
 pub struct VerifiedOnlineDescriptor {
+    pub namespace: String,
+    pub model: String,
+    pub version: u64,
+    pub artifact_digest: String,
     pub resources: OnnxResources,
     pub liveness_path: String,
     pub readiness_path: String,
@@ -702,6 +728,10 @@ fn verify_signed_online_descriptor(
         );
     }
     Ok(VerifiedOnlineDescriptor {
+        namespace: online.namespace,
+        model: online.model,
+        version: online.version,
+        artifact_digest: online.artifact_digest,
         resources: OnnxResources {
             cpu_millis: online.resources.cpu_millis,
             memory_mib: online.resources.memory_mib,
@@ -757,6 +787,127 @@ fn verify_version_manifest(online: &OnlineDescriptor, trust: &RegistryTrust) -> 
         .unwrap_or_default();
     if metadata_digest_field != online.artifact_digest {
         bail!("version metadata artifact_digest does not match the online descriptor");
+    }
+    Ok(())
+}
+
+fn blocked(reason: &str) -> anyhow::Error {
+    anyhow::anyhow!("classical model promotion blocked: {reason}")
+}
+
+/// Admit classical model channel promotion from a signed registry attestation.
+pub fn require_classical_promotion_attestation(
+    descriptor: &ModelRuntimeDescriptor,
+    workdir: &Path,
+    trust: &RegistryTrust,
+) -> Result<()> {
+    if descriptor.runtime.engine != "onnx" {
+        return Ok(());
+    }
+    if trust.is_empty() {
+        return Err(blocked(&format!(
+            "trusted registry keys missing ({TRUSTED_KEYS_ENV})"
+        )));
+    }
+    if descriptor.model.registry_attestation.is_empty() {
+        return Err(blocked("registry promotion attestation missing"));
+    }
+    let descriptor_path = workdir.join(&descriptor.model.registry_descriptor);
+    let descriptor_bytes = std::fs::read(&descriptor_path).map_err(|_| {
+        blocked(&format!(
+            "registry promotion attestation missing (signed descriptor {})",
+            descriptor.model.registry_descriptor
+        ))
+    })?;
+    let online = verify_signed_online_descriptor(
+        &descriptor_bytes,
+        trust,
+        &descriptor.model.artifact_digest,
+    )
+    .map_err(|error| blocked(&format!("registry descriptor invalid ({error})")))?;
+    let attestation_path = workdir.join(&descriptor.model.registry_attestation);
+    let attestation_bytes = match std::fs::read(&attestation_path) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return Err(blocked(&format!(
+                "registry promotion attestation missing ({})",
+                descriptor.model.registry_attestation
+            )));
+        }
+    };
+    verify_signed_promotion_attestation(&attestation_bytes, trust, &online)
+}
+
+fn verify_signed_promotion_attestation(
+    bytes: &[u8],
+    trust: &RegistryTrust,
+    expected: &VerifiedOnlineDescriptor,
+) -> Result<()> {
+    let envelope: SignedAttestationEnvelope = serde_json::from_slice(bytes)
+        .map_err(|error| blocked(&format!("registry promotion attestation invalid ({error})")))?;
+    if envelope.format != SIGNED_ATTESTATION_FORMAT {
+        return Err(blocked(&format!(
+            "registry promotion attestation invalid (format must be {SIGNED_ATTESTATION_FORMAT}, got {})",
+            envelope.format
+        )));
+    }
+    let key = trust
+        .verifying_key(&envelope.key_id)
+        .map_err(|error| blocked(&format!("registry promotion attestation invalid ({error})")))?;
+    crate::signature_verification::verify_strict(
+        key,
+        "registry promotion attestation signature",
+        &envelope.signature,
+        envelope.attestation.as_bytes(),
+    )
+    .map_err(|error| blocked(&format!("registry promotion attestation invalid ({error})")))?;
+    let attestation: PromotionAttestation = serde_json::from_str(&envelope.attestation)
+        .map_err(|error| blocked(&format!("registry promotion attestation invalid ({error})")))?;
+    if attestation.format != PROMOTION_ATTESTATION_FORMAT {
+        return Err(blocked(&format!(
+            "registry promotion attestation invalid (format must be {PROMOTION_ATTESTATION_FORMAT}, got {})",
+            attestation.format
+        )));
+    }
+    if attestation.approver.trim().is_empty() || attestation.reference.trim().is_empty() {
+        return Err(blocked(
+            "registry promotion attestation invalid (approver and reference are required)",
+        ));
+    }
+    if attestation.stage == "archived" {
+        return Err(blocked(
+            "registry promotion attestation expired (stage archived)",
+        ));
+    }
+    if attestation.stage != "production" {
+        return Err(blocked(&format!(
+            "registry promotion attestation mismatch: stage expected production got {}",
+            attestation.stage
+        )));
+    }
+    if attestation.namespace != expected.namespace {
+        return Err(blocked(&format!(
+            "registry promotion attestation mismatch: namespace expected {} got {}",
+            expected.namespace, attestation.namespace
+        )));
+    }
+    if attestation.model != expected.model {
+        return Err(blocked(&format!(
+            "registry promotion attestation mismatch: model expected {} got {}",
+            expected.model, attestation.model
+        )));
+    }
+    if attestation.version != expected.version {
+        return Err(blocked(&format!(
+            "registry promotion attestation mismatch: version expected {} got {}",
+            expected.version, attestation.version
+        )));
+    }
+    if attestation.artifact_digest != expected.artifact_digest {
+        return Err(blocked(&format!(
+            "registry promotion attestation mismatch: artifact_digest expected {} got {}",
+            expected.artifact_digest, attestation.artifact_digest
+        )));
     }
     Ok(())
 }
@@ -872,6 +1023,26 @@ mod tests {
         (serde_json::to_vec_pretty(&envelope).unwrap(), online)
     }
 
+    fn signed_attestation(artifact_digest: &str, version: u64, stage: &str) -> Vec<u8> {
+        let attestation = canonical(&json!({
+            "approver": "alice@governance",
+            "artifact_digest": artifact_digest,
+            "format": PROMOTION_ATTESTATION_FORMAT,
+            "model": "churn",
+            "namespace": "tenant-a",
+            "reference": "CHG-1042",
+            "stage": stage,
+            "version": version,
+        }));
+        let envelope = json!({
+            "attestation": attestation,
+            "format": SIGNED_ATTESTATION_FORMAT,
+            "key_id": KEY_ID,
+            "signature": sign(SEED, attestation.as_bytes()),
+        });
+        serde_json::to_vec_pretty(&envelope).unwrap()
+    }
+
     fn onnx_descriptor(
         weights: &Path,
         digest: &str,
@@ -891,6 +1062,7 @@ mod tests {
                 artifact_digest: digest.into(),
                 license: "proprietary".into(),
                 registry_descriptor: format!("signed-descriptor-v{registry_version}.json"),
+                registry_attestation: format!("promotion-attestation-v{registry_version}.json"),
             },
             runtime: ModelRuntimeSection {
                 engine: "onnx".into(),
@@ -922,6 +1094,11 @@ mod tests {
             envelope,
         )
         .unwrap();
+        std::fs::write(
+            root.join(format!("promotion-attestation-v{version}.json")),
+            signed_attestation(&digest, version, "production"),
+        )
+        .unwrap();
         (digest, weights)
     }
 
@@ -948,6 +1125,71 @@ mod tests {
         parsed["descriptor"] = json!(format!("{} ", parsed["descriptor"].as_str().unwrap()));
         envelope = serde_json::to_vec(&parsed).unwrap();
         assert!(verify_signed_online_descriptor(&envelope, &trust(), &digest).is_err());
+    }
+
+    #[test]
+    fn promotion_attestation_admits_valid_and_names_refusals() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-onnx-attest-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let (digest, weights) = write_fixture(&root, b"onnx-attest", 1);
+        let descriptor = onnx_descriptor(&weights, &digest, "1.0.0", 1, 18080);
+        require_classical_promotion_attestation(&descriptor, &root, &trust()).unwrap();
+
+        let mut missing = descriptor.clone();
+        missing.model.registry_attestation.clear();
+        let err = require_classical_promotion_attestation(&missing, &root, &trust())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("classical model promotion blocked") && err.contains("missing"),
+            "{err}"
+        );
+
+        std::fs::write(
+            root.join("promotion-attestation-v1.json"),
+            signed_attestation(&format!("sha256:{}", "00".repeat(32)), 1, "production"),
+        )
+        .unwrap();
+        let err = require_classical_promotion_attestation(&descriptor, &root, &trust())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("mismatch") && err.contains("artifact_digest"),
+            "{err}"
+        );
+
+        std::fs::write(
+            root.join("promotion-attestation-v1.json"),
+            signed_attestation(&digest, 2, "production"),
+        )
+        .unwrap();
+        let err = require_classical_promotion_attestation(&descriptor, &root, &trust())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("mismatch") && err.contains("version"), "{err}");
+
+        std::fs::write(
+            root.join("promotion-attestation-v1.json"),
+            signed_attestation(&digest, 1, "archived"),
+        )
+        .unwrap();
+        let err = require_classical_promotion_attestation(&descriptor, &root, &trust())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("expired") && err.contains("archived"), "{err}");
+
+        let empty = RegistryTrust::empty();
+        let err = require_classical_promotion_attestation(&descriptor, &root, &empty)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("trusted registry keys missing") && err.contains(TRUSTED_KEYS_ENV),
+            "{err}"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1123,6 +1365,7 @@ quantization = "none"
 artifact_digest = "{digest}"
 license = "proprietary"
 registry_descriptor = "signed-descriptor-v{registry_version}.json"
+registry_attestation = "promotion-attestation-v{registry_version}.json"
 
 [runtime]
 engine = "onnx"
@@ -1400,6 +1643,135 @@ max_startup_seconds = 30
             );
         }
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn catalog_promote_requires_named_registry_attestation() {
+        let _env = EnvRestore {
+            keys: std::env::var_os(TRUSTED_KEYS_ENV),
+            monitoring: std::env::var_os(MONITORING_BASE_ENV),
+            _lock: ENV.lock().await,
+        };
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-onnx-promote-attest-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let manifest_dir = root.join("model");
+        let keys_path = root.join("registry.keys.json");
+        std::fs::create_dir_all(&manifest_dir).unwrap();
+        std::fs::write(
+            &keys_path,
+            format!(
+                r#"{{"keys":[{{"key_id":"{KEY_ID}","public_key":"{}"}}]}}"#,
+                public_hex(SEED)
+            ),
+        )
+        .unwrap();
+        unsafe {
+            std::env::set_var(TRUSTED_KEYS_ENV, &keys_path);
+            std::env::remove_var(MONITORING_BASE_ENV);
+        }
+
+        let (digest, weights) = write_fixture(&manifest_dir, b"onnx-promote-v1", 1);
+        let mut toml = std::fs::read_to_string({
+            write_manifest(&manifest_dir, "1.0.0", &digest, &weights, 1);
+            manifest_dir.join("tenkai.toml")
+        })
+        .unwrap();
+        toml = toml.replace(
+            "registry_attestation = \"promotion-attestation-v1.json\"\n",
+            "",
+        );
+        std::fs::write(manifest_dir.join("tenkai.toml"), toml).unwrap();
+        std::fs::remove_file(manifest_dir.join("promotion-attestation-v1.json")).unwrap();
+
+        let mut ctx = crate::client::Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        publish_unsigned(&mut ctx, &manifest_dir).await;
+        crate::model_release_evidence::record_passing_evaluation_for_release(
+            &mut ctx,
+            "churn-scorer@1.0.0",
+        )
+        .await
+        .unwrap();
+        let actor = crate::auth_context::test_management_context("onnx-attest");
+        let missing = crate::catalog::promote(&mut ctx, &actor, "churn-scorer@1.0.0", "canary")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            missing.contains("classical model promotion blocked")
+                && missing.contains("registry promotion attestation missing"),
+            "{missing}"
+        );
+
+        std::fs::write(
+            manifest_dir.join("promotion-attestation-v1.json"),
+            signed_attestation(&format!("sha256:{}", "00".repeat(32)), 1, "production"),
+        )
+        .unwrap();
+        write_manifest(&manifest_dir, "1.0.1", &digest, &weights, 1);
+        publish_unsigned(&mut ctx, &manifest_dir).await;
+        crate::model_release_evidence::record_passing_evaluation_for_release(
+            &mut ctx,
+            "churn-scorer@1.0.1",
+        )
+        .await
+        .unwrap();
+        let mismatch = crate::catalog::promote(&mut ctx, &actor, "churn-scorer@1.0.1", "canary")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            mismatch.contains("mismatch") && mismatch.contains("artifact_digest"),
+            "{mismatch}"
+        );
+
+        std::fs::write(
+            manifest_dir.join("promotion-attestation-v1.json"),
+            signed_attestation(&digest, 1, "production"),
+        )
+        .unwrap();
+        write_manifest(&manifest_dir, "1.0.2", &digest, &weights, 1);
+        publish_unsigned(&mut ctx, &manifest_dir).await;
+        crate::model_release_evidence::record_passing_evaluation_for_release(
+            &mut ctx,
+            "churn-scorer@1.0.2",
+        )
+        .await
+        .unwrap();
+        let workdir = {
+            let release = ctx
+                .get(&crate::ontology::release_id("churn-scorer", "1.0.2"))
+                .await
+                .unwrap()
+                .unwrap();
+            std::path::PathBuf::from(release.properties.get("workdir").unwrap())
+        };
+        std::fs::write(
+            workdir.join("promotion-attestation-v1.json"),
+            signed_attestation(&digest, 9, "production"),
+        )
+        .unwrap();
+        let tampered = crate::catalog::promote(&mut ctx, &actor, "churn-scorer@1.0.2", "canary")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            tampered.contains("mismatch") && tampered.contains("snapshot artifact_digest"),
+            "{tampered}"
+        );
+        std::fs::write(
+            workdir.join("promotion-attestation-v1.json"),
+            signed_attestation(&digest, 1, "production"),
+        )
+        .unwrap();
+        let promoted = crate::catalog::promote(&mut ctx, &actor, "churn-scorer@1.0.2", "canary")
+            .await
+            .unwrap();
+        assert!(promoted.contains("canary"), "{promoted}");
         let _ = std::fs::remove_dir_all(root);
     }
 

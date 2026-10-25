@@ -829,6 +829,7 @@ pub async fn promote(
     };
     change_set_pin::require_stored_accepted(&release)?;
     crate::model_release_evidence::require_published_model_evaluation(ctx, &release).await?;
+    crate::model_runtime::require_classical_registry_attestation(&release)?;
     let owner = format!(
         "promotion:{}:{spec}:{}",
         actor.principal_id(),
@@ -849,6 +850,7 @@ pub async fn promote(
             crate::change_set_pin::require_stored_accepted(&release)?;
             crate::model_release_evidence::require_published_model_evaluation(ctx, &release)
                 .await?;
+            crate::model_runtime::require_classical_registry_attestation(&release)?;
             let cid = channel_id(&promotion_name, &promotion_channel);
             let mut channel_properties = HashMap::from([
                 ("product".into(), promotion_name.clone()),
