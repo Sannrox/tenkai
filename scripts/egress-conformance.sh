@@ -16,8 +16,9 @@ export LC_ALL=C
 
 # Integration drills: deploy, upgrade, rollback and offline bind.
 DRILLS=(stateful_upgrade_drill connectivity_upgrade_cli two_environment_closure_drill offline_fleet_drill)
-# Library tests by filter: the offline first install into an empty catalog.
-LIB_FILTERS=(connectivity::tests::first_install)
+# Library tests by filter: the offline first install into an empty catalog,
+# and the site-local directory OIDC bridge (login, group mapping, outage).
+LIB_FILTERS=(connectivity::tests::first_install oidc_verifier::tests::directory_bridge)
 REPORT="${EGRESS_REPORT:-$ROOT/target/egress-report.txt}"
 mkdir -p "$(dirname "$REPORT")"
 

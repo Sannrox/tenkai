@@ -123,6 +123,9 @@ Behavior:
 
 - For a worked example with Keycloak, including the identity-provider side,
   see [sign in to the web console with Keycloak](console-sign-in-with-keycloak.md).
+- For a customer LDAP or Active Directory, federate it through a site-local
+  OIDC provider. Tenkai never handles directory passwords
+  ([sign in against a customer directory](directory-sign-in.md)).
 - A missing, unknown, expired, or otherwise rejected credential gets **401**
   with `WWW-Authenticate: Bearer` (`error="invalid_token"` when a token was
   sent), so clients ask for new credentials. A valid credential that may not

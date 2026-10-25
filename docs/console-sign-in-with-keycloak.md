@@ -157,6 +157,10 @@ tenkaictl --target remote env list
   `https://example.com/tenkai/ui/auth/callback`.
 - Map real groups to the narrowest capabilities; a rule with `environment`
   confines management to one environment.
+- To federate Keycloak (or another site-local issuer) to a customer LDAP or
+  Active Directory, see
+  [sign in against a customer directory](directory-sign-in.md). Tenkai never
+  binds to the directory.
 - If Keycloak's token endpoint is on a different origin from the issuer, add it
   to `[client] connect_origins`.
 

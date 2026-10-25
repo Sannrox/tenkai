@@ -30,6 +30,7 @@ will be split over time. Contributor and agent workflow live in
 | Install and verify release binaries | [release-binaries.md](release-binaries.md) |
 | Run reconciliation, `tenkai-server`, and environment runtimes | [run-tenkai-server.md](run-tenkai-server.md) |
 | Configure server authentication (bearer tokens, enterprise JWT, OIDC) | [configure-server-authentication.md](configure-server-authentication.md) |
+| Sign in against a customer directory (site-local OIDC, no LDAP bind) | [directory-sign-in.md](directory-sign-in.md) |
 | Manage environments and maintenance windows | [manage-environments.md](manage-environments.md) |
 | Notify an external system after apply | [deploy-webhooks.md](deploy-webhooks.md) |
 | Upgrade, roll back, and recover a product | [upgrade-and-rollback.md](upgrade-and-rollback.md) |

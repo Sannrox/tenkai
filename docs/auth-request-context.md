@@ -10,6 +10,8 @@ provider, a login flow, tenant lifecycle, or billing.
 
 To configure a server rather than integrate with this contract, see
 [configure server authentication](configure-server-authentication.md).
+Customer directories federate through a site-local OIDC issuer;
+[sign in against a customer directory](directory-sign-in.md).
 
 Source of truth for types and startup composition: `src/auth_context.rs`.
 Architecture decision: [ADR 0004](decisions/0004-authenticated-request-context.md).
