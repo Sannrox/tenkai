@@ -233,7 +233,7 @@ in favor of the single-backend model already used by Sekai-Chisei.
 | Runtime protocol/execution | Remote profiles retain scoped pull execution and fencing | Same-minor compatibility until a wider window is proven |
 | Providers | Provider requirements do not change by profile | SQLite terminal-outcome wiring is shipped; audit/planning-event export and complete PostgreSQL host wiring remain pre-activation evidence; recovery remains provider-independent |
 | HA/replicas | Shared state remains distinct from product HA | Preserve explicit non-guarantee and fail-closed HA requirement |
-| Ontology | The current portable ontology has no operating-profile or backend definitions | Add portable definitions only when the repository adopts a tracked ontology artifact |
+| Ontology | This repository has no tracked portable ontology artifact | Add portable definitions only if a later decision adopts one |
 | Security | Dual-store fallback and caller-selected tenant authority are prohibited | Fail-closed startup and authorization tests |
 
 ## Implementation sequence

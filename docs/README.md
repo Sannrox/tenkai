@@ -150,3 +150,5 @@ will be split over time. Contributor and agent workflow live in
 - [Rollout-control simplification](research/rollout-control-simplification.md)
 - [Staged-document product kinds](research/staged-document-product-kinds.md)
 - [Additional model serving executors](research/additional-model-serving-executors.md)
+- [Completion-gated Docker initialization jobs](research/docker-initialization-jobs.md)
+- [Software compatibility preflight](research/software-compatibility-preflight.md)
