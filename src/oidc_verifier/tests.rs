@@ -560,3 +560,5 @@ fn fleet_administrators_are_unbound_management_rules() {
         .retain(|rule| rule.value != "tenkai-admins");
     assert!(readers_only.fleet_administrator_values().is_empty());
 }
+
+mod directory_bridge;

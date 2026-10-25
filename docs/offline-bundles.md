@@ -279,7 +279,9 @@ directory. Tenant-mode hubs refuse import.
 
 `scripts/egress-conformance.sh` proves the install, first deploy, upgrade and
 rollback drills make no outbound call, including the offline first install
-into an empty catalog. It builds the drills normally, then
+into an empty catalog and the site-local directory OIDC bridge (login, group
+mapping, and directory or issuer outage failing closed). It builds the drills
+normally, then
 runs each test binary in a fresh network namespace that has only loopback,
 under `strace`. Any `connect()` or addressed send (as unconnected UDP uses)
 to a non-loopback address, and any DNS lookup
