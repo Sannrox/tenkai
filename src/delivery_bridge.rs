@@ -130,6 +130,7 @@ impl DeliveryAdapter for CallbackAdapter {
 pub struct BridgeExecution<'a> {
     pub expected_environment: &'a str,
     pub approval: Option<(&'a Path, &'a Path)>,
+    pub requester: Option<&'a str>,
     pub skip_gates: bool,
     pub now: i64,
     pub fence: Option<Arc<dyn ReconcileTickFence>>,
@@ -226,13 +227,14 @@ async fn admit_before_delegation(
         &adapter.capabilities().into_iter().collect::<Vec<_>>(),
     )?;
     if let Some((approval, trust_roots)) = options.approval {
-        crate::plan_approval::verify_for_execution(
+        crate::plan_approval::verify_for_execution_named(
             ctx,
             plan,
             approval,
             trust_roots,
             options.now,
             false,
+            options.requester,
         )
         .await?;
         let apply_already_admitted_gates =
@@ -564,6 +566,7 @@ mod tests {
         BridgeExecution {
             expected_environment: "prod",
             approval: Some((approval, trust)),
+            requester: None,
             skip_gates,
             now,
             fence: None,
@@ -694,6 +697,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delegated_apply_carries_requester_through_exclude_requester_policy() {
+        let mut fixture = signed_upgrade("exclude-req").await;
+        let policy_path = fixture.root.join("policy.toml");
+        std::fs::write(
+            &policy_path,
+            r#"
+version = 1
+mode = "manual"
+ttl_ms = 3600000
+
+[[quorum]]
+purpose = "execute_plan"
+n = 1
+exclude_requester = true
+"#,
+        )
+        .unwrap();
+        crate::environment::set_plan_approval_policy(&mut fixture.ctx, "prod", &policy_path)
+            .await
+            .unwrap();
+        let now = crate::now_millis();
+        let adapter = PollingAdapter::new(FakeMode::Succeed);
+        let approval = fixture.approval.clone();
+        let trust = fixture.trust.clone();
+        let plan = fixture.plan.clone();
+        let missing = execute_bridged_plan(
+            &mut fixture.ctx,
+            &adapter,
+            &plan,
+            opts(&approval, &trust, now, true),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            missing.contains("no authenticated requester")
+                || missing.contains("excludes the apply requester"),
+            "{missing}"
+        );
+        let mut named = opts(&approval, &trust, now, true);
+        named.requester = Some("alice");
+        let report = execute_bridged_plan(&mut fixture.ctx, &adapter, &plan, named)
+            .await
+            .unwrap();
+        assert_eq!(report.state, PlanState::Succeeded);
+        let _ = std::fs::remove_dir_all(fixture.root);
+    }
+
+    #[tokio::test]
     async fn timeout_stays_non_terminal_and_repeated_apply_is_idempotent() {
         let mut fixture = signed_upgrade("idem").await;
         let now = crate::now_millis();
@@ -777,6 +829,7 @@ mod tests {
             authorization: crate::apply::ExecutionAuthorization::Signed {
                 approval,
                 trust_roots: trust,
+                requester: None,
             },
             software_executor: None,
             model_runtime_executor: None,

@@ -6,6 +6,12 @@
         "approval": {
           "$ref": "#/$defs/ApprovalEnvelope"
         },
+        "approvals": {
+          "items": {
+            "$ref": "#/$defs/ApprovalEnvelope"
+          },
+          "type": "array"
+        },
         "emergency_reason": {
           "type": [
             "string",
@@ -552,6 +558,34 @@
         "state",
         "warn_ms",
         "refuse_ms"
+      ],
+      "type": "object"
+    },
+    "CollectedApproval": {
+      "description": "One collected, still-detached envelope for a plan.",
+      "properties": {
+        "expires_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "groups": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "key_id": {
+          "type": "string"
+        },
+        "signer_identity": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key_id",
+        "signer_identity",
+        "expires_at"
       ],
       "type": "object"
     },
@@ -1181,6 +1215,13 @@
         },
         "mode": {
           "type": "string"
+        },
+        "quorums": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/QuorumRule"
+          },
+          "type": "array"
         },
         "require_human": {
           "default": [],
@@ -3141,6 +3182,12 @@
           },
           "type": "array"
         },
+        "groups": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "identity": {
           "type": "string"
         },
@@ -3180,6 +3227,56 @@
       },
       "required": [
         "source"
+      ],
+      "type": "object"
+    },
+    "PlanApprovalsView": {
+      "description": "Collected versus missing approvals for one plan and purpose.",
+      "properties": {
+        "collected": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CollectedApproval"
+          },
+          "type": "array"
+        },
+        "exclude_requester": {
+          "type": "boolean"
+        },
+        "groups": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "missing": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "plan_digest": {
+          "type": "string"
+        },
+        "plan_id": {
+          "type": "string"
+        },
+        "purpose": {
+          "type": "string"
+        },
+        "required": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "plan_id",
+        "plan_digest",
+        "purpose",
+        "required",
+        "exclude_requester",
+        "missing"
       ],
       "type": "object"
     },
@@ -3323,6 +3420,47 @@
         "manifest",
         "signature",
         "trust_roots"
+      ],
+      "type": "object"
+    },
+    "QuorumPurpose": {
+      "description": "Purpose a quorum rule applies to. Derived from the plan and apply flags;\nthe v1 envelope purpose stays `execute_plan`.",
+      "enum": [
+        "execute_plan",
+        "rollback",
+        "skip_gates",
+        "downgrade"
+      ],
+      "type": "string"
+    },
+    "QuorumRule": {
+      "additionalProperties": false,
+      "description": "N distinct human signers from named groups for one purpose.",
+      "properties": {
+        "exclude_requester": {
+          "default": false,
+          "description": "When true, the apply requester's principal cannot count toward N.",
+          "type": "boolean"
+        },
+        "groups": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "n": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "purpose": {
+          "$ref": "#/$defs/QuorumPurpose"
+        }
+      },
+      "required": [
+        "purpose",
+        "n"
       ],
       "type": "object"
     },
@@ -4492,6 +4630,15 @@
       },
       "response": {
         "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/plans/{plan_id}/approvals",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/PlanApprovalsView"
       }
     },
     {

@@ -14,6 +14,7 @@ pub enum ExecutionAuthorization<'a> {
     Signed {
         approval: &'a Path,
         trust_roots: &'a Path,
+        requester: Option<&'a str>,
     },
     /// Record an explicit embedded-only development bypass.
     LocalDevelopment { reason: &'a str },
@@ -72,6 +73,7 @@ pub(super) struct AttemptExecutionPolicy<'a> {
     pub delivery_adapter: Option<std::sync::Arc<dyn crate::delivery_bridge::DeliveryAdapter>>,
     pub delivery_fence: Option<std::sync::Arc<dyn crate::reconcile_fence::ReconcileTickFence>>,
     pub approval: Option<(std::path::PathBuf, std::path::PathBuf)>,
+    pub requester: Option<String>,
 }
 
 /// Compatibility entry point retained so downstream crates receive an
@@ -143,14 +145,16 @@ async fn execute_with_options_inner(
         ExecutionAuthorization::Signed {
             approval,
             trust_roots,
+            requester,
         } => {
-            crate::plan_approval::verify_for_execution(
+            crate::plan_approval::verify_for_execution_named(
                 ctx,
                 &stored_plan,
                 approval,
                 trust_roots,
                 now,
                 options.skip_gates,
+                requester,
             )
             .await?
         }
@@ -209,12 +213,16 @@ async fn execute_with_options_inner(
     let artifact_registry = options.artifact_registry;
     let delivery_adapter = options.delivery_adapter.clone();
     let delivery_fence = options.delivery_fence.clone();
-    let approval = match options.authorization {
+    let (approval, requester) = match options.authorization {
         ExecutionAuthorization::Signed {
             approval,
             trust_roots,
-        } => Some((approval.to_path_buf(), trust_roots.to_path_buf())),
-        ExecutionAuthorization::LocalDevelopment { .. } => None,
+            requester,
+        } => (
+            Some((approval.to_path_buf(), trust_roots.to_path_buf())),
+            requester.map(str::to_string),
+        ),
+        ExecutionAuthorization::LocalDevelopment { .. } => (None, None),
     };
     let canary_execution =
         crate::canary::execute_attempt(ctx, &canary_plan, options.skip_gates, move |ctx| {
@@ -233,6 +241,7 @@ async fn execute_with_options_inner(
                         delivery_adapter,
                         delivery_fence,
                         approval,
+                        requester,
                     },
                     &execution_lease,
                 )

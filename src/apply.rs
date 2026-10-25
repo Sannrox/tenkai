@@ -322,6 +322,7 @@ async fn execute_locked(
                     .approval
                     .as_ref()
                     .map(|(approval, trust)| (approval.as_path(), trust.as_path())),
+                requester: options.requester.as_deref(),
                 skip_gates,
                 now: crate::now_millis(),
                 fence: options.delivery_fence.clone(),

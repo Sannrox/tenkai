@@ -110,6 +110,7 @@ async fn apply_pin_plan(
             ExecutionAuthorization::Signed {
                 approval: &approval_path,
                 trust_roots,
+                requester: None,
             }
         }
     };

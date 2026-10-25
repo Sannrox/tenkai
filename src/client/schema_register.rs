@@ -12,9 +12,10 @@ use crate::ontology::{
     KIND_CANARY_OUTCOME, KIND_CANARY_POLICY, KIND_CANARY_POLICY_POINTER, KIND_CHANNEL,
     KIND_CONNECTIVITY_UPGRADE, KIND_DEPLOYMENT, KIND_ENVIRONMENT, KIND_ENVIRONMENT_EXECUTION,
     KIND_HEALTH_GATE_EVIDENCE, KIND_MAINTENANCE_CONFIG, KIND_PACKAGE_MIGRATION,
-    KIND_PACKAGE_MIGRATION_LOCK, KIND_PLAN, KIND_PLAN_APPROVAL_VERIFICATION, KIND_PRODUCT,
-    KIND_PRODUCT_MAINTENANCE_CONFIG, KIND_PROMOTION_AUDIT, KIND_PROMOTION_LOCK, KIND_RELEASE,
-    KIND_RELEASE_RECALL, KIND_RELEASE_VERIFICATION, KIND_WAVE, REL_SUBSCRIBES,
+    KIND_PACKAGE_MIGRATION_LOCK, KIND_PLAN, KIND_PLAN_APPROVAL_ENVELOPE,
+    KIND_PLAN_APPROVAL_VERIFICATION, KIND_PRODUCT, KIND_PRODUCT_MAINTENANCE_CONFIG,
+    KIND_PROMOTION_AUDIT, KIND_PROMOTION_LOCK, KIND_RELEASE, KIND_RELEASE_RECALL,
+    KIND_RELEASE_VERIFICATION, KIND_WAVE, REL_SUBSCRIBES,
 };
 use crate::pb::graph_action::{ActionOp, ActionParamDef, ActionTypeDef};
 use crate::pb::sekai::{ObjectType, PropertyDef};
@@ -493,6 +494,24 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
                     false,
                     "Audited reason that admits rollback onto recalled content",
                 ),
+            ],
+        ),
+        object_type(
+            KIND_PLAN_APPROVAL_ENVELOPE,
+            "A detached plan-approval envelope collected before execution",
+            vec![
+                prop("plan_id", true, "Approved plan object id"),
+                prop("plan_digest", true, "Approved executable plan digest"),
+                prop("key_id", true, "Signer public-key digest"),
+                prop("signer_identity", true, "Trusted signer identity"),
+                prop("groups", false, "JSON array of signer group names"),
+                prop("expires_at", true, "Envelope expiry in Unix milliseconds"),
+                prop(
+                    "envelope",
+                    true,
+                    "Detached tenkai.plan-approval.v1 envelope",
+                ),
+                prop("collected_at", true, "Collection time in Unix milliseconds"),
             ],
         ),
         object_type(

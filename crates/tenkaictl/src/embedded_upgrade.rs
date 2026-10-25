@@ -70,12 +70,15 @@ pub(crate) async fn run(ctx: &mut client::Ctx, command: UpgradeCommand) -> Resul
             println!("{}", connectivity::format_upgrade(&record));
         }
         UpgradeCommand::Advance { name, approval } => {
+            let actor = crate::authorization::embedded_management_actor().ok();
+            let requester = actor.as_ref().map(|actor| actor.principal_id());
             let authorization = execution_authorization(
                 approval.approval.as_deref(),
                 approval.approval_trust_roots.as_deref(),
                 approval.allow_unapproved_development,
                 approval.development_reason.as_deref(),
                 "upgrade execution requires --approval and --approval-trust-roots, or --allow-unapproved-development with --development-reason",
+                requester,
             )?;
             let record = connectivity::advance(ctx, &name, authorization).await?;
             println!("{}", connectivity::format_upgrade(&record));

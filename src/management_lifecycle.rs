@@ -346,6 +346,8 @@ pub struct ApplyRequest {
     pub environment: String,
     pub expected_generation: u64,
     pub approval: ApprovalEnvelope,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approvals: Vec<ApprovalEnvelope>,
     pub trust_roots: PlanApprovalTrustRoots,
     #[serde(default)]
     pub skip_gates: bool,
@@ -459,7 +461,18 @@ impl RemoteApprovalFiles {
         approval: &ApprovalEnvelope,
         trust_roots: &PlanApprovalTrustRoots,
     ) -> Result<Self> {
+        Self::materialize_set(approval, &[], trust_roots)
+    }
+
+    pub fn materialize_set(
+        approval: &ApprovalEnvelope,
+        extra: &[ApprovalEnvelope],
+        trust_roots: &PlanApprovalTrustRoots,
+    ) -> Result<Self> {
         require_approval_files(approval, trust_roots)?;
+        for envelope in extra {
+            require_approval_files(envelope, trust_roots)?;
+        }
         let dir = std::env::temp_dir().join(format!(
             "tenkai-remote-approval-{}-{}-{}",
             std::process::id(),
@@ -468,20 +481,35 @@ impl RemoteApprovalFiles {
         ));
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("creating approval staging directory {}", dir.display()))?;
-        let approval_path = dir.join("approval.json");
         let trust_roots_path = dir.join("approval-trust-roots.toml");
-        std::fs::write(&approval_path, serde_json::to_vec(approval)?)
-            .with_context(|| format!("writing staged approval {}", approval_path.display()))?;
         std::fs::write(&trust_roots_path, toml::to_string(trust_roots)?).with_context(|| {
             format!(
                 "writing staged approval trust roots {}",
                 trust_roots_path.display()
             )
         })?;
+        if extra.is_empty() {
+            let approval_path = dir.join("approval.json");
+            std::fs::write(&approval_path, serde_json::to_vec(approval)?)
+                .with_context(|| format!("writing staged approval {}", approval_path.display()))?;
+            return Ok(Self {
+                _dir: dir,
+                approval: approval_path,
+                trust_roots: trust_roots_path,
+            });
+        }
+        let mut envelopes = Vec::with_capacity(extra.len() + 1);
+        envelopes.push(approval.clone());
+        envelopes.extend(extra.iter().cloned());
+        for (index, envelope) in envelopes.iter().enumerate() {
+            let path = dir.join(format!("{index}.json"));
+            std::fs::write(&path, serde_json::to_vec(envelope)?)
+                .with_context(|| format!("writing staged approval {}", path.display()))?;
+        }
         Ok(Self {
-            _dir: dir,
-            approval: approval_path,
+            approval: dir.clone(),
             trust_roots: trust_roots_path,
+            _dir: dir,
         })
     }
 }
@@ -971,12 +999,23 @@ pub fn load_apply_request(
     skip_gates: bool,
     emergency_reason: Option<String>,
 ) -> Result<ApplyRequest> {
+    let mut envelopes = crate::plan_approval::load_envelopes(approval)?;
+    let first = envelopes
+        .first()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("missing approval evidence"))?;
+    let extra = if envelopes.len() > 1 {
+        envelopes.split_off(1)
+    } else {
+        Vec::new()
+    };
     Ok(ApplyRequest {
         version: MANAGEMENT_LIFECYCLE_API_VERSION,
         operation: ManagementLifecycleOperation::Apply.as_str().into(),
         environment: environment.to_string(),
         expected_generation,
-        approval: load_approval_envelope(approval)?,
+        approval: first,
+        approvals: extra,
         trust_roots: PlanApprovalTrustRoots::load(trust_roots)?,
         skip_gates,
         emergency_reason,

@@ -264,6 +264,7 @@ async fn execute(
                     apply::ExecutionAuthorization::Signed {
                         approval: &envelope,
                         trust_roots: roots,
+                        requester: None,
                     },
                 )
                 .await;

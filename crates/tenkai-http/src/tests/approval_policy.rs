@@ -73,6 +73,28 @@ async fn approval_policy_read_requires_auth_and_environment_grant() {
 }
 
 #[tokio::test]
+async fn plan_approvals_read_requires_auth() {
+    let root = std::env::temp_dir().join(format!(
+        "tenkai-plan-approvals-auth-{}-{}",
+        std::process::id(),
+        tenkai::now_millis()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let (app, _config, _) = lifecycle_router(&root).await;
+    let unauthenticated = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/plans/missing/approvals")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn remote_approval_policy_round_trip_reports_configured_auto_view() {
     let root = std::env::temp_dir().join(format!(
         "tenkai-approval-policy-remote-{}-{}",

@@ -43,6 +43,7 @@ pub(crate) fn execution_authorization<'a>(
     allow_unapproved_development: bool,
     development_reason: Option<&'a str>,
     missing: &str,
+    requester: Option<&'a str>,
 ) -> Result<apply::ExecutionAuthorization<'a>> {
     signed_or_local_development(
         approval,
@@ -53,6 +54,7 @@ pub(crate) fn execution_authorization<'a>(
         |approval, trust_roots| apply::ExecutionAuthorization::Signed {
             approval,
             trust_roots,
+            requester,
         },
         |reason| apply::ExecutionAuthorization::LocalDevelopment { reason },
     )
@@ -207,6 +209,7 @@ mod tests {
             false,
             None,
             "missing",
+            None,
         )
         .unwrap();
         assert!(matches!(
@@ -214,8 +217,8 @@ mod tests {
             apply::ExecutionAuthorization::Signed { .. }
         ));
 
-        let local =
-            execution_authorization(None, None, true, Some("local drill"), "missing").unwrap();
+        let local = execution_authorization(None, None, true, Some("local drill"), "missing", None)
+            .unwrap();
         assert!(matches!(
             local,
             apply::ExecutionAuthorization::LocalDevelopment {
@@ -223,9 +226,15 @@ mod tests {
             }
         ));
 
-        let error =
-            execution_authorization(None, None, false, None, "plan execution requires flags")
-                .unwrap_err();
+        let error = execution_authorization(
+            None,
+            None,
+            false,
+            None,
+            "plan execution requires flags",
+            None,
+        )
+        .unwrap_err();
         assert_eq!(error.to_string(), "plan execution requires flags");
     }
 }

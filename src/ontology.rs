@@ -18,6 +18,7 @@ pub const KIND_MAINTENANCE_CONFIG: &str = "tenkai.maintenance_config";
 pub const KIND_PRODUCT_MAINTENANCE_CONFIG: &str = "tenkai.product_maintenance_config";
 pub const KIND_PLAN: &str = "tenkai.plan";
 pub const KIND_PLAN_APPROVAL_VERIFICATION: &str = "tenkai.plan_approval_verification";
+pub const KIND_PLAN_APPROVAL_ENVELOPE: &str = "tenkai.plan_approval_envelope";
 pub const KIND_ENVIRONMENT_EXECUTION: &str = "tenkai.environment_execution";
 pub const KIND_DEPLOYMENT: &str = "tenkai.deployment";
 pub const KIND_HEALTH_GATE_EVIDENCE: &str = "tenkai.health_gate_evidence";

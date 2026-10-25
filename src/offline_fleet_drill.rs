@@ -158,6 +158,7 @@ pub async fn rehearse(
             ExecutionAuthorization::Signed {
                 approval: &approval,
                 trust_roots: &trust,
+                requester: None,
             },
         )
         .await?;
@@ -209,6 +210,7 @@ pub async fn rehearse(
                 authorization: ExecutionAuthorization::Signed {
                     approval: &approval,
                     trust_roots: &trust,
+                    requester: None,
                 },
                 software_executor: Some(std::sync::Arc::new(
                     crate::software_executor::FakeSoftwareExecutor::new(),

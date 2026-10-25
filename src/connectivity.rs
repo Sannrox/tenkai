@@ -2103,6 +2103,7 @@ install = "true"
             ExecutionAuthorization::Signed {
                 approval: &site_a,
                 trust_roots: &trust,
+                requester: None,
             },
         )
         .await
@@ -2129,6 +2130,7 @@ install = "true"
             ExecutionAuthorization::Signed {
                 approval: &site_b,
                 trust_roots: &trust,
+                requester: None,
             },
         )
         .await
@@ -2145,6 +2147,7 @@ install = "true"
             ExecutionAuthorization::Signed {
                 approval: &site_c,
                 trust_roots: &trust,
+                requester: None,
             },
         )
         .await
@@ -2192,6 +2195,7 @@ install = "true"
             ExecutionAuthorization::Signed {
                 approval: &site_c,
                 trust_roots: &trust,
+                requester: None,
             },
         )
         .await
