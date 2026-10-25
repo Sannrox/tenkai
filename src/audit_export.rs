@@ -1,21 +1,26 @@
-//! Signed, chained audit exports (#644).
+//! Signed, chained audit exports (#644) with derived usage records (#639).
 //!
 //! An export lists every audit record (who did which management action,
 //! with what outcome) and every change event (approvals, plans, holds,
 //! receipts and other delivery transitions) written since the previous
-//! export. Entries carry identities and outcomes only: no credentials,
-//! request bodies or payloads.
+//! export, plus a documented `usage` record kind of Tenkai's own
+//! deployment activity in that period. Entries carry identities, outcomes
+//! and integer quantities only: no credentials, request bodies, payloads
+//! or billing.
 //!
 //! Exports are bounded by durable insertion cursors, not by time: each
 //! starts at the audit and change cursors where the previous one ended, so a
 //! record that commits late, or under a clock that moved back, lands in the
 //! next export instead of falling between two. The period times are the
-//! previous export's end and this export's time, for reading.
+//! previous export's end and this export's time, for reading. Usage records
+//! are derived from the audit and change entries of this export; they are
+//! not a second chain.
 //!
 //! Exports chain: each names the digest of the one before it, with a
 //! sequence number one higher. [`verify_chain`] refuses a cursor gap, a
 //! reordered or missing export, and any change to a signed statement. The
-//! first export of a chain has sequence 1 and no predecessor.
+//! first export of a chain has sequence 1 and no predecessor. The same
+//! period exported twice is byte-identical.
 
 use std::path::Path;
 
@@ -32,13 +37,20 @@ use crate::storage::OperationalStore;
 pub const AUDIT_EXPORT_SCHEMA: &str = "tenkai.audit-export.v1";
 const SIGNING_DOMAIN: &[u8] = b"TENKAI-AUDIT-EXPORT-V1\0";
 const PAGE: usize = 1_000;
+const USAGE_SOURCE: &str = "usage";
+const USAGE_ENVIRONMENTS: &str = "environments.managed";
+const USAGE_PLANS: &str = "plans.applied";
+const USAGE_RELEASES: &str = "releases.deployed";
+const USAGE_EXECUTOR_HOURS: &str = "executor.hours";
+const USAGE_RUNTIME_HOURS: &str = "runtime.hours";
 
 /// One audited fact. Identities and outcomes only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuditEntry {
     pub at_ms: i64,
-    /// `audit` (a management action) or `change` (a delivery transition).
+    /// `audit` (a management action), `change` (a delivery transition), or
+    /// `usage` (a period quantity of Tenkai's own deployment activity).
     pub source: String,
     /// The audit record or change event id.
     pub id: String,
@@ -165,10 +177,65 @@ fn entries_after(
             break;
         }
     }
-    entries.sort_by(|left, right| {
-        (left.at_ms, &left.source, left.cursor).cmp(&(right.at_ms, &right.source, right.cursor))
-    });
+    sort_entries(&mut entries);
     Ok((entries, audit_through, change_through))
+}
+
+fn sort_entries(entries: &mut [AuditEntry]) {
+    entries.sort_by(|left, right| {
+        (
+            left.at_ms,
+            left.source.as_str(),
+            left.cursor,
+            left.action.as_str(),
+            left.id.as_str(),
+        )
+            .cmp(&(
+                right.at_ms,
+                right.source.as_str(),
+                right.cursor,
+                right.action.as_str(),
+                right.id.as_str(),
+            ))
+    });
+}
+
+/// Period quantities of Tenkai's own deployment activity. Counts only;
+/// millihours stay 0 until execution interval evidence exists. Nothing is priced.
+fn usage_records(period_end_ms: i64, entries: &[AuditEntry]) -> Vec<AuditEntry> {
+    let mut environments = std::collections::BTreeSet::new();
+    let mut plans = 0_u64;
+    for entry in entries {
+        if entry.source != "change" {
+            continue;
+        }
+        if !entry.environment.is_empty() {
+            environments.insert(entry.environment.as_str());
+        }
+        if entry.action == "plan_applied" {
+            plans += 1;
+        }
+    }
+    [
+        (USAGE_ENVIRONMENTS, environments.len().to_string()),
+        (USAGE_PLANS, plans.to_string()),
+        (USAGE_RELEASES, plans.to_string()),
+        (USAGE_EXECUTOR_HOURS, "0".into()),
+        (USAGE_RUNTIME_HOURS, "0".into()),
+    ]
+    .into_iter()
+    .map(|(action, outcome)| AuditEntry {
+        at_ms: period_end_ms,
+        source: USAGE_SOURCE.into(),
+        id: format!("usage:{action}"),
+        cursor: 0,
+        action: action.into(),
+        principal: String::new(),
+        resource: "tenkai".into(),
+        outcome,
+        environment: String::new(),
+    })
+    .collect()
 }
 
 /// Sign the export of everything written since `previous` (or since the
@@ -198,7 +265,8 @@ pub fn export(
     if let Some(previous) = previous {
         require_store_continues(store, previous)?;
     }
-    let (entries, audit_through, change_through) = entries_after(store, audit_after, change_after)?;
+    let (mut entries, audit_through, change_through) =
+        entries_after(store, audit_after, change_after)?;
     let newest = |source: &str, cursor: i64| {
         entries
             .iter()
@@ -207,6 +275,8 @@ pub fn export(
     };
     let audit_last = newest("audit", audit_through).unwrap_or(audit_last);
     let change_last = newest("change", change_through).unwrap_or(change_last);
+    entries.extend(usage_records(end_ms, &entries));
+    sort_entries(&mut entries);
     let statement = AuditStatement {
         audit_last,
         change_last,
@@ -397,6 +467,19 @@ pub fn verify_chain(
             "change" => {
                 statement.change_after < entry.cursor && entry.cursor <= statement.change_through
             }
+            USAGE_SOURCE => {
+                entry.cursor == 0
+                    && entry.at_ms == statement.period_end_ms
+                    && entry.id == format!("usage:{}", entry.action)
+                    && matches!(
+                        entry.action.as_str(),
+                        USAGE_ENVIRONMENTS
+                            | USAGE_PLANS
+                            | USAGE_RELEASES
+                            | USAGE_EXECUTOR_HOURS
+                            | USAGE_RUNTIME_HOURS
+                    )
+            }
             _ => false,
         };
         if statement.period_end_ms < statement.period_start_ms
@@ -509,7 +592,14 @@ mod tests {
         audit(&store, 100, "plan.approve.completed");
 
         let first = export(&store, None, 200, &seed_path).unwrap();
-        assert_eq!(first.statement.entries.len(), 1);
+        assert_eq!(observed(&first).len(), 1);
+        assert_eq!(usage_outcome(&first, USAGE_ENVIRONMENTS), "0");
+        assert_eq!(usage_outcome(&first, USAGE_PLANS), "0");
+        let again = export(&store, None, 200, &seed_path).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&first).unwrap(),
+            serde_json::to_vec(&again).unwrap()
+        );
         // A record stamped before the first export but committed after it
         // (a slow write, or a clock that moved back) lands in the next one.
         audit(&store, 150, "plan.apply.completed");
@@ -517,9 +607,11 @@ mod tests {
             .append_change_event(260, "plan_applied", "plan-1", "prod")
             .unwrap();
         let second = export(&store, Some(&first), 300, &seed_path).unwrap();
-        assert_eq!(second.statement.entries.len(), 2);
-        assert_eq!(second.statement.entries[0].at_ms, 150);
-        assert_eq!(second.statement.entries[1].environment, "prod");
+        assert_eq!(observed(&second).len(), 2);
+        assert_eq!(observed(&second)[0].at_ms, 150);
+        assert_eq!(observed(&second)[1].environment, "prod");
+        assert_eq!(usage_outcome(&second, USAGE_ENVIRONMENTS), "1");
+        assert_eq!(usage_outcome(&second, USAGE_PLANS), "1");
         verify_chain(&[first.clone(), second.clone()], &roots, None).unwrap();
 
         // A cursor gap between exports.
@@ -545,7 +637,7 @@ mod tests {
         // Tampering with a signed entry.
         let mut tampered = second.clone();
         tampered.statement.entries[0].principal = "someone-else".into();
-        let error = verify_chain(&[first, tampered], &roots, None).unwrap_err();
+        let error = verify_chain(&[first.clone(), tampered], &roots, None).unwrap_err();
         assert!(format!("{error:#}").contains("was changed"), "{error:#}");
 
         // The directory chain continues from the newest export.
@@ -553,7 +645,7 @@ mod tests {
         let a = export_next(&store, &chain, 500, &seed_path, None).unwrap();
         audit(&store, 510, "backup.take.completed");
         let b = export_next(&store, &chain, 600, &seed_path, None).unwrap();
-        assert_eq!((a.statement.sequence, b.statement.entries.len()), (1, 1));
+        assert_eq!((a.statement.sequence, observed(&b).len()), (1, 1));
         verify_chain(&[a.clone(), b], &roots, None).unwrap();
         // A damaged directory chain is not continued.
         let mut edited = a;
@@ -569,7 +661,7 @@ mod tests {
         // after exports that added nothing.
         let empty = export(&store, Some(&second), 450, &seed_path).unwrap();
         let empty = export(&store, Some(&empty), 460, &seed_path).unwrap();
-        assert!(empty.statement.entries.is_empty());
+        assert!(observed(&empty).is_empty());
         let restored = SqliteStore::open(dir.join("restored.db")).unwrap();
         audit(&restored, 100, "plan.approve.completed");
         audit(&restored, 700, "someone.else.completed");
@@ -580,6 +672,79 @@ mod tests {
         assert!(
             error.to_string().contains("start a new audit chain"),
             "{error}"
+        );
+
+        let mut usage_tampered = second.clone();
+        let plans = usage_tampered
+            .statement
+            .entries
+            .iter_mut()
+            .find(|entry| entry.source == USAGE_SOURCE && entry.action == USAGE_PLANS)
+            .unwrap();
+        plans.outcome = "99".into();
+        let error = verify_chain(&[first.clone(), usage_tampered], &roots, None).unwrap_err();
+        assert!(format!("{error:#}").contains("was changed"), "{error:#}");
+
+        let body = serde_json::to_string(&second).unwrap();
+        for leak in ["price", "invoice", "currency", "bill"] {
+            assert!(!body.contains(leak), "{leak} in {body}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn observed(export: &AuditExport) -> Vec<&AuditEntry> {
+        export
+            .statement
+            .entries
+            .iter()
+            .filter(|entry| entry.source != USAGE_SOURCE)
+            .collect()
+    }
+
+    fn usage_outcome(export: &AuditExport, action: &str) -> String {
+        export
+            .statement
+            .entries
+            .iter()
+            .find(|entry| entry.source == USAGE_SOURCE && entry.action == action)
+            .map(|entry| entry.outcome.clone())
+            .unwrap()
+    }
+
+    #[test]
+    fn usage_records_count_applies_not_catalog_or_event_gaps() {
+        let dir = std::env::temp_dir().join(format!(
+            "tenkai-audit-usage-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (seed_path, roots) = seed(&dir);
+        let store = SqliteStore::open(dir.join("tenkai.db")).unwrap();
+        store
+            .append_change_event(1_000, "release_published", "rel-1", "")
+            .unwrap();
+        store
+            .append_change_event(1_100, "release_promoted", "rel-1", "")
+            .unwrap();
+        store
+            .append_change_event(2_000, "plan_applied", "plan-a", "lab")
+            .unwrap();
+        store
+            .append_change_event(2_000 + 3_600_000, "plan_applied", "plan-b", "lab")
+            .unwrap();
+        audit(&store, 500, "environment.configure.set_fact.requested");
+        let exported = export(&store, None, 10_000_000, &seed_path).unwrap();
+        verify_chain(std::slice::from_ref(&exported), &roots, None).unwrap();
+        assert_eq!(usage_outcome(&exported, USAGE_ENVIRONMENTS), "1");
+        assert_eq!(usage_outcome(&exported, USAGE_PLANS), "2");
+        assert_eq!(usage_outcome(&exported, USAGE_RELEASES), "2");
+        assert_eq!(usage_outcome(&exported, USAGE_EXECUTOR_HOURS), "0");
+        assert_eq!(usage_outcome(&exported, USAGE_RUNTIME_HOURS), "0");
+        let again = export(&store, None, 10_000_000, &seed_path).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&exported).unwrap(),
+            serde_json::to_vec(&again).unwrap()
         );
         let _ = std::fs::remove_dir_all(dir);
     }
