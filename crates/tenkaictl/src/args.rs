@@ -247,7 +247,7 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: SupportBundleCommand,
     },
-    /// Export or verify signed, period-chained audit records.
+    /// Export or verify signed, period-chained audit and usage records.
     Audit {
         #[command(subcommand)]
         command: AuditCommand,

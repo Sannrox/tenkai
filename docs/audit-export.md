@@ -14,9 +14,20 @@ previous export. It lists, oldest first:
   which resource, and with what outcome.
 - **Change events:** delivery transitions such as plans, applies, holds,
   receipts and rollbacks, with the environment they belong to.
+- **Usage records:** Tenkai's own deployment activity in this period, as
+  the documented `usage` record kind (`source` is `usage`). The actions
+  are `environments.managed` (distinct environments on delivery change
+  events), `plans.applied` (successful `plan_applied` events),
+  `releases.deployed` (the same successful applies; catalog publish or
+  promote is not a deployment), `executor.hours` and `runtime.hours`.
+  Counts and millihours live in `outcome`. Millihours are 0 until Tenkai
+  persists execution start and end; event spacing is not duration. Tenkai
+  does not price, invoice or otherwise bill.
 
 Entries carry identities, actions and outcomes only. No credential, token,
-request body or payload is exported.
+request body or payload is exported. Usage is derived from the change
+entries of the same export, so the same period exported twice is
+byte-identical. Tenkai does not import a usage export.
 
 Exports are bounded by durable insertion cursors, not by time. Each export
 starts at the audit and change cursors where the previous one ended. A record
