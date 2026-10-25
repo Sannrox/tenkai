@@ -53,7 +53,9 @@ health → rollback. The local reference executor stages the **descriptor** only
 Engine plugins that download multi-GB weights implement `ModelRuntimeExecutor`.
 
 Apply selects the executor by `runtime.engine`. `llama.cpp` keeps the
-reference executor. `onnx` uses the classical scoring executor: it verifies a
+reference executor. `mlx` is the Apple-silicon host-process executor next to
+it (fake engine in CI; real `mlx_lm.server` behind `TENKAI_MLX_SERVER` /
+`TENKAI_USE_REAL_MLX`). `onnx` uses the classical scoring executor: it verifies a
 signed registry online descriptor (`model.registry_descriptor`) against
 trusted registry keys, checks the artifact digest, applies declared
 resources and health paths, and runs scoring through an injected engine port
@@ -195,8 +197,8 @@ leave the host or invent unknown keys.
 
 **Choice:** the reference plugin targets **llama.cpp** because manifests default
 to `runtime.engine = "llama.cpp"`, health is plain HTTP on loopback, and a single
-host can run without a GPU fleet control plane. MLX and other engines remain
-future plugins implementing the same ports.
+host can run without a GPU fleet control plane. `runtime.engine = "mlx"` is the
+Apple-silicon sibling of this path. TGI and NVIDIA NIM remain future plugins.
 
 ### Ports
 
@@ -386,6 +388,52 @@ computation **orders** steps (it does not merge kinds):
 Unsafe orders are rejected (`validate_model_routing_rollout_order`). See
 [examples/model-routing-rollout](../examples/model-routing-rollout/README.md).
 
+## MLX on Apple silicon hosts
+
+`runtime.engine = "mlx"` is the host-process executor for Apple silicon / edge
+hosts. It reuses the llama.cpp lifecycle: `WeightCache` verifies weights, a
+candidate binds loopback only, health plus a completion smoke must pass, then
+the candidate activates and the previous generation is retained for ordinary
+Tenkai rollback. A failed candidate is stopped and does not replace the
+active generation.
+
+Default apply wiring uses `FakeMlxEngine`, so community CI never needs an
+Apple GPU or an MLX binary. Operators enable the real process via env.
+
+`accelerator = ["apple-metal"]`. Do not declare `[requirements.gpu]` with
+`cuda` or `rocm`; those facts are NVIDIA/AMD GPU inventory.
+
+### Ports
+
+| Type | Role |
+| --- | --- |
+| `FakeMlxEngine` | Deterministic CI lifecycle without a binary |
+| `MlxLmServerLauncher` | Optional external `TENKAI_MLX_SERVER` / `mlx_lm.server` |
+| `MlxHostExecutor` | verify weights → start → health and completion smoke → activate; retain previous |
+
+### Environment
+
+| Variable | Meaning |
+| --- | --- |
+| `TENKAI_MLX_SERVER` | Absolute or PATH path to the server binary (enables real engine) |
+| `TENKAI_USE_REAL_MLX=1` | Use default binary name `mlx_lm.server` from `PATH` |
+| `TENKAI_WEIGHT_CACHE` | Cache root for the verified `--model` path (default: a sidecar of the runtime state file) |
+
+When neither server variable is set, apply uses `FakeMlxEngine` (CI-safe) and
+does not fetch weights. Enabling the real engine always attaches a
+`WeightCache` and passes the verified blob path as `--model`. The binary is
+spawned with argv only (`--host`, `--port`, `--model <verified path>`); never
+put credentials in the manifest. Bind host is forced to loopback. Completion
+smoke uses the model id advertised at `/v1/models`.
+
+**Optional integration test**
+
+```bash
+# Requires a real binary; skipped in default CI
+TENKAI_MLX_SERVER=/path/to/mlx_lm.server \
+  cargo test --locked mlx_operator_golden_path -- --ignored --nocapture
+```
+
 ## vLLM on Kubernetes
 
 `runtime.engine = "vllm"` uses the host-injected Kubernetes executor. Serving
@@ -405,5 +453,5 @@ signers and record the signed result with `tenkaictl eval-evidence`
 ## Follow-on
 
 - Peer/regional caches
-- Additional engine plugins: MLX first, then TGI, then NVIDIA NIM
+- Additional engine plugins: TGI, then NVIDIA NIM
   ([research](research/additional-model-serving-executors.md))
