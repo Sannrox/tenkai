@@ -1,32 +1,21 @@
 use super::*;
 
 impl SqliteStore {
-    pub fn create_link(
-        &self,
-        link: Link,
-        fail_if_exists: bool,
-    ) -> std::result::Result<(), tonic::Status> {
-        let connection = self
-            .connection()
-            .map_err(|error| tonic::Status::internal(error.to_string()))?;
-        let changed = connection
-            .execute(
-                "INSERT OR IGNORE INTO catalog_links(id,from_id,to_id,relation,payload)
+    pub fn create_link(&self, link: Link, fail_if_exists: bool) -> Result<()> {
+        let connection = self.connection()?;
+        let changed = connection.execute(
+            "INSERT OR IGNORE INTO catalog_links(id,from_id,to_id,relation,payload)
                  VALUES(?1,?2,?3,?4,?5)",
-                params![
-                    link.id,
-                    link.from_id,
-                    link.to_id,
-                    link.relation,
-                    link.encode_to_vec()
-                ],
-            )
-            .map_err(|error| tonic::Status::internal(error.to_string()))?;
+            params![
+                link.id,
+                link.from_id,
+                link.to_id,
+                link.relation,
+                link.encode_to_vec()
+            ],
+        )?;
         if fail_if_exists && changed == 0 {
-            return Err(tonic::Status::already_exists(format!(
-                "link {} already exists",
-                link.id
-            )));
+            return Err(StoreError::already_exists("link", link.id));
         }
         Ok(())
     }

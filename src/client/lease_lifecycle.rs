@@ -23,7 +23,7 @@ impl LeaseLifecycle<'_> {
         key: &str,
         owner: &str,
         ttl_ms: i64,
-    ) -> Result<Lease> {
+    ) -> std::result::Result<Lease, super::LeaseError> {
         match self {
             Self::Embedded(store) => {
                 let store = Arc::clone(store);
@@ -34,10 +34,11 @@ impl LeaseLifecycle<'_> {
                     store.acquire_namespaced_lease(&namespace, &key, &owner, ttl_ms)
                 })
                 .await
+                .map_err(super::LeaseError::from_anyhow)
             }
             Self::Remote(client) => {
                 let request_id = uuid::Uuid::new_v4().to_string();
-                let response: AcquireLeaseResponse = remote_unary_with_options(
+                match remote_unary_with_options(
                     client,
                     "/sekai.SekaiService/AcquireLease",
                     AcquireLeaseRequest {
@@ -49,8 +50,20 @@ impl LeaseLifecycle<'_> {
                     },
                     CallOptions::default().with_request_id(request_id),
                 )
-                .await?;
-                response.lease.context("provider returned an empty lease")
+                .await
+                {
+                    Ok(response) => {
+                        let response: AcquireLeaseResponse = response;
+                        response
+                            .lease
+                            .context("provider returned an empty lease")
+                            .map_err(super::LeaseError::Failed)
+                    }
+                    Err(status) if status.code() == tonic::Code::AlreadyExists => {
+                        Err(super::LeaseError::AlreadyExists)
+                    }
+                    Err(status) => Err(super::LeaseError::Failed(status.into())),
+                }
             }
         }
     }

@@ -37,7 +37,7 @@ impl SqliteStore {
         self.get_object(id)
     }
 
-    pub fn create(&self, object: Object) -> std::result::Result<Object, tonic::Status> {
+    pub fn create(&self, object: Object) -> Result<Object> {
         self.create_object(object)
     }
 
@@ -49,19 +49,16 @@ impl SqliteStore {
         self.delete_object(id)
     }
 
-    pub fn create_object(&self, object: Object) -> std::result::Result<Object, tonic::Status> {
+    pub fn create_object(&self, object: Object) -> Result<Object> {
         if self
             .get_object(&object.id)
-            .map_err(|error| tonic::Status::internal(error.to_string()))?
+            .map_err(|error| StoreError::Database(error.to_string()))?
             .is_some()
         {
-            return Err(tonic::Status::already_exists(format!(
-                "object {} already exists",
-                object.id
-            )));
+            return Err(StoreError::already_exists("object", object.id));
         }
         self.put_object(object.clone())
-            .map_err(|error| tonic::Status::internal(error.to_string()))?;
+            .map_err(|error| StoreError::Database(error.to_string()))?;
         Ok(object)
     }
 
@@ -196,10 +193,7 @@ impl SqliteStore {
         let tx = connection.transaction()?;
         require_active_lease_in(&tx, namespace, key, fencing_token)?;
         if create && previous.is_some() {
-            return Err(anyhow::Error::new(tonic::Status::already_exists(format!(
-                "object {} already exists",
-                object.id
-            ))));
+            return Err(StoreError::already_exists("object", object.id.clone()).into());
         }
         if !create {
             anyhow::ensure!(

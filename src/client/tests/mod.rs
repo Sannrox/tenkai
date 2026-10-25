@@ -1,6 +1,7 @@
 use tonic::Status;
 
 use super::ClientError;
+use crate::storage::StoreError;
 
 mod action_lifecycle;
 mod helper_units;
@@ -32,5 +33,8 @@ fn unique_conflict_treats_already_exists_and_internal_unique_as_the_same() {
     )));
     assert!(!super::is_unique_conflict(&ClientError::from_status(
         Status::not_found("missing")
+    )));
+    assert!(super::is_unique_conflict(&ClientError::from(
+        StoreError::already_exists("object", "tenkai:conformance:object")
     )));
 }

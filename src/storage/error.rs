@@ -8,6 +8,8 @@ pub enum StoreError {
     ImmutableConflict { kind: &'static str, id: String },
     #[error("{kind} {id} was not found")]
     NotFound { kind: &'static str, id: String },
+    #[error("{kind} {id} already exists")]
+    AlreadyExists { kind: &'static str, id: String },
     #[error("plan {id} cannot transition from {from:?} to {to:?}")]
     InvalidPlanTransition {
         id: String,
@@ -73,6 +75,19 @@ pub enum StoreError {
     /// Feature or configuration required for an optional store adapter is missing.
     #[error("optional store adapter unavailable: {0}")]
     AdapterUnavailable(String),
+}
+
+impl StoreError {
+    pub fn already_exists(kind: &'static str, id: impl Into<String>) -> Self {
+        Self::AlreadyExists {
+            kind,
+            id: id.into(),
+        }
+    }
+
+    pub fn is_already_exists(&self) -> bool {
+        matches!(self, Self::AlreadyExists { .. })
+    }
 }
 
 impl From<rusqlite::Error> for StoreError {
