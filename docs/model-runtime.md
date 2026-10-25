@@ -22,6 +22,7 @@ quantization = "Q4_K_M"
 artifact_digest = "sha256:…"   # 64 hex chars
 license = "apache-2.0"
 # registry_descriptor = "signed-descriptor.json"  # required for engine = "onnx"
+# registry_attestation = "promotion-attestation.json"  # required to promote engine = "onnx"
 
 [runtime]
 engine = "llama.cpp"
@@ -229,7 +230,8 @@ never requires an inference binary. Operators enable the real process via env
 `runtime.engine = "onnx"` is the deploy path for classical models registered
 with a signed online descriptor. The release carries the descriptor as
 `model.registry_descriptor` (a relative JSON file, hashed with the other
-immutable inputs). Apply:
+immutable inputs) and, for channel promotion, a signed registry promotion
+attestation as `model.registry_attestation`. Apply:
 
 1. Verifies the signed descriptor and the embedded version manifest against
    the host's trusted registry keys (`TENKAI_MODEL_REGISTRY_TRUSTED_KEYS`).
@@ -243,9 +245,14 @@ immutable inputs). Apply:
    for ordinary Tenkai rollback, and exports a prediction summary to the
    descriptor monitoring path (`TENKAI_MODEL_REGISTRY_URL` when set).
 
-Unknown keys, a tampered descriptor, or a missing workdir fail closed. Canary
-and promotion stay on the existing release flow; the promotion-gate slice is
-separate.
+Unknown keys, a tampered descriptor, or a missing workdir fail closed.
+
+Channel promotion of an `onnx` release requires a valid
+`hinagata.signed-attestation/v1` over `hinagata.promotion-attestation/v1`
+matching the descriptor's namespace, model, version, and artifact digest,
+signed by a trusted registry key. A missing file, an archived stage, or a
+mismatched digest or version is refused with that named reason. Releases
+that are not classical `onnx` model_runtime products are unchanged.
 
 | Variable | Meaning |
 | --- | --- |

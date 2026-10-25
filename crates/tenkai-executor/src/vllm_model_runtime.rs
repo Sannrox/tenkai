@@ -1040,6 +1040,7 @@ mod tests {
                 artifact_digest: fixture.digest.clone(),
                 license: "llama3".into(),
                 registry_descriptor: String::new(),
+                registry_attestation: String::new(),
             },
             runtime: ModelRuntimeSection {
                 engine: "vllm".into(),

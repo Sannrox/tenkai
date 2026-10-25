@@ -93,6 +93,8 @@
 //!   results from Chisei, signed outbox export when a `model_runtime` canary
 //!   or smoke completes, and fail-closed promotion when evaluation evidence is
 //!   missing, stale, or invalid.
+//!   Classical `onnx` channel promotion also requires a signed registry
+//!   promotion attestation matching the deployed version and artifact digest.
 //! - [`software_executor`], [`model_runtime`], [`routing`], [`staged_artifact`],
 //!   [`workshop_module`], and [`worker_pool`] adapt typed delivery products to
 //!   their target runtimes.
