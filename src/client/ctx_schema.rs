@@ -1,6 +1,6 @@
 //! Schema, lease, and remote-dispatch methods on `Ctx`.
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use prost::Message;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
@@ -21,7 +21,7 @@ impl Ctx {
     pub(super) fn remote(&self) -> Result<&RemoteClient> {
         match &self.backend {
             Backend::Remote { client, .. } => Ok(client.as_ref()),
-            Backend::Embedded(_) => {
+            Backend::Embedded(_) | Backend::TenantHub => {
                 anyhow::bail!("operation requires a configured remote provider")
             }
         }
@@ -57,7 +57,7 @@ impl Ctx {
     pub(crate) fn embedded_arc(&self) -> Option<Arc<crate::storage::SqliteStore>> {
         match &self.backend {
             Backend::Embedded(store) => Some(Arc::clone(store)),
-            Backend::Remote { .. } => None,
+            Backend::Remote { .. } | Backend::TenantHub => None,
         }
     }
 
@@ -65,6 +65,11 @@ impl Ctx {
         &mut self,
         schema: ObjectType,
     ) -> std::result::Result<(), super::ClientError> {
+        if self.is_tenant_hub() {
+            return Err(super::ClientError::Failed(anyhow!(
+                super::TENANT_HUB_UNAVAILABLE
+            )));
+        }
         if let Some(store) = self.embedded_arc() {
             return block_embedded_status(store, move |store| store.register_schema(schema)).await;
         }
@@ -91,6 +96,9 @@ impl Ctx {
     }
 
     pub(crate) async fn schemas(&mut self) -> Result<Vec<ObjectType>> {
+        if self.is_tenant_hub() {
+            return Ok(Vec::new());
+        }
         if let Some(store) = self.embedded_arc() {
             return block_embedded(store, |store| store.schemas()).await;
         }
@@ -119,6 +127,9 @@ impl Ctx {
             anyhow::bail!(
                 "embedded mode has no governance provider; configure remote provider mode for evaluation gate evidence"
             );
+        }
+        if self.is_tenant_hub() {
+            anyhow::bail!(super::TENANT_HUB_UNAVAILABLE);
         }
         Ok(self
             .remote_unary(

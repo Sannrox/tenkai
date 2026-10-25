@@ -27,11 +27,12 @@ use tenkai::runtime_capabilities::{
     enterprise_auth_capabilities, shell_executor_capabilities, validate_runtime_capabilities,
 };
 use tenkai::storage::{OperationalStore, SqliteStore};
+use tenkai::tenant_store::TenantOperationalStore;
 use tenkai_http::{ServerConfig, router};
 use tenkai_postgres::{
-    compiled_host_feature_report_with, require_hub_tenant_mode,
-    resolve_reconcile_fence_for_replicas, resolve_server_tenant_store,
-    tenant_postgres_store_capabilities,
+    compiled_host_feature_report_with, enterprise_postgres_hub_profile,
+    refuse_mixed_store_configuration, require_hub_tenant_mode, resolve_enterprise_hub,
+    resolve_reconcile_fence_for_replicas,
 };
 
 const JWT_AUTH_EXTENSION_ID: &str = "auth.jwt.aldunis";
@@ -47,12 +48,10 @@ const OIDC_CONFIG_ENV: &str = "TENKAI_OIDC_CONFIG";
 struct Cli {
     #[arg(long, env = "TENKAI_LISTEN", default_value = "127.0.0.1:8080")]
     listen: SocketAddr,
-    #[arg(
-        long,
-        env = "TENKAI_DATABASE",
-        default_value = ".tenkai-state/tenkai.db"
-    )]
-    database: PathBuf,
+    /// Community SQLite path. Default `.tenkai-state/tenkai.db` when unset.
+    /// Invalid with `--tenant-mode` or `TENKAI_POSTGRES_URL`.
+    #[arg(long, env = "TENKAI_DATABASE")]
+    database: Option<PathBuf>,
     #[arg(long, default_value_t = 10)]
     reconcile_interval: u64,
     #[arg(long, default_value_t = 8)]
@@ -361,12 +360,28 @@ async fn main() -> Result<()> {
         "TENKAI_DEVELOPMENT_FIXTURE_PRINCIPALS requires --with-development-fixtures"
     );
 
-    if !cli.tenant_mode {
+    let postgres_configured = tenkai::secret_source::is_configured("TENKAI_POSTGRES_URL");
+    refuse_mixed_store_configuration(cli.database.is_some(), postgres_configured)
+        .context("refusing mixed SQLite and PostgreSQL runtime configuration")?;
+    refuse_tenant_remote_provider(cli.tenant_mode, cli.provider_mode)?;
+    let community_database = if cli.tenant_mode {
+        anyhow::ensure!(
+            cli.database.is_none(),
+            "tenant-mode hubs refuse --database / TENKAI_DATABASE; PostgreSQL is the sole authoritative store"
+        );
+        None
+    } else {
         tenkai::storage::refuse_postgres_on_embedded().context(
             "spoke and community hosts refuse TENKAI_POSTGRES_URL; SQLite is the sole operational store",
         )?;
-    }
-    if let Some(parent) = cli.database.parent()
+        Some(
+            cli.database
+                .clone()
+                .unwrap_or_else(|| PathBuf::from(".tenkai-state/tenkai.db")),
+        )
+    };
+    if let Some(database) = &community_database
+        && let Some(parent) = database.parent()
         && !parent.as_os_str().is_empty()
     {
         std::fs::create_dir_all(parent).with_context(|| {
@@ -386,7 +401,7 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(cli.listen).await?;
     let bound = listener.local_addr()?;
     let opening_profile = if cli.tenant_mode {
-        "enterprise-tenant-postgres"
+        "enterprise-experimental"
     } else {
         "community-sqlite"
     };
@@ -416,19 +431,23 @@ async fn main() -> Result<()> {
             .await
     });
 
-    let database = cli.database.clone();
-    let store = match run_blocking_startup("operational sqlite store", move || {
-        SqliteStore::open(&database).with_context(|| format!("opening {}", database.display()))
+    let opened = match run_blocking_startup("operational store", {
+        let tenant_mode = cli.tenant_mode;
+        let database = community_database.clone();
+        move || open_host_store(tenant_mode, database)
     })
     .await
     {
-        Ok(store) => Arc::new(store),
+        Ok(opened) => opened,
         Err(error) => {
             let _ = shutdown_tx.send(true);
             let _ = server_task.await;
             return Err(error);
         }
     };
+    let sqlite_store = opened.sqlite;
+    let store = opened.operational;
+    let tenant_store = opened.tenant;
     let outcome_provider = match cli.outcome_provider {
         OutcomeProviderMode::Disabled => {
             anyhow::ensure!(
@@ -441,6 +460,10 @@ async fn main() -> Result<()> {
             None
         }
         OutcomeProviderMode::Chisei => {
+            anyhow::ensure!(
+                !cli.tenant_mode,
+                "enterprise hub does not advertise terminal-outcome export until PostgreSQL atomic outbox wiring exists"
+            );
             anyhow::ensure!(
                 matches!(cli.provider_mode, ProviderMode::Embedded),
                 "outcome export requires embedded Tenkai application state so terminal state and outbox enqueue share one transaction"
@@ -486,32 +509,21 @@ async fn main() -> Result<()> {
     } else {
         community_auth_capabilities()
     };
-    let mut capabilities = community_sqlite_profile(auth_capabilities);
-    // Prefer the live store advertisement so adapters own their claims.
-    if let Some(store_component) = capabilities
-        .components
-        .iter_mut()
-        .find(|component| component.component_id == "store.sqlite")
-    {
-        *store_component = store.runtime_capabilities();
+    let mut capabilities = if cli.tenant_mode {
+        enterprise_postgres_hub_profile(auth_capabilities)
     } else {
-        capabilities.components.push(store.runtime_capabilities());
-    }
-
-    // Tenant mode requires durable Postgres hub store (#127): feature + URL.
-    let tenant_store = run_blocking_startup("tenant operational store", move || {
-        resolve_server_tenant_store(cli.tenant_mode).map_err(Into::into)
-    })
-    .await
-    .context("resolving tenant operational store for tenant mode")?;
-    if let Some(ref tenant) = tenant_store {
-        capabilities.components.push(tenant.runtime_capabilities());
-        // Keep sqlite component for community ops tables; tenant adapter is additive.
-        let _ = tenant_postgres_store_capabilities();
-        if cli.tenant_mode {
-            capabilities.profile = "enterprise-tenant-postgres".into();
+        let mut capabilities = community_sqlite_profile(auth_capabilities);
+        if let Some(store_component) = capabilities
+            .components
+            .iter_mut()
+            .find(|component| component.component_id == "store.sqlite")
+        {
+            *store_component = store.runtime_capabilities();
+        } else {
+            capabilities.components.push(store.runtime_capabilities());
         }
-    }
+        capabilities
+    };
 
     // Resolve the deploy guard now so a missing install surfaces at startup and
     // in /readyz capabilities, not at the first shell-executor apply.
@@ -534,15 +546,14 @@ async fn main() -> Result<()> {
         .with_context(|| "runtime capability negotiation failed at startup")?;
 
     let ctx = match cli.provider_mode {
-        ProviderMode::Embedded if cli.tenant_mode => {
-            tenkai::client::Ctx::embedded_hub(&cli.database, outcome_provider.is_some())
+        ProviderMode::Embedded if cli.tenant_mode => tenkai::client::Ctx::tenant_hub(),
+        ProviderMode::Embedded => {
+            let database = community_database
+                .as_ref()
+                .expect("community hosts open SQLite");
+            tenkai::client::Ctx::embedded_with_outcome_export(database, outcome_provider.is_some())
                 .context("opening embedded application state")?
         }
-        ProviderMode::Embedded => tenkai::client::Ctx::embedded_with_outcome_export(
-            &cli.database,
-            outcome_provider.is_some(),
-        )
-        .context("opening embedded application state")?,
         ProviderMode::Remote => tenkai::client::connect()
             .await
             .context("connecting explicitly configured remote provider")?,
@@ -583,7 +594,7 @@ async fn main() -> Result<()> {
         .as_ref()
         .map(|client| client.connect_origins.clone())
         .unwrap_or_default();
-    let backups = backup_settings(cli.tenant_mode, &store)?;
+    let backups = backup_settings(cli.tenant_mode, sqlite_store.as_ref())?;
     let imports = import_settings()?;
     let import_staging = imports.as_ref().map(|settings| settings.staging.clone());
     let clock_every = clock_settings()?;
@@ -819,12 +830,21 @@ async fn main() -> Result<()> {
     let host_endpoints = tenkai::operational_events::host_endpoints_from_env()?;
     let host_staging = import_staging.clone();
     // Host alerts the outbox has not taken survive a restart beside the store.
-    let host_alert_state = cli.database.with_extension("host-alerts.json");
+    let host_alert_state = match &community_database {
+        Some(database) => database.with_extension("host-alerts.json"),
+        None => PathBuf::from(".tenkai-state").join("host-alerts.json"),
+    };
+    let host_watch_enabled =
+        !host_endpoints.is_empty() || !smtp_sinks.is_empty() || host_staging.is_some();
+    if host_watch_enabled
+        && let Some(parent) = host_alert_state.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating host alert state directory {}", parent.display()))?;
+    }
     let host_reconciler = reconciler.clone();
-    let host_task = (!host_endpoints.is_empty()
-        || !smtp_sinks.is_empty()
-        || host_staging.is_some())
-    .then(|| {
+    let host_task = host_watch_enabled.then(|| {
         let host_store = store.clone();
         let host_backups = host_backups.clone();
         let mut host_shutdown_rx = shutdown_tx.subscribe();
@@ -1154,6 +1174,40 @@ fn import_settings() -> Result<Option<tenkai::offline_import::ImportSettings>> {
     }
 }
 
+struct OpenedHostStore {
+    sqlite: Option<Arc<SqliteStore>>,
+    operational: Arc<dyn OperationalStore>,
+    tenant: Option<Arc<dyn TenantOperationalStore>>,
+}
+
+fn refuse_tenant_remote_provider(tenant_mode: bool, provider_mode: ProviderMode) -> Result<()> {
+    anyhow::ensure!(
+        !tenant_mode || matches!(provider_mode, ProviderMode::Embedded),
+        "tenant-mode hubs refuse --provider-mode remote; PostgreSQL is the sole authoritative store"
+    );
+    Ok(())
+}
+
+fn open_host_store(tenant_mode: bool, database: Option<PathBuf>) -> Result<OpenedHostStore> {
+    if tenant_mode {
+        let hub = resolve_enterprise_hub().map_err(anyhow::Error::from)?;
+        return Ok(OpenedHostStore {
+            sqlite: None,
+            operational: hub.operational,
+            tenant: Some(hub.tenant),
+        });
+    }
+    let database = database.context("community hosts require a SQLite database path")?;
+    let sqlite = Arc::new(
+        SqliteStore::open(&database).with_context(|| format!("opening {}", database.display()))?,
+    );
+    Ok(OpenedHostStore {
+        operational: sqlite.clone(),
+        sqlite: Some(sqlite),
+        tenant: None,
+    })
+}
+
 /// Server-mode backups from `TENKAI_BACKUP_DIR` (unset: off) and, when set,
 /// `TENKAI_BACKUP_INTERVAL_SECS` (default 86400; 0 takes backups only on
 /// demand), `TENKAI_BACKUP_RETAIN` (default 7) and
@@ -1161,7 +1215,7 @@ fn import_settings() -> Result<Option<tenkai::offline_import::ImportSettings>> {
 /// Tenant-mode hubs keep their state in PostgreSQL and refuse the setting.
 fn backup_settings(
     tenant_mode: bool,
-    store: &Arc<SqliteStore>,
+    store: Option<&Arc<SqliteStore>>,
 ) -> Result<Option<(Arc<tenkai::backup::Backups>, Option<Duration>)>> {
     let Some(dir) = std::env::var_os("TENKAI_BACKUP_DIR") else {
         return Ok(None);
@@ -1170,6 +1224,7 @@ fn backup_settings(
         !tenant_mode,
         "TENKAI_BACKUP_DIR backs up the SQLite store; tenant-mode hubs back up PostgreSQL with its own tools"
     );
+    let store = store.context("community backups require the SQLite operational store")?;
     let number = |name: &str, default: u64| -> Result<u64> {
         std::env::var(name)
             .ok()
@@ -1221,6 +1276,23 @@ mod tests {
         )
         .unwrap();
         path
+    }
+
+    #[test]
+    fn mixed_sqlite_and_postgres_flags_are_refused_before_opening_stores() {
+        let error = refuse_mixed_store_configuration(true, true)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("SQLite and PostgreSQL"), "{error}");
+        assert!(error.contains("ADR 0010"), "{error}");
+    }
+
+    #[test]
+    fn tenant_mode_refuses_remote_provider() {
+        refuse_tenant_remote_provider(true, ProviderMode::Remote).unwrap_err();
+        refuse_tenant_remote_provider(true, ProviderMode::Embedded).unwrap();
+        refuse_tenant_remote_provider(false, ProviderMode::Remote).unwrap();
     }
 
     #[test]

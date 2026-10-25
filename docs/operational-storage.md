@@ -24,8 +24,8 @@ authoritative plan, deployment, or reconciled environment record and inserts
 the `provider_events` row through the same SQLite transaction. A failed insert
 rolls back the object update; a committed object update therefore cannot lose
 its outcome row. PostgreSQL retains the same kind-filtered outbox contract, but
-the current mixed enterprise composition cannot claim atomic terminal wiring
-until PostgreSQL owns the corresponding authoritative state under ADR 0010.
+tenant-mode hubs refuse `--outcome-provider chisei` until PostgreSQL atomic
+outbox wiring exists.
 
 Software compatibility observations are immutable content-addressed operational
 records (`tenkai.software_compatibility_evidence`), indexed by environment and

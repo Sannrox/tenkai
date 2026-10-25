@@ -1,12 +1,13 @@
 //! Optional PostgreSQL multi-tenant operational store for the **control-plane hub**.
 //!
-//! Community hosts keep SQLite (`SqliteStore`). Enterprise hubs that need durable
-//! multi-tenant recovery can enable this adapter behind Cargo feature `postgres`.
+//! Community hosts keep SQLite (`SqliteStore`). Enterprise hubs open PostgreSQL
+//! as the sole authoritative store behind Cargo feature `postgres`.
 //!
-//! Model: **schema-per-tenant** inside one Tenkai-owned database (never co-located
-//! with the identity plane). Claims `shared_replica_state` under the
-//! single-active-writer model and durable tick fencing. Does **not** claim
-//! `high_availability` until ADR 0009's remaining HA drills and criteria land.
+//! Model: **schema-per-tenant** plus hub schema `tenkai_hub` inside one
+//! Tenkai-owned database (never co-located with the identity plane). Claims
+//! `shared_replica_state` under the single-active-writer model and durable tick
+//! fencing. Does **not** claim `high_availability` until ADR 0009's remaining HA
+//! drills and criteria land. SQLite is not opened in this profile.
 //!
 //! Connection strings come from env/config only — never argv secrets.
 //!
@@ -33,7 +34,9 @@ pub use capabilities::{
     tenant_postgres_store_capabilities,
 };
 pub use config::{
-    PostgresTenantConfig, require_hub_tenant_mode, resolve_server_tenant_store, tenant_schema_name,
+    EnterpriseHub, HUB_SCHEMA, PostgresTenantConfig, refuse_mixed_store_configuration,
+    require_hub_tenant_mode, resolve_enterprise_hub, resolve_server_tenant_store,
+    tenant_schema_name,
 };
 #[cfg(feature = "postgres")]
 pub use fence::PostgresReconcileFence;

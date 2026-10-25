@@ -64,6 +64,54 @@ fn open_without_feature_fails_closed() {
 }
 
 #[test]
+fn mixed_sqlite_and_postgres_configuration_is_refused() {
+    refuse_mixed_store_configuration(true, true).expect_err("mixed stores");
+    refuse_mixed_store_configuration(true, false).unwrap();
+    refuse_mixed_store_configuration(false, true).unwrap();
+    refuse_mixed_store_configuration(false, false).unwrap();
+}
+
+#[test]
+fn enterprise_hub_profile_is_postgres_only() {
+    use tenkai::runtime_capabilities::{
+        CapabilityName, RuntimeRequirements, community_auth_capabilities,
+        enterprise_auth_capabilities, validate_runtime_capabilities,
+    };
+
+    let provided = enterprise_postgres_hub_profile(enterprise_auth_capabilities());
+    assert_eq!(provided.profile, "enterprise-experimental");
+    assert!(
+        !provided
+            .components
+            .iter()
+            .any(|component| component.component_id == "store.sqlite")
+    );
+    validate_runtime_capabilities(
+        &provided,
+        &RuntimeRequirements {
+            tenant_mode: true,
+            replica_count: 2,
+            require_enterprise_authentication: true,
+            ..RuntimeRequirements::community()
+        },
+    )
+    .expect("postgres-only hub satisfies ADR 0010 enterprise startup");
+    let community = enterprise_postgres_hub_profile(community_auth_capabilities());
+    assert!(
+        validate_runtime_capabilities(
+            &community,
+            &RuntimeRequirements {
+                tenant_mode: true,
+                require_enterprise_authentication: true,
+                ..RuntimeRequirements::community()
+            },
+        )
+        .is_err()
+    );
+    assert!(community.supports(CapabilityName::TenantIsolation));
+}
+
+#[test]
 fn capabilities_advertise_tenant_and_shared_replica_not_ha() {
     let caps = tenant_postgres_store_capabilities();
     let names = caps.names().join(",");
@@ -196,6 +244,20 @@ fn resolve_server_tenant_store_fails_closed_without_feature_or_url() {
 }
 
 #[test]
+fn resolve_enterprise_hub_fails_closed_without_feature_or_url() {
+    let err = match resolve_enterprise_hub() {
+        Ok(_) => panic!("enterprise hub without config must fail closed"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        err.contains("features postgres")
+            || err.contains("TENKAI_POSTGRES_URL")
+            || err.contains("postgres"),
+        "{err}"
+    );
+}
+
+#[test]
 fn open_postgres_reconcile_fence_fails_closed_without_feature_or_url() {
     let err = match open_postgres_reconcile_fence() {
         Ok(_) => {
@@ -237,3 +299,5 @@ mod live_fixture;
 mod live_isolation;
 #[cfg(feature = "postgres")]
 mod live_retirement;
+#[cfg(feature = "postgres")]
+mod live_sole_store;

@@ -71,3 +71,37 @@ async fn remote_ctx_conforms_to_object_lifecycle() {
     assert_object_lifecycle(ctx).await;
     server.abort();
 }
+
+#[tokio::test]
+async fn tenant_hub_ctx_reads_empty_and_writes_fail_closed() {
+    let mut ctx = Ctx::tenant_hub();
+    assert!(!ctx.is_embedded());
+    assert!(ctx.is_tenant_hub());
+    assert_eq!(ctx.get("tenkai:conformance:object").await.unwrap(), None);
+    assert!(
+        ctx.list_kind("tenkai.conformance")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let object = Object {
+        id: "tenkai:conformance:object".into(),
+        kind: "tenkai.conformance".into(),
+        name: "original".into(),
+        ..Default::default()
+    };
+    let create = ctx.create_once(object.clone()).await.unwrap_err();
+    assert!(
+        create
+            .to_string()
+            .contains("enterprise hub does not open SQLite"),
+        "{create}"
+    );
+    let put = ctx.put(object).await.unwrap_err();
+    assert!(
+        put.to_string()
+            .contains("enterprise hub does not open SQLite"),
+        "{put}"
+    );
+}

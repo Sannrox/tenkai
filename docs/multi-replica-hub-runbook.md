@@ -6,13 +6,11 @@ not environment runtimes. It is a conformance lab, not a supported operating
 profile, product HA claim, failover procedure, or complete backup and recovery
 contract.
 
-The commands compose PostgreSQL tenant state with SQLite-backed non-tenant
-application state. That mixed-store diagnostic composition cannot activate the
-gated `enterprise-experimental` profile until PostgreSQL is the sole
-authoritative store and all readiness evidence in
-[ADR 0010](decisions/0010-supported-operating-profiles.md) exists. The supported
-profile contract remains `local` by default and experimental single-server
-`fleet` for remote runtime operation.
+The commands open PostgreSQL as the sole hub store (`tenkai_hub` plus
+`tenkai_t_*`). Mixed `--database` / `TENKAI_DATABASE` with `TENKAI_POSTGRES_URL`
+is refused. Catalog object-graph lifecycle and terminal-outcome export remain
+unavailable. The supported profile contract remains `local` by default and
+experimental single-server `fleet` for remote runtime operation.
 
 The lab assumes:
 
@@ -29,18 +27,17 @@ The lab assumes:
 
 | Component evidence exercised by this lab | **Not** guaranteed |
 | --- | --- |
-| Shared durable tenant state in Postgres | One complete authoritative operational store |
+| Shared durable hub and tenant state in Postgres | Catalog object-graph lifecycle |
 | Capability gate for `--replica-count > 1` | Multi-active concurrent writers without fencing |
 | Tick fence so two hosts do not double-reconcile the same env | Automatic multi-AZ product packaging |
-| Manual role-switch and PostgreSQL dump/restore exercises | Supported failover, backup, or recovery profile |
-| Tenant isolation conformance | Product HA inside canary/stage/prod |
+| Manual role-switch and PostgreSQL dump/restore exercises | Product HA or automatic failover |
+| Tenant isolation conformance | Terminal-outcome export |
 
 **Single-active writer component model:** at most one control-plane process
 should actively reconcile and mutate the tested tenant state. Lab peers share
 `TENKAI_POSTGRES_URL`. Tick fencing (`SharedReconcileFence` /
 `ReconcileTickFence`) reduces double-reconcile races when more than one process
-is live. SQLite still owns other authoritative state, so this composition has
-no single transaction, backup, restore, or cutover boundary.
+is live. PostgreSQL dump/restore is the hub recovery path.
 
 ## Prerequisites
 
@@ -85,14 +82,12 @@ export TENKAI_POSTGRES_URL='postgres://tenkai:tenkai@127.0.0.1:5432/tenkai'
 cargo run -p tenkai-server --features postgres,ui -- \
   --tenant-mode \
   --replica-count 2 \
-  --listen 127.0.0.1:8080 \
-  --database .tenkai-state/hub-1.db
+  --listen 127.0.0.1:8080
 ```
 
-Expect diagnostic composition identifier `enterprise-tenant-postgres` and
-capabilities including `tenant_isolation` and `shared_replica_state`. That
-identifier reports the current low-level composition; it is not the
-`enterprise-experimental` operating profile defined by ADR 0010.
+Expect diagnostic profile `enterprise-experimental` and capabilities including
+`tenant_isolation` and `shared_replica_state`. Catalog lifecycle stays
+unavailable. Product `high_availability` is not claimed.
 
 ### 3. Start secondary lab peer
 
@@ -103,14 +98,13 @@ export TENKAI_INSTANCE_ID=hub-2
 cargo run -p tenkai-server --features postgres,ui -- \
   --tenant-mode \
   --replica-count 2 \
-  --listen 127.0.0.1:8081 \
-  --database .tenkai-state/hub-2.db
+  --listen 127.0.0.1:8081
 ```
 
 Notes:
 
-- Local SQLite paths may still be used for non-tenant application paths; tenant
-  isolation uses Postgres schemas `tenkai_t_*`.
+- Both hosts open the same PostgreSQL database. Hub records live in
+  `tenkai_hub`; tenant isolation uses schemas `tenkai_t_*`.
 - With `--features postgres`, `TENKAI_POSTGRES_URL`, and `replica_count > 1`,
   both hosts use the durable Postgres `ReconcileTickFence`. Distinct
   `TENKAI_INSTANCE_ID` values are required.
@@ -128,9 +122,8 @@ Do not print tokens in logs or commit them.
 
 ## Manual role-switch conformance drill
 
-This drill tests shared tenant state and fencing only. It is not evidence for a
-supported failover or recovery profile because each host still has independent
-SQLite-backed application state.
+This drill tests shared hub state and fencing. It is a lab role-switch, not
+product HA.
 
 1. Confirm primary (`hub-1`) is healthy (`/readyz`, reconcile log lines).
 2. Stop primary (`Ctrl+C` or kill the process).
@@ -146,14 +139,13 @@ the same environment when both share a fence; with per-process fences only,
 
 ## PostgreSQL component dump and restore exercise
 
-This exercise covers the PostgreSQL tenant schemas used by the lab. It does not
-capture the SQLite-backed application state and therefore is not a complete
-Tenkai backup, restore, or enterprise recovery procedure.
+This exercise dumps the hub PostgreSQL database (`tenkai_hub` and
+`tenkai_t_*`). Tokens are re-injected from the secret store after restore.
 
 ### Backup
 
 ```bash
-# Logical dump (includes all tenant schemas tenkai_t_*)
+# Logical dump (includes hub schema tenkai_hub and tenant schemas tenkai_t_*)
 pg_dump "$TENKAI_POSTGRES_URL" -Fc -f tenkai-hub-$(date +%Y%m%d).dump
 ```
 
@@ -172,10 +164,8 @@ pg_restore -d "$TENKAI_POSTGRES_URL" --clean --if-exists tenkai-hub-YYYYMMDD.dum
 4. Re-inject management/runtime tokens from the secret store (never stored in DB).
 5. Only then start additional lab peers.
 
-SQLite `tenkaictl backup` / `restore` remains the community embedded path; it is
-**not** a substitute for a complete enterprise PostgreSQL backend. Conversely,
-the PostgreSQL dump above is not a substitute for backing up the mixed
-composition's SQLite state.
+SQLite `tenkaictl backup` / `restore` remains the community embedded path.
+Tenant-mode hubs refuse `TENKAI_BACKUP_DIR`.
 
 ## Durable tick fence (#135)
 
@@ -198,9 +188,8 @@ Mutation-level replay and stale-generation evidence:
   (ADR 0005 / 0008).
 - `high_availability` product flag is separate from `shared_replica_state` and
   is not claimed by the Postgres adapter by default.
-- No complete operating profile currently admits multiple server replicas;
-  `enterprise-experimental` remains gated by ADR 0010's single-store parity and
-  readiness evidence.
+- Catalog object-graph lifecycle and terminal-outcome export remain unavailable
+  in tenant mode.
 
 ## Related docs
 

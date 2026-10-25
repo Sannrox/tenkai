@@ -61,13 +61,19 @@ enum Backend {
         action_defs: action_lifecycle::RemoteActionDefs,
     },
     Embedded(Arc<crate::storage::SqliteStore>),
+    /// Enterprise hub: PostgreSQL owns authority; no SQLite catalog is opened.
+    TenantHub,
 }
+
+pub(super) const TENANT_HUB_UNAVAILABLE: &str =
+    "the enterprise hub does not open SQLite; catalog lifecycle is not available in tenant mode";
 
 impl Backend {
     fn object_lifecycle(&self) -> object_lifecycle::ObjectLifecycle<'_> {
         match self {
             Self::Remote { client, .. } => object_lifecycle::ObjectLifecycle::Remote(client),
             Self::Embedded(store) => object_lifecycle::ObjectLifecycle::Embedded(Arc::clone(store)),
+            Self::TenantHub => object_lifecycle::ObjectLifecycle::Unavailable,
         }
     }
 
@@ -77,6 +83,7 @@ impl Backend {
             Self::Embedded(store) => {
                 relation_lifecycle::RelationLifecycle::Embedded(Arc::clone(store))
             }
+            Self::TenantHub => relation_lifecycle::RelationLifecycle::Unavailable,
         }
     }
 
@@ -84,6 +91,7 @@ impl Backend {
         match self {
             Self::Remote { client, .. } => lease_lifecycle::LeaseLifecycle::Remote(client),
             Self::Embedded(store) => lease_lifecycle::LeaseLifecycle::Embedded(Arc::clone(store)),
+            Self::TenantHub => lease_lifecycle::LeaseLifecycle::Unavailable,
         }
     }
 
@@ -97,6 +105,7 @@ impl Backend {
                 action_defs,
             },
             Self::Embedded(store) => action_lifecycle::ActionLifecycle::Embedded(Arc::clone(store)),
+            Self::TenantHub => action_lifecycle::ActionLifecycle::Unavailable,
         }
     }
 }
