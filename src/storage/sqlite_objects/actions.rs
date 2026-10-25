@@ -1,14 +1,11 @@
 use super::*;
 
 impl SqliteStore {
-    pub fn register_schema(&self, schema: ObjectType) -> std::result::Result<(), tonic::Status> {
-        self.connection()
-            .map_err(|error| tonic::Status::internal(error.to_string()))?
-            .execute(
-                "INSERT OR REPLACE INTO catalog_schema_types(name,payload) VALUES(?1,?2)",
-                params![schema.kind, schema.encode_to_vec()],
-            )
-            .map_err(|error| tonic::Status::internal(error.to_string()))?;
+    pub fn register_schema(&self, schema: ObjectType) -> Result<()> {
+        self.connection()?.execute(
+            "INSERT OR REPLACE INTO catalog_schema_types(name,payload) VALUES(?1,?2)",
+            params![schema.kind, schema.encode_to_vec()],
+        )?;
         Ok(())
     }
 
@@ -21,14 +18,11 @@ impl SqliteStore {
         decode_many(payloads, "schema")
     }
 
-    pub fn register_action(&self, action: ActionTypeDef) -> std::result::Result<(), tonic::Status> {
-        self.connection()
-            .map_err(|error| tonic::Status::internal(error.to_string()))?
-            .execute(
-                "INSERT OR REPLACE INTO catalog_action_types(name,payload) VALUES(?1,?2)",
-                params![action.name, action.encode_to_vec()],
-            )
-            .map_err(|error| tonic::Status::internal(error.to_string()))?;
+    pub fn register_action(&self, action: ActionTypeDef) -> Result<()> {
+        self.connection()?.execute(
+            "INSERT OR REPLACE INTO catalog_action_types(name,payload) VALUES(?1,?2)",
+            params![action.name, action.encode_to_vec()],
+        )?;
         Ok(())
     }
 

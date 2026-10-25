@@ -192,6 +192,16 @@ impl From<Status> for ClientError {
     }
 }
 
+impl From<crate::storage::StoreError> for ClientError {
+    fn from(error: crate::storage::StoreError) -> Self {
+        match error {
+            crate::storage::StoreError::AlreadyExists { .. } => Self::UniqueConflict,
+            crate::storage::StoreError::NotFound { .. } => Self::NotFound,
+            other => Self::Failed(other.into()),
+        }
+    }
+}
+
 impl std::fmt::Display for ClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -238,6 +248,19 @@ impl std::error::Error for LeaseError {
         match self {
             Self::AlreadyExists => None,
             Self::Failed(error) => Some(error.as_ref()),
+        }
+    }
+}
+
+impl LeaseError {
+    pub(crate) fn from_anyhow(error: anyhow::Error) -> Self {
+        if error
+            .downcast_ref::<crate::storage::StoreError>()
+            .is_some_and(crate::storage::StoreError::is_already_exists)
+        {
+            Self::AlreadyExists
+        } else {
+            Self::Failed(error)
         }
     }
 }

@@ -23,14 +23,11 @@ impl SqliteStore {
             )
             .optional()?,
         )?;
-        if let Some(held) = current
+        if current
             .as_ref()
-            .filter(|lease| lease.status == "active" && lease.expires_at_ms > now)
+            .is_some_and(|lease| lease.status == "active" && lease.expires_at_ms > now)
         {
-            return Err(anyhow::Error::new(tonic::Status::already_exists(format!(
-                "embedded lease {namespace}/{key} is held by {}",
-                held.owner
-            ))));
+            return Err(StoreError::already_exists("lease", format!("{namespace}/{key}")).into());
         }
         let generation = current
             .as_ref()

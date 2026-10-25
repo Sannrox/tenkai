@@ -6,6 +6,27 @@ use crate::storage::OperationalStore;
 use prost::Message;
 
 #[test]
+fn create_once_conflict_is_store_already_exists() {
+    let path = std::env::temp_dir().join(format!(
+        "tenkai-743-create-{}-{}.db",
+        std::process::id(),
+        crate::now_millis()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let store = SqliteStore::open(&path).unwrap();
+    let object = Object {
+        id: "tenkai:conformance:object".into(),
+        kind: "tenkai.conformance".into(),
+        name: "original".into(),
+        ..Object::default()
+    };
+    store.create(object.clone()).unwrap();
+    let error = store.create(object).unwrap_err();
+    assert!(error.is_already_exists(), "{error}");
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn leftover_graph_cannot_authorize_apply_after_migration() {
     let path = std::env::temp_dir().join(format!(
         "tenkai-382-graph-{}-{}.db",

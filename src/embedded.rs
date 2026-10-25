@@ -15,7 +15,7 @@ use rusqlite::{
 
 use crate::pb::graph_action::{ActionResult, ActionTypeDef};
 use crate::pb::sekai::{Decision, Lease, Link, Object, ObjectChange, ObjectType};
-use crate::storage::{ProviderEventRecord, enqueue_provider_event_in};
+use crate::storage::{ProviderEventRecord, StoreError, enqueue_provider_event_in};
 
 const SCHEMA_VERSION: u32 = 5;
 
@@ -161,29 +161,20 @@ impl EmbeddedStore {
         )
     }
 
-    pub fn create(&self, object: Object) -> std::result::Result<Object, tonic::Status> {
-        let mut connection = self
-            .connection()
-            .map_err(|error| tonic::Status::internal(error.to_string()))?;
-        let tx = connection
-            .transaction()
-            .map_err(|error| tonic::Status::internal(error.to_string()))?;
+    pub fn create(&self, object: Object) -> crate::storage::Result<Object> {
+        let mut connection = self.connection().map_err(store_database)?;
+        let tx = connection.transaction().map_err(store_database)?;
         let changed = tx
             .execute(
                 "INSERT OR IGNORE INTO embedded_objects(id,kind,payload) VALUES(?1,?2,?3)",
                 params![object.id, object.kind, object.encode_to_vec()],
             )
-            .map_err(|error| tonic::Status::internal(error.to_string()))?;
+            .map_err(store_database)?;
         if changed == 0 {
-            return Err(tonic::Status::already_exists(format!(
-                "object {} already exists",
-                object.id
-            )));
+            return Err(StoreError::already_exists("object", object.id));
         }
-        replace_object_properties(&tx, &object)
-            .map_err(|error| tonic::Status::internal(error.to_string()))?;
-        tx.commit()
-            .map_err(|error| tonic::Status::internal(error.to_string()))?;
+        replace_object_properties(&tx, &object).map_err(store_database)?;
+        tx.commit().map_err(store_database)?;
         Ok(object)
     }
 
@@ -366,10 +357,7 @@ impl EmbeddedStore {
                 params![object.id, object.kind, object.encode_to_vec()],
             )?;
             if changed == 0 {
-                return Err(anyhow::Error::new(tonic::Status::already_exists(format!(
-                    "object {} already exists",
-                    object.id
-                ))));
+                return Err(StoreError::already_exists("object", object.id.clone()).into());
             }
             replace_object_properties(&tx, &object)?;
             tx.commit()?;
@@ -413,14 +401,8 @@ impl EmbeddedStore {
         Ok(())
     }
 
-    pub fn create_link(
-        &self,
-        link: Link,
-        fail_if_exists: bool,
-    ) -> std::result::Result<(), tonic::Status> {
-        let connection = self
-            .connection()
-            .map_err(|error| tonic::Status::internal(error.to_string()))?;
+    pub fn create_link(&self, link: Link, fail_if_exists: bool) -> crate::storage::Result<()> {
+        let connection = self.connection().map_err(store_database)?;
         let changed = connection
             .execute(
                 "INSERT OR IGNORE INTO embedded_links(id,from_id,to_id,relation,payload)
@@ -433,12 +415,9 @@ impl EmbeddedStore {
                     link.encode_to_vec()
                 ],
             )
-            .map_err(|error| tonic::Status::internal(error.to_string()))?;
+            .map_err(store_database)?;
         if fail_if_exists && changed == 0 {
-            return Err(tonic::Status::already_exists(format!(
-                "link {} already exists",
-                link.id
-            )));
+            return Err(StoreError::already_exists("link", link.id));
         }
         Ok(())
     }
@@ -624,10 +603,8 @@ impl EmbeddedStore {
         Ok(ids)
     }
 
-    pub fn register_schema(&self, schema: ObjectType) -> std::result::Result<(), tonic::Status> {
-        let connection = self
-            .connection()
-            .map_err(|error| tonic::Status::internal(error.to_string()))?;
+    pub fn register_schema(&self, schema: ObjectType) -> crate::storage::Result<()> {
+        let connection = self.connection().map_err(store_database)?;
         insert_definition(
             &connection,
             "embedded_schema_types",
@@ -641,10 +618,8 @@ impl EmbeddedStore {
         definitions(&connection, "embedded_schema_types", "schema")
     }
 
-    pub fn register_action(&self, action: ActionTypeDef) -> std::result::Result<(), tonic::Status> {
-        let connection = self
-            .connection()
-            .map_err(|error| tonic::Status::internal(error.to_string()))?;
+    pub fn register_action(&self, action: ActionTypeDef) -> crate::storage::Result<()> {
+        let connection = self.connection().map_err(store_database)?;
         insert_definition(
             &connection,
             "embedded_action_types",
@@ -780,10 +755,7 @@ impl EmbeddedStore {
             && current.status == "active"
             && current.expires_at_ms > now
         {
-            return Err(anyhow::Error::new(tonic::Status::already_exists(format!(
-                "embedded lease {namespace}/{key} is held by {}",
-                current.owner
-            ))));
+            return Err(StoreError::already_exists("lease", format!("{namespace}/{key}")).into());
         }
         let generation = current.map_or(1, |lease| lease.generation.saturating_add(1));
         let lease = Lease {
@@ -1217,17 +1189,19 @@ fn insert_definition(
     table: &str,
     name: &str,
     payload: Vec<u8>,
-) -> std::result::Result<(), tonic::Status> {
+) -> crate::storage::Result<()> {
     let sql = format!("INSERT OR IGNORE INTO {table}(name,payload) VALUES(?1,?2)");
     let changed = connection
         .execute(&sql, params![name, payload])
-        .map_err(|error| tonic::Status::internal(error.to_string()))?;
+        .map_err(store_database)?;
     if changed == 0 {
-        return Err(tonic::Status::already_exists(format!(
-            "definition {name} already exists"
-        )));
+        return Err(StoreError::already_exists("definition", name));
     }
     Ok(())
+}
+
+fn store_database(error: impl std::fmt::Display) -> StoreError {
+    StoreError::Database(error.to_string())
 }
 
 fn definitions<T: Message + Default>(

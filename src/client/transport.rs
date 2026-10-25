@@ -28,14 +28,12 @@ pub(crate) async fn block_embedded_status<T, F>(
 ) -> std::result::Result<T, super::ClientError>
 where
     T: Send + 'static,
-    F: FnOnce(&crate::storage::SqliteStore) -> std::result::Result<T, tonic::Status>
-        + Send
-        + 'static,
+    F: FnOnce(&crate::storage::SqliteStore) -> crate::storage::Result<T> + Send + 'static,
 {
     tokio::task::spawn_blocking(move || operation(&store))
         .await
         .unwrap_or_else(|error| {
-            Err(tonic::Status::unavailable(format!(
+            Err(crate::storage::StoreError::Database(format!(
                 "embedded store blocking task failed: {error}"
             )))
         })
