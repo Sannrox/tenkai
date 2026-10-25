@@ -227,6 +227,11 @@ never requires an inference binary. Operators enable the real process via env
 
 ## Classical ONNX scoring
 
+Parent epic: [#651](https://github.com/Sannrox/tenkai/issues/651).  
+Issues: [#727](https://github.com/Sannrox/tenkai/issues/727),
+[#728](https://github.com/Sannrox/tenkai/issues/728);
+registry attestation: [Sannrox/hinagata#39](https://github.com/Sannrox/hinagata/issues/39).
+
 `runtime.engine = "onnx"` is the deploy path for classical models registered
 with a signed online descriptor. The release carries the descriptor as
 `model.registry_descriptor` (a relative JSON file, hashed with the other
