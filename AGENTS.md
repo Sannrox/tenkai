@@ -97,16 +97,16 @@ read `docs/operational-storage.md`.
 
 ## Ontology Policy
 
-For portable ontology definitions, classes, relations, provenance, validation,
-import, export, or structural queries, always use the project-local
-`sekai-ontology` Skill in `.agents/skills/sekai-ontology/`.
+Tenkai's ontology is the closed set of schema kinds, relation names, and
+identifier rules in `src/ontology.rs`. Those names identify catalog, plan,
+environment, and execution records in the operational store. They are not a
+portable Sekai ontology database, and this repository has no tracked portable
+ontology artifact.
 
-Select the ontology database explicitly with `--db <path>` or `SEKAI_DB`, then
-run `sekai --db <path> --json validate` before relying on its contents. Treat
-successful ontology output as structured repository evidence, preserve its
-provenance in answers, and state when validation fails or the requested fact
-is absent rather than inferring it. Do not use Tenkai's operational SQLite
-database as a portable ontology database.
+Do not use Tenkai's operational SQLite database as a portable ontology
+database. For kind and identifier questions, read `src/ontology.rs` and the
+persistence modules that store those records. Do not infer kinds the module
+does not define.
 
 ## Agent boundaries
 
@@ -176,7 +176,7 @@ Prefer publishing PR branch tips with GitHub-signed commits so GitHub shows
 
 1. Implement and commit locally as usual (`commit.gpgsign` may still apply).
 2. Publish the branch tip with `scripts/gh-verified-push.sh` instead of a plain
-   `git push` when you want the hosted commit Verified (OpenClaw-style GraphQL
+   `git push` when you want the hosted commit Verified (GraphQL
    `createCommitOnBranch`). That path creates one server-side commit with the
    local `HEAD` tree; committer is typically **GitHub**.
 3. New branch:

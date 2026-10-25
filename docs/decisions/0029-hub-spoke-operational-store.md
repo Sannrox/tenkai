@@ -129,6 +129,6 @@ adapter boundary, and refuse process startup when both engines are configured.
 
 ## Evidence and provenance
 
-Source audit of `src/embedded.rs`, `src/storage.rs`, `src/postgres_tenant.rs`,
+Source audit of `src/embedded.rs`, `src/storage.rs`, `crates/tenkai-postgres/`,
 `src/client.rs`, `src/tenant_store.rs`, ADR 0001, ADR 0008, ADR 0010, and the
 shipped recovery drills. No new store implementation is in this change.

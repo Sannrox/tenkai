@@ -262,7 +262,7 @@ pub fn tenant_visible_rpcs() -> &'static [TenantVisibleRpc] {
 }
 
 /// Tenant-visible RPCs that are **live on management HTTP** today and must be
-/// enforced in `src/server.rs` under tenant mode.
+/// enforced in `crates/tenkai-http` under tenant mode.
 ///
 /// All other entries in [`tenant_visible_rpcs`] remain harness or in-process
 /// enterprise surfaces; they are not advertised as public HTTP unless listed
