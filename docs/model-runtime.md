@@ -21,6 +21,7 @@ format = "gguf"
 quantization = "Q4_K_M"
 artifact_digest = "sha256:…"   # 64 hex chars
 license = "apache-2.0"
+# registry_descriptor = "signed-descriptor.json"  # required for engine = "onnx"
 
 [runtime]
 engine = "llama.cpp"
@@ -51,7 +52,12 @@ health → rollback. The local reference executor stages the **descriptor** only
 Engine plugins that download multi-GB weights implement `ModelRuntimeExecutor`.
 
 Apply selects the executor by `runtime.engine`. `llama.cpp` keeps the
-reference executor. `vllm` uses the host-injected executor, only on an
+reference executor. `onnx` uses the classical scoring executor: it verifies a
+signed registry online descriptor (`model.registry_descriptor`) against
+trusted registry keys, checks the artifact digest, applies declared
+resources and health paths, and runs scoring through an injected engine port
+(a fake engine in CI). Prediction summaries are exported to the descriptor
+monitoring path. `vllm` uses the host-injected executor, only on an
 environment that carries `cluster_config_path`; without a cluster
 configuration or a host executor it fails closed, as does any unknown engine.
 The host registers its factory at process start (`tenkai-executor` installs
@@ -217,6 +223,34 @@ future plugins implementing the same ports.
 Default apply wiring uses `FakeInferenceEngine` so community software-only CI
 never requires an inference binary. Operators enable the real process via env
 (see golden path below). Manifest fields are passed as argv only (no shell).
+
+## Classical ONNX scoring
+
+`runtime.engine = "onnx"` is the deploy path for classical models registered
+with a signed online descriptor. The release carries the descriptor as
+`model.registry_descriptor` (a relative JSON file, hashed with the other
+immutable inputs). Apply:
+
+1. Verifies the signed descriptor and the embedded version manifest against
+   the host's trusted registry keys (`TENKAI_MODEL_REGISTRY_TRUSTED_KEYS`).
+2. Refuses a digest mismatch between the descriptor, the manifest, and
+   `model.artifact_digest`, and verifies the weight bytes through
+   `WeightCache`.
+3. Starts a candidate scoring runtime through `OnnxScoringEngine` (CI uses
+   `FakeOnnxEngine`) with the descriptor's resources and `/healthz` /
+   `/readyz` health paths.
+4. On smoke success, activates the candidate, retains the previous generation
+   for ordinary Tenkai rollback, and exports a prediction summary to the
+   descriptor monitoring path (`TENKAI_MODEL_REGISTRY_URL` when set).
+
+Unknown keys, a tampered descriptor, or a missing workdir fail closed. Canary
+and promotion stay on the existing release flow; the promotion-gate slice is
+separate.
+
+| Variable | Meaning |
+| --- | --- |
+| `TENKAI_MODEL_REGISTRY_TRUSTED_KEYS` | JSON file `{"keys":[{"key_id":"…","public_key":"<64 hex>"}]}` |
+| `TENKAI_MODEL_REGISTRY_URL` | Optional base URL that receives `POST {path}` prediction summaries |
 
 ### Operator golden path (real llama.cpp)
 

@@ -116,6 +116,7 @@ fn descriptor(
             quantization: "bf16".into(),
             artifact_digest: digest.into(),
             license: "apache-2.0".into(),
+            registry_descriptor: String::new(),
         },
         runtime: ModelRuntimeSection {
             engine: "vllm".into(),

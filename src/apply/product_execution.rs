@@ -62,8 +62,9 @@ pub(super) async fn activate(
             crate::model_runtime::ModelRuntimeDescriptor::from_manifest(&content.manifest)?;
         // Engine selection: llama.cpp keeps the reference executor (fake by
         // default; real binary when TENKAI_LLAMA_SERVER / TENKAI_USE_REAL_LLAMA
-        // is set, see model-runtime.md); other engines use the host-injected
-        // executor and fail closed without one.
+        // is set, see model-runtime.md); onnx verifies a signed registry
+        // descriptor and runs the injected scoring port; other engines use the
+        // host-injected executor and fail closed without one.
         let executor = match model_runtime_executor(ctx, content, adapters, &descriptor).await? {
             Ok(executor) => executor,
             Err(detail) => return Ok(Err(detail)),
@@ -618,6 +619,7 @@ async fn model_runtime_executor(
         registry: adapters.artifact_registry_handle,
         mirrors: crate::oci_artifact::mirrors_from_properties(&env_obj.properties),
         isolated,
+        workdir: Some(content.workdir.clone()),
     });
     Ok(crate::model_runtime::select_model_runtime_executor(
         descriptor,

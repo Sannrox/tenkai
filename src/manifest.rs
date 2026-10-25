@@ -226,6 +226,10 @@ pub struct ModelSection {
     pub quantization: String,
     pub artifact_digest: String,
     pub license: String,
+    /// Relative path of a signed registry online descriptor
+    /// (`hinagata.signed-descriptor/v1`). Required for `runtime.engine = "onnx"`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub registry_descriptor: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -703,6 +707,15 @@ impl Manifest {
             && !inputs.contains(&module.document)
         {
             inputs.push(module.document.clone());
+        }
+        if let Some(path) = self
+            .model
+            .as_ref()
+            .map(|model| model.registry_descriptor.as_str())
+            .filter(|path| !path.is_empty())
+            && !inputs.iter().any(|input| input == path)
+        {
+            inputs.push(path.to_string());
         }
         inputs
     }
