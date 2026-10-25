@@ -14,6 +14,7 @@ use crate::pb::sekai::{
 pub(super) enum LeaseLifecycle<'a> {
     Remote(&'a RemoteClient),
     Embedded(Arc<crate::storage::SqliteStore>),
+    Unavailable,
 }
 
 impl LeaseLifecycle<'_> {
@@ -25,6 +26,9 @@ impl LeaseLifecycle<'_> {
         ttl_ms: i64,
     ) -> std::result::Result<Lease, super::LeaseError> {
         match self {
+            Self::Unavailable => Err(super::LeaseError::Failed(anyhow::anyhow!(
+                super::TENANT_HUB_UNAVAILABLE
+            ))),
             Self::Embedded(store) => {
                 let store = Arc::clone(store);
                 let namespace = namespace.to_string();
@@ -70,6 +74,7 @@ impl LeaseLifecycle<'_> {
 
     pub(super) async fn get(&self, namespace: &str, key: &str) -> Result<Option<Lease>> {
         match self {
+            Self::Unavailable => Ok(None),
             Self::Embedded(store) => {
                 let store = Arc::clone(store);
                 let namespace = namespace.to_string();
@@ -106,6 +111,7 @@ impl LeaseLifecycle<'_> {
         ttl_ms: i64,
     ) -> Result<Lease> {
         match self {
+            Self::Unavailable => anyhow::bail!(super::TENANT_HUB_UNAVAILABLE),
             Self::Embedded(store) => {
                 let store = Arc::clone(store);
                 let namespace = namespace.to_string();
@@ -145,6 +151,7 @@ impl LeaseLifecycle<'_> {
         fencing_token: &str,
     ) -> Result<Lease> {
         match self {
+            Self::Unavailable => anyhow::bail!(super::TENANT_HUB_UNAVAILABLE),
             Self::Embedded(store) => {
                 let store = Arc::clone(store);
                 let namespace = namespace.to_string();
@@ -186,6 +193,7 @@ impl LeaseLifecycle<'_> {
         ttl_ms: i64,
     ) -> Result<Lease> {
         match self {
+            Self::Unavailable => anyhow::bail!(super::TENANT_HUB_UNAVAILABLE),
             Self::Embedded(store) => {
                 let store = Arc::clone(store);
                 let namespace = namespace.to_string();

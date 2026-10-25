@@ -36,6 +36,7 @@ pub(super) enum ActionLifecycle<'a> {
         action_defs: &'a RemoteActionDefs,
     },
     Embedded(Arc<crate::storage::SqliteStore>),
+    Unavailable,
 }
 
 impl ActionLifecycle<'_> {
@@ -44,6 +45,9 @@ impl ActionLifecycle<'_> {
         action: ActionTypeDef,
     ) -> std::result::Result<(), super::ClientError> {
         match self {
+            Self::Unavailable => Err(super::ClientError::Failed(anyhow!(
+                super::TENANT_HUB_UNAVAILABLE
+            ))),
             Self::Embedded(store) => {
                 let store = Arc::clone(store);
                 super::block_embedded_status(store, move |store| store.register_action(action))
@@ -98,6 +102,7 @@ impl ActionLifecycle<'_> {
         dry_run: bool,
     ) -> Result<ActionResult> {
         match self {
+            Self::Unavailable => anyhow::bail!(super::TENANT_HUB_UNAVAILABLE),
             Self::Embedded(store) => {
                 let store = Arc::clone(store);
                 let action = action.to_string();
@@ -183,6 +188,7 @@ impl ActionLifecycle<'_> {
 
     pub(super) async fn deny(&self, approval_id: &str, reason: &str) -> Result<()> {
         match self {
+            Self::Unavailable => anyhow::bail!(super::TENANT_HUB_UNAVAILABLE),
             Self::Embedded(_) => anyhow::bail!(
                 "embedded mode has no deferred approvals; action {approval_id} cannot be denied"
             ),
@@ -202,6 +208,7 @@ impl ActionLifecycle<'_> {
         after: i64,
     ) -> Result<Vec<Decision>> {
         match self {
+            Self::Unavailable => Ok(Vec::new()),
             Self::Embedded(store) => {
                 let store = Arc::clone(store);
                 let actor = actor.to_string();

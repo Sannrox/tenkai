@@ -90,6 +90,9 @@ impl Ctx {
                 "find_by_property order key must be non-empty"
             );
         }
+        if self.is_tenant_hub() {
+            return Ok(Vec::new());
+        }
         if let Some(store) = self.embedded_arc() {
             let kind = query.kind.to_string();
             let key = query.key.to_string();
@@ -150,6 +153,9 @@ impl Ctx {
     }
 
     pub async fn list_kind(&mut self, kind: &str) -> Result<Vec<Object>> {
+        if self.is_tenant_hub() {
+            return Ok(Vec::new());
+        }
         if let Some(store) = self.embedded_arc() {
             let kind = kind.to_string();
             return block_embedded(store, move |store| store.list_kind(&kind)).await;
@@ -184,6 +190,9 @@ impl Ctx {
     /// Remote adapters still page `ListObjects` and keep only ids; there is no
     /// cheaper name/id RPC on the vendored protocol.
     pub(crate) async fn list_kind_ids(&mut self, kind: &str) -> Result<Vec<String>> {
+        if self.is_tenant_hub() {
+            return Ok(Vec::new());
+        }
         if let Some(store) = self.embedded_arc() {
             let kind = kind.to_string();
             return block_embedded(store, move |store| store.list_kind_ids(&kind)).await;

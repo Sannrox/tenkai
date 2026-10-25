@@ -39,12 +39,12 @@ pub fn tenant_postgres_store_capabilities() -> ComponentCapabilities {
     )
 }
 
-/// Compose a host capability profile: community auth + Postgres tenant hub store.
+/// Compose the enterprise hub profile: PostgreSQL is the sole store.
 pub fn enterprise_postgres_hub_profile(
     auth: ComponentCapabilities,
 ) -> tenkai::runtime_capabilities::ProvidedCapabilities {
     tenkai::runtime_capabilities::ProvidedCapabilities::assemble(
-        "enterprise-tenant-postgres",
+        "enterprise-experimental",
         [tenant_postgres_store_capabilities(), auth],
     )
 }

@@ -211,12 +211,10 @@ cannot observe another tenant's outcome identities.
 Pre-v2 outcome rows remain durable for delivery but are omitted from this
 projection because their historical identity did not bind every returned field.
 
-The PostgreSQL adapter exposes the same kind-filtered queue contract, but the
-current mixed SQLite/PostgreSQL composition does not provide atomic terminal
-wiring for the gated `enterprise-experimental` profile. That profile therefore
-does not advertise terminal-outcome, audit, or planning-event export until
-PostgreSQL owns the complete authoritative state and its wiring and recovery
-evidence are complete.
+The PostgreSQL adapter exposes the same kind-filtered queue contract.
+Tenant-mode hubs refuse `--outcome-provider chisei` until PostgreSQL atomic
+outbox wiring exists, so the profile does not advertise terminal-outcome,
+audit, or planning-event export.
 
 ## Remote gate HTTP JSON contract (#113)
 

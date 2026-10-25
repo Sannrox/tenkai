@@ -42,16 +42,14 @@ composition, not an operator support contract:
 - `community-sqlite` is the current diagnostic identifier for SQLite-backed
   hosts. It underlies the stable default `local` profile and the experimental
   single-server `fleet` profile.
-- `enterprise-tenant-postgres` identifies the current mixed composition:
-  PostgreSQL owns tenant-store state while SQLite still owns non-tenant
-  application state. It is a test-only integration surface, not the gated
-  `enterprise-experimental` operating profile.
+- `enterprise-experimental` identifies the tenant-mode hub composition:
+  PostgreSQL is the sole authoritative store (`store.tenant_postgres` plus
+  authentication). SQLite is not opened. Catalog object-graph lifecycle and
+  terminal-outcome export remain unavailable. Product `high_availability` is
+  not claimed.
 
-ADR 0010 defines complete operating profiles. The mixed-store composition
-cannot activate `enterprise-experimental` until PostgreSQL is the sole
-authoritative operational store and the ADR's startup, conformance, migration,
-backup, restore, and usability evidence exists. Capability negotiation remains
-useful component evidence, but a set of component claims is not by itself a
+ADR 0010 defines complete operating profiles. Capability negotiation remains
+useful component evidence; a set of component claims is not by itself a
 support, failover, or recovery promise.
 
 ## Community SQLite diagnostic composition
@@ -83,11 +81,10 @@ only — not multi-writer reconcile. Multi-replica and HA flags fail closed unti
 a store honestly advertises the matching capabilities. Decision:
 [ADR 0009](decisions/0009-multi-replica-reconcile-and-ha-profile.md).
 
-The optional Postgres tenant-store component (`--features postgres`) advertises
-`shared_replica_state` under a **single-active-writer** model (failover on
-the shared tenant-state database). Multi-host conformance uses tick fencing;
-neither claim covers SQLite-backed application state or establishes product
-failover, HA, backup, or recovery. See
+The optional Postgres hub store (`--features postgres`, `--tenant-mode`)
+advertises `shared_replica_state` under a **single-active-writer** model.
+Multi-host conformance uses tick fencing. Product failover, HA, and
+catalog-lifecycle guarantees remain out of this claim. See
 [postgres-tenant-store.md](postgres-tenant-store.md#shared-replica-state-128)
 and [multi-replica-hub-runbook.md](multi-replica-hub-runbook.md).
 
@@ -168,8 +165,8 @@ Automated coverage lives in `community_sqlite_compatibility_matrix()` and the
 
 ## Non-goals
 
-This contract does **not** implement complete PostgreSQL authority, tenant
-lifecycle, high availability, or operating-profile activation. Future adapters
+This contract does **not** implement product high availability, catalog
+object-graph lifecycle on PostgreSQL, or terminal-outcome export. Adapters
 add component capabilities by implementing
 `OperationalStore::runtime_capabilities` and composing auth extension claims;
-ADR 0010 separately governs when a complete profile may be selected.
+ADR 0010 separately governs operator support.

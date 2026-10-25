@@ -17,11 +17,13 @@ use crate::pb::sekai::{
 pub(super) enum ObjectLifecycle<'a> {
     Remote(&'a RemoteClient),
     Embedded(Arc<crate::storage::SqliteStore>),
+    Unavailable,
 }
 
 impl ObjectLifecycle<'_> {
     pub(super) async fn get(&self, id: &str) -> Result<Option<Object>> {
         match self {
+            Self::Unavailable => Ok(None),
             Self::Embedded(store) => {
                 let store = Arc::clone(store);
                 let id = id.to_string();
@@ -48,6 +50,9 @@ impl ObjectLifecycle<'_> {
         object: Object,
     ) -> std::result::Result<Object, super::ClientError> {
         match self {
+            Self::Unavailable => Err(super::ClientError::Failed(anyhow::anyhow!(
+                super::TENANT_HUB_UNAVAILABLE
+            ))),
             Self::Embedded(store) => {
                 let store = Arc::clone(store);
                 super::block_embedded_status(store, move |store| store.create(object)).await
@@ -79,6 +84,7 @@ impl ObjectLifecycle<'_> {
 
     pub(super) async fn delete(&self, id: &str) -> Result<()> {
         match self {
+            Self::Unavailable => anyhow::bail!(super::TENANT_HUB_UNAVAILABLE),
             Self::Embedded(store) => {
                 let store = Arc::clone(store);
                 let id = id.to_string();
@@ -101,6 +107,7 @@ impl ObjectLifecycle<'_> {
 
     pub(super) async fn put(&self, object: Object) -> Result<Object> {
         match self {
+            Self::Unavailable => anyhow::bail!(super::TENANT_HUB_UNAVAILABLE),
             Self::Embedded(store) => {
                 let store = Arc::clone(store);
                 super::block_embedded(store, move |store| store.put(object)).await

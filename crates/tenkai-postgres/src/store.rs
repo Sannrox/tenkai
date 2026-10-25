@@ -1,8 +1,8 @@
 use tenkai::auth_context::AuthenticatedRequestContext;
 use tenkai::runtime_capabilities::ComponentCapabilities;
-use tenkai::storage::EnvironmentRecord;
-#[cfg(feature = "postgres")]
-use tenkai::storage::Result;
+#[cfg(not(feature = "postgres"))]
+use tenkai::storage::StoreError;
+use tenkai::storage::{EnvironmentRecord, Result};
 use tenkai::tenant_isolation::IsolationError;
 
 #[cfg(feature = "postgres")]
@@ -30,6 +30,28 @@ pub struct PostgresTenantOperationalStore {
 impl PostgresTenantOperationalStore {
     pub fn runtime_capabilities(&self) -> ComponentCapabilities {
         tenant_postgres_store_capabilities()
+    }
+
+    /// Host-scoped operational store in schema [`crate::HUB_SCHEMA`].
+    ///
+    /// Audit, runtime claims, and the hub outbox live here so the enterprise
+    /// process does not open SQLite for authoritative state.
+    pub fn hub_partition(&self) -> Result<PostgresTenantPartition> {
+        #[cfg(feature = "postgres")]
+        {
+            self.inner.ensure_tenant_schema(crate::HUB_SCHEMA)?;
+            Ok(PostgresTenantPartition {
+                tenant_id: "hub".into(),
+                schema: crate::HUB_SCHEMA.into(),
+                inner: self.inner.clone(),
+            })
+        }
+        #[cfg(not(feature = "postgres"))]
+        {
+            Err(StoreError::AdapterUnavailable(
+                "rebuild tenkai with --features postgres to use the PostgreSQL hub store".into(),
+            ))
+        }
     }
 
     #[cfg(feature = "postgres")]

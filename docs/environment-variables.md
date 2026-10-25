@@ -36,7 +36,7 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `TENKAI_DATABASE` | `.tenkai-state/tenkai.db` | Embedded or server-owned operational SQLite database |
+| `TENKAI_DATABASE` | `.tenkai-state/tenkai.db` | Community SQLite path for embedded `tenkaictl` and community `tenkai-server`. Invalid with `--tenant-mode` or `TENKAI_POSTGRES_URL` |
 | `TENKAI_HOST_WEBHOOKS` | unset | `tenkai-server` only: JSON list of webhook endpoints for host events (`backup.stale`, `clock.drift`) ([operational events](deploy-webhooks.md#operational-events)) |
 | `TENKAI_SMTP_SINKS` | unset | `tenkai-server` only: JSON list of SMTP digest sinks for operational events ([SMTP digests](deploy-webhooks.md#smtp-digests)) |
 | `TENKAI_AUDIT_EXPORT_DIR` | unset | `tenkai-server` only: directory of the scheduled [audit export](audit-export.md) chain. Set with `TENKAI_AUDIT_SIGNING_KEY` |
@@ -87,7 +87,7 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | `TENKAI_RUNTIME_TOKENS` | `{}` | JSON object mapping bearer secrets to one environment each |
 | `TENKAI_ENVIRONMENT_MANAGEMENT_TOKENS` | `{}` | JSON object mapping environment-scoped management bearers to one environment each; distinct from the fleet management token and runtime tokens |
 | `TENKAI_OIDC_CONFIG` | unset | Filesystem path to an OIDC trust TOML file; the server verifies OIDC access tokens sent as `Authorization: Bearer` and maps groups to grants ([configure server authentication](configure-server-authentication.md#oidc-access-tokens-468)). May be set together with `TENKAI_JWT_VERIFIER_CONFIG` when the issuers differ |
-| `TENKAI_POSTGRES_URL` | unset | Hub tenant-store URL only; embedded `tenkaictl` and spoke `tenkai-server` fail closed when it is set. Non-loopback hosts require verified TLS |
+| `TENKAI_POSTGRES_URL` | unset | Sole hub store URL for `--tenant-mode`. Invalid together with `TENKAI_DATABASE`. Embedded `tenkaictl` and spoke `tenkai-server` fail closed when it is set. Non-loopback hosts require verified TLS |
 | `TENKAI_INSTANCE_ID` | random UUID per process | Replica identity used for multi-replica fencing; the server records it as `tenkai-server-<value>` |
 | `TENKAI_ENABLE_METRICS` | `false` | Enable the Prometheus scrape endpoint (`--enable-metrics`) |
 | `TENKAI_AGENT_ACTOR_POLICY` | `require_approval` | Mutations whose token `act` chain names an agent: `require_approval` allows only plans, which still need approval under the environment's policy; `forbid` refuses all ([auth request context](auth-request-context.md#delegated-calls-and-agent-actors)) |

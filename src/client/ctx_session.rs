@@ -39,6 +39,21 @@ impl Ctx {
         Self::embedded_application_state(path, outcome_export_enabled, false)
     }
 
+    /// Enterprise hub catalog port. PostgreSQL owns authority; this context
+    /// does not open SQLite.
+    pub fn tenant_hub() -> Self {
+        Self {
+            backend: Backend::TenantHub,
+            canary_schema_preflight: Arc::new(OnceCell::new()),
+            outcome_export_enabled: false,
+            outcome_inspection_enabled: true,
+            release_trust_roots: None,
+            require_host_release_trust: false,
+            plan_kind_list: Arc::new(PlanKindListTick::default()),
+            health_metrics: None,
+        }
+    }
+
     fn embedded_application_state(
         path: impl AsRef<Path>,
         outcome_export_enabled: bool,
@@ -81,6 +96,10 @@ impl Ctx {
 
     pub fn is_embedded(&self) -> bool {
         matches!(self.backend, Backend::Embedded(_))
+    }
+
+    pub(crate) fn is_tenant_hub(&self) -> bool {
+        matches!(self.backend, Backend::TenantHub)
     }
 
     /// Whether this context is already bound to a reconcile-tick Plan kind-list

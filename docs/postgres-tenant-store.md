@@ -1,21 +1,22 @@
 # Optional PostgreSQL tenant OperationalStore integration
 
-Postgres is an **optional**, component-level multi-tenant store adapter for the
-**Tenkai hub** (`tenkai-server` / control plane), not for remote environment
-agents. The current server composition keeps non-tenant application state in
-SQLite, so this adapter is test-only integration evidence rather than a
-supported operating profile or complete recovery backend.
+Postgres is the **sole authoritative store** for tenant-mode `tenkai-server`
+hubs compiled with `--features postgres`. Community and spoke hosts keep
+SQLite. Supplying both `--database` / `TENKAI_DATABASE` and
+`TENKAI_POSTGRES_URL` is refused (ADR 0010). This adapter is for the
+**Tenkai hub** (control plane), not for remote environment agents.
 
 [ADR 0010](decisions/0010-supported-operating-profiles.md) defines the supported
 profiles. The default `local` profile and experimental single-server `fleet`
-profile use SQLite. The gated `enterprise-experimental` profile cannot activate
-until PostgreSQL is the sole authoritative store and every ADR 0010 readiness
-requirement passes.
+profile use SQLite. Tenant-mode hubs assemble diagnostic profile
+`enterprise-experimental` from PostgreSQL plus authentication; catalog
+object-graph lifecycle and terminal-outcome export remain unavailable until
+those surfaces are wired on PostgreSQL.
 
 | Role | Store |
 | --- | --- |
 | Community / solo | SQLite (`SqliteStore`) — default |
-| Tenant-store integration and conformance | Optional Postgres (`PostgresTenantOperationalStore`) |
+| Enterprise hub (`--tenant-mode`) | PostgreSQL sole store (`tenkai_hub` plus `tenkai_t_*`) |
 | Conformance without Postgres | In-memory tenant partitions (`InMemoryTenantOperationalStore`) |
 
 Source: `crates/tenkai-postgres`. Decision: [ADR 0008](decisions/0008-production-tenant-operational-store.md).
@@ -44,7 +45,7 @@ shared application store, or supported failover. It does **not** advertise
 | --- | --- |
 | `shared_replica_state` | Shared durable state for this adapter; sufficient for single-active-writer component tests |
 | Tick fence table | `tenkai_reconcile_tick_claims` for multi-host reconcile (#135); not a HA product claim |
-| Not claimed yet | Complete PostgreSQL authority, product `high_availability`, supported failover or recovery |
+| Not claimed yet | Product `high_availability`, catalog object-graph lifecycle, terminal-outcome export |
 
 Community SQLite never advertises `shared_replica_state`.
 The two-connection mutation and lease-handoff proof is documented in
@@ -113,14 +114,13 @@ Default CI does **not** require a Postgres service. Live tests are `#[ignore]`.
 
 ## Component backup notes
 
-- Use Postgres-native backup (`pg_dump` / continuous archiving) to exercise
-  backup of the adapter's tenant schemas.
-- Document tenant schema names (`tenkai_t_*`) in ops runbooks.
-- A lab restore stops writers, restores the PostgreSQL component, starts one
-  server, and verifies `/readyz`.
-- This does not restore SQLite-backed releases, channels, environments, plans,
-  execution, receipts, rollback, or other non-tenant application state. It is
-  therefore not an enterprise backup, cutover, or recovery contract.
+- Use Postgres-native backup (`pg_dump` / continuous archiving) of the hub
+  database. The dump includes hub schema `tenkai_hub` and tenant schemas
+  `tenkai_t_*`.
+- A lab restore stops writers, restores that database, starts one server, and
+  verifies `/readyz`.
+- `TENKAI_BACKUP_DIR` is refused in tenant mode; SQLite `tenkaictl backup` is
+  the community path.
 - Do not confuse with environment runtime state or identity-plane backups.
 
 ## `tenkai-server` wiring (#127)
@@ -147,13 +147,14 @@ Rules:
 | No `--tenant-mode` on a `postgres`-feature hub host | Startup fails: this is not the community SQLite host |
 | `--tenant-mode` without feature | Startup fails: rebuild with `--features postgres` |
 | `--tenant-mode` without `TENKAI_POSTGRES_URL` | Startup fails closed |
-| `--tenant-mode` + feature + URL | Wires `PostgresTenantOperationalStore`; diagnostic composition `enterprise-tenant-postgres` |
+| `--tenant-mode` + `--database` / `TENKAI_DATABASE` | Startup fails: mixed SQLite and PostgreSQL configuration is refused |
+| `--tenant-mode` + feature + URL | Opens PostgreSQL as the sole store; diagnostic profile `enterprise-experimental` |
 
 In-memory adapter remains for unit tests (`ServerConfig.tenant_store = Some(Arc::new(InMemory…))`).
 
 `--replica-count > 1` passes capability negotiation when the Postgres hub store
-is composed (#128). Multi-active reconcile uses tick fencing (#129). These
-component claims do not activate `enterprise-experimental`; the mixed-store
-path must remain a diagnostic/conformance composition until PostgreSQL owns
-every authoritative surface and ADR 0010 readiness evidence exists. Lab steps:
+is composed (#128). Multi-active reconcile uses tick fencing (#129). Catalog
+lifecycle stays fail-closed in tenant mode. `--outcome-provider chisei` is
+refused until PostgreSQL atomic outbox wiring exists. Product
+`high_availability` remains unclaimed. Lab steps:
 [multi-replica-hub-runbook.md](multi-replica-hub-runbook.md) (#130).

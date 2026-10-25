@@ -1,8 +1,33 @@
-use tenkai::storage::{Result, StoreError};
+use std::sync::Arc;
+
+use tenkai::storage::{OperationalStore, Result, StoreError};
 use tenkai::tenant_store::TenantOperationalStore;
 
 use super::PostgresTenantOperationalStore;
 use super::postgres_feature_enabled;
+
+/// Hub-wide PostgreSQL schema for host-scoped operational records (audit,
+/// runtime claims, provider outbox). Distinct from per-tenant `tenkai_t_*`.
+pub const HUB_SCHEMA: &str = "tenkai_hub";
+
+/// Enterprise hub composition: tenant partitions plus the hub operational store.
+pub struct EnterpriseHub {
+    pub tenant: Arc<dyn TenantOperationalStore>,
+    pub operational: Arc<dyn OperationalStore>,
+}
+
+/// ADR 0010: a process selects exactly one authoritative operational backend.
+pub fn refuse_mixed_store_configuration(
+    sqlite_configured: bool,
+    postgres_configured: bool,
+) -> Result<()> {
+    if sqlite_configured && postgres_configured {
+        return Err(StoreError::AdapterUnavailable(
+            "SQLite and PostgreSQL runtime configuration cannot be supplied together; a process selects exactly one authoritative operational backend (ADR 0010)".into(),
+        ));
+    }
+    Ok(())
+}
 
 /// Hub connection configuration (no secrets in process arguments).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,7 +112,30 @@ pub fn resolve_server_tenant_store(
     }
     let config = PostgresTenantConfig::from_env()?;
     let store = config.open()?;
-    Ok(Some(std::sync::Arc::new(store)))
+    Ok(Some(Arc::new(store)))
+}
+
+/// Open the enterprise hub with PostgreSQL as the sole authoritative store.
+///
+/// Tenant partitions and the hub schema live in one database. SQLite is not
+/// opened. Callers must already have refused a mixed SQLite configuration.
+pub fn resolve_enterprise_hub() -> Result<EnterpriseHub> {
+    #[cfg(feature = "postgres")]
+    {
+        let store = PostgresTenantConfig::from_env()?.open()?;
+        let hub = store.hub_partition()?;
+        Ok(EnterpriseHub {
+            tenant: Arc::new(store),
+            operational: Arc::new(hub),
+        })
+    }
+    #[cfg(not(feature = "postgres"))]
+    {
+        Err(StoreError::AdapterUnavailable(
+            "tenant mode requires a binary built with --features postgres and TENKAI_POSTGRES_URL"
+                .into(),
+        ))
+    }
 }
 
 /// Sanitize tenant id into a safe Postgres schema name (`tenkai_t_*`).
