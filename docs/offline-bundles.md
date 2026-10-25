@@ -91,6 +91,46 @@ the first install, a second bundle of the same format updates the site
 through the existing upgrade bind/receipt/advance path and rolls back with
 `tenkaictl upgrade rollback`.
 
+## Host binaries
+
+The archive may carry the Tenkai CLI, server, and executor hosts that GitHub
+Releases otherwise attach online. They are ordinary v1 entries (they fit the
+64 MiB limit) under `hosts/<platform>/<name>`, plus a signed
+`hosts/manifest.json` (`tenkai.offline-host-binaries.v1`) and
+`hosts/SHA256SUMS` in the GitHub Release checksum format. Each listed file
+records its digest, size, and release provenance (tag, git sha, workflow).
+The bundle signature covers those entries; verification uses the exporter
+trust roots received out of band, the same roots as the rest of the archive.
+A Tenkai without this index ignores the extra entries. A Tenkai that sees
+the index refuses a missing role, a digest mismatch, or a checksum mismatch
+before it writes a destination, and names the file.
+
+```bash
+tenkaictl upgrade install-hosts site-c \
+  --bundle site-c.bundle.json \
+  --trust-roots offline-trust.toml \
+  --dest tenkai-hosts \
+  --platform linux-x86_64
+```
+
+`--platform` is `linux-x86_64` or `darwin-aarch64`. Omit it to use this
+process's packaged platform. The command writes unsuffixed
+`tenkaictl`, `tenkai-server`, and `tenkai-executor-guard` after verification,
+mode 0755. The installer sets that mode on the file before linking it. A
+destination that already holds the signed bytes is left in place so a retry
+can finish, and its mode is restored to 0755. A different file or a symlink
+is refused; swapping a running host is a later operation. The command does
+not open application storage. Bind and first-install of a product stack also
+preflight the host index when it is present, so a tampered host file cannot
+ride along with an otherwise valid stack.
+
+Rehearsal: `cargo test --locked tampered_host_binary_is_refused_before_install_and_names_the_file`
+tampers `hosts/linux-x86_64/tenkaictl` in a signed archive, presents the
+exporter trust roots, and keeps the destination empty while naming that file.
+`cargo test --locked offline_install_of_tenkai_hosts_from_signed_bundle`
+installs both platforms' hosts from one archive onto one platform's
+destination.
+
 Rehearsal: `cargo test --locked incomplete_first_install_bundle_is_refused_before_mutation`
 starts from an environment that does not exist, presents a signed bundle
 without a stack index, and confirms the environment and upgrade record stay

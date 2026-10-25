@@ -1,8 +1,44 @@
+use std::path::Path;
+
 use anyhow::{Result, bail};
-use tenkai::{apply, client, connectivity, offline_bundle, release_signing};
+use tenkai::{
+    apply, client, connectivity, offline_bundle, offline_host_binaries, ontology, release_signing,
+};
 
 use crate::authorization::execution_authorization;
 use crate::upgrade_args::UpgradeCommand;
+
+/// Install verified hosts from a signed archive. Needs no application store.
+pub(crate) fn install_hosts(
+    env: &str,
+    bundle: &Path,
+    trust_roots: &Path,
+    dest: &Path,
+    platform: Option<&str>,
+) -> Result<()> {
+    let envelope = offline_bundle::BundleEnvelope::load(bundle)?;
+    let roots = release_signing::TrustRoots::load(trust_roots)?;
+    let platform = match platform {
+        Some(platform) => platform.to_string(),
+        None => offline_host_binaries::detect_platform()?.to_string(),
+    };
+    let installed = offline_host_binaries::verify_and_install(
+        &envelope,
+        &roots,
+        ontology::NS,
+        env,
+        tenkai::now_millis(),
+        dest,
+        &platform,
+    )?;
+    for host in installed {
+        println!(
+            "installed {} {} ({})",
+            host.platform, host.name, host.digest
+        );
+    }
+    Ok(())
+}
 
 pub(crate) async fn run(ctx: &mut client::Ctx, command: UpgradeCommand) -> Result<()> {
     match command {
@@ -51,6 +87,9 @@ pub(crate) async fn run(ctx: &mut client::Ctx, command: UpgradeCommand) -> Resul
         UpgradeCommand::Resume { name, env } => {
             let record = connectivity::resume_transfer(ctx, &name, &env).await?;
             println!("{}", connectivity::format_upgrade(&record));
+        }
+        UpgradeCommand::InstallHosts { .. } => {
+            unreachable!("handled before opening the embedded database")
         }
         UpgradeCommand::InstallBundle {
             name,

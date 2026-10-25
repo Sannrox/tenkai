@@ -31,6 +31,22 @@ pub(crate) enum UpgradeCommand {
     Interrupt { name: String, env: String },
     /// Resume a verified intermittent transfer.
     Resume { name: String, env: String },
+    /// Install verified Tenkai host binaries from a signed offline bundle.
+    InstallHosts {
+        env: String,
+        /// Path to a tenkai.offline-bundle.v1 JSON archive.
+        #[arg(long)]
+        bundle: PathBuf,
+        /// Trust roots that must authenticate the bundle exporter.
+        #[arg(long)]
+        trust_roots: PathBuf,
+        /// Directory that receives unsuffixed tenkaictl, tenkai-server, and tenkai-executor-guard.
+        #[arg(long)]
+        dest: PathBuf,
+        /// Packaged host platform: linux-x86_64 or darwin-aarch64. Defaults to this process.
+        #[arg(long)]
+        platform: Option<String>,
+    },
     /// First-install an empty isolated environment from one signed bundle.
     InstallBundle {
         name: String,
@@ -140,6 +156,29 @@ mod tests {
                     ..
                 }
             } if name == "fleet-1" && approval.approval.as_deref() == Some(std::path::Path::new("site-a.json"))
+        ));
+        let install_hosts = Cli::try_parse_from([
+            "tenkaictl",
+            "upgrade",
+            "install-hosts",
+            "site-c",
+            "--bundle",
+            "site-c.bundle.json",
+            "--trust-roots",
+            "offline-trust.toml",
+            "--dest",
+            "hosts",
+            "--platform",
+            "linux-x86_64",
+        ])
+        .unwrap();
+        assert!(matches!(
+            install_hosts.command,
+            Command::Upgrade {
+                command: UpgradeCommand::InstallHosts { ref env, ref dest, ref platform, .. }
+            } if env == "site-c"
+                && dest == std::path::Path::new("hosts")
+                && platform.as_deref() == Some("linux-x86_64")
         ));
         let install = Cli::try_parse_from([
             "tenkaictl",

@@ -128,3 +128,12 @@ before assets are uploaded.
 
 Tags `v0.2.0`, `v0.3.0`, and `v0.3.1` predate this workflow and have no
 attached hosts. Install those from source. First attached hosts: `v0.3.2`.
+
+## Disconnected sites
+
+A dark site cannot fetch GitHub Release attachments. Carry the same hosts
+inside a signed [offline bundle](offline-bundles.md#host-binaries):
+`hosts/<platform>/<name>`, `hosts/manifest.json`, and `hosts/SHA256SUMS`.
+Verify them with the exporter trust roots received out of band, then install
+with `tenkaictl upgrade install-hosts`. GitHub artifact attestations stay an
+online check; the bundle signature is the offline one.

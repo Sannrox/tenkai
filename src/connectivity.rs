@@ -542,6 +542,7 @@ pub async fn preview_isolated_bundle(
         environment,
         crate::now_millis(),
     )?;
+    crate::offline_host_binaries::preflight(&verified)?;
     let (record, index, bundle_digest) =
         admit_isolated_bind(ctx, name, environment, &verified).await?;
     if crate::offline_bundle::stack_manifest(&verified)?.is_some() {
@@ -659,6 +660,7 @@ pub async fn bind_isolated_bundle(
         environment,
         crate::now_millis(),
     )?;
+    crate::offline_host_binaries::preflight(&verified)?;
     let (mut record, index, bundle_digest) =
         admit_isolated_bind(ctx, name, environment, &verified).await?;
     if crate::offline_bundle::stack_manifest(&verified)?.is_some() {
@@ -734,6 +736,7 @@ pub async fn install_isolated_stack(
         environment,
         crate::now_millis(),
     )?;
+    crate::offline_host_binaries::preflight(&verified)?;
     crate::offline_bundle::preflight_full_stack(&verified, bundle_path)?;
     let expected_release = format!("{}@{}", spec.product, spec.version);
     let sanitized = expected_release.replace([':', '@'], "-");
