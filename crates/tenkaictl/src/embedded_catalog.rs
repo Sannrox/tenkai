@@ -92,18 +92,47 @@ pub(crate) async fn run(
                         stored.environment
                     );
                 }
-                // Same checks as execution, so the live policy (including
-                // `require_preflight`) applies to recorded approvals too.
-                let evidence = tenkai::plan_approval::verify_for_execution(
+                // Collect always. Record only once the quorum is complete, and
+                // then run the same live checks as execution (`require_preflight`,
+                // automatic-signer, host auto-key).
+                let now = tenkai::now_millis();
+                let envelope = tenkai::plan_approval::load_envelopes(&approval)?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("missing approval evidence"))?;
+                let roots = tenkai::plan_approval::TrustRoots::load(&approval_trust_roots)?;
+                tenkai::plan_approval::collect_envelope(ctx, &stored, &envelope, &roots, now)
+                    .await?;
+                let actor = crate::authorization::embedded_management_actor().ok();
+                let requester = actor.as_ref().map(|actor| actor.principal_id());
+                let skip_gates = envelope.statement.skip_gates;
+                let view = tenkai::plan_approval::approvals_view(
                     ctx,
                     &stored,
-                    &approval,
-                    &approval_trust_roots,
-                    tenkai::now_millis(),
-                    false,
+                    Some(&roots),
+                    now,
+                    skip_gates,
+                    requester,
                 )
                 .await?;
-                tenkai::plan_approval::record(ctx, &evidence).await?;
+                let evidence = if view.missing == 0 {
+                    let evidence = tenkai::plan_approval::verify_for_execution_named(
+                        ctx,
+                        &stored,
+                        &approval,
+                        &approval_trust_roots,
+                        now,
+                        skip_gates,
+                        requester,
+                    )
+                    .await?;
+                    tenkai::plan_approval::record(ctx, &evidence).await?;
+                    evidence
+                } else {
+                    tenkai::plan_approval::verify_envelope(
+                        &stored, &envelope, &roots, now, skip_gates,
+                    )?
+                };
                 if output == OutputFormat::JsonV1 {
                     print_machine_result(&crate::output::approve_result(
                         &stored.id,

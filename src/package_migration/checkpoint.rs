@@ -126,6 +126,7 @@ pub(super) async fn apply_pin(
             ExecutionAuthorization::Signed {
                 approval: &approval_path,
                 trust_roots,
+                requester: None,
             }
         }
     };

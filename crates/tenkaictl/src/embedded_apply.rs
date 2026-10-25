@@ -68,12 +68,15 @@ pub(crate) async fn run(
                 println!("applying {} to {}:", stored.id, stored.environment);
                 print_steps(&stored.steps);
             }
+            let actor = crate::authorization::embedded_management_actor().ok();
+            let requester = actor.as_ref().map(|actor| actor.principal_id());
             let authorization = execution_authorization(
                 approval.approval.as_deref(),
                 approval.approval_trust_roots.as_deref(),
                 approval.allow_unapproved_development,
                 approval.development_reason.as_deref(),
                 "plan execution requires --approval and --approval-trust-roots; local development may explicitly use --allow-unapproved-development with --development-reason",
+                requester,
             )?;
             run_plan(
                 ctx,

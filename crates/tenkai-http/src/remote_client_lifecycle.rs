@@ -216,6 +216,17 @@ impl RemoteClient {
         .await
     }
 
+    pub async fn plan_approvals(
+        &self,
+        plan_id: &str,
+    ) -> anyhow::Result<tenkai::plan_approval::PlanApprovalsView> {
+        self.request_json(
+            reqwest::Method::GET,
+            &format!("/v1/plans/{}/approvals", encode_plan_path(plan_id)),
+        )
+        .await
+    }
+
     pub async fn approve_plan(
         &self,
         plan_id: &str,

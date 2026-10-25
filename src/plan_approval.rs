@@ -58,6 +58,8 @@ pub struct TrustedSigner {
     pub environments: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub providers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,6 +79,31 @@ pub struct VerificationEvidence {
     #[serde(default)]
     pub skip_gates: bool,
     pub bypass_reason: Option<String>,
+}
+
+/// One collected, still-detached envelope for a plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CollectedApproval {
+    pub key_id: String,
+    pub signer_identity: String,
+    #[serde(default)]
+    pub groups: Vec<String>,
+    pub expires_at: i64,
+}
+
+/// Collected versus missing approvals for one plan and purpose.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PlanApprovalsView {
+    pub plan_id: String,
+    pub plan_digest: String,
+    pub purpose: String,
+    pub required: u32,
+    #[serde(default)]
+    pub groups: Vec<String>,
+    pub exclude_requester: bool,
+    #[serde(default)]
+    pub collected: Vec<CollectedApproval>,
+    pub missing: u32,
 }
 
 pub fn canonical_bytes(statement: &ApprovalStatement) -> Result<Vec<u8>> {
@@ -140,7 +167,12 @@ impl TrustRoots {
         let mut keys = BTreeMap::new();
         let mut identities = std::collections::BTreeSet::new();
         for signer in &roots.signers {
-            for scope in signer.environments.iter().chain(&signer.providers) {
+            for scope in signer
+                .environments
+                .iter()
+                .chain(&signer.providers)
+                .chain(&signer.groups)
+            {
                 validate_text("trusted signer scope", scope)?;
             }
             if signer
@@ -184,6 +216,36 @@ impl TrustRoots {
     }
 }
 
+/// Load one envelope, a JSON array, or every `*.json` file in a directory.
+pub fn load_envelopes(path: &Path) -> Result<Vec<ApprovalEnvelope>> {
+    if path.is_dir() {
+        let mut files: Vec<_> = std::fs::read_dir(path)
+            .with_context(|| format!("reading plan approval directory {}", path.display()))?
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|candidate| candidate.extension().and_then(|ext| ext.to_str()) == Some("json"))
+            .collect();
+        files.sort();
+        let mut envelopes = Vec::new();
+        for file in files {
+            envelopes.extend(load_envelopes(&file)?);
+        }
+        if envelopes.is_empty() {
+            bail!(
+                "plan approval directory {} contains no envelopes",
+                path.display()
+            );
+        }
+        return Ok(envelopes);
+    }
+    let raw =
+        std::fs::read(path).with_context(|| format!("reading plan approval {}", path.display()))?;
+    if let Ok(envelope) = serde_json::from_slice::<ApprovalEnvelope>(&raw) {
+        return Ok(vec![envelope]);
+    }
+    serde_json::from_slice(&raw).context("parsing plan approval envelope set")
+}
+
 /// Check host-configured automatic keys as well as the envelope's root scopes.
 pub async fn verify_for_execution(
     ctx: &mut Ctx,
@@ -193,7 +255,92 @@ pub async fn verify_for_execution(
     now: i64,
     skip_gates: bool,
 ) -> Result<VerificationEvidence> {
-    let evidence = verify(plan, envelope_path, trust_roots_path, now, skip_gates)?;
+    verify_for_execution_named(
+        ctx,
+        plan,
+        envelope_path,
+        trust_roots_path,
+        now,
+        skip_gates,
+        None,
+    )
+    .await
+}
+
+/// Like [`verify_for_execution`], naming the apply requester for exclude-requester quorums.
+pub async fn verify_for_execution_named(
+    ctx: &mut Ctx,
+    plan: &Plan,
+    envelope_path: &Path,
+    trust_roots_path: &Path,
+    now: i64,
+    skip_gates: bool,
+    requester: Option<&str>,
+) -> Result<VerificationEvidence> {
+    let roots = TrustRoots::load(trust_roots_path)?;
+    let mut envelopes = load_envelopes(envelope_path)?;
+    envelopes.extend(list_collected_envelopes(ctx, &plan.id).await?);
+    if envelopes.is_empty() {
+        bail!("plan approval is missing");
+    }
+    // Verify each envelope before unique-by-key so an expired or unusable
+    // request file cannot hide a collected renewal for the same signer.
+    let mut verified = Vec::new();
+    let mut last_error = None;
+    for envelope in envelopes {
+        match verify_envelope(plan, &envelope, &roots, now, skip_gates) {
+            Ok(evidence) => verified.push((envelope, evidence)),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    if verified.is_empty() {
+        return Err(last_error.unwrap_or_else(|| anyhow::anyhow!("plan approval is missing")));
+    }
+    let mut unique = Vec::new();
+    let mut seen_keys = std::collections::BTreeSet::new();
+    for item in verified {
+        if seen_keys.insert(item.0.key_id.clone()) {
+            unique.push(item);
+        }
+    }
+    let environment = crate::environment::environment(ctx, &plan.environment).await?;
+    let policy = crate::approval_policy::load_live_policy(&environment.properties)?;
+    let purpose = crate::approval_policy::quorum_purpose(plan, skip_gates);
+    let rule = match &policy {
+        Some(policy) => crate::approval_policy::quorum_rule(policy, purpose),
+        None => crate::approval_policy::default_quorum(purpose),
+    };
+    if rule.exclude_requester && requester.is_none() {
+        bail!(
+            "this approval policy excludes the apply requester, but no authenticated requester identity was supplied"
+        );
+    }
+    let candidates: Vec<CountedApproval> = unique
+        .iter()
+        .filter_map(|(envelope, _)| {
+            let signer = roots.signer(&envelope.key_id).ok()?;
+            Some(CountedApproval {
+                key_id: envelope.key_id.clone(),
+                identity: signer.identity.clone(),
+                groups: signer.groups.clone(),
+                auto: envelope.statement.policy_provider == "builtin-auto",
+            })
+        })
+        .collect();
+    let tally = count_quorum(&rule, &candidates, requester);
+    if tally.missing > 0 {
+        bail!("{}", quorum_refusal(&rule, &tally));
+    }
+    let counted_keys: std::collections::BTreeSet<&str> = tally
+        .counted
+        .iter()
+        .map(|item| item.key_id.as_str())
+        .collect();
+    let evidence = unique
+        .iter()
+        .find(|(envelope, _)| counted_keys.contains(envelope.key_id.as_str()))
+        .map(|(_, evidence)| evidence.clone())
+        .context("plan approval is missing")?;
     if evidence.policy_provider == "builtin-auto" {
         let environment = crate::environment::environment(ctx, &plan.environment).await?;
         let policy = crate::approval_policy::load_live_policy(&environment.properties)?
@@ -220,33 +367,9 @@ pub async fn verify_for_execution(
         }
     }
     let roots = TrustRoots::load(trust_roots_path)?;
-    let signer = roots.signer(&evidence.key_id)?;
-    if signer.environments.is_empty() || signer.providers != ["builtin-auto"] {
-        for environment in ctx.list_kind(crate::ontology::KIND_ENVIRONMENT).await? {
-            let known_keys: std::collections::BTreeSet<String> = environment
-                .properties
-                .get(crate::approval_policy::AUTO_SIGNER_KEYS_PROPERTY)
-                .map(|raw| serde_json::from_str(raw))
-                .transpose()?
-                .unwrap_or_default();
-            // Legacy policies may predate retained public key identities. A
-            // missing unrelated policy/key must not revoke human authority.
-            let live_key = crate::approval_policy::load_live_policy(&environment.properties)
-                .ok()
-                .flatten()
-                .and_then(|policy| {
-                    crate::approval_policy::signer_key_id(&policy)
-                        .ok()
-                        .flatten()
-                });
-            if known_keys.contains(&evidence.key_id)
-                || live_key.as_deref() == Some(evidence.key_id.as_str())
-            {
-                bail!(
-                    "host-configured automatic key requires explicit environment and builtin-auto scopes"
-                );
-            }
-        }
+    for counted in &tally.counted {
+        let signer = roots.signer(&counted.key_id)?;
+        refuse_unscoped_host_automatic_key(ctx, &counted.key_id, signer).await?;
     }
     let environment = crate::environment::environment(ctx, &plan.environment).await?;
     let policy = crate::approval_policy::load_live_policy(&environment.properties)?;
@@ -283,6 +406,17 @@ pub fn verify(
         .with_context(|| format!("reading plan approval {}", envelope_path.display()))?;
     let envelope: ApprovalEnvelope =
         serde_json::from_slice(&raw).context("parsing plan approval envelope")?;
+    let roots = TrustRoots::load(trust_roots_path)?;
+    verify_envelope(plan, &envelope, &roots, now, skip_gates)
+}
+
+pub fn verify_envelope(
+    plan: &Plan,
+    envelope: &ApprovalEnvelope,
+    roots: &TrustRoots,
+    now: i64,
+    skip_gates: bool,
+) -> Result<VerificationEvidence> {
     if envelope.schema != APPROVAL_SCHEMA {
         bail!("unsupported plan approval schema {}", envelope.schema);
     }
@@ -301,7 +435,6 @@ pub fn verify(
     if now >= envelope.statement.expires_at {
         bail!("plan approval expired at {}", envelope.statement.expires_at);
     }
-    let roots = TrustRoots::load(trust_roots_path)?;
     let signer = roots.signer(&envelope.key_id)?;
     if !signer.environments.is_empty() && !signer.environments.contains(&plan.environment) {
         bail!("plan approval signer is outside its environment scope");
@@ -338,10 +471,10 @@ pub fn verify(
         plan_digest: expected_digest,
         environment: plan.environment.clone(),
         signer_identity: signer.identity.clone(),
-        key_id: envelope.key_id,
-        policy_provider: envelope.statement.policy_provider,
-        policy_evidence_id: envelope.statement.policy_evidence_id,
-        policy_digest: envelope.statement.policy_digest,
+        key_id: envelope.key_id.clone(),
+        policy_provider: envelope.statement.policy_provider.clone(),
+        policy_evidence_id: envelope.statement.policy_evidence_id.clone(),
+        policy_digest: envelope.statement.policy_digest.clone(),
         issued_at: envelope.statement.issued_at,
         expires_at: envelope.statement.expires_at,
         verified_at: now,
@@ -447,6 +580,310 @@ impl VerificationEvidence {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CountedApproval {
+    key_id: String,
+    identity: String,
+    groups: Vec<String>,
+    auto: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QuorumTally {
+    counted: Vec<CountedApproval>,
+    missing: u32,
+}
+
+fn count_quorum(
+    rule: &crate::approval_policy::QuorumRule,
+    candidates: &[CountedApproval],
+    requester: Option<&str>,
+) -> QuorumTally {
+    let mut counted = Vec::new();
+    let mut seen_keys = std::collections::BTreeSet::new();
+    let mut seen_identities = std::collections::BTreeSet::new();
+    for candidate in candidates {
+        if rule.n > 1 && candidate.auto {
+            continue;
+        }
+        // Execution refuses when this rule is set and requester is None.
+        if rule.exclude_requester && requester.is_some_and(|id| id == candidate.identity) {
+            continue;
+        }
+        if !rule.groups.is_empty()
+            && !candidate
+                .groups
+                .iter()
+                .any(|group| rule.groups.iter().any(|needed| needed == group))
+        {
+            continue;
+        }
+        if seen_keys.contains(&candidate.key_id) || seen_identities.contains(&candidate.identity) {
+            continue;
+        }
+        seen_keys.insert(candidate.key_id.clone());
+        seen_identities.insert(candidate.identity.clone());
+        counted.push(candidate.clone());
+        if counted.len() as u32 >= rule.n {
+            break;
+        }
+    }
+    let missing = rule.n.saturating_sub(counted.len() as u32);
+    QuorumTally { counted, missing }
+}
+
+fn quorum_refusal(rule: &crate::approval_policy::QuorumRule, tally: &QuorumTally) -> String {
+    let groups = if rule.groups.is_empty() {
+        String::new()
+    } else {
+        format!(" from groups [{}]", rule.groups.join(", "))
+    };
+    let have = if tally.counted.is_empty() {
+        "none".into()
+    } else {
+        tally
+            .counted
+            .iter()
+            .map(|item| item.identity.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "need {} {} approvals{}; have {} ({}); missing {}",
+        rule.n,
+        rule.purpose.as_str(),
+        groups,
+        tally.counted.len(),
+        have,
+        tally.missing
+    )
+}
+
+fn collected_id(plan_id: &str, key_id: &str, skip_gates: bool) -> String {
+    format!("{plan_id}:envelope:{key_id}:skip_gates={skip_gates}")
+}
+
+async fn refuse_unscoped_host_automatic_key(
+    ctx: &mut Ctx,
+    key_id: &str,
+    signer: &TrustedSigner,
+) -> Result<()> {
+    if !signer.environments.is_empty() && signer.providers == ["builtin-auto"] {
+        return Ok(());
+    }
+    for environment in ctx.list_kind(crate::ontology::KIND_ENVIRONMENT).await? {
+        let known_keys: std::collections::BTreeSet<String> = environment
+            .properties
+            .get(crate::approval_policy::AUTO_SIGNER_KEYS_PROPERTY)
+            .map(|raw| serde_json::from_str(raw))
+            .transpose()?
+            .unwrap_or_default();
+        // Legacy policies may predate retained public key identities. A
+        // missing unrelated policy/key must not revoke human authority.
+        let live_key = crate::approval_policy::load_live_policy(&environment.properties)
+            .ok()
+            .flatten()
+            .and_then(|policy| {
+                crate::approval_policy::signer_key_id(&policy)
+                    .ok()
+                    .flatten()
+            });
+        if known_keys.contains(key_id) || live_key.as_deref() == Some(key_id) {
+            bail!(
+                "host-configured automatic key requires explicit environment and builtin-auto scopes"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Persist one verified envelope so later apply or GET can see it.
+pub async fn collect_envelope(
+    ctx: &mut Ctx,
+    plan: &Plan,
+    envelope: &ApprovalEnvelope,
+    roots: &TrustRoots,
+    now: i64,
+) -> Result<CollectedApproval> {
+    let evidence = verify_envelope(plan, envelope, roots, now, envelope.statement.skip_gates)?;
+    let signer = roots.signer(&envelope.key_id)?;
+    let object = Object {
+        id: collected_id(&plan.id, &envelope.key_id, envelope.statement.skip_gates),
+        kind: crate::ontology::KIND_PLAN_APPROVAL_ENVELOPE.into(),
+        name: format!("plan approval envelope {}", envelope.key_id),
+        namespace: "tenkai".into(),
+        external_id: String::new(),
+        properties: HashMap::from([
+            ("plan_id".into(), plan.id.clone()),
+            ("plan_digest".into(), evidence.plan_digest),
+            ("key_id".into(), envelope.key_id.clone()),
+            ("signer_identity".into(), signer.identity.clone()),
+            ("groups".into(), serde_json::to_string(&signer.groups)?),
+            (
+                "expires_at".into(),
+                envelope.statement.expires_at.to_string(),
+            ),
+            ("envelope".into(), serde_json::to_string(envelope)?),
+            ("collected_at".into(), now.to_string()),
+        ]),
+        created: now,
+        updated: now,
+    };
+    if let Some(existing) = ctx.get(&object.id).await? {
+        let still_valid = existing
+            .properties
+            .get("expires_at")
+            .and_then(|value| value.parse::<i64>().ok())
+            .is_some_and(|expires_at| now < expires_at);
+        if still_valid {
+            let expires_at = existing
+                .properties
+                .get("expires_at")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(envelope.statement.expires_at);
+            return Ok(CollectedApproval {
+                key_id: envelope.key_id.clone(),
+                signer_identity: existing
+                    .properties
+                    .get("signer_identity")
+                    .cloned()
+                    .unwrap_or_else(|| signer.identity.clone()),
+                groups: existing
+                    .properties
+                    .get("groups")
+                    .and_then(|raw| serde_json::from_str(raw).ok())
+                    .unwrap_or_else(|| signer.groups.clone()),
+                expires_at,
+            });
+        }
+    }
+    ctx.put(object).await?;
+    Ok(CollectedApproval {
+        key_id: envelope.key_id.clone(),
+        signer_identity: signer.identity.clone(),
+        groups: signer.groups.clone(),
+        expires_at: envelope.statement.expires_at,
+    })
+}
+
+async fn list_collected_envelopes(ctx: &mut Ctx, plan_id: &str) -> Result<Vec<ApprovalEnvelope>> {
+    let objects = ctx
+        .find_by_property(
+            crate::ontology::KIND_PLAN_APPROVAL_ENVELOPE,
+            "plan_id",
+            plan_id,
+        )
+        .await?;
+    let mut envelopes = Vec::new();
+    for object in objects {
+        let Some(raw) = object.properties.get("envelope") else {
+            continue;
+        };
+        envelopes.push(serde_json::from_str(raw).context("collected plan approval is not JSON")?);
+    }
+    Ok(envelopes)
+}
+
+/// Operator view of collected versus missing approvals for a live plan.
+pub async fn approvals_view(
+    ctx: &mut Ctx,
+    plan: &Plan,
+    roots: Option<&TrustRoots>,
+    now: i64,
+    skip_gates: bool,
+    requester: Option<&str>,
+) -> Result<PlanApprovalsView> {
+    let environment = crate::environment::environment(ctx, &plan.environment).await?;
+    let policy = crate::approval_policy::load_live_policy(&environment.properties)?;
+    let purpose = crate::approval_policy::quorum_purpose(plan, skip_gates);
+    let rule = match &policy {
+        Some(policy) => crate::approval_policy::quorum_rule(policy, purpose),
+        None => crate::approval_policy::default_quorum(purpose),
+    };
+    let expected_digest = format!("sha256:{}", plan.executable_digest()?);
+    let objects = ctx
+        .find_by_property(
+            crate::ontology::KIND_PLAN_APPROVAL_ENVELOPE,
+            "plan_id",
+            &plan.id,
+        )
+        .await?;
+    let mut collected = Vec::new();
+    let mut candidates = Vec::new();
+    for object in objects {
+        let Some(key_id) = object.properties.get("key_id").cloned() else {
+            continue;
+        };
+        let expires_at = object
+            .properties
+            .get("expires_at")
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(0);
+        if now >= expires_at {
+            continue;
+        }
+        let Some(envelope) = object
+            .properties
+            .get("envelope")
+            .and_then(|raw| serde_json::from_str::<ApprovalEnvelope>(raw).ok())
+        else {
+            continue;
+        };
+        if envelope.statement.skip_gates != skip_gates
+            || envelope.statement.environment != plan.environment
+            || envelope.statement.plan_digest != expected_digest
+        {
+            continue;
+        }
+        let mut identity = object
+            .properties
+            .get("signer_identity")
+            .cloned()
+            .unwrap_or_default();
+        let mut groups: Vec<String> = object
+            .properties
+            .get("groups")
+            .and_then(|raw| serde_json::from_str(raw).ok())
+            .unwrap_or_default();
+        if let Some(roots) = roots {
+            if verify_envelope(plan, &envelope, roots, now, skip_gates).is_err() {
+                continue;
+            }
+            let Ok(signer) = roots.signer(&key_id) else {
+                continue;
+            };
+            identity = signer.identity.clone();
+            groups = signer.groups.clone();
+        }
+        if !identity.is_empty() {
+            let auto = envelope.statement.policy_provider == "builtin-auto";
+            candidates.push(CountedApproval {
+                key_id: key_id.clone(),
+                identity: identity.clone(),
+                groups: groups.clone(),
+                auto,
+            });
+        }
+        collected.push(CollectedApproval {
+            key_id,
+            signer_identity: identity,
+            groups,
+            expires_at,
+        });
+    }
+    let tally = count_quorum(&rule, &candidates, requester);
+    Ok(PlanApprovalsView {
+        plan_id: plan.id.clone(),
+        plan_digest: format!("sha256:{}", plan.executable_digest()?),
+        purpose: rule.purpose.as_str().into(),
+        required: rule.n,
+        groups: rule.groups,
+        exclude_requester: rule.exclude_requester,
+        collected,
+        missing: tally.missing,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -498,5 +935,135 @@ mod tests {
         let mut invalid = statement();
         invalid.expires_at = invalid.issued_at;
         assert!(canonical_bytes(&invalid).is_err());
+    }
+
+    fn counted(key: &str, identity: &str, groups: &[&str]) -> CountedApproval {
+        CountedApproval {
+            key_id: key.into(),
+            identity: identity.into(),
+            groups: groups.iter().map(|group| (*group).to_string()).collect(),
+            auto: false,
+        }
+    }
+
+    fn rule(
+        n: u32,
+        groups: &[&str],
+        exclude_requester: bool,
+    ) -> crate::approval_policy::QuorumRule {
+        crate::approval_policy::QuorumRule {
+            purpose: crate::approval_policy::QuorumPurpose::ExecutePlan,
+            n,
+            groups: groups.iter().map(|group| (*group).to_string()).collect(),
+            exclude_requester,
+        }
+    }
+
+    #[test]
+    fn same_key_or_principal_counts_once() {
+        let need = rule(2, &[], false);
+        assert_eq!(
+            count_quorum(
+                &need,
+                &[counted("k1", "alice", &[]), counted("k1", "alice", &[])],
+                None
+            )
+            .missing,
+            1
+        );
+        assert_eq!(
+            count_quorum(
+                &need,
+                &[counted("k1", "alice", &[]), counted("k2", "alice", &[])],
+                None
+            )
+            .missing,
+            1
+        );
+        assert_eq!(
+            count_quorum(
+                &need,
+                &[counted("k1", "alice", &[]), counted("k2", "bob", &[])],
+                None
+            )
+            .missing,
+            0
+        );
+    }
+
+    #[test]
+    fn refusal_lists_what_is_missing() {
+        let need = rule(2, &["release", "sre"], false);
+        let tally = count_quorum(&need, &[counted("k1", "alice", &["release"])], None);
+        let message = quorum_refusal(&need, &tally);
+        assert!(message.contains("need 2 execute_plan approvals from groups [release, sre]"));
+        assert!(message.contains("have 1 (alice)"));
+        assert!(message.contains("missing 1"), "{message}");
+    }
+
+    #[test]
+    fn requester_does_not_count_when_excluded() {
+        let need = rule(1, &[], true);
+        assert_eq!(
+            count_quorum(&need, &[counted("k1", "alice", &[])], Some("alice")).missing,
+            1
+        );
+        assert_eq!(
+            count_quorum(&need, &[counted("k1", "alice", &[])], Some("bob")).missing,
+            0
+        );
+    }
+
+    #[test]
+    fn named_groups_filter_eligible_signers() {
+        let need = rule(1, &["release"], false);
+        assert_eq!(
+            count_quorum(&need, &[counted("k1", "alice", &["sre"])], None).missing,
+            1
+        );
+        assert_eq!(
+            count_quorum(&need, &[counted("k1", "alice", &["release"])], None).missing,
+            0
+        );
+    }
+
+    #[test]
+    fn automatic_approval_cannot_satisfy_n_greater_than_one() {
+        let need = rule(2, &[], false);
+        let mut auto = counted("k-auto", "lab-auto", &[]);
+        auto.auto = true;
+        assert_eq!(
+            count_quorum(&need, &[auto.clone(), counted("k1", "alice", &[])], None).missing,
+            1
+        );
+        assert_eq!(count_quorum(&rule(1, &[], false), &[auto], None).missing, 0);
+    }
+
+    #[test]
+    fn load_envelopes_reads_a_json_array() {
+        let dir = std::env::temp_dir().join(format!(
+            "tenkai-approval-set-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = ApprovalEnvelope {
+            schema: APPROVAL_SCHEMA.into(),
+            key_id: "k1".into(),
+            statement: statement(),
+            signature: "c2ln".into(),
+        };
+        let mut second = first.clone();
+        second.key_id = "k2".into();
+        let path = dir.join("set.json");
+        std::fs::write(&path, serde_json::to_vec(&[&first, &second]).unwrap()).unwrap();
+        let loaded = load_envelopes(&path).unwrap();
+        assert_eq!(loaded.len(), 2);
+        let nested = dir.join("set");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("a.json"), serde_json::to_vec(&first).unwrap()).unwrap();
+        std::fs::write(nested.join("b.json"), serde_json::to_vec(&second).unwrap()).unwrap();
+        assert_eq!(load_envelopes(&nested).unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

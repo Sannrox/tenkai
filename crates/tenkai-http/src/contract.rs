@@ -37,6 +37,7 @@ use tenkai::package_migration::{
     PackageMigrationPreviewRequest, PackageMigrationResult,
 };
 use tenkai::page::PageQuery;
+use tenkai::plan_approval::PlanApprovalsView;
 use tenkai::reconciler::TickReport;
 
 /// Contract id for this document; additive changes keep it.
@@ -397,6 +398,13 @@ pub fn http_contract() -> Value {
             auth: Auth::Management,
             request: Some(schema::<ChannelHoldRequest>(&mut g)),
             response: lifecycle.clone(),
+        },
+        Route {
+            method: "GET",
+            path: "/v1/plans/{plan_id}/approvals",
+            auth: Auth::Read,
+            request: None,
+            response: schema::<PlanApprovalsView>(&mut g),
         },
         Route {
             method: "POST",

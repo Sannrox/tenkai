@@ -58,9 +58,48 @@ pub struct ApprovalPolicy {
     /// approvals alike.
     #[serde(default)]
     pub require_preflight: Option<PreflightRequirement>,
+    /// Optional N-of-M human approval per purpose. Absent means one trusted
+    /// envelope still authorizes, matching the v1 single-envelope policy.
+    #[serde(default)]
+    pub quorum: Vec<QuorumRule>,
     /// SHA-256 of the TOML file bytes when loaded from disk.
     #[serde(skip)]
     source_digest: Option<String>,
+}
+
+/// Purpose a quorum rule applies to. Derived from the plan and apply flags;
+/// the v1 envelope purpose stays `execute_plan`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum QuorumPurpose {
+    ExecutePlan,
+    Rollback,
+    SkipGates,
+    Downgrade,
+}
+
+impl QuorumPurpose {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ExecutePlan => "execute_plan",
+            Self::Rollback => "rollback",
+            Self::SkipGates => "skip_gates",
+            Self::Downgrade => "downgrade",
+        }
+    }
+}
+
+/// N distinct human signers from named groups for one purpose.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuorumRule {
+    pub purpose: QuorumPurpose,
+    pub n: u32,
+    #[serde(default)]
+    pub groups: Vec<String>,
+    /// When true, the apply requester's principal cannot count toward N.
+    #[serde(default)]
+    pub exclude_requester: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,6 +202,21 @@ impl ApprovalPolicy {
         {
             bail!("plan approval policy require_preflight.max_age_ms must be positive");
         }
+        let mut purposes = std::collections::BTreeSet::new();
+        for rule in &self.quorum {
+            if rule.n == 0 {
+                bail!("plan approval policy quorum n must be at least 1");
+            }
+            if !purposes.insert(rule.purpose.as_str()) {
+                bail!(
+                    "plan approval policy quorum purpose {} is duplicated",
+                    rule.purpose.as_str()
+                );
+            }
+            for group in &rule.groups {
+                crate::ontology::validate_identifier("quorum group", group)?;
+            }
+        }
         Ok(())
     }
 
@@ -215,6 +269,11 @@ pub fn evaluate(
             reason: "policy mode is manual".into(),
         };
     }
+    if quorum_rule(policy, quorum_purpose(plan, skip_gates)).n > 1 {
+        return Decision::RequireHuman {
+            reason: "multi-party approval requires human-signed envelopes".into(),
+        };
+    }
     if skip_gates {
         return Decision::RequireHuman {
             reason: "skip_gates requires a human-signed envelope".into(),
@@ -253,6 +312,52 @@ pub fn evaluate(
     }
     Decision::Auto {
         evidence_id: "auto".into(),
+    }
+}
+
+/// Purpose used to select a quorum rule for this plan and apply flags.
+pub fn quorum_purpose(plan: &Plan, skip_gates: bool) -> QuorumPurpose {
+    if skip_gates {
+        QuorumPurpose::SkipGates
+    } else if plan
+        .steps
+        .iter()
+        .any(|step| step.action == Action::Rollback)
+    {
+        QuorumPurpose::Rollback
+    } else if plan
+        .steps
+        .iter()
+        .any(|step| step.action == Action::Downgrade)
+    {
+        QuorumPurpose::Downgrade
+    } else {
+        QuorumPurpose::ExecutePlan
+    }
+}
+
+/// The matching quorum, or the v1 default of one trusted envelope.
+pub fn quorum_rule(policy: &ApprovalPolicy, purpose: QuorumPurpose) -> QuorumRule {
+    policy
+        .quorum
+        .iter()
+        .find(|rule| rule.purpose == purpose)
+        .cloned()
+        .unwrap_or(QuorumRule {
+            purpose,
+            n: 1,
+            groups: Vec::new(),
+            exclude_requester: false,
+        })
+}
+
+/// Default N=1 rule when no live policy is configured.
+pub fn default_quorum(purpose: QuorumPurpose) -> QuorumRule {
+    QuorumRule {
+        purpose,
+        n: 1,
+        groups: Vec::new(),
+        exclude_requester: false,
     }
 }
 
@@ -367,6 +472,8 @@ pub struct EffectiveApprovalPolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub digest: Option<String>,
+    #[serde(default)]
+    pub quorums: Vec<QuorumRule>,
 }
 
 /// Whether a plan was approved by policy or still needs a human, and why.
@@ -399,6 +506,7 @@ pub fn effective_policy(properties: &HashMap<String, String>) -> Result<Effectiv
             auto_signers: Vec::new(),
             require_human: vec!["all plans require a human-signed envelope".into()],
             digest: None,
+            quorums: Vec::new(),
         });
     };
     let require_human = match policy.mode {
@@ -432,6 +540,7 @@ pub fn effective_policy(properties: &HashMap<String, String>) -> Result<Effectiv
         auto_signers,
         require_human,
         digest: Some(policy.digest()?),
+        quorums: policy.quorum.clone(),
     })
 }
 
@@ -1023,6 +1132,39 @@ mod tests {
         }
     }
 
+    #[test]
+    fn quorum_toml_is_optional_and_validates() {
+        let dir = unique_dir(&format!("quorum-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("policy.toml");
+        fs::write(
+            &path,
+            r#"
+version = 1
+mode = "manual"
+ttl_ms = 3600000
+
+[[quorum]]
+purpose = "execute_plan"
+n = 2
+groups = ["release", "sre"]
+exclude_requester = true
+"#,
+        )
+        .unwrap();
+        let policy = ApprovalPolicy::load(&path).unwrap();
+        assert_eq!(policy.quorum.len(), 1);
+        assert_eq!(policy.quorum[0].n, 2);
+        assert_eq!(policy.quorum[0].purpose, QuorumPurpose::ExecutePlan);
+        assert!(policy.quorum[0].exclude_requester);
+        fs::write(&path, "version = 1\nmode = \"manual\"\nttl_ms = 3600000\n[[quorum]]\npurpose = \"execute_plan\"\nn = 0\n").unwrap();
+        let error = ApprovalPolicy::load(&path).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("n must be at least 1"),
+            "{error:#}"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
     fn auto_policy(key: &Path, product: Option<&str>) -> ApprovalPolicy {
         ApprovalPolicy {
             require_preflight: None,
@@ -1037,6 +1179,7 @@ mod tests {
                     }]
                 })
                 .unwrap_or_default(),
+            quorum: Vec::new(),
             source_digest: None,
         }
     }
@@ -1341,6 +1484,302 @@ mod tests {
         )
         .await
         .unwrap();
+        drop(ctx);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn expired_request_envelope_does_not_hide_collected_renewal_for_same_key() {
+        let dir = unique_dir("collected-renewal");
+        let mut ctx = crate::client::Ctx::embedded(dir.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::plan::env_add(&mut ctx, "lab", "fixture")
+            .await
+            .unwrap();
+        let plan = sample_plan(Action::Install, "api");
+        let now = crate::now_millis();
+        let key = SigningKey::from_bytes(&[11_u8; 32]);
+        let public = key.verifying_key().to_bytes();
+        let kid = crate::signature_verification::key_id(&public);
+        let roots = dir.join("trust.toml");
+        fs::write(
+            &roots,
+            format!(
+                "version = 1\n\n[[signers]]\nkey_id = \"{kid}\"\nidentity = \"alice@lab\"\npublic_key = \"{}\"\n",
+                STANDARD.encode(public)
+            ),
+        )
+        .unwrap();
+        let digest = format!("sha256:{}", plan.executable_digest().unwrap());
+        let statement = |issued: i64, expires: i64| ApprovalStatement {
+            plan_digest: digest.clone(),
+            environment: plan.environment.clone(),
+            purpose: "execute_plan".into(),
+            skip_gates: false,
+            issued_at: issued,
+            expires_at: expires,
+            policy_provider: "builtin".into(),
+            policy_evidence_id: "renewal".into(),
+            policy_digest: format!("sha256:{}", "a".repeat(64)),
+        };
+        let sign = |statement: ApprovalStatement| {
+            let signature = key.sign(&canonical_bytes(&statement).unwrap());
+            ApprovalEnvelope {
+                schema: APPROVAL_SCHEMA.into(),
+                key_id: kid.clone(),
+                statement,
+                signature: STANDARD.encode(signature.to_bytes()),
+            }
+        };
+        let live = sign(statement(now.saturating_sub(1), now.saturating_add(60_000)));
+        let expired = sign(statement(now.saturating_sub(80_000), now.saturating_sub(1)));
+        let request = dir.join("request.json");
+        fs::write(&request, serde_json::to_vec(&expired).unwrap()).unwrap();
+        let loaded = crate::plan_approval::TrustRoots::load(&roots).unwrap();
+        crate::plan_approval::collect_envelope(&mut ctx, &plan, &live, &loaded, now)
+            .await
+            .unwrap();
+        crate::plan_approval::verify_for_execution(&mut ctx, &plan, &request, &roots, now, false)
+            .await
+            .unwrap();
+        drop(ctx);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn collect_envelope_accepts_skip_gates_approvals() {
+        let dir = unique_dir("collect-skip-gates");
+        let mut ctx = crate::client::Ctx::embedded(dir.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::plan::env_add(&mut ctx, "lab", "fixture")
+            .await
+            .unwrap();
+        let plan = sample_plan(Action::Install, "api");
+        let now = crate::now_millis();
+        let key = SigningKey::from_bytes(&[13_u8; 32]);
+        let public = key.verifying_key().to_bytes();
+        let kid = crate::signature_verification::key_id(&public);
+        let roots = dir.join("trust.toml");
+        fs::write(
+            &roots,
+            format!(
+                "version = 1\n\n[[signers]]\nkey_id = \"{kid}\"\nidentity = \"alice@lab\"\npublic_key = \"{}\"\n",
+                STANDARD.encode(public)
+            ),
+        )
+        .unwrap();
+        let statement = ApprovalStatement {
+            plan_digest: format!("sha256:{}", plan.executable_digest().unwrap()),
+            environment: plan.environment.clone(),
+            purpose: "execute_plan".into(),
+            skip_gates: true,
+            issued_at: now.saturating_sub(1),
+            expires_at: now.saturating_add(60_000),
+            policy_provider: "builtin".into(),
+            policy_evidence_id: "skip".into(),
+            policy_digest: format!("sha256:{}", "a".repeat(64)),
+        };
+        let signature = key.sign(&canonical_bytes(&statement).unwrap());
+        let envelope = ApprovalEnvelope {
+            schema: APPROVAL_SCHEMA.into(),
+            key_id: kid,
+            statement,
+            signature: STANDARD.encode(signature.to_bytes()),
+        };
+        let loaded = crate::plan_approval::TrustRoots::load(&roots).unwrap();
+        crate::plan_approval::collect_envelope(&mut ctx, &plan, &envelope, &loaded, now)
+            .await
+            .unwrap();
+        let path = dir.join("skip.json");
+        fs::write(&path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+        crate::plan_approval::verify_for_execution(&mut ctx, &plan, &path, &roots, now, true)
+            .await
+            .unwrap();
+        let mut execute = envelope.clone();
+        execute.statement.skip_gates = false;
+        execute.signature = STANDARD.encode(
+            key.sign(&canonical_bytes(&execute.statement).unwrap())
+                .to_bytes(),
+        );
+        crate::plan_approval::collect_envelope(&mut ctx, &plan, &execute, &loaded, now)
+            .await
+            .unwrap();
+        let skip_view =
+            crate::plan_approval::approvals_view(&mut ctx, &plan, None, now, true, None)
+                .await
+                .unwrap();
+        let execute_view =
+            crate::plan_approval::approvals_view(&mut ctx, &plan, None, now, false, None)
+                .await
+                .unwrap();
+        assert_eq!(skip_view.collected.len(), 1);
+        assert_eq!(execute_view.collected.len(), 1);
+        assert_eq!(skip_view.missing, 0);
+        assert_eq!(execute_view.missing, 0);
+        drop(ctx);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn approvals_view_without_roots_ignores_skip_gates_envelopes() {
+        let dir = unique_dir("view-skip-filter");
+        let mut ctx = crate::client::Ctx::embedded(dir.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::plan::env_add(&mut ctx, "lab", "fixture")
+            .await
+            .unwrap();
+        let plan = sample_plan(Action::Install, "api");
+        let now = crate::now_millis();
+        let key = SigningKey::from_bytes(&[14_u8; 32]);
+        let public = key.verifying_key().to_bytes();
+        let kid = crate::signature_verification::key_id(&public);
+        let roots = dir.join("trust.toml");
+        fs::write(
+            &roots,
+            format!(
+                "version = 1\n\n[[signers]]\nkey_id = \"{kid}\"\nidentity = \"alice@lab\"\npublic_key = \"{}\"\n",
+                STANDARD.encode(public)
+            ),
+        )
+        .unwrap();
+        let statement = ApprovalStatement {
+            plan_digest: format!("sha256:{}", plan.executable_digest().unwrap()),
+            environment: plan.environment.clone(),
+            purpose: "execute_plan".into(),
+            skip_gates: true,
+            issued_at: now.saturating_sub(1),
+            expires_at: now.saturating_add(60_000),
+            policy_provider: "builtin".into(),
+            policy_evidence_id: "skip".into(),
+            policy_digest: format!("sha256:{}", "a".repeat(64)),
+        };
+        let signature = key.sign(&canonical_bytes(&statement).unwrap());
+        let envelope = ApprovalEnvelope {
+            schema: APPROVAL_SCHEMA.into(),
+            key_id: kid,
+            statement,
+            signature: STANDARD.encode(signature.to_bytes()),
+        };
+        let loaded = crate::plan_approval::TrustRoots::load(&roots).unwrap();
+        crate::plan_approval::collect_envelope(&mut ctx, &plan, &envelope, &loaded, now)
+            .await
+            .unwrap();
+        let execute_view =
+            crate::plan_approval::approvals_view(&mut ctx, &plan, None, now, false, None)
+                .await
+                .unwrap();
+        assert_eq!(execute_view.collected.len(), 0);
+        assert_eq!(execute_view.missing, 1);
+        drop(ctx);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn approvals_view_excludes_signers_removed_from_trust_roots() {
+        let dir = unique_dir("revoked-tally");
+        let mut ctx = crate::client::Ctx::embedded(dir.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::plan::env_add(&mut ctx, "lab", "fixture")
+            .await
+            .unwrap();
+        let policy_path = dir.join("policy.toml");
+        fs::write(
+            &policy_path,
+            r#"
+version = 1
+mode = "manual"
+ttl_ms = 3600000
+
+[[quorum]]
+purpose = "execute_plan"
+n = 2
+"#,
+        )
+        .unwrap();
+        crate::environment::set_plan_approval_policy(&mut ctx, "lab", &policy_path)
+            .await
+            .unwrap();
+        let plan = sample_plan(Action::Install, "api");
+        let now = crate::now_millis();
+        let alice_key = SigningKey::from_bytes(&[21_u8; 32]);
+        let bob_key = SigningKey::from_bytes(&[22_u8; 32]);
+        let alice_public = alice_key.verifying_key().to_bytes();
+        let bob_public = bob_key.verifying_key().to_bytes();
+        let alice_kid = crate::signature_verification::key_id(&alice_public);
+        let bob_kid = crate::signature_verification::key_id(&bob_public);
+        let both = dir.join("both.toml");
+        fs::write(
+            &both,
+            format!(
+                "version = 1\n\n[[signers]]\nkey_id = \"{alice_kid}\"\nidentity = \"alice@lab\"\npublic_key = \"{}\"\n\n[[signers]]\nkey_id = \"{bob_kid}\"\nidentity = \"bob@lab\"\npublic_key = \"{}\"\n",
+                STANDARD.encode(alice_public),
+                STANDARD.encode(bob_public)
+            ),
+        )
+        .unwrap();
+        let bob_only = dir.join("bob.toml");
+        fs::write(
+            &bob_only,
+            format!(
+                "version = 1\n\n[[signers]]\nkey_id = \"{bob_kid}\"\nidentity = \"bob@lab\"\npublic_key = \"{}\"\n",
+                STANDARD.encode(bob_public)
+            ),
+        )
+        .unwrap();
+        let digest = format!("sha256:{}", plan.executable_digest().unwrap());
+        let sign = |key: &SigningKey, kid: &str, evidence: &str| {
+            let statement = ApprovalStatement {
+                plan_digest: digest.clone(),
+                environment: plan.environment.clone(),
+                purpose: "execute_plan".into(),
+                skip_gates: false,
+                issued_at: now.saturating_sub(1),
+                expires_at: now.saturating_add(60_000),
+                policy_provider: "builtin".into(),
+                policy_evidence_id: evidence.into(),
+                policy_digest: format!("sha256:{}", "a".repeat(64)),
+            };
+            let signature = key.sign(&canonical_bytes(&statement).unwrap());
+            ApprovalEnvelope {
+                schema: APPROVAL_SCHEMA.into(),
+                key_id: kid.to_string(),
+                statement,
+                signature: STANDARD.encode(signature.to_bytes()),
+            }
+        };
+        let alice = sign(&alice_key, &alice_kid, "alice");
+        let bob = sign(&bob_key, &bob_kid, "bob");
+        let loaded_both = crate::plan_approval::TrustRoots::load(&both).unwrap();
+        crate::plan_approval::collect_envelope(&mut ctx, &plan, &alice, &loaded_both, now)
+            .await
+            .unwrap();
+        crate::plan_approval::collect_envelope(&mut ctx, &plan, &bob, &loaded_both, now)
+            .await
+            .unwrap();
+        let complete = crate::plan_approval::approvals_view(
+            &mut ctx,
+            &plan,
+            Some(&loaded_both),
+            now,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(complete.missing, 0);
+        let loaded_bob = crate::plan_approval::TrustRoots::load(&bob_only).unwrap();
+        let partial = crate::plan_approval::approvals_view(
+            &mut ctx,
+            &plan,
+            Some(&loaded_bob),
+            now,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(partial.missing, 1, "{partial:?}");
+        assert_eq!(partial.collected.len(), 1);
         drop(ctx);
         let _ = fs::remove_dir_all(dir);
     }

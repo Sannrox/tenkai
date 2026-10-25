@@ -617,6 +617,34 @@ impl ManagementOperations {
             .map_err(|_| ManagementError::Unavailable("approval policy is unreadable".into()))
     }
 
+    pub async fn plan_approvals(
+        &self,
+        credential: &CredentialMaterial,
+        plan_id: &str,
+    ) -> Result<crate::plan_approval::PlanApprovalsView, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        self.require_community_catalog_host()?;
+        crate::clock_guard::require_trusted_time("plan approvals")
+            .map_err(|error| ManagementError::Unavailable(error.to_string()))?;
+        let mut ctx = self.application_ctx()?;
+        let stored = crate::plan::load(&mut ctx, plan_id)
+            .await
+            .map_err(map_plan_lifecycle_error)?;
+        self.require_environment_visible(&context, &stored.environment)
+            .await?;
+        crate::plan_approval::approvals_view(
+            &mut ctx,
+            &stored,
+            None,
+            crate::now_millis(),
+            false,
+            Some(context.principal_id()),
+        )
+        .await
+        .map_err(map_plan_lifecycle_error)
+    }
+
     pub async fn software_compatibility_report(
         &self,
         credential: &CredentialMaterial,
@@ -1848,19 +1876,48 @@ impl ManagementOperations {
                 request.environment, stored.environment
             )));
         }
-        let evidence = crate::plan_approval::verify_for_execution(
+        let now = crate::now_millis();
+        let envelope = crate::plan_approval::load_envelopes(&files.approval)
+            .map_err(map_plan_lifecycle_error)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| ManagementError::BadRequest("missing approval evidence".into()))?;
+        let roots = crate::plan_approval::TrustRoots::load(&files.trust_roots)
+            .map_err(map_plan_lifecycle_error)?;
+        crate::plan_approval::collect_envelope(&mut ctx, &stored, &envelope, &roots, now)
+            .await
+            .map_err(map_plan_lifecycle_error)?;
+        let skip_gates = envelope.statement.skip_gates;
+        let view = crate::plan_approval::approvals_view(
             &mut ctx,
             &stored,
-            &files.approval,
-            &files.trust_roots,
-            crate::now_millis(),
-            false,
+            Some(&roots),
+            now,
+            skip_gates,
+            Some(context.principal_id()),
         )
         .await
         .map_err(map_plan_lifecycle_error)?;
-        crate::plan_approval::record(&mut ctx, &evidence)
+        let evidence = if view.missing == 0 {
+            let evidence = crate::plan_approval::verify_for_execution_named(
+                &mut ctx,
+                &stored,
+                &files.approval,
+                &files.trust_roots,
+                now,
+                skip_gates,
+                Some(context.principal_id()),
+            )
             .await
             .map_err(map_plan_lifecycle_error)?;
+            crate::plan_approval::record(&mut ctx, &evidence)
+                .await
+                .map_err(map_plan_lifecycle_error)?;
+            evidence
+        } else {
+            crate::plan_approval::verify_envelope(&stored, &envelope, &roots, now, skip_gates)
+                .map_err(map_plan_lifecycle_error)?
+        };
         self.audit(actor, "plan.approve.completed")?;
         self.record_change(
             crate::change_stream::ChangeEventKind::PlanApproved,
@@ -1897,8 +1954,9 @@ impl ManagementOperations {
         self.require_environment_visible(&context, &request.environment)
             .await?;
         self.require_current_generation(&request.environment, request.expected_generation)?;
-        let files = management_lifecycle::RemoteApprovalFiles::materialize(
+        let files = management_lifecycle::RemoteApprovalFiles::materialize_set(
             &request.approval,
+            &request.approvals,
             &request.trust_roots,
         )
         .map_err(map_lifecycle_error)?;
@@ -1929,6 +1987,7 @@ impl ManagementOperations {
                 authorization: crate::apply::ExecutionAuthorization::Signed {
                     approval: &files.approval,
                     trust_roots: &files.trust_roots,
+                    requester: Some(context.principal_id()),
                 },
                 software_executor: None,
                 model_runtime_executor:
@@ -2249,6 +2308,9 @@ fn map_plan_lifecycle_error(error: anyhow::Error) -> ManagementError {
         || message.contains("approval is bound")
         || message.contains("approval expired")
         || message.contains("approval is not valid")
+        || (message.contains("need ")
+            && message.contains(" approvals")
+            && message.contains("missing "))
         || message.contains("signer")
         || message.contains("signature")
         || message.contains("trust")

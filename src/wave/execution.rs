@@ -980,6 +980,7 @@ async fn advance_locked(
                     ExecutionAuthorization::Signed {
                         approval: &approval_path,
                         trust_roots,
+                        requester: None,
                     }
                 }
                 None => {
@@ -1190,6 +1191,7 @@ async fn rollback_locked(
                     ExecutionAuthorization::Signed {
                         approval: &approval_path,
                         trust_roots,
+                        requester: None,
                     }
                 }
                 None => {

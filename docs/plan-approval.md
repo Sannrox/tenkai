@@ -55,6 +55,7 @@ version = 1
 key_id = "sha256:<sha256-of-the-32-byte-public-key>"
 identity = "deployment-approver@example.com"
 public_key = "<base64-encoded-32-byte-Ed25519-public-key>"
+groups = ["release"]   # optional; used by multi-party quorum
 ```
 
 Apply verifies the signature, exact plan and environment scope, purpose, issue
@@ -63,6 +64,48 @@ execution lease. Removing a key therefore revokes every not-yet-executed
 approval made by that key; adding a replacement key does not alter existing
 envelopes. Unknown fields, duplicate roots, malformed values, and missing or
 mismatched inputs fail closed.
+
+## Multi-party approval
+
+The v1 envelope is unchanged. An environment policy may require N distinct
+human signers from named groups per purpose. Distinctness is by key and by
+principal: two envelopes from the same key or the same identity count once.
+Purpose is derived from the plan and apply flags (`execute_plan`, `rollback`,
+`skip_gates`, `downgrade`). When no matching `[[quorum]]` is set, one trusted
+envelope still authorizes.
+
+```toml
+[[signers]]
+key_id = "sha256:<sha256-of-the-32-byte-public-key>"
+identity = "release-approver@example.com"
+public_key = "<base64-encoded-32-byte-Ed25519-public-key>"
+groups = ["release"]
+
+# On the environment approval policy, not the trust file:
+
+[[quorum]]
+purpose = "execute_plan"
+n = 2
+groups = ["release", "sre"]
+exclude_requester = true
+```
+
+`exclude_requester` means the principal that calls apply cannot be one of the
+N. Automatic approval cannot satisfy `n > 1`. Apply accepts one envelope
+file, a JSON array of envelopes, or a directory of envelope files. Envelopes
+collected on separate media are imported together that way.
+
+```sh
+tenkaictl apply <plan-id> \
+  --approval ./envelopes \
+  --approval-trust-roots plan-approvers.toml
+```
+
+`POST /v1/plans/{plan_id}/approve` accepts one envelope at a time.
+`GET /v1/plans/{plan_id}/approvals` lists collected envelopes and how many
+are still missing. Apply unions those stored envelopes with the request set
+and refuses until N valid, unexpired envelopes are present; the refusal lists
+what is missing. See [ADR 0037](decisions/0037-multi-party-plan-approval.md).
 
 ```sh
 tenkaictl apply <plan-id> \
