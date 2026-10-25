@@ -19,8 +19,10 @@ use crate::manifest::{
     Manifest, ModelHealthSection, ModelRequirementsSection, ModelRuntimeSection, ModelSection,
 };
 
+mod mlx;
 mod onnx;
 
+pub use mlx::{FakeMlxEngine, MLX_ENGINE, MlxHostExecutor, MlxLmServerLauncher};
 pub use onnx::{
     ClassicalOnnxExecutor, FakeOnnxEngine, OnnxEngineRequest, OnnxResources, OnnxScoringEngine,
     PredictionSummarySink, RecordingSummarySink, RegistryTrust,
@@ -808,7 +810,8 @@ pub fn selected_model_runtime_executor_factory() -> Option<Arc<dyn ModelRuntimeE
 
 /// Select the executor for one descriptor by `runtime.engine`.
 ///
-/// `llama.cpp` always keeps the reference executor. `onnx` uses the classical
+/// `llama.cpp` always keeps the reference executor. `mlx` uses the Apple-silicon
+/// host-process executor (fake engine in CI). `onnx` uses the classical
 /// scoring executor (fake engine in CI) and needs the release workdir so it
 /// can read the signed registry descriptor. `vllm` uses the injected host
 /// executor, and only on an environment that carries a cluster configuration.
@@ -825,6 +828,10 @@ pub fn select_model_runtime_executor(
     match descriptor.runtime.engine.as_str() {
         "llama.cpp" => Ok(Arc::new(ReferenceLlamaCppExecutor::for_operator_host(
             state_path.to_path_buf(),
+        ))),
+        "mlx" => Ok(Arc::new(MlxHostExecutor::for_operator_host(
+            state_path.to_path_buf(),
+            artifacts,
         ))),
         "onnx" => {
             let workdir = artifacts
@@ -1469,6 +1476,24 @@ mod tests {
     }
 
     #[test]
+    fn engine_selection_uses_mlx_host_executor() {
+        let mut descriptor = sample_descriptor();
+        descriptor.runtime.engine = "mlx".into();
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-select-mlx-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let state = root.join("active.json");
+        let selected =
+            select_model_runtime_executor(&descriptor, "lab", None, None, &state, None).unwrap();
+        let digest = selected.apply(&descriptor).unwrap();
+        assert_eq!(digest, descriptor.digest().unwrap());
+        assert!(state.exists(), "mlx executor must stage the descriptor");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn engine_selection_uses_classical_executor_for_onnx() {
         let mut descriptor = sample_descriptor();
         descriptor.runtime.engine = "onnx".into();
@@ -1574,7 +1599,7 @@ mod tests {
     #[test]
     fn engine_selection_refuses_unknown_engines() {
         let mut descriptor = sample_descriptor();
-        for engine in ["tensorrt", "mlx", "tgi", "nim"] {
+        for engine in ["tensorrt", "tgi", "nim"] {
             descriptor.runtime.engine = engine.into();
             let error = select_model_runtime_executor(
                 &descriptor,

@@ -62,7 +62,9 @@ pub(super) async fn activate(
             crate::model_runtime::ModelRuntimeDescriptor::from_manifest(&content.manifest)?;
         // Engine selection: llama.cpp keeps the reference executor (fake by
         // default; real binary when TENKAI_LLAMA_SERVER / TENKAI_USE_REAL_LLAMA
-        // is set, see model-runtime.md); onnx verifies a signed registry
+        // is set, see model-runtime.md); mlx is the Apple-silicon host-process
+        // executor (fake by default; real mlx_lm.server when TENKAI_MLX_SERVER /
+        // TENKAI_USE_REAL_MLX is set); onnx verifies a signed registry
         // descriptor and runs the injected scoring port; other engines use the
         // host-injected executor and fail closed without one.
         let executor = match model_runtime_executor(ctx, content, adapters, &descriptor).await? {
@@ -584,7 +586,9 @@ async fn model_runtime_executor(
     adapters: TargetAdapters<'_>,
     descriptor: &crate::model_runtime::ModelRuntimeDescriptor,
 ) -> Result<Result<std::sync::Arc<dyn crate::model_runtime::ModelRuntimeExecutor>, String>> {
-    // The reference path never consults cluster configuration.
+    // The llama.cpp reference path never consults cluster or weight-origin
+    // configuration. mlx is also a host process (no cluster) but still needs
+    // environment mirrors, isolation, and registry for WeightCache.
     if descriptor.runtime.engine == "llama.cpp" {
         return Ok(crate::model_runtime::select_model_runtime_executor(
             descriptor,

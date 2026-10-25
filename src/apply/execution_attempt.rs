@@ -27,8 +27,8 @@ pub struct ExecutionOptions<'a> {
     pub authorization: ExecutionAuthorization<'a>,
     /// Host-selected software adapter. `None` keeps the shell install path.
     pub software_executor: Option<Arc<dyn crate::software_executor::SoftwareExecutor>>,
-    /// Host-selected model-runtime executor factory. `None` serves only the
-    /// reference `llama.cpp` engine; other engines fail closed.
+    /// Host-selected model-runtime executor factory. `None` still serves the
+    /// in-tree `llama.cpp` and `mlx` host-process engines; other engines fail closed.
     pub model_runtime_executor: Option<Arc<dyn crate::model_runtime::ModelRuntimeExecutorFactory>>,
     /// Host-selected live worker-lifecycle port. Required for worker-pool apply.
     pub worker_lifecycle: Option<Arc<dyn crate::worker_pool::WorkerLifecyclePort>>,
