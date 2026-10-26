@@ -76,6 +76,29 @@ async fn tenant_mode_management_apis_isolate_environments() {
 
     let store = Arc::new(tenkai::storage::SqliteStore::open_in_memory().unwrap());
     let tenant_app = router(config, Arc::new(FixedReconciler::default()), store).unwrap();
+    // Runtime enrollment uses the host's store, which is not tenant-partitioned.
+    let enrollment = tenant_app
+        .clone()
+        .oneshot(
+            Request::post("/v1/environments/env-a/runtime-enrollments")
+                .header(
+                    "x-tenkai-assertion",
+                    r#"{"tenant":"tenant-a","principal":"user-a","capabilities":["read","management"]}"#,
+                )
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(enrollment.status(), StatusCode::FORBIDDEN);
+    let refusal = axum::body::to_bytes(enrollment.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&refusal).contains("tenant mode"),
+        "{refusal:?}"
+    );
 
     let list_a = tenant_app
         .clone()

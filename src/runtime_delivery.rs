@@ -566,6 +566,29 @@ impl RuntimeDeliveryOperations {
         environment: &str,
     ) -> Result<RuntimeWork, RuntimeDeliveryError> {
         let identity = self.admit(token, instance, environment)?;
+        // While the server may still run a plan it began before a runtime
+        // enrolled (#630), no plan is handed out. Checked before the plan is
+        // chosen, so one the server finished meanwhile is seen as finished.
+        // The server checks enrollment under that lease, so the two never
+        // execute one environment together.
+        {
+            let Some(mut ctx) = self.reconciler.application_ctx() else {
+                return Err(RuntimeDeliveryError::Unavailable(
+                    "application core is not available on this host".into(),
+                ));
+            };
+            match crate::apply::runtime_may_take_over(&mut ctx, environment).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Ok(RuntimeWork {
+                        environment: environment.into(),
+                        plan: None,
+                        claim: None,
+                    });
+                }
+                Err(error) => return Err(RuntimeDeliveryError::Unavailable(error.to_string())),
+            }
+        }
         let plan = self
             .reconciler
             .pending_work(environment.to_string())
@@ -633,6 +656,33 @@ impl RuntimeDeliveryOperations {
             .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))?;
         match claim {
             Some(claim) => {
+                // A runtime's plan stays Computed until its completion is
+                // durable, so a fresh claim on a Running plan means the server
+                // began it, before a runtime enrolled (#630). No server lease
+                // is left (checked above, an expired one taken over), so it
+                // stopped: fail the plan as server recovery does, rather than
+                // run it again from its first step. Recovery, such as a
+                // rollback, is the next plan.
+                if claim.completion_json.is_none() && plan.state == crate::plan::PlanState::Running
+                {
+                    let mut abandoned = plan;
+                    crate::plan::transition(
+                        &mut ctx,
+                        &mut abandoned,
+                        crate::plan::Transition::new(
+                            crate::plan::PlanState::Failed,
+                            "controller stopped after execution began; lease expired before recovery",
+                        ),
+                        crate::plan::Persistence::Standard,
+                    )
+                    .await
+                    .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))?;
+                    return Ok(RuntimeWork {
+                        environment: environment.into(),
+                        plan: None,
+                        claim: None,
+                    });
+                }
                 // Placement admits new execution only: a claim holding a
                 // durable completion is replayed whatever the facts say now.
                 if claim.completion_json.is_none() {
@@ -644,11 +694,28 @@ impl RuntimeDeliveryOperations {
                     claim: Some(claim),
                 })
             }
-            None => Ok(RuntimeWork {
-                environment: environment.into(),
-                plan: None,
-                claim: None,
-            }),
+            None => {
+                // Another runtime's claim. If it stored its completion and
+                // then stopped, or was revoked, before it was applied, the
+                // server applies it once that claim lapses (#630).
+                let lapsed = self
+                    .store
+                    .lapsed_runtime_completion(environment, &plan.id, crate::now_millis())
+                    .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))?;
+                if let Some(completion_json) = lapsed {
+                    let completion: RuntimeCompletion = serde_json::from_str(&completion_json)
+                        .map_err(|error| RuntimeDeliveryError::Internal(error.to_string()))?;
+                    self.reconciler
+                        .complete_work(environment.to_string(), completion)
+                        .await
+                        .map_err(|error| RuntimeDeliveryError::Internal(format!("{error:#}")))?;
+                }
+                Ok(RuntimeWork {
+                    environment: environment.into(),
+                    plan: None,
+                    claim: None,
+                })
+            }
         }
     }
 
@@ -768,8 +835,10 @@ impl RuntimeDeliveryOperations {
         let token = token
             .filter(|token| !token.is_empty())
             .ok_or(RuntimeDeliveryError::MissingCredential)?;
-        let assigned = runtime_assignment(&self.assignments, token)
-            .ok_or(RuntimeDeliveryError::InvalidCredential)?;
+        let assigned = match runtime_assignment(&self.assignments, token) {
+            Some(environment) => environment,
+            None => self.enrolled_environment(token)?,
+        };
         let instance = instance
             .filter(|instance| !instance.is_empty() && instance.len() <= 128 && instance.is_ascii())
             .ok_or(RuntimeDeliveryError::InvalidInstance)?;
@@ -779,6 +848,76 @@ impl RuntimeDeliveryOperations {
         Ok(RuntimeIdentity {
             owner: runtime_owner(token, instance),
         })
+    }
+}
+
+/// What a runtime agent sends to exchange its enrollment token (#630).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeEnrollRequest {
+    pub token: String,
+}
+
+/// The agent's own credential, shown only in this response. `credential_id`
+/// is what an operator revokes it by.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeEnrolled {
+    pub environment: String,
+    pub credential: String,
+    pub credential_id: String,
+}
+
+impl RuntimeDeliveryOperations {
+    /// Exchange a single-use enrollment token of `environment` for a runtime
+    /// credential. An unknown, spent, expired or foreign token is refused
+    /// alike, and a refused token is not spent.
+    pub fn enroll(
+        &self,
+        environment: &str,
+        request: &RuntimeEnrollRequest,
+    ) -> Result<RuntimeEnrolled, RuntimeDeliveryError> {
+        use crate::runtime_credentials::{
+            CREDENTIAL_PREFIX, ENROLLMENT_TOKEN_PREFIX, digest, mint,
+        };
+        if !request.token.starts_with(ENROLLMENT_TOKEN_PREFIX) {
+            return Err(RuntimeDeliveryError::InvalidCredential);
+        }
+        // A drifted clock must not stretch a token's expiry.
+        crate::clock_guard::require_trusted_time("runtime enrollment")
+            .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))?;
+        let credential = mint(CREDENTIAL_PREFIX)
+            .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))?;
+        let record = match self.store.redeem_runtime_enrollment(
+            environment,
+            &digest(&request.token),
+            &digest(&credential),
+            crate::now_millis(),
+        ) {
+            Ok(record) => record,
+            Err(crate::storage::StoreError::InvalidData { .. }) => {
+                return Err(RuntimeDeliveryError::InvalidCredential);
+            }
+            Err(error) => return Err(RuntimeDeliveryError::Unavailable(error.to_string())),
+        };
+        Ok(RuntimeEnrolled {
+            environment: record.environment_id,
+            credential,
+            credential_id: record.credential_digest,
+        })
+    }
+
+    /// The environment of an enrolled, unrevoked runtime credential. A store
+    /// that cannot answer refuses: admission fails closed.
+    fn enrolled_environment(&self, token: &str) -> Result<String, RuntimeDeliveryError> {
+        use crate::runtime_credentials::{CREDENTIAL_PREFIX, digest};
+        if !token.starts_with(CREDENTIAL_PREFIX) {
+            return Err(RuntimeDeliveryError::InvalidCredential);
+        }
+        match self.store.runtime_credential(&digest(token)) {
+            Ok(Some(record)) if record.revoked_at.is_none() => Ok(record.environment_id),
+            Ok(_) => Err(RuntimeDeliveryError::InvalidCredential),
+            Err(error) => Err(RuntimeDeliveryError::Unavailable(error.to_string())),
+        }
     }
 }
 
@@ -847,15 +986,19 @@ mod tests {
         fn pending_work(&self, environment: String) -> WorkFuture<'_> {
             Box::pin(async move {
                 let plan = if let Some(mut ctx) = self.ctx.clone() {
-                    self.plan
+                    let created = self
+                        .plan
                         .get_or_try_init(|| async {
+                            let mut ctx = ctx.clone();
                             crate::ontology::register(&mut ctx).await?;
                             crate::environment::env_add(&mut ctx, &environment, "runtime-test")
                                 .await?;
                             crate::plan::create_from_steps(&mut ctx, &environment, Vec::new()).await
                         })
                         .await?
-                        .clone()
+                        .clone();
+                    // As the reconciler does, hand out the plan as stored now.
+                    crate::plan::load(&mut ctx, &created.id).await?
                 } else {
                     Plan {
                         format_version: 1,
@@ -972,6 +1115,66 @@ mod tests {
         )
     }
 
+    #[test]
+    fn an_enrolled_agent_is_admitted_to_its_environment_until_revoked() {
+        use crate::runtime_credentials::{ENROLLMENT_TOKEN_PREFIX, digest, mint};
+        let (operations, _) = operations();
+        let issue = || {
+            let token = mint(ENROLLMENT_TOKEN_PREFIX).unwrap();
+            operations
+                .store
+                .create_runtime_enrollment(&crate::storage::RuntimeEnrollmentRecord {
+                    token_digest: digest(&token),
+                    environment_id: "prod".into(),
+                    expires_at: i64::MAX,
+                    created_by: "operator".into(),
+                })
+                .unwrap();
+            RuntimeEnrollRequest { token }
+        };
+        let request = issue();
+        // Presented to another environment, the token is refused and kept.
+        assert!(matches!(
+            operations.enroll("stage", &request),
+            Err(RuntimeDeliveryError::InvalidCredential)
+        ));
+        let enrolled = operations.enroll("prod", &request).unwrap();
+        assert_eq!(enrolled.credential_id, digest(&enrolled.credential));
+        assert!(matches!(
+            operations.enroll("prod", &request),
+            Err(RuntimeDeliveryError::InvalidCredential)
+        ));
+        let admit = |token: &str, environment: &str| {
+            operations
+                .admit(Some(token), Some("instance-a"), environment)
+                .map(|_| ())
+        };
+        admit(&enrolled.credential, "prod").unwrap();
+        assert!(matches!(
+            admit(&enrolled.credential, "stage"),
+            Err(RuntimeDeliveryError::ForeignEnvironment)
+        ));
+        operations
+            .store
+            .revoke_runtime_credential(&enrolled.credential_id, 1)
+            .unwrap();
+        assert!(matches!(
+            admit(&enrolled.credential, "prod"),
+            Err(RuntimeDeliveryError::InvalidCredential)
+        ));
+        // Token-configured runtimes keep working.
+        admit("runtime-secret", "prod").unwrap();
+        assert!(matches!(
+            operations.enroll(
+                "prod",
+                &RuntimeEnrollRequest {
+                    token: "runtime-secret".into()
+                }
+            ),
+            Err(RuntimeDeliveryError::InvalidCredential)
+        ));
+    }
+
     #[tokio::test]
     async fn unavailable_application_context_refuses_claim_and_renewal() {
         let (mut operations, _) = operations();
@@ -1001,6 +1204,116 @@ mod tests {
                 .await,
             Err(RuntimeDeliveryError::Unavailable(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn a_runtime_claims_nothing_while_the_server_holds_the_environment() {
+        let (operations, port) = operations();
+        // The plan exists before the server takes the environment.
+        port.pending_work("prod".into()).await.unwrap().unwrap();
+        let mut ctx = port.ctx.clone().unwrap();
+        ctx.acquire_lease(
+            crate::apply::ENVIRONMENT_LEASE_NAMESPACE,
+            "prod",
+            "plan-0",
+            60_000,
+        )
+        .await
+        .unwrap();
+        let work = operations
+            .claim_work(Some("runtime-secret"), Some("instance-a"), "prod")
+            .await
+            .unwrap();
+        assert!(work.claim.is_none() && work.plan.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_plan_the_server_stopped_is_failed_not_run_again_by_a_runtime() {
+        let (operations, port) = operations();
+        let mut plan = port.pending_work("prod".into()).await.unwrap().unwrap();
+        let mut ctx = port.ctx.clone().unwrap();
+        crate::plan::transition(
+            &mut ctx,
+            &mut plan,
+            crate::plan::Transition::new(PlanState::Running, "server execution"),
+            crate::plan::Persistence::Standard,
+        )
+        .await
+        .unwrap();
+        let work = operations
+            .claim_work(Some("runtime-secret"), Some("instance-a"), "prod")
+            .await
+            .unwrap();
+        assert!(work.plan.is_none() && work.claim.is_none());
+        assert_eq!(
+            crate::plan::load(&mut ctx, &plan.id).await.unwrap().state,
+            PlanState::Failed
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lapsed_runtime_completion_is_applied_by_the_server() {
+        let (operations, port) = operations();
+        let plan = port.pending_work("prod".into()).await.unwrap().unwrap();
+        // A runtime stored its completion, then stopped before applying it.
+        let gone = runtime_owner("runtime-secret", "instance-a");
+        let claim = operations
+            .store
+            .claim_runtime_plan("prod", &plan.id, &gone, crate::now_millis() + 20)
+            .unwrap()
+            .unwrap();
+        let completion = RuntimeCompletion {
+            plan_id: plan.id.clone(),
+            generation: claim.generation,
+            succeeded: true,
+            detail: "done".into(),
+            receipts: Vec::new(),
+        };
+        operations
+            .store
+            .complete_runtime_plan(
+                &plan.id,
+                &gone,
+                claim.generation,
+                &serde_json::to_string(&completion).unwrap(),
+            )
+            .unwrap();
+        let before_lapse = operations
+            .claim_work(Some("runtime-secret"), Some("instance-b"), "prod")
+            .await
+            .unwrap();
+        assert!(before_lapse.claim.is_none());
+        assert!(!port.calls.lock().unwrap().contains(&"complete"));
+
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        let work = operations
+            .claim_work(Some("runtime-secret"), Some("instance-b"), "prod")
+            .await
+            .unwrap();
+        assert!(work.claim.is_none());
+        assert!(port.calls.lock().unwrap().contains(&"complete"));
+    }
+
+    #[tokio::test]
+    async fn a_runtime_takes_over_after_the_server_lease_expires() {
+        let (operations, port) = operations();
+        port.pending_work("prod".into()).await.unwrap().unwrap();
+        let mut ctx = port.ctx.clone().unwrap();
+        // A server that crashed while executing: its lease lapses.
+        ctx.acquire_lease(
+            crate::apply::ENVIRONMENT_LEASE_NAMESPACE,
+            "prod",
+            "plan-0",
+            1,
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let work = operations
+            .claim_work(Some("runtime-secret"), Some("instance-a"), "prod")
+            .await
+            .unwrap();
+        assert!(work.claim.is_some());
     }
 
     #[tokio::test]

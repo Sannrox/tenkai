@@ -1099,6 +1099,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_enrolled_environment_is_left_to_its_runtime() {
+        let (database, mut ctx) = registered_ctx("runtime-enrolled", &["stage"]).await;
+        let work = test_plan("stage", 100, PlanState::Computed);
+        plan::store(&mut ctx, &work).await.unwrap();
+        let mut poisoned = ctx.get(&work.id).await.unwrap().unwrap();
+        poisoned
+            .properties
+            .insert("status".into(), "succeeded".into());
+        ctx.put(poisoned).await.unwrap();
+        crate::runtime_credentials::mark_runtime_managed(&mut ctx, "stage")
+            .await
+            .unwrap();
+
+        // The runtime path's own check fails here: the server path is not taken.
+        let reconciler = Reconciler::new(ctx.clone(), config()).unwrap();
+        let report = reconciler.run_once().await.unwrap();
+        assert!(
+            matches!(
+                &report.environments[0].status,
+                EnvironmentStatus::Failed { error, .. }
+                    if error.contains("status index succeeded does not match payload computed")
+            ),
+            "{:?}",
+            report.environments[0].status
+        );
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
     async fn bounded_tick_excludes_foreign_work_before_reconcile() {
         let (database, ctx) = registered_ctx("bounded-reconcile", &["env-a", "env-b"]).await;
 

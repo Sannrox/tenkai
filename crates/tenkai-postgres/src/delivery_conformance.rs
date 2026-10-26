@@ -33,6 +33,7 @@ const IMPLEMENTATION_SOURCES: &[&str] = &[
     include_str!("postgres_imp/reconcile.rs"),
     include_str!("postgres_imp/rollbacks.rs"),
     include_str!("postgres_imp/runtime.rs"),
+    include_str!("postgres_imp/runtime_enrollment.rs"),
     include_str!("postgres_imp/schema.rs"),
     include_str!("../../../src/storage.rs"),
     include_str!("../../../src/runtime_capabilities.rs"),

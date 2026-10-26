@@ -24,12 +24,29 @@ struct Cli {
     /// `TENKAI_RUNTIME_INVENTORY=0|false|off|no`.
     #[arg(long, default_value_t = false)]
     no_inventory_report: bool,
+    /// Where the agent keeps its own credential (#630). Created on first
+    /// start from a single-use enrollment token
+    /// (`TENKAI_RUNTIME_ENROLLMENT_TOKEN`, from `tenkaictl runtime enroll`).
+    /// Without it, `TENKAI_RUNTIME_TOKEN` is used as before.
+    #[arg(long, env = "TENKAI_RUNTIME_CREDENTIAL_FILE")]
+    credential_file: Option<PathBuf>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let token = tenkai::secret_source::require("TENKAI_RUNTIME_TOKEN")?;
+    let token = match &cli.credential_file {
+        Some(file) => {
+            tenkai::runtime_agent::enrolled_credential(
+                &cli.server_url,
+                &cli.environment,
+                || tenkai::secret_source::read("TENKAI_RUNTIME_ENROLLMENT_TOKEN"),
+                file,
+            )
+            .await?
+        }
+        None => tenkai::secret_source::require("TENKAI_RUNTIME_TOKEN")?,
+    };
     let inventory_report = !cli.no_inventory_report && env_inventory_enabled();
     let client = RuntimeClient::new_with_options(
         cli.server_url,

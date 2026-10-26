@@ -3758,6 +3758,63 @@
       ],
       "type": "object"
     },
+    "RuntimeCredentialRevoked": {
+      "properties": {
+        "credential_id": {
+          "type": "string"
+        },
+        "environment": {
+          "type": "string"
+        },
+        "revoked_at": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "credential_id",
+        "environment",
+        "revoked_at"
+      ],
+      "type": "object"
+    },
+    "RuntimeEnrollmentIssued": {
+      "description": "A new enrollment. `token` is shown only here.",
+      "properties": {
+        "environment": {
+          "type": "string"
+        },
+        "expires_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "environment",
+        "token",
+        "expires_at"
+      ],
+      "type": "object"
+    },
+    "RuntimeEnrollmentRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "ttl_seconds": {
+          "default": null,
+          "description": "How long the token may be redeemed; default 15 minutes, at most 24 hours.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "ScanEvidence": {
       "additionalProperties": false,
       "description": "What the scanner said about one import.",
@@ -4599,6 +4656,26 @@
       },
       "response": {
         "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/environments/{environment}/runtime-enrollments",
+      "request": {
+        "$ref": "#/$defs/RuntimeEnrollmentRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/RuntimeEnrollmentIssued"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/runtime-credentials/{credential_id}/revoke",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/RuntimeCredentialRevoked"
       }
     },
     {

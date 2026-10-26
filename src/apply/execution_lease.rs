@@ -135,6 +135,15 @@ pub(super) async fn claim_execution_environment(
 ) -> Result<EnvironmentLease> {
     let lease =
         claim_environment_with_options(ctx, environment, owner, EXECUTION_LEASE_MS, true).await?;
+    // An environment with an enrolled runtime is run by that runtime only
+    // (#630). Checked while this lease is held, and a runtime claims no work
+    // while it is, so the two never execute one environment together.
+    let delegated = crate::runtime_credentials::runtime_managed(ctx, environment).await;
+    if !matches!(delegated, Ok(false)) {
+        release_environment(ctx, &lease).await?;
+        delegated?;
+        bail!("environment {environment} is runtime-managed; its enrolled runtime runs its plans");
+    }
     crate::telemetry::record_metric(
         crate::telemetry::METRIC_LEASE_ACQUIRED,
         1.0,
@@ -597,6 +606,44 @@ pub(crate) async fn environment_lease_status(
     Ok(Some(EnvironmentLeaseStatus { owner: lease.owner }))
 }
 
+/// Whether a runtime may take work in `environment` after it enrolled
+/// (#630): no server execution may still be running there. A server lease
+/// past its expiry is taken over atomically, as server execution takes one
+/// over, and released: its holder can no longer renew it, and its writes fail
+/// their generation fence. A live lease, or a claim only an operator may
+/// clear, keeps the runtime waiting. Polls write nothing unless a lease is
+/// taken over.
+pub(crate) async fn runtime_may_take_over(ctx: &mut Ctx, environment: &str) -> Result<bool> {
+    if environment_lease_status(ctx, environment).await?.is_none() {
+        return Ok(true);
+    }
+    if ctx
+        .get(&legacy_environment_claim_id(environment))
+        .await?
+        .is_some()
+    {
+        return Ok(false);
+    }
+    match get_environment_lease(ctx, environment).await? {
+        Some(lease) if lease.status == "active" && lease.expires_at_ms > crate::now_millis() => {
+            return Ok(false);
+        }
+        Some(lease) if lease.status == "active" => {}
+        _ => return Ok(false),
+    }
+    // Renewed meanwhile, the lease refuses this takeover, and the runtime retries.
+    let lease = claim_environment_with_options(
+        ctx,
+        environment,
+        "runtime-handoff",
+        ENVIRONMENT_LEASE_MS,
+        true,
+    )
+    .await?;
+    release_environment(ctx, &lease).await?;
+    Ok(true)
+}
+
 pub async fn unlock_environment(ctx: &mut Ctx, environment: &str) -> Result<String> {
     crate::ontology::validate_identifier("environment", environment)?;
     let legacy_id = legacy_environment_claim_id(environment);
@@ -701,6 +748,29 @@ mod tests {
             .await
             .unwrap();
         assert!(lease.generation >= 2);
+        release_environment(&mut ctx, &lease).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_server_does_not_execute_an_environment_with_an_enrolled_runtime() {
+        let mut ctx = context("enrolled-runtime");
+        crate::runtime_credentials::mark_runtime_managed(&mut ctx, "prod")
+            .await
+            .unwrap();
+        let refused = match claim_execution_environment(&mut ctx, "prod", "plan-1").await {
+            Ok(_) => panic!("an enrolled environment must not execute on the server"),
+            Err(error) => error.to_string(),
+        };
+        assert!(refused.contains("runtime-managed"), "{refused}");
+        // The lease it took to check is released again.
+        assert!(
+            environment_lease_status(&mut ctx, "prod")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // Other environment work, such as a configuration change, still runs.
+        let lease = claim_environment(&mut ctx, "prod", "config").await.unwrap();
         release_environment(&mut ctx, &lease).await.unwrap();
     }
 }

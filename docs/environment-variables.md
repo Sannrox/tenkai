@@ -113,6 +113,8 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | `TENKAI_SERVER_URL` | unset | Control-plane URL; also used by `tenkaictl --target remote` |
 | `TENKAI_RUNTIME_ENVIRONMENT` | unset | The one environment assigned to an environment-runtime process |
 | `TENKAI_RUNTIME_TOKEN` | unset | Runtime-only bearer secret; kept out of command-line arguments and executor state |
+| `TENKAI_RUNTIME_CREDENTIAL_FILE` | unset | Where an enrolled runtime keeps its own credential, owner-only; replaces `TENKAI_RUNTIME_TOKEN` ([enrolling a runtime](run-tenkai-server.md#enrolling-a-runtime)) |
+| `TENKAI_RUNTIME_ENROLLMENT_TOKEN` | unset | Single-use token exchanged for that credential on first start; unused once the file exists |
 | `TENKAI_RUNTIME_EXECUTOR` | unset | Absolute path to the environment executor implementing the idempotency contract |
 | `TENKAI_RUNTIME_INVENTORY` | enabled | Set `0`/`false`/`off`/`no` to disable runtime inventory reports |
 

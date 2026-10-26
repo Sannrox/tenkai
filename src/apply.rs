@@ -30,7 +30,7 @@ mod step_lifecycle;
 pub(crate) use execution_admission::{CandidateAdmission, classify_candidate};
 pub(crate) use execution_lease::{
     ENVIRONMENT_LEASE_NAMESPACE, EnvironmentLease, claim_environment, environment_lease_status,
-    refresh_environment_lease, release_environment,
+    refresh_environment_lease, release_environment, runtime_may_take_over,
 };
 pub use execution_lease::{EnvironmentLeaseInspect, inspect_environment_lease, unlock_environment};
 use execution_lease::{claim_execution_environment, run_guarded_mutation, run_mutation_command};

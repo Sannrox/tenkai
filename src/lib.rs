@@ -224,6 +224,7 @@ pub mod rollout_time;
 pub mod routing;
 pub mod runtime_agent;
 pub mod runtime_capabilities;
+pub mod runtime_credentials;
 pub mod runtime_delivery;
 pub mod runtime_protocol;
 pub mod schema_contract;

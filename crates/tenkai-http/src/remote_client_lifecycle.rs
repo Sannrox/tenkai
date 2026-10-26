@@ -407,6 +407,32 @@ impl RemoteClient {
         .await
     }
 
+    /// Issue a single-use runtime enrollment token for `environment` (#630).
+    pub async fn create_runtime_enrollment(
+        &self,
+        environment: &str,
+        request: &tenkai::management_operations::RuntimeEnrollmentRequest,
+    ) -> anyhow::Result<tenkai::management_operations::RuntimeEnrollmentIssued> {
+        self.request_json_body(
+            reqwest::Method::POST,
+            &format!("/v1/environments/{environment}/runtime-enrollments"),
+            Some(request),
+        )
+        .await
+    }
+
+    /// Revoke the runtime credential `credential_id` (#630).
+    pub async fn revoke_runtime_credential(
+        &self,
+        credential_id: &str,
+    ) -> anyhow::Result<tenkai::management_operations::RuntimeCredentialRevoked> {
+        self.request_json(
+            reqwest::Method::POST,
+            &format!("/v1/runtime-credentials/{credential_id}/revoke"),
+        )
+        .await
+    }
+
     async fn lifecycle_result<B: serde::Serialize>(
         &self,
         method: reqwest::Method,

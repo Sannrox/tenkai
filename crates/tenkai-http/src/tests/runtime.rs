@@ -231,3 +231,77 @@ async fn runtime_credentials_are_environment_scoped() {
     assert!(second.plan.is_some());
     assert!(second.claim.unwrap().completion_json.is_some());
 }
+
+#[tokio::test]
+async fn an_agent_enrolls_once_works_with_its_credential_and_stops_when_revoked() {
+    // Issuing an enrollment marks the environment in the application core.
+    let (app, _store) = app_with_reconciler(FixedReconciler::for_runtime());
+    let call = |method: &str, path: &str, bearer: Option<&str>, body: serde_json::Value| {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("content-type", "application/json")
+            .header("x-tenkai-runtime-instance", "rt-1");
+        if let Some(bearer) = bearer {
+            request = request.header("authorization", format!("Bearer {bearer}"));
+        }
+        let app = app.clone();
+        async move {
+            let response = app
+                .oneshot(request.body(Body::from(body.to_string())).unwrap())
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (
+                status,
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_default(),
+            )
+        }
+    };
+    let enrollments = "/v1/environments/prod/runtime-enrollments";
+    let (status, _) = call("POST", enrollments, None, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, issued) = call(
+        "POST",
+        enrollments,
+        Some("management-secret"),
+        serde_json::json!({"ttl_seconds": 60}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{issued}");
+    let token = issued["token"].as_str().unwrap().to_string();
+
+    let enroll = "/v1/runtime/environments/prod/enroll";
+    let (status, enrolled) = call("POST", enroll, None, serde_json::json!({"token": token})).await;
+    assert_eq!(status, StatusCode::CREATED, "{enrolled}");
+    let credential = enrolled["credential"].as_str().unwrap().to_string();
+    let (status, _) = call("POST", enroll, None, serde_json::json!({"token": token})).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "a spent token is refused");
+
+    let inventory = "/v1/runtime/environments/prod/inventory";
+    let facts = serde_json::json!({"facts": {"architecture": "arm64"}, "source": "runtime-probe"});
+    let (status, _) = call("POST", inventory, Some(&credential), facts.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let revoke = format!(
+        "/v1/runtime-credentials/{}/revoke",
+        enrolled["credential_id"].as_str().unwrap()
+    );
+    let (status, revoked) = call(
+        "POST",
+        &revoke,
+        Some("management-secret"),
+        serde_json::json!(null),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{revoked}");
+    let (status, _) = call("POST", inventory, Some(&credential), facts).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a revoked credential is refused"
+    );
+}

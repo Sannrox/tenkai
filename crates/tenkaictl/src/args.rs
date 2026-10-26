@@ -149,6 +149,11 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: KeysCommand,
     },
+    /// Enroll runtime agents and revoke their credentials (server only).
+    Runtime {
+        #[command(subcommand)]
+        command: RuntimeCommand,
+    },
     /// The read-only seed registry over the local artifact store.
     Registry {
         #[command(subcommand)]
@@ -327,6 +332,21 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: DevCommand,
     },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum RuntimeCommand {
+    /// Issue a single-use enrollment token for an environment's runtime
+    /// agent. The token is printed once; the agent exchanges it for its own
+    /// credential with `tenkai-runtime --enrollment-token`.
+    Enroll {
+        env: String,
+        /// How long the token may be redeemed, in seconds (default 900).
+        #[arg(long)]
+        ttl_seconds: Option<u64>,
+    },
+    /// Revoke a runtime credential by its id (`sha256:...`).
+    Revoke { credential_id: String },
 }
 
 #[derive(Subcommand)]

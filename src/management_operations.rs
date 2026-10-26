@@ -6,6 +6,11 @@
 
 use std::sync::Arc;
 
+mod runtime_enrollment;
+pub use runtime_enrollment::{
+    RuntimeCredentialRevoked, RuntimeEnrollmentIssued, RuntimeEnrollmentRequest,
+};
+
 use crate::auth_context::{
     AuthMode, AuthStack, AuthenticatedRequestContext, CredentialMaterial, DeliveryCapability,
 };

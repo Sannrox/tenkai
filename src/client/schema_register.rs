@@ -15,7 +15,7 @@ use crate::ontology::{
     KIND_PACKAGE_MIGRATION_LOCK, KIND_PLAN, KIND_PLAN_APPROVAL_ENVELOPE,
     KIND_PLAN_APPROVAL_VERIFICATION, KIND_PRODUCT, KIND_PRODUCT_MAINTENANCE_CONFIG,
     KIND_PROMOTION_AUDIT, KIND_PROMOTION_LOCK, KIND_RELEASE, KIND_RELEASE_RECALL,
-    KIND_RELEASE_VERIFICATION, KIND_WAVE, REL_SUBSCRIBES,
+    KIND_RELEASE_VERIFICATION, KIND_RUNTIME_ENROLLMENT, KIND_WAVE, REL_SUBSCRIBES,
 };
 use crate::pb::graph_action::{ActionOp, ActionParamDef, ActionTypeDef};
 use crate::pb::sekai::{ObjectType, PropertyDef};
@@ -697,6 +697,11 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
             KIND_PROMOTION_LOCK,
             "An exclusive lock serializing policy changes and channel promotion",
             vec![prop("owner", true, "Operation holding the lock")],
+        ),
+        object_type(
+            KIND_RUNTIME_ENROLLMENT,
+            "Marks an environment a runtime agent was enrolled for: only that runtime runs its plans",
+            vec![prop("environment", true, "The runtime-managed environment")],
         ),
         object_type(
             KIND_WAVE,
