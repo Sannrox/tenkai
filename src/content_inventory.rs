@@ -79,7 +79,7 @@ impl ContentInventory {
 
 /// Inventory of the content stores configured in this process's environment.
 pub async fn inventory(ctx: &mut Ctx) -> Result<ContentInventory> {
-    let oci_root = std::env::var_os("TENKAI_OCI_STORE")
+    let oci_root = crate::host_env::var_os("TENKAI_OCI_STORE")
         .filter(|root| !root.is_empty())
         .map(std::path::PathBuf::from);
     let weights = crate::offline_chunk_store::weight_cache_from_env()?;

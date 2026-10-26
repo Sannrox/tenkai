@@ -189,7 +189,7 @@ impl FilesystemArtifactRegistry {
     }
 
     pub fn from_env() -> Result<Self> {
-        let root = std::env::var("TENKAI_OCI_STORE").map_err(|_| {
+        let root = crate::host_env::var("TENKAI_OCI_STORE").map_err(|_| {
             anyhow::anyhow!("TENKAI_OCI_STORE is required when a release names OCI artifacts")
         })?;
         Ok(Self::new(PathBuf::from(root)))
@@ -670,7 +670,7 @@ impl ArtifactRegistry for MirroredRegistry {
 /// The store `TENKAI_OCI_STORE` names, if set. The variable is read once,
 /// so a concurrent change cannot pass the check and fail the construction.
 pub fn selected_registry() -> Result<Option<std::sync::Arc<dyn ArtifactRegistry>>> {
-    match std::env::var("TENKAI_OCI_STORE") {
+    match crate::host_env::var("TENKAI_OCI_STORE") {
         Ok(path) if !path.is_empty() => Ok(Some(std::sync::Arc::new(
             FilesystemArtifactRegistry::new(PathBuf::from(path)),
         ))),

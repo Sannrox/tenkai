@@ -195,7 +195,7 @@ fn operator_weight_cache(
     state_path: &Path,
     artifacts: Option<super::ModelRuntimeArtifacts>,
 ) -> WeightCache {
-    let cache_root = std::env::var_os("TENKAI_WEIGHT_CACHE")
+    let cache_root = crate::host_env::var_os("TENKAI_WEIGHT_CACHE")
         .map(PathBuf::from)
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| state_path.with_extension("weights"));

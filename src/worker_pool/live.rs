@@ -581,7 +581,7 @@ impl LocalProcessWorkerLifecycle {
     pub fn from_env() -> Result<Self> {
         let runtime_root = match std::env::var("TENKAI_WORKER_LIFECYCLE_ROOT") {
             Ok(path) => PathBuf::from(path),
-            Err(_) => match std::env::var("TENKAI_STATE_DIR") {
+            Err(_) => match crate::host_env::var("TENKAI_STATE_DIR") {
                 Ok(path) => PathBuf::from(path).join("worker-lifecycle"),
                 Err(_) => PathBuf::from(".tenkai-state/worker-lifecycle"),
             },

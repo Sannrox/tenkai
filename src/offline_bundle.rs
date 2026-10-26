@@ -906,11 +906,11 @@ pub fn preflight_full_stack(bundle: &VerifiedBundle, bundle_path: Option<&Path>)
             bail!("bundle is missing a required {kind} {path}");
         }
     }
-    match std::env::var("TENKAI_OCI_STORE") {
+    match crate::host_env::var("TENKAI_OCI_STORE") {
         Ok(path) if !path.is_empty() => {}
         _ => bail!("TENKAI_OCI_STORE is required to import offline artifact layers"),
     }
-    match std::env::var_os("TENKAI_WEIGHT_CACHE") {
+    match crate::host_env::var_os("TENKAI_WEIGHT_CACHE") {
         Some(path) if !path.is_empty() => {}
         _ => bail!("TENKAI_WEIGHT_CACHE is required to import chunked weights"),
     }
