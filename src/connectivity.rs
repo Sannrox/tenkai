@@ -709,6 +709,11 @@ pub async fn bind_isolated_bundle(
 /// Completeness, the authenticated plan, and catalog payload are checked
 /// before graph mutation. Artifact import happens before the upgrade record
 /// is created so a failed import can be retried.
+///
+/// With `seed_registry` (`host[:port]`, #627), every image registry the
+/// bundle names is mirrored to that one local registry: layers are stored
+/// under it in `TENKAI_OCI_STORE`, which `tenkaictl registry serve` serves,
+/// and later bundles bind through the same mirror.
 pub async fn install_isolated_stack(
     ctx: &mut Ctx,
     spec: &UpgradeSpec,
@@ -716,6 +721,7 @@ pub async fn install_isolated_stack(
     bundle: &crate::offline_bundle::BundleEnvelope,
     trust_roots: &crate::release_signing::TrustRoots,
     bundle_path: Option<&Path>,
+    seed_registry: Option<&str>,
 ) -> Result<UpgradeRecord> {
     spec.validate()?;
     if spec.environments.len() != 1 || spec.environments[0] != environment {
@@ -759,8 +765,18 @@ pub async fn install_isolated_stack(
     require_first_install_plan(&plan, spec)?;
     require_connectivity_upgrade_schema(ctx).await?;
     let upgrade_id = connectivity_upgrade_id(&spec.name);
-    if ctx.get(&upgrade_id).await?.is_some() {
-        bail!("upgrade {} already exists", spec.name);
+    let mirrors = bundle_layer_mirrors(&verified, seed_registry)?;
+    if let Some(existing) = ctx.get(&upgrade_id).await? {
+        return reinstall_isolated_stack(
+            ctx,
+            spec,
+            environment,
+            &verified,
+            bundle_path,
+            &mirrors,
+            record_from_object(&existing)?,
+        )
+        .await;
     }
     if let Some(existing) = ctx.get(&env_id(environment)).await? {
         if existing.kind != crate::ontology::KIND_ENVIRONMENT {
@@ -776,7 +792,6 @@ pub async fn install_isolated_stack(
         }
     }
     let (_, pending_catalog) = admit_isolated_catalog(ctx, spec, &verified, &plan).await?;
-    let mirrors = bundle_layer_mirrors(&verified)?;
     let imported = (|| {
         crate::offline_bundle::import_artifact_layers(
             &verified,
@@ -809,7 +824,7 @@ pub async fn install_isolated_stack(
         return Err(error);
     }
     let pin = if let Some(pending) = pending_catalog {
-        commit_isolated_catalog(ctx, spec, &plan, pending).await?
+        commit_isolated_catalog(ctx, spec, &plan, pending, &mirrors).await?
     } else {
         crate::catalog::pin_isolated_channel(ctx, &spec.product, &spec.version, &spec.channel)
             .await?;
@@ -859,6 +874,58 @@ pub async fn install_isolated_stack(
     ctx.create_once(upgrade_object(&record)?)
         .await
         .map_err(|status| anyhow::anyhow!("{status}"))?;
+    Ok(record)
+}
+
+/// A repeated first install of the same bundle (#627): nothing in the graph
+/// changes, and the layers and weights are imported again, which stores
+/// only what is missing, so a store lost or replaced since is refilled.
+/// A different bundle, release or mirror is refused as before.
+async fn reinstall_isolated_stack(
+    ctx: &mut Ctx,
+    spec: &UpgradeSpec,
+    environment: &str,
+    verified: &crate::offline_bundle::VerifiedBundle,
+    bundle_path: Option<&Path>,
+    mirrors: &BTreeMap<String, String>,
+    record: UpgradeRecord,
+) -> Result<UpgradeRecord> {
+    let same_bundle = record.product == spec.product
+        && record.version == spec.version
+        && record.channel == spec.channel
+        && matches!(
+            record.environments.as_slice(),
+            [only] if only.name == environment
+                && only.isolated.as_ref().is_some_and(|evidence| evidence.bundle_digest == verified.digest())
+        );
+    if !same_bundle {
+        bail!("upgrade {} already exists", spec.name);
+    }
+    let env = ctx
+        .get(&env_id(environment))
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("environment {environment} is not registered"))?;
+    let persisted = crate::oci_artifact::mirrors_from_properties(&env.properties);
+    if mirrors
+        .iter()
+        .any(|(registry, mirror)| persisted.get(registry) != Some(mirror))
+    {
+        bail!(
+            "upgrade {} already exists with other artifact mirrors; change them with the environment's artifact mirror settings",
+            spec.name
+        );
+    }
+    crate::offline_bundle::import_artifact_layers(
+        verified,
+        bundle_path,
+        crate::oci_artifact::selected_registry()?.as_deref(),
+        mirrors,
+    )?;
+    crate::offline_chunk_store::import_weight_chunks_for_bundle(
+        verified,
+        bundle_path,
+        crate::offline_chunk_store::weight_cache_from_env()?.as_ref(),
+    )?;
     Ok(record)
 }
 
@@ -1382,16 +1449,23 @@ fn bundle_release_verification_paths(
     Ok((signature, trust))
 }
 
+/// Each image registry of the bundle mapped to `seed_registry`, or to
+/// itself when there is none.
 fn bundle_layer_mirrors(
     verified: &crate::offline_bundle::VerifiedBundle,
+    seed_registry: Option<&str>,
 ) -> Result<BTreeMap<String, String>> {
+    if let Some(seed) = seed_registry {
+        crate::oci_artifact::validate_pull_registry("seed registry", seed)?;
+    }
     let mut mirrors = BTreeMap::new();
     let Some(raw) = verified.entry(crate::offline_bundle::LAYER_INSTRUCTION_PATH) else {
         return Ok(mirrors);
     };
     let layers: crate::offline_bundle::OfflineArtifactLayerManifest = serde_json::from_slice(raw)?;
     for layer in &layers.layers {
-        mirrors.insert(layer.registry.clone(), layer.registry.clone());
+        let mirror = seed_registry.unwrap_or(&layer.registry);
+        mirrors.insert(layer.registry.clone(), mirror.to_string());
     }
     Ok(mirrors)
 }
@@ -1787,6 +1861,7 @@ async fn commit_isolated_catalog(
     spec: &UpgradeSpec,
     plan: &Plan,
     admission: IsolatedCatalogAdmission,
+    mirrors: &BTreeMap<String, String>,
 ) -> Result<ReleasePin> {
     require_isolated_channel_available(ctx, spec).await?;
     let published = crate::catalog::publish(
@@ -1796,7 +1871,13 @@ async fn commit_isolated_catalog(
             signature: Some(admission.source.join("release.sig.json")),
             trust_roots: Some(admission.source.join("release-trust.toml")),
             allow_unsigned_development: false,
-            artifact_registry: crate::oci_artifact::selected_registry()?,
+            // Layers were imported under their mirrors; verify them there.
+            artifact_registry: crate::oci_artifact::selected_registry()?.map(|store| {
+                std::sync::Arc::new(crate::oci_artifact::MirroredRegistry::new(
+                    store,
+                    mirrors.clone(),
+                )) as std::sync::Arc<dyn crate::oci_artifact::ArtifactRegistry>
+            }),
             state_dir: Some(isolated_catalog_state_dir()?),
             change_set_evidence: admission
                 .change_set_evidence
@@ -2737,7 +2818,7 @@ install = "true"
             channel: "stable".into(),
             environments: vec!["dark-1".into()],
         };
-        let err = install_isolated_stack(&mut ctx, &spec, "dark-1", &bundle, &roots, None)
+        let err = install_isolated_stack(&mut ctx, &spec, "dark-1", &bundle, &roots, None, None)
             .await
             .unwrap_err()
             .to_string();
@@ -2760,7 +2841,7 @@ install = "true"
             registry: "ghcr.io".into(),
             repository: "edge/app".into(),
             digest: sha256_digest(bytes),
-            media_type: "application/vnd.oci.image.manifest.v1+json".into(),
+            media_type: "application/vnd.oci.image.layer.v1.tar".into(),
         }
     }
 
@@ -3081,11 +3162,18 @@ install = "true"
             channel: "stable".into(),
             environments: vec!["dark-1".into()],
         };
-        let err =
-            install_isolated_stack(&mut ctx, &spec, "dark-1", &bundle, &roots, Some(&archive))
-                .await
-                .unwrap_err()
-                .to_string();
+        let err = install_isolated_stack(
+            &mut ctx,
+            &spec,
+            "dark-1",
+            &bundle,
+            &roots,
+            Some(&archive),
+            None,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
         assert!(
             err.contains("executable plan") || err.contains("canonical plan"),
             "{err}"
@@ -3139,11 +3227,18 @@ install = "true"
             channel: "stable".into(),
             environments: vec!["dark-1".into()],
         };
-        let err =
-            install_isolated_stack(&mut ctx, &spec, "dark-1", &bundle, &roots, Some(&archive))
-                .await
-                .unwrap_err()
-                .to_string();
+        let err = install_isolated_stack(
+            &mut ctx,
+            &spec,
+            "dark-1",
+            &bundle,
+            &roots,
+            Some(&archive),
+            None,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("not executable"), "{err}");
         assert!(
             crate::environment::environment(&mut ctx, "dark-1")
@@ -3193,11 +3288,18 @@ install = "true"
             channel: "stable".into(),
             environments: vec!["dark-1".into()],
         };
-        let err =
-            install_isolated_stack(&mut ctx, &spec, "dark-1", &bundle, &roots, Some(&archive))
-                .await
-                .unwrap_err()
-                .to_string();
+        let err = install_isolated_stack(
+            &mut ctx,
+            &spec,
+            "dark-1",
+            &bundle,
+            &roots,
+            Some(&archive),
+            None,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("signed release verification"), "{err}");
         assert!(
             crate::environment::environment(&mut ctx, "dark-1")
@@ -3248,10 +3350,17 @@ install = "true"
             channel: "stable".into(),
             environments: vec!["dark-1".into()],
         };
-        let record =
-            install_isolated_stack(&mut ctx, &spec, "dark-1", &bundle, &roots, Some(&archive))
-                .await
-                .unwrap();
+        let record = install_isolated_stack(
+            &mut ctx,
+            &spec,
+            "dark-1",
+            &bundle,
+            &roots,
+            Some(&archive),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(record.status, UpgradeStatus::Admitted);
         assert_eq!(
             record.environments[0].plan_id.as_deref(),
@@ -3311,6 +3420,95 @@ install = "true"
     }
 
     #[tokio::test]
+    async fn first_install_seeds_one_local_registry_and_a_rerun_is_a_no_op() {
+        let root = temp_root("first-install-seed");
+        let _stores = lock_artifact_stores(&root);
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let exporter = SigningKey::from_bytes(&[7; 32]);
+        let artifact = sample_layer(b"layer-a");
+        let (toml, signature, trust, release_digest, artifact_digest) =
+            sign_catalog_for_layer(&root, &artifact, "");
+        let plan = signed_first_install_plan(
+            "dark-1",
+            &release_digest,
+            &artifact_digest,
+            "/exporter/state/edge-app",
+        );
+        let archive = root.join("delivery.json");
+        let bundle = complete_first_install_bundle(
+            "dark-1",
+            &serde_json::to_vec(&plan).unwrap(),
+            Some((&toml, Some(&signature), Some(&trust))),
+            &archive,
+            &exporter,
+        );
+        bundle.save(&archive).unwrap();
+        let roots = isolated_trust_roots(&exporter, None);
+        let spec = UpgradeSpec {
+            name: "first-seed".into(),
+            product: "edge-app".into(),
+            version: "1.0.0".into(),
+            channel: "stable".into(),
+            environments: vec!["dark-1".into()],
+        };
+        let seed = Some("seed.site:5443");
+        let record = install_isolated_stack(
+            &mut ctx,
+            &spec,
+            "dark-1",
+            &bundle,
+            &roots,
+            Some(&archive),
+            seed,
+        )
+        .await
+        .unwrap();
+        let env = ctx.get(&env_id("dark-1")).await.unwrap().unwrap();
+        assert_eq!(
+            env.properties
+                .get(&format!("artifact_mirror.{}", artifact.registry))
+                .map(String::as_str),
+            seed
+        );
+        let blob = root
+            .join("oci/seed.site:5443")
+            .join(&artifact.repository)
+            .join(artifact.digest.replace(':', "-"));
+        assert!(blob.is_file(), "layer not stored under the seed registry");
+
+        // The store is lost; the same install refills it and changes nothing else.
+        std::fs::remove_file(&blob).unwrap();
+        let rerun = install_isolated_stack(
+            &mut ctx,
+            &spec,
+            "dark-1",
+            &bundle,
+            &roots,
+            Some(&archive),
+            seed,
+        )
+        .await
+        .unwrap();
+        assert_eq!(rerun, record);
+        assert!(blob.is_file());
+        let other = install_isolated_stack(
+            &mut ctx,
+            &spec,
+            "dark-1",
+            &bundle,
+            &roots,
+            Some(&archive),
+            Some("other.site"),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(other.contains("other artifact mirrors"), "{other}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn first_install_rejects_mismatched_layer_reference_before_mutation() {
         let root = temp_root("first-install-layer-ref");
         let _stores = lock_artifact_stores(&root);
@@ -3352,11 +3550,18 @@ install = "true"
             channel: "stable".into(),
             environments: vec!["dark-1".into()],
         };
-        let err =
-            install_isolated_stack(&mut ctx, &spec, "dark-1", &bundle, &roots, Some(&archive))
-                .await
-                .unwrap_err()
-                .to_string();
+        let err = install_isolated_stack(
+            &mut ctx,
+            &spec,
+            "dark-1",
+            &bundle,
+            &roots,
+            Some(&archive),
+            None,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
         assert!(
             err.contains("layer instructions do not name catalog artifact"),
             "{err}"
@@ -3442,11 +3647,18 @@ install = "true"
             channel: "stable".into(),
             environments: vec!["dark-1".into()],
         };
-        let err =
-            install_isolated_stack(&mut ctx, &spec, "dark-1", &bundle, &roots, Some(&archive))
-                .await
-                .unwrap_err()
-                .to_string();
+        let err = install_isolated_stack(
+            &mut ctx,
+            &spec,
+            "dark-1",
+            &bundle,
+            &roots,
+            Some(&archive),
+            None,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("recalled"), "{err}");
         assert!(
             crate::environment::environment(&mut ctx, "dark-1")
@@ -3520,10 +3732,17 @@ install = "true"
             channel: "stable".into(),
             environments: vec!["dark-1".into()],
         };
-        let record =
-            install_isolated_stack(&mut ctx, &spec, "dark-1", &bundle, &roots, Some(&archive))
-                .await
-                .unwrap();
+        let record = install_isolated_stack(
+            &mut ctx,
+            &spec,
+            "dark-1",
+            &bundle,
+            &roots,
+            Some(&archive),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(record.status, UpgradeStatus::Admitted);
         let channel = ctx
             .get(&channel_id("edge-app", "stable"))
@@ -3586,11 +3805,18 @@ install = "true"
             channel: "stable".into(),
             environments: vec!["dark-1".into()],
         };
-        let err =
-            install_isolated_stack(&mut ctx, &spec, "dark-1", &bundle, &roots, Some(&archive))
-                .await
-                .unwrap_err()
-                .to_string();
+        let err = install_isolated_stack(
+            &mut ctx,
+            &spec,
+            "dark-1",
+            &bundle,
+            &roots,
+            Some(&archive),
+            None,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("file mode path missing.sh"), "{err}");
         assert!(
             crate::environment::environment(&mut ctx, "dark-1")
@@ -3667,11 +3893,18 @@ install = "true"
             channel: "stable".into(),
             environments: vec!["dark-1".into()],
         };
-        let err =
-            install_isolated_stack(&mut ctx, &spec, "dark-1", &bundle, &roots, Some(&archive))
-                .await
-                .unwrap_err()
-                .to_string();
+        let err = install_isolated_stack(
+            &mut ctx,
+            &spec,
+            "dark-1",
+            &bundle,
+            &roots,
+            Some(&archive),
+            None,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
         assert!(
             err.contains("layer instructions do not name catalog artifact"),
             "{err}"
@@ -3733,11 +3966,18 @@ install = "true"
             channel: "stable".into(),
             environments: vec!["dark-1".into()],
         };
-        let err =
-            install_isolated_stack(&mut ctx, &spec, "dark-1", &bundle, &roots, Some(&archive))
-                .await
-                .unwrap_err()
-                .to_string();
+        let err = install_isolated_stack(
+            &mut ctx,
+            &spec,
+            "dark-1",
+            &bundle,
+            &roots,
+            Some(&archive),
+            None,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
         assert!(
             err.contains("change-set publication evidence") || err.contains("change-set"),
             "{err}"
@@ -3817,11 +4057,18 @@ install = "true"
             channel: "stable".into(),
             environments: vec!["dark-1".into()],
         };
-        let err =
-            install_isolated_stack(&mut ctx, &spec, "dark-1", &bundle, &roots, Some(&archive))
-                .await
-                .unwrap_err()
-                .to_string();
+        let err = install_isolated_stack(
+            &mut ctx,
+            &spec,
+            "dark-1",
+            &bundle,
+            &roots,
+            Some(&archive),
+            None,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
         assert!(
             err.contains("does not match published release")
                 || err.contains("signed release verification"),

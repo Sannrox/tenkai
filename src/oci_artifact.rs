@@ -40,6 +40,17 @@ pub fn validate_registry_host(label: &str, host: &str) -> Result<()> {
     Ok(())
 }
 
+/// A registry a client can pull from by name (#627): a valid host that also
+/// reads as a registry, with a `.` or a port or as `localhost`. Docker reads
+/// a single label such as `seed` as a Docker Hub namespace instead.
+pub fn validate_pull_registry(label: &str, host: &str) -> Result<()> {
+    validate_registry_host(label, host)?;
+    if !(host.contains(['.', ':']) || host == "localhost") {
+        bail!("{label} {host:?} must contain a '.' or a port, or be localhost");
+    }
+    Ok(())
+}
+
 impl OciArtifactRef {
     pub fn validate(&self) -> Result<()> {
         validate_registry_host("artifact registry", &self.registry)?;
@@ -473,6 +484,189 @@ pub fn verify_environment_pull(
     Ok(pulls)
 }
 
+/// Media types whose bytes name other blobs of the same repository.
+const MANIFEST_MEDIA_TYPES: [&str; 4] = [
+    "application/vnd.oci.image.manifest.v1+json",
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.docker.distribution.manifest.v2+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+];
+
+pub fn is_manifest_media_type(media_type: &str) -> bool {
+    MANIFEST_MEDIA_TYPES.contains(&media_type)
+}
+
+#[derive(Deserialize)]
+struct Descriptor {
+    digest: String,
+    #[serde(rename = "mediaType")]
+    media_type: Option<String>,
+}
+
+/// The fields of an image manifest or index that reference other blobs.
+#[derive(Deserialize)]
+struct ManifestBody {
+    #[serde(rename = "mediaType")]
+    media_type: Option<String>,
+    config: Option<Descriptor>,
+    #[serde(default)]
+    layers: Vec<Descriptor>,
+    #[serde(default)]
+    manifests: Vec<Descriptor>,
+}
+
+/// The blobs an image manifest or index references, as `(digest, media
+/// type)`: its config and layers, or the manifests it lists (#627). A pull
+/// of the image needs every one of them from the same repository. Empty for
+/// other media types; a descriptor without a media type reads as opaque.
+pub fn referenced_blobs(media_type: &str, bytes: &[u8]) -> Result<Vec<(String, String)>> {
+    if !is_manifest_media_type(media_type) {
+        return Ok(Vec::new());
+    }
+    let body: ManifestBody = serde_json::from_slice(bytes)
+        .map_err(|error| anyhow::anyhow!("image manifest of type {media_type}: {error}"))?;
+    body.config
+        .into_iter()
+        .chain(body.layers)
+        .chain(body.manifests)
+        .map(|descriptor| {
+            crate::signature_verification::validate_prefixed_digest(
+                "referenced digest",
+                &descriptor.digest,
+            )?;
+            let media_type = descriptor
+                .media_type
+                .unwrap_or_else(|| "application/octet-stream".into());
+            Ok((descriptor.digest, media_type))
+        })
+        .collect()
+}
+
+/// `artifacts` and every blob their image manifests and indexes reference,
+/// read from `registry`, each once and in first-seen order (#627).
+pub fn image_closure(
+    artifacts: &[OciArtifactRef],
+    registry: &dyn ArtifactRegistry,
+) -> Result<Vec<OciArtifactRef>> {
+    let mut closure: Vec<OciArtifactRef> = Vec::new();
+    let mut pending: std::collections::VecDeque<OciArtifactRef> =
+        artifacts.iter().cloned().collect();
+    while let Some(artifact) = pending.pop_front() {
+        let seen = closure.iter().any(|known| {
+            known.registry == artifact.registry
+                && known.repository == artifact.repository
+                && known.digest == artifact.digest
+        });
+        if seen {
+            continue;
+        }
+        for (digest, media_type) in
+            referenced_blobs(&artifact.media_type, &registry.fetch(&artifact)?)?
+        {
+            pending.push_back(OciArtifactRef {
+                registry: artifact.registry.clone(),
+                repository: artifact.repository.clone(),
+                digest,
+                media_type,
+            });
+        }
+        closure.push(artifact);
+    }
+    Ok(closure)
+}
+
+/// The content type to serve a stored manifest with: its own `mediaType`,
+/// else what its fields show. `None` when the bytes are not a manifest.
+pub fn manifest_content_type(bytes: &[u8]) -> Option<String> {
+    let body: ManifestBody = serde_json::from_slice(bytes).ok()?;
+    match body.media_type {
+        Some(media_type) if is_manifest_media_type(&media_type) => Some(media_type),
+        Some(_) => None,
+        None if !body.manifests.is_empty() => Some(MANIFEST_MEDIA_TYPES[1].into()),
+        None if body.config.is_some() => Some(MANIFEST_MEDIA_TYPES[0].into()),
+        None => None,
+    }
+}
+
+/// An OCI distribution repository name: lowercase `/`-separated segments of
+/// alphanumerics joined by `.`, `_` or `-`.
+pub fn validate_repository_name(name: &str) -> Result<()> {
+    let separator = |c: char| matches!(c, '.' | '_' | '-');
+    let valid = !name.is_empty()
+        && name.split('/').all(|segment| {
+            !segment.is_empty()
+                && segment
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || separator(c))
+                && !segment.starts_with(separator)
+                && !segment.ends_with(separator)
+        });
+    if !valid {
+        bail!("repository name {name:?} is not a valid OCI repository name");
+    }
+    Ok(())
+}
+
+impl FilesystemArtifactRegistry {
+    /// Where the blob `digest` of `registry`/`repository` is stored, for
+    /// serving it (#627). Every part is validated, so a request path never
+    /// leaves the store.
+    pub fn served_blob_path(
+        &self,
+        registry: &str,
+        repository: &str,
+        digest: &str,
+    ) -> Result<PathBuf> {
+        validate_registry_host("served registry", registry)?;
+        validate_repository_name(repository)?;
+        crate::signature_verification::validate_prefixed_digest("blob digest", digest)?;
+        Ok(self
+            .root
+            .join(registry)
+            .join(repository)
+            .join(digest.replace(':', "-")))
+    }
+}
+
+/// A store read through environment mirrors: each reference is looked up
+/// under its mirror registry, where imports put it (#627). Verification
+/// answers with the reference as asked, so release identity is unchanged.
+pub struct MirroredRegistry {
+    store: std::sync::Arc<dyn ArtifactRegistry>,
+    mirrors: BTreeMap<String, String>,
+}
+
+impl MirroredRegistry {
+    pub fn new(
+        store: std::sync::Arc<dyn ArtifactRegistry>,
+        mirrors: BTreeMap<String, String>,
+    ) -> Self {
+        Self { store, mirrors }
+    }
+}
+
+impl ArtifactRegistry for MirroredRegistry {
+    fn stored(&self, reference: &OciArtifactRef) -> Result<Option<bool>> {
+        self.store
+            .stored(&pull_reference(reference, &self.mirrors)?)
+    }
+
+    fn verify(&self, reference: &OciArtifactRef) -> Result<OciArtifactRef> {
+        self.store
+            .verify(&pull_reference(reference, &self.mirrors)?)?;
+        Ok(reference.clone())
+    }
+
+    fn fetch(&self, reference: &OciArtifactRef) -> Result<Vec<u8>> {
+        self.store.fetch(&pull_reference(reference, &self.mirrors)?)
+    }
+
+    fn store(&self, reference: &OciArtifactRef, bytes: Vec<u8>) -> Result<()> {
+        self.store
+            .store(&pull_reference(reference, &self.mirrors)?, bytes)
+    }
+}
+
 pub fn selected_registry() -> Result<Option<std::sync::Arc<dyn ArtifactRegistry>>> {
     match std::env::var("TENKAI_OCI_STORE") {
         Ok(path) if !path.is_empty() => {
@@ -498,7 +692,7 @@ mod tests {
             registry: registry.into(),
             repository: "edge/app".into(),
             digest: digest_for(bytes),
-            media_type: "application/vnd.oci.image.manifest.v1+json".into(),
+            media_type: "application/vnd.oci.image.layer.v1.tar".into(),
         }
     }
 
@@ -591,5 +785,90 @@ mod tests {
             .to_string();
         assert!(err.contains(&reference.digest), "{err}");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn manifests_name_their_config_and_layers_and_indexes_their_manifests() {
+        let (config, layer) = (digest_for(b"config"), digest_for(b"layer"));
+        let manifest = serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": config, "size": 6},
+            "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar", "digest": layer, "size": 5}],
+        })
+        .to_string();
+        let media = "application/vnd.oci.image.manifest.v1+json";
+        assert_eq!(
+            referenced_blobs(media, manifest.as_bytes()).unwrap(),
+            [
+                (
+                    config.clone(),
+                    "application/vnd.oci.image.config.v1+json".to_string()
+                ),
+                (layer, "application/vnd.oci.image.layer.v1.tar".to_string())
+            ]
+        );
+        assert_eq!(
+            manifest_content_type(manifest.as_bytes()).as_deref(),
+            Some(media)
+        );
+        let index =
+            serde_json::json!({"schemaVersion": 2, "manifests": [{"digest": config}]}).to_string();
+        assert_eq!(
+            manifest_content_type(index.as_bytes()).as_deref(),
+            Some("application/vnd.oci.image.index.v1+json")
+        );
+        assert!(
+            referenced_blobs("application/vnd.oci.image.layer.v1.tar", b"opaque")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(referenced_blobs(media, b"opaque").is_err());
+        assert_eq!(manifest_content_type(b"opaque"), None);
+    }
+
+    #[test]
+    fn served_paths_stay_inside_the_store() {
+        let store = FilesystemArtifactRegistry::new(PathBuf::from("/store"));
+        let digest = digest_for(b"x");
+        assert_eq!(
+            store
+                .served_blob_path("seed.site:5443", "edge/app", &digest)
+                .unwrap(),
+            PathBuf::from(format!(
+                "/store/seed.site:5443/edge/app/{}",
+                digest.replace(':', "-")
+            ))
+        );
+        for repository in [
+            "../etc",
+            "edge/../app",
+            "edge//app",
+            "/edge",
+            "Edge/app",
+            "edge/.app",
+            "",
+        ] {
+            assert!(
+                store
+                    .served_blob_path("seed.site", repository, &digest)
+                    .is_err(),
+                "{repository}"
+            );
+        }
+        assert!(
+            store
+                .served_blob_path("seed.site", "edge/app", "sha256:../../x")
+                .is_err()
+        );
+        assert!(
+            store
+                .served_blob_path("../seed", "edge/app", &digest)
+                .is_err()
+        );
+        assert!(validate_pull_registry("seed", "seed").is_err());
+        for registry in ["seed.site", "seed:5443", "localhost"] {
+            validate_pull_registry("seed", registry).unwrap();
+        }
     }
 }

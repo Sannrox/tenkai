@@ -352,11 +352,71 @@ impl DockerHostExecutor {
     }
 
     fn topology(&self, request: &SoftwareApplyRequest) -> Result<DockerHostTopology> {
-        load_topology(&request.workdir)
+        let mut topology = load_topology(&request.workdir)?;
+        mirror_images(&mut topology, &request.artifact_pulls)?;
+        Ok(topology)
+    }
+}
+
+/// Point every digest-pinned image at its admitted environment mirror
+/// (#627), so pull, run and observe all use the mirror. With admitted pulls,
+/// an image that is not one of them is refused, a local image ID too: origin
+/// pull is never used, and nothing runs unadmitted. Without any, the
+/// topology is unchanged.
+fn mirror_images(
+    topology: &mut DockerHostTopology,
+    pulls: &[tenkai::oci_artifact::OciArtifactRef],
+) -> Result<()> {
+    if pulls.is_empty() {
+        return Ok(());
+    }
+    for container in &mut topology.containers {
+        let Some((name, digest)) = container.image.split_once('@') else {
+            bail!(
+                "image {} is a local image ID; with admitted artifacts every image must be one of them",
+                container.image
+            );
+        };
+        let repository = image_repository(name);
+        let Some(pull) = pulls
+            .iter()
+            .find(|pull| pull.digest == digest && pull.repository == repository)
+        else {
+            bail!(
+                "image {} is not an admitted environment-mirror artifact; origin pull is refused",
+                container.image
+            );
+        };
+        tenkai::oci_artifact::validate_pull_registry("artifact mirror", &pull.registry)?;
+        container.image = format!("{}/{}@{}", pull.registry, pull.repository, pull.digest);
+    }
+    Ok(())
+}
+
+/// The repository of an image name, without its registry host: the first
+/// segment is a host when it has a `.` or `:` or is `localhost`. A
+/// single-segment Docker Hub name, bare or under `docker.io`, is under
+/// `library/`, as Docker resolves it.
+fn image_repository(name: &str) -> String {
+    let (host, repository) = match name.split_once('/') {
+        Some((host, rest)) if host.contains(['.', ':']) || host == "localhost" => {
+            (Some(host), rest)
+        }
+        _ => (None, name),
+    };
+    let docker_hub = matches!(host, None | Some("docker.io" | "index.docker.io"));
+    if docker_hub && !repository.contains('/') {
+        format!("library/{repository}")
+    } else {
+        repository.to_string()
     }
 }
 
 impl SoftwareExecutor for DockerHostExecutor {
+    fn consumes_admitted_artifact_pulls(&self) -> bool {
+        true
+    }
+
     fn apply(&self, request: &SoftwareApplyRequest) -> Result<()> {
         self.apply_timed(request).map(|_| ())
     }
@@ -2240,6 +2300,54 @@ mod tests {
         std::fs::set_permissions(&script, permissions).unwrap();
         let state = root.join("fake-state.json");
         (script, state)
+    }
+
+    #[test]
+    fn admitted_pulls_point_images_at_the_mirror_and_refuse_the_rest() {
+        let pull = |image: &str| {
+            let (name, digest) = image.split_once('@').unwrap();
+            tenkai::oci_artifact::OciArtifactRef {
+                registry: "seed.site:5443".into(),
+                repository: image_repository(name),
+                digest: digest.into(),
+                media_type: "application/vnd.oci.image.manifest.v1+json".into(),
+            }
+        };
+        let mut unchanged = sample_topology();
+        mirror_images(&mut unchanged, &[]).unwrap();
+        assert_eq!(unchanged, sample_topology());
+
+        let mut topology = sample_topology();
+        mirror_images(&mut topology, &[pull(DIGEST_A), pull(DIGEST_B)]).unwrap();
+        assert_eq!(
+            topology.containers[0].image,
+            DIGEST_A.replace("registry.example:5000", "seed.site:5443")
+        );
+        assert_eq!(
+            topology.containers[1].image,
+            DIGEST_B.replace("registry.example:5000", "seed.site:5443")
+        );
+
+        let mut local = sample_topology();
+        local.containers[0].image = format!("sha256:{}", "a".repeat(64));
+        let error = mirror_images(&mut local, &[pull(DIGEST_B)])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("local image ID"), "{error}");
+
+        let mut origin = sample_topology();
+        let error = mirror_images(&mut origin, &[pull(DIGEST_A)])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(DIGEST_B) && error.contains("origin pull is refused"),
+            "{error}"
+        );
+        assert_eq!(image_repository("nginx"), "library/nginx");
+        assert_eq!(image_repository("edge/app"), "edge/app");
+        assert_eq!(image_repository("localhost/edge/app"), "edge/app");
+        assert_eq!(image_repository("docker.io/nginx"), "library/nginx");
+        assert_eq!(image_repository("seed.site:5443/app"), "app");
     }
 
     fn sample_topology() -> DockerHostTopology {

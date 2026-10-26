@@ -63,6 +63,10 @@ pub(crate) enum UpgradeCommand {
         /// Trust roots that must authenticate the bundle exporter.
         #[arg(long)]
         trust_roots: PathBuf,
+        /// Mirror every image registry to this local seed registry
+        /// (`host[:port]`), served by `tenkaictl registry serve`.
+        #[arg(long)]
+        seed_registry: Option<String>,
     },
     /// Bind a verified ADR 0003 isolated bundle.
     BindBundle {

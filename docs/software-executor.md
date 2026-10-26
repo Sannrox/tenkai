@@ -236,6 +236,12 @@ and the next apply or restart recreate that container with the new values. No
 new release is needed. Containers created before this label existed are
 recreated once on their next apply.
 
+When the release names OCI artifacts, the Docker executor deploys from the
+environment-mirror references Tenkai admitted for the apply: each
+digest-pinned image is pulled, run and observed as `<mirror>/<repository>@<digest>`.
+An image that is not one of those artifacts is refused, a local image ID
+too; origin pull is never used. Releases without artifacts keep the images as written.
+
 Apply creates networks and volumes, pulls missing digest-pinned images,
 then replaces containers in dependency order. A running container whose
 image and Tenkai labels already match, and whose health is not `unhealthy`, is

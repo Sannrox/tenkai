@@ -174,6 +174,27 @@ async fn run(cli: Cli) -> Result<()> {
     if let Command::Keys { command } = &cli.command {
         return keys::run(command);
     }
+    if let Command::Registry {
+        command:
+            args::RegistryCommand::Serve {
+                store,
+                name,
+                listen,
+                tls_cert,
+                tls_key,
+            },
+    } = &cli.command
+    {
+        // Needs no Tenkai store: it serves files that imports wrote.
+        let router = tenkai_http::oci_registry::router(store, name)?;
+        let tls = tenkai_http::oci_registry::tls_config(tls_cert, tls_key)?;
+        let listener = tokio::net::TcpListener::bind(listen).await?;
+        eprintln!(
+            "seed registry {name} serving {} on {listen}",
+            store.display()
+        );
+        return tenkai_http::oci_registry::serve_tls(listener, tls, router).await;
+    }
     // Local only: host install needs the archive, trust roots, and dest.
     if let Command::Upgrade {
         command:

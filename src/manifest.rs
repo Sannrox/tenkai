@@ -1213,7 +1213,7 @@ max_startup_seconds = 30
             registry: "ghcr.io".into(),
             repository: "edge/app".into(),
             digest: format!("sha256:{}", "aa".repeat(32)),
-            media_type: "application/vnd.oci.image.manifest.v1+json".into(),
+            media_type: "application/vnd.oci.image.layer.v1.tar".into(),
         };
         let mut second = first.clone();
         second.digest = format!("sha256:{}", "bb".repeat(32));

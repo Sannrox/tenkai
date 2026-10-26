@@ -149,6 +149,11 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: KeysCommand,
     },
+    /// The read-only seed registry over the local artifact store.
+    Registry {
+        #[command(subcommand)]
+        command: RegistryCommand,
+    },
     /// Inspect or reverify published release trust evidence.
     Release {
         #[command(subcommand)]
@@ -321,6 +326,30 @@ pub(crate) enum Command {
     Dev {
         #[command(subcommand)]
         command: DevCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum RegistryCommand {
+    /// Serve `TENKAI_OCI_STORE` as a read-only OCI registry over TLS, by
+    /// digest only, so executors on a dark site can pull imported images.
+    Serve {
+        /// The artifact store bundles were imported into.
+        #[arg(long, env = "TENKAI_OCI_STORE")]
+        store: PathBuf,
+        /// The `host[:port]` executors pull from; the environment's mirror
+        /// (`upgrade install-bundle --seed-registry`).
+        #[arg(long)]
+        name: String,
+        /// Address to listen on.
+        #[arg(long)]
+        listen: std::net::SocketAddr,
+        /// PEM certificate chain for `name`, issued by the site's CA.
+        #[arg(long)]
+        tls_cert: PathBuf,
+        /// PEM private key of that certificate.
+        #[arg(long)]
+        tls_key: PathBuf,
     },
 }
 

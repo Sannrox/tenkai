@@ -95,6 +95,46 @@ the first install, a second bundle of the same format updates the site
 through the existing upgrade bind/receipt/advance path and rolls back with
 `tenkaictl upgrade rollback`.
 
+An image manifest or index in the bundle comes with every blob it
+references (config and layers, or the listed manifests) in the same
+repository: export follows a release's image manifests to them. Install and
+bind refuse a bundle that misses one, naming the image and the digest, before
+anything is stored.
+
+## Seed registry
+
+A first dark-site install has no registry for executors to pull from. Tenkai
+serves its own artifact store as one (#627):
+
+1. Install with `tenkaictl upgrade install-bundle ... --seed-registry
+   <host>:<port>`. Every image registry the bundle names is mirrored to that
+   one name, and the layers are stored under it in `TENKAI_OCI_STORE`. Later
+   bundles bind through the same mirror, so upgrades fill the same registry.
+2. Run `tenkaictl registry serve --name <host>:<port> --listen <addr>
+   --tls-cert <chain.pem> --tls-key <key.pem>` with `TENKAI_OCI_STORE` set.
+   The certificate is issued for `<host>` by the site CA. Each executor host
+   trusts that CA for the registry (for Docker,
+   `/etc/docker/certs.d/<host>:<port>/ca.crt`).
+3. Executors pull `<host>:<port>/<repository>@<digest>`, the mirror
+   references Tenkai admits for each apply.
+
+The registry is read-only and answers `GET` and `HEAD` by digest only. Tags,
+pushes and deletes are refused, so it serves exactly what verified bundles
+stored, and clients check every digest. It holds no state of its own: any
+number of instances may serve one store, and `/v2/` answers 503 when an
+instance cannot read it. It does not authenticate pulls; it serves only
+release images, to the network it listens on.
+
+Re-running the same install changes nothing in the graph. It imports the
+layers and weights again, which stores only what is missing, so a store lost
+or replaced since is refilled. A different bundle, release or seed registry
+is refused.
+
+`scripts/rehearse-seed-registry.sh` rehearses the pull side with Docker. A
+fresh Docker daemon on a network with no route out pulls an image by digest
+from the registry, trusting only a throwaway site CA. The digests must
+match, a second pull must change nothing, and tag and origin pulls must fail.
+
 ## Host binaries
 
 The archive may carry the Tenkai CLI, server, and executor hosts that GitHub
