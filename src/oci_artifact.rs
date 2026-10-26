@@ -667,14 +667,13 @@ impl ArtifactRegistry for MirroredRegistry {
     }
 }
 
+/// The store `TENKAI_OCI_STORE` names, if set. The variable is read once,
+/// so a concurrent change cannot pass the check and fail the construction.
 pub fn selected_registry() -> Result<Option<std::sync::Arc<dyn ArtifactRegistry>>> {
     match std::env::var("TENKAI_OCI_STORE") {
-        Ok(path) if !path.is_empty() => {
-            let _ = path;
-            Ok(Some(std::sync::Arc::new(
-                FilesystemArtifactRegistry::from_env()?,
-            )))
-        }
+        Ok(path) if !path.is_empty() => Ok(Some(std::sync::Arc::new(
+            FilesystemArtifactRegistry::new(PathBuf::from(path)),
+        ))),
         _ => Ok(None),
     }
 }
