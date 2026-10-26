@@ -178,4 +178,52 @@ pub trait OperationalStore: Send + Sync {
         generation: u64,
         completion_json: &str,
     ) -> Result<()>;
+    /// The durable completion of `plan_id` in `environment` whose claim has
+    /// lapsed: its runtime stopped, or was revoked, before the server applied
+    /// it (#630). The server applies it then; it is validated and idempotent.
+    fn lapsed_runtime_completion(
+        &self,
+        _environment: &str,
+        _plan_id: &str,
+        _now: i64,
+    ) -> Result<Option<String>> {
+        Ok(None)
+    }
+    /// Record a single-use runtime enrollment (#630).
+    fn create_runtime_enrollment(&self, _enrollment: &RuntimeEnrollmentRecord) -> Result<()> {
+        Err(StoreError::AdapterUnavailable(
+            "runtime enrollment is not implemented by this store".into(),
+        ))
+    }
+    /// Spend the enrollment `token_digest` of `environment` once, before it
+    /// expires at `now`,
+    /// and record `credential_digest` as its credential, in one transaction:
+    /// of two concurrent redemptions, one wins. Unknown, spent and expired
+    /// enrollments are all `InvalidData`.
+    fn redeem_runtime_enrollment(
+        &self,
+        _environment: &str,
+        _token_digest: &str,
+        _credential_digest: &str,
+        _now: i64,
+    ) -> Result<RuntimeCredentialRecord> {
+        Err(StoreError::AdapterUnavailable(
+            "runtime enrollment is not implemented by this store".into(),
+        ))
+    }
+    fn runtime_credential(
+        &self,
+        _credential_digest: &str,
+    ) -> Result<Option<RuntimeCredentialRecord>> {
+        Err(StoreError::AdapterUnavailable(
+            "runtime credentials are not implemented by this store".into(),
+        ))
+    }
+    /// Revoke a runtime credential from `now` on; revoking again keeps the
+    /// first time. Unknown credentials are `NotFound`.
+    fn revoke_runtime_credential(&self, _credential_digest: &str, _now: i64) -> Result<()> {
+        Err(StoreError::AdapterUnavailable(
+            "runtime credentials are not implemented by this store".into(),
+        ))
+    }
 }

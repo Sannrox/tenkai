@@ -172,3 +172,57 @@ pub(super) fn encode_plan_path(plan_id: &str) -> String {
         })
         .collect()
 }
+
+/// A runtime agent exchanges its single-use enrollment token for its own
+/// credential (#630). The token is the only credential this route takes.
+pub(super) async fn runtime_enroll(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    Json(request): Json<tenkai::runtime_delivery::RuntimeEnrollRequest>,
+) -> Response {
+    match state.runtime_delivery.enroll(&environment, &request) {
+        Ok(enrolled) => (StatusCode::CREATED, Json(enrolled)).into_response(),
+        Err(error) => runtime_delivery_error(error),
+    }
+}
+
+/// Issue a single-use enrollment token for an environment's runtime agent.
+pub(super) async fn create_runtime_enrollment(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match super::auth::require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let request = match super::auth::parse_management_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    super::auth::manage_result(
+        state
+            .management
+            .create_runtime_enrollment(&credential, &environment, request)
+            .await,
+    )
+}
+
+/// Revoke a runtime credential by its id.
+pub(super) async fn revoke_runtime_credential(
+    State(state): State<Arc<AppState>>,
+    Path(credential_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match super::auth::require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    super::auth::manage_result(
+        state
+            .management
+            .revoke_runtime_credential(&credential, &credential_id)
+            .await,
+    )
+}

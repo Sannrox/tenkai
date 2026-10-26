@@ -21,7 +21,7 @@ use crate::storage::{
     AuditRecord, ChannelRecord, EnvironmentRecord, LeaseRecord, OfflineImportRecord,
     OfflineStepImportRecord, OperationalStore, PlanRecord, PlanStatus, ProviderEventRecord,
     ReceiptRecord, ReleaseRecord, Result, RollbackRecord, RollbackStatus, RuntimeClaim,
-    SCHEMA_VERSION, SqliteStore,
+    RuntimeCredentialRecord, RuntimeEnrollmentRecord, SCHEMA_VERSION, SqliteStore,
 };
 use crate::tenant_isolation::{
     IsolationError, TenantIsolationHarness, TenantResources, TwoTenantFixture,
@@ -761,6 +761,37 @@ impl OperationalStore for TenantPartition {
         owner: &str,
     ) -> Result<Option<RuntimeClaim>> {
         self.store.durable_runtime_completion(plan_id, owner)
+    }
+    fn lapsed_runtime_completion(
+        &self,
+        environment: &str,
+        plan_id: &str,
+        now: i64,
+    ) -> Result<Option<String>> {
+        self.store
+            .lapsed_runtime_completion(environment, plan_id, now)
+    }
+    fn create_runtime_enrollment(&self, enrollment: &RuntimeEnrollmentRecord) -> Result<()> {
+        self.store.create_runtime_enrollment(enrollment)
+    }
+    fn redeem_runtime_enrollment(
+        &self,
+        environment: &str,
+        token_digest: &str,
+        credential_digest: &str,
+        now: i64,
+    ) -> Result<RuntimeCredentialRecord> {
+        self.store
+            .redeem_runtime_enrollment(environment, token_digest, credential_digest, now)
+    }
+    fn runtime_credential(
+        &self,
+        credential_digest: &str,
+    ) -> Result<Option<RuntimeCredentialRecord>> {
+        self.store.runtime_credential(credential_digest)
+    }
+    fn revoke_runtime_credential(&self, credential_digest: &str, now: i64) -> Result<()> {
+        self.store.revoke_runtime_credential(credential_digest, now)
     }
 }
 

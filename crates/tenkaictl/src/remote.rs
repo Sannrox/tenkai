@@ -258,6 +258,30 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
             crate::remote_delivery::run_migrate(&client, command).await?;
             Ok(())
         }
+        Command::Runtime { command } => match command {
+            crate::args::RuntimeCommand::Enroll { env, ttl_seconds } => {
+                let issued = client
+                    .create_runtime_enrollment(
+                        &env,
+                        &tenkai::management_operations::RuntimeEnrollmentRequest { ttl_seconds },
+                    )
+                    .await?;
+                println!(
+                    "enrollment token for {} (single use, expires at {}):",
+                    issued.environment, issued.expires_at
+                );
+                println!("{}", issued.token);
+                Ok(())
+            }
+            crate::args::RuntimeCommand::Revoke { credential_id } => {
+                let revoked = client.revoke_runtime_credential(&credential_id).await?;
+                println!(
+                    "revoked runtime credential {} of {} at {}",
+                    revoked.credential_id, revoked.environment, revoked.revoked_at
+                );
+                Ok(())
+            }
+        },
         other => crate::remote_catalog::run(&client, other, output).await,
     }
 }

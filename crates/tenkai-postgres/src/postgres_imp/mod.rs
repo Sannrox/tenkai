@@ -5,8 +5,9 @@ use std::thread::{self, JoinHandle};
 pub(crate) use tenkai::storage::{
     AuditRecord, ChannelRecord, EnvironmentRecord, LeaseRecord, OfflineImportRecord,
     OfflineStepImportRecord, PlanRecord, PlanStatus, ProviderEventRecord, ReceiptRecord,
-    ReleaseRecord, Result, RollbackRecord, RollbackStatus, RuntimeClaim, SCHEMA_VERSION,
-    StoreError, provider_event_payloads_match, rollback_intent_digest,
+    ReleaseRecord, Result, RollbackRecord, RollbackStatus, RuntimeClaim, RuntimeCredentialRecord,
+    RuntimeEnrollmentRecord, SCHEMA_VERSION, StoreError, provider_event_payloads_match,
+    rollback_intent_digest,
 };
 
 pub struct Inner {
@@ -159,6 +160,7 @@ mod receipts;
 mod reconcile;
 mod rollbacks;
 mod runtime;
+mod runtime_enrollment;
 mod schema;
 
 pub(crate) use leases::{lock_lease, require_lease, require_plan_environment};

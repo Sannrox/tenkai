@@ -98,6 +98,9 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
             signing_key,
         } => crate::embedded_preflight::run(&mut ctx, &env, &config, &signing_key).await,
         command @ Command::Reconcile { .. } => crate::embedded_reconcile::run(ctx, command).await,
+        Command::Runtime { .. } => anyhow::bail!(
+            "runtime agents enroll with a Tenkai server; run this with --target remote"
+        ),
         Command::Restore { .. }
         | Command::SupportBundle { .. }
         | Command::RestoreDrill { .. }

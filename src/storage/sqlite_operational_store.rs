@@ -321,4 +321,38 @@ impl OperationalStore for SqliteStore {
     ) -> Result<()> {
         self.complete_runtime_plan_sqlite(plan_id, owner, generation, completion_json)
     }
+
+    fn lapsed_runtime_completion(
+        &self,
+        environment: &str,
+        plan_id: &str,
+        now: i64,
+    ) -> Result<Option<String>> {
+        self.lapsed_runtime_completion_sqlite(environment, plan_id, now)
+    }
+
+    fn create_runtime_enrollment(&self, enrollment: &RuntimeEnrollmentRecord) -> Result<()> {
+        self.create_runtime_enrollment_sqlite(enrollment)
+    }
+
+    fn redeem_runtime_enrollment(
+        &self,
+        environment: &str,
+        token_digest: &str,
+        credential_digest: &str,
+        now: i64,
+    ) -> Result<RuntimeCredentialRecord> {
+        self.redeem_runtime_enrollment_sqlite(environment, token_digest, credential_digest, now)
+    }
+
+    fn runtime_credential(
+        &self,
+        credential_digest: &str,
+    ) -> Result<Option<RuntimeCredentialRecord>> {
+        self.runtime_credential_sqlite(credential_digest)
+    }
+
+    fn revoke_runtime_credential(&self, credential_digest: &str, now: i64) -> Result<()> {
+        self.revoke_runtime_credential_sqlite(credential_digest, now)
+    }
 }

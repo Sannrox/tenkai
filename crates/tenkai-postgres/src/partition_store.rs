@@ -4,6 +4,7 @@ use tenkai::storage::{
     AuditRecord, ChannelRecord, EnvironmentRecord, LeaseRecord, OfflineImportRecord,
     OfflineStepImportRecord, OperationalStore, PlanRecord, PlanStatus, ProviderEventRecord,
     ReceiptRecord, ReleaseRecord, Result, RollbackRecord, RollbackStatus, RuntimeClaim,
+    RuntimeCredentialRecord, RuntimeEnrollmentRecord,
 };
 
 use super::PostgresTenantPartition;
@@ -269,5 +270,49 @@ impl OperationalStore for PostgresTenantPartition {
     ) -> Result<()> {
         self.inner
             .complete_runtime_plan(&self.schema, plan_id, owner, generation, completion_json)
+    }
+
+    fn lapsed_runtime_completion(
+        &self,
+        environment: &str,
+        plan_id: &str,
+        now: i64,
+    ) -> Result<Option<String>> {
+        self.inner
+            .lapsed_runtime_completion(&self.schema, environment, plan_id, now)
+    }
+
+    fn create_runtime_enrollment(&self, enrollment: &RuntimeEnrollmentRecord) -> Result<()> {
+        self.inner
+            .create_runtime_enrollment(&self.schema, enrollment)
+    }
+
+    fn redeem_runtime_enrollment(
+        &self,
+        environment: &str,
+        token_digest: &str,
+        credential_digest: &str,
+        now: i64,
+    ) -> Result<RuntimeCredentialRecord> {
+        self.inner.redeem_runtime_enrollment(
+            &self.schema,
+            environment,
+            token_digest,
+            credential_digest,
+            now,
+        )
+    }
+
+    fn runtime_credential(
+        &self,
+        credential_digest: &str,
+    ) -> Result<Option<RuntimeCredentialRecord>> {
+        self.inner
+            .runtime_credential(&self.schema, credential_digest)
+    }
+
+    fn revoke_runtime_credential(&self, credential_digest: &str, now: i64) -> Result<()> {
+        self.inner
+            .revoke_runtime_credential(&self.schema, credential_digest, now)
     }
 }

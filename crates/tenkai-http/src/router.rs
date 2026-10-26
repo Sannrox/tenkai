@@ -35,7 +35,10 @@ use super::package_migration::{
     apply_package_migration, package_migration_status, preview_package_migration,
     resume_package_migration, rollback_package_migration,
 };
-use super::runtime::{runtime_complete, runtime_heartbeat, runtime_inventory, runtime_work};
+use super::runtime::{
+    create_runtime_enrollment, revoke_runtime_credential, runtime_complete, runtime_enroll,
+    runtime_heartbeat, runtime_inventory, runtime_work,
+};
 
 pub(super) struct AppState {
     pub(super) config: ServerConfig,
@@ -242,6 +245,18 @@ pub fn router(
         .route(
             "/v1/runtime/environments/{environment}/inventory",
             post(runtime_inventory),
+        )
+        .route(
+            "/v1/runtime/environments/{environment}/enroll",
+            post(runtime_enroll),
+        )
+        .route(
+            "/v1/environments/{environment}/runtime-enrollments",
+            post(create_runtime_enrollment),
+        )
+        .route(
+            "/v1/runtime-credentials/{credential_id}/revoke",
+            post(revoke_runtime_credential),
         );
     if metrics_enabled {
         router = router.route("/metrics", get(openmetrics));

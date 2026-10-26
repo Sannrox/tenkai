@@ -29,6 +29,7 @@ pub const KIND_CANARY_ATTEMPT: &str = "tenkai.canary_attempt";
 pub const KIND_CANARY_OUTCOME: &str = "tenkai.canary_outcome";
 pub const KIND_PROMOTION_AUDIT: &str = "tenkai.promotion_audit";
 pub const KIND_PROMOTION_LOCK: &str = "tenkai.promotion_lock";
+pub const KIND_RUNTIME_ENROLLMENT: &str = "tenkai.runtime_enrollment";
 pub const KIND_WAVE: &str = "tenkai.wave";
 pub const KIND_CONNECTIVITY_UPGRADE: &str = "tenkai.connectivity_upgrade";
 pub const KIND_PACKAGE_MIGRATION: &str = "tenkai.package_migration";

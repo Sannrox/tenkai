@@ -211,3 +211,24 @@ pub struct RuntimeClaim {
     pub expires_at: i64,
     pub completion_json: Option<String>,
 }
+
+/// A single-use enrollment for a runtime agent (#630). Only the digest of
+/// the token is stored; the token itself is shown once, to the operator.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeEnrollmentRecord {
+    pub token_digest: String,
+    pub environment_id: String,
+    pub expires_at: i64,
+    pub created_by: String,
+}
+
+/// The credential a runtime agent got for its enrollment. Only its digest
+/// is stored, and it doubles as the id an operator revokes it by.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeCredentialRecord {
+    pub credential_digest: String,
+    pub environment_id: String,
+    pub enrollment_digest: String,
+    pub created_at: i64,
+    pub revoked_at: Option<i64>,
+}

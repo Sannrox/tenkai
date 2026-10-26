@@ -14,6 +14,112 @@ use crate::plan::{Plan, Step};
 use crate::runtime_delivery::{RuntimeCompletion, RuntimeStepReceipt};
 use crate::runtime_delivery::{RuntimeHeartbeat, RuntimeInventoryReport, RuntimeWork};
 
+/// `base_url` without a trailing `/`, when credentials may be sent to it:
+/// HTTPS, or HTTP on loopback.
+fn protected_base_url(base_url: String) -> Result<String> {
+    let base_url = base_url.trim_end_matches('/').to_owned();
+    let parsed = url::Url::parse(&base_url)?;
+    let protected = parsed.scheme() == "https"
+        || (parsed.scheme() == "http"
+            && parsed.host().is_some_and(|host| match host {
+                url::Host::Domain(name) => name.eq_ignore_ascii_case("localhost"),
+                url::Host::Ipv4(address) => address.is_loopback(),
+                url::Host::Ipv6(address) => address.is_loopback(),
+            }));
+    anyhow::ensure!(
+        protected,
+        "runtime credentials require HTTPS or an HTTP loopback URL"
+    );
+    Ok(base_url)
+}
+
+/// The agent's own credential (#630): the one kept in `credential_file`, or,
+/// on first start, the one the server issues for the enrollment token, written
+/// there (owner-only) before it is used. `enrollment_token` is read only when
+/// there is no credential yet, so a removed bootstrap secret does not block a
+/// restart. The token is spent on the server when redeemed, so a crash
+/// before the write needs a new token.
+pub async fn enrolled_credential(
+    base_url: &str,
+    environment: &str,
+    enrollment_token: impl FnOnce() -> Result<Option<String>>,
+    credential_file: &std::path::Path,
+) -> Result<String> {
+    match std::fs::read_to_string(credential_file) {
+        Ok(stored) => {
+            let stored = stored.trim().to_owned();
+            anyhow::ensure!(
+                stored.starts_with(crate::runtime_credentials::CREDENTIAL_PREFIX),
+                "{} does not hold a runtime credential",
+                credential_file.display()
+            );
+            return Ok(stored);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("reading {}", credential_file.display()));
+        }
+    }
+    let token = enrollment_token()?.with_context(|| {
+        format!(
+            "{} does not exist; an enrollment token is required to create it",
+            credential_file.display()
+        )
+    })?;
+    let base_url = protected_base_url(base_url.to_owned())?;
+    // No redirects: the token goes only to the protected URL checked above.
+    let response = crate::outbound_tls::client()?
+        .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?
+        .post(format!(
+            "{base_url}/v1/runtime/environments/{environment}/enroll"
+        ))
+        .json(&crate::runtime_delivery::RuntimeEnrollRequest { token })
+        .send()
+        .await?;
+    let status = response.status();
+    if !status.is_success() {
+        bail!("runtime enrollment refused: {status}");
+    }
+    let enrolled: crate::runtime_delivery::RuntimeEnrolled = response.json().await?;
+    write_owner_only(credential_file, &enrolled.credential)?;
+    eprintln!(
+        "enrolled runtime credential {} for {}",
+        enrolled.credential_id, enrolled.environment
+    );
+    Ok(enrolled.credential)
+}
+
+/// Write `secret` to `path` readable by the owner only, replacing nothing:
+/// a temporary file beside it is synced and linked into place, and the
+/// directory is synced so the new name survives a host crash.
+fn write_owner_only(path: &std::path::Path, secret: &str) -> Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    // Unique per attempt: a leftover from a crash never blocks a retry.
+    let temporary = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4().simple()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)
+        .with_context(|| format!("creating {}", temporary.display()))?;
+    let written = file
+        .write_all(secret.as_bytes())
+        .and_then(|()| file.sync_all())
+        .and_then(|()| std::fs::hard_link(&temporary, path));
+    let _ = std::fs::remove_file(&temporary);
+    written.with_context(|| format!("writing {}", path.display()))?;
+    let directory = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => std::path::Path::new("."),
+    };
+    std::fs::File::open(directory)
+        .and_then(|directory| directory.sync_all())
+        .with_context(|| format!("syncing {}", directory.display()))
+}
+
 #[derive(Clone)]
 pub struct RuntimeClient {
     base_url: String,
@@ -43,19 +149,7 @@ impl RuntimeClient {
         executor: PathBuf,
         inventory_report: bool,
     ) -> Result<Self> {
-        let base_url = base_url.into().trim_end_matches('/').to_owned();
-        let parsed = url::Url::parse(&base_url)?;
-        let protected = parsed.scheme() == "https"
-            || (parsed.scheme() == "http"
-                && parsed.host().is_some_and(|host| match host {
-                    url::Host::Domain(name) => name.eq_ignore_ascii_case("localhost"),
-                    url::Host::Ipv4(address) => address.is_loopback(),
-                    url::Host::Ipv6(address) => address.is_loopback(),
-                }));
-        anyhow::ensure!(
-            protected,
-            "runtime credentials require HTTPS or an HTTP loopback URL"
-        );
+        let base_url = protected_base_url(base_url.into())?;
         let environment = environment.into();
         let token = token.into();
         anyhow::ensure!(!environment.is_empty(), "runtime environment is required");
@@ -396,6 +490,50 @@ fn validate_plan(plan: &Plan, environment: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn the_credential_file_is_kept_owner_only_and_never_replaced() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!(
+            "tenkai-runtime-credential-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("credential");
+        let missing = enrolled_credential("http://127.0.0.1:9", "prod", || Ok(None), &file)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            missing.contains("enrollment token is required"),
+            "{missing}"
+        );
+
+        write_owner_only(&file, "tkr_first").unwrap();
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(write_owner_only(&file, "tkr_second").is_err());
+        // A kept credential is used without contacting the server.
+        let kept = enrolled_credential(
+            "http://127.0.0.1:9",
+            "prod",
+            || anyhow::bail!("not read when a credential is kept"),
+            &file,
+        )
+        .await
+        .unwrap();
+        assert_eq!(kept, "tkr_first");
+        std::fs::write(&file, "not a credential").unwrap();
+        assert!(
+            enrolled_credential("http://127.0.0.1:9", "prod", || Ok(None), &file)
+                .await
+                .is_err()
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn credentials_require_a_protected_transport() {

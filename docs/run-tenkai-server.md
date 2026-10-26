@@ -206,6 +206,56 @@ export TENKAI_RUNTIME_EXECUTOR=/opt/tenkai/bin/environment-executor
 tenkai-runtime
 ```
 
+### Enrolling a runtime
+
+Instead of a long-lived token in `TENKAI_RUNTIME_TOKENS`, a runtime can enroll
+once with a short-lived, single-use token and keep its own credential (#630):
+
+```sh
+# Operator, with a management credential:
+tenkaictl --target remote runtime enroll prod --ttl-seconds 900
+
+# On the host, once:
+export TENKAI_RUNTIME_CREDENTIAL_FILE=/var/lib/tenkai-runtime/credential
+export TENKAI_RUNTIME_ENROLLMENT_TOKEN='tke_...'
+tenkai-runtime
+```
+
+- **Exchange.** On first start the runtime posts the token to
+  `POST /v1/runtime/environments/{environment}/enroll` and writes the
+  credential it gets to `TENKAI_RUNTIME_CREDENTIAL_FILE`, owner-only. It
+  never replaces that file, and later starts use it without the token.
+- **Single use.** A token works once, before it expires (15 minutes by
+  default, 24 hours at most), and only for the environment it was issued
+  for. Of two concurrent redemptions, one wins. Unknown, spent, expired and
+  foreign tokens are all refused alike, and a refused token is not spent. If
+  the runtime stops before writing the file, issue a new token.
+- **Storage.** Tenkai stores only SHA-256 digests of tokens and credentials.
+  A credential's digest is its id: the runtime prints it at enrollment, and
+  `tenkaictl --target remote runtime revoke sha256:...` revokes it. The
+  runtime is refused from its next request on. A completion it already
+  stored is applied by the server when a runtime of that environment next
+  polls after the claim lapsed, so revoking a runtime mid-plan and enrolling
+  its replacement does not strand the environment.
+- **Hand-off.** Issuing the first enrollment marks the environment
+  runtime-managed for good, revoked credentials or not. From then on only its
+  runtime runs its plans. Every server execution checks the mark while
+  holding the environment's lease, and a runtime claims no work while the
+  server holds that lease. So a plan the server began before the enrollment
+  finishes there, and the two never run one environment together. A lease
+  left by a crashed server is taken over once it expires, as server
+  execution takes one over. A plan the server had started is not run again
+  from its first step: once its lease is gone, it is failed, as server
+  recovery fails it, and a rollback plan recovers the environment. Issuing and redeeming tokens needs a trusted clock. Issue
+  enrollments once every server replica runs this version.
+- **Scope.** Enrollment is for single-tenant hosts; tenant mode refuses it.
+- **Compatibility.** Token-configured runtimes keep working. Enrollment and
+  credentials are additive tables in SQLite and PostgreSQL, which an older
+  server ignores.
+
+The runtime stays pull-only: it opens every connection, and Tenkai has no
+path to the host.
+
 The configured executor receives only non-secret arguments:
 `--action`, `--product`, `--target-version`, `--release-digest`,
 `--artifact-digest`, `--workdir`, and `--idempotency-key`. It must durably

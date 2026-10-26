@@ -275,7 +275,12 @@ async fn run_admitted(request: &TickRequest<'_>, ctx: Ctx) -> Result<TickReport>
 
                 let mut ctx = ctx.clone();
                 let config = request.config.clone();
-                let runtime_managed = request.runtime_environments.contains(&name);
+                // A configured runtime token, or an enrolled runtime (#630).
+                // Unknown counts as enrolled: the server must not run it.
+                let runtime_managed = request.runtime_environments.contains(&name)
+                    || crate::runtime_credentials::runtime_managed(&mut ctx, &name)
+                        .await
+                        .unwrap_or(true);
                 let guard = AdmissionGuard {
                     environment: name.clone(),
                     state: Arc::clone(&request.state),

@@ -28,6 +28,7 @@ mod provider_lifecycle;
 mod receipts;
 mod records;
 mod rollbacks;
+mod runtime_enrollment;
 mod runtime_plans;
 mod sqlite_objects;
 mod sqlite_operational_store;

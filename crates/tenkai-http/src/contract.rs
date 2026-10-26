@@ -379,6 +379,22 @@ pub fn http_contract() -> Value {
             response: lifecycle.clone(),
         },
         Route {
+            method: "POST",
+            path: "/v1/environments/{environment}/runtime-enrollments",
+            auth: Auth::Management,
+            request: Some(schema::<
+                tenkai::management_operations::RuntimeEnrollmentRequest,
+            >(&mut g)),
+            response: schema::<tenkai::management_operations::RuntimeEnrollmentIssued>(&mut g),
+        },
+        Route {
+            method: "POST",
+            path: "/v1/runtime-credentials/{credential_id}/revoke",
+            auth: Auth::Management,
+            request: None,
+            response: schema::<tenkai::management_operations::RuntimeCredentialRevoked>(&mut g),
+        },
+        Route {
             method: "GET",
             path: "/v1/products/{product}/channels/{channel}/hold",
             auth: Auth::Read,
