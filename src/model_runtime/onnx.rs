@@ -78,7 +78,7 @@ impl RegistryTrust {
     }
 
     pub fn from_env() -> Result<Self> {
-        let Some(path) = std::env::var(TRUSTED_KEYS_ENV)
+        let Some(path) = crate::host_env::var(TRUSTED_KEYS_ENV)
             .ok()
             .filter(|value| !value.trim().is_empty())
         else {
@@ -405,7 +405,7 @@ impl ClassicalOnnxExecutor {
         artifacts: Option<ModelRuntimeArtifacts>,
     ) -> Result<Self> {
         let trust = RegistryTrust::from_env()?;
-        let sink: Arc<dyn PredictionSummarySink> = match std::env::var(MONITORING_BASE_ENV) {
+        let sink: Arc<dyn PredictionSummarySink> = match crate::host_env::var(MONITORING_BASE_ENV) {
             Ok(base) if !base.trim().is_empty() => Arc::new(HttpSummarySink { base }),
             _ => Arc::new(RecordingSummarySink::default()),
         };
@@ -416,7 +416,7 @@ impl ClassicalOnnxExecutor {
             trust,
             sink,
         );
-        let cache_root = std::env::var_os("TENKAI_WEIGHT_CACHE")
+        let cache_root = crate::host_env::var_os("TENKAI_WEIGHT_CACHE")
             .map(PathBuf::from)
             .filter(|path| !path.as_os_str().is_empty())
             .unwrap_or_else(|| state_path.with_extension("weights"));
@@ -1442,34 +1442,8 @@ max_startup_seconds = 30
         plan_id
     }
 
-    struct EnvRestore {
-        keys: Option<std::ffi::OsString>,
-        monitoring: Option<std::ffi::OsString>,
-        _lock: tokio::sync::MutexGuard<'static, ()>,
-    }
-
-    impl Drop for EnvRestore {
-        fn drop(&mut self) {
-            unsafe {
-                match &self.keys {
-                    Some(value) => std::env::set_var(TRUSTED_KEYS_ENV, value),
-                    None => std::env::remove_var(TRUSTED_KEYS_ENV),
-                }
-                match &self.monitoring {
-                    Some(value) => std::env::set_var(MONITORING_BASE_ENV, value),
-                    None => std::env::remove_var(MONITORING_BASE_ENV),
-                }
-            }
-        }
-    }
-
     #[tokio::test]
     async fn lab_register_deploy_canary_promote_rollback_and_digest_mismatch() {
-        let _env = EnvRestore {
-            keys: std::env::var_os(TRUSTED_KEYS_ENV),
-            monitoring: std::env::var_os(MONITORING_BASE_ENV),
-            _lock: ENV.lock().await,
-        };
         let root = std::env::temp_dir().join(format!(
             "tenkai-onnx-lab-{}-{}",
             std::process::id(),
@@ -1486,10 +1460,10 @@ max_startup_seconds = 30
             ),
         )
         .unwrap();
-        unsafe {
-            std::env::set_var(TRUSTED_KEYS_ENV, &keys_path);
-            std::env::remove_var(MONITORING_BASE_ENV);
-        }
+        let _env = crate::host_env::overlay::set([
+            (TRUSTED_KEYS_ENV, Some(keys_path.as_os_str())),
+            (MONITORING_BASE_ENV, None),
+        ]);
 
         let (digest_v1, weights_v1) = write_fixture(&manifest_dir, b"onnx-lab-v1", 1);
         write_manifest(&manifest_dir, "1.0.0", &digest_v1, &weights_v1, 1);
@@ -1648,11 +1622,6 @@ max_startup_seconds = 30
 
     #[tokio::test]
     async fn catalog_promote_requires_named_registry_attestation() {
-        let _env = EnvRestore {
-            keys: std::env::var_os(TRUSTED_KEYS_ENV),
-            monitoring: std::env::var_os(MONITORING_BASE_ENV),
-            _lock: ENV.lock().await,
-        };
         let root = std::env::temp_dir().join(format!(
             "tenkai-onnx-promote-attest-{}-{}",
             std::process::id(),
@@ -1669,10 +1638,10 @@ max_startup_seconds = 30
             ),
         )
         .unwrap();
-        unsafe {
-            std::env::set_var(TRUSTED_KEYS_ENV, &keys_path);
-            std::env::remove_var(MONITORING_BASE_ENV);
-        }
+        let _env = crate::host_env::overlay::set([
+            (TRUSTED_KEYS_ENV, Some(keys_path.as_os_str())),
+            (MONITORING_BASE_ENV, None),
+        ]);
 
         let (digest, weights) = write_fixture(&manifest_dir, b"onnx-promote-v1", 1);
         let mut toml = std::fs::read_to_string({
@@ -1774,6 +1743,4 @@ max_startup_seconds = 30
         assert!(promoted.contains("canary"), "{promoted}");
         let _ = std::fs::remove_dir_all(root);
     }
-
-    static ENV: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 }

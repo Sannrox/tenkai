@@ -973,7 +973,7 @@ pub(crate) fn snapshot_workdir_in(
 ) -> Result<PathBuf> {
     let state_dir = match state_dir {
         Some(path) if !path.as_os_str().is_empty() => path.to_path_buf(),
-        _ => match std::env::var_os("TENKAI_STATE_DIR") {
+        _ => match crate::host_env::var_os("TENKAI_STATE_DIR") {
             Some(path) if !path.is_empty() => PathBuf::from(path),
             _ => source
                 .parent()

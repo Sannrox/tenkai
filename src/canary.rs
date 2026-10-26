@@ -856,12 +856,10 @@ max_startup_seconds = 30
                 .unwrap();
             file.write_all(&[29_u8; 32]).unwrap();
         }
-        unsafe {
-            std::env::set_var(
-                crate::model_release_evidence::MODEL_RUNTIME_EVIDENCE_SIGNING_KEY_ENV,
-                &key_path,
-            );
-        }
+        let _evidence_key = crate::host_env::overlay::set([(
+            crate::model_release_evidence::MODEL_RUNTIME_EVIDENCE_SIGNING_KEY_ENV,
+            Some(key_path.as_os_str()),
+        )]);
         write_model_runtime_manifest(&manifest_dir, "qwen-export", "1.0.0");
 
         let mut ctx = Ctx::embedded_with_outcome_export(&database, true).unwrap();
@@ -907,11 +905,6 @@ max_startup_seconds = 30
         })
         .await
         .unwrap();
-        unsafe {
-            std::env::remove_var(
-                crate::model_release_evidence::MODEL_RUNTIME_EVIDENCE_SIGNING_KEY_ENV,
-            );
-        }
         assert!(
             records.len() >= 2,
             "expected smoke and canary outbox records, got {}",

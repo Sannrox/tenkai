@@ -470,7 +470,7 @@ pub fn import_weight_chunks_for_bundle(
 
 /// Weight cache selected by `TENKAI_WEIGHT_CACHE`.
 pub fn weight_cache_from_env() -> Result<Option<WeightCache>> {
-    match std::env::var_os("TENKAI_WEIGHT_CACHE") {
+    match crate::host_env::var_os("TENKAI_WEIGHT_CACHE") {
         Some(root) => Ok(Some(WeightCache::new(root))),
         None => Ok(None),
     }

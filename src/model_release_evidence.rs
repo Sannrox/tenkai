@@ -843,7 +843,7 @@ pub(crate) fn descriptor_from_release_object(
 }
 
 pub(crate) fn signing_key_from_env() -> Result<Option<SigningKey>> {
-    let Some(path) = std::env::var_os(MODEL_RUNTIME_EVIDENCE_SIGNING_KEY_ENV) else {
+    let Some(path) = crate::host_env::var_os(MODEL_RUNTIME_EVIDENCE_SIGNING_KEY_ENV) else {
         return Ok(None);
     };
     Ok(Some(signing_key_from_path(Path::new(&path))?))

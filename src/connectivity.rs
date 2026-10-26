@@ -1846,7 +1846,7 @@ async fn admit_isolated_catalog(
 }
 
 fn isolated_catalog_state_dir() -> Result<std::path::PathBuf> {
-    if let Ok(path) = std::env::var("TENKAI_STATE_DIR")
+    if let Ok(path) = crate::host_env::var("TENKAI_STATE_DIR")
         && !path.is_empty()
     {
         return Ok(std::path::PathBuf::from(path));
@@ -2891,55 +2891,20 @@ install = "true"
         plan
     }
 
-    struct StoreEnvGuard {
-        previous_oci: Option<std::ffi::OsString>,
-        previous_weights: Option<std::ffi::OsString>,
-        previous_state: Option<std::ffi::OsString>,
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-
-    impl Drop for StoreEnvGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match &self.previous_oci {
-                    Some(value) => std::env::set_var("TENKAI_OCI_STORE", value),
-                    None => std::env::remove_var("TENKAI_OCI_STORE"),
-                }
-                match &self.previous_weights {
-                    Some(value) => std::env::set_var("TENKAI_WEIGHT_CACHE", value),
-                    None => std::env::remove_var("TENKAI_WEIGHT_CACHE"),
-                }
-                match &self.previous_state {
-                    Some(value) => std::env::set_var("TENKAI_STATE_DIR", value),
-                    None => std::env::remove_var("TENKAI_STATE_DIR"),
-                }
-            }
-        }
-    }
-
-    fn lock_artifact_stores(root: &std::path::Path) -> StoreEnvGuard {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let lock = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    /// Point this test's artifact store, weight cache and state directory
+    /// under `root`, for this test's thread only.
+    fn lock_artifact_stores(root: &std::path::Path) -> crate::host_env::overlay::Scoped {
         let oci = root.join("oci");
         let weights = root.join("weights");
         let state = root.join("state");
-        std::fs::create_dir_all(&oci).unwrap();
-        std::fs::create_dir_all(&weights).unwrap();
-        std::fs::create_dir_all(&state).unwrap();
-        let previous_oci = std::env::var_os("TENKAI_OCI_STORE");
-        let previous_weights = std::env::var_os("TENKAI_WEIGHT_CACHE");
-        let previous_state = std::env::var_os("TENKAI_STATE_DIR");
-        unsafe {
-            std::env::set_var("TENKAI_OCI_STORE", &oci);
-            std::env::set_var("TENKAI_WEIGHT_CACHE", &weights);
-            std::env::set_var("TENKAI_STATE_DIR", &state);
+        for dir in [&oci, &weights, &state] {
+            std::fs::create_dir_all(dir).unwrap();
         }
-        StoreEnvGuard {
-            previous_oci,
-            previous_weights,
-            previous_state,
-            _lock: lock,
-        }
+        crate::host_env::overlay::set([
+            ("TENKAI_OCI_STORE", Some(oci.as_os_str())),
+            ("TENKAI_WEIGHT_CACHE", Some(weights.as_os_str())),
+            ("TENKAI_STATE_DIR", Some(state.as_os_str())),
+        ])
     }
 
     fn sign_catalog_for_layer(
@@ -3578,7 +3543,7 @@ install = "true"
                 .unwrap()
                 .is_none()
         );
-        let oci = std::path::PathBuf::from(std::env::var_os("TENKAI_OCI_STORE").unwrap());
+        let oci = std::path::PathBuf::from(crate::host_env::var_os("TENKAI_OCI_STORE").unwrap());
         assert!(
             !oci.join("registry.example").exists(),
             "layer import mutated the OCI store"
@@ -3666,7 +3631,7 @@ install = "true"
                 .is_err()
         );
         assert!(load_upgrade(&mut ctx, "first-recalled").await.is_err());
-        let oci = std::path::PathBuf::from(std::env::var_os("TENKAI_OCI_STORE").unwrap());
+        let oci = std::path::PathBuf::from(crate::host_env::var_os("TENKAI_OCI_STORE").unwrap());
         assert!(
             !oci.join("ghcr.io").exists(),
             "recalled first-install imported layers"
