@@ -513,6 +513,8 @@ pub fn insert_artifact_layers_chunked(
     }
     let mut chunked: Vec<crate::offline_chunk_store::OfflineChunkArtifact> = Vec::new();
     oci_artifact::validate_all(artifacts)?;
+    // An image manifest travels with the blobs it references (#627).
+    let artifacts = &oci_artifact::image_closure(artifacts, registry)?;
     let mut layers = Vec::with_capacity(artifacts.len());
     let mut seen_paths = BTreeSet::new();
     for artifact in artifacts {
@@ -753,6 +755,7 @@ pub fn import_artifact_layers(
     mirrors: &BTreeMap<String, String>,
 ) -> Result<Vec<OciArtifactRef>> {
     let planned = plan_artifact_layers(bundle, mirrors)?;
+    preflight_image_closure(bundle)?;
     // Every mirror is resolved, and every chunked layer verified, before
     // anything is stored.
     let chunked = chunked_layers(bundle)?
@@ -890,6 +893,7 @@ pub fn preflight_full_stack(bundle: &VerifiedBundle, bundle_path: Option<&Path>)
             bail!("artifact digest {digest} does not match bundle layer {actual}");
         }
     }
+    preflight_image_closure(bundle)?;
     preflight_image_chunks(bundle, bundle_path)?;
     crate::offline_chunk_store::preflight_weight_chunks(bundle, bundle_path, &manifest.weights)?;
     for path in manifest.schemas.iter().chain(manifest.hub.iter()) {
@@ -916,6 +920,59 @@ pub fn preflight_full_stack(bundle: &VerifiedBundle, bundle_path: Option<&Path>)
 struct IndexedLayer {
     path: String,
     reference: OciArtifactRef,
+}
+
+/// Every image manifest or index the bundle carries must come with the
+/// blobs it references, in the same repository, so a registry serving the
+/// store can hand out the whole image (#627). Missing ones are named.
+fn preflight_image_closure(bundle: &VerifiedBundle) -> Result<()> {
+    let Some(raw) = bundle.entry(LAYER_INSTRUCTION_PATH) else {
+        return Ok(());
+    };
+    let instructions: OfflineArtifactLayerManifest =
+        serde_json::from_slice(raw).context("parsing offline artifact layer instructions")?;
+    let carried: BTreeSet<(&str, &str, &str)> = instructions
+        .layers
+        .iter()
+        .map(|layer| {
+            (
+                layer.registry.as_str(),
+                layer.repository.as_str(),
+                layer.digest.as_str(),
+            )
+        })
+        .collect();
+    for layer in &instructions.layers {
+        if !oci_artifact::is_manifest_media_type(&layer.media_type) {
+            continue;
+        }
+        let entry = (layer.path != IMAGE_CHUNKS_PATH)
+            .then(|| bundle.entry(&layer.path))
+            .flatten();
+        let Some(bytes) = entry else {
+            bail!(
+                "image manifest {} of {}/{} must travel as a bundle entry",
+                layer.digest,
+                layer.registry,
+                layer.repository
+            );
+        };
+        for (digest, _) in oci_artifact::referenced_blobs(&layer.media_type, bytes)? {
+            if !carried.contains(&(
+                layer.registry.as_str(),
+                layer.repository.as_str(),
+                digest.as_str(),
+            )) {
+                bail!(
+                    "image {}/{}@{} references {digest}, which the bundle does not carry",
+                    layer.registry,
+                    layer.repository,
+                    layer.digest
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn layer_instruction_index(bundle: &VerifiedBundle) -> Result<BTreeMap<String, IndexedLayer>> {
@@ -1533,23 +1590,36 @@ mod tests {
             registry: "ghcr.io".into(),
             repository: "edge/app".into(),
             digest: digest(bytes),
-            media_type: "application/vnd.oci.image.manifest.v1+json".into(),
+            media_type: "application/vnd.oci.image.layer.v1.tar".into(),
         }
     }
 
     fn layered_bundle(key: &SigningKey, artifact: &OciArtifactRef, bytes: &[u8]) -> BundleEnvelope {
+        let stored = [(artifact.clone(), bytes.to_vec())];
+        let payloads = layered_payloads(&stored, std::slice::from_ref(artifact));
+        bundle_of(key, payloads)
+    }
+
+    /// Bundle payloads exporting `listed` from an origin holding `stored`.
+    fn layered_payloads(
+        stored: &[(OciArtifactRef, Vec<u8>)],
+        listed: &[OciArtifactRef],
+    ) -> BTreeMap<String, (String, Vec<u8>)> {
         let origin = crate::oci_artifact::MemoryArtifactRegistry::new();
-        origin.put(artifact, bytes.to_vec()).unwrap();
+        for (artifact, bytes) in stored {
+            origin.put(artifact, bytes.clone()).unwrap();
+        }
         let mut payloads = BTreeMap::new();
-        let approval = br#"{"approval":"plan-1"}"#.to_vec();
         payloads.insert(
             "approvals/plan-1.json".into(),
-            ("application/json".into(), approval.clone()),
+            (
+                "application/json".into(),
+                br#"{"approval":"plan-1"}"#.to_vec(),
+            ),
         );
-        let plan = br#"{"plan":"plan-1"}"#.to_vec();
         payloads.insert(
             "plans/plan-1.json".into(),
-            ("application/json".into(), plan.clone()),
+            ("application/json".into(), br#"{"plan":"plan-1"}"#.to_vec()),
         );
         payloads.insert(
             "releases/app@1.0.0/payload.bin".into(),
@@ -1558,14 +1628,21 @@ mod tests {
                 b"immutable payload".to_vec(),
             ),
         );
-        insert_artifact_layers(&mut payloads, std::slice::from_ref(artifact), &origin).unwrap();
+        insert_artifact_layers(&mut payloads, listed, &origin).unwrap();
+        payloads
+    }
+
+    fn bundle_of(
+        key: &SigningKey,
+        payloads: BTreeMap<String, (String, Vec<u8>)>,
+    ) -> BundleEnvelope {
         BundleEnvelope::create(
             BundleStatement {
                 tenant_id: "tenant-1".into(),
                 environment_id: "airgap-1".into(),
                 plan_id: "plan-1".into(),
-                plan_digest: digest(&plan),
-                approval_digest: digest(&approval),
+                plan_digest: digest(br#"{"plan":"plan-1"}"#),
+                approval_digest: digest(br#"{"approval":"plan-1"}"#),
                 release_ids: vec!["app@1.0.0".into()],
                 exporter_identity: "exporter".into(),
                 issued_at_unix_ms: 1_000,
@@ -1756,6 +1833,55 @@ mod tests {
         assert_eq!(first[0].digest, artifact.digest);
         assert_eq!(first[0].registry, "mirror.internal");
         dest.verify(&first[0]).unwrap();
+    }
+
+    #[test]
+    fn an_image_manifest_imports_only_with_every_blob_it_references() {
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let config = sample_artifact(b"config");
+        let layer = sample_artifact(b"layer-a");
+        let manifest_bytes = serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "config": {"digest": config.digest, "mediaType": config.media_type},
+            "layers": [{"digest": layer.digest, "mediaType": layer.media_type}],
+        })
+        .to_string()
+        .into_bytes();
+        let manifest = OciArtifactRef {
+            media_type: "application/vnd.oci.image.manifest.v1+json".into(),
+            ..sample_artifact(&manifest_bytes)
+        };
+        let mut mirrors = BTreeMap::new();
+        mirrors.insert("ghcr.io".into(), "seed.site:5443".into());
+        let import = |payloads| {
+            let verified = bundle_of(&key, payloads)
+                .verify(&roots(&key, "exporter"), "tenant-1", "airgap-1", 2_000)
+                .unwrap();
+            let dest = crate::oci_artifact::MemoryArtifactRegistry::new();
+            import_artifact_layers(&verified, None, Some(&dest), &mirrors)
+                .map(|pulled| pulled.len())
+        };
+        // Export follows the manifest to its config and layer.
+        let stored = [
+            (manifest.clone(), manifest_bytes),
+            (config, b"config".to_vec()),
+            (layer.clone(), b"layer-a".to_vec()),
+        ];
+        let payloads = layered_payloads(&stored, std::slice::from_ref(&manifest));
+        assert_eq!(import(payloads.clone()).unwrap(), 3);
+
+        // A bundle without the layer is refused, naming it.
+        let mut without_layer = payloads;
+        without_layer.remove(&layer.layer_entry_path().unwrap());
+        let (_, raw) = without_layer.get_mut(LAYER_INSTRUCTION_PATH).unwrap();
+        let mut instructions: OfflineArtifactLayerManifest = serde_json::from_slice(raw).unwrap();
+        instructions
+            .layers
+            .retain(|entry| entry.digest != layer.digest);
+        *raw = serde_json::to_vec(&instructions).unwrap();
+        let refused = import(without_layer).unwrap_err().to_string();
+        assert!(refused.contains(&layer.digest), "{refused}");
     }
 
     #[test]

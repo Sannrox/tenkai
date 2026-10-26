@@ -7,6 +7,7 @@ mod environment_config;
 mod imports;
 mod inspect;
 mod lifecycle;
+pub mod oci_registry;
 mod opening;
 mod package_migration;
 mod remote_client;

@@ -102,6 +102,7 @@ pub(crate) async fn run(ctx: &mut client::Ctx, command: UpgradeCommand) -> Resul
             channel,
             bundle,
             trust_roots,
+            seed_registry,
         } => {
             let envelope = offline_bundle::BundleEnvelope::load(&bundle)?;
             let roots = release_signing::TrustRoots::load(&trust_roots)?;
@@ -119,6 +120,7 @@ pub(crate) async fn run(ctx: &mut client::Ctx, command: UpgradeCommand) -> Resul
                 &envelope,
                 &roots,
                 Some(&bundle),
+                seed_registry.as_deref(),
             )
             .await?;
             println!("{}", connectivity::format_upgrade(&record));

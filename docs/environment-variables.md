@@ -66,7 +66,7 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | `TENKAI_OIDC_CLIENT_SECRET` | unset | Confidential OIDC client secret for `tenkaictl login --client-credentials`. CLI-only; never passed on a command line, never stored in `tokens.json`, and never set on `tenkai-server` |
 | `TENKAI_JWT_ASSERTION` | unset | Optional compact JWT for embedded `promote` / canary mutations including `canary repair`; requires `TENKAI_JWT_VERIFIER_CONFIG` |
 | `TENKAI_JWT_VERIFIER_CONFIG` | unset | Filesystem path to a JWT trust TOML file for enterprise JWT verification. May be set together with `TENKAI_OIDC_CONFIG` when the issuers differ |
-| `TENKAI_OCI_STORE` | unset | Filesystem adapter root used to verify digest-bound OCI artifact references at publish and apply, and to load signed offline-bundle layers onto an environment mirror |
+| `TENKAI_OCI_STORE` | unset | Filesystem adapter root used to verify digest-bound OCI artifact references at publish and apply, to load signed offline-bundle layers onto an environment mirror, and served read-only by `tenkaictl registry serve` ([seed registry](offline-bundles.md#seed-registry)) |
 | `TENKAI_EXECUTOR_GUARD` | current `tenkaictl` binary | Optional explicit guard path for applications embedding the Tenkai library |
 | `TENKAI_PLAN_APPROVAL_DIR` | unset | Directory of signed plan-approval envelopes |
 | `TENKAI_PLAN_APPROVAL_TRUST_ROOTS` | unset | Trust-root file for plan-approval verification |
