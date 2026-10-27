@@ -29,9 +29,10 @@ mod store;
 mod tenant_store;
 
 pub use capabilities::{
-    POSTGRES_SHARED_REPLICA_WRITER_MODEL, SharedReplicaWriterModel, compiled_host_feature_report,
-    compiled_host_feature_report_with, enterprise_postgres_hub_profile, postgres_feature_enabled,
-    tenant_postgres_store_capabilities,
+    AuthoritativeSurface, POSTGRES_SHARED_REPLICA_WRITER_MODEL, SharedReplicaWriterModel,
+    compiled_host_feature_report, compiled_host_feature_report_with,
+    enterprise_authoritative_surfaces, enterprise_postgres_hub_profile, postgres_feature_enabled,
+    require_enterprise_profile, tenant_postgres_store_capabilities,
 };
 pub use config::{
     EnterpriseHub, HUB_SCHEMA, PostgresTenantConfig, refuse_mixed_store_configuration,

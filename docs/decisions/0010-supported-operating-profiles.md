@@ -89,7 +89,7 @@ continues to fail the affected operation closed.
 | Upgrade path | Take and verify a PostgreSQL recovery point, migrate under the documented compatibility window, keep server/runtime protocol minors compatible, and restore the prior binary plus database recovery point if migration fails. |
 | Guarantees | Tenant isolation, federated assertion verification, PostgreSQL durability, leases/fencing, and single-store recovery once every required PostgreSQL capability passes startup validation and conformance. |
 | Non-guarantees | Multiple server replicas, automatic failover, multi-AZ packaging, multi-active writers, zero-downtime migration, browser OIDC sessions, or product `high_availability`. |
-| Stability | **Experimental and gated.** The profile is unavailable until PostgreSQL implements every required authoritative surface and passes enterprise recovery and usability drills. Component-level PostgreSQL evidence alone does not activate it. |
+| Stability | **Experimental and gated.** The profile is unavailable until PostgreSQL implements every required authoritative surface and passes enterprise recovery and usability drills. Component-level PostgreSQL evidence alone does not activate it. `tenkai-server --tenant-mode --require-enterprise-profile` checks the gate at startup and names each missing surface (#747). |
 
 ## Backend and recovery rules
 

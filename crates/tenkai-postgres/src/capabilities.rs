@@ -49,6 +49,58 @@ pub fn enterprise_postgres_hub_profile(
     )
 }
 
+/// One authoritative surface the supported `enterprise-experimental` profile
+/// needs PostgreSQL to own (ADR 0010), and whether this build has it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthoritativeSurface {
+    pub name: &'static str,
+    pub available: bool,
+    /// The issue that delivers it, while it is missing.
+    pub tracked_by: Option<&'static str>,
+}
+
+/// Every surface the enterprise profile requires, in a fixed order (#747).
+/// An entry becomes available when its PostgreSQL implementation lands.
+pub fn enterprise_authoritative_surfaces() -> [AuthoritativeSurface; 5] {
+    let available = |name| AuthoritativeSurface {
+        name,
+        available: true,
+        tracked_by: None,
+    };
+    let missing = |name, issue| AuthoritativeSurface {
+        name,
+        available: false,
+        tracked_by: Some(issue),
+    };
+    [
+        available("operational store"),
+        available("tenant isolation"),
+        available("shared replica state"),
+        missing("catalog object graph", "#764"),
+        missing("terminal-outcome export", "#765"),
+    ]
+}
+
+/// Refuse the supported enterprise profile while any required surface is
+/// missing, naming each one; the diagnostic lab profile does not ask.
+pub fn require_enterprise_profile(surfaces: &[AuthoritativeSurface]) -> anyhow::Result<()> {
+    let missing: Vec<String> = surfaces
+        .iter()
+        .filter(|surface| !surface.available)
+        .map(|surface| match surface.tracked_by {
+            Some(issue) => format!("{} ({issue})", surface.name),
+            None => surface.name.to_string(),
+        })
+        .collect();
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "the enterprise-experimental profile needs PostgreSQL to own every authoritative surface; missing: {}",
+            missing.join(", ")
+        );
+    }
+    Ok(())
+}
+
 /// Whether this binary was compiled with the `postgres` feature.
 pub fn postgres_feature_enabled() -> bool {
     cfg!(feature = "postgres")
@@ -66,5 +118,28 @@ pub fn compiled_host_feature_report_with(postgres: bool, ui: bool) -> &'static s
         (true, false) => "Compiled features: postgres",
         (false, true) => "Compiled features: ui",
         (false, false) => "Compiled features: (none)",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_enterprise_profile_names_every_missing_surface() {
+        let error = require_enterprise_profile(&enterprise_authoritative_surfaces())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("catalog object graph (#764)")
+                && error.contains("terminal-outcome export (#765)"),
+            "{error}"
+        );
+        assert!(!error.contains("tenant isolation"), "{error}");
+        let complete = enterprise_authoritative_surfaces().map(|surface| AuthoritativeSurface {
+            available: true,
+            ..surface
+        });
+        require_enterprise_profile(&complete).unwrap();
     }
 }
