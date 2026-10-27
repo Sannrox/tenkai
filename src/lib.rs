@@ -248,6 +248,7 @@ pub mod tenant_isolation;
 pub mod tenant_store;
 mod terminal_outcome;
 pub mod topology;
+pub mod version_skew;
 pub mod wave;
 pub mod worker_pool;
 pub mod workshop_module;

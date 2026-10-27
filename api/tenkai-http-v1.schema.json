@@ -2500,6 +2500,11 @@
           "format": "uint",
           "minimum": 0,
           "type": "integer"
+        },
+        "server_version": {
+          "default": "",
+          "description": "The server's own version, which runners and consoles compare\nagainst (#761).",
+          "type": "string"
         }
       },
       "required": [
@@ -4063,6 +4068,10 @@
         },
         "runtime_version": {
           "type": "string"
+        },
+        "skew": {
+          "description": "The instance's version against this server: `current`, `behind`\n(one minor release, supported), `unsupported` or `ahead` (#761).",
+          "type": "string"
         }
       },
       "required": [
@@ -4150,10 +4159,15 @@
         },
         "status": {
           "type": "string"
+        },
+        "version": {
+          "description": "This server's version (#761).",
+          "type": "string"
         }
       },
       "required": [
         "status",
+        "version",
         "profile",
         "capabilities",
         "contracts"
