@@ -156,6 +156,10 @@ pub struct Plan {
     /// Audited reason that admits rollback onto recalled Catalog content.
     #[serde(default)]
     pub recalled_recovery_reason: Option<String>,
+    /// A certificate that lapses before the next maintenance window opens
+    /// (#778). Advisory, and outside the content address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_runway: Option<crate::trust_posture::CredentialRunway>,
 }
 
 #[derive(Serialize)]
@@ -619,6 +623,7 @@ mod tests {
             maintenance_blocked: false,
             prior_warnings: Vec::new(),
             recalled_recovery_reason: None,
+            credential_runway: None,
         };
         plan.content_id = content_address(
             &plan.environment,
@@ -1327,6 +1332,65 @@ mod tests {
         assert_eq!(summary.step_count, 1);
         assert!(summary.status_detail.is_empty());
         assert!(!summary.status_detail.contains("do-not-return"));
+    }
+
+    /// A plan for an environment whose window is closed names the certificate
+    /// that lapses before the window opens (#778); without trust sources
+    /// nothing is flagged.
+    #[tokio::test]
+    async fn plan_flags_a_certificate_that_lapses_before_the_window_opens() {
+        use chrono::Datelike as _;
+        let dir = std::env::temp_dir().join(format!("tenkai-runway-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut params = rcgen::CertificateParams::new(vec!["hub.example.test".into()]).unwrap();
+        let now = time::OffsetDateTime::now_utc();
+        params.not_before = now - time::Duration::days(1);
+        params.not_after = now + time::Duration::hours(1);
+        let key = rcgen::KeyPair::generate().unwrap();
+        let listener = dir.join("listener.pem");
+        std::fs::write(&listener, params.self_signed(&key).unwrap().pem()).unwrap();
+        let sources = crate::trust_posture::TrustSources {
+            certificates: vec![(
+                "listener".into(),
+                crate::trust_posture::CertificateSource::File(listener),
+            )],
+            warning_days: 30,
+            critical_days: 7,
+            ..Default::default()
+        };
+
+        let mut ctx = Ctx::embedded(dir.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        env_add(&mut ctx, "prod", "production").await.unwrap();
+        // A weekday other than today in the window's zone keeps it closed.
+        let today = chrono::Utc::now()
+            .with_timezone(&chrono_tz::Asia::Tokyo)
+            .weekday()
+            .number_from_monday();
+        let window = crate::maintenance::Window::new(
+            "weekly",
+            "Asia/Tokyo",
+            vec![today % 7 + 1],
+            "02:00",
+            60,
+        )
+        .unwrap();
+        crate::maintenance::set(&mut ctx, "prod", window)
+            .await
+            .unwrap();
+
+        let unflagged = create(&mut ctx, "prod").await.unwrap();
+        assert_eq!(unflagged.credential_runway, None);
+
+        let mut ctx = ctx.with_trust_sources(std::sync::Arc::new(sources));
+        let flagged = create(&mut ctx, "prod")
+            .await
+            .unwrap()
+            .credential_runway
+            .expect("runway flagged");
+        assert_eq!(flagged.credential, "listener (CN=rcgen self signed cert)");
+        assert!(flagged.expires_at_ms < flagged.window_opens_at_ms);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

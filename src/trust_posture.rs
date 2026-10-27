@@ -159,6 +159,59 @@ fn redacted(error: &anyhow::Error, path: &Path) -> String {
     format!("{error:#}").replace(&*path.to_string_lossy(), &file_name(path))
 }
 
+/// A certificate that lapses before an environment's next maintenance window
+/// opens, so a plan waiting for that window would fail at apply time (#778).
+/// Advisory: it never blocks the plan or changes its steps.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialRunway {
+    /// The certificate's purpose, with its subject when readable.
+    pub credential: String,
+    pub expires_at_ms: i64,
+    pub window_opens_at_ms: i64,
+}
+
+impl CredentialRunway {
+    /// One line for plan output, with UTC timestamps.
+    pub fn summary(&self) -> String {
+        let at = |ms: i64| {
+            chrono::DateTime::from_timestamp_millis(ms)
+                .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+                .unwrap_or_else(|| ms.to_string())
+        };
+        format!(
+            "{} expires {}, before the maintenance window opens {}",
+            self.credential,
+            at(self.expires_at_ms),
+            at(self.window_opens_at_ms)
+        )
+    }
+}
+
+/// The first certificate in `sources` that lapses at or before
+/// `window_opens_at_ms`, if any. A certificate without a readable expiry is
+/// left to the posture's own `critical` grade.
+pub fn runway(
+    sources: &TrustSources,
+    now_ms: i64,
+    window_opens_at_ms: i64,
+) -> Option<CredentialRunway> {
+    let shown = posture(sources, now_ms.div_euclid(1_000));
+    shown
+        .tls
+        .into_iter()
+        .filter_map(|entry| Some((entry.not_after?.saturating_mul(1_000), entry)))
+        .filter(|(expires_at_ms, _)| *expires_at_ms <= window_opens_at_ms)
+        .min_by_key(|(expires_at_ms, _)| *expires_at_ms)
+        .map(|(expires_at_ms, entry)| CredentialRunway {
+            credential: match entry.subject {
+                Some(subject) => format!("{} ({subject})", entry.purpose),
+                None => entry.purpose,
+            },
+            expires_at_ms,
+            window_opens_at_ms,
+        })
+}
+
 /// The posture of `sources` at `now_secs`.
 pub fn posture(sources: &TrustSources, now_secs: i64) -> TrustPosture {
     let revoked = installed_revocations(sources);
@@ -337,6 +390,42 @@ mod tests {
         let path = dir.join(name);
         std::fs::write(&path, params.self_signed(&key).unwrap().pem()).unwrap();
         path
+    }
+
+    /// A window opening after a certificate lapses is flagged with the first
+    /// certificate to lapse; one opening before every expiry is not (#778).
+    #[test]
+    fn runway_names_the_first_certificate_to_lapse_before_the_window() {
+        let dir = std::env::temp_dir().join(format!("tenkai-runway-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sources = TrustSources {
+            certificates: vec![
+                (
+                    "listener".into(),
+                    CertificateSource::File(certificate(&dir, "listener.pem", 200)),
+                ),
+                (
+                    "runner_ca".into(),
+                    CertificateSource::File(certificate(&dir, "runner-ca.pem", 5)),
+                ),
+                (
+                    "client_ca".into(),
+                    CertificateSource::File(certificate(&dir, "client-ca.pem", 10)),
+                ),
+            ],
+            warning_days: 30,
+            critical_days: 7,
+            ..TrustSources::default()
+        };
+        let now_ms = crate::now_millis();
+        let day_ms = 86_400_000;
+
+        let flagged = runway(&sources, now_ms, now_ms + 30 * day_ms).unwrap();
+        assert_eq!(flagged.credential, "runner_ca (CN=rcgen self signed cert)");
+        assert_eq!(flagged.window_opens_at_ms, now_ms + 30 * day_ms);
+        assert!((flagged.expires_at_ms - (now_ms + 5 * day_ms)).abs() < day_ms);
+        assert_eq!(runway(&sources, now_ms, now_ms + 2 * day_ms), None);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// Certificates are graded against the thresholds, the worst wins, and

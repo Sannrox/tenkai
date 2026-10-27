@@ -678,6 +678,14 @@ async fn main() -> Result<()> {
     validate_runtime_capabilities(&capabilities, &requirements)
         .with_context(|| "runtime capability negotiation failed at startup")?;
 
+    let imports = import_settings()?;
+    let runner_ca = runner_ca_from_env()?;
+    // Read by `/v1/trust`, `/readyz`, the host watch and plan runway (#778).
+    let trust_sources = Arc::new(trust_sources(
+        imports.as_ref(),
+        tls.as_ref(),
+        runner_ca.as_ref(),
+    )?);
     let ctx = match cli.provider_mode {
         ProviderMode::Embedded if cli.tenant_mode => tenkai::client::Ctx::tenant_hub(),
         ProviderMode::Embedded => {
@@ -691,9 +699,11 @@ async fn main() -> Result<()> {
             .await
             .context("connecting explicitly configured remote provider")?,
     };
-    let ctx = ctx.with_release_trust_roots(
-        std::env::var_os("TENKAI_RELEASE_TRUST_ROOTS").map(std::path::PathBuf::from),
-    );
+    let ctx = ctx
+        .with_release_trust_roots(
+            std::env::var_os("TENKAI_RELEASE_TRUST_ROOTS").map(std::path::PathBuf::from),
+        )
+        .with_trust_sources(trust_sources.clone());
     let runtime_environments = runtime_assignments
         .values()
         .cloned()
@@ -728,8 +738,6 @@ async fn main() -> Result<()> {
         .map(|client| client.connect_origins.clone())
         .unwrap_or_default();
     let backups = backup_settings(cli.tenant_mode, sqlite_store.as_ref())?;
-    let imports = import_settings()?;
-    let runner_ca = runner_ca_from_env()?;
     // Shared with the host watch, which announces trust.expiring (#775).
     let trust_status: Arc<std::sync::RwLock<Option<tenkai::trust_posture::TrustStatus>>> =
         Default::default();
@@ -774,7 +782,7 @@ async fn main() -> Result<()> {
             exports,
             writer_fence: writer_fence.clone(),
             runner_ca: runner_ca.clone(),
-            trust_sources: trust_sources(imports.as_ref(), tls.as_ref(), runner_ca.as_ref())?,
+            trust_sources: (*trust_sources).clone(),
             trust_status: trust_status.clone(),
         },
         reconciler.clone(),

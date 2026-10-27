@@ -52,6 +52,7 @@ pub struct Ctx {
     outcome_inspection_enabled: bool,
     plan_kind_list: Arc<PlanKindListTick>,
     health_metrics: Option<Arc<dyn crate::health_gate::HealthMetricsSource>>,
+    trust_sources: Option<Arc<crate::trust_posture::TrustSources>>,
 }
 
 #[derive(Clone)]
@@ -164,6 +165,7 @@ pub async fn connect() -> Result<Ctx> {
         outcome_inspection_enabled: false,
         plan_kind_list: Arc::new(PlanKindListTick::default()),
         health_metrics: None,
+        trust_sources: None,
     })
 }
 
