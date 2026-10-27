@@ -334,7 +334,12 @@ environment-scoped credential sees only its environment's runners.
 - **Instances.** For each instance that presented the runner's credential:
   its instance id, the agent version it sends in `x-tenkai-runtime-version`,
   its last work pull, heartbeat and inventory report, and whether it holds a
-  runtime plan lease now. Activity is written at most every 30 seconds per
+  runtime plan lease now, and its `skew` against the server's version:
+  `current`, `behind` (one minor release behind, supported during a rolling
+  upgrade), `unsupported` (further behind, or another major) or `ahead`.
+  Before 1.0 the minor number is the compatibility line. `/readyz` and
+  fleet status report the server's own `version`. Activity is written at
+  most every 30 seconds per
   instance and kind, so it can trail by that much, and a failed write never
   fails the runtime's request.
 - **Revocation.** A reason is required, and it and the revoking principal

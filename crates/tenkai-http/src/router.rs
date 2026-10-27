@@ -54,6 +54,8 @@ pub(super) struct AppState {
 #[derive(Clone, Debug, Serialize, schemars::JsonSchema)]
 pub(super) struct ServiceStatus {
     pub(super) status: &'static str,
+    /// This server's version (#761).
+    pub(super) version: &'static str,
     pub(super) profile: String,
     pub(super) capabilities: Vec<String>,
     /// API contract ids this server serves, for client compatibility checks.
