@@ -27,6 +27,11 @@ pub enum ChangeEventKind {
 }
 
 impl ChangeEventKind {
+    /// Wire names of every kind this version reads; stores skip the rest.
+    pub fn names() -> Vec<&'static str> {
+        Self::ALL.iter().map(|kind| kind.as_str()).collect()
+    }
+
     /// Every kind the stream may emit. Contract tests iterate this list.
     pub const ALL: &[Self] = &[
         Self::PlanCreated,

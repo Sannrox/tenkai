@@ -4,7 +4,8 @@
 //! events. Environment-scoped events go to that environment's webhooks:
 //! `plan.held`, `plan.awaiting_approval` and `import.failed`. Host-scoped
 //! events go to the host webhook list in `TENKAI_HOST_WEBHOOKS` (the same
-//! JSON shape as environment webhooks): `backup.stale` and `clock.drift`. An
+//! JSON shape as environment webhooks): `backup.stale`, `clock.drift` and
+//! `trust.expiring` (#775). An
 //! endpoint receives an operational event only when it lists it.
 //!
 //! Each event fires once per transition. Its outbox id is derived from the
@@ -301,6 +302,7 @@ pub async fn announce_tick(
 pub struct HostWatch {
     backup: Condition,
     clock: Condition,
+    trust: Condition,
     /// Where announcements still waiting for the outbox are kept, so a
     /// restart retries them; `None` keeps them in memory only.
     state: Option<std::path::PathBuf>,
@@ -444,6 +446,7 @@ impl HostWatch {
         [
             (OperationalEvent::BackupStale, &self.backup),
             (OperationalEvent::ClockDrift, &self.clock),
+            (OperationalEvent::TrustExpiring, &self.trust),
         ]
         .into_iter()
         .flat_map(|(event, condition)| {
@@ -462,9 +465,11 @@ impl HostWatch {
     fn adopt(&mut self, pending: Vec<PendingHostAlert>) {
         self.backup.pending.clear();
         self.clock.pending.clear();
+        self.trust.pending.clear();
         for alert in pending {
             let condition = match alert.event {
                 OperationalEvent::ClockDrift => &mut self.clock,
+                OperationalEvent::TrustExpiring => &mut self.trust,
                 _ => &mut self.backup,
             };
             condition.pending.push((alert.state, alert.key));
@@ -477,6 +482,7 @@ impl HostWatch {
         endpoints: &[WebhookEndpoint],
         backup: Option<&crate::backup::BackupHealth>,
         clock: Option<&crate::clock_guard::ClockHealth>,
+        trust: Option<crate::trust_posture::TrustStatus>,
         now: i64,
     ) {
         let backup = backup.map(|backup| {
@@ -498,6 +504,20 @@ impl HostWatch {
             OperationalEvent::ClockDrift,
             "clock",
             clock,
+            now,
+        ));
+        let trust = trust.map(|status| match status {
+            crate::trust_posture::TrustStatus::Ok => None,
+            crate::trust_posture::TrustStatus::Warning => Some("warning"),
+            crate::trust_posture::TrustStatus::Critical => Some("critical"),
+            crate::trust_posture::TrustStatus::Expired => Some("expired"),
+        });
+        delivered.extend(self.trust.observe(
+            store,
+            endpoints,
+            OperationalEvent::TrustExpiring,
+            "trust",
+            trust,
             now,
         ));
         self.save(&delivered);
@@ -755,17 +775,26 @@ mod tests {
                 &hosts,
                 Some(&backup("stale")),
                 Some(&clock("ok")),
+                None,
                 now,
             );
         }
         assert_eq!(deliveries(&store, HOST_SCOPE, 10).unwrap().len(), 1);
         // Recovers, then turns stale again: a second event. Clock warns, then refuses.
-        watch.observe(&store, &hosts, Some(&backup("ok")), Some(&clock("warn")), 4);
+        watch.observe(
+            &store,
+            &hosts,
+            Some(&backup("ok")),
+            Some(&clock("warn")),
+            None,
+            4,
+        );
         watch.observe(
             &store,
             &hosts,
             Some(&backup("stale")),
             Some(&clock("refuse")),
+            None,
             5,
         );
         watch.observe(
@@ -773,6 +802,7 @@ mod tests {
             &hosts,
             Some(&backup("stale")),
             Some(&clock("refuse")),
+            None,
             6,
         );
         let events: Vec<String> = deliveries(&store, HOST_SCOPE, 10)
@@ -782,6 +812,35 @@ mod tests {
             .collect();
         assert_eq!(events.iter().filter(|e| *e == "backup.stale").count(), 2);
         assert_eq!(events.iter().filter(|e| *e == "clock.drift").count(), 2);
+    }
+
+    /// `trust.expiring` (#775): announced once per crossing into warning,
+    /// critical or expired; healthy certificates announce nothing.
+    #[test]
+    fn trust_expiry_is_announced_once_per_crossing() {
+        use crate::trust_posture::TrustStatus;
+        let store = SqliteStore::open_in_memory().unwrap();
+        let hosts = vec![endpoint(vec![OperationalEvent::TrustExpiring])];
+        let mut watch = HostWatch::default();
+        for (now, status) in [
+            (1, TrustStatus::Ok),
+            (2, TrustStatus::Warning),
+            (3, TrustStatus::Warning),
+            (4, TrustStatus::Critical),
+            (5, TrustStatus::Critical),
+            (6, TrustStatus::Expired),
+        ] {
+            watch.observe(&store, &hosts, None, None, Some(status), now);
+        }
+        let events: Vec<String> = deliveries(&store, HOST_SCOPE, 10)
+            .unwrap()
+            .into_iter()
+            .map(|delivery| delivery.event)
+            .collect();
+        assert_eq!(
+            events,
+            ["trust.expiring", "trust.expiring", "trust.expiring"]
+        );
     }
 
     #[test]

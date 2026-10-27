@@ -110,6 +110,7 @@ stored in its field.
 | `import.failed` | Environment webhooks | A server-side bundle import is refused. `resource` is the import job id |
 | `backup.stale` | Host webhooks | Backup age turns `stale`, `missing` or `unreadable` |
 | `clock.drift` | Host webhooks | The clock guard turns `warn` or `refuse` |
+| `trust.expiring` | Host webhooks | The worst certificate status turns `warning`, `critical` or `expired` ([trust posture](run-tenkai-server.md#trust-posture)) |
 
 Host webhooks are configured with `TENKAI_HOST_WEBHOOKS`, a JSON list of
 endpoints with the same shape as environment webhooks:

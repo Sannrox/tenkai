@@ -60,6 +60,10 @@ pub enum OperationalEvent {
     BackupStale,
     #[serde(rename = "clock.drift")]
     ClockDrift,
+    /// A certificate the host serves or trusts entered a warning, critical
+    /// or expired status (#775).
+    #[serde(rename = "trust.expiring")]
+    TrustExpiring,
 }
 
 impl OperationalEvent {
@@ -70,6 +74,7 @@ impl OperationalEvent {
             Self::ImportFailed => "import.failed",
             Self::BackupStale => "backup.stale",
             Self::ClockDrift => "clock.drift",
+            Self::TrustExpiring => "trust.expiring",
         }
     }
 
@@ -80,6 +85,7 @@ impl OperationalEvent {
             "import.failed" => Some(Self::ImportFailed),
             "backup.stale" => Some(Self::BackupStale),
             "clock.drift" => Some(Self::ClockDrift),
+            "trust.expiring" => Some(Self::TrustExpiring),
             _ => None,
         }
     }

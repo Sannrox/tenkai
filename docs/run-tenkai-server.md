@@ -349,7 +349,11 @@ The worst certificate status also appears on `/readyz` as `trust`, from a
 snapshot refreshed every minute, without failing readiness. Only public
 certificates and trust roots are read, never key files, and files are
 named without their directories.
-Expiry events, notifications and plan-time runway checks are #775.
+**Announcements (#775).** When the worst certificate status turns
+`warning`, `critical` or `expired`, host webhooks that list `trust.expiring`
+are notified once per turn, as for `backup.stale` and `clock.drift`.
+On a multi-replica hub only the writer announces. A matching `/v1/events`
+entry is #784; plan-time runway checks are #778.
 
 ### Runner certificates
 
