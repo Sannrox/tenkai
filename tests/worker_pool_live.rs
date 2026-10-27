@@ -11,6 +11,29 @@ use tenkai::worker_pool::{
     authorize_observations, load_snapshots, ready_snapshot, retained_observation,
 };
 
+/// Temp root for one test, removed on drop even when the test panics. The
+/// fixture exits once its worker directory is gone, so no process outlives
+/// the test (#779).
+struct TestRoot(PathBuf);
+
+impl TestRoot {
+    fn new(prefix: &str) -> Self {
+        let root = std::env::temp_dir().join(format!(
+            "{prefix}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        Self(root)
+    }
+}
+
+impl Drop for TestRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 const PRODUCT: &str = "edge-workers";
 const ENV: &str = "local";
 
@@ -79,14 +102,8 @@ fn scope(version: &str, generation: u64) -> WorkerLifecycleScope {
 
 #[test]
 fn live_process_replaces_release_a_with_b_and_recovers_from_retained_files() {
-    let root = std::env::temp_dir().join(format!(
-        "tenkai-worker-live-{}-{}",
-        std::process::id(),
-        tenkai::now_millis()
-    ));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
-    let port = LocalProcessWorkerLifecycle::new(root.join("runtime"), fixture_bin());
+    let root = TestRoot::new("tenkai-worker-live");
+    let port = LocalProcessWorkerLifecycle::new(root.0.join("runtime"), fixture_bin());
 
     port.start_replica(&WorkerReplicaRequest {
         scope: scope("1.0.0", 1),
@@ -128,7 +145,7 @@ fn live_process_replaces_release_a_with_b_and_recovers_from_retained_files() {
     assert_eq!(after[0].snapshot.active_claims, 0);
     assert_eq!(after[0].snapshot.active_runs, 0);
 
-    let retained_dir = root.join("retained");
+    let retained_dir = root.0.join("retained");
     std::fs::create_dir_all(&retained_dir).unwrap();
     std::fs::write(
         retained_dir.join("w1.json"),
@@ -148,7 +165,7 @@ fn live_process_replaces_release_a_with_b_and_recovers_from_retained_files() {
     let recovered = port.observe(&scope("2.0.0", 1)).unwrap();
     assert_eq!(recovered[0].snapshot.version, "2.0.0");
     drop(port);
-    let surviving = LocalProcessWorkerLifecycle::new(root.join("runtime"), fixture_bin());
+    let surviving = LocalProcessWorkerLifecycle::new(root.0.join("runtime"), fixture_bin());
     let after_drop = surviving.observe(&scope("2.0.0", 1)).unwrap();
     assert_eq!(after_drop[0].snapshot.version, "2.0.0");
     surviving
@@ -158,19 +175,12 @@ fn live_process_replaces_release_a_with_b_and_recovers_from_retained_files() {
             version: "2.0.0".into(),
         })
         .unwrap();
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
 fn busy_live_process_drains_and_lost_fence_cannot_complete_replacement() {
-    let root = std::env::temp_dir().join(format!(
-        "tenkai-worker-live-busy-{}-{}",
-        std::process::id(),
-        tenkai::now_millis()
-    ));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
-    let port = LocalProcessWorkerLifecycle::new(root.join("runtime"), fixture_bin());
+    let root = TestRoot::new("tenkai-worker-live-busy");
+    let port = LocalProcessWorkerLifecycle::new(root.0.join("runtime"), fixture_bin());
     port.start_replica(&WorkerReplicaRequest {
         scope: scope("1.0.0", 1),
         worker_id: "w1".into(),
@@ -179,6 +189,7 @@ fn busy_live_process_drains_and_lost_fence_cannot_complete_replacement() {
     .unwrap();
 
     let control = root
+        .0
         .join("runtime")
         .join(ENV)
         .join(PRODUCT)
@@ -228,19 +239,12 @@ fn busy_live_process_drains_and_lost_fence_cannot_complete_replacement() {
     );
     let still_a = port.observe(&scope("1.0.0", 1)).unwrap();
     assert_eq!(still_a[0].snapshot.version, "1.0.0");
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
 fn stale_generation_cannot_mutate_live_process() {
-    let root = std::env::temp_dir().join(format!(
-        "tenkai-worker-live-gen-{}-{}",
-        std::process::id(),
-        tenkai::now_millis()
-    ));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
-    let port = LocalProcessWorkerLifecycle::new(root.join("runtime"), fixture_bin());
+    let root = TestRoot::new("tenkai-worker-live-gen");
+    let port = LocalProcessWorkerLifecycle::new(root.0.join("runtime"), fixture_bin());
     port.start_replica(&WorkerReplicaRequest {
         scope: scope("1.0.0", 1),
         worker_id: "w1".into(),
@@ -275,5 +279,38 @@ fn stale_generation_cannot_mutate_live_process() {
         version: "1.0.0".into(),
     })
     .unwrap();
-    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn worker_exits_once_its_directory_is_removed() {
+    let root = TestRoot::new("tenkai-worker-live-orphan");
+    let port = LocalProcessWorkerLifecycle::new(root.0.join("runtime"), fixture_bin());
+    port.start_replica(&WorkerReplicaRequest {
+        scope: scope("1.0.0", 1),
+        worker_id: "w1".into(),
+        version: "1.0.0".into(),
+    })
+    .unwrap();
+    let pid_file = root
+        .0
+        .join("runtime")
+        .join(ENV)
+        .join(PRODUCT)
+        .join("w1.pid");
+    let pid: i32 = std::fs::read_to_string(pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    drop(root);
+    // This test spawned the fixture, so reap it rather than probe it: an
+    // exited but unreaped child still answers kill(pid, 0).
+    let mut status = 0;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut exited = false;
+    while !exited && std::time::Instant::now() < deadline {
+        exited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) } == pid;
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(exited, "fixture {pid} outlived its directory");
 }
