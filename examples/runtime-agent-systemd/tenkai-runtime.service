@@ -1,0 +1,22 @@
+# The Tenkai runtime agent, run from its home so Tenkai can upgrade and roll
+# it back as releases of `tenkai-runtime`. Install it once with
+#   tenkai-runtime install --home /var/lib/tenkai-runtime
+[Unit]
+Description=Tenkai runtime agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Environment=TENKAI_RUNTIME_HOME=/var/lib/tenkai-runtime
+EnvironmentFile=/etc/tenkai-runtime/env
+# Before every start, a version known to run (`previous`, else `current`)
+# counts the starts of a switch not yet reported and reverts it after three,
+# however slowly the new version fails.
+ExecStartPre=/bin/sh -c 'for version in previous current; do agent=/var/lib/tenkai-runtime/$version/tenkai-runtime; [ -x "$agent" ] && exec "$agent" prestart; done; exit 1'
+ExecStart=/var/lib/tenkai-runtime/current/tenkai-runtime
+# A switch to a new version exits cleanly; start whatever is current then.
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

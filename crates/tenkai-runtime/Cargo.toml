@@ -28,5 +28,11 @@ anyhow = "1"
 clap = { version = "4", default-features = false, features = ["derive", "env", "error-context", "help", "std", "usage"] }
 tokio = { version = "1", default-features = false, features = ["io-std", "io-util", "macros", "process", "rt-multi-thread", "signal"] }
 
+[dev-dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+tenkai-http = { path = "../tenkai-http", version = "0.5.0" }
+tokio = { version = "1", default-features = false, features = ["macros", "net", "rt-multi-thread"] }
+uuid = { version = "1", features = ["v4"] }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

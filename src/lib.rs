@@ -228,6 +228,7 @@ pub mod runtime_capabilities;
 pub mod runtime_credentials;
 pub mod runtime_delivery;
 pub mod runtime_protocol;
+pub mod runtime_self_upgrade;
 pub mod schema_contract;
 pub mod secret_source;
 pub mod shutdown;

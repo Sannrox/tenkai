@@ -115,6 +115,7 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | `TENKAI_RUNTIME_TOKEN` | unset | Runtime-only bearer secret; kept out of command-line arguments and executor state |
 | `TENKAI_RUNTIME_CREDENTIAL_FILE` | unset | Where an enrolled runtime keeps its own credential, owner-only; replaces `TENKAI_RUNTIME_TOKEN` ([enrolling a runtime](run-tenkai-server.md#enrolling-a-runtime)) |
 | `TENKAI_RUNTIME_ENROLLMENT_TOKEN` | unset | Single-use token exchanged for that credential on first start; unused once the file exists |
+| `TENKAI_RUNTIME_HOME` | unset | Where the runtime agent keeps its own versions, so Tenkai can upgrade and roll it back ([upgrading the runtime agent](run-tenkai-server.md#upgrading-the-runtime-agent)) |
 | `TENKAI_RUNTIME_EXECUTOR` | unset | Absolute path to the environment executor implementing the idempotency contract |
 | `TENKAI_RUNTIME_INVENTORY` | enabled | Set `0`/`false`/`off`/`no` to disable runtime inventory reports |
 

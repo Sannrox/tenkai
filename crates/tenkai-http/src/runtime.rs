@@ -67,6 +67,42 @@ pub(super) async fn runtime_heartbeat(
     }
 }
 
+/// One binary of the runtime agent's own release, for the claimed runtime
+/// (#685). The body is the file; `x-tenkai-file-mode` its octal mode.
+pub(super) async fn runtime_self_release(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<tenkai::runtime_delivery::RuntimeSelfReleaseFile>,
+) -> Response {
+    match state
+        .runtime_delivery
+        .self_release_file(
+            bearer(&headers),
+            runtime_instance(&headers),
+            &environment,
+            &request,
+        )
+        .await
+    {
+        Ok((bytes, mode)) => (
+            [
+                (
+                    axum::http::header::CONTENT_TYPE,
+                    "application/octet-stream".to_string(),
+                ),
+                (
+                    axum::http::HeaderName::from_static("x-tenkai-file-mode"),
+                    format!("{mode:o}"),
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(error) => runtime_delivery_error(error),
+    }
+}
+
 /// Runtime inventory report: write admitted capability facts for the assigned env (#136).
 pub(super) async fn runtime_inventory(
     State(state): State<Arc<AppState>>,

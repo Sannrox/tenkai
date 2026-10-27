@@ -280,10 +280,16 @@ async fn compute_snapshot_with_policy(
                 || !matches!(entry.1, Action::Downgrade | Action::Rollback)
         });
     }
-    // Enforce model_runtime ↔ routing_config rollout order (see docs).
+    // Enforce model_runtime ↔ routing_config rollout order (see docs). The
+    // runtime agent's own release always runs last: switching restarts the
+    // agent, so nothing may follow it in the plan (#685).
     pending.sort_by(|a, b| {
-        model_routing_rollout_rank(a.6, a.1)
-            .cmp(&model_routing_rollout_rank(b.6, b.1))
+        let agent = |product: &str| product == crate::runtime_self_upgrade::SELF_PRODUCT;
+        agent(&a.0)
+            .cmp(&agent(&b.0))
+            .then_with(|| {
+                model_routing_rollout_rank(a.6, a.1).cmp(&model_routing_rollout_rank(b.6, b.1))
+            })
             .then_with(|| a.0.cmp(&b.0))
     });
     validate_model_routing_rollout_order(
