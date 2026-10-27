@@ -289,9 +289,9 @@ pub fn measure_docker_count(
     write_docker_release(&work_v1, services, false, image_a, image_b)?;
     write_docker_release(&work_v2, services, true, image_a, image_b)?;
     let env = format!("r{}t{}s{services}", std::process::id(), crate::now_millis());
-    // Distinct versions: container_mismatch also keys on tenkai.version and
-    // tenkai.release-id, so a real one-image release still recreates every
-    // container. The 5 s upgrade budget must include that work.
+    // Distinct versions, as a real release has. Version and release id are
+    // provenance labels only (#669): the one-image upgrade recreates only the
+    // changed container, so its overhead stays flat in the service count.
     let v1 = docker_request(&work_v1, &env, "1.0.0");
     let v2 = docker_request(&work_v2, &env, "2.0.0");
     let samples = vec![

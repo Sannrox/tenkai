@@ -460,6 +460,7 @@ data:
             artifact_pulls: Vec::new(),
             cluster_config_path: None,
             secret_dir_path: None,
+            apply_attempt: String::new(),
         };
         let executor = KubernetesSoftwareExecutor {
             kubectl_binary: PathBuf::from(binary),

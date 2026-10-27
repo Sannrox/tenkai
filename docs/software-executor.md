@@ -236,6 +236,12 @@ and the next apply or restart recreate that container with the new values. No
 new release is needed. Containers created before this label existed are
 recreated once on their next apply.
 
+A Docker container is recreated only when its image, its `tenkai.spec-digest`
+or the environment's overlay digest differ from the request. `tenkai.version`
+and `tenkai.release-id` record which release created it and are not compared:
+a release that leaves a container unchanged leaves it running with its older
+labels, and observe still reports it Present (#669).
+
 When the release names OCI artifacts, the Docker executor deploys from the
 environment-mirror references Tenkai admitted for the apply: each
 digest-pinned image is pulled, run and observed as `<mirror>/<repository>@<digest>`.
@@ -347,8 +353,8 @@ Secret material remains an environment-scoped `env_file`.
 `src/rollout_time.rs` times Docker (and in-process Kubernetes) apply phases for
 fixtures of 1, 5, and 20 services: fresh install, no-op re-apply, one-service
 upgrade, and rollback. One-service upgrade changes one image under a new
-release identity; Docker recreates every container because version and
-release-id labels change. It also times planner compute and one reconcile tick
+release identity; Docker recreates only that container, because version and
+release-id labels are provenance and not part of the recreate check (#669). It also times planner compute and one reconcile tick
 at 100 and 1_000 environments. Default `cargo test` drives the fake Docker CLI
 and records planner and reconcile times at 100 and 1_000 environments.
 Published apply budgets gate live Docker daemon samples:
