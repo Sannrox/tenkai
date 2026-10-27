@@ -209,7 +209,9 @@ generation, expiry). The generation only grows.
 - Single-replica hubs have no lease and write as before.
 
 This replaces stopping the old writer by hand in the drill above: two hubs
-may run at once, and only the lease holder writes.
+may run at once, and only the lease holder writes. Failover detection,
+verification and rollback are in the
+[hub failover runbook](ha-failover-runbook.md).
 
 ### Kill-the-leader drill (#749)
 
