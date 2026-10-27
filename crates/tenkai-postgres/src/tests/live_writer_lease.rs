@@ -18,16 +18,16 @@ fn audit(id: &str) -> AuditRecord {
 
 /// A database of its own for one run, dropped afterwards. The writer lease
 /// is one hub-wide row, so two runs sharing a database would contend for it.
-struct ScratchDatabase {
+pub(super) struct ScratchDatabase {
     admin_url: String,
     name: String,
-    url: String,
+    pub(super) url: String,
 }
 
 impl ScratchDatabase {
     /// Created beside the database `TENKAI_POSTGRES_URL` names; needs
     /// `CREATEDB` there.
-    fn create() -> Self {
+    pub(super) fn create() -> Self {
         let admin_url = PostgresTenantConfig::from_env()
             .expect("TENKAI_POSTGRES_URL")
             .url;

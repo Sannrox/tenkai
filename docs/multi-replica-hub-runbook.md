@@ -211,6 +211,32 @@ generation, expiry). The generation only grows.
 This replaces stopping the old writer by hand in the drill above: two hubs
 may run at once, and only the lease holder writes.
 
+### Kill-the-leader drill (#749)
+
+CI runs a failover drill against an ephemeral PostgreSQL on every change
+(`Failover drill` job). Each replica is its own process that renews the
+writer lease and works a plan one step at a time under the reconcile tick
+claim and an environment lease, recording a receipt per step. The drill
+stops the leader inside a write transaction, in two ways:
+
+- **Killed** (`SIGKILL`): the standby leads within the lease lifetime plus
+  one renewal, resumes at the first step without a receipt, and finishes
+  the plan.
+- **Stopped and resumed** (`SIGSTOP`, then `SIGCONT`): the leader is
+  stopped after writing a receipt and before committing. The standby takes
+  the lease; when the old leader resumes, the writer fence refuses its
+  commit at the superseded generation, it becomes a standby, and the new
+  leader finishes the plan.
+
+Both check that every step has exactly one receipt, that the old leader's
+receipts stop where it was stopped, and that the plan succeeded once. To
+run it locally with a role that may create databases:
+
+```bash
+TENKAI_POSTGRES_URL='postgresql://…?sslmode=disable' \
+  cargo test -p tenkai-postgres --features postgres --lib -- --ignored live_failover_drill
+```
+
 ## Durable tick fence (#135)
 
 With `--features postgres` and `TENKAI_POSTGRES_URL`, multi-replica hosts use
