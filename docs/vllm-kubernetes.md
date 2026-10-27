@@ -1,14 +1,16 @@
-# vLLM Kubernetes executor
+# vLLM and TGI Kubernetes executor
 
 Tenkai's in-process Kubernetes adapter can serve `model_runtime` products with
-`runtime.engine = "vllm"` on a GPU cluster. The core crate does not link vLLM;
+`runtime.engine = "vllm"` or `runtime.engine = "tgi"` (Text Generation
+Inference) on a GPU cluster. Both engines share one lifecycle: candidate,
+readiness, smoke, switch, rollback. The core crate links neither;
 `tenkai-executor` installs a host factory at process start.
 
 Related: [model runtime](model-runtime.md), [ADR 0007](decisions/0007-model-runtime-fleet-control-plane.md).
 
 ## Minimal manifest
 
-vLLM loads a model directory, so the pinned artifact is a tar of that
+Both engines load a model directory, so the pinned artifact is a tar of that
 directory (`model.format = "directory+tar"`).
 
 ```toml
@@ -48,27 +50,37 @@ max_startup_seconds = 600
 
 Rules:
 
-- `runtime.engine` must be `vllm`. Other engines stay on the reference path.
+- `runtime.engine` is `vllm` or `tgi`. Either one needs an environment
+  cluster configuration and the host factory, or selection fails closed.
 - GPU requirements are mandatory for this executor.
 - Serving image, placement, and the weights volume are host configuration,
   never manifest fields.
 
 ## Host configuration
 
-The factory reads these from the host environment. Missing or empty values
+The factory reads these from the host environment, with the prefix
+`TENKAI_VLLM_` for vLLM and `TENKAI_TGI_` for TGI. Missing or empty values
 fail closed with a named error.
 
 | Variable | Meaning |
 | --- | --- |
-| `TENKAI_VLLM_IMAGE` | Digest-pinned serving image (`…@sha256:…`) |
-| `TENKAI_VLLM_WEIGHTS_CLAIM` | PersistentVolumeClaim that holds the weight cache |
-| `TENKAI_VLLM_WEIGHTS_ROOT` | Host mount of that claim; the executor writes verified weights here |
-| `TENKAI_VLLM_SMOKE_BASE_URL` | Optional smoke URL template; default `http://{service}.{namespace}.svc:{port}` |
+| `<prefix>IMAGE` | Digest-pinned serving image (`…@sha256:…`) |
+| `<prefix>WEIGHTS_CLAIM` | PersistentVolumeClaim that holds the weight cache |
+| `<prefix>WEIGHTS_ROOT` | Host mount of that claim; the executor writes verified weights here |
+| `<prefix>SMOKE_BASE_URL` | Optional smoke URL template; default `http://{service}.{namespace}.svc:{port}` |
+
+| Engine | Server arguments | Smoke request |
+| --- | --- | --- |
+| `vllm` | `--model <dir> --served-model-name <product> --tensor-parallel-size <n> --max-model-len <context>` | `POST /v1/completions`, non-empty `choices[0].text` |
+| `tgi` | `--model-id <dir> --num-shard <n> --max-total-tokens <context>`, `HF_HUB_OFFLINE=1` | `POST /generate`, non-empty `generated_text` |
+
+Weights always come from the verified cache mount; neither engine downloads
+from a hub at start, and weights are never baked into the image.
 
 `TENKAI_CLUSTER_CONFIG` is the environment-scoped kubeconfig already required
 for in-process Kubernetes apply. The executor never reads `KUBECONFIG`.
 
-Placement is part of `VllmConfig` when a host constructs the executor
+Placement is part of `ServingConfig` when a host constructs the executor
 directly:
 
 | Field | Meaning |
@@ -86,7 +98,7 @@ Each descriptor generation is a candidate Deployment and Service.
 
 1. Verify and unpack the digest-pinned weights into the claim.
 2. Apply the candidate objects and wait until the Deployment is Available.
-3. Smoke-probe a completion against the candidate Service (`/v1/completions`).
+3. Smoke-probe a completion against the candidate Service (see the table above).
 4. On success, the stable Service selects that generation. The previous
    generation stays deployed so rollback can re-select it.
 5. On launch, readiness, or smoke failure, the candidate is removed. The
@@ -99,8 +111,9 @@ not delete executor state files by hand.
 
 ## Optional GPU test
 
-Default CI does not need a GPU. The test is `#[ignore]` and also requires
-`TENKAI_VLLM_LIVE_TEST=1`. It applies a small model, waits for readiness
+Default CI does not need a GPU. Each engine has an `#[ignore]` test that also
+requires `TENKAI_VLLM_LIVE_TEST=1` or `TENKAI_TGI_LIVE_TEST=1`, and reads that
+engine's prefix for the variables below. It applies a small model, waits for readiness
 and smoke, rolls forward, forces a smoke/startup failure, and rolls back.
 
 The weights PersistentVolumeClaim is namespace-scoped. Set
@@ -127,3 +140,6 @@ TENKAI_VLLM_TOLERATIONS='[{"key":"nvidia.com/gpu","operator":"Exists","effect":"
 TENKAI_VLLM_SMOKE_BASE_URL='http://{service}.{namespace}.svc:{port}' \
   cargo test -p tenkai-executor --locked vllm_live_gpu_apply_forward_smoke_fail_rollback -- --ignored --nocapture
 ```
+
+For TGI, use the `TENKAI_TGI_` variables and
+`tgi_live_gpu_apply_forward_smoke_fail_rollback`.

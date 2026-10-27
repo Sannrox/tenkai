@@ -4,7 +4,7 @@ mod docker;
 mod helm;
 mod in_process_kubernetes;
 mod kubernetes;
-mod vllm_model_runtime;
+mod kubernetes_model_runtime;
 
 pub use docker::{
     DOCKER_TOPOLOGY_DIR, DOCKER_TOPOLOGY_FILE, DockerHostExecutor, DockerHostTopology,
@@ -16,8 +16,9 @@ pub use in_process_kubernetes::{
     WorkloadObservation, selected_in_process_executor,
 };
 pub use kubernetes::KubernetesSoftwareExecutor;
-pub use vllm_model_runtime::{
-    HttpSmokeProbe, SmokeProbe, VllmConfig, VllmExecutorFactory, VllmModelRuntimeExecutor,
+pub use kubernetes_model_runtime::{
+    HttpSmokeProbe, KubernetesModelRuntimeExecutor, KubernetesModelRuntimeFactory, ServingConfig,
+    ServingEngine, SmokeProbe,
 };
 
 /// Register CLI and in-process adapters with Tenkai's executor selector.
@@ -35,6 +36,6 @@ pub fn install() {
         Box::new(selected_in_process_executor())
     });
     tenkai::model_runtime::install_model_runtime_executor_factory(std::sync::Arc::new(
-        VllmExecutorFactory,
+        KubernetesModelRuntimeFactory,
     ));
 }

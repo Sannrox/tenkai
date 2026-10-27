@@ -198,7 +198,8 @@ leave the host or invent unknown keys.
 **Choice:** the reference plugin targets **llama.cpp** because manifests default
 to `runtime.engine = "llama.cpp"`, health is plain HTTP on loopback, and a single
 host can run without a GPU fleet control plane. `runtime.engine = "mlx"` is the
-Apple-silicon sibling of this path. TGI and NVIDIA NIM remain future plugins.
+Apple-silicon sibling of this path. `vllm` and `tgi` serve on Kubernetes
+([vLLM and TGI](vllm-kubernetes.md)). NVIDIA NIM remains a future plugin.
 
 ### Ports
 
@@ -453,5 +454,5 @@ signers and record the signed result with `tenkaictl eval-evidence`
 ## Follow-on
 
 - Peer/regional caches
-- Additional engine plugins: TGI, then NVIDIA NIM
+- Additional engine plugins: NVIDIA NIM
   ([research](research/additional-model-serving-executors.md))
