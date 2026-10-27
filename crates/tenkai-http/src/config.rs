@@ -63,6 +63,11 @@ pub struct ServerConfig {
     /// The hub writer role on multi-replica hubs (#748): a standby reports
     /// not ready. `None` on single-replica hosts.
     pub writer_fence: Option<Arc<tenkai::writer_fence::WriterFence>>,
+    /// The host's trust configuration, shown by `GET /v1/trust` (#676).
+    pub trust_sources: tenkai::trust_posture::TrustSources,
+    /// The worst certificate status, refreshed in the background so health
+    /// probes never read trust files themselves.
+    pub trust_status: Arc<std::sync::RwLock<Option<tenkai::trust_posture::TrustStatus>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -98,6 +103,8 @@ impl ServerConfig {
             exports: None,
             runner_ca: None,
             writer_fence: None,
+            trust_sources: Default::default(),
+            trust_status: Default::default(),
         }
     }
 

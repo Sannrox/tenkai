@@ -515,7 +515,7 @@ async fn main() -> Result<()> {
             }
         }
     };
-    let server_task = match tls {
+    let server_task = match tls.clone() {
         Some(tls) => {
             // A renewed certificate is picked up within this interval, or at
             // once on SIGHUP; open connections keep the one they began with.
@@ -729,6 +729,7 @@ async fn main() -> Result<()> {
         .unwrap_or_default();
     let backups = backup_settings(cli.tenant_mode, sqlite_store.as_ref())?;
     let imports = import_settings()?;
+    let runner_ca = runner_ca_from_env()?;
     let import_staging = imports.as_ref().map(|settings| settings.staging.clone());
     let clock_every = clock_settings()?;
     let audit_export = audit_export_settings(cli.tenant_mode)?;
@@ -768,8 +769,10 @@ async fn main() -> Result<()> {
             backups: backups.as_ref().map(|(backups, _)| backups.clone()),
             imports: imports.clone(),
             exports,
-            runner_ca: runner_ca_from_env()?,
             writer_fence: writer_fence.clone(),
+            runner_ca: runner_ca.clone(),
+            trust_sources: trust_sources(imports.as_ref(), tls.as_ref(), runner_ca.as_ref())?,
+            trust_status: Default::default(),
         },
         reconciler.clone(),
         store.clone(),
@@ -1552,6 +1555,104 @@ fn backup_settings(
     )?;
     let every = (interval > 0).then(|| Duration::from_secs(interval));
     Ok(Some((Arc::new(backups), every)))
+}
+
+/// The trust files this host is configured with, for `GET /v1/trust`
+/// (#676), and the expiry thresholds (`TENKAI_TRUST_WARNING_DAYS`, default
+/// 30; `TENKAI_TRUST_CRITICAL_DAYS`, default 7). Key files are not listed.
+fn trust_sources(
+    imports: Option<&tenkai::offline_import::ImportSettings>,
+    tls: Option<&Arc<tenkai_http::tls::ReloadingTls>>,
+    runner_ca: Option<&Arc<tenkai::runner_ca::RunnerCa>>,
+) -> Result<tenkai::trust_posture::TrustSources> {
+    use tenkai::trust_posture::CertificateSource;
+    let path = |name: &str| std::env::var_os(name).map(PathBuf::from);
+    let days = |name: &str, default: u32| -> Result<u32> {
+        std::env::var(name)
+            .ok()
+            .map(|value| value.parse::<u32>())
+            .transpose()
+            .with_context(|| format!("{name} must be a whole number of days"))
+            .map(|value| value.unwrap_or(default))
+    };
+    let signing = [
+        ("release", path("TENKAI_RELEASE_TRUST_ROOTS")),
+        (
+            "package_migration_approval",
+            path("TENKAI_PACKAGE_MIGRATION_APPROVAL_TRUST_ROOTS"),
+        ),
+        (
+            "bundle_import",
+            imports.map(|imports| imports.trust_roots.clone()),
+        ),
+        (
+            "key_revocation",
+            path(tenkai::key_revocation::REVOCATION_TRUST_ROOTS_ENV),
+        ),
+    ];
+    // The listener, client CA and runner CA as the server loaded them, so a
+    // renewal that failed to load cannot clear a warning.
+    let loaded =
+        |name: &str, pem: Arc<dyn Fn() -> Vec<u8> + Send + Sync>| CertificateSource::Loaded {
+            name: name.into(),
+            pem,
+        };
+    let certificates = [
+        (
+            "listener",
+            tls.map(|tls| {
+                let tls = tls.clone();
+                loaded(
+                    "listener certificate in use",
+                    Arc::new(move || tls.active_cert_chain()),
+                )
+            }),
+        ),
+        (
+            "tls_client_ca",
+            tls.filter(|tls| tls.active_client_ca().is_some())
+                .map(|tls| {
+                    let tls = tls.clone();
+                    loaded(
+                        "client CA in use",
+                        Arc::new(move || tls.active_client_ca().unwrap_or_default()),
+                    )
+                }),
+        ),
+        (
+            "runner_ca",
+            runner_ca.map(|ca| {
+                let ca = ca.clone();
+                loaded(
+                    "runner CA in use",
+                    Arc::new(move || ca.trust_bundle().into_bytes()),
+                )
+            }),
+        ),
+        (
+            "outbound_ca_bundle",
+            path(tenkai::outbound_tls::CA_BUNDLE_ENV).map(CertificateSource::File),
+        ),
+    ];
+    let sources = tenkai::trust_posture::TrustSources {
+        signing: signing
+            .into_iter()
+            .filter_map(|(purpose, path)| Some((purpose.to_string(), path?)))
+            .collect(),
+        revocations: path(tenkai::key_revocation::REVOCATIONS_ENV)
+            .zip(path(tenkai::key_revocation::REVOCATION_TRUST_ROOTS_ENV)),
+        certificates: certificates
+            .into_iter()
+            .filter_map(|(purpose, source)| Some((purpose.to_string(), source?)))
+            .collect(),
+        warning_days: days("TENKAI_TRUST_WARNING_DAYS", 30)?,
+        critical_days: days("TENKAI_TRUST_CRITICAL_DAYS", 7)?,
+    };
+    anyhow::ensure!(
+        sources.critical_days <= sources.warning_days,
+        "TENKAI_TRUST_CRITICAL_DAYS must not exceed TENKAI_TRUST_WARNING_DAYS"
+    );
+    Ok(sources)
 }
 
 /// The runner CA (#674) from `TENKAI_RUNNER_CA_CERT` and `TENKAI_RUNNER_CA_KEY`

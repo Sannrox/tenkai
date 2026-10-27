@@ -156,6 +156,23 @@ impl ReloadingTls {
         }))
     }
 
+    /// The certificate chain (PEM) in use: the last that loaded, which a
+    /// renewal that failed to load has not replaced (#676).
+    pub fn active_cert_chain(&self) -> Vec<u8> {
+        self.current
+            .read()
+            .map(|current| current.0.cert_chain.clone())
+            .unwrap_or_default()
+    }
+
+    /// The client CA (PEM) in use, when one is configured.
+    pub fn active_client_ca(&self) -> Option<Vec<u8>> {
+        self.current
+            .read()
+            .ok()
+            .and_then(|current| current.0.client_ca.clone())
+    }
+
     /// Read the material again and swap the configuration in when it
     /// changed. `Ok(true)` when it was replaced.
     pub fn reload(&self) -> Result<bool> {

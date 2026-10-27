@@ -28,6 +28,7 @@ struct OpeningState {
 pub fn opening_router(profile: impl Into<String>, capabilities: Vec<String>) -> Router {
     let live = ServiceStatus {
         version: tenkai::version_skew::SERVER_VERSION,
+        trust: None,
         status: "ok",
         profile: profile.into(),
         capabilities,
