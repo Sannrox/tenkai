@@ -149,7 +149,8 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: KeysCommand,
     },
-    /// Enroll runtime agents and revoke their credentials (server only).
+    /// Enroll, list, inspect and revoke runtime agents (server only).
+    #[command(visible_alias = "runner")]
     Runtime {
         #[command(subcommand)]
         command: RuntimeCommand,
@@ -345,8 +346,18 @@ pub(crate) enum RuntimeCommand {
         #[arg(long)]
         ttl_seconds: Option<u64>,
     },
-    /// Revoke a runtime credential by its id (`sha256:...`).
-    Revoke { credential_id: String },
+    /// List runners: enrolled credentials and static tokens, with each
+    /// instance's last work pull, heartbeat and version.
+    List,
+    /// Show one runner by its id (`sha256:...`).
+    Inspect { runner_id: String },
+    /// Revoke a runner's credential by its id (`sha256:...`).
+    Revoke {
+        credential_id: String,
+        /// Why; recorded and shown on inspect.
+        #[arg(long)]
+        reason: String,
+    },
 }
 
 #[derive(Subcommand)]

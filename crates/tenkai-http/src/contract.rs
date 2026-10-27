@@ -396,6 +396,27 @@ pub fn http_contract() -> Value {
         },
         Route {
             method: "GET",
+            path: "/v1/runners",
+            auth: Auth::Management,
+            request: None,
+            response: schema::<tenkai::management_operations::RuntimeRunnerList>(&mut g),
+        },
+        Route {
+            method: "GET",
+            path: "/v1/runners/{credential_id}",
+            auth: Auth::Management,
+            request: None,
+            response: schema::<tenkai::management_operations::RuntimeRunner>(&mut g),
+        },
+        Route {
+            method: "POST",
+            path: "/v1/runners/{credential_id}/revoke",
+            auth: Auth::Management,
+            request: Some(schema::<tenkai::management_operations::RuntimeRevokeRequest>(&mut g)),
+            response: schema::<tenkai::management_operations::RuntimeCredentialRevoked>(&mut g),
+        },
+        Route {
+            method: "GET",
             path: "/v1/products/{product}/channels/{channel}/hold",
             auth: Auth::Read,
             request: None,

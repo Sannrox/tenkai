@@ -484,6 +484,7 @@ impl RuntimeClient {
             ))
             .bearer_auth(&self.token)
             .header("x-tenkai-runtime-instance", &self.instance_id)
+            .header("x-tenkai-runtime-version", env!("CARGO_PKG_VERSION"))
             .send()
             .await?;
         decode_response(response, "pulling runtime work").await
@@ -512,6 +513,7 @@ impl RuntimeClient {
             ))
             .bearer_auth(&self.token)
             .header("x-tenkai-runtime-instance", &self.instance_id)
+            .header("x-tenkai-runtime-version", env!("CARGO_PKG_VERSION"))
             .json(&report)
             .send()
             .await?;
@@ -568,6 +570,7 @@ impl RuntimeClient {
                 .timeout(Duration::from_secs(300))
                 .bearer_auth(&self.token)
                 .header("x-tenkai-runtime-instance", &self.instance_id)
+                .header("x-tenkai-runtime-version", env!("CARGO_PKG_VERSION"))
                 .json(&crate::runtime_delivery::RuntimeSelfReleaseFile {
                     plan_id: plan_id.into(),
                     generation,
@@ -620,6 +623,7 @@ impl RuntimeClient {
             ))
             .bearer_auth(&self.token)
             .header("x-tenkai-runtime-instance", &self.instance_id)
+            .header("x-tenkai-runtime-version", env!("CARGO_PKG_VERSION"))
             .json(&RuntimeHeartbeat {
                 plan_id: plan_id.into(),
                 generation,
@@ -647,6 +651,7 @@ impl RuntimeClient {
             ))
             .bearer_auth(&self.token)
             .header("x-tenkai-runtime-instance", &self.instance_id)
+            .header("x-tenkai-runtime-version", env!("CARGO_PKG_VERSION"))
             .json(&RuntimeHeartbeat {
                 plan_id: plan_id.into(),
                 generation,
@@ -760,6 +765,7 @@ impl RuntimeClient {
             ))
             .bearer_auth(&self.token)
             .header("x-tenkai-runtime-instance", &self.instance_id)
+            .header("x-tenkai-runtime-version", env!("CARGO_PKG_VERSION"))
             .json(&completion)
             .send()
             .await?;

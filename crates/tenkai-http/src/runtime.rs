@@ -17,7 +17,7 @@ pub(super) async fn runtime_work(
 ) -> Response {
     match state
         .runtime_delivery
-        .claim_work(bearer(&headers), runtime_instance(&headers), &environment)
+        .claim_work(bearer(&headers), runtime_caller(&headers), &environment)
         .await
     {
         Ok(work) => Json(work).into_response(),
@@ -56,7 +56,7 @@ pub(super) async fn runtime_heartbeat(
         .runtime_delivery
         .renew(
             bearer(&headers),
-            runtime_instance(&headers),
+            runtime_caller(&headers),
             &environment,
             &heartbeat,
         )
@@ -114,7 +114,7 @@ pub(super) async fn runtime_inventory(
         .runtime_delivery
         .report_inventory(
             bearer(&headers),
-            runtime_instance(&headers),
+            runtime_caller(&headers),
             &environment,
             report,
         )
@@ -122,6 +122,16 @@ pub(super) async fn runtime_inventory(
     {
         Ok(response) => Json(response).into_response(),
         Err(error) => runtime_delivery_error(error),
+    }
+}
+
+/// The calling instance and, when sent, the agent's version (#673).
+fn runtime_caller(headers: &HeaderMap) -> tenkai::runtime_delivery::RuntimeCaller<'_> {
+    tenkai::runtime_delivery::RuntimeCaller {
+        instance: runtime_instance(headers),
+        version: headers
+            .get("x-tenkai-runtime-version")
+            .and_then(|value| value.to_str().ok()),
     }
 }
 
@@ -245,8 +255,32 @@ pub(super) async fn create_runtime_enrollment(
     )
 }
 
-/// Revoke a runtime credential by its id.
+/// Revoke a runtime credential by its id; the body carries the reason.
 pub(super) async fn revoke_runtime_credential(
+    State(state): State<Arc<AppState>>,
+    Path(credential_id): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match super::auth::require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let request = match super::auth::parse_management_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    super::auth::manage_result(
+        state
+            .management
+            .revoke_runtime_credential(&credential, &credential_id, request)
+            .await,
+    )
+}
+
+/// The #630 revoke route, kept bodyless for released clients; it records a
+/// fixed reason. `/v1/runners/{id}/revoke` requires one.
+pub(super) async fn revoke_runtime_credential_legacy(
     State(state): State<Arc<AppState>>,
     Path(credential_id): Path<String>,
     headers: HeaderMap,
@@ -258,7 +292,43 @@ pub(super) async fn revoke_runtime_credential(
     super::auth::manage_result(
         state
             .management
-            .revoke_runtime_credential(&credential, &credential_id)
+            .revoke_runtime_credential(
+                &credential,
+                &credential_id,
+                tenkai::management_operations::RuntimeRevokeRequest {
+                    reason: "revoked through /v1/runtime-credentials (no reason given)".into(),
+                },
+            )
+            .await,
+    )
+}
+
+/// The runner registry (#673): enrolled credentials and static tokens.
+pub(super) async fn list_runtime_runners(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match super::auth::require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    super::auth::manage_result(state.management.list_runtime_runners(&credential).await)
+}
+
+/// One runner of the registry.
+pub(super) async fn inspect_runtime_runner(
+    State(state): State<Arc<AppState>>,
+    Path(credential_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match super::auth::require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    super::auth::manage_result(
+        state
+            .management
+            .inspect_runtime_runner(&credential, &credential_id)
             .await,
     )
 }

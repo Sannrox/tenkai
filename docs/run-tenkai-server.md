@@ -232,8 +232,8 @@ tenkai-runtime
   the runtime stops before writing the file, issue a new token.
 - **Storage.** Tenkai stores only SHA-256 digests of tokens and credentials.
   A credential's digest is its id: the runtime prints it at enrollment, and
-  `tenkaictl --target remote runtime revoke sha256:...` revokes it. The
-  runtime is refused from its next request on. A completion it already
+  `tenkaictl --target remote runtime revoke sha256:... --reason '...'`
+  revokes it. The runtime is refused from its next request on. A completion it already
   stored is applied by the server when a runtime of that environment next
   polls after the claim lapsed, so revoking a runtime mid-plan and enrolling
   its replacement does not strand the environment.
@@ -248,6 +248,33 @@ tenkai-runtime
   from its first step: once its lease is gone, it is failed, as server
   recovery fails it, and a rollback plan recovers the environment. Issuing and redeeming tokens needs a trusted clock. Issue
   enrollments once every server replica runs this version.
+
+### Runner registry
+
+`tenkaictl --target remote runner list` (`runner` is an alias of `runtime`)
+shows every runner: each enrolled credential, active or revoked, and each
+token in `TENKAI_RUNTIME_TOKENS` as a read-only `static` runner (#673).
+`runner inspect sha256:...` shows one. The HTTP surface is `GET /v1/runners`,
+`GET /v1/runners/{id}` and `POST /v1/runners/{id}/revoke` with
+`{"reason": "..."}`; all need the management capability, and an
+environment-scoped credential sees only its environment's runners.
+
+- **Ids, never secrets.** A runner's id is the `sha256:` digest of its
+  credential or token. No listing returns a credential, token or enrollment
+  token.
+- **Instances.** For each instance that presented the runner's credential:
+  its instance id, the agent version it sends in `x-tenkai-runtime-version`,
+  its last work pull, heartbeat and inventory report, and whether it holds a
+  runtime plan lease now. Activity is written at most every 30 seconds per
+  instance and kind, so it can trail by that much, and a failed write never
+  fails the runtime's request.
+- **Revocation.** A reason is required, and it and the revoking principal
+  are shown on inspect. The earlier bodyless
+  `POST /v1/runtime-credentials/{id}/revoke` keeps working for released
+  clients and records that no reason was given. A static runner cannot be revoked: remove its token
+  from `TENKAI_RUNTIME_TOKENS`.
+- **Rolling upgrades.** The registry's tables are additive. Older servers
+  ignore them and the version header.
 - **Scope.** Enrollment is for single-tenant hosts; tenant mode refuses it.
 - **Compatibility.** Token-configured runtimes keep working. Enrollment and
   credentials are additive tables in SQLite and PostgreSQL, which an older

@@ -421,16 +421,36 @@ impl RemoteClient {
         .await
     }
 
-    /// Revoke the runtime credential `credential_id` (#630).
+    /// Revoke the runner `credential_id` for `reason` (#630, #673).
     pub async fn revoke_runtime_credential(
         &self,
         credential_id: &str,
+        reason: &str,
     ) -> anyhow::Result<tenkai::management_operations::RuntimeCredentialRevoked> {
-        self.request_json(
+        self.request_json_body(
             reqwest::Method::POST,
-            &format!("/v1/runtime-credentials/{credential_id}/revoke"),
+            &format!("/v1/runners/{credential_id}/revoke"),
+            Some(&tenkai::management_operations::RuntimeRevokeRequest {
+                reason: reason.into(),
+            }),
         )
         .await
+    }
+
+    /// The runner registry (#673).
+    pub async fn list_runtime_runners(
+        &self,
+    ) -> anyhow::Result<tenkai::management_operations::RuntimeRunnerList> {
+        self.request_json(reqwest::Method::GET, "/v1/runners").await
+    }
+
+    /// One runner of the registry (#673).
+    pub async fn inspect_runtime_runner(
+        &self,
+        runner_id: &str,
+    ) -> anyhow::Result<tenkai::management_operations::RuntimeRunner> {
+        self.request_json(reqwest::Method::GET, &format!("/v1/runners/{runner_id}"))
+            .await
     }
 
     async fn lifecycle_result<B: serde::Serialize>(

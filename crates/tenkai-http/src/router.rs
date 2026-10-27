@@ -36,7 +36,8 @@ use super::package_migration::{
     resume_package_migration, rollback_package_migration,
 };
 use super::runtime::{
-    create_runtime_enrollment, revoke_runtime_credential, runtime_complete, runtime_enroll,
+    create_runtime_enrollment, inspect_runtime_runner, list_runtime_runners,
+    revoke_runtime_credential, revoke_runtime_credential_legacy, runtime_complete, runtime_enroll,
     runtime_heartbeat, runtime_inventory, runtime_self_release, runtime_work,
 };
 
@@ -102,7 +103,8 @@ pub fn router(
             config.release_trust_roots.clone(),
             config.environment_management_assignments.clone(),
         )
-        .with_agent_actor_policy(config.agent_actor_policy),
+        .with_agent_actor_policy(config.agent_actor_policy)
+        .with_static_runtime_runners(&config.runtime_assignments),
     );
     let mut router = Router::new()
         .route("/healthz", get(health))
@@ -260,6 +262,12 @@ pub fn router(
         )
         .route(
             "/v1/runtime-credentials/{credential_id}/revoke",
+            post(revoke_runtime_credential_legacy),
+        )
+        .route("/v1/runners", get(list_runtime_runners))
+        .route("/v1/runners/{credential_id}", get(inspect_runtime_runner))
+        .route(
+            "/v1/runners/{credential_id}/revoke",
             post(revoke_runtime_credential),
         );
     if metrics_enabled {

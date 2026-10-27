@@ -3815,6 +3815,112 @@
       },
       "type": "object"
     },
+    "RuntimeRevokeRequest": {
+      "additionalProperties": false,
+      "description": "Why a runner is revoked; recorded and shown on inspect.",
+      "properties": {
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "type": "object"
+    },
+    "RuntimeRunner": {
+      "description": "One runner of the registry: an enrolled credential, or a static token\nconfigured on the server. Never carries a secret.",
+      "properties": {
+        "created_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "created_by": {
+          "type": "string"
+        },
+        "environment": {
+          "type": "string"
+        },
+        "id": {
+          "description": "`sha256:` digest of the credential or token; what revoke takes.",
+          "type": "string"
+        },
+        "instances": {
+          "description": "Instances that presented this runner's credential, most recent first.",
+          "items": {
+            "$ref": "#/$defs/RuntimeRunnerInstance"
+          },
+          "type": "array"
+        },
+        "revoke_reason": {
+          "type": "string"
+        },
+        "revoked_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "revoked_by": {
+          "type": "string"
+        },
+        "state": {
+          "description": "`active`, `revoked`, or `static` for a configured token, which only\nserver configuration changes.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "environment",
+        "state",
+        "instances"
+      ],
+      "type": "object"
+    },
+    "RuntimeRunnerInstance": {
+      "description": "What one instance of a runner last did. Activity is recorded at most\nevery 30 seconds per kind, so times can trail by that much.",
+      "properties": {
+        "holds_lease": {
+          "description": "Holds an unexpired runtime plan lease now.",
+          "type": "boolean"
+        },
+        "instance_id": {
+          "type": "string"
+        },
+        "last_heartbeat_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "last_inventory_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "last_work_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "runtime_version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "instance_id",
+        "holds_lease"
+      ],
+      "type": "object"
+    },
+    "RuntimeRunnerList": {
+      "properties": {
+        "runners": {
+          "items": {
+            "$ref": "#/$defs/RuntimeRunner"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "runners"
+      ],
+      "type": "object"
+    },
     "ScanEvidence": {
       "additionalProperties": false,
       "description": "What the scanner said about one import.",
@@ -4674,6 +4780,35 @@
       "method": "POST",
       "path": "/v1/runtime-credentials/{credential_id}/revoke",
       "request": null,
+      "response": {
+        "$ref": "#/$defs/RuntimeCredentialRevoked"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "GET",
+      "path": "/v1/runners",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/RuntimeRunnerList"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "GET",
+      "path": "/v1/runners/{credential_id}",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/RuntimeRunner"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/runners/{credential_id}/revoke",
+      "request": {
+        "$ref": "#/$defs/RuntimeRevokeRequest"
+      },
       "response": {
         "$ref": "#/$defs/RuntimeCredentialRevoked"
       }

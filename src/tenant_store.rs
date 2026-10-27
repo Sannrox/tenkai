@@ -20,8 +20,9 @@ use crate::runtime_capabilities::{
 use crate::storage::{
     AuditRecord, ChannelRecord, EnvironmentRecord, LeaseRecord, OfflineImportRecord,
     OfflineStepImportRecord, OperationalStore, PlanRecord, PlanStatus, ProviderEventRecord,
-    ReceiptRecord, ReleaseRecord, Result, RollbackRecord, RollbackStatus, RuntimeClaim,
-    RuntimeCredentialRecord, RuntimeEnrollmentRecord, SCHEMA_VERSION, SqliteStore,
+    ReceiptRecord, ReleaseRecord, Result, RollbackRecord, RollbackStatus, RuntimeActivityRecord,
+    RuntimeClaim, RuntimeCredentialRecord, RuntimeEnrollmentRecord, RuntimeRevocation,
+    RuntimeRunnerRecord, SCHEMA_VERSION, SqliteStore,
 };
 use crate::tenant_isolation::{
     IsolationError, TenantIsolationHarness, TenantResources, TwoTenantFixture,
@@ -790,8 +791,26 @@ impl OperationalStore for TenantPartition {
     ) -> Result<Option<RuntimeCredentialRecord>> {
         self.store.runtime_credential(credential_digest)
     }
-    fn revoke_runtime_credential(&self, credential_digest: &str, now: i64) -> Result<()> {
-        self.store.revoke_runtime_credential(credential_digest, now)
+    fn revoke_runtime_credential(
+        &self,
+        credential_digest: &str,
+        now: i64,
+        revocation: &RuntimeRevocation,
+    ) -> Result<()> {
+        self.store
+            .revoke_runtime_credential(credential_digest, now, revocation)
+    }
+    fn runtime_runners(&self) -> Result<Vec<RuntimeRunnerRecord>> {
+        self.store.runtime_runners()
+    }
+    fn record_runtime_activity(&self, activity: &RuntimeActivityRecord) -> Result<()> {
+        self.store.record_runtime_activity(activity)
+    }
+    fn runtime_activity(&self) -> Result<Vec<RuntimeActivityRecord>> {
+        self.store.runtime_activity()
+    }
+    fn live_runtime_claim_owners(&self, now: i64) -> Result<Vec<String>> {
+        self.store.live_runtime_claim_owners(now)
     }
 }
 
