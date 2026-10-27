@@ -91,6 +91,11 @@ struct Cli {
     /// Require enterprise authentication capability before accepting traffic.
     #[arg(long, default_value_t = false)]
     require_enterprise_auth: bool,
+    /// Require the supported `enterprise-experimental` profile: refuse to
+    /// start, naming each one, while PostgreSQL does not own every
+    /// authoritative surface (ADR 0010). Needs `--tenant-mode`.
+    #[arg(long, default_value_t = false)]
+    require_enterprise_profile: bool,
     /// Minimum operational store migration level required at startup.
     #[arg(long, default_value_t = 1)]
     min_migration_level: u32,
@@ -378,6 +383,15 @@ async fn main() -> Result<()> {
     }
     require_hub_tenant_mode(cli.tenant_mode)
         .context("hub host refuses to start as the community SQLite host")?;
+    if cli.require_enterprise_profile {
+        anyhow::ensure!(
+            cli.tenant_mode,
+            "--require-enterprise-profile needs --tenant-mode"
+        );
+        tenkai_postgres::require_enterprise_profile(
+            &tenkai_postgres::enterprise_authoritative_surfaces(),
+        )?;
+    }
     if let Some(operation_id) = cli
         .operation_id
         .as_deref()

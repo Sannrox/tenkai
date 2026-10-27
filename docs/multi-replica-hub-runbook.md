@@ -8,9 +8,13 @@ contract.
 
 The commands open PostgreSQL as the sole hub store (`tenkai_hub` plus
 `tenkai_t_*`). Mixed `--database` / `TENKAI_DATABASE` with `TENKAI_POSTGRES_URL`
-is refused. Catalog object-graph lifecycle and terminal-outcome export remain
-unavailable. The supported profile contract remains `local` by default and
-experimental single-server `fleet` for remote runtime operation.
+is refused. Catalog object-graph lifecycle (#764) and terminal-outcome export
+(#765) remain unavailable. The supported profile contract remains `local` by
+default and experimental single-server `fleet` for remote runtime operation.
+`--require-enterprise-profile` (with `--tenant-mode`) asks for the supported
+`enterprise-experimental` profile instead of this lab. It refuses to start
+while PostgreSQL does not own every authoritative surface, and names each
+missing one.
 
 The lab assumes:
 
