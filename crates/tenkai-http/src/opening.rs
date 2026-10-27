@@ -61,7 +61,7 @@ async fn not_ready() -> Response {
 pub struct HotSwap {
     current: Arc<RwLock<Router>>,
     runtime_client_certificate_required: bool,
-    client_certificate: bool,
+    client_certificate: Option<Arc<[u8]>>,
 }
 
 impl HotSwap {
@@ -69,7 +69,7 @@ impl HotSwap {
         Self {
             current: Arc::new(RwLock::new(router)),
             runtime_client_certificate_required: false,
-            client_certificate: false,
+            client_certificate: None,
         }
     }
 
@@ -103,7 +103,7 @@ where
     fn call(&mut self, stream: IncomingStream<'_, L>) -> Self::Future {
         use crate::tls::PeerCertificate as _;
         let mut connection = self.clone();
-        connection.client_certificate = stream.io().has_client_certificate();
+        connection.client_certificate = stream.io().client_certificate();
         std::future::ready(Ok(connection))
     }
 }
@@ -118,17 +118,23 @@ impl Service<Request> for HotSwap {
     }
 
     fn call(&mut self, mut req: Request) -> Self::Future {
+        // Enrollment and renewal are how a runner gets a certificate (#674):
+        // a first one, and a new one once its own has expired.
+        let enrollment =
+            req.uri().path().ends_with("/enroll") || req.uri().path().ends_with("/certificate");
         if self.runtime_client_certificate_required
-            && !self.client_certificate
+            && self.client_certificate.is_none()
             && req.uri().path().starts_with("/v1/runtime/")
+            && !enrollment
         {
             return Box::pin(std::future::ready(Ok(crate::runtime::error_response(
                 StatusCode::FORBIDDEN,
                 "runtime routes require a client certificate",
             ))));
         }
-        req.extensions_mut()
-            .insert(crate::tls::ClientCertificate(self.client_certificate));
+        req.extensions_mut().insert(crate::tls::ClientCertificate(
+            self.client_certificate.clone(),
+        ));
         let mut router = self
             .current
             .read()

@@ -40,6 +40,10 @@ thiserror = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 # Validates TENKAI_CA_BUNDLE certificates as trust anchors (#633); already in the tree via reqwest.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# The runner certificate authority (#674): issue from CSRs, verify leaves.
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring", "x509-parser"] }
+time = { version = "0.3", default-features = false }
+x509-parser = { version = "0.18", default-features = false, features = ["verify"] }
 # SMTP STARTTLS for the operational digest sink (#725), with the shared trust.
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 webpki-roots = "1"
@@ -58,8 +62,6 @@ test-support = []
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 tower = { version = "0.5", features = ["util"] }
 tonic = { version = "0.14", default-features = false, features = ["channel", "codegen", "router", "server", "tls-ring", "tls-webpki-roots", "transport"] }
-# Throwaway CA and HTTPS server for the outbound TLS tests (#633).
-rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 tokio-stream = "0.1"
 ed25519-dalek = "2"
 base64 = "0.22"

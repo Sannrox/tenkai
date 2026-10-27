@@ -84,8 +84,11 @@ never an argument.
   client certificate is verified against that CA when presented and is
   optional otherwise; an untrusted one fails the handshake.
   `--tls-require-runtime-client-cert` additionally refuses `/v1/runtime/*` on
-  connections without one (`403`). Management routes accept either, and
-  `/healthz` never requires one. Bearer tokens are still required as before.
+  connections without one (`403`), except enrollment and certificate
+  renewal, which are how a runner gets a certificate. Management routes accept either, and
+  `/healthz` never requires one. Without a runner CA, bearer tokens are
+  still required as before; with one, a runner certificate is the runner's
+  identity ([runner certificates](#runner-certificates)).
 - **Renewal.** The certificate, key and client CA are read again every five
   seconds and on `SIGHUP`. Changed material applies to new connections; open
   connections keep theirs, and runner leases, which live in the store, are not
@@ -317,6 +320,51 @@ tenkai-runtime
   from its first step: once its lease is gone, it is failed, as server
   recovery fails it, and a rollback plan recovers the environment. Issuing and redeeming tokens needs a trusted clock. Issue
   enrollments once every server replica runs this version.
+
+### Runner certificates
+
+With a runner CA, a runtime agent's identity is a short-lived client
+certificate instead of a long-lived bearer (#674).
+
+```sh
+# Once: create the runner CA, or bring your own certificate and key.
+tenkaictl runner-ca init --dir /etc/tenkai/runner-ca
+export TENKAI_RUNNER_CA_CERT=/etc/tenkai/runner-ca/runner-ca.pem
+export TENKAI_RUNNER_CA_KEY=/etc/tenkai/runner-ca/runner-ca-key.pem
+export TENKAI_TLS_CLIENT_CA=/etc/tenkai/runner-ca/runner-ca.pem
+
+# On the runner host, with an enrollment token as above:
+export TENKAI_RUNTIME_CERTIFICATE_DIR=/var/lib/tenkai-runtime/certificate
+```
+
+- **Enrollment.** The agent generates its key in the certificate directory
+  (owner-only) and sends only a CSR with the enrollment token. The server
+  issues a certificate valid for 24 hours whose only identity is
+  `urn:tenkai:runner:<environment>:<runner id>`, whatever names the CSR
+  asked for. The runner id is the registry id of the credential the
+  enrollment produced. A CSR the server cannot sign is refused before the
+  token is spent.
+- **Admission.** The agent presents its certificate on every request. A
+  certificate issued by the runner CA, valid now, names the runner. The
+  runner may act only in that environment, and only while its credential is
+  enrolled and not revoked in the [registry](#runner-registry). A
+  certificate from any other CA the TLS client CA trusts names no runner. A
+  presented runner certificate that fails is refused, not retried as a
+  bearer.
+- **Keys.** The runner CA key is separate from release and approval signing
+  keys. A production profile should keep it under the same controls as
+  those.
+- **Renewal.** The agent renews its certificate over
+  `POST /v1/runtime/environments/{environment}/certificate` once a third of
+  its lifetime is left, with a CSR over the same key, admitted by the
+  current certificate. Once a certificate has expired (an agent offline
+  for a day), the agent renews with its enrolled bearer credential, on that
+  route only. Like enrollment, the route is exempt from the runtime
+  client-certificate requirement. An agent with a certificate directory
+  never uses its bearer for work, so a runner keeps one lease identity
+  across renewals.
+- **Not yet:** CA rotation and trust-bundle delivery (#769), and offline
+  revocation lists, trust bundles and disconnected grace (#770).
 
 ### Runner registry
 

@@ -14,10 +14,15 @@ pub(super) async fn runtime_work(
     State(state): State<Arc<AppState>>,
     Path(environment): Path<String>,
     headers: HeaderMap,
+    certificate: Option<axum::Extension<crate::tls::ClientCertificate>>,
 ) -> Response {
     match state
         .runtime_delivery
-        .claim_work(bearer(&headers), runtime_caller(&headers), &environment)
+        .claim_work(
+            bearer(&headers),
+            runtime_caller(&headers, certificate.as_ref()),
+            &environment,
+        )
         .await
     {
         Ok(work) => Json(work).into_response(),
@@ -29,13 +34,14 @@ pub(super) async fn runtime_complete(
     State(state): State<Arc<AppState>>,
     Path(environment): Path<String>,
     headers: HeaderMap,
+    certificate: Option<axum::Extension<crate::tls::ClientCertificate>>,
     Json(completion): Json<tenkai::runtime_delivery::RuntimeCompletion>,
 ) -> Response {
     match state
         .runtime_delivery
         .complete(
             bearer(&headers),
-            runtime_instance(&headers),
+            runtime_caller(&headers, certificate.as_ref()),
             &environment,
             completion,
         )
@@ -50,13 +56,14 @@ pub(super) async fn runtime_heartbeat(
     State(state): State<Arc<AppState>>,
     Path(environment): Path<String>,
     headers: HeaderMap,
+    certificate: Option<axum::Extension<crate::tls::ClientCertificate>>,
     Json(heartbeat): Json<RuntimeHeartbeat>,
 ) -> Response {
     match state
         .runtime_delivery
         .renew(
             bearer(&headers),
-            runtime_caller(&headers),
+            runtime_caller(&headers, certificate.as_ref()),
             &environment,
             &heartbeat,
         )
@@ -73,13 +80,14 @@ pub(super) async fn runtime_self_release(
     State(state): State<Arc<AppState>>,
     Path(environment): Path<String>,
     headers: HeaderMap,
+    certificate: Option<axum::Extension<crate::tls::ClientCertificate>>,
     Json(request): Json<tenkai::runtime_delivery::RuntimeSelfReleaseFile>,
 ) -> Response {
     match state
         .runtime_delivery
         .self_release_file(
             bearer(&headers),
-            runtime_instance(&headers),
+            runtime_caller(&headers, certificate.as_ref()),
             &environment,
             &request,
         )
@@ -103,18 +111,39 @@ pub(super) async fn runtime_self_release(
     }
 }
 
+/// Renew a runner certificate (#674): admitted by the current one, or by
+/// the enrolled bearer once it has expired.
+pub(super) async fn runtime_certificate(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+    certificate: Option<axum::Extension<crate::tls::ClientCertificate>>,
+    Json(request): Json<tenkai::runtime_delivery::RuntimeCertificateRequest>,
+) -> Response {
+    match state.runtime_delivery.renew_certificate(
+        bearer(&headers),
+        runtime_caller(&headers, certificate.as_ref()),
+        &environment,
+        &request,
+    ) {
+        Ok(renewed) => Json(renewed).into_response(),
+        Err(error) => runtime_delivery_error(error),
+    }
+}
+
 /// Runtime inventory report: write admitted capability facts for the assigned env (#136).
 pub(super) async fn runtime_inventory(
     State(state): State<Arc<AppState>>,
     Path(environment): Path<String>,
     headers: HeaderMap,
+    certificate: Option<axum::Extension<crate::tls::ClientCertificate>>,
     Json(report): Json<RuntimeInventoryReport>,
 ) -> Response {
     match state
         .runtime_delivery
         .report_inventory(
             bearer(&headers),
-            runtime_caller(&headers),
+            runtime_caller(&headers, certificate.as_ref()),
             &environment,
             report,
         )
@@ -125,13 +154,18 @@ pub(super) async fn runtime_inventory(
     }
 }
 
-/// The calling instance and, when sent, the agent's version (#673).
-fn runtime_caller(headers: &HeaderMap) -> tenkai::runtime_delivery::RuntimeCaller<'_> {
+/// The calling instance, the agent's version when sent (#673), and the
+/// connection's verified client certificate (#674).
+fn runtime_caller<'a>(
+    headers: &'a HeaderMap,
+    certificate: Option<&'a axum::Extension<crate::tls::ClientCertificate>>,
+) -> tenkai::runtime_delivery::RuntimeCaller<'a> {
     tenkai::runtime_delivery::RuntimeCaller {
         instance: runtime_instance(headers),
         version: headers
             .get("x-tenkai-runtime-version")
             .and_then(|value| value.to_str().ok()),
+        certificate: certificate.and_then(|certificate| certificate.0.0.as_deref()),
     }
 }
 

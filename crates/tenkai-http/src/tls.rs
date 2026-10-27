@@ -290,30 +290,32 @@ impl axum::serve::Listener for TlsListener {
     }
 }
 
-/// Whether a connection's client presented a certificate. The handshake
-/// verified any it presented against the client CA, so presence is trust.
+/// The leaf certificate (DER) a connection's client presented, if any. The
+/// handshake verified it against the client CA, so presence is trust; the
+/// runner CA then binds it to one runner (#674).
 pub trait PeerCertificate {
-    fn has_client_certificate(&self) -> bool;
+    fn client_certificate(&self) -> Option<Arc<[u8]>>;
 }
 
 impl PeerCertificate for TcpStream {
-    fn has_client_certificate(&self) -> bool {
-        false
+    fn client_certificate(&self) -> Option<Arc<[u8]>> {
+        None
     }
 }
 
 impl PeerCertificate for TlsStream<TcpStream> {
-    fn has_client_certificate(&self) -> bool {
+    fn client_certificate(&self) -> Option<Arc<[u8]>> {
         self.get_ref()
             .1
             .peer_certificates()
-            .is_some_and(|chain| !chain.is_empty())
+            .and_then(|chain| chain.first())
+            .map(|leaf| Arc::from(leaf.as_ref()))
     }
 }
 
-/// Request extension: the connection carried a verified client certificate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ClientCertificate(pub bool);
+/// Request extension: the verified client certificate of the connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientCertificate(pub Option<Arc<[u8]>>);
 
 #[cfg(test)]
 mod tests {

@@ -38,8 +38,9 @@ use super::package_migration::{
 };
 use super::runtime::{
     create_runtime_enrollment, inspect_runtime_runner, list_runtime_runners,
-    revoke_runtime_credential, revoke_runtime_credential_legacy, runtime_complete, runtime_enroll,
-    runtime_heartbeat, runtime_inventory, runtime_self_release, runtime_work,
+    revoke_runtime_credential, revoke_runtime_credential_legacy, runtime_certificate,
+    runtime_complete, runtime_enroll, runtime_heartbeat, runtime_inventory, runtime_self_release,
+    runtime_work,
 };
 
 pub(super) struct AppState {
@@ -86,11 +87,15 @@ pub fn router(
     let auth = config.build_auth_stack()?;
     let metrics_enabled = config.metrics_enabled;
     let development_fixtures_enabled = config.development_fixtures.is_some();
-    let runtime_delivery = Arc::new(RuntimeDeliveryOperations::new(
+    let mut runtime_delivery = RuntimeDeliveryOperations::new(
         config.runtime_assignments.clone(),
         reconciler.clone(),
         store.clone(),
-    ));
+    );
+    if let Some(ca) = &config.runner_ca {
+        runtime_delivery = runtime_delivery.with_runner_ca(ca.clone());
+    }
+    let runtime_delivery = Arc::new(runtime_delivery);
     let package_migration_trust_roots = match &config.package_migration_trust_roots {
         Some(path) => Some(tenkai::package_migration::load_trust_roots(path)?),
         None => None,
@@ -261,6 +266,10 @@ pub fn router(
         .route(
             "/v1/runtime/environments/{environment}/enroll",
             post(runtime_enroll),
+        )
+        .route(
+            "/v1/runtime/environments/{environment}/certificate",
+            post(runtime_certificate),
         )
         .route(
             "/v1/environments/{environment}/runtime-enrollments",
