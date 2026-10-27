@@ -85,6 +85,11 @@ pub struct RuntimeRunnerInstance {
     pub last_inventory_at: Option<i64>,
     /// Holds an unexpired runtime plan lease now.
     pub holds_lease: bool,
+    /// The instance's version against this server: `current`, `behind`
+    /// (one minor release, supported), `unsupported` or `ahead` (#761).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub skew: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -270,6 +275,10 @@ impl ManagementOperations {
                     last_heartbeat_at: record.last_heartbeat_at,
                     last_inventory_at: record.last_inventory_at,
                     holds_lease: leases.contains(&record.owner),
+                    skew: record.runtime_version.as_deref().and_then(|version| {
+                        crate::version_skew::skew(crate::version_skew::SERVER_VERSION, version)
+                            .map(str::to_string)
+                    }),
                 })
                 .collect()
         };

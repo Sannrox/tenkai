@@ -202,6 +202,11 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: WaveCommand,
     },
+    /// Create a runner certificate authority (local only, #674).
+    RunnerCa {
+        #[command(subcommand)]
+        command: RunnerCaCommand,
+    },
     /// Upgrade or roll back this host's Tenkai server binaries from a signed
     /// bundle, gated on the store check and readiness (local only).
     SelfUpgrade {
@@ -363,6 +368,21 @@ pub(crate) enum RuntimeCommand {
         /// Why; recorded and shown on inspect.
         #[arg(long)]
         reason: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum RunnerCaCommand {
+    /// Generate a runner CA: `runner-ca.pem` and the owner-only
+    /// `runner-ca-key.pem` in `dir`. Point the server's
+    /// `TENKAI_RUNNER_CA_CERT`/`TENKAI_RUNNER_CA_KEY` and its TLS client CA
+    /// at them. Bring your own CA instead by supplying those files.
+    Init {
+        #[arg(long)]
+        dir: std::path::PathBuf,
+        /// The CA's common name.
+        #[arg(long, default_value = "Tenkai runner CA")]
+        name: String,
     },
 }
 

@@ -739,6 +739,7 @@ async fn main() -> Result<()> {
             backups: backups.as_ref().map(|(backups, _)| backups.clone()),
             imports: imports.clone(),
             exports,
+            runner_ca: runner_ca_from_env()?,
         },
         reconciler.clone(),
         store.clone(),
@@ -1386,6 +1387,22 @@ fn backup_settings(
     )?;
     let every = (interval > 0).then(|| Duration::from_secs(interval));
     Ok(Some((Arc::new(backups), every)))
+}
+
+/// The runner CA (#674) from `TENKAI_RUNNER_CA_CERT` and `TENKAI_RUNNER_CA_KEY`
+/// (PEM files, set together), or none.
+fn runner_ca_from_env() -> Result<Option<Arc<tenkai::runner_ca::RunnerCa>>> {
+    match (
+        std::env::var_os("TENKAI_RUNNER_CA_CERT"),
+        std::env::var_os("TENKAI_RUNNER_CA_KEY"),
+    ) {
+        (None, None) => Ok(None),
+        (Some(cert), Some(key)) => Ok(Some(Arc::new(tenkai::runner_ca::RunnerCa::load(
+            std::path::Path::new(&cert),
+            std::path::Path::new(&key),
+        )?))),
+        _ => anyhow::bail!("TENKAI_RUNNER_CA_CERT and TENKAI_RUNNER_CA_KEY must be set together"),
+    }
 }
 
 #[cfg(test)]

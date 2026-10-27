@@ -558,6 +558,9 @@ struct RuntimeIdentity {
 pub struct RuntimeCaller<'a> {
     pub instance: Option<&'a str>,
     pub version: Option<&'a str>,
+    /// The verified client certificate (DER) of the connection, which names
+    /// the runner when the runner CA issued it (#674).
+    pub certificate: Option<&'a [u8]>,
 }
 
 impl<'a> From<Option<&'a str>> for RuntimeCaller<'a> {
@@ -565,6 +568,7 @@ impl<'a> From<Option<&'a str>> for RuntimeCaller<'a> {
         Self {
             instance,
             version: None,
+            certificate: None,
         }
     }
 }
@@ -592,6 +596,9 @@ pub struct RuntimeDeliveryOperations {
     /// Last written activity per `(runner, instance, kind)`, with the version
     /// it carried: a write cache only, so each replica keeps its own.
     activity: std::sync::Mutex<ActivityWrites>,
+    /// Issues runner certificates at enrollment and binds presented ones to
+    /// a runner (#674). Without it, certificates name no runner.
+    runner_ca: Option<Arc<crate::runner_ca::RunnerCa>>,
 }
 
 impl RuntimeDeliveryOperations {
@@ -605,7 +612,14 @@ impl RuntimeDeliveryOperations {
             reconciler,
             store,
             activity: std::sync::Mutex::new(HashMap::new()),
+            runner_ca: None,
         }
+    }
+
+    /// Issue and accept runner certificates from `ca` (#674).
+    pub fn with_runner_ca(mut self, ca: Arc<crate::runner_ca::RunnerCa>) -> Self {
+        self.runner_ca = Some(ca);
+        self
     }
 
     /// Record what an admitted runner instance did, throttled. Activity is
@@ -659,7 +673,7 @@ impl RuntimeDeliveryOperations {
         environment: &str,
     ) -> Result<RuntimeWork, RuntimeDeliveryError> {
         let caller = caller.into();
-        let identity = self.admit(token, caller.instance, environment)?;
+        let identity = self.admit(token, &caller, environment)?;
         self.note_activity(&identity, environment, caller.version, Activity::Work);
         // While the server may still run a plan it began before a runtime
         // enrolled (#630), no plan is handed out. Checked before the plan is
@@ -817,11 +831,12 @@ impl RuntimeDeliveryOperations {
     pub async fn complete(
         &self,
         token: Option<&str>,
-        instance: Option<&str>,
+        caller: impl Into<RuntimeCaller<'_>>,
         environment: &str,
         completion: RuntimeCompletion,
     ) -> Result<(), RuntimeDeliveryError> {
-        let identity = self.admit(token, instance, environment)?;
+        let caller = caller.into();
+        let identity = self.admit(token, &caller, environment)?;
         let completion_json = serde_json::to_string(&completion)
             .map_err(|error| RuntimeDeliveryError::InvalidRequest(error.to_string()))?;
         self.reconciler
@@ -850,7 +865,7 @@ impl RuntimeDeliveryOperations {
         heartbeat: &RuntimeHeartbeat,
     ) -> Result<RuntimeClaim, RuntimeDeliveryError> {
         let caller = caller.into();
-        let identity = self.admit(token, caller.instance, environment)?;
+        let identity = self.admit(token, &caller, environment)?;
         self.note_activity(&identity, environment, caller.version, Activity::Heartbeat);
         let Some(mut ctx) = self.reconciler.application_ctx() else {
             return Err(RuntimeDeliveryError::Unavailable(
@@ -910,7 +925,7 @@ impl RuntimeDeliveryOperations {
     pub async fn self_release_file(
         &self,
         token: Option<&str>,
-        instance: Option<&str>,
+        caller: impl Into<RuntimeCaller<'_>>,
         environment: &str,
         request: &RuntimeSelfReleaseFile,
     ) -> Result<(Vec<u8>, u32), RuntimeDeliveryError> {
@@ -921,7 +936,7 @@ impl RuntimeDeliveryOperations {
         }
         self.renew(
             token,
-            instance,
+            caller.into(),
             environment,
             &RuntimeHeartbeat {
                 plan_id: request.plan_id.clone(),
@@ -971,7 +986,7 @@ impl RuntimeDeliveryOperations {
         report: RuntimeInventoryReport,
     ) -> Result<RuntimeInventoryResponse, RuntimeDeliveryError> {
         let caller = caller.into();
-        let identity = self.admit(token, caller.instance, environment)?;
+        let identity = self.admit(token, &caller, environment)?;
         self.note_activity(&identity, environment, caller.version, Activity::Inventory);
         validate_inventory_source(&report.source)?;
         let applied = self
@@ -989,9 +1004,15 @@ impl RuntimeDeliveryOperations {
     fn admit(
         &self,
         token: Option<&str>,
-        instance: Option<&str>,
+        caller: &RuntimeCaller<'_>,
         environment: &str,
     ) -> Result<RuntimeIdentity, RuntimeDeliveryError> {
+        let instance = caller.instance;
+        // A runner-CA certificate names the runner, and is preferred to any
+        // bearer the request also carries (#674).
+        if let (Some(certificate), Some(ca)) = (caller.certificate, &self.runner_ca) {
+            return self.admit_certificate(ca, certificate, instance, environment);
+        }
         let token = token
             .filter(|token| !token.is_empty())
             .ok_or(RuntimeDeliveryError::MissingCredential)?;
@@ -1013,11 +1034,106 @@ impl RuntimeDeliveryOperations {
     }
 }
 
+impl RuntimeDeliveryOperations {
+    /// The runner a runner-CA certificate names: issued by the runner CA,
+    /// valid now, for this environment, and its credential enrolled and not
+    /// revoked in the registry. Anything else is refused, not retried as a
+    /// bearer: a presented runner certificate is the claimed identity.
+    fn admit_certificate(
+        &self,
+        ca: &crate::runner_ca::RunnerCa,
+        certificate: &[u8],
+        instance: Option<&str>,
+        environment: &str,
+    ) -> Result<RuntimeIdentity, RuntimeDeliveryError> {
+        let named = ca
+            .verify(certificate, crate::now_millis() / 1_000)
+            .map_err(|_| RuntimeDeliveryError::InvalidCredential)?;
+        let instance = instance
+            .filter(|instance| !instance.is_empty() && instance.len() <= 128 && instance.is_ascii())
+            .ok_or(RuntimeDeliveryError::InvalidInstance)?;
+        match self.store.runtime_credential(&named.runner_id) {
+            Ok(Some(record))
+                if record.revoked_at.is_none() && record.environment_id == named.environment => {}
+            Ok(_) => return Err(RuntimeDeliveryError::InvalidCredential),
+            Err(error) => return Err(RuntimeDeliveryError::Unavailable(error.to_string())),
+        }
+        if named.environment != environment {
+            return Err(RuntimeDeliveryError::ForeignEnvironment);
+        }
+        Ok(RuntimeIdentity {
+            // The lease owner follows the runner, not one certificate, so a
+            // renewed certificate keeps the claims of its runner.
+            owner: runtime_owner(&named.runner_id, instance),
+            runner_id: named.runner_id,
+            instance: instance.into(),
+        })
+    }
+}
+
+/// A renewal of a runner certificate (#674): a CSR over the agent's key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeCertificateRequest {
+    pub csr: String,
+}
+
+/// A renewed runner certificate and the runner CA that issued it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeCertificate {
+    pub certificate: String,
+    pub ca: String,
+}
+
+impl RuntimeDeliveryOperations {
+    /// A new runner certificate for the runner calling: named by its current
+    /// runner certificate, or, once that has expired, by its enrolled bearer
+    /// credential. Static tokens name no registry runner and get none.
+    pub fn renew_certificate<'a>(
+        &self,
+        token: Option<&str>,
+        caller: impl Into<RuntimeCaller<'a>>,
+        environment: &str,
+        request: &RuntimeCertificateRequest,
+    ) -> Result<RuntimeCertificate, RuntimeDeliveryError> {
+        let caller = caller.into();
+        let ca = self.runner_ca.as_ref().ok_or_else(|| {
+            RuntimeDeliveryError::InvalidRequest("this server has no runner CA".into())
+        })?;
+        let identity = self.admit(token, &caller, environment)?;
+        if caller.certificate.is_none()
+            && token.is_some_and(|token| runtime_assignment(&self.assignments, token).is_some())
+        {
+            return Err(RuntimeDeliveryError::InvalidRequest(
+                "a static runtime token names no enrolled runner to certify".into(),
+            ));
+        }
+        let certificate = ca
+            .issue(
+                &request.csr,
+                &crate::runner_ca::RunnerIdentity {
+                    environment: environment.into(),
+                    runner_id: identity.runner_id,
+                },
+                crate::now_millis() / 1_000,
+            )
+            .map_err(|error| RuntimeDeliveryError::InvalidRequest(format!("{error:#}")))?;
+        Ok(RuntimeCertificate {
+            certificate,
+            ca: ca.cert_pem().into(),
+        })
+    }
+}
+
 /// What a runtime agent sends to exchange its enrollment token (#630).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeEnrollRequest {
     pub token: String,
+    /// A PEM certificate request over a key the agent generated and keeps;
+    /// the response then carries its runner certificate (#674).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub csr: Option<String>,
 }
 
 /// The agent's own credential, shown only in this response. `credential_id`
@@ -1027,6 +1143,12 @@ pub struct RuntimeEnrolled {
     pub environment: String,
     pub credential: String,
     pub credential_id: String,
+    /// The runner certificate (PEM) issued for the request's CSR.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificate: Option<String>,
+    /// The runner CA certificate (PEM) that issued it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca: Option<String>,
 }
 
 impl RuntimeDeliveryOperations {
@@ -1047,6 +1169,23 @@ impl RuntimeDeliveryOperations {
         // A drifted clock must not stretch a token's expiry.
         crate::clock_guard::require_trusted_time("runtime enrollment")
             .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))?;
+        // A CSR this server cannot sign is refused before the token is spent.
+        let ca = match &request.csr {
+            None => None,
+            Some(csr) => {
+                let ca = self.runner_ca.as_ref().ok_or_else(|| {
+                    RuntimeDeliveryError::InvalidRequest(
+                        "this server has no runner CA to sign a certificate request".into(),
+                    )
+                })?;
+                rcgen::CertificateSigningRequestParams::from_pem(csr).map_err(|_| {
+                    RuntimeDeliveryError::InvalidRequest(
+                        "the CSR is not a valid, self-signed certificate request".into(),
+                    )
+                })?;
+                Some(ca)
+            }
+        };
         let credential = mint(CREDENTIAL_PREFIX)
             .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))?;
         let record = match self.store.redeem_runtime_enrollment(
@@ -1061,10 +1200,28 @@ impl RuntimeDeliveryOperations {
             }
             Err(error) => return Err(RuntimeDeliveryError::Unavailable(error.to_string())),
         };
+        let certificate = match (ca, &request.csr) {
+            (Some(ca), Some(csr)) => Some(
+                ca.issue(
+                    csr,
+                    &crate::runner_ca::RunnerIdentity {
+                        environment: record.environment_id.clone(),
+                        runner_id: record.credential_digest.clone(),
+                    },
+                    crate::now_millis() / 1_000,
+                )
+                .map_err(|error| RuntimeDeliveryError::Internal(format!("{error:#}")))?,
+            ),
+            _ => None,
+        };
         Ok(RuntimeEnrolled {
             environment: record.environment_id,
             credential,
             credential_id: record.credential_digest,
+            ca: certificate
+                .as_ref()
+                .and_then(|_| ca.map(|ca| ca.cert_pem().to_string())),
+            certificate,
         })
     }
 
@@ -1277,6 +1434,139 @@ mod tests {
         )
     }
 
+    /// Certificate identity (#674): enrollment with a CSR issues a runner
+    /// certificate; it admits its runner only in its environment and only
+    /// until the credential is revoked; one from another CA claims nothing;
+    /// a CSR the server cannot sign is refused before the token is spent.
+    #[test]
+    fn a_runner_certificate_admits_only_its_runner_in_its_environment() {
+        use crate::runtime_credentials::{ENROLLMENT_TOKEN_PREFIX, digest, mint};
+        let (operations, _) = operations();
+        let issue = |operations: &RuntimeDeliveryOperations| {
+            let token = mint(ENROLLMENT_TOKEN_PREFIX).unwrap();
+            operations
+                .store
+                .create_runtime_enrollment(&crate::storage::RuntimeEnrollmentRecord {
+                    token_digest: digest(&token),
+                    environment_id: "prod".into(),
+                    expires_at: i64::MAX,
+                    created_by: "operator".into(),
+                })
+                .unwrap();
+            token
+        };
+        let key = rcgen::KeyPair::generate().unwrap();
+        let csr = rcgen::CertificateParams::new(Vec::<String>::new())
+            .unwrap()
+            .serialize_request(&key)
+            .unwrap()
+            .pem()
+            .unwrap();
+
+        // Without a runner CA, a CSR is refused and the token stays unspent.
+        let token = issue(&operations);
+        let request = RuntimeEnrollRequest {
+            token,
+            csr: Some(csr.clone()),
+        };
+        assert!(matches!(
+            operations.enroll("prod", &request),
+            Err(RuntimeDeliveryError::InvalidRequest(_))
+        ));
+        let (cert, ca_key) = crate::runner_ca::RunnerCa::generate("runner CA").unwrap();
+        let ca = Arc::new(crate::runner_ca::RunnerCa::from_pem(&cert, &ca_key).unwrap());
+        let operations = operations.with_runner_ca(ca);
+        let enrolled = operations.enroll("prod", &request).unwrap();
+        assert_eq!(enrolled.ca.as_deref(), Some(cert.as_str()));
+        let leaf = x509_parser::pem::parse_x509_pem(enrolled.certificate.unwrap().as_bytes())
+            .unwrap()
+            .1
+            .contents;
+
+        let admit = |certificate: &[u8], environment: &str| {
+            let caller = RuntimeCaller {
+                instance: Some("instance-a"),
+                version: None,
+                certificate: Some(certificate),
+            };
+            operations.admit(None, &caller, environment)
+        };
+        let admitted = admit(&leaf, "prod").unwrap();
+        assert_eq!(admitted.runner_id, enrolled.credential_id);
+        assert!(matches!(
+            admit(&leaf, "stage"),
+            Err(RuntimeDeliveryError::ForeignEnvironment)
+        ));
+        // A certificate from another CA names no runner, whatever it says.
+        let (other_cert, other_key) = crate::runner_ca::RunnerCa::generate("other").unwrap();
+        let other = crate::runner_ca::RunnerCa::from_pem(&other_cert, &other_key).unwrap();
+        let forged = other
+            .issue(
+                &csr,
+                &crate::runner_ca::RunnerIdentity {
+                    environment: "prod".into(),
+                    runner_id: enrolled.credential_id.clone(),
+                },
+                crate::now_millis() / 1_000,
+            )
+            .unwrap();
+        let forged = x509_parser::pem::parse_x509_pem(forged.as_bytes())
+            .unwrap()
+            .1
+            .contents;
+        assert!(matches!(
+            admit(&forged, "prod"),
+            Err(RuntimeDeliveryError::InvalidCredential)
+        ));
+        // Renewal (#674): by the current certificate, or by the enrolled
+        // bearer once it has expired; static tokens name no runner.
+        let renew = |token: Option<&str>, certificate: Option<&[u8]>| {
+            operations.renew_certificate(
+                token,
+                RuntimeCaller {
+                    instance: Some("instance-a"),
+                    version: None,
+                    certificate,
+                },
+                "prod",
+                &RuntimeCertificateRequest { csr: csr.clone() },
+            )
+        };
+        let renewed = renew(None, Some(&leaf)).unwrap();
+        let renewed_leaf = x509_parser::pem::parse_x509_pem(renewed.certificate.as_bytes())
+            .unwrap()
+            .1
+            .contents;
+        assert_eq!(
+            admit(&renewed_leaf, "prod").unwrap().owner,
+            admitted.owner,
+            "a renewed certificate keeps its runner's lease identity"
+        );
+        renew(Some(&enrolled.credential), None).unwrap();
+        assert!(matches!(
+            renew(Some("runtime-secret"), None),
+            Err(RuntimeDeliveryError::InvalidRequest(_))
+        ));
+        // Revoked in the registry, the certificate is refused from the next request.
+        operations
+            .store
+            .revoke_runtime_credential(
+                &enrolled.credential_id,
+                1,
+                &crate::storage::RuntimeRevocation {
+                    reason: "host retired".into(),
+                    revoked_by: "operator".into(),
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            admit(&leaf, "prod"),
+            Err(RuntimeDeliveryError::InvalidCredential)
+        ));
+        assert!(renew(None, Some(&leaf)).is_err());
+        assert!(renew(Some(&enrolled.credential), None).is_err());
+    }
+
     #[test]
     fn an_enrolled_agent_is_admitted_to_its_environment_until_revoked() {
         use crate::runtime_credentials::{ENROLLMENT_TOKEN_PREFIX, digest, mint};
@@ -1292,7 +1582,7 @@ mod tests {
                     created_by: "operator".into(),
                 })
                 .unwrap();
-            RuntimeEnrollRequest { token }
+            RuntimeEnrollRequest { token, csr: None }
         };
         let request = issue();
         // Presented to another environment, the token is refused and kept.
@@ -1308,7 +1598,7 @@ mod tests {
         ));
         let admit = |token: &str, environment: &str| {
             operations
-                .admit(Some(token), Some("instance-a"), environment)
+                .admit(Some(token), &Some("instance-a").into(), environment)
                 .map(|_| ())
         };
         admit(&enrolled.credential, "prod").unwrap();
@@ -1337,7 +1627,8 @@ mod tests {
             operations.enroll(
                 "prod",
                 &RuntimeEnrollRequest {
-                    token: "runtime-secret".into()
+                    token: "runtime-secret".into(),
+                    csr: None,
                 }
             ),
             Err(RuntimeDeliveryError::InvalidCredential)

@@ -2555,6 +2555,7 @@ mod tests {
         fn fleet_status(&self) -> FleetStatusFuture<'_> {
             Box::pin(async {
                 Ok(FleetStatusReport {
+                    server_version: String::new(),
                     environments: Vec::new(),
                     environment_count: 0,
                     environments_current: 0,

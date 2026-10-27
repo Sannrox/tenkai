@@ -2884,6 +2884,7 @@ dependencies = [
  "tar",
  "tenkai-wire",
  "thiserror",
+ "time",
  "tokio",
  "tokio-rustls",
  "tokio-stream",
@@ -2894,6 +2895,7 @@ dependencies = [
  "url",
  "uuid",
  "webpki-roots",
+ "x509-parser",
 ]
 
 [[package]]

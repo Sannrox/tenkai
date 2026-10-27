@@ -37,6 +37,12 @@ struct Cli {
     /// Without it, `TENKAI_RUNTIME_TOKEN` is used as before.
     #[arg(long, env = "TENKAI_RUNTIME_CREDENTIAL_FILE")]
     credential_file: Option<PathBuf>,
+    /// Where the agent keeps its runner certificate (#674): enrollment
+    /// generates the key here, sends a CSR, and stores the issued
+    /// certificate, which the agent then presents on every request. Needs a
+    /// server with a runner CA and `--credential-file`.
+    #[arg(long, env = "TENKAI_RUNTIME_CERTIFICATE_DIR")]
+    certificate_dir: Option<PathBuf>,
 }
 
 /// Manage the agent's own versions under `--home`.
@@ -102,6 +108,7 @@ async fn main() -> Result<()> {
                 &environment,
                 || tenkai::secret_source::read("TENKAI_RUNTIME_ENROLLMENT_TOKEN"),
                 file,
+                cli.certificate_dir.as_deref(),
             )
             .await?
         }
@@ -115,6 +122,13 @@ async fn main() -> Result<()> {
         executor,
         inventory_report,
     )?;
+    if let Some(dir) = &cli.certificate_dir {
+        anyhow::ensure!(
+            cli.credential_file.is_some(),
+            "--certificate-dir needs --credential-file: the certificate is issued at enrollment"
+        );
+        client = client.with_certificate_dir(dir.clone())?;
+    }
     if let Some(home) = cli.home {
         client = client.with_home(tenkai::runtime_self_upgrade::Home::new(home))?;
     }

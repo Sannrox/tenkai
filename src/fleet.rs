@@ -42,6 +42,10 @@ pub struct FleetEnvironmentRow {
 /// Fleet-wide delivery posture (no credentials).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FleetStatusReport {
+    /// The server's own version, which runners and consoles compare
+    /// against (#761).
+    #[serde(default)]
+    pub server_version: String,
     pub environments: Vec<FleetEnvironmentRow>,
     pub environment_count: usize,
     pub environments_current: usize,
@@ -401,6 +405,7 @@ fn aggregate_fleet_report(environments: Vec<FleetEnvironmentRow>) -> FleetStatus
         .filter(|row| row.posture == "empty")
         .count();
     FleetStatusReport {
+        server_version: crate::version_skew::SERVER_VERSION.into(),
         environments,
         environment_count,
         environments_current,

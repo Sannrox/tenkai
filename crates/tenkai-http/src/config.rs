@@ -57,6 +57,9 @@ pub struct ServerConfig {
     pub imports: Option<tenkai::offline_import::ImportSettings>,
     /// Exports over HTTP (#682): `/v1/exports`.
     pub exports: Option<Arc<tenkai::exports::Exports>>,
+    /// The runner CA (#674): issues runner certificates at enrollment and
+    /// admits runners by them.
+    pub runner_ca: Option<Arc<tenkai::runner_ca::RunnerCa>>,
 }
 
 #[derive(Clone, Debug)]
@@ -90,6 +93,7 @@ impl ServerConfig {
             backups: None,
             imports: None,
             exports: None,
+            runner_ca: None,
         }
     }
 

@@ -95,7 +95,9 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | `TENKAI_TLS_CERT` | unset | `tenkai-server` only: PEM certificate chain for [native TLS](run-tenkai-server.md#native-tls); required for a non-loopback bind |
 | `TENKAI_TLS_KEY` | unset | Secret setting: PEM private key for `TENKAI_TLS_CERT` (also `TENKAI_TLS_KEY_FILE` or the secret directory) |
 | `TENKAI_TLS_CLIENT_CA` | unset | PEM CA bundle that verifies client certificates when presented |
-| `TENKAI_TLS_REQUIRE_RUNTIME_CLIENT_CERT` | `false` | Refuse `/v1/runtime/*` without a verified client certificate; needs `TENKAI_TLS_CLIENT_CA` |
+| `TENKAI_TLS_REQUIRE_RUNTIME_CLIENT_CERT` | `false` | Refuse `/v1/runtime/*` without a verified client certificate, except enrollment; needs `TENKAI_TLS_CLIENT_CA` |
+| `TENKAI_RUNNER_CA_CERT`, `TENKAI_RUNNER_CA_KEY` | unset | `tenkai-server` only: the [runner CA](run-tenkai-server.md#runner-certificates) (PEM files, set together) that issues and admits runner certificates |
+| `TENKAI_RUNTIME_CERTIFICATE_DIR` | unset | `tenkai-runtime`: keeps the runner key, certificate and CA; needs `TENKAI_RUNTIME_CREDENTIAL_FILE` |
 | `TENKAI_TLS_MIN_VERSION` | `1.3` | Lowest TLS version accepted: `1.3` or `1.2` |
 | `TENKAI_ENABLE_METRICS` | `false` | Enable the Prometheus scrape endpoint (`--enable-metrics`) |
 | `TENKAI_AGENT_ACTOR_POLICY` | `require_approval` | Mutations whose token `act` chain names an agent: `require_approval` allows only plans, which still need approval under the environment's policy; `forbid` refuses all ([auth request context](auth-request-context.md#delegated-calls-and-agent-actors)) |

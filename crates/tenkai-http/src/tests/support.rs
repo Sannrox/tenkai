@@ -136,6 +136,7 @@ impl ReconcilePort for FixedReconciler {
     fn fleet_status(&self) -> FleetStatusFuture<'_> {
         Box::pin(async {
             Ok(tenkai::plan::FleetStatusReport {
+                server_version: String::new(),
                 environments: vec![tenkai::plan::FleetEnvironmentRow {
                     name: "prod".into(),
                     id: "tenkai:env:prod".into(),

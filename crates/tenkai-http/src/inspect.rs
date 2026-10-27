@@ -183,6 +183,7 @@ pub(super) async fn observed_runtime(
 fn service_status(status: &'static str, config: &ServerConfig) -> ServiceStatus {
     ServiceStatus {
         status,
+        version: tenkai::version_skew::SERVER_VERSION,
         profile: config.capabilities.profile.clone(),
         capabilities: config.capabilities.diagnostic_names(),
         contracts: super::contract::SERVED_CONTRACTS.to_vec(),

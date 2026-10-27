@@ -196,6 +196,13 @@ async fn run(cli: Cli) -> Result<()> {
         );
         return tenkai_http::oci_registry::serve_tls(listener, tls, router).await;
     }
+    // Local only: a runner CA is two files written here.
+    if let Command::RunnerCa {
+        command: args::RunnerCaCommand::Init { dir, name },
+    } = &cli.command
+    {
+        return init_runner_ca(dir, name);
+    }
     // Local only: a server self-upgrade acts on this host's home and store.
     if let Command::SelfUpgrade { .. } = &cli.command {
         let Command::SelfUpgrade { command } = cli.command else {
@@ -308,4 +315,37 @@ async fn run(cli: Cli) -> Result<()> {
         return embedded_dev::run_dev(&cli).await;
     }
     embedded::run(cli).await
+}
+
+/// Write a new runner CA into `dir`, refusing to replace an existing one.
+fn init_runner_ca(dir: &std::path::Path, name: &str) -> Result<()> {
+    use anyhow::Context as _;
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let (cert, key) = tenkai::runner_ca::RunnerCa::generate(name)?;
+    std::fs::create_dir_all(dir)?;
+    for (file, contents, mode) in [
+        ("runner-ca-key.pem", &key, 0o600),
+        ("runner-ca.pem", &cert, 0o644),
+    ] {
+        let path = dir.join(file);
+        let mut out = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .open(&path)
+            .with_context(|| {
+                format!(
+                    "creating {} (an existing CA is never replaced)",
+                    path.display()
+                )
+            })?;
+        out.write_all(contents.as_bytes())?;
+        out.sync_all()?;
+    }
+    println!(
+        "wrote {}/runner-ca.pem and runner-ca-key.pem",
+        dir.display()
+    );
+    Ok(())
 }

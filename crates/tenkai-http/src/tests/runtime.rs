@@ -313,6 +313,11 @@ async fn an_agent_enrolls_once_works_with_its_credential_and_stops_when_revoked(
     assert_eq!(agent["environment"], "prod");
     assert_eq!(agent["instances"][0]["instance_id"], "rt-1");
     assert_eq!(agent["instances"][0]["runtime_version"], "0.5.0");
+    // Its skew against this server's version (#761).
+    assert_eq!(
+        agent["instances"][0]["skew"],
+        tenkai::version_skew::skew(tenkai::version_skew::SERVER_VERSION, "0.5.0").unwrap()
+    );
     assert!(agent["instances"][0]["last_inventory_at"].is_i64());
     let static_id = tenkai::runtime_credentials::digest("runtime-secret");
     let fixed = runners
