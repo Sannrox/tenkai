@@ -489,6 +489,16 @@ pub struct RuntimeWork {
     pub claim: Option<RuntimeClaim>,
 }
 
+/// Which binary of which agent self-upgrade step a runtime asks for (#685).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSelfReleaseFile {
+    pub plan_id: String,
+    pub generation: u64,
+    pub step_id: String,
+    pub name: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeHeartbeat {
@@ -803,6 +813,67 @@ impl RuntimeDeliveryOperations {
             require_runtime_placement(&mut ctx, environment, &plan).await?;
         }
         Ok(claim)
+    }
+
+    /// One binary of the agent's own release, for the claimed runtime that
+    /// runs that plan step (#685): pull-only, so an agent on another host
+    /// needs no access to the server's files. The claim is renewed first, so
+    /// only its current holder is served. Returns the bytes and their mode;
+    /// the agent checks both against the signed artifact digest.
+    pub async fn self_release_file(
+        &self,
+        token: Option<&str>,
+        instance: Option<&str>,
+        environment: &str,
+        request: &RuntimeSelfReleaseFile,
+    ) -> Result<(Vec<u8>, u32), RuntimeDeliveryError> {
+        if !crate::runtime_self_upgrade::BINARIES.contains(&request.name.as_str()) {
+            return Err(RuntimeDeliveryError::InvalidRequest(
+                "not a runtime agent binary".into(),
+            ));
+        }
+        self.renew(
+            token,
+            instance,
+            environment,
+            &RuntimeHeartbeat {
+                plan_id: request.plan_id.clone(),
+                generation: request.generation,
+            },
+        )
+        .await?;
+        let Some(mut ctx) = self.reconciler.application_ctx() else {
+            return Err(RuntimeDeliveryError::Unavailable(
+                "plans unavailable".into(),
+            ));
+        };
+        let plan = crate::plan::load(&mut ctx, &request.plan_id)
+            .await
+            .map_err(|_| RuntimeDeliveryError::Unavailable("plans unavailable".into()))?;
+        let step = plan
+            .steps
+            .iter()
+            .find(|step| {
+                step.id == request.step_id
+                    && step.product == crate::runtime_self_upgrade::SELF_PRODUCT
+            })
+            .ok_or_else(|| {
+                RuntimeDeliveryError::InvalidRequest(
+                    "the plan has no runtime agent step with that id".into(),
+                )
+            })?;
+        let path = std::path::Path::new(&step.workdir).join(&request.name);
+        let read = || -> std::io::Result<(Vec<u8>, u32)> {
+            use std::os::unix::fs::PermissionsExt as _;
+            let file = std::fs::File::open(&path)?;
+            let mode = file.metadata()?.permissions().mode() & 0o7777;
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut &file, &mut bytes)?;
+            Ok((bytes, mode))
+        };
+        read().map_err(|_| {
+            RuntimeDeliveryError::Unavailable("runtime agent release content unavailable".into())
+        })
     }
 
     pub async fn report_inventory(

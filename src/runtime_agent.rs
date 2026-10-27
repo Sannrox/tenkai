@@ -130,6 +130,11 @@ pub struct RuntimeClient {
     http: reqwest::Client,
     /// When true, probe local inventory and POST to the hub each poll (#136).
     inventory_report: bool,
+    /// Where the agent keeps its own versions, to run its own release (#685).
+    home: Option<std::sync::Arc<crate::runtime_self_upgrade::Home>>,
+    /// Set once the agent switched to a new version of itself: it stops so
+    /// the supervisor starts that version.
+    restart: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl RuntimeClient {
@@ -168,7 +173,24 @@ impl RuntimeClient {
                 .timeout(Duration::from_secs(10))
                 .build()?,
             inventory_report,
+            home: None,
+            restart: Default::default(),
         })
+    }
+
+    /// Run the agent's own releases with versions kept under `home` (#685).
+    /// A switch not yet reported keeps the instance identity that claimed it.
+    pub fn with_home(mut self, home: crate::runtime_self_upgrade::Home) -> Result<Self> {
+        if let Some(pending) = home.pending()? {
+            self.instance_id = pending.instance_id;
+        }
+        self.home = Some(std::sync::Arc::new(home));
+        Ok(self)
+    }
+
+    /// Whether the agent switched to a new version of itself and must stop.
+    pub fn restart_requested(&self) -> bool {
+        self.restart.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub async fn run_once(&self) -> Result<bool> {
@@ -176,6 +198,9 @@ impl RuntimeClient {
         // visible but non-fatal so temporary probe issues do not stop delivery.
         if let Err(error) = self.report_inventory().await {
             eprintln!("runtime inventory report failed (continuing): {error:#}");
+        }
+        if self.report_switch().await? {
+            return Ok(true);
         }
         let work = self.pull().await?;
         let (Some(plan), Some(claim)) = (work.plan, work.claim) else {
@@ -195,11 +220,23 @@ impl RuntimeClient {
 
         let mut receipts = Vec::with_capacity(plan.steps.len());
         let mut succeeded = true;
-        for step in &plan.steps {
+        for (index, step) in plan.steps.iter().enumerate() {
             if !self.heartbeat(&plan.id, claim.generation).await? {
                 bail!("runtime claim was fenced before step {}", step.id);
             }
-            let receipt = self.execute_step(&plan.id, claim.generation, step).await?;
+            let receipt = if step.product == crate::runtime_self_upgrade::SELF_PRODUCT {
+                let last = index + 1 == plan.steps.len();
+                match self
+                    .switch_self(&plan.id, claim.generation, step, last, &receipts)
+                    .await?
+                {
+                    Some(receipt) => receipt,
+                    // Switched: the new version reports this plan.
+                    None => return Ok(true),
+                }
+            } else {
+                self.execute_step(&plan.id, claim.generation, step).await?
+            };
             succeeded &= receipt.succeeded;
             receipts.push(receipt);
             if !succeeded {
@@ -228,6 +265,192 @@ impl RuntimeClient {
         Ok(true)
     }
 
+    /// Run the agent's own step (#685): stage the release's binaries and
+    /// switch to them. `None` once switched; the plan is then reported by the
+    /// new version. A receipt when there is nothing to switch or it fails.
+    async fn switch_self(
+        &self,
+        plan_id: &str,
+        generation: u64,
+        step: &Step,
+        last: bool,
+        receipts: &[RuntimeStepReceipt],
+    ) -> Result<Option<RuntimeStepReceipt>> {
+        let receipt = |succeeded: bool, detail: String| {
+            Some(RuntimeStepReceipt {
+                step_id: step.id.clone(),
+                succeeded,
+                detail,
+            })
+        };
+        if !last {
+            return Ok(receipt(
+                false,
+                "the runtime agent's own release must be the plan's last step".into(),
+            ));
+        }
+        let Some(home) = &self.home else {
+            return Ok(receipt(
+                false,
+                "TENKAI_RUNTIME_HOME is not set; the runtime agent cannot switch its own version"
+                    .into(),
+            ));
+        };
+        // Pulled from the server, into a directory only this agent writes:
+        // an agent on another host has no access to the server's files.
+        let download = match self
+            .while_claimed(
+                plan_id,
+                generation,
+                self.download_self_release(home, plan_id, generation, step),
+            )
+            .await
+        {
+            Ok(download) => download,
+            Err(error) => {
+                return Ok(receipt(
+                    false,
+                    format!("fetching the runtime agent release: {error:#}"),
+                ));
+            }
+        };
+        // Its bytes and modes must be the signed release's before anything is
+        // staged, run or switched; staging checks its own copy again.
+        let expected = step.artifact_digest.clone();
+        let staging = {
+            let home = home.clone();
+            tokio::task::spawn_blocking(move || {
+                let source = download.path();
+                crate::runtime_self_upgrade::verify_release(source, &expected)
+                    .and_then(|()| home.stage(source, &expected))
+            })
+            .await
+            .context("staging the runtime agent")?
+        };
+        let staged = match staging {
+            Ok(staged) => staged,
+            Err(error) => {
+                return Ok(receipt(
+                    false,
+                    format!("staging the runtime agent: {error:#}"),
+                ));
+            }
+        };
+        let Some(current) = home.current()? else {
+            return Ok(receipt(
+                false,
+                "the runtime agent has no current version; run `tenkai-runtime install` first"
+                    .into(),
+            ));
+        };
+        // A restart of the running version still restarts: the switch below
+        // repoints `current` at itself and the restarted agent reports it.
+        if current == staged && step.action != crate::plan::Action::Restart {
+            return Ok(receipt(
+                true,
+                format!("runtime agent already runs version {staged}"),
+            ));
+        }
+        // Staging can take a while: switch only while the claim still holds,
+        // so a runtime that has taken over is never raced.
+        if !self.heartbeat(plan_id, generation).await? {
+            bail!("runtime claim was fenced before switching to version {staged}");
+        }
+        home.write_pending(&crate::runtime_self_upgrade::Pending {
+            plan_id: plan_id.into(),
+            generation,
+            step_id: step.id.clone(),
+            instance_id: self.instance_id.clone(),
+            receipts: receipts.to_vec(),
+            from: current,
+            to: staged.clone(),
+            reverted: false,
+        })?;
+        if let Err(error) = home.switch(&staged) {
+            home.clear_pending()?;
+            return Ok(receipt(
+                false,
+                format!("switching the runtime agent: {error:#}"),
+            ));
+        }
+        self.restart
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(None)
+    }
+
+    /// Report a switch of the agent's own version, once the version it left
+    /// for is running, or the previous one after a revert (#685). True when
+    /// there was one to report.
+    async fn report_switch(&self) -> Result<bool> {
+        let Some(home) = &self.home else {
+            return Ok(false);
+        };
+        let Some(pending) = home.pending()? else {
+            return Ok(false);
+        };
+        // A revert interrupted by a crash is finished before anything is
+        // reported.
+        home.finish_revert(&pending)?;
+        let current = home.current()?;
+        // Prepared but never switched (a crash between the two): resume the
+        // switch under the claim, or drop it once the claim is gone. The
+        // new version was never started, so this is no failure to report.
+        if !pending.reverted
+            && pending.from != pending.to
+            && current.as_deref() == Some(pending.from.as_str())
+        {
+            if self.renewable(&pending.plan_id, pending.generation).await? {
+                home.switch(&pending.to)?;
+                self.restart
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            } else {
+                home.clear_pending()?;
+            }
+            return Ok(true);
+        }
+        let (succeeded, detail) = if !pending.reverted && current.as_deref() == Some(&pending.to) {
+            (
+                true,
+                format!("runtime agent now runs version {}", pending.to),
+            )
+        } else {
+            (
+                false,
+                format!(
+                    "runtime agent version {} did not start; running version {} again",
+                    pending.to, pending.from
+                ),
+            )
+        };
+        // Lost or refused meanwhile, the claim is taken again and the plan
+        // runs again; its own step then finds the version already current. A
+        // refusal must not keep this report, or the agent would never pull
+        // the work that recovers it; a transport failure retries.
+        if self.renewable(&pending.plan_id, pending.generation).await? {
+            let mut receipts = pending.receipts.clone();
+            receipts.push(RuntimeStepReceipt {
+                step_id: pending.step_id.clone(),
+                succeeded,
+                detail,
+            });
+            let all = receipts.iter().all(|receipt| receipt.succeeded);
+            self.complete(RuntimeCompletion {
+                plan_id: pending.plan_id.clone(),
+                generation: pending.generation,
+                succeeded: all,
+                detail: if all {
+                    "environment runtime completed every step".into()
+                } else {
+                    "environment runtime reported a failed step".into()
+                },
+                receipts,
+            })
+            .await?;
+        }
+        home.clear_pending()?;
+        Ok(true)
+    }
+
     pub async fn run(&self, interval: Duration) -> Result<()> {
         anyhow::ensure!(
             !interval.is_zero(),
@@ -236,6 +459,7 @@ impl RuntimeClient {
         let mut consecutive_failures = 0_u32;
         loop {
             let delay = match self.run_once().await {
+                Ok(_) if self.restart_requested() => return Ok(()),
                 Ok(_) => {
                     consecutive_failures = 0;
                     interval
@@ -297,6 +521,121 @@ impl RuntimeClient {
             bail!("reporting runtime inventory returned {status}: {detail}");
         }
         Ok(())
+    }
+
+    /// Run `work` while renewing the plan's claim every 30 seconds; stop it
+    /// once the claim is fenced (#685).
+    async fn while_claimed<T>(
+        &self,
+        plan_id: &str,
+        generation: u64,
+        work: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        tokio::pin!(work);
+        let mut renew = tokio::time::interval(Duration::from_secs(30));
+        renew.tick().await;
+        loop {
+            tokio::select! {
+                done = &mut work => return done,
+                _ = renew.tick() => {
+                    if !self.heartbeat(plan_id, generation).await? {
+                        bail!("runtime claim was fenced while fetching the runtime agent");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Download the agent's own release for `step` into a fresh private
+    /// directory under the home, each binary with the mode the server
+    /// reports (#685).
+    async fn download_self_release(
+        &self,
+        home: &crate::runtime_self_upgrade::Home,
+        plan_id: &str,
+        generation: u64,
+        step: &Step,
+    ) -> Result<crate::runtime_self_upgrade::Download> {
+        let download = home.download_dir()?;
+        let dir = download.path();
+        for name in crate::runtime_self_upgrade::BINARIES {
+            let response = self
+                .http
+                .post(format!(
+                    "{}/v1/runtime/environments/{}/self-release",
+                    self.base_url, self.environment
+                ))
+                .timeout(Duration::from_secs(300))
+                .bearer_auth(&self.token)
+                .header("x-tenkai-runtime-instance", &self.instance_id)
+                .json(&crate::runtime_delivery::RuntimeSelfReleaseFile {
+                    plan_id: plan_id.into(),
+                    generation,
+                    step_id: step.id.clone(),
+                    name: name.into(),
+                })
+                .send()
+                .await?;
+            let status = response.status();
+            if !status.is_success() {
+                bail!("the server refused {name}: {status}");
+            }
+            let mode = response
+                .headers()
+                .get("x-tenkai-file-mode")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| u32::from_str_radix(value, 8).ok())
+                .filter(|mode| *mode <= 0o7777);
+            let Some(mode) = mode else {
+                bail!("the server sent {name} without a file mode");
+            };
+            let bytes = response.bytes().await?;
+            let written = (|| -> std::io::Result<()> {
+                use std::io::Write as _;
+                use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+                let path = dir.join(name);
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&path)?;
+                file.write_all(&bytes)?;
+                file.sync_all()?;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))
+            })();
+            written.with_context(|| format!("writing {name}"))?;
+        }
+        Ok(download)
+    }
+
+    /// Whether the claim still holds: `false` when the server refuses the
+    /// renewal for any client-side reason (fenced, withdrawn admission or
+    /// placement), an error only when it could not answer.
+    async fn renewable(&self, plan_id: &str, generation: u64) -> Result<bool> {
+        let response = self
+            .http
+            .post(format!(
+                "{}/v1/runtime/environments/{}/heartbeat",
+                self.base_url, self.environment
+            ))
+            .bearer_auth(&self.token)
+            .header("x-tenkai-runtime-instance", &self.instance_id)
+            .json(&RuntimeHeartbeat {
+                plan_id: plan_id.into(),
+                generation,
+            })
+            .send()
+            .await?;
+        let status = response.status();
+        if status.is_client_error() {
+            eprintln!(
+                "runtime agent switch report for plan {plan_id} refused ({status}); continuing"
+            );
+            return Ok(false);
+        }
+        let _: crate::storage::RuntimeClaim =
+            decode_response(response, "renewing runtime claim").await?;
+        Ok(true)
     }
 
     async fn heartbeat(&self, plan_id: &str, generation: u64) -> Result<bool> {

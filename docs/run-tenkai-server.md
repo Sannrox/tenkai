@@ -256,6 +256,58 @@ tenkai-runtime
 The runtime stays pull-only: it opens every connection, and Tenkai has no
 path to the host.
 
+### Upgrading the runtime agent
+
+The runtime agent is a component like any other (#685). It ships as signed
+releases of the product `tenkai-runtime`, whose deploy inputs are exactly
+`tenkai-runtime` and `tenkai-runtime-guard`. Publishing, compatibility
+profiles, plans, approvals, rollback and receipts work as for every product,
+and the agent runs its own step:
+
+```sh
+tenkai-runtime install --home /var/lib/tenkai-runtime   # once, on the host
+export TENKAI_RUNTIME_HOME=/var/lib/tenkai-runtime      # then run current/tenkai-runtime
+```
+
+- **Fetch.** The agent pulls the two binaries from the server over its
+  runtime credential (`POST /v1/runtime/environments/{environment}/self-release`),
+  which serves them only to the runtime holding the plan's current claim.
+  The agent needs no access to the server's files, and the server opens no
+  connection to the host.
+- **Before any switch.** The downloaded binaries, with their modes, must hash
+  to the artifact digest of the signed release the plan names, and so must
+  the staged copy; changed content is refused.
+  The new version must answer `tenkai-runtime protocol`, within ten seconds,
+  with the runtime
+  protocol this agent speaks to the server (same major, this minor); one that
+  does not is refused. Neither refusal stages or switches anything.
+- **Switch.** The agent copies the release's binaries to
+  `versions/<artifact digest>/` and checks the new version starts. It records the
+  switch in `pending.json`, repoints `current` (keeping `previous`), and
+  exits, so its supervisor starts the new version. The new version reports
+  the step's receipt. Every write is a rename, so a crash leaves the old or
+  the new layout.
+- **Rollback.** `tenkaictl rollback` plans the previous release, which the
+  agent switches back to the same way.
+- **A version that does not start.** Before every start the supervisor runs
+  `tenkai-runtime prestart` from a version known to run (`previous`, else
+  `current`). While a switch is unreported it counts the new version's
+  starts in the home, and after three it reverts: it restores the previous
+  version and marks the new one failed on this host, so it is not switched
+  to again. The previous version then reports the step as failed. The count
+  does not depend on how fast the new version fails or on supervisor start
+  limits. `tenkai-runtime revert` reverts at once, by hand.
+  [`examples/runtime-agent-systemd`](../examples/runtime-agent-systemd/tenkai-runtime.service)
+  holds the unit.
+- **Rules.** The agent's own release must be its plan's last step; a plan
+  that runs other products as well finishes them first. Without
+  `TENKAI_RUNTIME_HOME` the step fails, and nothing changes on the host.
+  The agent confirms its claim just before switching, so a runtime that has
+  taken over the plan meanwhile is never raced. A
+  runtime-run component now records the version it replaced, as server
+  execution does, so `tenkaictl rollback` works for every component a
+  runtime runs.
+
 The configured executor receives only non-secret arguments:
 `--action`, `--product`, `--target-version`, `--release-digest`,
 `--artifact-digest`, `--workdir`, and `--idempotency-key`. It must durably

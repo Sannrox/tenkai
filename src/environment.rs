@@ -374,6 +374,8 @@ pub(crate) async fn update_runtime_deployments_object(
 ) -> Result<()> {
     for step in steps {
         validate_identifier("product", &step.product)?;
+        let previous_key = format!("deployed_prev.{}", step.product);
+        let kept_previous = object.properties.get(&previous_key).cloned();
         update_reconciled_deployment_object(
             ctx,
             object,
@@ -382,6 +384,19 @@ pub(crate) async fn update_runtime_deployments_object(
             observed_at,
         )
         .await?;
+        // As server execution records it, so a runtime-run component rolls
+        // back to the version it replaced (#685). A same-version step (a
+        // restart) replaced nothing and keeps the version recorded before.
+        match step.from.as_deref().filter(|previous| *previous != step.to) {
+            Some(previous) => {
+                object.properties.insert(previous_key, previous.to_string());
+            }
+            None => {
+                if let Some(kept) = kept_previous {
+                    object.properties.insert(previous_key, kept);
+                }
+            }
+        }
     }
     Ok(())
 }

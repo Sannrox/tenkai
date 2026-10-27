@@ -2964,10 +2964,13 @@ name = "tenkai-runtime"
 version = "0.5.0"
 dependencies = [
  "anyhow",
+ "axum",
  "clap",
  "libc",
  "tenkai",
+ "tenkai-http",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
