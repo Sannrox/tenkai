@@ -380,8 +380,17 @@ export TENKAI_RUNTIME_CERTIFICATE_DIR=/var/lib/tenkai-runtime/certificate
 
   The server rereads the TLS client CA on its own; restart it to reload the
   runner CA.
-- **Not yet:** offline revocation lists, trust bundles and disconnected
-  grace (#770).
+- **Isolated sites (#770).** A dark site runs its own server, and that
+  server is its runners' registry and CA. Runners enroll there, and
+  revocation there takes effect from the runner's next request, with no
+  list to carry. Rotation follows the steps above with the site's own CA
+  files. A connected source never names a site's runners, so offline
+  bundles carry no runner revocations or runner trust bundle. A runner cut
+  off from its server past its certificate's expiry claims no new work.
+  When contact returns, it renews with its enrolled bearer on the renewal
+  route and reports under the same lease identity. A plan whose lease lapsed
+  meanwhile has its stored completion applied by the server's lapsed
+  completion recovery.
 
 ### Runner registry
 
