@@ -599,6 +599,7 @@ async fn main() -> Result<()> {
     let import_staging = imports.as_ref().map(|settings| settings.staging.clone());
     let clock_every = clock_settings()?;
     let audit_export = audit_export_settings(cli.tenant_mode)?;
+    let exports = export_settings(cli.tenant_mode)?;
     let app = router(
         ServerConfig {
             management_token,
@@ -633,6 +634,7 @@ async fn main() -> Result<()> {
             agent_actor_policy: cli.agent_actor_policy,
             backups: backups.as_ref().map(|(backups, _)| backups.clone()),
             imports: imports.clone(),
+            exports,
         },
         reconciler.clone(),
         store.clone(),
@@ -1206,6 +1208,37 @@ fn open_host_store(tenant_mode: bool, database: Option<PathBuf>) -> Result<Opene
         sqlite: Some(sqlite),
         tenant: None,
     })
+}
+
+/// Exports over HTTP (#682) from `TENKAI_EXPORT_DIR` and
+/// `TENKAI_EXPORT_SIGNING_KEY` (an Ed25519 seed file that signs support
+/// bundles and audit exports), which must be set together, and optionally
+/// `TENKAI_EXPORT_TRUST_ROOTS` for audit exports signed before a key
+/// rotation. Tenant-mode hubs
+/// keep tenant records in PostgreSQL and refuse the setting.
+fn export_settings(tenant_mode: bool) -> Result<Option<Arc<tenkai::exports::Exports>>> {
+    match (
+        std::env::var_os("TENKAI_EXPORT_DIR"),
+        std::env::var_os("TENKAI_EXPORT_SIGNING_KEY"),
+    ) {
+        (None, None) => Ok(None),
+        (Some(dir), Some(seed)) => {
+            anyhow::ensure!(
+                !tenant_mode,
+                "TENKAI_EXPORT_DIR exports the SQLite operational store; tenant-mode hubs keep tenant records in PostgreSQL"
+            );
+            // Earlier audit exports may be signed by a rotated key.
+            let rotated = std::env::var_os("TENKAI_EXPORT_TRUST_ROOTS")
+                .map(|path| tenkai::release_signing::TrustRoots::load(std::path::Path::new(&path)))
+                .transpose()?;
+            Ok(Some(Arc::new(tenkai::exports::Exports::new(
+                dir.into(),
+                seed.into(),
+                rotated,
+            )?)))
+        }
+        _ => anyhow::bail!("TENKAI_EXPORT_DIR and TENKAI_EXPORT_SIGNING_KEY must be set together"),
+    }
 }
 
 /// Server-mode backups from `TENKAI_BACKUP_DIR` (unset: off) and, when set,

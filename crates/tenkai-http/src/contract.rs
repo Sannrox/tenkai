@@ -142,6 +142,39 @@ pub fn http_contract() -> Value {
         },
         Route {
             method: "POST",
+            path: "/v1/exports",
+            auth: Auth::Management,
+            request: Some(schema::<tenkai::management_operations::ExportRequest>(
+                &mut g,
+            )),
+            response: schema::<tenkai::exports::ExportEntry>(&mut g),
+        },
+        Route {
+            method: "GET",
+            path: "/v1/exports",
+            auth: Auth::Management,
+            request: None,
+            response: schema::<tenkai::exports::ExportList>(&mut g),
+        },
+        Route {
+            method: "GET",
+            path: "/v1/exports/{id}",
+            auth: Auth::Management,
+            request: None,
+            response: schema::<tenkai::exports::ExportEntry>(&mut g),
+        },
+        Route {
+            method: "GET",
+            path: "/v1/exports/{id}/download",
+            auth: Auth::Management,
+            request: None,
+            // Takes a required `reason` query parameter. Answers the stored
+            // artifact in its own format: support bundle, audit export,
+            // recovery bundle or offline receipt.
+            response: schema::<serde_json::Value>(&mut g),
+        },
+        Route {
+            method: "POST",
             path: "/v1/imports",
             auth: Auth::Management,
             request: Some(schema::<ImportRequest>(&mut g)),

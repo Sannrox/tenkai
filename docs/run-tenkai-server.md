@@ -152,6 +152,49 @@ that zip; the checksum is still enforced. Builds without `ui` serve no console
 and need no network. For console development, `--ui-dir <path>` serves a local
 console build (a directory with `index.html`) instead of the embedded one.
 
+### Exports over HTTP
+
+With `TENKAI_EXPORT_DIR` and `TENKAI_EXPORT_SIGNING_KEY` (an Ed25519 seed
+file) set, an operator without shell access on the host can create and
+download the files the CLI otherwise writes there (#682):
+
+| `kind` | Scope | Artifact |
+| --- | --- | --- |
+| `support-bundle` | hub | signed [support bundle](support-bundle.md), without log events |
+| `audit-export` | hub | the next signed [audit export](audit-export.md) of the chain kept under `TENKAI_EXPORT_DIR/audit-chain` |
+| `recovery-bundle` | `environment`, `plan_id` | ADR 0027 recovery diagnostic |
+| `offline-receipt` | `environment`, `upgrade` | the accepted `tenkai.offline-receipt.v1` of an isolated environment |
+
+- `POST /v1/exports` with `{"kind": ..., "reason": ..., ...}` produces one
+  export and answers it with `201`. `GET /v1/exports` lists exports newest
+  first, `GET /v1/exports/{id}` shows one, and
+  `GET /v1/exports/{id}/download?reason=...` returns the artifact as an
+  attachment under the name the CLI gives it.
+- **Unchanged formats.** A downloaded file is byte for byte what the server
+  stored. Support bundles and audit exports verify with
+  `tenkaictl support-bundle verify` and `tenkaictl audit verify` like locally
+  produced ones, and a receipt imports with `tenkaictl upgrade import-receipt`.
+- **Who and why.** Every creation and download needs a reason. Each is kept
+  with its principal and time beside the export and shown on inspect, and
+  each writes an `export.<kind>.*` audit record naming the export. A
+  download is recorded before any byte is sent.
+- **Scope.** Management capability only; read-only credentials can neither
+  create nor list exports. An environment-scoped credential creates and sees
+  only its own environment's recovery bundles and offline receipts.
+- **Durability.** An export is assembled in a staging directory and renamed
+  into place, so a crash never leaves a partial export. Exports are never
+  deleted by the server. If the audit chain advanced but an entry's export was
+  not stored, audit-export requests store such entries, oldest first, before
+  the chain advances again, so the downloaded chain has no gap. A lock on the
+  export directory serializes this across overlapping server processes.
+- **Key rotation.** After rotating `TENKAI_EXPORT_SIGNING_KEY`, point
+  `TENKAI_EXPORT_TRUST_ROOTS` at trust roots naming the earlier key so the
+  audit chain continues.
+- **Receipts.** The hub keeps an accepted receipt from this version on.
+  Importing a receipt accepted by an older version again stores it.
+- **Tenant mode** refuses the setting at startup, and a tenant-mode host
+  answers every export route with `503`: tenant records live in PostgreSQL.
+
 ### Remote CLI
 
 Remote v1 CLI support covers `reconcile --once`, `fleet status`, `fleet watch`,

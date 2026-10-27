@@ -211,7 +211,7 @@ fn is_plain_field(value: &str) -> bool {
 pub async fn export(
     ctx: Option<&mut Ctx>,
     schema_version: Option<u32>,
-    log: Option<&mut dyn std::io::BufRead>,
+    log: Option<&mut (dyn std::io::BufRead + Send)>,
     seed_path: &Path,
     now_ms: i64,
 ) -> Result<SupportBundle> {
@@ -267,7 +267,7 @@ pub async fn export(
 /// corrupt or unopenable database is reported, never created or repaired.
 pub async fn export_from_database(
     database: &Path,
-    log: Option<&mut dyn std::io::BufRead>,
+    log: Option<&mut (dyn std::io::BufRead + Send)>,
     seed_path: &Path,
     now_ms: i64,
 ) -> Result<SupportBundle> {

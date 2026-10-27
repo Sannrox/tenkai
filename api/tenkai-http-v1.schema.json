@@ -2230,6 +2230,170 @@
       ],
       "type": "object"
     },
+    "ExportAction": {
+      "enum": [
+        "created",
+        "downloaded"
+      ],
+      "type": "string"
+    },
+    "ExportEntry": {
+      "description": "An export with its events, oldest first.",
+      "properties": {
+        "created_at_ms": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "environment": {
+          "description": "Set exactly for environment-scoped kinds.",
+          "type": "string"
+        },
+        "events": {
+          "items": {
+            "$ref": "#/$defs/ExportEvent"
+          },
+          "type": "array"
+        },
+        "file_name": {
+          "description": "The name the download carries, as the CLI would name the file.",
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/ExportKind"
+        },
+        "schema": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "size_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema",
+        "id",
+        "kind",
+        "file_name",
+        "sha256",
+        "size_bytes",
+        "created_at_ms",
+        "events"
+      ],
+      "type": "object"
+    },
+    "ExportEvent": {
+      "additionalProperties": false,
+      "description": "Who created or downloaded an export, when, and why.",
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/ExportAction"
+        },
+        "at_ms": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "principal": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "at_ms",
+        "principal",
+        "action",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "ExportKind": {
+      "oneOf": [
+        {
+          "const": "support-bundle",
+          "description": "Hub-wide: redacted, signed `tenkai.support-bundle.v1`.",
+          "type": "string"
+        },
+        {
+          "const": "audit-export",
+          "description": "Hub-wide: the next signed `tenkai.audit-export.v1` of this host's chain.",
+          "type": "string"
+        },
+        {
+          "const": "recovery-bundle",
+          "description": "One environment's plan: `tenkai.recovery_bundle.v1`.",
+          "type": "string"
+        },
+        {
+          "const": "offline-receipt",
+          "description": "One isolated environment's accepted `tenkai.offline-receipt.v1`.",
+          "type": "string"
+        }
+      ]
+    },
+    "ExportList": {
+      "description": "`GET /v1/exports`, newest first.",
+      "properties": {
+        "exports": {
+          "items": {
+            "$ref": "#/$defs/ExportEntry"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "exports"
+      ],
+      "type": "object"
+    },
+    "ExportRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "environment": {
+          "default": null,
+          "description": "Required for `recovery-bundle` and `offline-receipt`, refused otherwise.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/ExportKind"
+        },
+        "plan_id": {
+          "default": null,
+          "description": "The plan of a `recovery-bundle`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "description": "Why the export is made; recorded with the creator.",
+          "type": "string"
+        },
+        "upgrade": {
+          "default": null,
+          "description": "The connectivity upgrade of an `offline-receipt`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "reason"
+      ],
+      "type": "object"
+    },
     "FleetEnvironmentRow": {
       "description": "One environment's row in a fleet posture table (no credentials).",
       "properties": {
@@ -4398,6 +4562,42 @@
       "response": {
         "$ref": "#/$defs/BackupManifest"
       }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/exports",
+      "request": {
+        "$ref": "#/$defs/ExportRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ExportEntry"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "GET",
+      "path": "/v1/exports",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/ExportList"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "GET",
+      "path": "/v1/exports/{id}",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/ExportEntry"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "GET",
+      "path": "/v1/exports/{id}/download",
+      "request": null,
+      "response": true
     },
     {
       "auth": "management",

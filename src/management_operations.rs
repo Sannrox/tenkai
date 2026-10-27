@@ -6,7 +6,9 @@
 
 use std::sync::Arc;
 
+mod exports;
 mod runtime_enrollment;
+pub use exports::ExportRequest;
 pub use runtime_enrollment::{
     RuntimeCredentialRevoked, RuntimeEnrollmentIssued, RuntimeEnrollmentRequest,
     RuntimeRevokeRequest, RuntimeRunner, RuntimeRunnerInstance, RuntimeRunnerList,

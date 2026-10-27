@@ -25,7 +25,8 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
             .map(std::io::BufReader::new);
         let bundle = tenkai::support_bundle::export_from_database(
             &database,
-            log.as_mut().map(|log| log as &mut dyn std::io::BufRead),
+            log.as_mut()
+                .map(|log| log as &mut (dyn std::io::BufRead + Send)),
             &signing_key,
             tenkai::now_millis(),
         )
