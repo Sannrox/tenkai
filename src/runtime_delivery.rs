@@ -1120,7 +1120,7 @@ impl RuntimeDeliveryOperations {
             .map_err(|error| RuntimeDeliveryError::InvalidRequest(format!("{error:#}")))?;
         Ok(RuntimeCertificate {
             certificate,
-            ca: ca.cert_pem().into(),
+            ca: ca.trust_bundle(),
         })
     }
 }
@@ -1220,7 +1220,7 @@ impl RuntimeDeliveryOperations {
             credential_id: record.credential_digest,
             ca: certificate
                 .as_ref()
-                .and_then(|_| ca.map(|ca| ca.cert_pem().to_string())),
+                .and_then(|_| ca.map(|ca| ca.trust_bundle())),
             certificate,
         })
     }
