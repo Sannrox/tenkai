@@ -34,6 +34,7 @@ mod remote_delivery;
 mod remote_env_config;
 mod remote_hold;
 mod revocations;
+mod self_upgrade;
 #[cfg(test)]
 mod tests;
 mod token_cache;
@@ -194,6 +195,13 @@ async fn run(cli: Cli) -> Result<()> {
             store.display()
         );
         return tenkai_http::oci_registry::serve_tls(listener, tls, router).await;
+    }
+    // Local only: a server self-upgrade acts on this host's home and store.
+    if let Command::SelfUpgrade { .. } = &cli.command {
+        let Command::SelfUpgrade { command } = cli.command else {
+            unreachable!("matched above");
+        };
+        return self_upgrade::run(command).await;
     }
     // Local only: host install needs the archive, trust roots, and dest.
     if let Command::Upgrade {

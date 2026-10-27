@@ -112,6 +112,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         | Command::Revocations { .. }
         | Command::Keys { .. }
         | Command::Registry { .. }
+        | Command::SelfUpgrade { .. }
         | Command::Logout => {
             unreachable!("handled before opening the embedded database")
         }

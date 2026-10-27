@@ -114,6 +114,11 @@ struct Cli {
         default_value = "require_approval"
     )]
     agent_actor_policy: tenkai::management_operations::AgentActorPolicy,
+    /// Check that this binary can open the SQLite store (`--database`) on a
+    /// private copy, print `{"stored":N,"supported":M}`, and exit; non-zero
+    /// when it cannot. `tenkaictl self-upgrade` runs it before a switch.
+    #[arg(long, default_value_t = false)]
+    check_store: bool,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -326,6 +331,31 @@ fn parse_cli() -> Cli {
 async fn main() -> Result<()> {
     tenkai_executor::install();
     let cli = parse_cli();
+    if cli.check_store {
+        let database = cli
+            .database
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(".tenkai-state/tenkai.db"));
+        let checked = if cli.tenant_mode
+            || tenkai::secret_source::is_configured("TENKAI_POSTGRES_URL")
+        {
+            Err(anyhow::anyhow!(
+                "--check-store checks the community SQLite store; PostgreSQL hubs are upgraded by their operator"
+            ))
+        } else {
+            tenkai::server_self_upgrade::check_store(&database)
+        };
+        match checked {
+            Ok(check) => {
+                println!("{}", serde_json::to_string(&check)?);
+                return Ok(());
+            }
+            Err(error) => {
+                println!("{error:#}");
+                std::process::exit(1);
+            }
+        }
+    }
     require_hub_tenant_mode(cli.tenant_mode)
         .context("hub host refuses to start as the community SQLite host")?;
     if let Some(operation_id) = cli

@@ -425,7 +425,17 @@ const PROBE_OUTPUT: u64 = 64 * 1024;
 /// [`PROBE_OUTPUT`] of its output while it runs. The whole group is killed
 /// if it has not finished within [`PROBE_DEADLINE`], so a stuck candidate, or
 /// a descendant holding its output open, cannot stall the agent.
-fn probe(binary: &Path, args: &[&std::ffi::OsStr]) -> Result<std::process::Output> {
+pub(crate) fn probe(binary: &Path, args: &[&std::ffi::OsStr]) -> Result<std::process::Output> {
+    probe_within(binary, args, PROBE_DEADLINE)
+}
+
+/// [`probe`] with its own deadline, for checks that take longer than a
+/// version answer.
+pub(crate) fn probe_within(
+    binary: &Path,
+    args: &[&std::ffi::OsStr],
+    within: std::time::Duration,
+) -> Result<std::process::Output> {
     use std::io::Read as _;
     use std::os::unix::process::CommandExt as _;
     let arg = args
@@ -455,17 +465,14 @@ fn probe(binary: &Path, args: &[&std::ffi::OsStr]) -> Result<std::process::Outpu
         unsafe { libc::killpg(group, libc::SIGKILL) };
         let _ = child.wait();
     };
-    let deadline = std::time::Instant::now() + PROBE_DEADLINE;
+    let deadline = std::time::Instant::now() + within;
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
         }
         if std::time::Instant::now() >= deadline {
             kill(&mut child);
-            bail!(
-                "did not answer `{arg}` within {}s",
-                PROBE_DEADLINE.as_secs()
-            );
+            bail!("did not answer `{arg}` within {}s", within.as_secs());
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     };
@@ -475,10 +482,7 @@ fn probe(binary: &Path, args: &[&std::ffi::OsStr]) -> Result<std::process::Outpu
         Err(_) => {
             // A descendant still holds the output open.
             kill(&mut child);
-            bail!(
-                "did not finish `{arg}` within {}s",
-                PROBE_DEADLINE.as_secs()
-            );
+            bail!("did not finish `{arg}` within {}s", within.as_secs());
         }
     };
     // Nothing of the probe may outlive it.
@@ -490,7 +494,7 @@ fn probe(binary: &Path, args: &[&std::ffi::OsStr]) -> Result<std::process::Outpu
     })
 }
 
-fn sync_dir(dir: &Path) -> Result<()> {
+pub(crate) fn sync_dir(dir: &Path) -> Result<()> {
     std::fs::File::open(dir)
         .and_then(|dir| dir.sync_all())
         .with_context(|| format!("syncing {}", dir.display()))

@@ -202,6 +202,12 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: WaveCommand,
     },
+    /// Upgrade or roll back this host's Tenkai server binaries from a signed
+    /// bundle, gated on the store check and readiness (local only).
+    SelfUpgrade {
+        #[command(subcommand)]
+        command: crate::self_upgrade::SelfUpgradeCommand,
+    },
     /// One signed upgrade across connected, intermittent, and isolated environments.
     Upgrade {
         #[command(subcommand)]

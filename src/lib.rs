@@ -232,6 +232,7 @@ pub mod runtime_protocol;
 pub mod runtime_self_upgrade;
 pub mod schema_contract;
 pub mod secret_source;
+pub mod server_self_upgrade;
 pub mod shutdown;
 mod signature_verification;
 pub mod signer;
