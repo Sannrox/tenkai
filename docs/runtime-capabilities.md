@@ -48,6 +48,10 @@ composition, not an operator support contract:
   terminal-outcome export remain unavailable. Product `high_availability` is
   not claimed.
 
+Multi-replica tenant-mode hubs fence writes on one hub writer lease; the
+[hub failover runbook](ha-failover-runbook.md) covers detection, takeover,
+verification and rollback. The profile stays gated (ADR 0010 amendment, #750).
+
 ADR 0010 defines complete operating profiles. Capability negotiation remains
 useful component evidence; a set of component claims is not by itself a
 support, failover, or recovery promise.
