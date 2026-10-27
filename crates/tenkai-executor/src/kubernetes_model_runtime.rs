@@ -1,5 +1,6 @@
-//! GPU `model_runtime` executor on the in-process Kubernetes path: vLLM (#600)
-//! and Text Generation Inference (#615) serve through one lifecycle.
+//! GPU `model_runtime` executor on the in-process Kubernetes path: vLLM (#600),
+//! Text Generation Inference (#615) and NVIDIA NIM (#616) serve through one
+//! lifecycle.
 //!
 //! Each descriptor generation is a candidate Deployment and Service. A candidate
 //! becomes active only after it is Available and passes a fixed completion smoke
@@ -41,6 +42,8 @@ pub enum ServingEngine {
     Vllm,
     /// Text Generation Inference.
     Tgi,
+    /// NVIDIA NIM; needs an [`NgcEntitlement`].
+    Nim,
 }
 
 impl ServingEngine {
@@ -48,6 +51,7 @@ impl ServingEngine {
         match engine {
             "vllm" => Ok(Self::Vllm),
             "tgi" => Ok(Self::Tgi),
+            "nim" => Ok(Self::Nim),
             other => bail!("model_runtime engine {other} has no Kubernetes serving executor"),
         }
     }
@@ -57,6 +61,15 @@ impl ServingEngine {
         match self {
             Self::Vllm => "vllm",
             Self::Tgi => "tgi",
+            Self::Nim => "nim",
+        }
+    }
+
+    /// The readiness probe path of the serving container.
+    fn readiness_path(self) -> &'static str {
+        match self {
+            Self::Vllm | Self::Tgi => "/health",
+            Self::Nim => "/v1/health/ready",
         }
     }
 
@@ -65,6 +78,7 @@ impl ServingEngine {
         match self {
             Self::Vllm => "TENKAI_VLLM",
             Self::Tgi => "TENKAI_TGI",
+            Self::Nim => "TENKAI_NIM",
         }
     }
 
@@ -76,6 +90,7 @@ impl ServingEngine {
         port: u16,
         tensor_parallel: u32,
         context_length: u32,
+        entitlement: Option<&NgcEntitlement>,
     ) -> (Value, Value) {
         match self {
             Self::Vllm => (
@@ -111,14 +126,66 @@ impl ServingEngine {
                 // The model is the mounted directory; nothing is downloaded at start.
                 json!([{"name": "HF_HUB_OFFLINE", "value": "1"}]),
             ),
+            // NIM is configured by environment. A local path as the model name
+            // loads the mounted directory instead of pulling weights from NGC;
+            // model-specific images only honour it with the manifest override.
+            // The key only entitles the container to run.
+            Self::Nim => (
+                json!([]),
+                json!([
+                    {"name": "NIM_MODEL_NAME", "value": model_path},
+                    {"name": "NIM_MANIFEST_ALLOW_UNSAFE", "value": "1"},
+                    {"name": "NIM_SERVED_MODEL_NAME", "value": served_model},
+                    {"name": "NIM_SERVER_PORT", "value": port.to_string()},
+                    {"name": "NIM_TENSOR_PARALLEL_SIZE", "value": tensor_parallel.to_string()},
+                    {"name": "NIM_MAX_MODEL_LEN", "value": context_length.to_string()},
+                    {"name": "HF_HUB_OFFLINE", "value": "1"},
+                    {"name": "NGC_API_KEY", "valueFrom": {"secretKeyRef": {
+                        "name": entitlement.map(|e| e.api_key_secret.as_str()),
+                        "key": "NGC_API_KEY",
+                    }}},
+                ]),
+            ),
         }
     }
+}
+
+/// The entitlement `engine` needs, from its `<prefix>_*` variables through
+/// `var` (given the suffix): NIM fails closed without both Secret names.
+fn entitlement_for(
+    engine: ServingEngine,
+    var: impl Fn(&str) -> Option<String>,
+) -> Result<Option<NgcEntitlement>> {
+    let prefix = engine.env_prefix();
+    Ok(match engine {
+        ServingEngine::Nim => Some(NgcEntitlement {
+            pull_secret: var("PULL_SECRET").with_context(|| {
+                format!("model_runtime engine nim requires {prefix}_PULL_SECRET (NGC image pull secret) on this host")
+            })?,
+            api_key_secret: var("NGC_API_KEY_SECRET").with_context(|| {
+                format!("model_runtime engine nim requires {prefix}_NGC_API_KEY_SECRET (Secret holding NGC_API_KEY) on this host")
+            })?,
+        }),
+        ServingEngine::Vllm | ServingEngine::Tgi => None,
+    })
+}
+
+/// Host-held NGC entitlement for NIM images: Kubernetes Secret names only,
+/// never the key itself, and never manifest data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NgcEntitlement {
+    /// Image pull secret for the registry that serves the NIM image.
+    pub pull_secret: String,
+    /// Secret holding the key under `NGC_API_KEY`.
+    pub api_key_secret: String,
 }
 
 /// Environment-scoped serving configuration; nothing here comes from the manifest.
 #[derive(Debug, Clone)]
 pub struct ServingConfig {
     pub engine: ServingEngine,
+    /// Required for [`ServingEngine::Nim`]; other engines ignore it.
+    pub entitlement: Option<NgcEntitlement>,
     pub cluster_config: PathBuf,
     pub namespace: String,
     /// Serving image, pinned by digest.
@@ -133,7 +200,7 @@ pub struct ServingConfig {
 }
 
 /// Host factory that binds the Kubernetes serving executor to one
-/// environment, for `runtime.engine` `vllm` or `tgi`.
+/// environment, for `runtime.engine` `vllm`, `tgi` or `nim`.
 ///
 /// Serving configuration is host configuration, never manifest data. Each
 /// engine reads its own variables (`TENKAI_VLLM_*` or `TENKAI_TGI_*`): the
@@ -144,7 +211,10 @@ pub struct ServingConfig {
 /// verified weights there and serving pods mount the same claim read-only;
 /// nothing copies between volumes. The environment name is the namespace, as
 /// on the in-process software path. `_SMOKE_BASE_URL` overrides the
-/// smoke-probe URL template.
+/// smoke-probe URL template. NIM also needs its entitlement:
+/// `TENKAI_NIM_PULL_SECRET` and `TENKAI_NIM_NGC_API_KEY_SECRET` name the
+/// image pull secret and the Secret holding `NGC_API_KEY`; without either,
+/// construction fails closed.
 pub struct KubernetesModelRuntimeFactory;
 
 impl tenkai::model_runtime::ModelRuntimeExecutorFactory for KubernetesModelRuntimeFactory {
@@ -175,6 +245,7 @@ impl tenkai::model_runtime::ModelRuntimeExecutorFactory for KubernetesModelRunti
         let weights_root = var("WEIGHTS_ROOT").map(PathBuf::from).with_context(|| {
             format!("model_runtime engine {name} requires {prefix}_WEIGHTS_ROOT (host mount of the weights claim) on this host")
         })?;
+        let entitlement = entitlement_for(engine, var)?;
         let probe = HttpSmokeProbe {
             engine,
             base_url: var("SMOKE_BASE_URL")
@@ -186,6 +257,7 @@ impl tenkai::model_runtime::ModelRuntimeExecutorFactory for KubernetesModelRunti
             probe,
             ServingConfig {
                 engine,
+                entitlement,
                 cluster_config: cluster_config.to_path_buf(),
                 namespace: environment.to_string(),
                 image,
@@ -220,7 +292,8 @@ pub trait SmokeProbe: Send + Sync {
 /// example `http://{service}.{namespace}.svc:{port}` when the executor runs in-cluster.
 #[derive(Debug, Clone)]
 pub struct HttpSmokeProbe {
-    /// Selects the request: OpenAI completions for vLLM, `/generate` for TGI.
+    /// Selects the request: OpenAI completions for vLLM and NIM, `/generate`
+    /// for TGI.
     pub engine: ServingEngine,
     pub base_url: String,
     /// Per-attempt cap; each attempt is also bounded by the remaining startup budget.
@@ -255,7 +328,7 @@ impl SmokeProbe for HttpSmokeProbe {
         // end; exact text is not required because base models do not follow
         // instructions. This is stricter than the llama.cpp path's HTTP-success check.
         let (path, body, text_at) = match self.engine {
-            ServingEngine::Vllm => (
+            ServingEngine::Vllm | ServingEngine::Nim => (
                 "/v1/completions",
                 json!({
                     "model": served_model,
@@ -370,15 +443,26 @@ impl<A: ClusterApplyApi, P: SmokeProbe> KubernetesModelRuntimeExecutor<A, P> {
     /// Generation id over the descriptor and the serving configuration, so a changed
     /// image or placement launches a gated candidate instead of patching live pods.
     pub(crate) fn generation_for(&self, descriptor: &ModelRuntimeDescriptor) -> Result<String> {
-        let serving = json!({
+        let mut serving = json!({
             "descriptor": descriptor.digest()?,
-            "engine": self.config.engine.name(),
             "namespace": self.config.namespace,
             "image": self.config.image,
             "weights_claim": self.config.weights_claim,
             "node_selector": self.config.node_selector,
             "tolerations": self.config.tolerations,
         });
+        // vLLM generations of every release (through v0.5.0) were hashed
+        // without the engine and entitlement fields, so those enter the id
+        // only when they differ from that: released deployments keep their
+        // ids across upgrades. Only unreleased builds between #615 and this
+        // change hashed `"engine": "vllm"`.
+        if self.config.engine != ServingEngine::Vllm {
+            serving["engine"] = json!(self.config.engine.name());
+        }
+        if let Some(entitlement) = &self.config.entitlement {
+            serving["pull_secret"] = json!(entitlement.pull_secret);
+            serving["api_key_secret"] = json!(entitlement.api_key_secret);
+        }
         let digest = format!("{:x}", Sha256::digest(serde_json::to_vec(&serving)?));
         Ok(digest[..GENERATION_LEN].to_string())
     }
@@ -602,7 +686,14 @@ impl<A: ClusterApplyApi, P: SmokeProbe> KubernetesModelRuntimeExecutor<A, P> {
             port,
             gpu.tensor_parallel,
             descriptor.runtime.context_length,
+            self.config.entitlement.as_ref(),
         );
+        let pull_secrets: Vec<Value> = self
+            .config
+            .entitlement
+            .iter()
+            .map(|entitlement| json!({"name": entitlement.pull_secret}))
+            .collect();
         Ok(json!({
             "apiVersion": "apps/v1",
             "kind": "Deployment",
@@ -618,6 +709,7 @@ impl<A: ClusterApplyApi, P: SmokeProbe> KubernetesModelRuntimeExecutor<A, P> {
                     "spec": {
                         "nodeSelector": self.config.node_selector,
                         "tolerations": self.config.tolerations,
+                        "imagePullSecrets": pull_secrets,
                         "containers": [{
                             "name": self.config.engine.name(),
                             "image": self.config.image,
@@ -632,7 +724,10 @@ impl<A: ClusterApplyApi, P: SmokeProbe> KubernetesModelRuntimeExecutor<A, P> {
                                 "limits": {resource: devices},
                             },
                             "readinessProbe": {
-                                "httpGet": {"path": "/health", "port": port},
+                                "httpGet": {
+                                    "path": self.config.engine.readiness_path(),
+                                    "port": port,
+                                },
                                 "periodSeconds": 10,
                             },
                             "volumeMounts": [
@@ -671,6 +766,9 @@ impl<A: ClusterApplyApi, P: SmokeProbe> ModelRuntimeExecutor
             );
         }
         require_digest_pinned(&self.config.image)?;
+        if self.config.engine == ServingEngine::Nim && self.config.entitlement.is_none() {
+            bail!("model_runtime engine nim requires an NGC entitlement on this host");
+        }
         let _lock = self.lock()?;
         let expected = descriptor.digest()?;
         let generation = self.generation_for(descriptor)?;
@@ -1199,6 +1297,7 @@ mod tests {
     fn config(fixture: &Fixture) -> ServingConfig {
         ServingConfig {
             engine: ServingEngine::Vllm,
+            entitlement: None,
             cluster_config: fixture.root.join("kubeconfig"),
             namespace: NS.into(),
             image: "vllm/vllm-openai@sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
@@ -1421,6 +1520,159 @@ mod tests {
         // A vLLM descriptor is not this executor's to serve.
         assert!(executor.apply(&descriptor(&fixture, "2.0.0")).is_err());
         let _ = std::fs::remove_dir_all(fixture.root);
+    }
+
+    /// NIM runs the same gated lifecycle, entitled by host Secret names: the
+    /// pod pulls with the pull secret, reads `NGC_API_KEY` from its Secret,
+    /// and loads the mounted model directory instead of pulling from NGC.
+    #[test]
+    fn nim_is_entitled_by_host_secrets_and_rolls_back() {
+        let fixture = fixture();
+        let api = MemoryClusterApi::new();
+        let cluster = Cluster {
+            inner: &api,
+            unready: Mutex::new(false),
+        };
+        let probe = ScriptedProbe::default();
+        let entitled = |entitlement| {
+            KubernetesModelRuntimeExecutor::new(
+                &cluster,
+                &probe,
+                ServingConfig {
+                    engine: ServingEngine::Nim,
+                    entitlement,
+                    ..config(&fixture)
+                },
+                fixture.cache.clone(),
+                fixture.root.join("state").join("llama-70b.json"),
+            )
+            .with_timeout(Duration::from_millis(50), Duration::from_millis(5))
+        };
+        let nim = |version| {
+            let mut descriptor = descriptor(&fixture, version);
+            descriptor.runtime.engine = "nim".into();
+            descriptor
+        };
+        let (v1, v2, v3) = (nim("1.0.0"), nim("1.1.0"), nim("1.2.0"));
+
+        // Constructed directly without an entitlement, apply refuses.
+        let unentitled = entitled(None);
+        assert!(
+            unentitled
+                .apply(&v1)
+                .unwrap_err()
+                .to_string()
+                .contains("NGC entitlement")
+        );
+        assert!(api.object(NS, "Service", "llama-70b-svc").is_none());
+
+        let executor = entitled(Some(NgcEntitlement {
+            pull_secret: "ngc-pull".into(),
+            api_key_secret: "ngc-key".into(),
+        }));
+        let (g1, g2, g3) = (
+            executor.generation_for(&v1).unwrap(),
+            executor.generation_for(&v2).unwrap(),
+            executor.generation_for(&v3).unwrap(),
+        );
+        let deployment = executor.deployment(&v1, &g1).unwrap();
+        let pod = &deployment["spec"]["template"]["spec"];
+        assert_eq!(pod["imagePullSecrets"], json!([{"name": "ngc-pull"}]));
+        let container = &pod["containers"][0];
+        assert_eq!(container["name"], "nim");
+        assert_eq!(
+            container["readinessProbe"]["httpGet"]["path"],
+            "/v1/health/ready"
+        );
+        let env = container["env"].as_array().unwrap();
+        let value = |name: &str| {
+            env.iter()
+                .find(|entry| entry["name"] == name)
+                .unwrap_or_else(|| panic!("{name} missing: {env:?}"))
+                .clone()
+        };
+        let hex = fixture.digest.trim_start_matches("sha256:");
+        assert_eq!(
+            value("NIM_MODEL_NAME")["value"],
+            format!("/weights/models/{hex}")
+        );
+        assert_eq!(value("NIM_TENSOR_PARALLEL_SIZE")["value"], "2");
+        assert_eq!(value("NIM_MANIFEST_ALLOW_UNSAFE")["value"], "1");
+        assert_eq!(
+            value("NGC_API_KEY")["valueFrom"]["secretKeyRef"],
+            json!({"name": "ngc-key", "key": "NGC_API_KEY"})
+        );
+
+        executor.apply(&v1).unwrap();
+        executor.apply(&v2).unwrap();
+        assert_eq!(selected_generation(&api), Some(g2.clone()));
+        *probe.fail.lock().unwrap() = true;
+        assert!(executor.apply(&v3).is_err());
+        assert!(
+            api.object(NS, "Deployment", &format!("llama-70b-{g3}"))
+                .is_none()
+        );
+        assert_eq!(selected_generation(&api), Some(g2));
+        assert_eq!(executor.rollback().unwrap(), v1.digest().unwrap());
+        assert_eq!(selected_generation(&api), Some(g1));
+        let _ = std::fs::remove_dir_all(fixture.root);
+    }
+
+    /// vLLM generation ids are those of releases before the engine and
+    /// entitlement fields existed, so existing generations are reconciled
+    /// rather than relaunched after an upgrade.
+    #[test]
+    fn unentitled_generations_keep_their_ids() {
+        let fixture = fixture();
+        let api = MemoryClusterApi::new();
+        let cluster = Cluster {
+            inner: &api,
+            unready: Mutex::new(false),
+        };
+        let probe = ScriptedProbe::default();
+        let executor = executor(&fixture, &cluster, &probe);
+        let descriptor = descriptor(&fixture, "1.0.0");
+        let config = config(&fixture);
+        let before = json!({
+            "descriptor": descriptor.digest().unwrap(),
+            "namespace": config.namespace,
+            "image": config.image,
+            "weights_claim": config.weights_claim,
+            "node_selector": config.node_selector,
+            "tolerations": config.tolerations,
+        });
+        let expected = format!("{:x}", Sha256::digest(serde_json::to_vec(&before).unwrap()));
+        assert_eq!(
+            executor.generation_for(&descriptor).unwrap(),
+            expected[..GENERATION_LEN]
+        );
+        let _ = std::fs::remove_dir_all(fixture.root);
+    }
+
+    #[test]
+    fn nim_construction_fails_closed_without_both_entitlement_secrets() {
+        let lookup = |set: &'static [&'static str]| {
+            move |suffix: &str| set.contains(&suffix).then(|| format!("{suffix}-value"))
+        };
+        for (set, missing) in [
+            (&[][..], "TENKAI_NIM_PULL_SECRET"),
+            (&["PULL_SECRET"][..], "TENKAI_NIM_NGC_API_KEY_SECRET"),
+        ] {
+            let error = entitlement_for(ServingEngine::Nim, lookup(set)).unwrap_err();
+            assert!(error.to_string().contains(missing), "{error}");
+        }
+        let entitlement = entitlement_for(
+            ServingEngine::Nim,
+            lookup(&["PULL_SECRET", "NGC_API_KEY_SECRET"]),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(entitlement.pull_secret, "PULL_SECRET-value");
+        assert!(
+            entitlement_for(ServingEngine::Vllm, lookup(&[]))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

@@ -815,7 +815,7 @@ pub fn selected_model_runtime_executor_factory() -> Option<Arc<dyn ModelRuntimeE
 /// `llama.cpp` always keeps the reference executor. `mlx` uses the Apple-silicon
 /// host-process executor (fake engine in CI). `onnx` uses the classical
 /// scoring executor (fake engine in CI) and needs the release workdir so it
-/// can read the signed registry descriptor. `vllm` and `tgi` use the injected
+/// can read the signed registry descriptor. `vllm`, `tgi` and `nim` use the injected
 /// host executor, and only on an environment that carries a cluster
 /// configuration.
 /// Every other case fails closed with a named error: an engine must never
@@ -851,7 +851,7 @@ pub fn select_model_runtime_executor(
                 artifacts,
             )?))
         }
-        engine @ ("vllm" | "tgi") => {
+        engine @ ("vllm" | "tgi" | "nim") => {
             let cluster_config = cluster_config.with_context(|| {
                 format!(
                     "model_runtime engine {engine} requires an environment cluster_config_path; environment {environment} has none"
@@ -1539,7 +1539,7 @@ mod tests {
 
     #[test]
     fn engine_selection_uses_injected_executor_for_gpu_engines_on_cluster_environment() {
-        for engine in ["vllm", "tgi"] {
+        for engine in ["vllm", "tgi", "nim"] {
             let mut descriptor = sample_descriptor();
             descriptor.runtime.engine = engine.into();
             let recording = Arc::new(RecordingExecutor::default());
@@ -1569,7 +1569,7 @@ mod tests {
 
     #[test]
     fn engine_selection_refuses_gpu_engines_without_cluster_or_factory() {
-        for engine in ["vllm", "tgi"] {
+        for engine in ["vllm", "tgi", "nim"] {
             let mut descriptor = sample_descriptor();
             descriptor.runtime.engine = engine.into();
             let state = Path::new("/tmp/model-runtime-state.json");
@@ -1603,7 +1603,7 @@ mod tests {
     #[test]
     fn engine_selection_refuses_unknown_engines() {
         let mut descriptor = sample_descriptor();
-        for engine in ["tensorrt", "sglang", "nim"] {
+        for engine in ["tensorrt", "sglang", "triton"] {
             descriptor.runtime.engine = engine.into();
             let error = select_model_runtime_executor(
                 &descriptor,
