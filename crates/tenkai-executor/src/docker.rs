@@ -428,8 +428,11 @@ impl SoftwareExecutor for DockerHostExecutor {
     /// `apply` restores the previous containers itself when it fails, so the
     /// caller only finishes a restore that `apply` could not complete: remove
     /// containers that have a kept previous one or still carry the failed
-    /// release's label (a failed apply always targets a new release), then
-    /// bring the kept ones back in dependency order.
+    /// release's label and were created by the failed attempt, then bring the
+    /// kept ones back in dependency order. An apply leaves unchanged
+    /// containers running with their older labels (#669); when a rollback
+    /// onto that older release fails, the attempt identity tells the
+    /// containers it created from the ones it never touched.
     fn cleanup_failed_apply(&self, request: &SoftwareApplyRequest) -> Result<()> {
         validate_request(request)?;
         let topology = self.topology(request)?;
@@ -443,6 +446,7 @@ impl SoftwareExecutor for DockerHostExecutor {
                 kept.push((name, previous));
             } else if inspect_container(self, &name)?.is_some_and(|inspected| {
                 inspected.labels.get("tenkai.release-id") == Some(&request.release_id)
+                    && created_by_attempt(request, &inspected)
                     && !successful_job(&inspected)
             }) {
                 remove_if_present(self, request, &name)?;
@@ -1489,6 +1493,10 @@ fn replace_container(
     }
     args.push("--label".into());
     args.push(format!("tenkai.spec-digest={spec_digest}"));
+    if !request.apply_attempt.is_empty() {
+        args.push("--label".into());
+        args.push(format!("tenkai.apply-attempt={}", request.apply_attempt));
+    }
     if matches!(container.mode, DockerContainerMode::OneShot { .. }) {
         args.push("--label".into());
         args.push("tenkai.job=true".into());
@@ -2040,6 +2048,19 @@ fn parse_inspect_json(raw: &str) -> Result<Option<InspectedContainer>> {
     }))
 }
 
+/// Whether a container must be recreated: its image, its spec (including the
+/// env_file and config file contents) or the environment's overlay digest
+/// differ. `tenkai.version` and `tenkai.release-id` are provenance only; a
+/// release that leaves a container unchanged leaves it running with its
+/// older labels (#669).
+/// Whether the failed apply attempt created this container. An unknown
+/// attempt owns nothing, so cleanup never removes a container it cannot tie
+/// to the attempt.
+fn created_by_attempt(request: &SoftwareApplyRequest, inspected: &InspectedContainer) -> bool {
+    !request.apply_attempt.is_empty()
+        && inspected.labels.get("tenkai.apply-attempt") == Some(&request.apply_attempt)
+}
+
 fn container_mismatch(
     request: &SoftwareApplyRequest,
     container: &DockerHostContainer,
@@ -2052,13 +2073,6 @@ fn container_mismatch(
             .get("tenkai.spec-digest")
             .map(String::as_str)
             != Some(spec_digest)
-        || inspected.labels.get("tenkai.version").map(String::as_str)
-            != Some(request.version.as_str())
-        || inspected
-            .labels
-            .get("tenkai.release-id")
-            .map(String::as_str)
-            != Some(request.release_id.as_str())
         || inspected
             .labels
             .get("tenkai.config-digest")
@@ -3242,6 +3256,100 @@ inputs = ["docker"]
         let state: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(state).unwrap()).unwrap();
         state["containers"].as_object().unwrap().clone()
+    }
+
+    /// A release that changes only api's image recreates only api; db keeps
+    /// running with its older version labels and still observes Present
+    /// (#669). A failed health check on a later api restores only api.
+    #[test]
+    fn a_one_image_release_recreates_only_the_changed_container() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-docker-one-image-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let secret_dir = root.join("secrets");
+        std::fs::create_dir_all(&secret_dir).unwrap();
+        std::fs::write(secret_dir.join("api.env"), "TOKEN=x\n").unwrap();
+        write_release(&root, "1.0.0", DIGEST_B);
+        write_release(&root, "2.0.0", DIGEST_C);
+        let (script, state) = fake_docker(&root);
+        let healthy = executor_for(&script, &state, &[]);
+        let v1 = request_for(&root, &secret_dir, "1.0.0");
+        let v2 = request_for(&root, &secret_dir, "2.0.0");
+        healthy.apply(&v1).unwrap();
+
+        let argv = |from: usize| {
+            std::fs::read_to_string(root.join("argv.log")).unwrap()[from..].to_string()
+        };
+        let count = |log: &str, verb: &str| {
+            log.lines()
+                .filter(|line| line.starts_with(&format!(r#"["{verb}""#)))
+                .count()
+        };
+        let before = argv(0).len();
+        healthy.apply(&v2).unwrap();
+        let upgrade = argv(before);
+        assert_eq!(count(&upgrade, "run"), 1, "{upgrade}");
+        assert_eq!(count(&upgrade, "rename"), 1, "{upgrade}");
+        let api = container_runtime_name(&v2, "api");
+        let db = container_runtime_name(&v2, "db");
+        let containers = fake_containers(&state);
+        assert_eq!(containers[&api]["labels"]["tenkai.version"], "2.0.0");
+        assert_eq!(containers[&db]["labels"]["tenkai.version"], "1.0.0");
+        assert_eq!(
+            healthy.observe(&v2).unwrap(),
+            SoftwareObserveStatus::Present
+        );
+
+        // 3.0.0 changes api again and its api never gets healthy: only api
+        // is touched and restored to 2.0.0; db never stops.
+        const DIGEST_D: &str = "registry.example:5000/edge/api@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        write_release(&root, "3.0.0", DIGEST_D);
+        let v3 = request_for(&root, &secret_dir, "3.0.0");
+        let unhealthy = executor_for(&script, &state, &[DIGEST_D]);
+        let before = argv(0).len();
+        let error = unhealthy.apply(&v3).unwrap_err().to_string();
+        assert!(
+            error.contains("restored the previous containers"),
+            "{error}"
+        );
+        unhealthy.cleanup_failed_apply(&v3).unwrap();
+        let failed = argv(before);
+        let touched_db = failed.lines().any(|line| {
+            line.contains(&format!(r#""{db}""#))
+                && ["run", "rename", "stop", "rm", "start"]
+                    .iter()
+                    .any(|verb| line.starts_with(&format!(r#"["{verb}""#)))
+        });
+        assert!(!touched_db, "{failed}");
+        let containers = fake_containers(&state);
+        assert_eq!(containers.len(), 2, "{containers:?}");
+        assert_eq!(containers[&api]["labels"]["tenkai.version"], "2.0.0");
+        assert_eq!(containers[&api]["running"], true);
+        assert_eq!(containers[&db]["labels"]["tenkai.version"], "1.0.0");
+        assert_eq!(
+            healthy.observe(&v2).unwrap(),
+            SoftwareObserveStatus::Present
+        );
+
+        // Rolling back onto 1.0.0, whose label db still carries, with the
+        // 1.0.0 api never healthy: cleanup removes only what this attempt
+        // created, so db keeps running.
+        let rollback = request_for(&root, &secret_dir, "1.0.0");
+        let unhealthy = executor_for(&script, &state, &[DIGEST_B]);
+        let error = unhealthy.apply(&rollback).unwrap_err().to_string();
+        assert!(
+            error.contains("restored the previous containers"),
+            "{error}"
+        );
+        unhealthy.cleanup_failed_apply(&rollback).unwrap();
+        let containers = fake_containers(&state);
+        assert_eq!(containers.len(), 2, "{containers:?}");
+        assert_eq!(containers[&db]["running"], true);
+        assert_eq!(containers[&api]["labels"]["tenkai.version"], "2.0.0");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

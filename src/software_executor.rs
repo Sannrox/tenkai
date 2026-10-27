@@ -113,6 +113,14 @@ pub struct SoftwareApplyRequest {
     /// Environment-scoped directory of Docker env files. Never secret bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret_dir_path: Option<PathBuf>,
+    /// Identity of this apply attempt: the environment lease generation for a
+    /// leased apply, else a fresh random value. The Docker executor stamps it
+    /// on every container the attempt creates, and failed-apply cleanup
+    /// removes only containers carrying it, so containers an earlier release
+    /// created are left alone (#669). Empty means unknown: cleanup removes
+    /// nothing by release label alone.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub apply_attempt: String,
 }
 
 /// Pluggable software apply path. Tenkai never hard-depends on a cluster.
@@ -398,6 +406,7 @@ pub fn request_from_parts(
         artifact_pulls: Vec::new(),
         cluster_config_path: None,
         secret_dir_path: None,
+        apply_attempt: uuid::Uuid::new_v4().simple().to_string(),
     }
 }
 
@@ -428,6 +437,7 @@ mod tests {
             artifact_pulls: Vec::new(),
             cluster_config_path: None,
             secret_dir_path: None,
+            apply_attempt: String::new(),
         }
     }
 

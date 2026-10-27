@@ -159,7 +159,7 @@ pub(super) async fn activate(
         if let Err(detail) = require_artifact_pull_consumer(content, Some(executor)) {
             return Ok(Err(detail));
         }
-        let request = software_request(ctx, content).await?;
+        let request = software_request(ctx, content, lease).await?;
         let install = software_blocking(|| executor.apply(&request)).map_err(|error| {
             software_phase_error(
                 crate::software_executor::SoftwareDeployPhase::Apply,
@@ -282,7 +282,7 @@ pub(super) async fn restart(
         if let Err(detail) = require_artifact_pull_consumer(content, Some(executor)) {
             return Ok(Err(detail));
         }
-        let request = software_request(ctx, content).await?;
+        let request = software_request(ctx, content, lease).await?;
         let bounce = software_blocking(|| executor.restart(&request)).map_err(|error| {
             software_phase_error(
                 crate::software_executor::SoftwareDeployPhase::Restart,
@@ -401,7 +401,7 @@ async fn deactivate_for(
         if let Err(detail) = require_artifact_pull_consumer(content, Some(executor)) {
             return Ok(Err(detail));
         }
-        let request = software_request(ctx, content).await?;
+        let request = software_request(ctx, content, lease).await?;
         let removed = software_blocking(|| match removal {
             Removal::Release => executor.remove(&request),
             Removal::FailedApply => executor.cleanup_failed_apply(&request),
@@ -475,6 +475,7 @@ fn software_blocking<T>(work: impl FnOnce() -> T) -> T {
 async fn software_request(
     ctx: &mut Ctx,
     content: &ReleaseContent,
+    lease: &EnvironmentLease,
 ) -> Result<crate::software_executor::SoftwareApplyRequest> {
     let env_obj = crate::environment::environment(ctx, &content.environment).await?;
     let overlays = crate::environment::product_overlays(&env_obj, &content.product)?;
@@ -496,6 +497,8 @@ async fn software_request(
         crate::software_executor::cluster_config_path_from_properties(&env_obj.properties)?;
     request.secret_dir_path =
         crate::software_executor::secret_dir_from_properties(&env_obj.properties)?;
+    // Apply and its failed-apply cleanup run under the same lease.
+    request.apply_attempt = format!("lease-{}", lease.generation);
     Ok(request)
 }
 

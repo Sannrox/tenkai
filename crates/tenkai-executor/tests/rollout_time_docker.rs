@@ -18,7 +18,7 @@ mod rollout_time {
     use super::*;
 
     #[test]
-    fn one_service_upgrade_recreates_on_new_release_identity() {
+    fn one_service_upgrade_recreates_only_the_changed_container() {
         let root = std::env::temp_dir().join(format!(
             "tenkai-rollout-one-{}-{}",
             std::process::id(),
@@ -41,10 +41,11 @@ mod rollout_time {
             .lines()
             .filter(|line| line.starts_with(r#"["run""#))
             .collect();
+        // A new release identity alone recreates nothing (#669).
         assert_eq!(
             runs.len(),
-            15,
-            "fresh 5 + upgrade 5 + rollback 5, got {}: {runs:?}",
+            7,
+            "fresh 5 + upgrade 1 + rollback 1, got {}: {runs:?}",
             runs.len()
         );
         assert!(
