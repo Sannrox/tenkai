@@ -375,19 +375,25 @@ fn write_docker_release(
 }
 
 /// Install the fake Docker CLI into `root` and return `(script, state)`.
+/// `install(1)` writes the executable in a child process: a copy written here
+/// would leave its write handle open in this process, where a concurrent fork
+/// inherits it and `execve` of the script fails with "Text file busy" (#767).
 pub fn install_fake_docker(root: &Path) -> Result<(PathBuf, PathBuf)> {
     let fixture =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/docker/fake-docker.py");
     let script = root.join("fake-docker");
-    fs::copy(&fixture, &script)
-        .with_context(|| format!("copying fake docker from {}", fixture.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = fs::metadata(&script)?.permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&script, permissions)?;
-    }
+    let status = std::process::Command::new("install")
+        .arg("-m")
+        .arg("755")
+        .arg(&fixture)
+        .arg(&script)
+        .status()
+        .context("running install for the fake docker fixture")?;
+    anyhow::ensure!(
+        status.success(),
+        "installing fake docker from {} failed: {status}",
+        fixture.display()
+    );
     Ok((script, root.join("fake-state.json")))
 }
 

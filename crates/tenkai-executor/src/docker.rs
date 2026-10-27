@@ -2276,7 +2276,6 @@ fn docker_output(executor: &DockerHostExecutor, args: &[&str]) -> Result<Output>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt as _;
     use std::sync::Arc;
     use tenkai::auth_context::{
         AuthenticatedRequestContextBuilder, PrincipalIdentity, PrincipalKind,
@@ -2290,16 +2289,10 @@ mod tests {
     const DIGEST_C: &str = "registry.example:5000/edge/api@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
     const SECRET: &str = "super-secret-token-value";
 
+    /// Fake Docker CLI in `root`, installed without a write handle in this
+    /// process that a concurrent fork could inherit (#767).
     fn fake_docker(root: &Path) -> (PathBuf, PathBuf) {
-        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/fixtures/docker/fake-docker.py");
-        let script = root.join("fake-docker");
-        std::fs::copy(&fixture, &script).unwrap();
-        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&script, permissions).unwrap();
-        let state = root.join("fake-state.json");
-        (script, state)
+        tenkai::rollout_time::install_fake_docker(root).unwrap()
     }
 
     #[test]
