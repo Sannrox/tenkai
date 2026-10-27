@@ -49,7 +49,9 @@ completion. Process start and stop stay with the selected executor adapter.
 Select the local acceptance adapter with `TENKAI_WORKER_LIFECYCLE=local-process`
 and, when needed, `TENKAI_WORKER_LIFECYCLE_FIXTURE` plus
 `TENKAI_WORKER_LIFECYCLE_ROOT`. That adapter supervises
-`tenkai-worker-lifecycle-fixture`. It is not a work scheduler.
+`tenkai-worker-lifecycle-fixture`. It is not a work scheduler. A fixture
+process exits when its worker directory under the root is removed, since it
+can no longer be observed or stopped.
 
 Environment inspect shows
 `worker_pool.<product>.{state,replicas,intake,detail,observation_source}`.

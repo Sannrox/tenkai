@@ -374,20 +374,17 @@ fn write_docker_release(
     Ok(())
 }
 
-/// Install the fake Docker CLI into `root` and return `(script, state)`.
+/// Return `(script, state)` for the fake Docker CLI, with its state in `root`.
+/// The tracked, executable fixture runs in place: writing a copy and then
+/// executing it races with forks on other threads ("Text file busy", #767).
 pub fn install_fake_docker(root: &Path) -> Result<(PathBuf, PathBuf)> {
-    let fixture =
+    let script =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/docker/fake-docker.py");
-    let script = root.join("fake-docker");
-    fs::copy(&fixture, &script)
-        .with_context(|| format!("copying fake docker from {}", fixture.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = fs::metadata(&script)?.permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&script, permissions)?;
-    }
+    anyhow::ensure!(
+        script.is_file(),
+        "fake docker fixture {} is missing",
+        script.display()
+    );
     Ok((script, root.join("fake-state.json")))
 }
 
