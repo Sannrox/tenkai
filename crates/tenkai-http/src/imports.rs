@@ -86,6 +86,33 @@ pub(super) async fn content_inventory(
     manage_result(state.management.content_inventory(&credential).await)
 }
 
+/// `GET /v1/trust` (#676): signing trust and certificate expiry of this host.
+pub(super) async fn trust_posture(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    // Trust files are read off the async workers.
+    let reading = state.clone();
+    match tokio::task::spawn_blocking(move || {
+        reading
+            .management
+            .trust_posture(&credential, &reading.config.trust_sources)
+    })
+    .await
+    {
+        Ok(result) => manage_result(result),
+        Err(_) => manage_result::<tenkai::trust_posture::TrustPosture>(Err(
+            tenkai::management_operations::ManagementError::Internal(
+                "reading the trust posture failed".into(),
+            ),
+        )),
+    }
+}
+
 pub(super) async fn environment_webhook_deliveries(
     State(state): State<Arc<AppState>>,
     Path(environment): Path<String>,

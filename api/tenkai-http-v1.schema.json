@@ -332,6 +332,45 @@
       ],
       "type": "object"
     },
+    "CertificateEntry": {
+      "properties": {
+        "days_left": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "error": {
+          "type": "string"
+        },
+        "file": {
+          "type": "string"
+        },
+        "not_after": {
+          "description": "Unix seconds.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "purpose": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/TrustSource"
+        },
+        "status": {
+          "$ref": "#/$defs/TrustStatus",
+          "description": "An unreadable certificate file is `critical`."
+        },
+        "subject": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "purpose",
+        "file",
+        "source",
+        "status"
+      ],
+      "type": "object"
+    },
     "ChangeEvent": {
       "description": "One durable change. `cursor` is the opaque resume token (monotonic sequence).",
       "properties": {
@@ -2654,6 +2693,34 @@
         }
       ]
     },
+    "InstalledRevocations": {
+      "properties": {
+        "error": {
+          "type": "string"
+        },
+        "file": {
+          "type": "string"
+        },
+        "revoked_keys": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sequence": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "signer_key_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "file",
+        "revoked_keys"
+      ],
+      "type": "object"
+    },
     "ManagementLifecycleResult": {
       "additionalProperties": false,
       "description": "Versioned result shared by catalog lifecycle routes.",
@@ -4160,6 +4227,10 @@
         "status": {
           "type": "string"
         },
+        "trust": {
+          "$ref": "#/$defs/TrustStatus",
+          "description": "The worst status of the host's certificates (#676), when any are\nconfigured. It never fails readiness; `GET /v1/trust` has details."
+        },
         "version": {
           "description": "This server's version (#761).",
           "type": "string"
@@ -4195,6 +4266,37 @@
         "key_id",
         "statement",
         "signature"
+      ],
+      "type": "object"
+    },
+    "SigningRoot": {
+      "properties": {
+        "error": {
+          "description": "Why the file could not be read, when it could not.",
+          "type": "string"
+        },
+        "file": {
+          "type": "string"
+        },
+        "purpose": {
+          "type": "string"
+        },
+        "signers": {
+          "items": {
+            "$ref": "#/$defs/TrustedSignerView"
+          },
+          "type": "array"
+        },
+        "source": {
+          "$ref": "#/$defs/TrustSource",
+          "description": "Trust-root files are read as they are on disk."
+        }
+      },
+      "required": [
+        "purpose",
+        "file",
+        "source",
+        "signers"
       ],
       "type": "object"
     },
@@ -4423,6 +4525,85 @@
       },
       "required": [
         "environments"
+      ],
+      "type": "object"
+    },
+    "TrustPosture": {
+      "properties": {
+        "critical_days": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revocation_list": {
+          "$ref": "#/$defs/InstalledRevocations"
+        },
+        "signing": {
+          "items": {
+            "$ref": "#/$defs/SigningRoot"
+          },
+          "type": "array"
+        },
+        "status": {
+          "$ref": "#/$defs/TrustStatus",
+          "description": "The worst certificate status; `ok` when nothing is about to lapse."
+        },
+        "tls": {
+          "items": {
+            "$ref": "#/$defs/CertificateEntry"
+          },
+          "type": "array"
+        },
+        "warning_days": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "status",
+        "warning_days",
+        "critical_days",
+        "signing",
+        "tls"
+      ],
+      "type": "object"
+    },
+    "TrustSource": {
+      "description": "Whether an entry shows material the server loaded and uses, or a file as\nit is on disk now, which a client that read it at startup adopts only\nonce restarted.",
+      "enum": [
+        "loaded",
+        "file"
+      ],
+      "type": "string"
+    },
+    "TrustStatus": {
+      "description": "Status ordering: `ok` < `warning` < `critical` < `expired`.",
+      "enum": [
+        "ok",
+        "warning",
+        "critical",
+        "expired"
+      ],
+      "type": "string"
+    },
+    "TrustedSignerView": {
+      "properties": {
+        "identity": {
+          "type": "string"
+        },
+        "key_id": {
+          "type": "string"
+        },
+        "revoked": {
+          "description": "Revoked by the key revocations this process enforces.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "key_id",
+        "identity",
+        "revoked"
       ],
       "type": "object"
     },
@@ -4996,6 +5177,15 @@
       "request": null,
       "response": {
         "$ref": "#/$defs/RuntimeCredentialRevoked"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/trust",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/TrustPosture"
       }
     },
     {

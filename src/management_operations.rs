@@ -457,6 +457,22 @@ impl ManagementOperations {
     }
 
     /// `GET /v1/content/inventory`: release content present and missing here.
+    /// `GET /v1/trust` (#676): this host's signing trust and certificate
+    /// expiry. Fleet-wide, so environment-scoped credentials are refused.
+    pub fn trust_posture(
+        &self,
+        credential: &CredentialMaterial,
+        sources: &crate::trust_posture::TrustSources,
+    ) -> Result<crate::trust_posture::TrustPosture, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        self.require_environment_grant(credential, &context, None, "trust posture")?;
+        Ok(crate::trust_posture::posture(
+            sources,
+            crate::now_millis() / 1_000,
+        ))
+    }
+
     pub async fn content_inventory(
         &self,
         credential: &CredentialMaterial,

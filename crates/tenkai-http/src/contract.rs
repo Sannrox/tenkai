@@ -429,6 +429,13 @@ pub fn http_contract() -> Value {
         },
         Route {
             method: "GET",
+            path: "/v1/trust",
+            auth: Auth::Read,
+            request: None,
+            response: schema::<tenkai::trust_posture::TrustPosture>(&mut g),
+        },
+        Route {
+            method: "GET",
             path: "/v1/runners",
             auth: Auth::Management,
             request: None,

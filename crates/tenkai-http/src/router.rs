@@ -18,7 +18,7 @@ use super::environment_config::{
 use super::exports::{create_export, download_export, inspect_export, list_exports};
 use super::imports::{
     content_inventory, environment_webhook_deliveries, host_webhook_deliveries, import_bundle,
-    import_job, staged_imports,
+    import_job, staged_imports, trust_posture,
 };
 use super::inspect::{
     backup_status, change_events, environment_approval_policy, environment_status, fleet_status,
@@ -57,6 +57,11 @@ pub(super) struct ServiceStatus {
     pub(super) status: &'static str,
     /// This server's version (#761).
     pub(super) version: &'static str,
+    /// The worst status of the host's certificates (#676), when any are
+    /// configured. It never fails readiness; `GET /v1/trust` has details.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = tenkai::schema_contract::omitted_when_none)]
+    pub(super) trust: Option<tenkai::trust_posture::TrustStatus>,
     pub(super) profile: String,
     pub(super) capabilities: Vec<String>,
     /// API contract ids this server serves, for client compatibility checks.
@@ -114,6 +119,7 @@ pub fn router(
         .with_agent_actor_policy(config.agent_actor_policy)
         .with_static_runtime_runners(&config.runtime_assignments),
     );
+    refresh_trust_status(&config);
     let mut router = Router::new()
         .route("/healthz", get(health))
         .route("/readyz", get(ready))
@@ -128,6 +134,7 @@ pub fn router(
         .route("/v1/imports/staged", get(staged_imports))
         .route("/v1/imports/{id}", get(import_job))
         .route("/v1/content/inventory", get(content_inventory))
+        .route("/v1/trust", get(trust_posture))
         .route("/v1/webhooks/deliveries", get(host_webhook_deliveries))
         .route(
             "/v1/environments/{environment}/webhooks/deliveries",
@@ -307,4 +314,39 @@ pub fn router(
         store,
         runtime_delivery,
     })))
+}
+
+/// Keep `config.trust_status` current: computed now, then every minute on a
+/// blocking thread, so health probes read a snapshot and never trust files.
+fn refresh_trust_status(config: &ServerConfig) {
+    if config.trust_sources.is_empty() {
+        return;
+    }
+    let compute = {
+        let sources = config.trust_sources.clone();
+        move || tenkai::trust_posture::posture(&sources, tenkai::now_millis() / 1_000).status
+    };
+    if let Ok(mut status) = config.trust_status.write() {
+        *status = Some(compute());
+    }
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    let snapshot = Arc::downgrade(&config.trust_status);
+    runtime.spawn(async move {
+        let mut ticks = tokio::time::interval(std::time::Duration::from_secs(60));
+        ticks.tick().await;
+        loop {
+            ticks.tick().await;
+            // Stops once the server, and with it the snapshot, is gone.
+            let Some(target) = snapshot.upgrade() else {
+                return;
+            };
+            if let Ok(status) = tokio::task::spawn_blocking(compute.clone()).await
+                && let Ok(mut current) = target.write()
+            {
+                *current = Some(status);
+            }
+        }
+    });
 }
