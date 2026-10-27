@@ -1012,8 +1012,14 @@ pub fn run_fixture_worker() -> Result<()> {
                 snapshot.fencing_ok = true;
             }
         }
-        if let Some(parent) = Path::new(&live).parent() {
-            std::fs::create_dir_all(parent)?;
+        // The supervisor owns the worker directory. Once it is gone (a test
+        // removed its temp root, or the state dir was wiped) nobody can
+        // observe or stop this worker, so it exits instead of lingering (#779).
+        if Path::new(&live)
+            .parent()
+            .is_some_and(|parent| !parent.is_dir())
+        {
+            return Ok(());
         }
         let tmp = format!("{live}.tmp");
         std::fs::write(&tmp, serde_json::to_vec_pretty(&snapshot)?)?;

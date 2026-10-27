@@ -42,7 +42,10 @@ outcomes only; bearer credentials and request secrets are never persisted.
 
 Typed operator-facing change events live in `change_events` (schema 13): a
 monotonic sequence cursor, kind, resource, and optional environment. `GET
-/v1/events` pages that log. The table is not the provider outbox.
+/v1/events` pages that log. The table is not the provider outbox. Readers
+skip kinds their version does not know, so a newer replica, or the release
+before a rollback, can add a kind without failing older readers' pages
+(#775).
 
 Remote runtime claims are durable, environment-scoped, expiring, and
 generation-fenced. Their completion payload retains per-step receipts and is

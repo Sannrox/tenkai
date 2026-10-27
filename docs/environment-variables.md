@@ -37,7 +37,7 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `TENKAI_DATABASE` | `.tenkai-state/tenkai.db` | Community SQLite path for embedded `tenkaictl` and community `tenkai-server`. Invalid with `--tenant-mode` or `TENKAI_POSTGRES_URL` |
-| `TENKAI_HOST_WEBHOOKS` | unset | `tenkai-server` only: JSON list of webhook endpoints for host events (`backup.stale`, `clock.drift`) ([operational events](deploy-webhooks.md#operational-events)) |
+| `TENKAI_HOST_WEBHOOKS` | unset | `tenkai-server` only: JSON list of webhook endpoints for host events (`backup.stale`, `clock.drift`, `trust.expiring`) ([operational events](deploy-webhooks.md#operational-events)) |
 | `TENKAI_SMTP_SINKS` | unset | `tenkai-server` only: JSON list of SMTP digest sinks for operational events ([SMTP digests](deploy-webhooks.md#smtp-digests)) |
 | `TENKAI_AUDIT_EXPORT_DIR` | unset | `tenkai-server` only: directory of the scheduled [audit export](audit-export.md) chain. Set with `TENKAI_AUDIT_SIGNING_KEY` |
 | `TENKAI_AUDIT_SIGNING_KEY` | unset | Ed25519 seed file that signs audit exports |

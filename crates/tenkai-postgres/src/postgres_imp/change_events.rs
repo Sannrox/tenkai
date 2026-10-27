@@ -51,6 +51,24 @@ impl Inner {
         })
     }
 
+    /// Insert a row with an arbitrary kind, as a newer version would.
+    #[cfg(test)]
+    pub(crate) fn insert_raw_change_event_for_conformance(
+        &self,
+        schema: &str,
+        kind: &str,
+    ) -> Result<()> {
+        let kind = kind.to_owned();
+        self.with_writer_schema(schema, move |tx| {
+            tx.execute(
+                "INSERT INTO change_events (occurred_at, kind, resource) VALUES (0, $1, 'x')",
+                &[&kind],
+            )
+            .map_err(pg)?;
+            Ok(())
+        })
+    }
+
     pub fn list_change_events_after(
         &self,
         schema: &str,
@@ -58,15 +76,18 @@ impl Inner {
         limit: usize,
     ) -> Result<Vec<ChangeEvent>> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        // Kinds a newer replica wrote are skipped, not fatal, so a rolling
+        // deploy or rollback can introduce a kind without breaking readers.
+        let known = ChangeEventKind::names();
         self.with_schema(schema, move |tx| {
             let rows = tx
                 .query(
                     "SELECT seq, occurred_at, kind, resource, environment_id
                      FROM change_events
-                     WHERE seq > $1
+                     WHERE seq > $1 AND kind = ANY($3)
                      ORDER BY seq
                      LIMIT $2",
-                    &[&cursor, &limit],
+                    &[&cursor, &limit, &known],
                 )
                 .map_err(pg)?;
             let mut events = Vec::new();
