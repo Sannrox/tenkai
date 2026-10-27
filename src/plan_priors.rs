@@ -381,6 +381,7 @@ mod tests {
             maintenance_blocked: false,
             prior_warnings: Vec::new(),
             recalled_recovery_reason: None,
+            credential_runway: None,
         };
         let env = EnvironmentInspectReport {
             name: "local".into(),
@@ -527,6 +528,7 @@ mod tests {
             maintenance_blocked: false,
             prior_warnings: Vec::new(),
             recalled_recovery_reason: None,
+            credential_runway: None,
         };
         let env = EnvironmentInspectReport {
             name: "local".into(),

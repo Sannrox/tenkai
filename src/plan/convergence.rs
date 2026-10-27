@@ -504,6 +504,7 @@ fn assemble_plan(
         maintenance_blocked: false,
         prior_warnings: Vec::new(),
         recalled_recovery_reason,
+        credential_runway: None,
     })
 }
 
@@ -522,9 +523,24 @@ async fn create_with_content(
             &inspect,
             &crate::plan_priors::PriorConfig::from_env(),
         );
+        plan.credential_runway = credential_runway(ctx, inspect.maintenance.as_ref());
     }
     store(ctx, &plan).await?;
     Ok(plan)
+}
+
+/// The certificate that lapses before a closed environment's next window
+/// opens, when this host knows its trust sources (#778). An open or
+/// unrestricted environment applies now, so it has no runway to check.
+fn credential_runway(
+    ctx: &Ctx,
+    maintenance: Option<&crate::environment::EnvironmentMaintenanceInspect>,
+) -> Option<crate::trust_posture::CredentialRunway> {
+    let sources = ctx.trust_sources()?;
+    let opens_at_ms = maintenance
+        .filter(|maintenance| maintenance.eligibility == "closed")?
+        .next_opens_at_ms?;
+    crate::trust_posture::runway(sources, crate::now_millis(), opens_at_ms)
 }
 
 /// A rollback step to the previously deployed version of one product.

@@ -2794,6 +2794,7 @@ mod tests {
             maintenance_blocked: false,
             prior_warnings: Vec::new(),
             recalled_recovery_reason: None,
+            credential_runway: None,
         };
         install.bind_content_identity().unwrap();
         crate::plan::store(&mut ctx, &install).await.unwrap();
@@ -3014,6 +3015,7 @@ mod tests {
             maintenance_blocked: false,
             prior_warnings: Vec::new(),
             recalled_recovery_reason: None,
+            credential_runway: None,
         };
         install.bind_content_identity().unwrap();
         crate::plan::store(&mut ctx, &install).await.unwrap();

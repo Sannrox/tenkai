@@ -353,7 +353,8 @@ named without their directories.
 `warning`, `critical` or `expired`, host webhooks that list `trust.expiring`
 are notified once per turn, as for `backup.stale` and `clock.drift`.
 On a multi-replica hub only the writer announces. A matching `/v1/events`
-entry is #784; plan-time runway checks are #778.
+entry is #784. Plans computed while a window is closed flag a certificate
+that lapses before it opens ([maintenance windows](manage-environments.md#maintenance-windows)).
 
 ### Runner certificates
 

@@ -51,6 +51,7 @@ impl Ctx {
             require_host_release_trust: false,
             plan_kind_list: Arc::new(PlanKindListTick::default()),
             health_metrics: None,
+            trust_sources: None,
         }
     }
 
@@ -74,7 +75,19 @@ impl Ctx {
             require_host_release_trust: false,
             plan_kind_list: Arc::new(PlanKindListTick::default()),
             health_metrics: None,
+            trust_sources: None,
         })
+    }
+
+    /// Certificates this host serves and trusts, so plans can flag one that
+    /// lapses before the next maintenance window (#778).
+    pub fn with_trust_sources(mut self, sources: Arc<crate::trust_posture::TrustSources>) -> Self {
+        self.trust_sources = Some(sources);
+        self
+    }
+
+    pub(crate) fn trust_sources(&self) -> Option<&crate::trust_posture::TrustSources> {
+        self.trust_sources.as_deref()
     }
 
     /// Inject a Prometheus-compatible instant-query source for SLO gates (#590).

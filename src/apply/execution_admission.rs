@@ -214,6 +214,7 @@ mod tests {
             maintenance_blocked: false,
             prior_warnings: Vec::new(),
             recalled_recovery_reason: None,
+            credential_runway: None,
         }
     }
 
@@ -399,6 +400,7 @@ mod tests {
             maintenance_blocked: false,
             prior_warnings: Vec::new(),
             recalled_recovery_reason: None,
+            credential_runway: None,
         };
         assert_eq!(
             classify_candidate(&mut ctx, &leftover).await.unwrap(),

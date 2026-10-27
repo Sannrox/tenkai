@@ -154,6 +154,13 @@ exits nonzero while the window is closed. When a window opens, rerun
 rules and ambiguous or skipped DST starts fail closed. Once execution starts
 inside a window, it may finish after that window closes.
 
+A plan computed while the window is closed is checked against the
+certificates the server serves and trusts (listener, client CA, runner CA,
+outbound CA). If one lapses before the window opens, the plan records it as
+`credential_runway` and the plan message names the certificate, its expiry
+and the window's opening, so it can be renewed first. The check is advisory
+and runs only on a server with those certificates configured.
+
 Per-product windows use `tenkaictl product maintenance`; see
 [ADR 0016](decisions/0016-same-version-remediation.md).
 

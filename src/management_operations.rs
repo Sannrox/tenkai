@@ -1877,6 +1877,10 @@ impl ManagementOperations {
         } else {
             format!("planned {} step(s) for {environment}", stored.steps.len())
         };
+        let message = match &stored.credential_runway {
+            Some(runway) => format!("{message}; {}", runway.summary()),
+            None => message,
+        };
         Ok(ManagementLifecycleResult::new(
             ManagementLifecycleOperation::Plan,
             message,
@@ -2495,6 +2499,7 @@ mod tests {
                     maintenance_blocked: false,
                     prior_warnings: Vec::new(),
                     recalled_recovery_reason: None,
+                    credential_runway: None,
                 }))
             })
         }
