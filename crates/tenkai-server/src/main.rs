@@ -31,7 +31,7 @@ use tenkai::tenant_store::TenantOperationalStore;
 use tenkai_http::{ServerConfig, router};
 use tenkai_postgres::{
     compiled_host_feature_report_with, enterprise_postgres_hub_profile,
-    refuse_mixed_store_configuration, require_hub_tenant_mode, resolve_enterprise_hub,
+    refuse_mixed_store_configuration, require_hub_tenant_mode, resolve_fenced_enterprise_hub,
     resolve_reconcile_fence_for_replicas,
 };
 
@@ -535,10 +535,38 @@ async fn main() -> Result<()> {
         }),
     };
 
+    // Multi-replica tenant-mode hubs fence their writes on the hub writer
+    // lease (#748): the lease is tried once before the store opens, so a
+    // replica never writes before it knows it leads.
+    let writer = if cli.tenant_mode && cli.replica_count > 1 {
+        let fence = Arc::new(tenkai::writer_fence::WriterFence::default());
+        let holder = format!("tenkai-server:{}", uuid::Uuid::new_v4());
+        let lease = Arc::new(
+            run_blocking_startup("writer lease", {
+                let fence = fence.clone();
+                move || {
+                    tenkai_postgres::open_hub_writer_lease(holder, WRITER_LEASE_TTL_MS, fence)
+                        .map_err(anyhow::Error::from)
+                }
+            })
+            .await?,
+        );
+        let first = run_blocking_startup("writer lease", {
+            let lease = lease.clone();
+            move || lease.renew().map_err(anyhow::Error::from)
+        })
+        .await?;
+        println!("tenkai.writer_lease role={}", role_label(&first));
+        Some((fence, lease))
+    } else {
+        None
+    };
+    let writer_fence = writer.as_ref().map(|(fence, _)| fence.clone());
     let opened = match run_blocking_startup("operational store", {
         let tenant_mode = cli.tenant_mode;
         let database = community_database.clone();
-        move || open_host_store(tenant_mode, database)
+        let fence = writer_fence.clone();
+        move || open_host_store(tenant_mode, database, fence)
     })
     .await
     {
@@ -552,6 +580,7 @@ async fn main() -> Result<()> {
     let sqlite_store = opened.sqlite;
     let store = opened.operational;
     let tenant_store = opened.tenant;
+    let tenant_store_for_lease = tenant_store.clone();
     let outcome_provider = match cli.outcome_provider {
         OutcomeProviderMode::Disabled => {
             anyhow::ensure!(
@@ -740,6 +769,7 @@ async fn main() -> Result<()> {
             imports: imports.clone(),
             exports,
             runner_ca: runner_ca_from_env()?,
+            writer_fence: writer_fence.clone(),
         },
         reconciler.clone(),
         store.clone(),
@@ -955,6 +985,7 @@ async fn main() -> Result<()> {
         let host_store = store.clone();
         let host_backups = host_backups.clone();
         let mut host_shutdown_rx = shutdown_tx.subscribe();
+        let standby_fence = writer_fence.clone();
         tokio::spawn(async move {
             let mut timer = tokio::time::interval(Duration::from_secs(60));
             timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -968,6 +999,10 @@ async fn main() -> Result<()> {
                         }
                     }
                     _ = timer.tick() => {
+                        // A standby leaves writes to the leader (#748).
+                        if standby_fence.as_ref().is_some_and(|fence| !fence.is_leader()) {
+                            continue;
+                        }
                         let now = tenkai::now_millis();
                         let backup = host_backups.as_ref().map(|backups| backups.health(now));
                         let clock = tenkai::clock_guard::installed().map(|guard| guard.health());
@@ -997,6 +1032,7 @@ async fn main() -> Result<()> {
     let webhook_task = {
         let webhook_store = store.clone();
         let mut webhook_shutdown_rx = shutdown_tx.subscribe();
+        let standby_fence = writer_fence.clone();
         tokio::spawn(async move {
             let mut timer = tokio::time::interval(Duration::from_secs(5));
             timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1008,6 +1044,10 @@ async fn main() -> Result<()> {
                         }
                     }
                     _ = timer.tick() => {
+                        // A standby leaves writes to the leader (#748).
+                        if standby_fence.as_ref().is_some_and(|fence| !fence.is_leader()) {
+                            continue;
+                        }
                         match deliver_webhook_batch(
                             &*webhook_store,
                             &ProcessWebhookSecrets,
@@ -1060,6 +1100,7 @@ async fn main() -> Result<()> {
     let digest_task = (!smtp_sinks.is_empty()).then(|| {
         let digest_store = store.clone();
         let mut digest_shutdown_rx = shutdown_tx.subscribe();
+        let standby_fence = writer_fence.clone();
         tokio::spawn(async move {
             let mut timer = tokio::time::interval(Duration::from_secs(30));
             timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1071,6 +1112,10 @@ async fn main() -> Result<()> {
                         }
                     }
                     _ = timer.tick() => {
+                        // A standby leaves writes to the leader (#748).
+                        if standby_fence.as_ref().is_some_and(|fence| !fence.is_leader()) {
+                            continue;
+                        }
                         match tenkai::smtp_digest::deliver_due(
                             &*digest_store,
                             &smtp_sinks,
@@ -1097,7 +1142,99 @@ async fn main() -> Result<()> {
             }
         })
     });
+    // Renews the writer lease every third of its life; a renewal that fails
+    // or finds another holder makes this replica a standby at once.
+    // The lease keeps renewing through a graceful shutdown and is released
+    // only after the server and every writer loop have drained, so their
+    // last writes still commit and no standby takes over mid-drain.
+    let (lease_stop_tx, lease_stop_rx) = tokio::sync::watch::channel(false);
+    let lease_task = writer.as_ref().map(|(_, lease)| {
+        let lease = lease.clone();
+        let lease_store = store.clone();
+        let lease_tenant_store = tenant_store_for_lease.clone();
+        let mut lease_shutdown_rx = lease_stop_rx.clone();
+        tokio::spawn(async move {
+            let mut timer =
+                tokio::time::interval(Duration::from_millis((WRITER_LEASE_TTL_MS / 3) as u64));
+            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut last = String::new();
+            // One store check at a time; a check that outlives a tick is
+            // awaited again on the next one rather than started twice.
+            let mut probe: Option<tokio::task::JoinHandle<bool>> = None;
+            // The last check that passed; `None` after one that failed, so a
+            // replica steps back up only once a check passes again.
+            let mut last_healthy = Some(std::time::Instant::now());
+            let lease_lifetime = Duration::from_millis(WRITER_LEASE_TTL_MS as u64);
+            loop {
+                tokio::select! {
+                    changed = lease_shutdown_rx.changed() => {
+                        if changed.is_err() || *lease_shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                    _ = timer.tick() => {
+                        // Lead only while this replica can write: a store
+                        // that answers with an error makes the leader step
+                        // down so a healthy standby takes over, and it does
+                        // not ask again until the store answers. A check
+                        // still queued behind store work is busy and does
+                        // not hold up the renewal, until no check has
+                        // passed for a whole lease lifetime.
+                        let check = probe.get_or_insert_with(|| {
+                            let (operational, tenant) =
+                                (lease_store.clone(), lease_tenant_store.clone());
+                            tokio::task::spawn_blocking(move || {
+                                operational.check_health().is_ok()
+                                    && tenant
+                                        .as_ref()
+                                        .is_none_or(|tenant| tenant.check_health().is_ok())
+                            })
+                        });
+                        let health = tokio::time::timeout(
+                            Duration::from_millis((WRITER_LEASE_TTL_MS / 5) as u64),
+                            check,
+                        )
+                        .await;
+                        let unhealthy = match health {
+                            Ok(answer) => {
+                                probe = None;
+                                last_healthy =
+                                    matches!(answer, Ok(true)).then(std::time::Instant::now);
+                                last_healthy.is_none()
+                            }
+                            Err(_) => last_healthy
+                                .is_none_or(|passed| passed.elapsed() >= lease_lifetime),
+                        };
+                        let renewing = lease.clone();
+                        let outcome = tokio::task::spawn_blocking(move || {
+                            if unhealthy {
+                                let _ = renewing.release();
+                                return Err("the operational store is unavailable".to_string());
+                            }
+                            renewing.renew().map_err(|error| format!("renewal failed: {error}"))
+                        })
+                        .await;
+                        let label = match outcome {
+                            Ok(Ok(role)) => role_label(&role),
+                            Ok(Err(detail)) => format!("standby detail={detail}"),
+                            Err(error) => format!("standby detail=renewal task failed: {error}"),
+                        };
+                        if label != last {
+                            println!("tenkai.writer_lease role={label}");
+                            last = label;
+                        }
+                    }
+                }
+            }
+            // Stepping down lets a standby take over without waiting out the lease.
+            let releasing = lease.clone();
+            if let Ok(Err(error)) = tokio::task::spawn_blocking(move || releasing.release()).await {
+                eprintln!("tenkai.writer_lease outcome=release_failed detail={error}");
+            }
+        })
+    });
     let tick_store = store.clone();
+    let standby_fence = writer_fence.clone();
     let reconcile_task = tokio::spawn(async move {
         let mut timer = tokio::time::interval(interval);
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1109,6 +1246,10 @@ async fn main() -> Result<()> {
                     }
                 }
                 _ = timer.tick() => {
+                    // A standby leaves writes to the leader (#748).
+                    if standby_fence.as_ref().is_some_and(|fence| !fence.is_leader()) {
+                        continue;
+                    }
                     match reconciler.run_once().await {
                         Ok(report) => {
                             // Held and approval-waiting plans, once per transition.
@@ -1184,6 +1325,13 @@ async fn main() -> Result<()> {
         backup_task
             .await
             .context("joining backup task during shutdown")?;
+    }
+    // Every writer has drained: step down and hand the lease over.
+    let _ = lease_stop_tx.send(true);
+    if let Some(lease_task) = lease_task {
+        lease_task
+            .await
+            .context("joining writer lease task during shutdown")?;
     }
     result.context("serving Tenkai API")
 }
@@ -1295,9 +1443,26 @@ fn refuse_tenant_remote_provider(tenant_mode: bool, provider_mode: ProviderMode)
     Ok(())
 }
 
-fn open_host_store(tenant_mode: bool, database: Option<PathBuf>) -> Result<OpenedHostStore> {
+/// How long the hub writer lease lives without renewal (#748). A standby
+/// takes over at most this long after the leader stops renewing.
+const WRITER_LEASE_TTL_MS: i64 = 15_000;
+
+fn role_label(role: &tenkai::writer_fence::WriterRole) -> String {
+    match role {
+        tenkai::writer_fence::WriterRole::Leader { generation, .. } => {
+            format!("leader generation={generation}")
+        }
+        tenkai::writer_fence::WriterRole::Standby => "standby".into(),
+    }
+}
+
+fn open_host_store(
+    tenant_mode: bool,
+    database: Option<PathBuf>,
+    writer_fence: Option<Arc<tenkai::writer_fence::WriterFence>>,
+) -> Result<OpenedHostStore> {
     if tenant_mode {
-        let hub = resolve_enterprise_hub().map_err(anyhow::Error::from)?;
+        let hub = resolve_fenced_enterprise_hub(writer_fence).map_err(anyhow::Error::from)?;
         return Ok(OpenedHostStore {
             sqlite: None,
             operational: hub.operational,

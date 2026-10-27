@@ -69,6 +69,14 @@ match or steal a later owner's live claim.
 
 This does **not** advertise product `high_availability` by itself.
 
+## Hub writer lease (#748)
+
+Tick claims coordinate who reconciles an environment; they are not checked
+inside data writes. On multi-replica tenant-mode hubs the hub writer lease
+fences the writes themselves: every authoritative write checks the lease's
+holder and generation in its own transaction. See
+[multi-replica-hub-runbook.md](multi-replica-hub-runbook.md#hub-writer-lease-748).
+
 ## Relation to store capabilities
 
 `--replica-count > 1` requires `shared_replica_state` (Postgres hub, single-active

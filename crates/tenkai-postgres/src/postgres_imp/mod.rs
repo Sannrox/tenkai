@@ -12,6 +12,8 @@ pub(crate) use tenkai::storage::{
 
 pub struct Inner {
     worker: Worker<Client>,
+    /// Set on multi-replica hubs (#748): writes need the writer lease.
+    fence: std::sync::OnceLock<std::sync::Arc<tenkai::writer_fence::WriterFence>>,
 }
 
 enum WorkerMessage<C> {
@@ -20,13 +22,25 @@ enum WorkerMessage<C> {
 }
 
 /// Keeps the synchronous client on one handle-free thread and bounds waiting callers.
+/// A client the database closed is replaced before the next operation runs.
 struct Worker<C> {
     sender: SyncSender<WorkerMessage<C>>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl<C: Send + 'static> Worker<C> {
-    fn start(initialize: impl FnOnce() -> Result<C> + Send + 'static) -> Result<Self> {
+    #[cfg(test)]
+    fn start(initialize: impl Fn() -> Result<C> + Send + 'static) -> Result<Self> {
+        Self::start_recovering(initialize, |_| false)
+    }
+
+    /// Runs `initialize` once now, and again before any operation when
+    /// `closed` reports the current client unusable. A failed reconnect
+    /// keeps the closed client, so that operation fails and the next retries.
+    fn start_recovering(
+        initialize: impl Fn() -> Result<C> + Send + 'static,
+        closed: impl Fn(&C) -> bool + Send + 'static,
+    ) -> Result<Self> {
         let (sender, receiver) = mpsc::sync_channel(0);
         let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
         let thread = thread::Builder::new()
@@ -46,6 +60,11 @@ impl<C: Send + 'static> Worker<C> {
                 };
 
                 while let Ok(WorkerMessage::Run(work)) = receiver.recv() {
+                    if closed(&client)
+                        && let Ok(fresh) = initialize()
+                    {
+                        client = fresh;
+                    }
                     work(&mut client);
                 }
             })
@@ -162,6 +181,7 @@ mod rollbacks;
 mod runtime;
 mod runtime_enrollment;
 mod schema;
+mod writer_lease;
 
 pub(crate) use leases::{lock_lease, require_lease, require_plan_environment};
 pub(crate) use schema::migrate_tenant_schema;

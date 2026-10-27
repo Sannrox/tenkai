@@ -75,6 +75,10 @@ pub enum StoreError {
     /// Feature or configuration required for an optional store adapter is missing.
     #[error("optional store adapter unavailable: {0}")]
     AdapterUnavailable(String),
+    /// This replica does not hold the hub writer lease at the generation it
+    /// writes with (#748): it is a standby, or another replica took over.
+    #[error("not the active hub writer: {0}")]
+    NotActiveWriter(String),
 }
 
 impl StoreError {

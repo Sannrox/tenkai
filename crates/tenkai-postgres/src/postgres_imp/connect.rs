@@ -11,7 +11,11 @@ impl Inner {
         let config = hub_transport(url)?;
         let tls = verified_tls()?;
         Ok(Self {
-            worker: Worker::start(move || connect_client(&config, tls))?,
+            worker: Worker::start_recovering(
+                move || connect_client(&config, tls.clone()),
+                Client::is_closed,
+            )?,
+            fence: std::sync::OnceLock::new(),
         })
     }
 }
@@ -159,6 +163,17 @@ fn connect_client(config: &Config, tls: MakeRustlsConnect) -> Result<Client> {
             "CREATE TABLE IF NOT EXISTS tenkai_reconcile_tick_claims (
                     environment TEXT PRIMARY KEY,
                     owner TEXT NOT NULL,
+                    generation BIGINT NOT NULL,
+                    expires_at BIGINT NOT NULL
+                 );",
+        )
+        .map_err(pg)?;
+    // The hub writer lease (#748): one row, a generation that only grows.
+    client
+        .batch_execute(
+            "CREATE TABLE IF NOT EXISTS tenkai_hub_writer_lease (
+                    id SMALLINT PRIMARY KEY CHECK (id = 1),
+                    holder TEXT NOT NULL,
                     generation BIGINT NOT NULL,
                     expires_at BIGINT NOT NULL
                  );",

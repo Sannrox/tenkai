@@ -47,7 +47,7 @@ impl Inner {
         environment: &EnvironmentRecord,
     ) -> Result<EnvironmentRecord> {
         let environment = environment.clone();
-        self.with_schema(schema, move |tx| {
+        self.with_writer_schema(schema, move |tx| {
             lock_lease(tx, &environment.id)?;
             if tx
                 .query_one(
@@ -159,7 +159,7 @@ impl Inner {
 
     pub fn publish_release(&self, schema: &str, release: &ReleaseRecord) -> Result<()> {
         let release = release.clone();
-        self.with_schema(schema, move |tx| {
+        self.with_writer_schema(schema, move |tx| {
             tx.execute(
                 "INSERT INTO releases(id,product,version,content_digest,descriptor_json)
                  VALUES($1,$2,$3,$4,$5)

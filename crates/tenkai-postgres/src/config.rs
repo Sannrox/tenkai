@@ -120,9 +120,20 @@ pub fn resolve_server_tenant_store(
 /// Tenant partitions and the hub schema live in one database. SQLite is not
 /// opened. Callers must already have refused a mixed SQLite configuration.
 pub fn resolve_enterprise_hub() -> Result<EnterpriseHub> {
+    resolve_fenced_enterprise_hub(None)
+}
+
+/// [`resolve_enterprise_hub`] whose authoritative writes need the hub
+/// writer lease when `fence` is set (#748, multi-replica hubs).
+pub fn resolve_fenced_enterprise_hub(
+    fence: Option<std::sync::Arc<tenkai::writer_fence::WriterFence>>,
+) -> Result<EnterpriseHub> {
     #[cfg(feature = "postgres")]
     {
         let store = PostgresTenantConfig::from_env()?.open()?;
+        if let Some(fence) = fence {
+            store.fence_writes(fence)?;
+        }
         let hub = store.hub_partition()?;
         Ok(EnterpriseHub {
             tenant: Arc::new(store),
@@ -131,6 +142,7 @@ pub fn resolve_enterprise_hub() -> Result<EnterpriseHub> {
     }
     #[cfg(not(feature = "postgres"))]
     {
+        let _ = fence;
         Err(StoreError::AdapterUnavailable(
             "tenant mode requires a binary built with --features postgres and TENKAI_POSTGRES_URL"
                 .into(),

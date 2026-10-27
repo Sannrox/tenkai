@@ -303,3 +303,5 @@ mod live_isolation;
 mod live_retirement;
 #[cfg(feature = "postgres")]
 mod live_sole_store;
+#[cfg(feature = "postgres")]
+mod live_writer_lease;

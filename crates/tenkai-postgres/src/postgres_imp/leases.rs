@@ -19,7 +19,7 @@ impl Inner {
         }
         let environment = environment.to_owned();
         let owner = owner.to_owned();
-        self.with_schema(schema, move |tx| {
+        self.with_writer_schema(schema, move |tx| {
             lock_lease(tx, &environment)?;
             ensure_environment_active(tx, &environment, "new apply leases")?;
             if tx
@@ -80,7 +80,7 @@ impl Inner {
         environment: &str,
     ) -> Result<()> {
         let environment = environment.to_owned();
-        self.with_schema(schema, move |tx| {
+        self.with_writer_schema(schema, move |tx| {
             tx.execute(
                 "UPDATE leases SET expires_at = 0 WHERE environment_id = $1",
                 &[&environment],

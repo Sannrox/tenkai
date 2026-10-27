@@ -61,6 +61,16 @@ impl PostgresTenantOperationalStore {
         })
     }
 
+    /// Refuse this store's authoritative writes unless `fence` is leader and
+    /// the lease still names it (#748). Set once, before serving.
+    #[cfg(feature = "postgres")]
+    pub fn fence_writes(
+        &self,
+        fence: std::sync::Arc<tenkai::writer_fence::WriterFence>,
+    ) -> Result<()> {
+        self.inner.fence_writes(fence)
+    }
+
     /// Durable multi-host reconcile tick fence backed by hub Postgres (#135).
     #[cfg(feature = "postgres")]
     pub fn reconcile_tick_fence(

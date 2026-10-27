@@ -5,7 +5,7 @@ impl Inner {
     pub fn record_receipt(&self, schema: &str, owner: &str, receipt: &ReceiptRecord) -> Result<()> {
         let owner = owner.to_owned();
         let receipt = receipt.clone();
-        self.with_schema(schema, move |tx| {
+        self.with_writer_schema(schema, move |tx| {
             let existing = tx
                 .query_opt(
                     "SELECT environment_id,plan_id,step_id,lease_generation,payload_json
@@ -106,7 +106,7 @@ impl Inner {
     ) -> Result<()> {
         let receipt = receipt.clone();
         let steps = steps.to_vec();
-        self.with_schema(schema, move |tx| {
+        self.with_writer_schema(schema, move |tx| {
             let existing = tx
                 .query_opt(
                     "SELECT environment_id,plan_id,receipt_json FROM offline_imports

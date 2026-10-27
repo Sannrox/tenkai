@@ -13,7 +13,7 @@ impl Inner {
         let fixture_id = fixture_id.to_owned();
         let actor = actor.to_owned();
         let request_id = request_id.to_owned();
-        self.with_schema(schema, move |tx| {
+        self.with_writer_schema(schema, move |tx| {
             let lock_key = format!("{lock_schema}:{fixture_id}");
             tx.query_one(
                 "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",

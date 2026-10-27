@@ -24,7 +24,7 @@ impl Inner {
         let resource = resource.to_string();
         let environment_id = environment_id.to_string();
         let lock_key = format!("{schema}:change_events");
-        self.with_schema(schema, move |tx| {
+        self.with_writer_schema(schema, move |tx| {
             // Serialize seq allocation with commit so a later cursor cannot skip
             // an earlier event whose BIGSERIAL value was assigned first.
             tx.query_one(

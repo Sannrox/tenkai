@@ -27,6 +27,7 @@ mod partition_store;
 mod postgres_imp;
 mod store;
 mod tenant_store;
+mod writer_lease;
 
 pub use capabilities::{
     AuthoritativeSurface, POSTGRES_SHARED_REPLICA_WRITER_MODEL, SharedReplicaWriterModel,
@@ -36,14 +37,17 @@ pub use capabilities::{
 };
 pub use config::{
     EnterpriseHub, HUB_SCHEMA, PostgresTenantConfig, refuse_mixed_store_configuration,
-    require_hub_tenant_mode, resolve_enterprise_hub, resolve_server_tenant_store,
-    tenant_schema_name,
+    require_hub_tenant_mode, resolve_enterprise_hub, resolve_fenced_enterprise_hub,
+    resolve_server_tenant_store, tenant_schema_name,
 };
 #[cfg(feature = "postgres")]
 pub use fence::PostgresReconcileFence;
 pub use fence::{open_postgres_reconcile_fence, resolve_reconcile_fence_for_replicas};
 pub use partition::PostgresTenantPartition;
 pub use store::PostgresTenantOperationalStore;
+#[cfg(feature = "postgres")]
+pub use writer_lease::PostgresHubWriterLease;
+pub use writer_lease::{HubWriterLease, open_hub_writer_lease};
 
 #[cfg(test)]
 mod tests;
