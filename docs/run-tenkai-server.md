@@ -363,8 +363,25 @@ export TENKAI_RUNTIME_CERTIFICATE_DIR=/var/lib/tenkai-runtime/certificate
   client-certificate requirement. An agent with a certificate directory
   never uses its bearer for work, so a runner keeps one lease identity
   across renewals.
-- **Not yet:** CA rotation and trust-bundle delivery (#769), and offline
-  revocation lists, trust bundles and disconnected grace (#770).
+- **Rotation (#769).** `TENKAI_RUNNER_CA_CERT` may list several CAs: the
+  first issues, with its key in `TENKAI_RUNNER_CA_KEY`, and every listed CA
+  is admitted. Enrollment and renewal return the whole list as the runner's
+  trust bundle, which runners present with their certificate. Use the same
+  file as `TENKAI_TLS_CLIENT_CA`. Rotate in three steps, so that no server
+  ever refuses a certificate another one issued:
+  1. **Accept.** Old CA first, new CA second, old key, on every server.
+     Nothing changes for runners yet.
+  2. **Issue.** New CA first, old CA second, new key, on every server.
+     Runners move to the new CA as they renew.
+  3. **Retire.** Every runner renews within two thirds of a certificate's
+     lifetime (16 hours). One lifetime (24 hours) after the last server
+     finished step 2, remove the old CA. Its certificates are refused from
+     then on.
+
+  The server rereads the TLS client CA on its own; restart it to reload the
+  runner CA.
+- **Not yet:** offline revocation lists, trust bundles and disconnected
+  grace (#770).
 
 ### Runner registry
 

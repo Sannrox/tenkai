@@ -8,6 +8,13 @@
 //! credential its enrollment produced, so registry revocation applies to
 //! certificates as it does to bearer credentials. The agent generates its
 //! key and sends only a CSR; no private key leaves its host.
+//!
+//! Rotation (#769): the CA file may list the new CA first and older ones
+//! after it. The first issues; every listed CA is accepted, and the whole
+//! list is the trust bundle runners receive with each certificate. A
+//! rotation first adds the new CA after the issuing one everywhere, then
+//! moves it first; every runner renews within two thirds of a certificate's
+//! lifetime, so the old CA can leave one lifetime after that.
 
 use std::path::Path;
 
@@ -47,10 +54,13 @@ impl RunnerIdentity {
     }
 }
 
-/// The CA certificate and key that issue runner certificates.
+/// The CA certificate and key that issue runner certificates, and the
+/// older CAs still accepted while runners move off them.
 pub struct RunnerCa {
     cert_pem: String,
     issuer: rcgen::Issuer<'static, rcgen::KeyPair>,
+    /// Every accepted CA certificate, issuing one first, as PEM.
+    accepted: Vec<String>,
 }
 
 impl RunnerCa {
@@ -81,13 +91,31 @@ impl RunnerCa {
         Self::from_pem(&cert_pem, &key_pem)
     }
 
+    /// `cert_pem` holds the issuing CA first, then any older CAs still
+    /// accepted; `key_pem` is the issuing CA's key.
     pub fn from_pem(cert_pem: &str, key_pem: &str) -> Result<Self> {
+        let accepted = x509_parser::pem::Pem::iter_from_buffer(cert_pem.as_bytes())
+            .map(|pem| {
+                let pem = pem.map_err(|error| anyhow::anyhow!("reading the runner CA: {error}"))?;
+                anyhow::ensure!(
+                    pem.label == "CERTIFICATE",
+                    "the runner CA file holds a {}",
+                    pem.label
+                );
+                Ok(pem_encode(&pem.contents))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let issuing = accepted
+            .first()
+            .context("the runner CA file holds no certificate")?
+            .clone();
         let key = rcgen::KeyPair::from_pem(key_pem).context("parsing the runner CA key")?;
-        let issuer = rcgen::Issuer::from_ca_cert_pem(cert_pem, key)
+        let issuer = rcgen::Issuer::from_ca_cert_pem(&issuing, key)
             .context("parsing the runner CA certificate")?;
         let ca = Self {
-            cert_pem: cert_pem.into(),
+            cert_pem: issuing,
             issuer,
+            accepted,
         };
         ca.self_check()?;
         Ok(ca)
@@ -113,13 +141,19 @@ impl RunnerCa {
             .map_err(|error| anyhow::anyhow!("reading the probe certificate: {error}"))?
             .1
             .contents;
-        self.verify(&der, now)
+        verify_against(std::slice::from_ref(&self.cert_pem), &der, now)
             .context("the runner CA key does not match its certificate")?;
         Ok(())
     }
 
     pub fn cert_pem(&self) -> &str {
         &self.cert_pem
+    }
+
+    /// Every accepted CA, issuing one first: what runners trust and present
+    /// as their chain, so they hold the new CA before the old one retires.
+    pub fn trust_bundle(&self) -> String {
+        self.accepted.concat()
     }
 
     /// A client certificate for `identity` over the key of `csr_pem`, valid
@@ -152,36 +186,61 @@ impl RunnerCa {
     /// the configured client CA; this binds it to the runner CA itself, so a
     /// certificate from any other trusted CA cannot claim a runner.
     pub fn verify(&self, leaf_der: &[u8], now_secs: i64) -> Result<RunnerIdentity> {
-        use x509_parser::prelude::*;
-        let (_, ca) = parse_x509_pem(self.cert_pem.as_bytes())
-            .map_err(|error| anyhow::anyhow!("parsing the runner CA certificate: {error}"))?;
-        let ca = ca
-            .parse_x509()
-            .map_err(|error| anyhow::anyhow!("parsing the runner CA certificate: {error}"))?;
-        let (_, leaf) = X509Certificate::from_der(leaf_der)
-            .map_err(|error| anyhow::anyhow!("parsing the client certificate: {error}"))?;
-        leaf.verify_signature(Some(ca.public_key())).map_err(|_| {
-            anyhow::anyhow!("the client certificate was not issued by the runner CA")
-        })?;
-        let validity = leaf.validity();
-        if now_secs < validity.not_before.timestamp() || now_secs > validity.not_after.timestamp() {
-            bail!("the client certificate is not valid now");
-        }
-        let names = leaf
-            .subject_alternative_name()
-            .ok()
-            .flatten()
-            .map(|extension| extension.value.general_names.clone())
-            .unwrap_or_default();
-        let mut identities = names.iter().filter_map(|name| match name {
-            GeneralName::URI(uri) => RunnerIdentity::from_uri(uri),
-            _ => None,
-        });
-        match (identities.next(), identities.next()) {
-            (Some(identity), None) => Ok(identity),
-            _ => bail!("the client certificate names no single runner"),
-        }
+        verify_against(&self.accepted, leaf_der, now_secs)
     }
+}
+
+/// [`RunnerCa::verify`] against the CA certificates `cas` (PEM).
+fn verify_against(cas: &[String], leaf_der: &[u8], now_secs: i64) -> Result<RunnerIdentity> {
+    use x509_parser::prelude::*;
+    let (_, leaf) = X509Certificate::from_der(leaf_der)
+        .map_err(|error| anyhow::anyhow!("parsing the client certificate: {error}"))?;
+    let issued_by_accepted = cas.iter().any(|ca_pem| {
+        parse_x509_pem(ca_pem.as_bytes())
+            .ok()
+            .and_then(|(_, pem)| {
+                pem.parse_x509()
+                    .ok()
+                    .map(|ca| leaf.verify_signature(Some(ca.public_key())).is_ok())
+            })
+            .unwrap_or(false)
+    });
+    if !issued_by_accepted {
+        bail!("the client certificate was not issued by the runner CA");
+    }
+    let validity = leaf.validity();
+    if now_secs < validity.not_before.timestamp() || now_secs > validity.not_after.timestamp() {
+        bail!("the client certificate is not valid now");
+    }
+    let names = leaf
+        .subject_alternative_name()
+        .ok()
+        .flatten()
+        .map(|extension| extension.value.general_names.clone())
+        .unwrap_or_default();
+    let mut identities = names.iter().filter_map(|name| match name {
+        GeneralName::URI(uri) => RunnerIdentity::from_uri(uri),
+        _ => None,
+    });
+    match (identities.next(), identities.next()) {
+        (Some(identity), None) => Ok(identity),
+        _ => bail!("the client certificate names no single runner"),
+    }
+}
+
+/// One certificate as PEM.
+fn pem_encode(der: &[u8]) -> String {
+    use base64::Engine as _;
+    let body = base64::engine::general_purpose::STANDARD.encode(der);
+    let lines: Vec<&str> = body
+        .as_bytes()
+        .chunks(64)
+        .map(|chunk| std::str::from_utf8(chunk).unwrap_or_default())
+        .collect();
+    format!(
+        "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+        lines.join("\n")
+    )
 }
 
 #[cfg(test)]
@@ -254,6 +313,37 @@ mod tests {
             format!("{refused:#}").contains("does not match"),
             "{refused:#}"
         );
+    }
+
+    /// Rotation (#769): with the new CA first and the old one after it,
+    /// certificates of both are admitted and new ones come from the new CA;
+    /// once the old CA leaves the list, its certificates are refused.
+    #[test]
+    fn rotation_admits_both_cas_until_the_old_one_retires() {
+        let now = 1_800_000_000;
+        let (old_cert, old_key) = RunnerCa::generate("runner CA 2026").unwrap();
+        let (new_cert, new_key) = RunnerCa::generate("runner CA 2027").unwrap();
+        let before = RunnerCa::from_pem(&old_cert, &old_key).unwrap();
+        let (_, request) = csr();
+        let old_leaf = leaf_der(&before.issue(&request, &identity("prod"), now).unwrap());
+
+        // Step 1, accept: the old CA still issues, and the new one is admitted.
+        let accepting = RunnerCa::from_pem(&format!("{old_cert}{new_cert}"), &old_key).unwrap();
+        assert_eq!(accepting.verify(&old_leaf, now).unwrap(), identity("prod"));
+        let overlap = RunnerCa::from_pem(&format!("{new_cert}{old_cert}"), &new_key).unwrap();
+        assert_eq!(overlap.verify(&old_leaf, now).unwrap(), identity("prod"));
+        let new_leaf = leaf_der(&overlap.issue(&request, &identity("prod"), now).unwrap());
+        assert_eq!(overlap.verify(&new_leaf, now).unwrap(), identity("prod"));
+        // A server still on step 1 admits what a server on step 2 issued.
+        assert_eq!(accepting.verify(&new_leaf, now).unwrap(), identity("prod"));
+        assert!(overlap.trust_bundle().contains(new_cert.trim()));
+        assert!(overlap.trust_bundle().contains(old_cert.trim()));
+        // The issuing key must be the first CA's.
+        assert!(RunnerCa::from_pem(&format!("{new_cert}{old_cert}"), &old_key).is_err());
+
+        let after = RunnerCa::from_pem(&new_cert, &new_key).unwrap();
+        assert!(after.verify(&old_leaf, now).is_err());
+        assert_eq!(after.verify(&new_leaf, now).unwrap(), identity("prod"));
     }
 
     #[test]
