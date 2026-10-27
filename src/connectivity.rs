@@ -123,6 +123,11 @@ pub struct IsolatedEvidence {
     /// The import scanner's outcome, when `TENKAI_IMPORT_SCANNER` is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scan: Option<crate::import_scanner::ScanEvidence>,
+    /// The accepted receipt itself, so the hub can hand it out again (#682).
+    /// Absent for receipts imported before it was kept; importing the same
+    /// receipt again stores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<crate::offline_bundle::ReceiptEnvelope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -728,6 +733,10 @@ pub async fn bind_isolated_bundle(
         plan_digest: Some(verified.statement().plan_digest.clone()),
         approval_digest: Some(verified.statement().approval_digest.clone()),
         scan,
+        receipt: record.environments[index]
+            .isolated
+            .as_ref()
+            .and_then(|evidence| evidence.receipt.clone()),
     });
     record.environments[index].detail = "verified offline bundle bound".into();
     persist(ctx, &record).await?;
@@ -900,6 +909,7 @@ pub async fn install_isolated_stack(
                 plan_digest: Some(verified.statement().plan_digest.clone()),
                 approval_digest: Some(verified.statement().approval_digest.clone()),
                 scan,
+                receipt: None,
             }),
         }],
         created_at: now,
@@ -1014,6 +1024,9 @@ pub async fn import_isolated_receipt(
     }
     match evidence.receipt_digest {
         Some(existing) if existing == receipt_digest => {
+            if let Some(evidence) = record.environments[index].isolated.as_mut() {
+                evidence.receipt.get_or_insert_with(|| receipt.clone());
+            }
             record.environments[index].detail =
                 "duplicate isolated receipt import is idempotent".into();
         }
@@ -1037,6 +1050,7 @@ pub async fn import_isolated_receipt(
                     .as_ref()
                     .and_then(|evidence| evidence.approval_digest.clone()),
                 scan: previous.and_then(|evidence| evidence.scan),
+                receipt: Some(receipt.clone()),
             });
             record.environments[index].detail = "isolated receipt accepted".into();
         }
@@ -2333,6 +2347,16 @@ install = "true"
         .await
         .unwrap();
         assert_eq!(finished.status, UpgradeStatus::Succeeded);
+        // The hub keeps the accepted receipt, so it can hand it out (#682).
+        assert_eq!(
+            finished
+                .environments
+                .iter()
+                .find(|environment| environment.name == "site-c")
+                .and_then(|environment| environment.isolated.as_ref())
+                .and_then(|evidence| evidence.receipt.as_ref()),
+            Some(&receipt)
+        );
         assert!(
             finished
                 .environments

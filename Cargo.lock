@@ -2921,6 +2921,8 @@ version = "0.5.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.22.1",
+ "ed25519-dalek",
  "rcgen",
  "reqwest",
  "rustls",

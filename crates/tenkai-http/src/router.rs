@@ -15,6 +15,7 @@ use super::environment_config::{
     configure_approval_policy, configure_constraints, configure_facts,
     configure_maintenance_window, configure_webhooks, register_environment,
 };
+use super::exports::{create_export, download_export, inspect_export, list_exports};
 use super::imports::{
     content_inventory, environment_webhook_deliveries, host_webhook_deliveries, import_bundle,
     import_job, staged_imports,
@@ -113,6 +114,9 @@ pub fn router(
         .route("/v1/reconcile", post(reconcile))
         .route("/v1/fleet/status", get(fleet_status))
         .route("/v1/backups", get(backup_status).post(take_backup))
+        .route("/v1/exports", get(list_exports).post(create_export))
+        .route("/v1/exports/{id}", get(inspect_export))
+        .route("/v1/exports/{id}/download", get(download_export))
         .route("/v1/imports", post(import_bundle))
         .route("/v1/imports/staged", get(staged_imports))
         .route("/v1/imports/{id}", get(import_job))

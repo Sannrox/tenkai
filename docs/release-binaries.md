@@ -137,3 +137,67 @@ inside a signed [offline bundle](offline-bundles.md#host-binaries):
 Verify them with the exporter trust roots received out of band, then install
 with `tenkaictl upgrade install-hosts`. GitHub artifact attestations stay an
 online check; the bundle signature is the offline one.
+
+## Upgrade a server host
+
+`tenkaictl self-upgrade` replaces a community SQLite server's binaries from
+a signed bundle, with the bundle's host binaries verified as above (#678).
+Run it on the server host. The service runs `<home>/current/tenkai-server`:
+
+```text
+<home>/versions/<digest>/tenkai-server, tenkai-executor-guard, tenkaictl
+<home>/current  -> versions/<digest>
+<home>/previous -> versions/<digest>
+<home>/upgrade.json                 the last switch
+<home>/backups/<ms>-<digest>.db     the store before that switch
+```
+
+```bash
+# Changes nothing: verifies the hosts and runs the candidate's store check.
+tenkaictl self-upgrade plan --home /opt/tenkai --bundle site.bundle.json \
+  --trust-roots offline-trust.toml --env site-c --database /var/lib/tenkai/tenkai.db
+
+# Backs up, switches, restarts, waits for readiness, rolls back if it fails.
+tenkaictl self-upgrade apply --home /opt/tenkai --bundle site.bundle.json \
+  --trust-roots offline-trust.toml --env site-c --database /var/lib/tenkai/tenkai.db \
+  --ready-url http://127.0.0.1:8080/readyz -- systemctl restart tenkai-server
+```
+
+1. **Store check.** The candidate's own `tenkai-server --check-store`
+   opens a private copy of the store. A binary that cannot open it, or a
+   store newer than the binary, is refused before anything changes. `plan`
+   and `apply` say when the candidate will migrate the schema.
+   The check copies and migrates the whole store, so it may take up to
+   `--check-timeout-secs` (default 1800).
+2. **Backup and switch.** `apply` copies the store into `backups/`, records
+   the switch, then repoints `current`.
+3. **Readiness.** The arguments after `--` restart the service, without a
+   shell. Then `apply` polls `--ready-url` until it answers 200 within
+   `--ready-timeout-secs` (default 120) and confirms the switch. A restart
+   command that fails counts as readiness that did not come. Without a
+   restart command, `apply` stops after the switch, because the old server
+   would still answer readiness. Restart the service yourself, then run
+   `tenkaictl self-upgrade confirm --home <home> --ready-url <url>`.
+4. **Automatic rollback.** When readiness does not come, `current` points
+   back at the previous version and the service is restarted again. If the
+   new version already migrated the store, the older binary cannot open it,
+   and the store must not be replaced under a running server. `apply` then
+   stops and says so. Stop the server, run
+   `tenkaictl self-upgrade rollback --home <home> --restore-backup`, and
+   start it. Restoring gives up what was written since the switch. The
+   store is checked again after the rollback restart, so a candidate that
+   migrated it while still starting is reported the same way. A restart
+   command that runs longer than five minutes is killed and counts as
+   failed.
+
+`self-upgrade rollback` also rolls back a confirmed switch by hand. A switch
+neither confirmed nor rolled back blocks the next one. An interrupted
+rollback is finished by running it again. The backup is restored at most
+once and only over a store the new version migrated, so a repeated rollback
+never overwrites what the older server wrote since. One self-upgrade
+command at a time holds a home.
+
+The record, backup and links cover one host. With several server replicas,
+upgrade one host at a time, with a schema both versions accept, as any
+rolling deploy requires. PostgreSQL (tenant-mode) hubs are upgraded and
+backed up by their operator; `--check-store` refuses them.
