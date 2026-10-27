@@ -20,7 +20,7 @@ impl Inner {
         let environment = environment.to_owned();
         let plan_id = plan_id.to_owned();
         let owner = owner.to_owned();
-        self.with_schema(schema, move |tx| {
+        self.with_writer_schema(schema, move |tx| {
             lock_lease(tx, &environment)?;
             ensure_environment_active(tx, &environment, "runtime work claims")?;
             if tx
@@ -133,7 +133,7 @@ impl Inner {
         }
         let plan_id = plan_id.to_owned();
         let owner = owner.to_owned();
-        self.with_schema(schema, move |tx| {
+        self.with_writer_schema(schema, move |tx| {
             let lease_gen = generation as i64;
             let changed = tx
                 .execute(
@@ -175,7 +175,7 @@ impl Inner {
         let plan_id = plan_id.to_owned();
         let owner = owner.to_owned();
         let completion_json = completion_json.to_owned();
-        self.with_schema(schema, move |tx| {
+        self.with_writer_schema(schema, move |tx| {
             let row = tx
                 .query_opt(
                     "SELECT owner,generation,expires_at,completion_json FROM runtime_claims

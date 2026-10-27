@@ -171,6 +171,46 @@ pg_restore -d "$TENKAI_POSTGRES_URL" --clean --if-exists tenkai-hub-YYYYMMDD.dum
 SQLite `tenkaictl backup` / `restore` remains the community embedded path.
 Tenant-mode hubs refuse `TENKAI_BACKUP_DIR`.
 
+## Hub writer lease (#748)
+
+A tenant-mode hub started with `--replica-count` above 1 takes part in one
+hub writer lease, a single row in `tenkai_hub_writer_lease` (holder,
+generation, expiry). The generation only grows.
+
+- **One writer.** The replica holding the lease leads. Every other replica is
+  a standby: `/readyz` answers `503` with
+  `standby: another replica holds the hub writer lease`, `/healthz` stays
+  `200`, and the reconcile, webhook, SMTP digest and host-watch loops skip
+  their ticks.
+- **Fenced writes.** Every authoritative write checks, inside its own
+  transaction, that the lease still names this replica at the generation it
+  writes with and has not expired. A replica whose lease lapsed or was taken
+  over cannot commit, even before it notices (`not the active hub writer`).
+  A standby's writes are refused before they reach the database.
+- **Takeover.** The leader renews every five seconds; the lease lives 15
+  seconds. A replica whose renewal fails becomes a standby at once, and so
+  does one whose renewal stalls past the lease's lifetime. Before renewing,
+  the leader checks its own store connections; if they answer with an
+  error, it releases the lease and does not ask again until they can. A
+  check still waiting behind store work counts as busy and the leader
+  renews, until no check has passed for 15 seconds. A transaction holding
+  the lease row that goes idle is ended by the database after five
+  seconds, so a paused replica cannot block a takeover; its connections
+  reconnect on their next use. When the
+  leader stops renewing, the next standby to renew takes the lease at the
+  next generation, at most 15 seconds later. A leader that shuts down keeps
+  renewing until its requests and loops have drained, then releases the
+  lease, so a standby takes over on its next renewal.
+- **Clock.** Expiry is judged by the database clock, so replicas with skewed
+  clocks agree on who leads.
+- The lease is tried once before the store opens, so a replica never writes
+  before it knows whether it leads. Lines `tenkai.writer_lease role=leader
+  generation=<n>` and `role=standby` log each change of role.
+- Single-replica hubs have no lease and write as before.
+
+This replaces stopping the old writer by hand in the drill above: two hubs
+may run at once, and only the lease holder writes.
+
 ## Durable tick fence (#135)
 
 With `--features postgres` and `TENKAI_POSTGRES_URL`, multi-replica hosts use
@@ -191,7 +231,9 @@ Mutation-level replay and stale-generation evidence:
 - Identity-plane / IdP databases must never be co-located with Tenkai ops DB
   (ADR 0005 / 0008).
 - `high_availability` product flag is separate from `shared_replica_state` and
-  is not claimed by the Postgres adapter by default.
+  is not claimed by the Postgres adapter by default. The writer lease (#748)
+  gives one active writer with fenced takeover; it does not make this a
+  supported HA profile.
 - Catalog object-graph lifecycle and terminal-outcome export remain unavailable
   in tenant mode.
 

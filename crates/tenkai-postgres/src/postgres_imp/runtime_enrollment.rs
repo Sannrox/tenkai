@@ -18,7 +18,7 @@ impl Inner {
         enrollment: &RuntimeEnrollmentRecord,
     ) -> Result<()> {
         let enrollment = enrollment.clone();
-        self.with_schema(schema, move |tx| {
+        self.with_writer_schema(schema, move |tx| {
             let inserted = tx
                 .execute(
                     "INSERT INTO runtime_enrollments(token_digest,environment_id,expires_at,created_by)
@@ -52,7 +52,7 @@ impl Inner {
         let environment_id = environment.to_owned();
         let token_digest = token_digest.to_owned();
         let credential_digest = credential_digest.to_owned();
-        self.with_schema(schema, move |tx| {
+        self.with_writer_schema(schema, move |tx| {
             let spent = tx
                 .execute(
                     "UPDATE runtime_enrollments SET redeemed_at=$3
@@ -135,7 +135,7 @@ impl Inner {
     ) -> Result<()> {
         let credential_digest = credential_digest.to_owned();
         let revocation = revocation.clone();
-        self.with_schema(schema, move |tx| {
+        self.with_writer_schema(schema, move |tx| {
             let known = tx
                 .execute(
                     "UPDATE runtime_credentials SET revoked_at=COALESCE(revoked_at, $2)
@@ -206,7 +206,7 @@ impl Inner {
         activity: &RuntimeActivityRecord,
     ) -> Result<()> {
         let activity = activity.clone();
-        self.with_schema(schema, move |tx| {
+        self.with_writer_schema(schema, move |tx| {
             // GREATEST ignores NULL, so an unset timestamp keeps the recorded one.
             tx.execute(
                 "INSERT INTO runtime_activity(runner_id,instance_id,environment_id,owner,

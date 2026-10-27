@@ -81,7 +81,7 @@ impl Inner {
         }
         let owner = owner.to_owned();
         let rollback = rollback.clone();
-        self.with_schema(schema, move |tx| {
+        self.with_writer_schema(schema, move |tx| {
             if rollback_in(tx, &rollback.id)?.is_some() {
                 if !rollback_intent_matches(tx, &rollback)? {
                     return Err(StoreError::ImmutableConflict {
@@ -145,7 +145,7 @@ impl Inner {
         let owner = owner.to_owned();
         let checkpoint_json = checkpoint_json.to_owned();
         let detail = detail.to_owned();
-        self.with_schema(schema, move |tx| {
+        self.with_writer_schema(schema, move |tx| {
             let environment: String = tx
                 .query_opt(
                     "SELECT environment_id FROM rollbacks WHERE id=$1",

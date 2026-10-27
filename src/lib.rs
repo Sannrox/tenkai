@@ -253,6 +253,7 @@ pub mod version_skew;
 pub mod wave;
 pub mod worker_pool;
 pub mod workshop_module;
+pub mod writer_fence;
 
 pub fn now_millis() -> i64 {
     std::time::SystemTime::now()

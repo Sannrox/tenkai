@@ -15,7 +15,7 @@ impl Inner {
             });
         }
         let event = event.clone();
-        self.with_schema(schema, move |tx| {
+        self.with_writer_schema(schema, move |tx| {
             let existing = tx
                 .query_opt(
                     "SELECT provider_kind,binding_digest,payload_json FROM provider_events

@@ -4,7 +4,7 @@ use super::{Inner, lock_lease, pg, require_lease};
 impl Inner {
     pub fn create_plan(&self, schema: &str, plan: &PlanRecord) -> Result<()> {
         let plan = plan.clone();
-        self.with_schema(schema, move |tx| {
+        self.with_writer_schema(schema, move |tx| {
             lock_lease(tx, &plan.environment_id)?;
             ensure_environment_active(tx, &plan.environment_id, "new plans")?;
             if tx
@@ -109,7 +109,7 @@ impl Inner {
         let id = id.to_owned();
         let owner = owner.to_owned();
         let detail = detail.to_owned();
-        self.with_schema(schema, move |tx| {
+        self.with_writer_schema(schema, move |tx| {
             if tx
                 .query_one(
                     "SELECT EXISTS(

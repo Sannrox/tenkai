@@ -219,3 +219,35 @@ async fn backups_are_fleet_management_and_their_age_shows_in_health() {
     assert_eq!(health["backup"]["state"], "ok");
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// A standby hub replica is alive but not ready to take writes (#748); it
+/// becomes ready the moment it holds the writer lease.
+#[tokio::test]
+async fn a_standby_replica_is_live_but_not_ready() {
+    let fence = Arc::new(tenkai::writer_fence::WriterFence::default());
+    let mut config = ServerConfig::community("management-secret", HashMap::new());
+    config.writer_fence = Some(fence.clone());
+    let store = Arc::new(tenkai::storage::SqliteStore::open_in_memory().unwrap());
+    let app = router(
+        config,
+        Arc::new(super::support::FixedReconciler::default()),
+        store,
+    )
+    .unwrap();
+    let status = |path: &'static str| {
+        let app = app.clone();
+        async move {
+            app.oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+    assert_eq!(status("/healthz").await, StatusCode::OK);
+    assert_eq!(status("/readyz").await, StatusCode::SERVICE_UNAVAILABLE);
+    fence.set(tenkai::writer_fence::WriterRole::Leader {
+        holder: "hub-a".into(),
+        generation: 1,
+    });
+    assert_eq!(status("/readyz").await, StatusCode::OK);
+}

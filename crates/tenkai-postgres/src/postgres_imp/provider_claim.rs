@@ -17,7 +17,7 @@ impl Inner {
             });
         }
         let claim_token = claim_token.to_owned();
-        self.with_schema(schema, move |tx| {
+        self.with_writer_schema(schema, move |tx| {
             tx.execute(
                 "UPDATE provider_events SET claim_token=NULL,claim_until=NULL
                  WHERE delivered_at IS NULL AND claim_until <= $1",
@@ -94,7 +94,7 @@ impl Inner {
         }
         let provider_kind = provider_kind.to_owned();
         let claim_token = claim_token.to_owned();
-        self.with_schema(schema, move |tx| {
+        self.with_writer_schema(schema, move |tx| {
             tx.execute(
                 "UPDATE provider_events SET claim_token=NULL,claim_until=NULL
                  WHERE delivered_at IS NULL AND claim_until <= $1",

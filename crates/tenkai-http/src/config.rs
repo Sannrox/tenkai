@@ -60,6 +60,9 @@ pub struct ServerConfig {
     /// The runner CA (#674): issues runner certificates at enrollment and
     /// admits runners by them.
     pub runner_ca: Option<Arc<tenkai::runner_ca::RunnerCa>>,
+    /// The hub writer role on multi-replica hubs (#748): a standby reports
+    /// not ready. `None` on single-replica hosts.
+    pub writer_fence: Option<Arc<tenkai::writer_fence::WriterFence>>,
 }
 
 #[derive(Clone, Debug)]
@@ -94,6 +97,7 @@ impl ServerConfig {
             imports: None,
             exports: None,
             runner_ca: None,
+            writer_fence: None,
         }
     }
 

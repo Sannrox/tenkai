@@ -256,6 +256,18 @@ pub(super) async fn oidc_client(State(state): State<Arc<AppState>>) -> Response 
 }
 
 pub(super) async fn ready(State(state): State<Arc<AppState>>) -> Response {
+    // A standby is alive (/healthz) but must not take writes (#748).
+    if state
+        .config
+        .writer_fence
+        .as_ref()
+        .is_some_and(|fence| !fence.is_leader())
+    {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "standby: another replica holds the hub writer lease",
+        );
+    }
     let operational_store = state.store.clone();
     match tokio::task::spawn_blocking(move || operational_store.check_health()).await {
         Ok(Ok(())) => {}
