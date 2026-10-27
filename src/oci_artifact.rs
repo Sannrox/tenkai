@@ -548,6 +548,16 @@ pub fn image_closure(
     artifacts: &[OciArtifactRef],
     registry: &dyn ArtifactRegistry,
 ) -> Result<Vec<OciArtifactRef>> {
+    image_closure_except(artifacts, registry, |_| false)
+}
+
+/// [`image_closure`], with artifacts whose digest `held` admits kept in the
+/// closure unfetched and unexpanded: a delta's base content (#635).
+pub fn image_closure_except(
+    artifacts: &[OciArtifactRef],
+    registry: &dyn ArtifactRegistry,
+    held: impl Fn(&str) -> bool,
+) -> Result<Vec<OciArtifactRef>> {
     let mut closure: Vec<OciArtifactRef> = Vec::new();
     let mut pending: std::collections::VecDeque<OciArtifactRef> =
         artifacts.iter().cloned().collect();
@@ -558,6 +568,10 @@ pub fn image_closure(
                 && known.digest == artifact.digest
         });
         if seen {
+            continue;
+        }
+        if held(&artifact.digest) {
+            closure.push(artifact);
             continue;
         }
         for (digest, media_type) in

@@ -101,6 +101,55 @@ repository: export follows a release's image manifests to them. Install and
 bind refuse a bundle that misses one, naming the image and the digest, before
 anything is stored.
 
+## Delta bundles and content retention
+
+A full bundle carries every layer and weight of a release, tens of GB for a
+model stack. Once a site holds a release, the next one can travel as a
+delta that carries only what that base release lacks (#635):
+
+- **Export:** `insert_artifact_layers_delta` takes the base release
+  (`<product>@<version>`) and the layer and weight digests it brought. Those
+  layers are neither fetched nor carried; their `oci-layers/mirrors.json`
+  instructions point at a signed `delta/base.json`
+  (`tenkai.offline-delta-base.v1`), which names the base release and lists
+  the digests. Base weights are left out of the chunk store.
+- **Before any change:** bind, dry-run import and server-side import refuse
+  a delta unless the base release is in the site's catalog and every listed
+  layer (under the environment's mirror) and weight is held here with
+  matching bytes. The refusal names the base release and the digest.
+- **First install:** always needs a full bundle; a delta is refused. An
+  update delta may keep `stack/manifest.json`; its base images and weights
+  count as present once the base check passes.
+- **Older Tenkai:** it refuses a delta rather than skipping layers, because
+  an instruction's path is not the layer's own entry. Full bundles are
+  unchanged.
+
+The site keeps what rollback needs and nothing else.
+`tenkaictl upgrade collect-content` lists the content it would remove;
+`--apply` removes it. A release is kept while:
+
+- a channel heads it;
+- an environment has it deployed, or as its previous deployment (N-1), so
+  `tenkaictl upgrade rollback` works from the local stores without media;
+- an upgrade that has not succeeded or rolled back targets it.
+
+Layers and weights that only unkept releases name are removed from
+`TENKAI_OCI_STORE` and `TENKAI_WEIGHT_CACHE`, under every mirror path. An
+image manifest keeps the blobs it references. Content no catalog release
+names is left alone, since an interrupted import may have stored it before
+its release was published. Collection holds an exclusive lock on this
+host's stores and refuses while an import or apply runs; both wait for a
+running collection. Channel heads and plans can still move: collection
+refuses if they changed while it read them, and a release made live after
+its content was collected fails closed at apply until its bundle is
+imported again. Base image manifests a delta relies on must have every
+blob they reference held here.
+
+Rehearsal: `cargo test --locked delta_bundle_applies_offline_and_rollback_survives_collection`
+imports N-1 from a full bundle, refuses the N delta against a store without
+the base, imports and applies it, collects an older release's content while
+keeping N-1, and rolls back to N-1 from the local store alone.
+
 ## Seed registry
 
 A first dark-site install has no registry for executors to pull from. Tenkai

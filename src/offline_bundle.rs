@@ -29,6 +29,13 @@ pub const LAYER_INSTRUCTION_MEDIA: &str = "application/vnd.tenkai.offline-artifa
 pub const IMAGE_CHUNKS_PATH: &str = "chunks/images.json";
 pub const IMAGE_CHUNKS_SCHEMA: &str = "tenkai.offline-image-chunks.v1";
 pub const IMAGE_CHUNKS_MEDIA: &str = "application/vnd.tenkai.offline-image-chunks.v1+json";
+/// Signed list of the content a delta bundle relies on but does not carry,
+/// because its named base release brought it (#635). A layer instruction
+/// whose path is this entry names such a layer; an older Tenkai refuses
+/// it, since the path is not the layer's own entry.
+pub const DELTA_BASE_PATH: &str = "delta/base.json";
+pub const DELTA_BASE_SCHEMA: &str = "tenkai.offline-delta-base.v1";
+pub const DELTA_BASE_MEDIA: &str = "application/vnd.tenkai.offline-delta-base.v1+json";
 pub const STACK_MANIFEST_SCHEMA: &str = "tenkai.offline-stack.v1";
 pub const STACK_MANIFEST_PATH: &str = "stack/manifest.json";
 pub const STACK_MANIFEST_MEDIA: &str = "application/vnd.tenkai.offline-stack.v1+json";
@@ -508,16 +515,89 @@ pub fn insert_artifact_layers_chunked(
     registry: &dyn ArtifactRegistry,
     chunks: Option<(&Path, u64)>,
 ) -> Result<()> {
+    insert_layers(payloads, artifacts, registry, chunks, None)
+}
+
+/// Content a delta bundle relies on but does not carry (#635): the layers
+/// and model weights, by digest, that its base release brought to the site.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OfflineDeltaBase {
+    pub schema: String,
+    /// `<product>@<version>` of the release the site must already hold.
+    pub base_release: String,
+    pub layers: Vec<String>,
+    pub weights: Vec<String>,
+}
+
+/// [`insert_artifact_layers_chunked`] for a delta bundle: layers `base`
+/// lists are neither fetched nor carried, and their instructions point at
+/// [`DELTA_BASE_PATH`], which is written from `base` with only the layers
+/// an instruction names. `base` may be the base release's whole inventory. Weights `base` lists
+/// are the caller's to leave out of the chunk store.
+pub fn insert_artifact_layers_delta(
+    payloads: &mut BTreeMap<String, (String, Vec<u8>)>,
+    artifacts: &[OciArtifactRef],
+    registry: &dyn ArtifactRegistry,
+    chunks: Option<(&Path, u64)>,
+    base: &OfflineDeltaBase,
+) -> Result<()> {
+    if base.schema != DELTA_BASE_SCHEMA {
+        bail!("unsupported offline delta base schema {}", base.schema);
+    }
+    base_release_parts(&base.base_release)?;
+    insert_layers(payloads, artifacts, registry, chunks, Some(base))?;
+    // Only the base layers an instruction names are listed; blobs behind a
+    // reused base manifest are verified through it at import.
+    let named: BTreeSet<String> = match payloads.get(LAYER_INSTRUCTION_PATH) {
+        Some((_, raw)) => serde_json::from_slice::<OfflineArtifactLayerManifest>(raw)?
+            .layers
+            .into_iter()
+            .filter(|layer| layer.path == DELTA_BASE_PATH)
+            .map(|layer| layer.digest)
+            .collect(),
+        None => BTreeSet::new(),
+    };
+    let listed = OfflineDeltaBase {
+        layers: named.into_iter().collect(),
+        ..base.clone()
+    };
+    payloads.insert(
+        DELTA_BASE_PATH.into(),
+        (DELTA_BASE_MEDIA.into(), serde_json::to_vec(&listed)?),
+    );
+    Ok(())
+}
+
+fn insert_layers(
+    payloads: &mut BTreeMap<String, (String, Vec<u8>)>,
+    artifacts: &[OciArtifactRef],
+    registry: &dyn ArtifactRegistry,
+    chunks: Option<(&Path, u64)>,
+    base: Option<&OfflineDeltaBase>,
+) -> Result<()> {
     if artifacts.is_empty() {
         return Ok(());
     }
+    let in_base = |digest: &str| base.is_some_and(|base| base.layers.iter().any(|d| d == digest));
     let mut chunked: Vec<crate::offline_chunk_store::OfflineChunkArtifact> = Vec::new();
     oci_artifact::validate_all(artifacts)?;
     // An image manifest travels with the blobs it references (#627).
-    let artifacts = &oci_artifact::image_closure(artifacts, registry)?;
+    let artifacts = &oci_artifact::image_closure_except(artifacts, registry, in_base)?;
     let mut layers = Vec::with_capacity(artifacts.len());
     let mut seen_paths = BTreeSet::new();
     for artifact in artifacts {
+        if in_base(&artifact.digest) {
+            artifact.validate()?;
+            layers.push(OfflineArtifactLayer {
+                path: DELTA_BASE_PATH.into(),
+                registry: artifact.registry.clone(),
+                repository: artifact.repository.clone(),
+                digest: artifact.digest.clone(),
+                media_type: artifact.media_type.clone(),
+            });
+            continue;
+        }
         let path = artifact.layer_entry_path()?;
         if seen_paths.insert(path.clone()) {
             let bytes = registry.fetch(artifact).map_err(|error| {
@@ -707,11 +787,12 @@ pub fn plan_artifact_layers<'a>(
         );
     }
     let mut planned = Vec::with_capacity(manifest.layers.len());
-    // Chunked layers are planned by `chunked_layers`, from the chunk store.
+    // Chunked layers are planned by `chunked_layers`, from the chunk store;
+    // a delta's base layers are already held (`preflight_delta_base`).
     for layer in manifest
         .layers
         .iter()
-        .filter(|layer| layer.path != IMAGE_CHUNKS_PATH)
+        .filter(|layer| layer.path != IMAGE_CHUNKS_PATH && layer.path != DELTA_BASE_PATH)
     {
         let reference = OciArtifactRef {
             registry: layer.registry.clone(),
@@ -756,6 +837,8 @@ pub fn import_artifact_layers(
 ) -> Result<Vec<OciArtifactRef>> {
     let planned = plan_artifact_layers(bundle, mirrors)?;
     preflight_image_closure(bundle)?;
+    // A delta's base layers are not carried; they must already be here.
+    preflight_delta_layers(bundle, dest, mirrors)?;
     // Every mirror is resolved, and every chunked layer verified, before
     // anything is stored.
     let chunked = chunked_layers(bundle)?
@@ -796,6 +879,156 @@ pub fn import_artifact_layers(
         }
     }
     Ok(pulled)
+}
+
+/// `(product, version)` of a delta base release named `<product>@<version>`.
+pub fn base_release_parts(release: &str) -> Result<(&str, &str)> {
+    validate_text("delta base release", release, 256)?;
+    match release.split_once('@') {
+        Some((product, version)) if !product.is_empty() && !version.is_empty() => {
+            Ok((product, version))
+        }
+        _ => bail!("offline delta base release {release} is not <product>@<version>"),
+    }
+}
+
+/// The signed delta base when the bundle is a delta, checked against its
+/// layer instructions: every instruction pointing at [`DELTA_BASE_PATH`]
+/// is listed, and every listed layer is named by an instruction.
+pub fn delta_base(
+    bundle: &VerifiedBundle,
+) -> Result<Option<(OfflineDeltaBase, Vec<OciArtifactRef>)>> {
+    let instructions: Vec<OfflineArtifactLayer> = match bundle.entry(LAYER_INSTRUCTION_PATH) {
+        Some(raw) => {
+            serde_json::from_slice::<OfflineArtifactLayerManifest>(raw)
+                .context("parsing offline artifact layer instructions")?
+                .layers
+        }
+        None => Vec::new(),
+    };
+    let from_base: Vec<OciArtifactRef> = instructions
+        .into_iter()
+        .filter(|layer| layer.path == DELTA_BASE_PATH)
+        .map(|layer| OciArtifactRef {
+            registry: layer.registry,
+            repository: layer.repository,
+            digest: layer.digest,
+            media_type: layer.media_type,
+        })
+        .collect();
+    let Some(raw) = bundle.entry(DELTA_BASE_PATH) else {
+        if let Some(layer) = from_base.first() {
+            bail!(
+                "layer {} points at {DELTA_BASE_PATH}, which the bundle does not carry",
+                layer.digest
+            );
+        }
+        return Ok(None);
+    };
+    let base: OfflineDeltaBase =
+        serde_json::from_slice(raw).context("parsing offline delta base")?;
+    if base.schema != DELTA_BASE_SCHEMA {
+        bail!("unsupported offline delta base schema {}", base.schema);
+    }
+    base_release_parts(&base.base_release)?;
+    for layer in &from_base {
+        layer.validate()?;
+        if !base.layers.contains(&layer.digest) {
+            bail!(
+                "layer {} points at {DELTA_BASE_PATH}, which does not list it",
+                layer.digest
+            );
+        }
+    }
+    if let Some(unnamed) = base
+        .layers
+        .iter()
+        .find(|digest| !from_base.iter().any(|layer| &layer.digest == *digest))
+    {
+        bail!("offline delta base lists layer {unnamed} no instruction names");
+    }
+    Ok(Some((base, from_base)))
+}
+
+/// Refuse a delta bundle, before anything is stored, unless this site
+/// holds every layer (under `mirrors`, in `store`) and weight (in `cache`)
+/// it relies on. Bytes are verified against their digests, so damaged base
+/// content refuses as missing content does. Errors name the base release
+/// and the digest.
+pub fn preflight_delta_base(
+    bundle: &VerifiedBundle,
+    store: Option<&dyn ArtifactRegistry>,
+    mirrors: &BTreeMap<String, String>,
+    cache: Option<&crate::model_runtime::WeightCache>,
+) -> Result<()> {
+    let Some((base, _)) = delta_base(bundle)? else {
+        return Ok(());
+    };
+    preflight_delta_layers(bundle, store, mirrors)?;
+    let release = &base.base_release;
+    if !base.weights.is_empty() {
+        let cache = cache.with_context(|| {
+            format!(
+                "TENKAI_WEIGHT_CACHE is required to check the weights of base release {release}"
+            )
+        })?;
+        for digest in &base.weights {
+            let held = cache.verify_cached(digest).with_context(|| {
+                format!("base release {release} weight {digest} is damaged here")
+            })?;
+            if !held {
+                bail!(
+                    "base release {release} weight {digest} is not held here; import the base release first"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The layer half of [`preflight_delta_base`]: every base layer, and the
+/// blobs base image manifests reference, held in `store` under `mirrors`.
+fn preflight_delta_layers(
+    bundle: &VerifiedBundle,
+    store: Option<&dyn ArtifactRegistry>,
+    mirrors: &BTreeMap<String, String>,
+) -> Result<()> {
+    let Some((base, layers)) = delta_base(bundle)? else {
+        return Ok(());
+    };
+    let release = &base.base_release;
+    if !layers.is_empty() {
+        let store = store.with_context(|| {
+            format!("TENKAI_OCI_STORE is required to check the layers of base release {release}")
+        })?;
+        // A base image manifest needs the blobs it references held too.
+        let mut pending: Vec<OciArtifactRef> = layers.clone();
+        let mut checked = BTreeSet::new();
+        while let Some(layer) = pending.pop() {
+            let pull = oci_artifact::pull_reference(&layer, mirrors)?;
+            if !checked.insert(pull.identity_key()) {
+                continue;
+            }
+            store.verify(&pull).with_context(|| {
+                format!(
+                    "base release {release} layer {} of {}/{} is not held here; import the base release first",
+                    layer.digest, layer.registry, layer.repository
+                )
+            })?;
+            if oci_artifact::is_manifest_media_type(&layer.media_type) {
+                for (digest, media_type) in
+                    oci_artifact::referenced_blobs(&layer.media_type, &store.fetch(&pull)?)?
+                {
+                    pending.push(OciArtifactRef {
+                        digest,
+                        media_type,
+                        ..layer.clone()
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Required first-install contents inside `tenkai.offline-bundle.v1`.
@@ -856,6 +1089,8 @@ pub fn preflight_full_stack(bundle: &VerifiedBundle, bundle_path: Option<&Path>)
     let Some(manifest) = stack_manifest(bundle)? else {
         bail!("first-install offline bundle requires {STACK_MANIFEST_PATH}");
     };
+    // A delta's base content is checked by `preflight_delta_base`.
+    let base = delta_base(bundle)?.map(|(base, _)| base);
     if manifest.images.is_empty()
         || manifest.weights.is_empty()
         || manifest.schemas.is_empty()
@@ -873,8 +1108,9 @@ pub fn preflight_full_stack(bundle: &VerifiedBundle, bundle_path: Option<&Path>)
         let Some(layer) = layers.get(digest) else {
             bail!("bundle is missing a required image {digest}");
         };
-        if layer.path == IMAGE_CHUNKS_PATH {
-            // Verified from the chunk store by `preflight_image_chunks`.
+        if layer.path == IMAGE_CHUNKS_PATH || layer.path == DELTA_BASE_PATH {
+            // Verified from the chunk store by `preflight_image_chunks`, or
+            // held here as base content.
             continue;
         }
         if layer.path != layer.reference.layer_entry_path()? {
@@ -895,7 +1131,19 @@ pub fn preflight_full_stack(bundle: &VerifiedBundle, bundle_path: Option<&Path>)
     }
     preflight_image_closure(bundle)?;
     preflight_image_chunks(bundle, bundle_path)?;
-    crate::offline_chunk_store::preflight_weight_chunks(bundle, bundle_path, &manifest.weights)?;
+    let carried: Vec<String> = manifest
+        .weights
+        .iter()
+        .filter(|digest| {
+            !base
+                .as_ref()
+                .is_some_and(|base| base.weights.contains(digest))
+        })
+        .cloned()
+        .collect();
+    if !carried.is_empty() {
+        crate::offline_chunk_store::preflight_weight_chunks(bundle, bundle_path, &carried)?;
+    }
     for path in manifest.schemas.iter().chain(manifest.hub.iter()) {
         if bundle.entry(path).is_none() {
             let kind = if manifest.schemas.iter().any(|schema| schema == path) {
@@ -943,7 +1191,9 @@ fn preflight_image_closure(bundle: &VerifiedBundle) -> Result<()> {
         })
         .collect();
     for layer in &instructions.layers {
-        if !oci_artifact::is_manifest_media_type(&layer.media_type) {
+        // A base manifest's closure was checked when the base was imported.
+        if !oci_artifact::is_manifest_media_type(&layer.media_type) || layer.path == DELTA_BASE_PATH
+        {
             continue;
         }
         let entry = (layer.path != IMAGE_CHUNKS_PATH)
