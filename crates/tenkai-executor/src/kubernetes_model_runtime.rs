@@ -1,11 +1,12 @@
-//! vLLM `model_runtime` executor on the in-process Kubernetes path (#600).
+//! GPU `model_runtime` executor on the in-process Kubernetes path: vLLM (#600)
+//! and Text Generation Inference (#615) serve through one lifecycle.
 //!
 //! Each descriptor generation is a candidate Deployment and Service. A candidate
 //! becomes active only after it is Available and passes a fixed completion smoke
 //! probe; then the stable Service selects it. The previous generation stays
-//! deployed so [`VllmModelRuntimeExecutor::rollback`] can re-select it.
+//! deployed so [`KubernetesModelRuntimeExecutor::rollback`] can re-select it.
 //!
-//! vLLM loads a model directory (configuration, tokenizer, weights), so the pinned
+//! Both engines load a model directory (configuration, tokenizer, weights), so the pinned
 //! artifact is a tar of that directory (`model.format = "directory+tar"`). After the
 //! cache verifies its digest, the executor unpacks it once under the cache root,
 //! which pods mount read-only from the claim that holds it.
@@ -34,9 +35,90 @@ const NAME_LIMIT: usize = 63;
 const GENERATION_LEN: usize = 12;
 const PRODUCT_LABEL: &str = "tenkai.product";
 
+/// The serving engine a [`ServingConfig`] runs, from `runtime.engine`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServingEngine {
+    Vllm,
+    /// Text Generation Inference.
+    Tgi,
+}
+
+impl ServingEngine {
+    pub fn parse(engine: &str) -> Result<Self> {
+        match engine {
+            "vllm" => Ok(Self::Vllm),
+            "tgi" => Ok(Self::Tgi),
+            other => bail!("model_runtime engine {other} has no Kubernetes serving executor"),
+        }
+    }
+
+    /// The `runtime.engine` value.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Vllm => "vllm",
+            Self::Tgi => "tgi",
+        }
+    }
+
+    /// Prefix of this engine's host configuration variables.
+    fn env_prefix(self) -> &'static str {
+        match self {
+            Self::Vllm => "TENKAI_VLLM",
+            Self::Tgi => "TENKAI_TGI",
+        }
+    }
+
+    /// Container arguments and environment serving `model_path` on `port`.
+    fn container(
+        self,
+        model_path: &Path,
+        served_model: &str,
+        port: u16,
+        tensor_parallel: u32,
+        context_length: u32,
+    ) -> (Value, Value) {
+        match self {
+            Self::Vllm => (
+                json!([
+                    "--model",
+                    model_path,
+                    "--served-model-name",
+                    served_model,
+                    "--port",
+                    port.to_string(),
+                    "--tensor-parallel-size",
+                    tensor_parallel.to_string(),
+                    "--max-model-len",
+                    context_length.to_string(),
+                ]),
+                json!([]),
+            ),
+            Self::Tgi => (
+                json!([
+                    "--model-id",
+                    model_path,
+                    "--hostname",
+                    "0.0.0.0",
+                    "--port",
+                    port.to_string(),
+                    "--num-shard",
+                    tensor_parallel.to_string(),
+                    "--max-total-tokens",
+                    context_length.to_string(),
+                    "--max-input-tokens",
+                    context_length.saturating_sub(1).max(1).to_string(),
+                ]),
+                // The model is the mounted directory; nothing is downloaded at start.
+                json!([{"name": "HF_HUB_OFFLINE", "value": "1"}]),
+            ),
+        }
+    }
+}
+
 /// Environment-scoped serving configuration; nothing here comes from the manifest.
 #[derive(Debug, Clone)]
-pub struct VllmConfig {
+pub struct ServingConfig {
+    pub engine: ServingEngine,
     pub cluster_config: PathBuf,
     pub namespace: String,
     /// Serving image, pinned by digest.
@@ -50,49 +132,60 @@ pub struct VllmConfig {
     pub tolerations: Vec<Value>,
 }
 
-/// Host factory that binds the vLLM executor to one environment.
+/// Host factory that binds the Kubernetes serving executor to one
+/// environment, for `runtime.engine` `vllm` or `tgi`.
 ///
-/// Serving configuration is host configuration, never manifest data: the
-/// digest-pinned serving image (`TENKAI_VLLM_IMAGE`), the weights claim
-/// (`TENKAI_VLLM_WEIGHTS_CLAIM`), and the weight-cache root
-/// (`TENKAI_VLLM_WEIGHTS_ROOT`) must be set, or executor construction fails
-/// closed with a named error. The cache root must be the host mount of the
-/// weights claim: the executor writes verified weights there and serving
-/// pods mount the same claim read-only; nothing copies between volumes. The
-/// environment name is the namespace, as on the in-process software path.
-/// `TENKAI_VLLM_SMOKE_BASE_URL` overrides the smoke-probe URL template.
-pub struct VllmExecutorFactory;
+/// Serving configuration is host configuration, never manifest data. Each
+/// engine reads its own variables (`TENKAI_VLLM_*` or `TENKAI_TGI_*`): the
+/// digest-pinned serving image (`_IMAGE`), the weights claim
+/// (`_WEIGHTS_CLAIM`), and the weight-cache root (`_WEIGHTS_ROOT`) must be
+/// set, or executor construction fails closed with a named error. The cache
+/// root must be the host mount of the weights claim: the executor writes
+/// verified weights there and serving pods mount the same claim read-only;
+/// nothing copies between volumes. The environment name is the namespace, as
+/// on the in-process software path. `_SMOKE_BASE_URL` overrides the
+/// smoke-probe URL template.
+pub struct KubernetesModelRuntimeFactory;
 
-impl tenkai::model_runtime::ModelRuntimeExecutorFactory for VllmExecutorFactory {
+impl tenkai::model_runtime::ModelRuntimeExecutorFactory for KubernetesModelRuntimeFactory {
     fn executor(
         &self,
+        engine: &str,
         environment: &str,
         cluster_config: &Path,
         state_path: &Path,
         artifacts: Option<tenkai::model_runtime::ModelRuntimeArtifacts>,
     ) -> Result<std::sync::Arc<dyn ModelRuntimeExecutor>> {
-        let image = std::env::var("TENKAI_VLLM_IMAGE").ok().filter(|v| !v.trim().is_empty())
-            .context("model_runtime engine vllm requires TENKAI_VLLM_IMAGE (digest-pinned serving image) on this host")?;
+        let engine = ServingEngine::parse(engine)?;
+        let (name, prefix) = (engine.name(), engine.env_prefix());
+        let var = |suffix: &str| {
+            std::env::var(format!("{prefix}_{suffix}"))
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        };
+        let image = var("IMAGE").with_context(|| {
+            format!("model_runtime engine {name} requires {prefix}_IMAGE (digest-pinned serving image) on this host")
+        })?;
         if !image.contains("@sha256:") {
-            bail!("TENKAI_VLLM_IMAGE must pin the serving image by digest (@sha256:...)");
+            bail!("{prefix}_IMAGE must pin the serving image by digest (@sha256:...)");
         }
-        let weights_claim = std::env::var("TENKAI_VLLM_WEIGHTS_CLAIM")
-            .ok()
-            .filter(|v| !v.trim().is_empty())
-            .context("model_runtime engine vllm requires TENKAI_VLLM_WEIGHTS_CLAIM on this host")?;
-        let weights_root = std::env::var_os("TENKAI_VLLM_WEIGHTS_ROOT")
-            .map(PathBuf::from)
-            .filter(|path| !path.as_os_str().is_empty())
-            .context("model_runtime engine vllm requires TENKAI_VLLM_WEIGHTS_ROOT (host mount of the weights claim) on this host")?;
+        let weights_claim = var("WEIGHTS_CLAIM").with_context(|| {
+            format!("model_runtime engine {name} requires {prefix}_WEIGHTS_CLAIM on this host")
+        })?;
+        let weights_root = var("WEIGHTS_ROOT").map(PathBuf::from).with_context(|| {
+            format!("model_runtime engine {name} requires {prefix}_WEIGHTS_ROOT (host mount of the weights claim) on this host")
+        })?;
         let probe = HttpSmokeProbe {
-            base_url: std::env::var("TENKAI_VLLM_SMOKE_BASE_URL")
-                .unwrap_or_else(|_| "http://{service}.{namespace}.svc:{port}".into()),
+            engine,
+            base_url: var("SMOKE_BASE_URL")
+                .unwrap_or_else(|| "http://{service}.{namespace}.svc:{port}".into()),
             timeout: Duration::from_secs(30),
         };
-        Ok(std::sync::Arc::new(VllmModelRuntimeExecutor::new(
+        Ok(std::sync::Arc::new(KubernetesModelRuntimeExecutor::new(
             crate::in_process_kubernetes::LiveKubeApi,
             probe,
-            VllmConfig {
+            ServingConfig {
+                engine,
                 cluster_config: cluster_config.to_path_buf(),
                 namespace: environment.to_string(),
                 image,
@@ -127,6 +220,8 @@ pub trait SmokeProbe: Send + Sync {
 /// example `http://{service}.{namespace}.svc:{port}` when the executor runs in-cluster.
 #[derive(Debug, Clone)]
 pub struct HttpSmokeProbe {
+    /// Selects the request: OpenAI completions for vLLM, `/generate` for TGI.
+    pub engine: ServingEngine,
     pub base_url: String,
     /// Per-attempt cap; each attempt is also bounded by the remaining startup budget.
     pub timeout: Duration,
@@ -159,17 +254,32 @@ impl SmokeProbe for HttpSmokeProbe {
         // predicate is a non-empty completion, which proves the inference path end to
         // end; exact text is not required because base models do not follow
         // instructions. This is stricter than the llama.cpp path's HTTP-success check.
+        let (path, body, text_at) = match self.engine {
+            ServingEngine::Vllm => (
+                "/v1/completions",
+                json!({
+                    "model": served_model,
+                    "prompt": prompt,
+                    "max_tokens": 16,
+                    "temperature": 0,
+                }),
+                "/choices/0/text",
+            ),
+            ServingEngine::Tgi => (
+                "/generate",
+                json!({
+                    "inputs": prompt,
+                    "parameters": {"max_new_tokens": 16, "do_sample": false},
+                }),
+                "/generated_text",
+            ),
+        };
         let response: Value = tenkai::outbound_tls::blocking_client()?
             .timeout(timeout.min(self.timeout))
             .build()
             .context("building smoke probe client")?
-            .post(format!("{}/v1/completions", base.trim_end_matches('/')))
-            .json(&json!({
-                "model": served_model,
-                "prompt": prompt,
-                "max_tokens": 16,
-                "temperature": 0,
-            }))
+            .post(format!("{}{path}", base.trim_end_matches('/')))
+            .json(&body)
             .send()
             .with_context(|| format!("smoke probe to {service}"))?
             .error_for_status()
@@ -177,7 +287,7 @@ impl SmokeProbe for HttpSmokeProbe {
             .json()
             .with_context(|| format!("smoke probe to {service} returned invalid JSON"))?;
         let text = response
-            .pointer("/choices/0/text")
+            .pointer(text_at)
             .and_then(Value::as_str)
             .unwrap_or_default();
         if text.trim().is_empty() {
@@ -187,22 +297,22 @@ impl SmokeProbe for HttpSmokeProbe {
     }
 }
 
-pub struct VllmModelRuntimeExecutor<A, P> {
+pub struct KubernetesModelRuntimeExecutor<A, P> {
     api: A,
     probe: P,
-    config: VllmConfig,
+    config: ServingConfig,
     weight_cache: WeightCache,
     state_path: PathBuf,
     timeout: Duration,
     poll_interval: Duration,
 }
 
-impl<A: ClusterApplyApi, P: SmokeProbe> VllmModelRuntimeExecutor<A, P> {
+impl<A: ClusterApplyApi, P: SmokeProbe> KubernetesModelRuntimeExecutor<A, P> {
     /// `state_path` records the active descriptor; `<state>.previous` the rollback one.
     pub fn new(
         api: A,
         probe: P,
-        config: VllmConfig,
+        config: ServingConfig,
         weight_cache: WeightCache,
         state_path: PathBuf,
     ) -> Self {
@@ -262,6 +372,7 @@ impl<A: ClusterApplyApi, P: SmokeProbe> VllmModelRuntimeExecutor<A, P> {
     pub(crate) fn generation_for(&self, descriptor: &ModelRuntimeDescriptor) -> Result<String> {
         let serving = json!({
             "descriptor": descriptor.digest()?,
+            "engine": self.config.engine.name(),
             "namespace": self.config.namespace,
             "image": self.config.image,
             "weights_claim": self.config.weights_claim,
@@ -367,7 +478,10 @@ impl<A: ClusterApplyApi, P: SmokeProbe> VllmModelRuntimeExecutor<A, P> {
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                bail!("vllm smoke probe did not pass before the startup deadline");
+                bail!(
+                    "{} smoke probe did not pass before the startup deadline",
+                    self.config.engine.name()
+                );
             }
             let outcome = self.probe.smoke(
                 &self.config.namespace,
@@ -378,7 +492,10 @@ impl<A: ClusterApplyApi, P: SmokeProbe> VllmModelRuntimeExecutor<A, P> {
                 remaining,
             );
             if Instant::now() > deadline {
-                bail!("vllm smoke probe answered after the startup deadline");
+                bail!(
+                    "{} smoke probe answered after the startup deadline",
+                    self.config.engine.name()
+                );
             }
             if outcome.is_ok() {
                 return outcome;
@@ -404,7 +521,8 @@ impl<A: ClusterApplyApi, P: SmokeProbe> VllmModelRuntimeExecutor<A, P> {
     fn stage_model_directory(&self, descriptor: &ModelRuntimeDescriptor) -> Result<PathBuf> {
         if descriptor.model.format != MODEL_DIRECTORY_FORMAT {
             bail!(
-                "vllm model_runtime needs model.format={MODEL_DIRECTORY_FORMAT}, got {}",
+                "{} model_runtime needs model.format={MODEL_DIRECTORY_FORMAT}, got {}",
+                self.config.engine.name(),
                 descriptor.model.format
             );
         }
@@ -415,7 +533,7 @@ impl<A: ClusterApplyApi, P: SmokeProbe> VllmModelRuntimeExecutor<A, P> {
             .trim_start_matches("sha256:");
         let target = self.weight_cache.root().join("models").join(hex);
         if target.is_dir() {
-            // vLLM loads the extracted files, so they must still match the archive.
+            // The engine loads the extracted files, so they must still match the archive.
             if directory_matches_archive(&archive, &target)? {
                 return Ok(target);
             }
@@ -447,11 +565,12 @@ impl<A: ClusterApplyApi, P: SmokeProbe> VllmModelRuntimeExecutor<A, P> {
     }
 
     fn deployment(&self, descriptor: &ModelRuntimeDescriptor, generation: &str) -> Result<Value> {
-        let gpu = descriptor
-            .requirements
-            .gpu
-            .as_ref()
-            .context("vllm model_runtime needs [requirements.gpu] to size its GPU request")?;
+        let gpu = descriptor.requirements.gpu.as_ref().with_context(|| {
+            format!(
+                "{} model_runtime needs [requirements.gpu] to size its GPU request",
+                self.config.engine.name()
+            )
+        })?;
         let model_dir = self.stage_model_directory(descriptor)?;
         let relative = model_dir
             .strip_prefix(self.weight_cache.root())
@@ -464,7 +583,8 @@ impl<A: ClusterApplyApi, P: SmokeProbe> VllmModelRuntimeExecutor<A, P> {
                 "amd.com/gpu"
             } else {
                 bail!(
-                    "vllm model_runtime supports nvidia or amd GPUs, got {:?}",
+                    "{} model_runtime supports nvidia or amd GPUs, got {:?}",
+                    self.config.engine.name(),
                     gpu.vendor
                 );
             };
@@ -475,6 +595,13 @@ impl<A: ClusterApplyApi, P: SmokeProbe> VllmModelRuntimeExecutor<A, P> {
             &descriptor.product_name,
             generation,
             &descriptor.product_version,
+        );
+        let (args, env) = self.config.engine.container(
+            &model_path,
+            &descriptor.product_name,
+            port,
+            gpu.tensor_parallel,
+            descriptor.runtime.context_length,
         );
         Ok(json!({
             "apiVersion": "apps/v1",
@@ -492,15 +619,10 @@ impl<A: ClusterApplyApi, P: SmokeProbe> VllmModelRuntimeExecutor<A, P> {
                         "nodeSelector": self.config.node_selector,
                         "tolerations": self.config.tolerations,
                         "containers": [{
-                            "name": "vllm",
+                            "name": self.config.engine.name(),
                             "image": self.config.image,
-                            "args": [
-                                "--model", model_path,
-                                "--served-model-name", descriptor.product_name,
-                                "--port", port.to_string(),
-                                "--tensor-parallel-size", gpu.tensor_parallel.to_string(),
-                                "--max-model-len", descriptor.runtime.context_length.to_string(),
-                            ],
+                            "args": args,
+                            "env": env,
                             "ports": [{"containerPort": port}],
                             "resources": {
                                 "requests": {
@@ -515,7 +637,7 @@ impl<A: ClusterApplyApi, P: SmokeProbe> VllmModelRuntimeExecutor<A, P> {
                             },
                             "volumeMounts": [
                                 {"name": "weights", "mountPath": WEIGHTS_MOUNT, "readOnly": true},
-                                // vLLM workers and NCCL need more than the default 64 MiB.
+                                // Engine workers and NCCL need more than the default 64 MiB.
                                 {"name": "dshm", "mountPath": "/dev/shm"},
                             ],
                         }],
@@ -536,12 +658,15 @@ impl<A: ClusterApplyApi, P: SmokeProbe> VllmModelRuntimeExecutor<A, P> {
     }
 }
 
-impl<A: ClusterApplyApi, P: SmokeProbe> ModelRuntimeExecutor for VllmModelRuntimeExecutor<A, P> {
+impl<A: ClusterApplyApi, P: SmokeProbe> ModelRuntimeExecutor
+    for KubernetesModelRuntimeExecutor<A, P>
+{
     fn apply(&self, descriptor: &ModelRuntimeDescriptor) -> Result<String> {
         descriptor.validate()?;
-        if descriptor.runtime.engine != "vllm" {
+        if descriptor.runtime.engine != self.config.engine.name() {
             bail!(
-                "VllmModelRuntimeExecutor requires runtime.engine=vllm, got {}",
+                "this executor serves runtime.engine={}, got {}",
+                self.config.engine.name(),
                 descriptor.runtime.engine
             );
         }
@@ -578,9 +703,10 @@ impl<A: ClusterApplyApi, P: SmokeProbe> ModelRuntimeExecutor for VllmModelRuntim
             if !already_active && retained != Some(generation.as_str()) {
                 let _ = self.remove_generation(&descriptor.product_name, &generation);
             }
-            return Err(error).context(
-                "vllm generation failed launch, readiness, or smoke; traffic left unchanged",
-            );
+            return Err(error).context(format!(
+                "{} generation failed launch, readiness, or smoke; traffic left unchanged",
+                self.config.engine.name()
+            ));
         }
         if already_active {
             // Reconciled the recorded generation; re-assert its selector.
@@ -817,7 +943,7 @@ fn require_digest_pinned(image: &str) -> Result<()> {
                 .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
     });
     if !pinned {
-        bail!("vllm serving image must be pinned by sha256 digest, got {image:?}");
+        bail!("serving image must be pinned by sha256 digest, got {image:?}");
     }
     Ok(())
 }
@@ -1070,8 +1196,9 @@ mod tests {
         }
     }
 
-    fn config(fixture: &Fixture) -> VllmConfig {
-        VllmConfig {
+    fn config(fixture: &Fixture) -> ServingConfig {
+        ServingConfig {
+            engine: ServingEngine::Vllm,
             cluster_config: fixture.root.join("kubeconfig"),
             namespace: NS.into(),
             image: "vllm/vllm-openai@sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
@@ -1085,11 +1212,23 @@ mod tests {
         fixture: &Fixture,
         cluster: &'a Cluster<'a>,
         probe: &'a ScriptedProbe,
-    ) -> VllmModelRuntimeExecutor<&'a Cluster<'a>, &'a ScriptedProbe> {
-        VllmModelRuntimeExecutor::new(
+    ) -> KubernetesModelRuntimeExecutor<&'a Cluster<'a>, &'a ScriptedProbe> {
+        executor_for(fixture, cluster, probe, ServingEngine::Vllm)
+    }
+
+    fn executor_for<'a>(
+        fixture: &Fixture,
+        cluster: &'a Cluster<'a>,
+        probe: &'a ScriptedProbe,
+        engine: ServingEngine,
+    ) -> KubernetesModelRuntimeExecutor<&'a Cluster<'a>, &'a ScriptedProbe> {
+        KubernetesModelRuntimeExecutor::new(
             cluster,
             probe,
-            config(fixture),
+            ServingConfig {
+                engine,
+                ..config(fixture)
+            },
             fixture.cache.clone(),
             fixture.root.join("state").join("llama-70b.json"),
         )
@@ -1207,6 +1346,80 @@ mod tests {
         assert_eq!(executor.rollback().unwrap(), v1.digest().unwrap());
         assert_eq!(selected_generation(&api), Some(g1));
         assert_eq!(executor.observe().unwrap(), Some(v1.digest().unwrap()));
+        let _ = std::fs::remove_dir_all(fixture.root);
+    }
+
+    /// TGI runs the same gated lifecycle with its own server arguments: the
+    /// mounted model directory, offline hub, and shards for tensor parallelism.
+    #[test]
+    fn tgi_serves_the_mounted_directory_offline_and_rolls_back() {
+        let fixture = fixture();
+        let api = MemoryClusterApi::new();
+        let cluster = Cluster {
+            inner: &api,
+            unready: Mutex::new(false),
+        };
+        let probe = ScriptedProbe::default();
+        let executor = executor_for(&fixture, &cluster, &probe, ServingEngine::Tgi);
+        let tgi = |version| {
+            let mut descriptor = descriptor(&fixture, version);
+            descriptor.runtime.engine = "tgi".into();
+            descriptor
+        };
+        let (v1, v2, v3) = (tgi("1.0.0"), tgi("1.1.0"), tgi("1.2.0"));
+        let (g1, g2, g3) = (
+            executor.generation_for(&v1).unwrap(),
+            executor.generation_for(&v2).unwrap(),
+            executor.generation_for(&v3).unwrap(),
+        );
+
+        let container =
+            executor.deployment(&v1, &g1).unwrap()["spec"]["template"]["spec"]["containers"][0]
+                .clone();
+        assert_eq!(container["name"], "tgi");
+        let args: Vec<&str> = container["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|arg| arg.as_str().unwrap())
+            .collect();
+        let hex = fixture.digest.trim_start_matches("sha256:");
+        let model = format!("/weights/models/{hex}");
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--model-id", model.as_str()]),
+            "{args:?}"
+        );
+        assert!(
+            args.windows(2).any(|pair| pair == ["--num-shard", "2"]),
+            "{args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--max-total-tokens", "8192"]),
+            "{args:?}"
+        );
+        assert_eq!(
+            container["env"][0],
+            json!({"name": "HF_HUB_OFFLINE", "value": "1"})
+        );
+        assert_eq!(container["resources"]["limits"]["nvidia.com/gpu"], "2");
+
+        executor.apply(&v1).unwrap();
+        executor.apply(&v2).unwrap();
+        assert_eq!(selected_generation(&api), Some(g2.clone()));
+        *probe.fail.lock().unwrap() = true;
+        assert!(executor.apply(&v3).is_err());
+        assert!(
+            api.object(NS, "Deployment", &format!("llama-70b-{g3}"))
+                .is_none()
+        );
+        assert_eq!(selected_generation(&api), Some(g2));
+        assert_eq!(executor.rollback().unwrap(), v1.digest().unwrap());
+        assert_eq!(selected_generation(&api), Some(g1));
+
+        // A vLLM descriptor is not this executor's to serve.
+        assert!(executor.apply(&descriptor(&fixture, "2.0.0")).is_err());
         let _ = std::fs::remove_dir_all(fixture.root);
     }
 
@@ -1465,7 +1678,7 @@ mod tests {
 
         let mut changed = config(&fixture);
         changed.image = "vllm/vllm-openai@sha256:1111111111111111111111111111111111111111111111111111111111111111".into();
-        let after = VllmModelRuntimeExecutor::new(
+        let after = KubernetesModelRuntimeExecutor::new(
             &cluster,
             &probe,
             changed,
@@ -1531,7 +1744,7 @@ mod tests {
         executor(&fixture, &cluster, &probe).apply(&v1).unwrap();
         let mut moved = config(&fixture);
         moved.namespace = "gpu-b".into();
-        let elsewhere = VllmModelRuntimeExecutor::new(
+        let elsewhere = KubernetesModelRuntimeExecutor::new(
             &cluster,
             &probe,
             moved,

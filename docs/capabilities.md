@@ -107,7 +107,7 @@ Postgres hub + multi-replica fencing) are landed on main. Remaining work is
 | Release packaging | [GitHub Release binaries](release-binaries.md); [v0.5.0 notes](releases/0.5.0.md) |
 | Hub HA product claim | Criteria + automated drills before advertising `high_availability` (fence already shipped #135) |
 | Intelligence loop depth | Fail-closed prior policy; live remote OutcomeProvider history |
-| Executor / model depth | Peer/regional weight caches; additional engines (vLLM Kubernetes shipped; MLX next, then TGI and NIM: [research](research/additional-model-serving-executors.md)) |
+| Executor / model depth | Peer/regional weight caches; additional engines (vLLM and TGI Kubernetes and MLX shipped; NIM next: [research](research/additional-model-serving-executors.md)) |
 | Enterprise host | Live IdP drills, tenant-isolated prior stores (OIDC JWKS discovery and key rotation shipped in #468) |
 | Local dogfood | [minikube path](local-dogfood-minikube.md): unsigned + signed multi-env (#152) + **software canary drill** (#154) landed; inventory → `env facts` drill still optional |
 

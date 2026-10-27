@@ -23,7 +23,7 @@ Evidence is the tracked sources on this revision:
 - llama.cpp candidate → smoke → activate, loopback-only
   (`ReferenceLlamaCppExecutor`)
 - vLLM candidate Deployment/Service, cache-mounted weights, host-configured
-  image (`crates/tenkai-executor/src/vllm_model_runtime.rs`)
+  image (`crates/tenkai-executor/src/kubernetes_model_runtime.rs`)
 - Planner accelerator and GPU fit (`docs/model-runtime.md`, ADR 0007)
 
 No GPU cluster, NGC entitlement, or Apple-silicon host was required. Default

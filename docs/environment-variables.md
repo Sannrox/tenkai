@@ -144,7 +144,8 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | `TENKAI_PACKAGE_MIGRATION_APPROVAL_TRUST_ROOTS` | [Package migrations](package-migrations.md) |
 | `TENKAI_LLAMA_SERVER`, `TENKAI_USE_REAL_LLAMA`, `TENKAI_MLX_SERVER`, `TENKAI_USE_REAL_MLX`, `TENKAI_MODEL_REGISTRY_TRUSTED_KEYS`, `TENKAI_MODEL_REGISTRY_URL` | [Model runtime](model-runtime.md) |
 | `TENKAI_WEIGHT_CACHE` | [Offline bundles](offline-bundles.md) |
-| `TENKAI_VLLM_IMAGE`, `TENKAI_VLLM_WEIGHTS_CLAIM`, `TENKAI_VLLM_WEIGHTS_ROOT`, `TENKAI_VLLM_SMOKE_BASE_URL` | [vLLM Kubernetes executor](vllm-kubernetes.md) |
+| `TENKAI_VLLM_IMAGE`, `TENKAI_VLLM_WEIGHTS_CLAIM`, `TENKAI_VLLM_WEIGHTS_ROOT`, `TENKAI_VLLM_SMOKE_BASE_URL` | [vLLM and TGI Kubernetes executor](vllm-kubernetes.md) |
+| `TENKAI_TGI_IMAGE`, `TENKAI_TGI_WEIGHTS_CLAIM`, `TENKAI_TGI_WEIGHTS_ROOT`, `TENKAI_TGI_SMOKE_BASE_URL` | [vLLM and TGI Kubernetes executor](vllm-kubernetes.md) |
 | `TENKAI_DEVELOPMENT_FIXTURE_PRINCIPALS` (server refuses to start when set without `--with-development-fixtures`) | [Development fixtures](development-fixtures.md) |
 
 The `TENKAI_WORKER_*` variables are internal worker-lifecycle plumbing, not
@@ -180,8 +181,8 @@ binaries.
 | --- | --- | --- |
 | `TENKAI_DOGFOOD_MODE` | `scripts/dogfood-minikube.sh` | `local`, `signed-multi-env`, or `canary` ([minikube dogfood](local-dogfood-minikube.md)) |
 | `TENKAI_DEV_KEYS` | `scripts/dogfood-minikube.sh` | Directory of development-only Ed25519 seeds |
-| `TENKAI_CLUSTER_CONFIG` | `crates/tenkai-executor/tests/in_process_kubernetes_kind.rs`, `crates/tenkai-executor/tests/vllm_kubernetes_live.rs` | Kubeconfig path for ignored in-process Kubernetes tests |
-| `TENKAI_VLLM_LIVE_TEST`, `TENKAI_VLLM_NAMESPACE`, `TENKAI_VLLM_MODEL_TAR`, `TENKAI_VLLM_NODE_SELECTOR`, `TENKAI_VLLM_TOLERATIONS` | `crates/tenkai-executor/tests/vllm_kubernetes_live.rs` | Opt-in GPU apply/rollback; namespace must already hold the weights claim |
+| `TENKAI_CLUSTER_CONFIG` | `crates/tenkai-executor/tests/in_process_kubernetes_kind.rs`, `crates/tenkai-executor/tests/gpu_kubernetes_live.rs` | Kubeconfig path for ignored in-process Kubernetes tests |
+| `TENKAI_VLLM_LIVE_TEST`, `TENKAI_VLLM_NAMESPACE`, `TENKAI_VLLM_MODEL_TAR`, `TENKAI_VLLM_NODE_SELECTOR`, `TENKAI_VLLM_TOLERATIONS`, and the same `TENKAI_TGI_*` names | `crates/tenkai-executor/tests/gpu_kubernetes_live.rs` | Opt-in GPU apply/rollback; namespace must already hold the weights claim |
 | `TENKAI_MLX_SERVER` | `src/model_runtime/mlx.rs` (`mlx_operator_golden_path`) | Opt-in real `mlx_lm.server`; default CI uses `FakeMlxEngine` |
 | `TENKAI_GATE_URL`, `TENKAI_GATE_TOKEN` | `crates/tenkaictl/tests/two_environment_closure_drill.rs` | Remote gate endpoint for the library-only HTTP gate adapter ([provider contracts](provider-contracts.md#remote-gate-http-json-contract-113)) |
 | `SEKAI_CHISEI_DIR`, `REPLAY_OUTPUT_DIR` | `scripts/capture-rollback-replay.sh` | Provider checkout and output directory for the replay capture |
