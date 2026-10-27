@@ -232,6 +232,9 @@ async fn runtime_credentials_are_environment_scoped() {
     assert!(second.claim.unwrap().completion_json.is_some());
 }
 
+/// The runner registry lists the enrolled agent with its instance and
+/// version, and the static token read-only, never a secret; revocation
+/// needs a reason, which inspect shows (#673).
 #[tokio::test]
 async fn an_agent_enrolls_once_works_with_its_credential_and_stops_when_revoked() {
     // Issuing an enrollment marks the environment in the application core.
@@ -241,7 +244,8 @@ async fn an_agent_enrolls_once_works_with_its_credential_and_stops_when_revoked(
             .method(method)
             .uri(path)
             .header("content-type", "application/json")
-            .header("x-tenkai-runtime-instance", "rt-1");
+            .header("x-tenkai-runtime-instance", "rt-1")
+            .header("x-tenkai-runtime-version", "0.5.0");
         if let Some(bearer) = bearer {
             request = request.header("authorization", format!("Bearer {bearer}"));
         }
@@ -286,18 +290,72 @@ async fn an_agent_enrolls_once_works_with_its_credential_and_stops_when_revoked(
     let (status, _) = call("POST", inventory, Some(&credential), facts.clone()).await;
     assert_eq!(status, StatusCode::OK);
 
-    let revoke = format!(
-        "/v1/runtime-credentials/{}/revoke",
-        enrolled["credential_id"].as_str().unwrap()
+    let id = enrolled["credential_id"].as_str().unwrap().to_string();
+    let (status, listed) = call(
+        "GET",
+        "/v1/runners",
+        Some("management-secret"),
+        serde_json::json!(null),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let text = listed.to_string();
+    assert!(
+        !text.contains(&credential) && !text.contains(&token) && !text.contains("runtime-secret"),
+        "the registry leaks a secret: {text}"
+    );
+    let runners = listed["runners"].as_array().unwrap();
+    let agent = runners
+        .iter()
+        .find(|runner| runner["id"] == id.as_str())
+        .unwrap();
+    assert_eq!(agent["state"], "active");
+    assert_eq!(agent["environment"], "prod");
+    assert_eq!(agent["instances"][0]["instance_id"], "rt-1");
+    assert_eq!(agent["instances"][0]["runtime_version"], "0.5.0");
+    assert!(agent["instances"][0]["last_inventory_at"].is_i64());
+    let static_id = tenkai::runtime_credentials::digest("runtime-secret");
+    let fixed = runners
+        .iter()
+        .find(|runner| runner["id"] == static_id.as_str())
+        .unwrap();
+    assert_eq!(fixed["state"], "static");
+
+    let revoke = format!("/v1/runners/{id}/revoke");
+    for body in [serde_json::json!(null), serde_json::json!({"reason": "  "})] {
+        let (status, _) = call("POST", &revoke, Some("management-secret"), body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "a reason is required");
+    }
+    let (status, _) = call(
+        "POST",
+        &format!("/v1/runners/{static_id}/revoke"),
+        Some("management-secret"),
+        serde_json::json!({"reason": "rotate"}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "static runners are configuration"
     );
     let (status, revoked) = call(
         "POST",
         &revoke,
         Some("management-secret"),
-        serde_json::json!(null),
+        serde_json::json!({"reason": "host retired"}),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{revoked}");
+    let (status, inspected) = call(
+        "GET",
+        &format!("/v1/runners/{id}"),
+        Some("management-secret"),
+        serde_json::json!(null),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{inspected}");
+    assert_eq!(inspected["state"], "revoked");
+    assert_eq!(inspected["revoke_reason"], "host retired");
     let (status, _) = call("POST", inventory, Some(&credential), facts).await;
     assert_eq!(
         status,

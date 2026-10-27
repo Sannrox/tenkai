@@ -1,8 +1,9 @@
-//! Opt-in GPU evidence for the Kubernetes serving executor: vLLM (#602) and
-//! TGI (#615).
+//! Opt-in GPU evidence for the Kubernetes serving executor: vLLM (#602), TGI
+//! (#615) and NIM (#616, which also needs `TENKAI_NIM_PULL_SECRET` and
+//! `TENKAI_NIM_NGC_API_KEY_SECRET`).
 //!
 //! Ignored by default so `cargo test` needs no GPU. Enable one engine with
-//! `TENKAI_VLLM_LIVE_TEST=1` or `TENKAI_TGI_LIVE_TEST=1`, plus a cluster
+//! `TENKAI_VLLM_LIVE_TEST=1`, `TENKAI_TGI_LIVE_TEST=1` or `TENKAI_NIM_LIVE_TEST=1`, plus a cluster
 //! kubeconfig and that engine's variables (`TENKAI_VLLM_*` or `TENKAI_TGI_*`):
 //! digest-pinned serving image, a namespace that already contains the weights
 //! claim, the host mount of that claim, and a small `directory+tar` model
@@ -21,8 +22,8 @@ use tenkai::model_runtime::{
     MODEL_RUNTIME_CONTRACT_VERSION, ModelRuntimeDescriptor, ModelRuntimeExecutor, WeightCache,
 };
 use tenkai_executor::{
-    HttpSmokeProbe, KubernetesModelRuntimeExecutor, LiveKubeApi, ServingConfig, ServingEngine,
-    SmokeProbe,
+    HttpSmokeProbe, KubernetesModelRuntimeExecutor, LiveKubeApi, NgcEntitlement, ServingConfig,
+    ServingEngine, SmokeProbe,
 };
 
 fn required_env(name: &str) -> String {
@@ -182,6 +183,12 @@ fn tgi_live_gpu_apply_forward_smoke_fail_rollback() {
     live_drill(ServingEngine::Tgi, "TENKAI_TGI");
 }
 
+#[test]
+#[ignore = "requires TENKAI_NIM_LIVE_TEST plus a GPU cluster, NIM image and NGC entitlement secrets"]
+fn nim_live_gpu_apply_forward_smoke_fail_rollback() {
+    live_drill(ServingEngine::Nim, "TENKAI_NIM");
+}
+
 /// Apply, roll forward, fail a candidate, and roll back on a real GPU
 /// cluster, reading `<prefix>_*` configuration.
 fn live_drill(engine: ServingEngine, prefix: &str) {
@@ -227,6 +234,10 @@ fn live_drill(engine: ServingEngine, prefix: &str) {
         probe.clone(),
         ServingConfig {
             engine,
+            entitlement: (engine == ServingEngine::Nim).then(|| NgcEntitlement {
+                pull_secret: required_env(&var("PULL_SECRET")),
+                api_key_secret: required_env(&var("NGC_API_KEY_SECRET")),
+            }),
             cluster_config: kubeconfig.clone(),
             namespace: namespace.clone(),
             image,

@@ -547,13 +547,51 @@ pub enum RuntimeDeliveryError {
 
 struct RuntimeIdentity {
     owner: String,
+    /// Digest of the credential or static token: the runner registry id.
+    runner_id: String,
+    instance: String,
 }
+
+/// Who is calling: the `x-tenkai-runtime-instance` header and, when the
+/// agent sends one, its `x-tenkai-runtime-version` (#673).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RuntimeCaller<'a> {
+    pub instance: Option<&'a str>,
+    pub version: Option<&'a str>,
+}
+
+impl<'a> From<Option<&'a str>> for RuntimeCaller<'a> {
+    fn from(instance: Option<&'a str>) -> Self {
+        Self {
+            instance,
+            version: None,
+        }
+    }
+}
+
+/// The runner activity [`RuntimeDeliveryOperations`] records (#673).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Activity {
+    Work,
+    Heartbeat,
+    Inventory,
+}
+
+/// Activity is written at most this often per runner instance and kind, so
+/// polling does not become a store write per request.
+const ACTIVITY_INTERVAL_MS: i64 = 30_000;
+
+/// Last written activity per `(runner, instance, kind)`, with its version.
+type ActivityWrites = HashMap<(String, String, Activity), (i64, Option<String>)>;
 
 /// Deep runtime delivery module used after transport extraction.
 pub struct RuntimeDeliveryOperations {
     assignments: HashMap<String, String>,
     reconciler: Arc<dyn ReconcilePort>,
     store: Arc<dyn OperationalStore>,
+    /// Last written activity per `(runner, instance, kind)`, with the version
+    /// it carried: a write cache only, so each replica keeps its own.
+    activity: std::sync::Mutex<ActivityWrites>,
 }
 
 impl RuntimeDeliveryOperations {
@@ -566,16 +604,63 @@ impl RuntimeDeliveryOperations {
             assignments,
             reconciler,
             store,
+            activity: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Record what an admitted runner instance did, throttled. Activity is
+    /// an operator view, not delivery state: a failed write is reported and
+    /// the request goes on.
+    fn note_activity(
+        &self,
+        identity: &RuntimeIdentity,
+        environment: &str,
+        version: Option<&str>,
+        kind: Activity,
+    ) {
+        let version = version
+            .filter(|version| !version.is_empty() && version.len() <= 64 && version.is_ascii())
+            .map(str::to_string);
+        let now = crate::now_millis();
+        let key = (identity.runner_id.clone(), identity.instance.clone(), kind);
+        {
+            let mut written = self
+                .activity
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if let Some((at, recorded)) = written.get(&key)
+                && now - at < ACTIVITY_INTERVAL_MS
+                && (version.is_none() || version == *recorded)
+            {
+                return;
+            }
+            written.insert(key, (now, version.clone()));
+        }
+        let at = Some(now);
+        let record = crate::storage::RuntimeActivityRecord {
+            runner_id: identity.runner_id.clone(),
+            instance_id: identity.instance.clone(),
+            environment_id: environment.into(),
+            owner: identity.owner.clone(),
+            runtime_version: version,
+            last_work_at: at.filter(|_| kind == Activity::Work),
+            last_heartbeat_at: at.filter(|_| kind == Activity::Heartbeat),
+            last_inventory_at: at.filter(|_| kind == Activity::Inventory),
+        };
+        if let Err(error) = self.store.record_runtime_activity(&record) {
+            eprintln!("recording runtime activity failed (continuing): {error}");
         }
     }
 
     pub async fn claim_work(
         &self,
         token: Option<&str>,
-        instance: Option<&str>,
+        caller: impl Into<RuntimeCaller<'_>>,
         environment: &str,
     ) -> Result<RuntimeWork, RuntimeDeliveryError> {
-        let identity = self.admit(token, instance, environment)?;
+        let caller = caller.into();
+        let identity = self.admit(token, caller.instance, environment)?;
+        self.note_activity(&identity, environment, caller.version, Activity::Work);
         // While the server may still run a plan it began before a runtime
         // enrolled (#630), no plan is handed out. Checked before the plan is
         // chosen, so one the server finished meanwhile is seen as finished.
@@ -760,11 +845,13 @@ impl RuntimeDeliveryOperations {
     pub async fn renew(
         &self,
         token: Option<&str>,
-        instance: Option<&str>,
+        caller: impl Into<RuntimeCaller<'_>>,
         environment: &str,
         heartbeat: &RuntimeHeartbeat,
     ) -> Result<RuntimeClaim, RuntimeDeliveryError> {
-        let identity = self.admit(token, instance, environment)?;
+        let caller = caller.into();
+        let identity = self.admit(token, caller.instance, environment)?;
+        self.note_activity(&identity, environment, caller.version, Activity::Heartbeat);
         let Some(mut ctx) = self.reconciler.application_ctx() else {
             return Err(RuntimeDeliveryError::Unavailable(
                 "software compatibility preflight unavailable".into(),
@@ -879,11 +966,13 @@ impl RuntimeDeliveryOperations {
     pub async fn report_inventory(
         &self,
         token: Option<&str>,
-        instance: Option<&str>,
+        caller: impl Into<RuntimeCaller<'_>>,
         environment: &str,
         report: RuntimeInventoryReport,
     ) -> Result<RuntimeInventoryResponse, RuntimeDeliveryError> {
-        self.admit(token, instance, environment)?;
+        let caller = caller.into();
+        let identity = self.admit(token, caller.instance, environment)?;
+        self.note_activity(&identity, environment, caller.version, Activity::Inventory);
         validate_inventory_source(&report.source)?;
         let applied = self
             .reconciler
@@ -918,6 +1007,8 @@ impl RuntimeDeliveryOperations {
         }
         Ok(RuntimeIdentity {
             owner: runtime_owner(token, instance),
+            runner_id: crate::runtime_credentials::digest(token),
+            instance: instance.into(),
         })
     }
 }
@@ -1227,7 +1318,14 @@ mod tests {
         ));
         operations
             .store
-            .revoke_runtime_credential(&enrolled.credential_id, 1)
+            .revoke_runtime_credential(
+                &enrolled.credential_id,
+                1,
+                &crate::storage::RuntimeRevocation {
+                    reason: "test".into(),
+                    revoked_by: "operator".into(),
+                },
+            )
             .unwrap();
         assert!(matches!(
             admit(&enrolled.credential, "prod"),

@@ -17,8 +17,8 @@ pub use in_process_kubernetes::{
 };
 pub use kubernetes::KubernetesSoftwareExecutor;
 pub use kubernetes_model_runtime::{
-    HttpSmokeProbe, KubernetesModelRuntimeExecutor, KubernetesModelRuntimeFactory, ServingConfig,
-    ServingEngine, SmokeProbe,
+    HttpSmokeProbe, KubernetesModelRuntimeExecutor, KubernetesModelRuntimeFactory, NgcEntitlement,
+    ServingConfig, ServingEngine, SmokeProbe,
 };
 
 /// Register CLI and in-process adapters with Tenkai's executor selector.

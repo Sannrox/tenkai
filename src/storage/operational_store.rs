@@ -219,11 +219,41 @@ pub trait OperationalStore: Send + Sync {
             "runtime credentials are not implemented by this store".into(),
         ))
     }
-    /// Revoke a runtime credential from `now` on; revoking again keeps the
-    /// first time. Unknown credentials are `NotFound`.
-    fn revoke_runtime_credential(&self, _credential_digest: &str, _now: i64) -> Result<()> {
+    /// Revoke a runtime credential from `now` on, recording `revocation`;
+    /// revoking again keeps the first time and reason. Unknown credentials
+    /// are `NotFound`.
+    fn revoke_runtime_credential(
+        &self,
+        _credential_digest: &str,
+        _now: i64,
+        _revocation: &RuntimeRevocation,
+    ) -> Result<()> {
         Err(StoreError::AdapterUnavailable(
             "runtime credentials are not implemented by this store".into(),
+        ))
+    }
+    /// Every enrolled runtime credential, revoked or not (#673).
+    fn runtime_runners(&self) -> Result<Vec<RuntimeRunnerRecord>> {
+        Err(StoreError::AdapterUnavailable(
+            "the runner registry is not implemented by this store".into(),
+        ))
+    }
+    /// Merge one instance's activity: set timestamps advance, a missing
+    /// version keeps the recorded one (#673).
+    fn record_runtime_activity(&self, _activity: &RuntimeActivityRecord) -> Result<()> {
+        Err(StoreError::AdapterUnavailable(
+            "the runner registry is not implemented by this store".into(),
+        ))
+    }
+    fn runtime_activity(&self) -> Result<Vec<RuntimeActivityRecord>> {
+        Err(StoreError::AdapterUnavailable(
+            "the runner registry is not implemented by this store".into(),
+        ))
+    }
+    /// Owners holding an unexpired runtime plan claim at `now`.
+    fn live_runtime_claim_owners(&self, _now: i64) -> Result<Vec<String>> {
+        Err(StoreError::AdapterUnavailable(
+            "the runner registry is not implemented by this store".into(),
         ))
     }
 }

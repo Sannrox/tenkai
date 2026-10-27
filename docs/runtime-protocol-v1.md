@@ -14,7 +14,9 @@ There is no served gRPC `RuntimeService`.
 
 The other endpoints take either a configured runtime token or an enrolled
 credential as the bearer
-([enrolling a runtime](run-tenkai-server.md#enrolling-a-runtime)).
+([enrolling a runtime](run-tenkai-server.md#enrolling-a-runtime)). An agent may
+send `x-tenkai-runtime-version`, which the
+[runner registry](run-tenkai-server.md#runner-registry) shows.
 
 Work pull does not accept supported versions or capabilities and does not
 negotiate. Completion covers the claimed plan in one request, not one proto

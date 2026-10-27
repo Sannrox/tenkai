@@ -1,8 +1,8 @@
-# vLLM and TGI Kubernetes executor
+# vLLM, TGI and NIM Kubernetes executor
 
 Tenkai's in-process Kubernetes adapter can serve `model_runtime` products with
-`runtime.engine = "vllm"` or `runtime.engine = "tgi"` (Text Generation
-Inference) on a GPU cluster. Both engines share one lifecycle: candidate,
+`runtime.engine = "vllm"`, `"tgi"` (Text Generation Inference) or `"nim"`
+(NVIDIA NIM) on a GPU cluster. Both engines share one lifecycle: candidate,
 readiness, smoke, switch, rollback. The core crate links neither;
 `tenkai-executor` installs a host factory at process start.
 
@@ -50,7 +50,7 @@ max_startup_seconds = 600
 
 Rules:
 
-- `runtime.engine` is `vllm` or `tgi`. Either one needs an environment
+- `runtime.engine` is `vllm`, `tgi` or `nim`. Either one needs an environment
   cluster configuration and the host factory, or selection fails closed.
 - GPU requirements are mandatory for this executor.
 - Serving image, placement, and the weights volume are host configuration,
@@ -59,7 +59,7 @@ Rules:
 ## Host configuration
 
 The factory reads these from the host environment, with the prefix
-`TENKAI_VLLM_` for vLLM and `TENKAI_TGI_` for TGI. Missing or empty values
+`TENKAI_VLLM_` for vLLM, `TENKAI_TGI_` for TGI and `TENKAI_NIM_` for NIM. Missing or empty values
 fail closed with a named error.
 
 | Variable | Meaning |
@@ -73,6 +73,22 @@ fail closed with a named error.
 | --- | --- | --- |
 | `vllm` | `--model <dir> --served-model-name <product> --tensor-parallel-size <n> --max-model-len <context>` | `POST /v1/completions`, non-empty `choices[0].text` |
 | `tgi` | `--model-id <dir> --num-shard <n> --max-total-tokens <context>`, `HF_HUB_OFFLINE=1` | `POST /generate`, non-empty `generated_text` |
+| `nim` | Environment: `NIM_MODEL_NAME=<dir>`, `NIM_MANIFEST_ALLOW_UNSAFE=1`, `NIM_SERVED_MODEL_NAME`, `NIM_TENSOR_PARALLEL_SIZE`, `NIM_MAX_MODEL_LEN`, `HF_HUB_OFFLINE=1`; readiness `/v1/health/ready` | `POST /v1/completions`, non-empty `choices[0].text` |
+
+NIM also needs an NGC entitlement, held on the host as Kubernetes Secret
+names, never the key and never manifest data. Missing either one fails
+executor construction closed:
+
+| Variable | Meaning |
+| --- | --- |
+| `TENKAI_NIM_PULL_SECRET` | Image pull secret for the registry serving the NIM image |
+| `TENKAI_NIM_NGC_API_KEY_SECRET` | Secret holding the key under `NGC_API_KEY`, passed to the container |
+
+The model name is the mounted directory, so NIM loads the verified weights
+rather than pulling or using baked ones. Model-specific NIM images accept a
+local model only with `NIM_MANIFEST_ALLOW_UNSAFE=1`, which the executor sets;
+the descriptor's digest-verified directory, not the image's built-in
+profile, is what serves.
 
 Weights always come from the verified cache mount; neither engine downloads
 from a hub at start, and weights are never baked into the image.
@@ -112,7 +128,7 @@ not delete executor state files by hand.
 ## Optional GPU test
 
 Default CI does not need a GPU. Each engine has an `#[ignore]` test that also
-requires `TENKAI_VLLM_LIVE_TEST=1` or `TENKAI_TGI_LIVE_TEST=1`, and reads that
+requires `TENKAI_VLLM_LIVE_TEST=1`, `TENKAI_TGI_LIVE_TEST=1` or `TENKAI_NIM_LIVE_TEST=1`, and reads that
 engine's prefix for the variables below. It applies a small model, waits for readiness
 and smoke, rolls forward, forces a smoke/startup failure, and rolls back.
 
@@ -142,4 +158,7 @@ TENKAI_VLLM_SMOKE_BASE_URL='http://{service}.{namespace}.svc:{port}' \
 ```
 
 For TGI, use the `TENKAI_TGI_` variables and
-`tgi_live_gpu_apply_forward_smoke_fail_rollback`.
+`tgi_live_gpu_apply_forward_smoke_fail_rollback`. For NIM, use the
+`TENKAI_NIM_` variables, including both entitlement Secrets, and
+`nim_live_gpu_apply_forward_smoke_fail_rollback`. Default CI needs no GPU
+and no NGC key.
