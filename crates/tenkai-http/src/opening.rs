@@ -50,16 +50,32 @@ async fn not_ready() -> Response {
 }
 
 /// Cloneable service that swaps the served [`Router`] after startup completes.
+///
+/// Each connection gets its own clone, which records whether the client
+/// presented a verified certificate (#671). That fact reaches handlers as the
+/// [`ClientCertificate`](crate::tls::ClientCertificate) extension, and when
+/// runtime client certificates are required, `/v1/runtime/*` without one is
+/// refused before routing.
 #[derive(Clone)]
 pub struct HotSwap {
     current: Arc<RwLock<Router>>,
+    runtime_client_certificate_required: bool,
+    client_certificate: bool,
 }
 
 impl HotSwap {
     pub fn new(router: Router) -> Self {
         Self {
             current: Arc::new(RwLock::new(router)),
+            runtime_client_certificate_required: false,
+            client_certificate: false,
         }
+    }
+
+    /// Refuse runtime routes on connections without a client certificate.
+    pub fn requiring_runtime_client_certificates(mut self) -> Self {
+        self.runtime_client_certificate_required = true;
+        self
     }
 
     pub fn replace(&self, router: Router) {
@@ -70,7 +86,11 @@ impl HotSwap {
     }
 }
 
-impl Service<IncomingStream<'_, tokio::net::TcpListener>> for HotSwap {
+impl<L> Service<IncomingStream<'_, L>> for HotSwap
+where
+    L: axum::serve::Listener,
+    L::Io: crate::tls::PeerCertificate,
+{
     type Response = Self;
     type Error = Infallible;
     type Future = std::future::Ready<Result<Self, Infallible>>;
@@ -79,8 +99,11 @@ impl Service<IncomingStream<'_, tokio::net::TcpListener>> for HotSwap {
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, _stream: IncomingStream<'_, tokio::net::TcpListener>) -> Self::Future {
-        std::future::ready(Ok(self.clone()))
+    fn call(&mut self, stream: IncomingStream<'_, L>) -> Self::Future {
+        use crate::tls::PeerCertificate as _;
+        let mut connection = self.clone();
+        connection.client_certificate = stream.io().has_client_certificate();
+        std::future::ready(Ok(connection))
     }
 }
 
@@ -93,7 +116,18 @@ impl Service<Request> for HotSwap {
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, req: Request) -> Self::Future {
+    fn call(&mut self, mut req: Request) -> Self::Future {
+        if self.runtime_client_certificate_required
+            && !self.client_certificate
+            && req.uri().path().starts_with("/v1/runtime/")
+        {
+            return Box::pin(std::future::ready(Ok(crate::runtime::error_response(
+                StatusCode::FORBIDDEN,
+                "runtime routes require a client certificate",
+            ))));
+        }
+        req.extensions_mut()
+            .insert(crate::tls::ClientCertificate(self.client_certificate));
         let mut router = self
             .current
             .read()

@@ -17,6 +17,7 @@ mod router;
 mod runtime;
 #[cfg(test)]
 mod tests;
+pub mod tls;
 pub mod ui;
 
 pub use config::{DevelopmentFixtureConfig, ServerConfig};
