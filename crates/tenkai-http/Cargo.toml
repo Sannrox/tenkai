@@ -28,6 +28,8 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tenkai = { path = "../..", version = "0.5.0", features = ["test-support"] }
+base64 = "0.22"
+ed25519-dalek = "2"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 sha2 = "0.10"
 toml = "0.8"

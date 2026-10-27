@@ -5,6 +5,7 @@ mod change_events;
 mod config;
 mod delivery_hold;
 mod environment_config;
+mod exports;
 mod fixtures;
 mod health;
 mod imports;

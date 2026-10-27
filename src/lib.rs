@@ -172,6 +172,7 @@ pub mod development_fixtures;
 pub mod embedded;
 pub mod environment;
 pub mod environment_config;
+pub mod exports;
 pub mod federated_identity;
 pub mod fenced_mutation;
 pub mod fleet;

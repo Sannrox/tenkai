@@ -55,6 +55,8 @@ pub struct ServerConfig {
     pub backups: Option<Arc<tenkai::backup::Backups>>,
     /// Server-side bundle import (#680): staging directory and bundle trust roots.
     pub imports: Option<tenkai::offline_import::ImportSettings>,
+    /// Exports over HTTP (#682): `/v1/exports`.
+    pub exports: Option<Arc<tenkai::exports::Exports>>,
 }
 
 #[derive(Clone, Debug)]
@@ -87,6 +89,7 @@ impl ServerConfig {
             agent_actor_policy: Default::default(),
             backups: None,
             imports: None,
+            exports: None,
         }
     }
 
