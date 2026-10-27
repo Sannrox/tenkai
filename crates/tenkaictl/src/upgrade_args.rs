@@ -99,6 +99,13 @@ pub(crate) enum UpgradeCommand {
         #[command(flatten)]
         bypass: DevelopmentBypassFlags,
     },
+    /// Remove stored layers and weights no kept release names. Kept: channel
+    /// heads, deployed and previous deployed releases, unfinished upgrades.
+    CollectContent {
+        /// Remove the content; without it, only list what would go.
+        #[arg(long)]
+        apply: bool,
+    },
 }
 
 #[cfg(test)]

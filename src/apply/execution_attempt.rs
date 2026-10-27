@@ -96,6 +96,9 @@ pub async fn execute_with_options(
         &crate::telemetry::DeliveryAttributes::new(crate::telemetry::Operation::Apply)
             .plan_id(plan_id),
     );
+    // Content collection removes what no deployment keeps; it waits for
+    // this apply, and an apply after it verifies the content it uses (#635).
+    let _content = crate::content_inventory::ContentLock::shared_from_env().await?;
     match execute_with_options_inner(ctx, plan_id, options, &mut apply_span).await {
         Ok(outcomes) => {
             apply_span.succeed();

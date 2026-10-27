@@ -552,6 +552,7 @@ pub async fn preview_isolated_bundle(
     crate::offline_bundle::preflight_image_chunks(&verified, bundle_path)?;
     let env = crate::environment::environment(ctx, environment).await?;
     let mirrors = crate::oci_artifact::mirrors_from_properties(&env.properties);
+    preflight_delta(ctx, &verified, &mirrors).await?;
     let layers: Vec<crate::oci_artifact::OciArtifactRef> =
         crate::offline_bundle::plan_artifact_layers(&verified, &mirrors)?
             .into_iter()
@@ -637,6 +638,31 @@ async fn admit_isolated_bind(
     Ok((record, index, bundle_digest))
 }
 
+/// Refuse a delta bundle (#635) unless its base release is in this site's
+/// catalog and every layer and weight it relies on is held here.
+async fn preflight_delta(
+    ctx: &mut Ctx,
+    verified: &crate::offline_bundle::VerifiedBundle,
+    mirrors: &BTreeMap<String, String>,
+) -> Result<()> {
+    let Some((base, _)) = crate::offline_bundle::delta_base(verified)? else {
+        return Ok(());
+    };
+    let (product, version) = crate::offline_bundle::base_release_parts(&base.base_release)?;
+    if ctx.get(&release_id(product, version)).await?.is_none() {
+        bail!(
+            "base release {} is not in this site's catalog; import the base release first",
+            base.base_release
+        );
+    }
+    crate::offline_bundle::preflight_delta_base(
+        verified,
+        crate::oci_artifact::selected_registry()?.as_deref(),
+        mirrors,
+        crate::offline_chunk_store::weight_cache_from_env()?.as_ref(),
+    )
+}
+
 pub async fn bind_isolated_bundle(
     ctx: &mut Ctx,
     name: &str,
@@ -667,11 +693,15 @@ pub async fn bind_isolated_bundle(
         crate::offline_bundle::preflight_full_stack(&verified, bundle_path)?;
     }
     let env = crate::environment::environment(ctx, environment).await?;
+    let mirrors = crate::oci_artifact::mirrors_from_properties(&env.properties);
+    // Content collection waits until this import has stored everything.
+    let _content = crate::content_inventory::ContentLock::shared_from_env().await?;
+    preflight_delta(ctx, &verified, &mirrors).await?;
     crate::offline_bundle::import_artifact_layers(
         &verified,
         bundle_path,
         crate::oci_artifact::selected_registry()?.as_deref(),
-        &crate::oci_artifact::mirrors_from_properties(&env.properties),
+        &mirrors,
     )?;
     let weight_cache = crate::offline_chunk_store::weight_cache_from_env()?;
     if scan.is_some() {
@@ -743,6 +773,9 @@ pub async fn install_isolated_stack(
         crate::now_millis(),
     )?;
     crate::offline_host_binaries::preflight(&verified)?;
+    if crate::offline_bundle::delta_base(&verified)?.is_some() {
+        bail!("a first install needs a full bundle; this one is a delta against a base release");
+    }
     crate::offline_bundle::preflight_full_stack(&verified, bundle_path)?;
     let expected_release = format!("{}@{}", spec.product, spec.version);
     let sanitized = expected_release.replace([':', '@'], "-");
@@ -792,6 +825,7 @@ pub async fn install_isolated_stack(
         }
     }
     let (_, pending_catalog) = admit_isolated_catalog(ctx, spec, &verified, &plan).await?;
+    let _content = crate::content_inventory::ContentLock::shared_from_env().await?;
     let imported = (|| {
         crate::offline_bundle::import_artifact_layers(
             &verified,
@@ -915,6 +949,7 @@ async fn reinstall_isolated_stack(
             spec.name
         );
     }
+    let _content = crate::content_inventory::ContentLock::shared_from_env().await?;
     crate::offline_bundle::import_artifact_layers(
         verified,
         bundle_path,
@@ -1296,6 +1331,22 @@ fn upgrade_object(record: &UpgradeRecord) -> Result<Object> {
         created: record.created_at,
         updated: now,
     })
+}
+
+/// `(product, version)` of every upgrade that has not finished: its target
+/// release must stay applicable here (#635).
+pub async fn unfinished_upgrade_releases(ctx: &mut Ctx) -> Result<Vec<(String, String)>> {
+    let mut releases = Vec::new();
+    for object in ctx.list_kind(KIND_CONNECTIVITY_UPGRADE).await? {
+        let record = record_from_object(&object)?;
+        if !matches!(
+            record.status,
+            UpgradeStatus::Succeeded | UpgradeStatus::RolledBack
+        ) {
+            releases.push((record.product, record.version));
+        }
+    }
+    Ok(releases)
 }
 
 fn record_from_object(object: &Object) -> Result<UpgradeRecord> {

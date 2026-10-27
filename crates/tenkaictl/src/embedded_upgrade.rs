@@ -184,6 +184,21 @@ pub(crate) async fn run(ctx: &mut client::Ctx, command: UpgradeCommand) -> Resul
             .await?;
             println!("{}", connectivity::format_upgrade(&record));
         }
+        UpgradeCommand::CollectContent { apply } => {
+            let collection = tenkai::content_inventory::collect_from_env(ctx, apply).await?;
+            for kept in &collection.kept {
+                println!("keep {kept}");
+            }
+            let verb = if collection.applied {
+                "removed"
+            } else {
+                "would remove"
+            };
+            for item in &collection.collected {
+                println!("{verb} {} {} {}", item.kind, item.digest, item.size_bytes);
+            }
+            println!("{verb} {} bytes", collection.collected_bytes);
+        }
     }
     Ok(())
 }

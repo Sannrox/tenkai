@@ -1699,4 +1699,264 @@ media_type = "{}"
         );
         let _ = std::fs::remove_dir_all(root);
     }
+
+    /// Delta N-1 -> N carries only new layers, imports and applies offline;
+    /// collection keeps N-1 (the previous deployment), so the rollback to it
+    /// applies from the local store alone, and only unkept content goes (#635).
+    #[tokio::test]
+    async fn delta_bundle_applies_offline_and_rollback_survives_collection() {
+        use crate::oci_artifact::{ArtifactRegistry as _, FilesystemArtifactRegistry};
+        use crate::offline_bundle::{
+            BundleEnvelope, BundleStatement, DELTA_BASE_SCHEMA, OfflineDeltaBase,
+            import_artifact_layers, insert_artifact_layers, insert_artifact_layers_delta,
+            preflight_delta_base,
+        };
+        use crate::release_signing::{TrustRoots, TrustedSigner};
+        use base64::engine::general_purpose::STANDARD;
+        use ed25519_dalek::SigningKey;
+
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-offline-delta-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let (a, b, c, d) = (
+            sample_oci_ref(b"shared-a"),
+            sample_oci_ref(b"only-1.0-b"),
+            sample_oci_ref(b"new-1.1-c"),
+            sample_oci_ref(b"old-0.9-d"),
+        );
+        let origin = std::sync::Arc::new(crate::oci_artifact::MemoryArtifactRegistry::new());
+        for (layer, bytes) in [
+            (&a, &b"shared-a"[..]),
+            (&b, b"only-1.0-b"),
+            (&c, b"new-1.1-c"),
+            (&d, b"old-0.9-d"),
+        ] {
+            origin.put(layer, bytes.to_vec()).unwrap();
+        }
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        for (version, layers) in [
+            ("0.9.0", vec![&d]),
+            ("1.0.0", vec![&a, &b]),
+            ("1.1.0", vec![&a, &c]),
+        ] {
+            let dir = root.join(version);
+            std::fs::create_dir_all(&dir).unwrap();
+            let artifacts: String = layers
+                .iter()
+                .map(|layer| {
+                    format!(
+                        "\n[[artifacts]]\nregistry = \"{}\"\nrepository = \"{}\"\ndigest = \"{}\"\nmedia_type = \"{}\"\n",
+                        layer.registry, layer.repository, layer.digest, layer.media_type
+                    )
+                })
+                .collect();
+            std::fs::write(
+                dir.join("tenkai.toml"),
+                format!(
+                    "[product]\nname = \"api\"\nversion = \"{version}\"\n\n[deploy]\ninstall = \"true\"\n{artifacts}"
+                ),
+            )
+            .unwrap();
+            publish(
+                &mut ctx,
+                &dir.join("tenkai.toml"),
+                &PublishOptions {
+                    allow_unsigned_development: true,
+                    artifact_registry: Some(origin.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let actor = crate::auth_context::test_management_context("offline-delta");
+        crate::catalog::promote(&mut ctx, &actor, "api@1.0.0", "stable")
+            .await
+            .unwrap();
+        crate::plan::env_add(&mut ctx, "local", "fixture")
+            .await
+            .unwrap();
+        crate::plan::subscribe(&mut ctx, "local", "api", "stable")
+            .await
+            .unwrap();
+        crate::environment::set_artifact_mirror(&mut ctx, "local", "ghcr.io", "mirror.internal")
+            .await
+            .unwrap();
+        let mut mirrors = std::collections::BTreeMap::new();
+        mirrors.insert("ghcr.io".to_string(), "mirror.internal".to_string());
+        let oci_root = root.join("oci");
+        let store = std::sync::Arc::new(FilesystemArtifactRegistry::new(oci_root.clone()));
+        let exporter = SigningKey::from_bytes(&[12; 32]);
+        let roots = TrustRoots {
+            version: 1,
+            signers: vec![TrustedSigner {
+                key_id: crate::release_signing::key_id(&exporter.verifying_key().to_bytes()),
+                identity: "exporter".into(),
+                public_key: STANDARD.encode(exporter.verifying_key().to_bytes()),
+            }],
+        };
+        let bundle = |mut payloads: std::collections::BTreeMap<String, (String, Vec<u8>)>| {
+            use sha2::{Digest as _, Sha256};
+            let (plan, approval) = (br#"{"plan":"offline-1"}"#, br#"{"approval":"offline-1"}"#);
+            for (path, bytes) in [
+                ("plans/offline-1.json", &plan[..]),
+                ("approvals/offline-1.json", &approval[..]),
+                ("releases/api@1.1.0/payload.bin", b"release"),
+            ] {
+                payloads.insert(path.into(), ("application/json".into(), bytes.to_vec()));
+            }
+            BundleEnvelope::create(
+                BundleStatement {
+                    tenant_id: "tenant-1".into(),
+                    environment_id: "airgap-1".into(),
+                    plan_id: "offline-1".into(),
+                    plan_digest: format!("sha256:{:x}", Sha256::digest(plan)),
+                    approval_digest: format!("sha256:{:x}", Sha256::digest(approval)),
+                    release_ids: vec!["api@1.1.0".into()],
+                    exporter_identity: "exporter".into(),
+                    issued_at_unix_ms: 1_000,
+                    expires_at_unix_ms: 10_000,
+                    entries: Vec::new(),
+                },
+                payloads,
+                &exporter,
+            )
+            .unwrap()
+            .verify(&roots, "tenant-1", "airgap-1", 2_000)
+            .unwrap()
+        };
+        let apply = async |ctx: &mut Ctx, plan_id: &str| {
+            let outcomes = crate::apply::execute_with_options(
+                ctx,
+                plan_id,
+                crate::apply::ExecutionOptions {
+                    skip_gates: false,
+                    emergency_reason: None,
+                    authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
+                        reason: "offline delta apply",
+                    },
+                    software_executor: Some(std::sync::Arc::new(
+                        crate::software_executor::FakeSoftwareExecutor::new(),
+                    )),
+                    model_runtime_executor: None,
+                    worker_lifecycle: None,
+                    artifact_registry: Some(store.clone()),
+                    delivery_adapter: None,
+                    delivery_fence: None,
+                },
+            )
+            .await
+            .unwrap();
+            assert!(
+                outcomes.iter().all(|outcome| matches!(
+                    outcome.classified_status(),
+                    Ok(crate::apply::StepOutcomeStatus::Succeeded)
+                )),
+                "{outcomes:?}"
+            );
+        };
+
+        // N-1 arrives as a full bundle; content of an older release is held too.
+        let mut full = std::collections::BTreeMap::new();
+        insert_artifact_layers(&mut full, &[a.clone(), b.clone()], origin.as_ref()).unwrap();
+        import_artifact_layers(&bundle(full), None, Some(store.as_ref()), &mirrors).unwrap();
+        let old = crate::oci_artifact::pull_reference(&d, &mirrors).unwrap();
+        store.store(&old, b"old-0.9-d".to_vec()).unwrap();
+        let plan = crate::plan::create(&mut ctx, "local").await.unwrap();
+        apply(&mut ctx, &plan.id).await;
+
+        // N arrives as a delta that carries only the layer N-1 lacks.
+        let base = OfflineDeltaBase {
+            schema: DELTA_BASE_SCHEMA.into(),
+            base_release: "api@1.0.0".into(),
+            layers: vec![a.digest.clone()],
+            weights: Vec::new(),
+        };
+        let mut delta = std::collections::BTreeMap::new();
+        insert_artifact_layers_delta(
+            &mut delta,
+            &[a.clone(), c.clone()],
+            origin.as_ref(),
+            None,
+            &base,
+        )
+        .unwrap();
+        assert!(!delta.contains_key(&a.layer_entry_path().unwrap()));
+        assert!(delta.contains_key(&c.layer_entry_path().unwrap()));
+        let delta = bundle(delta);
+
+        // Against a site without the base, the delta is refused, naming it.
+        let empty = FilesystemArtifactRegistry::new(root.join("empty-oci"));
+        let refused = preflight_delta_base(&delta, Some(&empty), &mirrors, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("api@1.0.0") && refused.contains(&a.digest),
+            "{refused}"
+        );
+
+        preflight_delta_base(&delta, Some(store.as_ref()), &mirrors, None).unwrap();
+        let imported =
+            import_artifact_layers(&delta, None, Some(store.as_ref()), &mirrors).unwrap();
+        assert_eq!(
+            imported
+                .iter()
+                .map(|layer| &layer.digest)
+                .collect::<Vec<_>>(),
+            vec![&c.digest]
+        );
+        crate::catalog::promote(&mut ctx, &actor, "api@1.1.0", "stable")
+            .await
+            .unwrap();
+        let plan = crate::plan::create(&mut ctx, "local").await.unwrap();
+        apply(&mut ctx, &plan.id).await;
+
+        // N is deployed and N-1 is the previous deployment: only 0.9.0 goes.
+        let dry = crate::content_inventory::collect(&mut ctx, Some(&oci_root), None, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            dry.collected
+                .iter()
+                .map(|item| &item.digest)
+                .collect::<Vec<_>>(),
+            vec![&d.digest]
+        );
+        assert!(
+            store.stored(&old).unwrap().is_some(),
+            "a dry run removed content"
+        );
+        let collected = crate::content_inventory::collect(&mut ctx, Some(&oci_root), None, true)
+            .await
+            .unwrap();
+        assert!(
+            collected
+                .kept
+                .iter()
+                .any(|kept| kept.ends_with("api@1.0.0 previous local")),
+            "{:?}",
+            collected.kept
+        );
+        assert!(store.stored(&old).unwrap().is_none());
+
+        // Roll back to N-1 with no media and no origin: only the local store.
+        let step = crate::plan::rollback_step(&mut ctx, "local", "api")
+            .await
+            .unwrap();
+        let rollback = crate::plan::create_from_steps(&mut ctx, "local", vec![step])
+            .await
+            .unwrap();
+        apply(&mut ctx, &rollback.id).await;
+        let env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        assert_eq!(
+            env.properties.get("deployed.api").map(String::as_str),
+            Some("1.0.0")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
