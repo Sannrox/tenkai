@@ -38,6 +38,36 @@ jobs:
       - run: cargo test --locked -p tenkai-http --features ui --lib ui
       - run: cargo test --locked -p tenkai-postgres --features postgres
 
+  failover-drill:
+    name: Failover drill
+    runs-on: ubuntu-latest
+    # An ephemeral PostgreSQL for this job only. The password is a local
+    # test value; the database never leaves the runner.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: tenkai
+          POSTGRES_PASSWORD: local-test-only
+          POSTGRES_DB: tenkai_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tenkai"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      TENKAI_POSTGRES_URL: postgresql://tenkai:local-test-only@127.0.0.1:5432/tenkai_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.96.1
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      # The hub writer lease and the kill-the-leader drill (#748, #749).
+      - run: cargo test --locked -p tenkai-postgres --features postgres --lib -- --ignored live_writer_lease live_failover_drill
+
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest

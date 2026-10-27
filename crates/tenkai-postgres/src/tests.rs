@@ -294,6 +294,8 @@ mod live_delivery;
 #[cfg(feature = "postgres")]
 mod live_enrollment;
 #[cfg(feature = "postgres")]
+mod live_failover_drill;
+#[cfg(feature = "postgres")]
 mod live_fence;
 #[cfg(feature = "postgres")]
 mod live_fixture;
