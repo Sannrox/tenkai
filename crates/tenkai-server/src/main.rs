@@ -48,6 +48,26 @@ const OIDC_CONFIG_ENV: &str = "TENKAI_OIDC_CONFIG";
 struct Cli {
     #[arg(long, env = "TENKAI_LISTEN", default_value = "127.0.0.1:8080")]
     listen: SocketAddr,
+    /// Serve TLS with this PEM certificate chain (#671). The private key is
+    /// the secret setting TENKAI_TLS_KEY (inline, _FILE or the secret
+    /// directory), never an argument. Required for a non-loopback bind.
+    #[arg(long, env = "TENKAI_TLS_CERT")]
+    tls_cert: Option<PathBuf>,
+    /// Verify client certificates against this PEM CA bundle when presented.
+    #[arg(long, env = "TENKAI_TLS_CLIENT_CA", requires = "tls_cert")]
+    tls_client_ca: Option<PathBuf>,
+    /// Refuse `/v1/runtime/*` on connections without a verified client
+    /// certificate. Needs --tls-client-ca.
+    #[arg(
+        long,
+        env = "TENKAI_TLS_REQUIRE_RUNTIME_CLIENT_CERT",
+        default_value_t = false,
+        requires = "tls_client_ca"
+    )]
+    tls_require_runtime_client_cert: bool,
+    /// Lowest TLS version accepted: 1.3 (default) or 1.2.
+    #[arg(long, env = "TENKAI_TLS_MIN_VERSION", default_value = "1.3")]
+    tls_min_version: tenkai_http::tls::TlsMinVersion,
     /// Community SQLite path. Default `.tenkai-state/tenkai.db` when unset.
     /// Invalid with `--tenant-mode` or `TENKAI_POSTGRES_URL`.
     #[arg(long, env = "TENKAI_DATABASE")]
@@ -367,9 +387,27 @@ async fn main() -> Result<()> {
         tenkai::telemetry::bind_process_operation_id(operation_id);
     }
     anyhow::ensure!(
-        cli.listen.ip().is_loopback(),
-        "tenkai-server currently accepts plaintext HTTP only and must bind to loopback; use an authenticated TLS reverse proxy for remote access"
+        cli.listen.ip().is_loopback() || cli.tls_cert.is_some(),
+        "tenkai-server refuses a plaintext non-loopback bind; set --tls-cert and TENKAI_TLS_KEY, or bind loopback behind a TLS reverse proxy"
     );
+    // The scrape endpoint is unauthenticated, so it stays loopback-only.
+    anyhow::ensure!(
+        !cli.enable_metrics || cli.listen.ip().is_loopback(),
+        "--enable-metrics serves unauthenticated /metrics and needs a loopback bind"
+    );
+    let tls = cli
+        .tls_cert
+        .clone()
+        .map(|cert_chain| {
+            tenkai_http::tls::ReloadingTls::new(tenkai_http::tls::TlsSource {
+                cert_chain,
+                key: tenkai_http::tls::TlsKey::Secret("TENKAI_TLS_KEY"),
+                client_ca: cli.tls_client_ca.clone(),
+                min_version: cli.tls_min_version,
+            })
+        })
+        .transpose()
+        .context("loading the TLS certificate and key")?;
     tenkai::key_revocation::load_configured()?;
     let management_token = tenkai::secret_source::require("TENKAI_MANAGEMENT_TOKEN")?;
     let runtime_assignments = tenkai::secret_source::read("TENKAI_RUNTIME_TOKENS")?
@@ -435,8 +473,15 @@ async fn main() -> Result<()> {
     } else {
         "community-sqlite"
     };
-    println!("tenkai-server listening on {bound} profile={opening_profile} capabilities=opening");
-    let swap = tenkai_http::HotSwap::new(tenkai_http::opening_router(opening_profile, Vec::new()));
+    println!(
+        "tenkai-server listening on {bound} profile={opening_profile} capabilities=opening tls={}",
+        if tls.is_some() { "on" } else { "off" }
+    );
+    let mut swap =
+        tenkai_http::HotSwap::new(tenkai_http::opening_router(opening_profile, Vec::new()));
+    if cli.tls_require_runtime_client_cert {
+        swap = swap.requiring_runtime_client_certificates();
+    }
     let serving = swap.clone();
     let mut serve_shutdown = shutdown_tx.subscribe();
     let signal_shutdown = shutdown_tx.clone();
@@ -446,20 +491,35 @@ async fn main() -> Result<()> {
         eprintln!("tenkai-server shutting down signal={signal}");
         let _ = signal_shutdown.send(true);
     });
-    let server_task = tokio::spawn(async move {
-        axum::serve(listener, serving)
-            .with_graceful_shutdown(async move {
-                loop {
-                    if *serve_shutdown.borrow() {
-                        break;
-                    }
-                    if serve_shutdown.changed().await.is_err() {
-                        break;
-                    }
-                }
+    let stopped = async move {
+        loop {
+            if *serve_shutdown.borrow() {
+                break;
+            }
+            if serve_shutdown.changed().await.is_err() {
+                break;
+            }
+        }
+    };
+    let server_task = match tls {
+        Some(tls) => {
+            // A renewed certificate is picked up within this interval, or at
+            // once on SIGHUP; open connections keep the one they began with.
+            tls.spawn_reloader(Duration::from_secs(5))
+                .context("installing the TLS reload handler")?;
+            let listener = tenkai_http::tls::TlsListener::reloading(listener, tls)?;
+            tokio::spawn(async move {
+                axum::serve(listener, serving)
+                    .with_graceful_shutdown(stopped)
+                    .await
             })
-            .await
-    });
+        }
+        None => tokio::spawn(async move {
+            axum::serve(listener, serving)
+                .with_graceful_shutdown(stopped)
+                .await
+        }),
+    };
 
     let opened = match run_blocking_startup("operational store", {
         let tenant_mode = cli.tenant_mode;

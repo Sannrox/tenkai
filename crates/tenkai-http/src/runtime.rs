@@ -149,7 +149,7 @@ pub(super) fn bearer(headers: &HeaderMap) -> Option<&str> {
         .filter(|token| !token.is_empty())
 }
 
-pub(super) fn error_response(status: StatusCode, error: impl Into<String>) -> Response {
+pub(crate) fn error_response(status: StatusCode, error: impl Into<String>) -> Response {
     (
         status,
         Json(ErrorBody {

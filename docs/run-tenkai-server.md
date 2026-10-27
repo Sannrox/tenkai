@@ -46,8 +46,9 @@ database. Environment runtimes use separate tokens, each scoped server-side to
 exactly one environment. Continuous reconcile ticks emit structured diagnostics
 documented in [server diagnostics](server-diagnostics.md).
 
-The server accepts plaintext HTTP only on loopback. Put a TLS reverse proxy in
-front of it for remote access; never pass tokens on a command line. By default
+Plaintext HTTP is accepted only on loopback. For remote access, either put a
+TLS reverse proxy in front of it or serve TLS natively (see
+[native TLS](#native-tls)); never pass tokens or keys on a command line. By default
 the server opens the same in-process state backend as `tenkaictl` and requires
 no provider service. `--provider-mode remote` is explicit and never inherits
 embedded development permissions. The server reconciles every
@@ -66,6 +67,31 @@ TENKAI_MANAGEMENT_TOKEN="$TENKAI_MANAGEMENT_TOKEN" \
   tenkaictl --target remote --server-url http://127.0.0.1:8080 \
   reconcile --once
 ```
+
+### Native TLS
+
+`tenkai-server` serves TLS itself when `--tls-cert` (`TENKAI_TLS_CERT`) names a
+PEM certificate chain (#671). The private key is the secret setting
+`TENKAI_TLS_KEY` (inline, `TENKAI_TLS_KEY_FILE`, or `$TENKAI_SECRET_DIR/TENKAI_TLS_KEY`),
+never an argument.
+
+- **Binding.** A non-loopback `--listen` needs TLS; a plaintext non-loopback
+  bind is refused. `--enable-metrics` stays loopback-only because `/metrics`
+  is unauthenticated.
+- **Versions.** TLS 1.3 only by default; `--tls-min-version 1.2` also accepts
+  TLS 1.2.
+- **Client certificates.** With `--tls-client-ca` (`TENKAI_TLS_CLIENT_CA`), a
+  client certificate is verified against that CA when presented and is
+  optional otherwise; an untrusted one fails the handshake.
+  `--tls-require-runtime-client-cert` additionally refuses `/v1/runtime/*` on
+  connections without one (`403`). Management routes accept either, and
+  `/healthz` never requires one. Bearer tokens are still required as before.
+- **Renewal.** The certificate, key and client CA are read again every five
+  seconds and on `SIGHUP`. Changed material applies to new connections; open
+  connections keep theirs, and runner leases, which live in the store, are not
+  affected. A renewal that does not load is logged as
+  `tenkai.tls_reload outcome=failed` and the certificate in use stays.
+- **Proxy mode** stays supported: bind loopback without `--tls-cert`.
 
 ### Install a server host
 

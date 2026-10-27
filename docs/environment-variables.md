@@ -92,6 +92,11 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | `TENKAI_OIDC_CONFIG` | unset | Filesystem path to an OIDC trust TOML file; the server verifies OIDC access tokens sent as `Authorization: Bearer` and maps groups to grants ([configure server authentication](configure-server-authentication.md#oidc-access-tokens-468)). May be set together with `TENKAI_JWT_VERIFIER_CONFIG` when the issuers differ |
 | `TENKAI_POSTGRES_URL` | unset | Sole hub store URL for `--tenant-mode`. Invalid together with `TENKAI_DATABASE`. Embedded `tenkaictl` and spoke `tenkai-server` fail closed when it is set. Non-loopback hosts require verified TLS |
 | `TENKAI_INSTANCE_ID` | random UUID per process | Replica identity used for multi-replica fencing; the server records it as `tenkai-server-<value>` |
+| `TENKAI_TLS_CERT` | unset | `tenkai-server` only: PEM certificate chain for [native TLS](run-tenkai-server.md#native-tls); required for a non-loopback bind |
+| `TENKAI_TLS_KEY` | unset | Secret setting: PEM private key for `TENKAI_TLS_CERT` (also `TENKAI_TLS_KEY_FILE` or the secret directory) |
+| `TENKAI_TLS_CLIENT_CA` | unset | PEM CA bundle that verifies client certificates when presented |
+| `TENKAI_TLS_REQUIRE_RUNTIME_CLIENT_CERT` | `false` | Refuse `/v1/runtime/*` without a verified client certificate; needs `TENKAI_TLS_CLIENT_CA` |
+| `TENKAI_TLS_MIN_VERSION` | `1.3` | Lowest TLS version accepted: `1.3` or `1.2` |
 | `TENKAI_ENABLE_METRICS` | `false` | Enable the Prometheus scrape endpoint (`--enable-metrics`) |
 | `TENKAI_AGENT_ACTOR_POLICY` | `require_approval` | Mutations whose token `act` chain names an agent: `require_approval` allows only plans, which still need approval under the environment's policy; `forbid` refuses all ([auth request context](auth-request-context.md#delegated-calls-and-agent-actors)) |
 

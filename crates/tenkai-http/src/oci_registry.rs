@@ -8,10 +8,8 @@
 //! exactly what signed bundles stored, and the client checks every digest.
 //! It holds no state; any number of instances may serve one store.
 
-use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use axum::Router;
@@ -23,14 +21,11 @@ use axum::routing::any;
 use rustls::pki_types::pem::PemObject as _;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tenkai::oci_artifact::{FilesystemArtifactRegistry, manifest_content_type};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
-use tokio_rustls::server::TlsStream;
 
 /// Largest manifest served; image manifests and indexes are a few KiB.
 const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
-/// A client that has not finished its TLS handshake by then is dropped.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct Registry {
     store: FilesystemArtifactRegistry,
@@ -59,7 +54,8 @@ pub async fn serve_tls(
     tls: rustls::ServerConfig,
     router: Router,
 ) -> Result<()> {
-    let listener = TlsListener::spawn(listener, TlsAcceptor::from(Arc::new(tls)))?;
+    let acceptor = TlsAcceptor::from(Arc::new(tls));
+    let listener = crate::tls::TlsListener::spawn(listener, move || acceptor.clone())?;
     axum::serve(listener, router).await?;
     Ok(())
 }
@@ -238,57 +234,6 @@ fn error(status: StatusCode, code: &str, message: &str) -> Response {
 
 /// TLS connections for `axum::serve`. Handshakes run in their own tasks, so
 /// a slow client never holds up the accept loop.
-struct TlsListener {
-    incoming: tokio::sync::mpsc::Receiver<(TlsStream<TcpStream>, SocketAddr)>,
-    local: SocketAddr,
-}
-
-impl TlsListener {
-    fn spawn(listener: TcpListener, acceptor: TlsAcceptor) -> Result<Self> {
-        let local = listener.local_addr()?;
-        let (sender, incoming) = tokio::sync::mpsc::channel(64);
-        tokio::spawn(async move {
-            loop {
-                let (stream, peer) = match listener.accept().await {
-                    Ok(accepted) => accepted,
-                    // Out of descriptors and the like: back off and go on.
-                    Err(_) => {
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                        continue;
-                    }
-                };
-                let acceptor = acceptor.clone();
-                let sender = sender.clone();
-                tokio::spawn(async move {
-                    if let Ok(Ok(tls)) =
-                        tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await
-                    {
-                        let _ = sender.send((tls, peer)).await;
-                    }
-                });
-            }
-        });
-        Ok(Self { incoming, local })
-    }
-}
-
-impl axum::serve::Listener for TlsListener {
-    type Io = TlsStream<TcpStream>;
-    type Addr = SocketAddr;
-
-    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
-        match self.incoming.recv().await {
-            Some(connection) => connection,
-            // The accept task never ends while the listener lives.
-            None => std::future::pending().await,
-        }
-    }
-
-    fn local_addr(&self) -> std::io::Result<Self::Addr> {
-        Ok(self.local)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
