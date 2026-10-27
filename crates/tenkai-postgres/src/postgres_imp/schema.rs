@@ -111,6 +111,17 @@ pub(crate) fn migrate_tenant_schema(tx: &mut Transaction<'_>) -> Result<()> {
             enrollment_digest TEXT NOT NULL UNIQUE, created_at BIGINT NOT NULL,
             revoked_at BIGINT
         );
+        CREATE TABLE IF NOT EXISTS runtime_credential_revocations (
+            credential_digest TEXT PRIMARY KEY, reason TEXT NOT NULL,
+            revoked_by TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS runtime_activity (
+            runner_id TEXT NOT NULL, instance_id TEXT NOT NULL,
+            environment_id TEXT NOT NULL, owner TEXT NOT NULL,
+            runtime_version TEXT, last_work_at BIGINT,
+            last_heartbeat_at BIGINT, last_inventory_at BIGINT,
+            PRIMARY KEY (runner_id, instance_id)
+        );
         CREATE TABLE IF NOT EXISTS offline_imports (
             bundle_digest TEXT PRIMARY KEY, environment_id TEXT NOT NULL,
             plan_id TEXT NOT NULL, receipt_json TEXT NOT NULL

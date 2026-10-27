@@ -1,9 +1,12 @@
-//! Opt-in GPU evidence for the vLLM Kubernetes executor (#602).
+//! Opt-in GPU evidence for the Kubernetes serving executor: vLLM (#602) and
+//! TGI (#615).
 //!
-//! Ignored by default so `cargo test` needs no GPU. Enable with
-//! `TENKAI_VLLM_LIVE_TEST=1` plus a cluster kubeconfig, digest-pinned serving
-//! image, a namespace that already contains the weights claim, the host mount
-//! of that claim, and a small `directory+tar` model archive.
+//! Ignored by default so `cargo test` needs no GPU. Enable one engine with
+//! `TENKAI_VLLM_LIVE_TEST=1` or `TENKAI_TGI_LIVE_TEST=1`, plus a cluster
+//! kubeconfig and that engine's variables (`TENKAI_VLLM_*` or `TENKAI_TGI_*`):
+//! digest-pinned serving image, a namespace that already contains the weights
+//! claim, the host mount of that claim, and a small `directory+tar` model
+//! archive.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -18,14 +21,15 @@ use tenkai::model_runtime::{
     MODEL_RUNTIME_CONTRACT_VERSION, ModelRuntimeDescriptor, ModelRuntimeExecutor, WeightCache,
 };
 use tenkai_executor::{
-    HttpSmokeProbe, LiveKubeApi, SmokeProbe, VllmConfig, VllmModelRuntimeExecutor,
+    HttpSmokeProbe, KubernetesModelRuntimeExecutor, LiveKubeApi, ServingConfig, ServingEngine,
+    SmokeProbe,
 };
 
 fn required_env(name: &str) -> String {
     std::env::var(name)
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| panic!("{name} must be set for TENKAI_VLLM_LIVE_TEST"))
+        .unwrap_or_else(|| panic!("{name} must be set for this live GPU test"))
 }
 
 fn required_path(name: &str) -> PathBuf {
@@ -99,6 +103,7 @@ fn smoke_stable(
 }
 
 fn descriptor(
+    engine: ServingEngine,
     product: &str,
     source: &Path,
     digest: &str,
@@ -120,7 +125,7 @@ fn descriptor(
             registry_attestation: String::new(),
         },
         runtime: ModelRuntimeSection {
-            engine: "vllm".into(),
+            engine: engine.name().into(),
             port: 8000,
             context_length: 2048,
         },
@@ -168,10 +173,24 @@ fn parse_json_array(name: &str) -> Vec<serde_json::Value> {
 #[test]
 #[ignore = "requires TENKAI_VLLM_LIVE_TEST plus a GPU cluster kubeconfig and image"]
 fn vllm_live_gpu_apply_forward_smoke_fail_rollback() {
+    live_drill(ServingEngine::Vllm, "TENKAI_VLLM");
+}
+
+#[test]
+#[ignore = "requires TENKAI_TGI_LIVE_TEST plus a GPU cluster kubeconfig and image"]
+fn tgi_live_gpu_apply_forward_smoke_fail_rollback() {
+    live_drill(ServingEngine::Tgi, "TENKAI_TGI");
+}
+
+/// Apply, roll forward, fail a candidate, and roll back on a real GPU
+/// cluster, reading `<prefix>_*` configuration.
+fn live_drill(engine: ServingEngine, prefix: &str) {
+    let var = |suffix: &str| format!("{prefix}_{suffix}");
     assert_eq!(
-        std::env::var("TENKAI_VLLM_LIVE_TEST").ok().as_deref(),
+        std::env::var(var("LIVE_TEST")).ok().as_deref(),
         Some("1"),
-        "set TENKAI_VLLM_LIVE_TEST=1 to run this ignored GPU test"
+        "set {}=1 to run this ignored GPU test",
+        var("LIVE_TEST")
     );
     let kubeconfig = required_path("TENKAI_CLUSTER_CONFIG");
     assert!(
@@ -179,16 +198,17 @@ fn vllm_live_gpu_apply_forward_smoke_fail_rollback() {
         "TENKAI_CLUSTER_CONFIG {} is not a file",
         kubeconfig.display()
     );
-    let image = required_env("TENKAI_VLLM_IMAGE");
+    let image = required_env(&var("IMAGE"));
     assert!(
         image.contains("@sha256:"),
-        "TENKAI_VLLM_IMAGE must pin the serving image by digest"
+        "{} must pin the serving image by digest",
+        var("IMAGE")
     );
-    let namespace = required_env("TENKAI_VLLM_NAMESPACE");
-    let weights_claim = required_env("TENKAI_VLLM_WEIGHTS_CLAIM");
-    let weights_root = required_path("TENKAI_VLLM_WEIGHTS_ROOT");
-    let model_tar = required_path("TENKAI_VLLM_MODEL_TAR");
-    let archive = std::fs::read(&model_tar).expect("read TENKAI_VLLM_MODEL_TAR");
+    let namespace = required_env(&var("NAMESPACE"));
+    let weights_claim = required_env(&var("WEIGHTS_CLAIM"));
+    let weights_root = required_path(&var("WEIGHTS_ROOT"));
+    let model_tar = required_path(&var("MODEL_TAR"));
+    let archive = std::fs::read(&model_tar).expect("read the model archive");
     let digest = format!("sha256:{:x}", Sha256::digest(&archive));
     let product = unique_product();
     let work = std::env::temp_dir().join(format!("tenkai-{product}"));
@@ -197,20 +217,22 @@ fn vllm_live_gpu_apply_forward_smoke_fail_rollback() {
     let source = work.join("model.tar");
     std::fs::write(&source, &archive).unwrap();
     let probe = HttpSmokeProbe {
-        base_url: std::env::var("TENKAI_VLLM_SMOKE_BASE_URL")
+        engine,
+        base_url: std::env::var(var("SMOKE_BASE_URL"))
             .unwrap_or_else(|_| "http://{service}.{namespace}.svc:{port}".into()),
         timeout: Duration::from_secs(30),
     };
-    let executor = VllmModelRuntimeExecutor::new(
+    let executor = KubernetesModelRuntimeExecutor::new(
         LiveKubeApi,
         probe.clone(),
-        VllmConfig {
+        ServingConfig {
+            engine,
             cluster_config: kubeconfig.clone(),
             namespace: namespace.clone(),
             image,
             weights_claim,
-            node_selector: parse_json_map("TENKAI_VLLM_NODE_SELECTOR"),
-            tolerations: parse_json_array("TENKAI_VLLM_TOLERATIONS"),
+            node_selector: parse_json_map(&var("NODE_SELECTOR")),
+            tolerations: parse_json_array(&var("TOLERATIONS")),
         },
         WeightCache::new(weights_root),
         work.join(format!("{product}.json")),
@@ -219,9 +241,9 @@ fn vllm_live_gpu_apply_forward_smoke_fail_rollback() {
         executor: &executor,
         work: work.clone(),
     };
-    let v1 = descriptor(&product, &source, &digest, "0.1.0", 600);
-    let v2 = descriptor(&product, &source, &digest, "0.2.0", 600);
-    let v3 = descriptor(&product, &source, &digest, "0.3.0", 1);
+    let v1 = descriptor(engine, &product, &source, &digest, "0.1.0", 600);
+    let v2 = descriptor(engine, &product, &source, &digest, "0.2.0", 600);
+    let v3 = descriptor(engine, &product, &source, &digest, "0.3.0", 1);
     let digest1 = executor.apply(&v1).expect("apply first generation");
     let generation1 = selected_generation(&kubeconfig, &namespace, &product);
     smoke_stable(&probe, &namespace, &product, &v1.health);
@@ -269,7 +291,7 @@ fn vllm_live_gpu_apply_forward_smoke_fail_rollback() {
 }
 
 struct LiveCleanup<'a> {
-    executor: &'a VllmModelRuntimeExecutor<LiveKubeApi, HttpSmokeProbe>,
+    executor: &'a KubernetesModelRuntimeExecutor<LiveKubeApi, HttpSmokeProbe>,
     work: PathBuf,
 }
 
@@ -277,7 +299,7 @@ impl Drop for LiveCleanup<'_> {
     fn drop(&mut self) {
         if let Err(error) = self.executor.remove() {
             eprintln!(
-                "vllm live test: cluster cleanup failed; leaving {} so remove can be retried: {error:#}",
+                "live GPU test: cluster cleanup failed; leaving {} so remove can be retried: {error:#}",
                 self.work.display()
             );
             return;

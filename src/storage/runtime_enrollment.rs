@@ -1,5 +1,6 @@
-//! Runtime agent enrollments and credentials in SQLite (#630). The tables
-//! are additive, so an older binary on the same database ignores them.
+//! Runtime agent enrollments and credentials in SQLite (#630), and the
+//! runner registry's revocation reasons and activity (#673). The tables are
+//! additive, so an older binary on the same database ignores them.
 
 use super::*;
 
@@ -14,6 +15,17 @@ pub(super) fn ensure_runtime_enrollment_tables(connection: &Connection) -> Resul
              credential_digest TEXT PRIMARY KEY, environment_id TEXT NOT NULL,
              enrollment_digest TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL,
              revoked_at INTEGER
+         );
+         CREATE TABLE IF NOT EXISTS runtime_credential_revocations (
+             credential_digest TEXT PRIMARY KEY, reason TEXT NOT NULL,
+             revoked_by TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS runtime_activity (
+             runner_id TEXT NOT NULL, instance_id TEXT NOT NULL,
+             environment_id TEXT NOT NULL, owner TEXT NOT NULL,
+             runtime_version TEXT, last_work_at INTEGER,
+             last_heartbeat_at INTEGER, last_inventory_at INTEGER,
+             PRIMARY KEY (runner_id, instance_id)
          );",
     )?;
     Ok(())
@@ -133,9 +145,11 @@ impl SqliteStore {
         &self,
         credential_digest: &str,
         now: i64,
+        revocation: &RuntimeRevocation,
     ) -> Result<()> {
-        let connection = self.connection()?;
-        let known = connection.execute(
+        let mut connection = self.connection()?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let known = tx.execute(
             "UPDATE runtime_credentials SET revoked_at=COALESCE(revoked_at, ?2)
              WHERE credential_digest=?1",
             params![credential_digest, now],
@@ -146,7 +160,100 @@ impl SqliteStore {
                 id: credential_digest.into(),
             });
         }
+        tx.execute(
+            "INSERT INTO runtime_credential_revocations(credential_digest,reason,revoked_by)
+             VALUES(?1,?2,?3) ON CONFLICT(credential_digest) DO NOTHING",
+            params![credential_digest, revocation.reason, revocation.revoked_by],
+        )?;
+        tx.commit()?;
         Ok(())
+    }
+
+    pub(super) fn runtime_runners_sqlite(&self) -> Result<Vec<RuntimeRunnerRecord>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT c.credential_digest,c.environment_id,c.enrollment_digest,c.created_at,
+                    c.revoked_at,COALESCE(e.created_by,''),r.reason,r.revoked_by
+             FROM runtime_credentials c
+             LEFT JOIN runtime_enrollments e ON e.token_digest=c.enrollment_digest
+             LEFT JOIN runtime_credential_revocations r
+                 ON r.credential_digest=c.credential_digest
+             ORDER BY c.environment_id, c.created_at, c.credential_digest",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let reason: Option<String> = row.get(6)?;
+            let revoked_by: Option<String> = row.get(7)?;
+            Ok(RuntimeRunnerRecord {
+                credential: credential_from_row(row)?,
+                created_by: row.get(5)?,
+                revocation: reason
+                    .zip(revoked_by)
+                    .map(|(reason, revoked_by)| RuntimeRevocation { reason, revoked_by }),
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub(super) fn record_runtime_activity_sqlite(
+        &self,
+        activity: &RuntimeActivityRecord,
+    ) -> Result<()> {
+        self.connection()?.execute(
+            "INSERT INTO runtime_activity(runner_id,instance_id,environment_id,owner,
+                 runtime_version,last_work_at,last_heartbeat_at,last_inventory_at)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
+             ON CONFLICT(runner_id,instance_id) DO UPDATE SET
+                 environment_id=excluded.environment_id, owner=excluded.owner,
+                 runtime_version=COALESCE(excluded.runtime_version, runtime_version),
+                 last_work_at=COALESCE(MAX(excluded.last_work_at, last_work_at),
+                     excluded.last_work_at, last_work_at),
+                 last_heartbeat_at=COALESCE(MAX(excluded.last_heartbeat_at, last_heartbeat_at),
+                     excluded.last_heartbeat_at, last_heartbeat_at),
+                 last_inventory_at=COALESCE(MAX(excluded.last_inventory_at, last_inventory_at),
+                     excluded.last_inventory_at, last_inventory_at)",
+            params![
+                activity.runner_id,
+                activity.instance_id,
+                activity.environment_id,
+                activity.owner,
+                activity.runtime_version,
+                activity.last_work_at,
+                activity.last_heartbeat_at,
+                activity.last_inventory_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub(super) fn runtime_activity_sqlite(&self) -> Result<Vec<RuntimeActivityRecord>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT runner_id,instance_id,environment_id,owner,runtime_version,
+                    last_work_at,last_heartbeat_at,last_inventory_at
+             FROM runtime_activity ORDER BY runner_id, instance_id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(RuntimeActivityRecord {
+                runner_id: row.get(0)?,
+                instance_id: row.get(1)?,
+                environment_id: row.get(2)?,
+                owner: row.get(3)?,
+                runtime_version: row.get(4)?,
+                last_work_at: row.get(5)?,
+                last_heartbeat_at: row.get(6)?,
+                last_inventory_at: row.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub(super) fn live_runtime_claim_owners_sqlite(&self, now: i64) -> Result<Vec<String>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT DISTINCT owner FROM runtime_claims WHERE expires_at>?1 ORDER BY owner",
+        )?;
+        let rows = statement.query_map([now], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 }
 
@@ -203,16 +310,82 @@ mod tests {
             store.redeem_runtime_enrollment("prod", "unknown", "c4", 10)
         ));
 
-        store.revoke_runtime_credential("c1", 50).unwrap();
-        store.revoke_runtime_credential("c1", 60).unwrap();
+        let first = RuntimeRevocation {
+            reason: "host retired".into(),
+            revoked_by: "operator-a".into(),
+        };
+        let second = RuntimeRevocation {
+            reason: "again".into(),
+            revoked_by: "operator-b".into(),
+        };
+        store.revoke_runtime_credential("c1", 50, &first).unwrap();
+        store.revoke_runtime_credential("c1", 60, &second).unwrap();
         assert_eq!(
             store.runtime_credential("c1").unwrap().unwrap().revoked_at,
             Some(50)
         );
         assert!(matches!(
-            store.revoke_runtime_credential("unknown", 60),
+            store.revoke_runtime_credential("unknown", 60, &first),
             Err(StoreError::NotFound { .. })
         ));
+        // The registry lists the credential with its issuer and the first reason.
+        let runners = store.runtime_runners().unwrap();
+        let c1 = runners
+            .iter()
+            .find(|runner| runner.credential.credential_digest == "c1")
+            .unwrap();
+        assert_eq!(c1.created_by, "operator");
+        assert_eq!(c1.revocation.as_ref(), Some(&first));
+    }
+
+    /// Activity merges per runner instance: timestamps only advance, a
+    /// report without a version keeps the recorded one, and live claims
+    /// name their owners (#673).
+    #[test]
+    fn activity_merges_per_instance_and_claims_name_lease_holders() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let activity =
+            |instance: &str, work: Option<i64>, beat: Option<i64>, version: Option<&str>| {
+                RuntimeActivityRecord {
+                    runner_id: "sha256:r1".into(),
+                    instance_id: instance.into(),
+                    environment_id: "prod".into(),
+                    owner: format!("runtime:{instance}"),
+                    runtime_version: version.map(str::to_string),
+                    last_work_at: work,
+                    last_heartbeat_at: beat,
+                    last_inventory_at: None,
+                }
+            };
+        store
+            .record_runtime_activity(&activity("a", Some(100), None, Some("0.5.0")))
+            .unwrap();
+        store
+            .record_runtime_activity(&activity("a", Some(90), Some(120), None))
+            .unwrap();
+        store
+            .record_runtime_activity(&activity("b", Some(110), None, Some("0.6.0")))
+            .unwrap();
+        let recorded = store.runtime_activity().unwrap();
+        assert_eq!(recorded.len(), 2);
+        assert_eq!(recorded[0].instance_id, "a");
+        assert_eq!(recorded[0].last_work_at, Some(100));
+        assert_eq!(recorded[0].last_heartbeat_at, Some(120));
+        assert_eq!(recorded[0].runtime_version.as_deref(), Some("0.5.0"));
+        assert_eq!(recorded[1].runtime_version.as_deref(), Some("0.6.0"));
+
+        let expires = crate::now_millis() + 60_000;
+        assert!(
+            store
+                .claim_runtime_plan("prod", "plan-1", "runtime:b", expires)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            store.live_runtime_claim_owners(expires - 1).unwrap(),
+            ["runtime:b"]
+        );
+        assert!(store.live_runtime_claim_owners(expires).unwrap().is_empty());
     }
 
     #[test]

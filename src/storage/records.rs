@@ -232,3 +232,37 @@ pub struct RuntimeCredentialRecord {
     pub created_at: i64,
     pub revoked_at: Option<i64>,
 }
+
+/// Why and by whom a runtime credential was revoked (#673). The first
+/// revocation's reason is kept.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeRevocation {
+    pub reason: String,
+    pub revoked_by: String,
+}
+
+/// An enrolled runtime credential as the runner registry lists it (#673).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeRunnerRecord {
+    pub credential: RuntimeCredentialRecord,
+    /// Who issued the enrollment it was redeemed from.
+    pub created_by: String,
+    /// Present once revoked through the registry; credentials revoked
+    /// before it existed have a `revoked_at` but no reason.
+    pub revocation: Option<RuntimeRevocation>,
+}
+
+/// What one instance of a runner last did (#673). `runner_id` is the
+/// digest of the credential or static token the instance presents.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeActivityRecord {
+    pub runner_id: String,
+    pub instance_id: String,
+    pub environment_id: String,
+    /// The lease owner this instance claims runtime plans as.
+    pub owner: String,
+    pub runtime_version: Option<String>,
+    pub last_work_at: Option<i64>,
+    pub last_heartbeat_at: Option<i64>,
+    pub last_inventory_at: Option<i64>,
+}

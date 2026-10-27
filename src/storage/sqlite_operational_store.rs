@@ -352,7 +352,28 @@ impl OperationalStore for SqliteStore {
         self.runtime_credential_sqlite(credential_digest)
     }
 
-    fn revoke_runtime_credential(&self, credential_digest: &str, now: i64) -> Result<()> {
-        self.revoke_runtime_credential_sqlite(credential_digest, now)
+    fn revoke_runtime_credential(
+        &self,
+        credential_digest: &str,
+        now: i64,
+        revocation: &RuntimeRevocation,
+    ) -> Result<()> {
+        self.revoke_runtime_credential_sqlite(credential_digest, now, revocation)
+    }
+
+    fn runtime_runners(&self) -> Result<Vec<RuntimeRunnerRecord>> {
+        self.runtime_runners_sqlite()
+    }
+
+    fn record_runtime_activity(&self, activity: &RuntimeActivityRecord) -> Result<()> {
+        self.record_runtime_activity_sqlite(activity)
+    }
+
+    fn runtime_activity(&self) -> Result<Vec<RuntimeActivityRecord>> {
+        self.runtime_activity_sqlite()
+    }
+
+    fn live_runtime_claim_owners(&self, now: i64) -> Result<Vec<String>> {
+        self.live_runtime_claim_owners_sqlite(now)
     }
 }

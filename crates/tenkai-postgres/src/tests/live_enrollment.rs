@@ -11,7 +11,10 @@ fn live_postgres_runtime_enrollment_is_single_use_across_replicas() {
         AuthenticatedRequestContextBuilder, PrincipalIdentity, PrincipalKind,
         TenantDerivationAuthority,
     };
-    use tenkai::storage::{OperationalStore as _, RuntimeEnrollmentRecord, StoreError};
+    use tenkai::storage::{
+        OperationalStore as _, RuntimeActivityRecord, RuntimeEnrollmentRecord, RuntimeRevocation,
+        StoreError,
+    };
 
     let suffix = uuid::Uuid::new_v4().simple().to_string();
     let config = PostgresTenantConfig::from_env().expect("TENKAI_POSTGRES_URL");
@@ -87,9 +90,17 @@ fn live_postgres_runtime_enrollment_is_single_use_across_replicas() {
         100
     )));
 
-    b.revoke_runtime_credential(&winner.credential_digest, 50)
+    let first = RuntimeRevocation {
+        reason: "host retired".into(),
+        revoked_by: "operator-a".into(),
+    };
+    let second = RuntimeRevocation {
+        reason: "again".into(),
+        revoked_by: "operator-b".into(),
+    };
+    b.revoke_runtime_credential(&winner.credential_digest, 50, &first)
         .unwrap();
-    a.revoke_runtime_credential(&winner.credential_digest, 60)
+    a.revoke_runtime_credential(&winner.credential_digest, 60, &second)
         .unwrap();
     assert_eq!(
         a.runtime_credential(&winner.credential_digest)
@@ -99,7 +110,40 @@ fn live_postgres_runtime_enrollment_is_single_use_across_replicas() {
         Some(50)
     );
     assert!(matches!(
-        a.revoke_runtime_credential("unknown", 60),
+        a.revoke_runtime_credential("unknown", 60, &first),
         Err(StoreError::NotFound { .. })
     ));
+    // The runner registry (#673): the first reason is kept, and activity
+    // from either replica merges per instance.
+    let runner = b
+        .runtime_runners()
+        .unwrap()
+        .into_iter()
+        .find(|runner| runner.credential.credential_digest == winner.credential_digest)
+        .unwrap();
+    assert_eq!(runner.revocation, Some(first));
+    let activity =
+        |work: Option<i64>, beat: Option<i64>, version: Option<&str>| RuntimeActivityRecord {
+            runner_id: winner.credential_digest.clone(),
+            instance_id: "rt-1".into(),
+            environment_id: runner.credential.environment_id.clone(),
+            owner: "runtime:rt-1".into(),
+            runtime_version: version.map(str::to_string),
+            last_work_at: work,
+            last_heartbeat_at: beat,
+            last_inventory_at: None,
+        };
+    a.record_runtime_activity(&activity(Some(100), None, Some("0.5.0")))
+        .unwrap();
+    b.record_runtime_activity(&activity(Some(90), Some(120), None))
+        .unwrap();
+    let recorded = a
+        .runtime_activity()
+        .unwrap()
+        .into_iter()
+        .find(|record| record.runner_id == winner.credential_digest)
+        .unwrap();
+    assert_eq!(recorded.last_work_at, Some(100));
+    assert_eq!(recorded.last_heartbeat_at, Some(120));
+    assert_eq!(recorded.runtime_version.as_deref(), Some("0.5.0"));
 }

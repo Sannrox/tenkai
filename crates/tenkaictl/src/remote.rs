@@ -273,8 +273,41 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
                 println!("{}", issued.token);
                 Ok(())
             }
-            crate::args::RuntimeCommand::Revoke { credential_id } => {
-                let revoked = client.revoke_runtime_credential(&credential_id).await?;
+            crate::args::RuntimeCommand::List => {
+                for runner in client.list_runtime_runners().await?.runners {
+                    let seen = runner
+                        .instances
+                        .first()
+                        .and_then(|instance| {
+                            instance
+                                .last_work_at
+                                .max(instance.last_heartbeat_at)
+                                .max(instance.last_inventory_at)
+                        })
+                        .map_or("-".to_string(), |at| at.to_string());
+                    println!(
+                        "{} {} {} instances={} last_seen={}",
+                        runner.id,
+                        runner.environment,
+                        runner.state,
+                        runner.instances.len(),
+                        seen
+                    );
+                }
+                Ok(())
+            }
+            crate::args::RuntimeCommand::Inspect { runner_id } => {
+                let runner = client.inspect_runtime_runner(&runner_id).await?;
+                println!("{}", serde_json::to_string_pretty(&runner)?);
+                Ok(())
+            }
+            crate::args::RuntimeCommand::Revoke {
+                credential_id,
+                reason,
+            } => {
+                let revoked = client
+                    .revoke_runtime_credential(&credential_id, &reason)
+                    .await?;
                 println!(
                     "revoked runtime credential {} of {} at {}",
                     revoked.credential_id, revoked.environment, revoked.revoked_at

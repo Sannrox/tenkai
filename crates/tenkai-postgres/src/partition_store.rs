@@ -3,8 +3,9 @@ use tenkai::runtime_capabilities::ComponentCapabilities;
 use tenkai::storage::{
     AuditRecord, ChannelRecord, EnvironmentRecord, LeaseRecord, OfflineImportRecord,
     OfflineStepImportRecord, OperationalStore, PlanRecord, PlanStatus, ProviderEventRecord,
-    ReceiptRecord, ReleaseRecord, Result, RollbackRecord, RollbackStatus, RuntimeClaim,
-    RuntimeCredentialRecord, RuntimeEnrollmentRecord,
+    ReceiptRecord, ReleaseRecord, Result, RollbackRecord, RollbackStatus, RuntimeActivityRecord,
+    RuntimeClaim, RuntimeCredentialRecord, RuntimeEnrollmentRecord, RuntimeRevocation,
+    RuntimeRunnerRecord,
 };
 
 use super::PostgresTenantPartition;
@@ -311,8 +312,29 @@ impl OperationalStore for PostgresTenantPartition {
             .runtime_credential(&self.schema, credential_digest)
     }
 
-    fn revoke_runtime_credential(&self, credential_digest: &str, now: i64) -> Result<()> {
+    fn revoke_runtime_credential(
+        &self,
+        credential_digest: &str,
+        now: i64,
+        revocation: &RuntimeRevocation,
+    ) -> Result<()> {
         self.inner
-            .revoke_runtime_credential(&self.schema, credential_digest, now)
+            .revoke_runtime_credential(&self.schema, credential_digest, now, revocation)
+    }
+
+    fn runtime_runners(&self) -> Result<Vec<RuntimeRunnerRecord>> {
+        self.inner.runtime_runners(&self.schema)
+    }
+
+    fn record_runtime_activity(&self, activity: &RuntimeActivityRecord) -> Result<()> {
+        self.inner.record_runtime_activity(&self.schema, activity)
+    }
+
+    fn runtime_activity(&self) -> Result<Vec<RuntimeActivityRecord>> {
+        self.inner.runtime_activity(&self.schema)
+    }
+
+    fn live_runtime_claim_owners(&self, now: i64) -> Result<Vec<String>> {
+        self.inner.live_runtime_claim_owners(&self.schema, now)
     }
 }

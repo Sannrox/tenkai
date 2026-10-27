@@ -9,6 +9,7 @@ use std::sync::Arc;
 mod runtime_enrollment;
 pub use runtime_enrollment::{
     RuntimeCredentialRevoked, RuntimeEnrollmentIssued, RuntimeEnrollmentRequest,
+    RuntimeRevokeRequest, RuntimeRunner, RuntimeRunnerInstance, RuntimeRunnerList,
 };
 
 use crate::auth_context::{
@@ -133,6 +134,9 @@ pub struct ManagementOperations {
     package_migration_trust_roots: Option<ApprovalTrustRoots>,
     release_trust_roots: Option<std::path::PathBuf>,
     environment_grants: std::collections::HashMap<String, String>,
+    /// `(token digest, environment)` of each configured static runtime
+    /// token, listed read-only by the runner registry (#673).
+    static_runtime_runners: Vec<(String, String)>,
 }
 
 impl ManagementOperations {
@@ -165,6 +169,7 @@ impl ManagementOperations {
             package_migration_trust_roots,
             release_trust_roots,
             environment_grants,
+            static_runtime_runners: Vec::new(),
         }
     }
 
@@ -206,6 +211,26 @@ impl ManagementOperations {
 
     pub fn with_agent_actor_policy(mut self, policy: AgentActorPolicy) -> Self {
         self.agent_actor_policy = policy;
+        self
+    }
+
+    /// List the configured static runtime tokens (token to environment) in
+    /// the runner registry, by digest; the tokens themselves are not kept.
+    pub fn with_static_runtime_runners(
+        mut self,
+        assignments: &std::collections::HashMap<String, String>,
+    ) -> Self {
+        let mut runners: Vec<(String, String)> = assignments
+            .iter()
+            .map(|(token, environment)| {
+                (
+                    crate::runtime_credentials::digest(token),
+                    environment.clone(),
+                )
+            })
+            .collect();
+        runners.sort();
+        self.static_runtime_runners = runners;
         self
     }
 
