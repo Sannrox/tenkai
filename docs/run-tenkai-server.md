@@ -321,6 +321,36 @@ tenkai-runtime
   recovery fails it, and a rollback plan recovers the environment. Issuing and redeeming tokens needs a trusted clock. Issue
   enrollments once every server replica runs this version.
 
+### Trust posture
+
+`GET /v1/trust` (read capability, fleet-wide credentials only) shows what
+this host trusts and how long its certificates last (#676):
+
+- **Signing.** Each configured trust-root file (`release`,
+  `package_migration_approval`, `bundle_import`, `key_revocation`) with its
+  signers' key ids and identities, each marked `revoked` when the installed
+  key revocation list revokes it, and that list's sequence and signer.
+- **TLS.** Every certificate in the listener chain (`TENKAI_TLS_CERT`), the
+  TLS client CA, the runner CA and the outbound CA bundle
+  (`TENKAI_CA_BUNDLE`), with subject, `not_after`, days left and a status:
+  `ok`, `warning` (fewer than `TENKAI_TRUST_WARNING_DAYS`, default 30),
+  `critical` (fewer than `TENKAI_TRUST_CRITICAL_DAYS`, default 7) or
+  `expired`. An unreadable file is `critical`.
+
+Each entry says its `source`: `loaded` is the material the server uses
+now (the listener chain, client CA and runner CA), so a renewal that
+failed to load keeps its warning; `file` is a file as it is on disk (trust
+roots, the outbound CA bundle), which a client that read it at startup
+uses only once restarted. After replacing such a file, restart the server
+for it to take effect. Signer
+`revoked` flags follow the revocations this process enforces, and the
+installed list is shown only once it verifies against its authorities.
+The worst certificate status also appears on `/readyz` as `trust`, from a
+snapshot refreshed every minute, without failing readiness. Only public
+certificates and trust roots are read, never key files, and files are
+named without their directories.
+Expiry events, notifications and plan-time runway checks are #775.
+
 ### Runner certificates
 
 With a runner CA, a runtime agent's identity is a short-lived client
