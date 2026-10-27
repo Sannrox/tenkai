@@ -32,6 +32,12 @@ impl PostgresTenantPartition {
             .expire_lease_for_conformance(&self.schema, environment)
     }
 
+    #[cfg(all(test, feature = "postgres"))]
+    pub(crate) fn insert_raw_change_event_for_conformance(&self, kind: &str) -> Result<()> {
+        self.inner
+            .insert_raw_change_event_for_conformance(&self.schema, kind)
+    }
+
     #[cfg(feature = "postgres")]
     pub(crate) fn cleanup_conformance_schema(&self) -> Result<()> {
         self.inner.cleanup_conformance_schema(&self.schema)

@@ -290,9 +290,13 @@ fn resolve_reconcile_fence_some_for_multi_replica() {
 }
 
 #[cfg(feature = "postgres")]
+mod live_change_events;
+#[cfg(feature = "postgres")]
 mod live_delivery;
 #[cfg(feature = "postgres")]
 mod live_enrollment;
+#[cfg(feature = "postgres")]
+mod live_failover_drill;
 #[cfg(feature = "postgres")]
 mod live_fence;
 #[cfg(feature = "postgres")]

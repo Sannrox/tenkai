@@ -5,74 +5,25 @@ impl Inner {
     pub fn record_receipt(&self, schema: &str, owner: &str, receipt: &ReceiptRecord) -> Result<()> {
         let owner = owner.to_owned();
         let receipt = receipt.clone();
+        self.with_writer_schema(schema, move |tx| record_receipt_in(tx, &owner, &receipt))
+    }
+
+    /// `record_receipt` with `stall` run inside the write transaction after
+    /// the receipt is written and before the commit-time writer check, so a
+    /// drill can stop a replica in the middle of a write.
+    #[cfg(test)]
+    pub(crate) fn record_receipt_stalled_for_test(
+        &self,
+        schema: &str,
+        owner: &str,
+        receipt: &ReceiptRecord,
+        stall: impl FnOnce() + Send + 'static,
+    ) -> Result<()> {
+        let owner = owner.to_owned();
+        let receipt = receipt.clone();
         self.with_writer_schema(schema, move |tx| {
-            let existing = tx
-                .query_opt(
-                    "SELECT environment_id,plan_id,step_id,lease_generation,payload_json
-                     FROM receipts WHERE id = $1",
-                    &[&receipt.id],
-                )
-                .map_err(pg)?;
-            if let Some(row) = existing {
-                let env: String = row.get(0);
-                let plan: String = row.get(1);
-                let step: String = row.get(2);
-                let lease_gen: i64 = row.get(3);
-                let payload: String = row.get(4);
-                if env != receipt.environment_id
-                    || plan != receipt.plan_id
-                    || step != receipt.step_id
-                    || lease_gen as u64 != receipt.lease_generation
-                    || payload != receipt.payload_json
-                {
-                    return Err(StoreError::ImmutableConflict {
-                        kind: "receipt",
-                        id: receipt.id.clone(),
-                    });
-                }
-                return Ok(());
-            }
-            require_plan_environment(tx, &receipt.plan_id, &receipt.environment_id)?;
-            require_lease(
-                tx,
-                &receipt.environment_id,
-                &owner,
-                receipt.lease_generation,
-                tenkai::now_millis(),
-            )?;
-            let lease_gen = receipt.lease_generation as i64;
-            tx.execute(
-                "INSERT INTO receipts(id,environment_id,plan_id,step_id,lease_generation,payload_json)
-                 VALUES($1,$2,$3,$4,$5,$6)
-                 ON CONFLICT(id) DO NOTHING",
-                &[
-                    &receipt.id,
-                    &receipt.environment_id,
-                    &receipt.plan_id,
-                    &receipt.step_id,
-                    &lease_gen,
-                    &receipt.payload_json,
-                ],
-            )
-            .map_err(pg)?;
-            let stored = tx
-                .query_one(
-                    "SELECT environment_id,plan_id,step_id,lease_generation,payload_json
-                     FROM receipts WHERE id = $1",
-                    &[&receipt.id],
-                )
-                .map_err(pg)?;
-            if stored.get::<_, String>(0) != receipt.environment_id
-                || stored.get::<_, String>(1) != receipt.plan_id
-                || stored.get::<_, String>(2) != receipt.step_id
-                || stored.get::<_, i64>(3) as u64 != receipt.lease_generation
-                || stored.get::<_, String>(4) != receipt.payload_json
-            {
-                return Err(StoreError::ImmutableConflict {
-                    kind: "receipt",
-                    id: receipt.id.clone(),
-                });
-            }
+            record_receipt_in(tx, &owner, &receipt)?;
+            stall();
             Ok(())
         })
     }
@@ -185,4 +136,79 @@ impl Inner {
             }))
         })
     }
+}
+
+fn record_receipt_in(
+    tx: &mut postgres::Transaction<'_>,
+    owner: &str,
+    receipt: &ReceiptRecord,
+) -> Result<()> {
+    let existing = tx
+        .query_opt(
+            "SELECT environment_id,plan_id,step_id,lease_generation,payload_json
+             FROM receipts WHERE id = $1",
+            &[&receipt.id],
+        )
+        .map_err(pg)?;
+    if let Some(row) = existing {
+        let env: String = row.get(0);
+        let plan: String = row.get(1);
+        let step: String = row.get(2);
+        let lease_gen: i64 = row.get(3);
+        let payload: String = row.get(4);
+        if env != receipt.environment_id
+            || plan != receipt.plan_id
+            || step != receipt.step_id
+            || lease_gen as u64 != receipt.lease_generation
+            || payload != receipt.payload_json
+        {
+            return Err(StoreError::ImmutableConflict {
+                kind: "receipt",
+                id: receipt.id.clone(),
+            });
+        }
+        return Ok(());
+    }
+    require_plan_environment(tx, &receipt.plan_id, &receipt.environment_id)?;
+    require_lease(
+        tx,
+        &receipt.environment_id,
+        owner,
+        receipt.lease_generation,
+        tenkai::now_millis(),
+    )?;
+    let lease_gen = receipt.lease_generation as i64;
+    tx.execute(
+        "INSERT INTO receipts(id,environment_id,plan_id,step_id,lease_generation,payload_json)
+         VALUES($1,$2,$3,$4,$5,$6)
+         ON CONFLICT(id) DO NOTHING",
+        &[
+            &receipt.id,
+            &receipt.environment_id,
+            &receipt.plan_id,
+            &receipt.step_id,
+            &lease_gen,
+            &receipt.payload_json,
+        ],
+    )
+    .map_err(pg)?;
+    let stored = tx
+        .query_one(
+            "SELECT environment_id,plan_id,step_id,lease_generation,payload_json
+             FROM receipts WHERE id = $1",
+            &[&receipt.id],
+        )
+        .map_err(pg)?;
+    if stored.get::<_, String>(0) != receipt.environment_id
+        || stored.get::<_, String>(1) != receipt.plan_id
+        || stored.get::<_, String>(2) != receipt.step_id
+        || stored.get::<_, i64>(3) as u64 != receipt.lease_generation
+        || stored.get::<_, String>(4) != receipt.payload_json
+    {
+        return Err(StoreError::ImmutableConflict {
+            kind: "receipt",
+            id: receipt.id.clone(),
+        });
+    }
+    Ok(())
 }

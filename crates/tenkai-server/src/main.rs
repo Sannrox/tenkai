@@ -730,6 +730,9 @@ async fn main() -> Result<()> {
     let backups = backup_settings(cli.tenant_mode, sqlite_store.as_ref())?;
     let imports = import_settings()?;
     let runner_ca = runner_ca_from_env()?;
+    // Shared with the host watch, which announces trust.expiring (#775).
+    let trust_status: Arc<std::sync::RwLock<Option<tenkai::trust_posture::TrustStatus>>> =
+        Default::default();
     let import_staging = imports.as_ref().map(|settings| settings.staging.clone());
     let clock_every = clock_settings()?;
     let audit_export = audit_export_settings(cli.tenant_mode)?;
@@ -772,7 +775,7 @@ async fn main() -> Result<()> {
             writer_fence: writer_fence.clone(),
             runner_ca: runner_ca.clone(),
             trust_sources: trust_sources(imports.as_ref(), tls.as_ref(), runner_ca.as_ref())?,
-            trust_status: Default::default(),
+            trust_status: trust_status.clone(),
         },
         reconciler.clone(),
         store.clone(),
@@ -989,6 +992,7 @@ async fn main() -> Result<()> {
         let host_backups = host_backups.clone();
         let mut host_shutdown_rx = shutdown_tx.subscribe();
         let standby_fence = writer_fence.clone();
+        let host_trust = trust_status.clone();
         tokio::spawn(async move {
             let mut timer = tokio::time::interval(Duration::from_secs(60));
             timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1009,11 +1013,13 @@ async fn main() -> Result<()> {
                         let now = tenkai::now_millis();
                         let backup = host_backups.as_ref().map(|backups| backups.health(now));
                         let clock = tenkai::clock_guard::installed().map(|guard| guard.health());
+                        let trust = host_trust.read().ok().and_then(|status| *status);
                         watch.observe(
                             &*host_store,
                             &host_endpoints,
                             backup.as_ref(),
                             clock.as_ref(),
+                            trust,
                             now,
                         );
                         // Failed imports the import request could not announce.
