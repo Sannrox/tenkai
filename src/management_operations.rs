@@ -711,7 +711,7 @@ impl ManagementOperations {
             .map_err(map_plan_lifecycle_error)?;
         self.require_environment_visible(&context, &stored.environment)
             .await?;
-        crate::plan_approval::approvals_view(
+        let view = crate::plan_approval::approvals_view(
             &mut ctx,
             &stored,
             None,
@@ -720,7 +720,15 @@ impl ManagementOperations {
             Some(context.principal_id()),
         )
         .await
-        .map_err(map_plan_lifecycle_error)
+        .map_err(map_plan_lifecycle_error)?;
+        // Eligibility comes from the roots execution verifies with, read per
+        // request like other trust roots; without them it stays absent.
+        let Some(path) = std::env::var_os(crate::plan_approval::TRUST_ROOTS_ENV) else {
+            return Ok(view);
+        };
+        let roots = crate::plan_approval::TrustRoots::load(std::path::Path::new(&path))
+            .map_err(|error| ManagementError::Unavailable(format!("{error:#}")))?;
+        Ok(view.with_eligible(&roots, &stored.environment, Some(context.principal_id())))
     }
 
     pub async fn software_compatibility_report(
