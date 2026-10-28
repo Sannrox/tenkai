@@ -192,6 +192,7 @@ fn service_status(status: &'static str, config: &ServerConfig) -> ServiceStatus 
         profile: config.capabilities.profile.clone(),
         capabilities: config.capabilities.diagnostic_names(),
         contracts: super::contract::SERVED_CONTRACTS.to_vec(),
+        first_administrator: Some(config.first_administrator),
         backup: config
             .backups
             .as_ref()

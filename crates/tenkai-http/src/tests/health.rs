@@ -252,3 +252,54 @@ async fn a_standby_replica_is_live_but_not_ready() {
     });
     assert_eq!(status("/readyz").await, StatusCode::OK);
 }
+
+/// #815: `/healthz` says whether a first administrator is configured, as
+/// one coarse status: no claim, rule value or identity.
+#[tokio::test]
+async fn health_reports_the_first_administrator_status_only() {
+    use tenkai::oidc_verifier::FirstAdministrator;
+    for (status, expected) in [
+        (FirstAdministrator::Missing, "missing"),
+        (FirstAdministrator::Configured, "configured"),
+    ] {
+        let store = Arc::new(tenkai::storage::SqliteStore::open_in_memory().unwrap());
+        let mut config = ServerConfig::community("management-secret", HashMap::new());
+        config.first_administrator = status;
+        let app = router(
+            config,
+            Arc::new(super::support::FixedReconciler::default()),
+            store,
+        )
+        .unwrap();
+        let response = app
+            .oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["first_administrator"], expected);
+        let text = body.to_string();
+        for detail in [
+            "groups",
+            "tenkai-admins",
+            "grants",
+            "claim",
+            "management-secret",
+        ] {
+            assert!(!text.contains(detail), "{detail} in {text}");
+        }
+    }
+    // While the server is still opening, the status is not reported yet.
+    let opening = crate::opening_router("community-sqlite", Vec::new())
+        .oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(opening.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(body.get("first_administrator").is_none(), "{body}");
+}

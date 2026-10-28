@@ -84,6 +84,27 @@ pub struct OidcPublicClient {
     pub connect_origins: Vec<String>,
 }
 
+/// Whether a first administrator is configured: a `[grants]` rule that gives
+/// fleet management (#631). Without one, only the management token can
+/// administer the server. Reported unauthenticated on `/healthz` (#815), so
+/// it is one coarse status and never names a rule or an identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FirstAdministrator {
+    Configured,
+    #[default]
+    Missing,
+}
+
+impl FirstAdministrator {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Configured => "configured",
+            Self::Missing => "missing",
+        }
+    }
+}
+
 /// Unauthenticated `GET /v1/auth/oidc` body: what a browser needs to start
 /// Authorization Code + PKCE. Public values only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
@@ -180,6 +201,16 @@ impl OidcConfig {
     /// Claim values whose rule grants fleet management: `management` with no
     /// environment binding. Such a rule is how the first administrator acts
     /// without the shared management token.
+    /// Whether a grant rule gives fleet management (#815): the one
+    /// derivation behind the startup log line and the `/healthz` field.
+    pub fn first_administrator(&self) -> FirstAdministrator {
+        if self.fleet_administrator_values().is_empty() {
+            FirstAdministrator::Missing
+        } else {
+            FirstAdministrator::Configured
+        }
+    }
+
     pub fn fleet_administrator_values(&self) -> Vec<&str> {
         self.grants
             .rules

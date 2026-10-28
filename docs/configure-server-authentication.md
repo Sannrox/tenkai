@@ -190,7 +190,12 @@ on first start, and no long-lived token is handed out for it.
    ```
 
    `first_administrator=missing` means no rule gives fleet management, so
-   only `TENKAI_MANAGEMENT_TOKEN` can administer the server.
+   only `TENKAI_MANAGEMENT_TOKEN` can administer the server. The same
+   status is on the unauthenticated `GET /healthz` as
+   `"first_administrator": "configured"` or `"missing"` (`missing` without
+   OIDC), so a console can show first-run guidance before sign-in. It names
+   no claim, rule or identity, and is absent while the server is still
+   starting.
 4. Sign in (`tenkaictl login`, or the web console) and confirm a management
    read such as `tenkaictl --target remote fleet status`.
 

@@ -30,6 +30,9 @@ pub struct ServerConfig {
     pub enterprise_auth: Option<Arc<dyn EnterpriseAuthExtension>>,
     /// Public OIDC client settings served at `GET /v1/auth/oidc` (#468).
     pub oidc_client: Option<tenkai::oidc_verifier::OidcClientDiscovery>,
+    /// Whether an OIDC grant rule gives fleet management, as the startup log
+    /// reports it; shown unauthenticated on `/healthz` (#815).
+    pub first_administrator: tenkai::oidc_verifier::FirstAdministrator,
     /// Federation accept rules (issuer/audience/replay). Community hosts leave
     /// the enterprise issuer unset so federation is not required.
     pub federation: FederationConfig,
@@ -94,6 +97,7 @@ impl ServerConfig {
             auth_host: AuthHostConfig::community(),
             enterprise_auth: None,
             oidc_client: None,
+            first_administrator: Default::default(),
             federation: FederationConfig::community(),
             identity_directory: Arc::new(IdentityDirectory::new()),
             tenant_store: None,
