@@ -45,6 +45,8 @@ pub(crate) struct EnvironmentLease {
     pub(crate) generation: u64,
     pub(crate) fencing_token: String,
     ttl_ms: i64,
+    /// The lease was taken over from an expired holder (#803).
+    pub(crate) took_over: bool,
 }
 
 fn object_environment_claim(environment: &str, owner: &str, expires_at_ms: i64) -> Object {
@@ -214,6 +216,12 @@ async fn claim_environment_with_options(
             }
         }
     }
+    // An expired active holder replaced by this claim is a takeover (#803),
+    // whether the backend replaces it inside AcquireLease (embedded) or
+    // through the explicit takeover below.
+    let expired_holder = get_environment_lease(ctx, environment)
+        .await?
+        .is_some_and(|existing| existing.status == "active" && existing.expires_at_ms <= now);
     // Maintenance/canary claims must not silently reclaim an expired active
     // lease via AcquireLease. Embedded (and the mock) treat expired holders as
     // free for acquire, which would otherwise skip the unlock gate and the
@@ -227,6 +235,7 @@ async fn claim_environment_with_options(
             "environment {environment} has an expired apply lease; verify no operation is running, then run `tenkaictl env unlock {environment}`"
         );
     }
+    let mut took_over = expired_holder;
     let lease = match ctx
         .acquire_lease(ENVIRONMENT_LEASE_NAMESPACE, environment, owner, ttl_ms)
         .await
@@ -240,6 +249,7 @@ async fn claim_environment_with_options(
                             "environment {environment} has an expired apply lease; verify no operation is running, then run `tenkaictl env unlock {environment}`"
                         );
                     }
+                    took_over = true;
                     ctx.takeover_expired_lease(
                         ENVIRONMENT_LEASE_NAMESPACE,
                         environment,
@@ -267,6 +277,7 @@ async fn claim_environment_with_options(
         generation: lease.generation,
         fencing_token: lease.fencing_token,
         ttl_ms,
+        took_over,
     };
     let available = object_environment_claim(environment, "released", 0);
     match ctx.create_once(available).await {
@@ -748,7 +759,14 @@ mod tests {
             .await
             .unwrap();
         assert!(lease.generation >= 2);
+        // Observations under this lease attribute it to a takeover (#803).
+        assert!(lease.took_over);
         release_environment(&mut ctx, &lease).await.unwrap();
+        let fresh = claim_execution_environment(&mut ctx, "prod", "owner-c")
+            .await
+            .unwrap();
+        assert!(!fresh.took_over);
+        release_environment(&mut ctx, &fresh).await.unwrap();
     }
 
     #[tokio::test]

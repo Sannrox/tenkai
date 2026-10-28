@@ -43,6 +43,8 @@ impl ExecutionCompletion {
             self.terminal_state,
             gates_skipped,
             self.detail,
+            // Each step outcome already left its own observation (#802).
+            &[],
         )
         .await?;
         Ok(self.outcomes)
@@ -60,7 +62,78 @@ pub(super) async fn fail(
     gates_skipped: bool,
     detail: impl Into<String>,
 ) -> Result<()> {
-    transition(ctx, lease, plan, PlanState::Failed, gates_skipped, detail).await
+    let detail = detail.into();
+    // A plan-level failure commits no step outcome; it leaves its own
+    // observation (#803). The detail is read for cancellation, never stored.
+    let reason = if crate::terminal_outcome::is_cancellation(&detail) {
+        crate::feedback_observation::Reason::Cancelled
+    } else {
+        crate::feedback_observation::Reason::PlanFailed
+    };
+    let observation = plan_observation(
+        lease,
+        plan,
+        None,
+        crate::feedback_observation::Operation::PlanFailed,
+        "failed",
+        reason,
+    );
+    transition(
+        ctx,
+        lease,
+        plan,
+        PlanState::Failed,
+        gates_skipped,
+        detail,
+        &[observation],
+    )
+    .await
+}
+
+/// The observation of a plan-level block or failure under `lease` (#803).
+/// `step` is the step that caused it, when one did (a release gate); a
+/// plan-wide block or failure names none. One per plan, operation and lease
+/// generation, so a retry of the same transition is idempotent and a later
+/// attempt is told apart.
+pub(super) fn plan_observation(
+    lease: &EnvironmentLease,
+    plan: &Plan,
+    step: Option<&Step>,
+    operation: crate::feedback_observation::Operation,
+    status: &str,
+    reason: crate::feedback_observation::Reason,
+) -> crate::feedback_observation::FeedbackObservation {
+    let observed_at_ms = crate::now_millis();
+    crate::feedback_observation::FeedbackObservation::capture(
+        crate::feedback_observation::Capture {
+            id: &format!(
+                "tenkai:plan:{}:{}:{}",
+                plan.id,
+                serde_json::to_value(operation)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .unwrap_or_default(),
+                lease.generation
+            ),
+            operation,
+            environment: &plan.environment,
+            product: step.map_or("", |step| step.product.as_str()),
+            plan_id: &plan.id,
+            step_id: step.map_or("", |step| step.id.as_str()),
+            action: step.map(|step| step.action),
+            release_id: step.map_or("", |step| step.release_id.as_str()),
+            status,
+            reason,
+            started_at_ms: None,
+            lease_generation: lease.generation,
+            observed_at_ms,
+            context: crate::feedback_observation::RetryContext {
+                takeover: lease.took_over,
+                recovery_reason: plan.recalled_recovery_reason.clone(),
+                ..Default::default()
+            },
+        },
+    )
 }
 
 pub(super) async fn transition(
@@ -70,6 +143,7 @@ pub(super) async fn transition(
     state: PlanState,
     gates_skipped: bool,
     detail: impl Into<String>,
+    observations: &[crate::feedback_observation::FeedbackObservation],
 ) -> Result<()> {
     plan::transition(
         ctx,
@@ -80,6 +154,7 @@ pub(super) async fn transition(
             key: &lease.environment,
             fencing_token: &lease.fencing_token,
             confirm_ambiguous: false,
+            observations,
         },
     )
     .await
@@ -93,6 +168,7 @@ pub(super) async fn transition_confirmed(
     state: PlanState,
     gates_skipped: bool,
     detail: impl Into<String>,
+    observations: &[crate::feedback_observation::FeedbackObservation],
 ) -> Result<()> {
     plan::transition(
         ctx,
@@ -103,6 +179,7 @@ pub(super) async fn transition_confirmed(
             key: &lease.environment,
             fencing_token: &lease.fencing_token,
             confirm_ambiguous: true,
+            observations,
         },
     )
     .await

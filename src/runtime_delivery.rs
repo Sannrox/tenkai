@@ -265,6 +265,22 @@ pub(crate) async fn complete_runtime_work(
     {
         anyhow::bail!("environment {environment} has an apply in progress");
     }
+    // The releases held as failed before this completion changes them, so
+    // each step's observation can say whether it retried one (#803).
+    let held_before: std::collections::HashMap<String, String> = ctx
+        .get(&crate::ontology::env_id(environment))
+        .await?
+        .map(|object| {
+            object
+                .properties
+                .into_iter()
+                .filter_map(|(key, value)| {
+                    key.strip_prefix("failed_target.")
+                        .map(|product| (product.to_string(), value))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     if completion.succeeded {
         let mut object = ctx
             .get(&crate::ontology::env_id(environment))
@@ -438,6 +454,13 @@ pub(crate) async fn complete_runtime_work(
                     started_at_ms: None,
                     lease_generation: completion.generation,
                     observed_at_ms: observed_at,
+                    context: crate::feedback_observation::RetryContext {
+                        runtime_claim_generation: Some(completion.generation),
+                        failed_target_retry: held_before.get(&step.product)
+                            == Some(&step.release_id),
+                        recovery_reason: stored.recalled_recovery_reason.clone(),
+                        ..Default::default()
+                    },
                 },
             ))
         })
