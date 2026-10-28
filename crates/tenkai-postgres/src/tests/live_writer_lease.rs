@@ -189,3 +189,84 @@ fn live_one_hub_leads_and_a_stale_generation_cannot_write_after_takeover() {
     drop((a, b));
     drop(scratch);
 }
+
+/// A trust threshold crossing (#784) is appended by the leader only, once:
+/// neither a repeat by the same writer nor the new writer after a takeover
+/// appends it again, and the superseded writer cannot append at all.
+#[cfg(feature = "postgres")]
+#[test]
+#[ignore = "requires Postgres; set TENKAI_POSTGRES_URL and cargo test --features postgres -- --ignored"]
+fn live_a_trust_crossing_is_appended_once_across_a_takeover() {
+    use tenkai::change_stream::ChangeEventKind::TrustThresholdCrossed;
+
+    let scratch = ScratchDatabase::create();
+    let config = PostgresTenantConfig::new(scratch.url.clone()).expect("scratch config");
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let a = replica(&config, &format!("hub-a-{suffix}"), 1_500);
+    let b = replica(&config, &format!("hub-b-{suffix}"), 1_500);
+    assert!(matches!(
+        a.lease.renew().expect("a"),
+        WriterRole::Leader { .. }
+    ));
+    assert_eq!(b.lease.renew().expect("b"), WriterRole::Standby);
+    let crossing = |replica: &Replica, resource: &str, at: i64| {
+        replica
+            .hub
+            .append_change_event_once(at, TrustThresholdCrossed, resource, 1_000, false)
+    };
+
+    assert!(
+        crossing(&a, "trust/warning", 2_000)
+            .expect("leader")
+            .is_some()
+    );
+    assert!(matches!(
+        crossing(&b, "trust/warning", 2_001),
+        Err(StoreError::NotActiveWriter(_))
+    ));
+    assert!(
+        crossing(&a, "trust/warning", 2_002)
+            .expect("repeat")
+            .is_none()
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(1_600));
+    assert!(matches!(
+        b.lease.renew().expect("takeover"),
+        WriterRole::Leader { .. }
+    ));
+    assert!(
+        crossing(&b, "trust/warning", 3_000)
+            .expect("new leader")
+            .is_none()
+    );
+    assert!(
+        crossing(&b, "trust/critical", 3_001)
+            .expect("new leader")
+            .is_some()
+    );
+    assert!(matches!(
+        crossing(&a, "trust/critical", 3_002),
+        Err(StoreError::NotActiveWriter(_))
+    ));
+
+    // Recovery is recorded once, and only after an announcement.
+    let recovered = |at: i64| {
+        b.hub
+            .append_change_event_once(at, TrustThresholdCrossed, "trust/ok", i64::MIN, true)
+    };
+    assert!(recovered(3_003).expect("recovery").is_some());
+    assert!(recovered(3_004).expect("repeat").is_none());
+
+    let resources: Vec<_> = b
+        .hub
+        .list_change_events_after(0, 10)
+        .expect("list")
+        .into_iter()
+        .map(|event| event.resource)
+        .collect();
+    assert_eq!(resources, ["trust/warning", "trust/critical", "trust/ok"]);
+    b.lease.release().expect("release");
+    drop((a, b));
+    drop(scratch);
+}

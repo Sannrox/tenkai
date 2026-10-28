@@ -184,7 +184,11 @@ fn service_status(status: &'static str, config: &ServerConfig) -> ServiceStatus 
     ServiceStatus {
         status,
         version: tenkai::version_skew::SERVER_VERSION,
-        trust: config.trust_status.read().ok().and_then(|status| *status),
+        trust: config
+            .trust_status
+            .read()
+            .ok()
+            .and_then(|snapshot| snapshot.map(|snapshot| snapshot.status)),
         profile: config.capabilities.profile.clone(),
         capabilities: config.capabilities.diagnostic_names(),
         contracts: super::contract::SERVED_CONTRACTS.to_vec(),

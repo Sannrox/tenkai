@@ -2987,11 +2987,13 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "ed25519-dalek",
+ "rcgen",
  "serde_json",
  "tenkai",
  "tenkai-executor",
  "tenkai-http",
  "tenkai-postgres",
+ "time",
  "tokio",
  "uuid",
 ]

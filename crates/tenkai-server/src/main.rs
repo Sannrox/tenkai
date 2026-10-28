@@ -106,6 +106,12 @@ struct Cli {
     /// Require an enterprise JWT verifier configured by TENKAI_JWT_VERIFIER_CONFIG.
     #[arg(long, default_value_t = false)]
     with_enterprise_auth: bool,
+    /// Append a `trust_threshold_crossed` change event on `/v1/events` when
+    /// the worst certificate status turns warning, critical or expired
+    /// (#784). Enable only once every replica, and any rollback target, runs
+    /// a release whose change-event readers skip unknown kinds (#775).
+    #[arg(long, env = "TENKAI_TRUST_CHANGE_EVENTS", default_value_t = false)]
+    trust_change_events: bool,
     /// Expose unauthenticated `GET /metrics` OpenMetrics on the loopback listener (#137).
     #[arg(long, env = "TENKAI_ENABLE_METRICS", default_value_t = false)]
     enable_metrics: bool,
@@ -739,7 +745,7 @@ async fn main() -> Result<()> {
         .unwrap_or_default();
     let backups = backup_settings(cli.tenant_mode, sqlite_store.as_ref())?;
     // Shared with the host watch, which announces trust.expiring (#775).
-    let trust_status: Arc<std::sync::RwLock<Option<tenkai::trust_posture::TrustStatus>>> =
+    let trust_status: Arc<std::sync::RwLock<Option<tenkai::trust_posture::TrustSnapshot>>> =
         Default::default();
     let import_staging = imports.as_ref().map(|settings| settings.staging.clone());
     let clock_every = clock_settings()?;
@@ -977,7 +983,8 @@ async fn main() -> Result<()> {
     let smtp_sinks = tenkai::smtp_digest::sinks_from_env()?;
     let smtp_trust = tenkai::outbound_tls::OutboundTrust::from_env()?;
     tenkai::smtp_digest::install(smtp_sinks.clone());
-    // Host events: backup age and clock drift, announced when they turn bad.
+    // Host events: backup age, clock drift and certificate expiry, announced
+    // when they turn bad.
     let host_endpoints = tenkai::operational_events::host_endpoints_from_env()?;
     let host_staging = import_staging.clone();
     // Host alerts the outbox has not taken survive a restart beside the store.
@@ -985,8 +992,11 @@ async fn main() -> Result<()> {
         Some(database) => database.with_extension("host-alerts.json"),
         None => PathBuf::from(".tenkai-state").join("host-alerts.json"),
     };
-    let host_watch_enabled =
-        !host_endpoints.is_empty() || !smtp_sinks.is_empty() || host_staging.is_some();
+    let trust_change_events = cli.trust_change_events;
+    let host_watch_enabled = !host_endpoints.is_empty()
+        || !smtp_sinks.is_empty()
+        || host_staging.is_some()
+        || trust_change_events;
     if host_watch_enabled
         && let Some(parent) = host_alert_state.parent()
         && !parent.as_os_str().is_empty()
@@ -1021,15 +1031,35 @@ async fn main() -> Result<()> {
                         let now = tenkai::now_millis();
                         let backup = host_backups.as_ref().map(|backups| backups.health(now));
                         let clock = tenkai::clock_guard::installed().map(|guard| guard.health());
-                        let trust = host_trust.read().ok().and_then(|status| *status);
+                        let trust = host_trust.read().ok().and_then(|snapshot| *snapshot);
                         watch.observe(
                             &*host_store,
                             &host_endpoints,
                             backup.as_ref(),
                             clock.as_ref(),
-                            trust,
+                            trust.map(|snapshot| snapshot.status),
                             now,
                         );
+                        // The store decides whether this crossing is new, so
+                        // a failed append is retried on the next tick (#784).
+                        // No trust sources leave no snapshot; that is healthy,
+                        // so an earlier announcement still gets its recovery.
+                        if trust_change_events {
+                            let snapshot = trust.unwrap_or(tenkai::trust_posture::TrustSnapshot {
+                                status: tenkai::trust_posture::TrustStatus::Ok,
+                                since_ms: 0,
+                            });
+                            match tenkai::trust_posture::announce_crossing(&*host_store, snapshot, now) {
+                                Ok(Some(event)) => eprintln!(
+                                    "tenkai.trust_event outcome=appended resource={} cursor={}",
+                                    event.resource, event.cursor
+                                ),
+                                Ok(None) => {}
+                                Err(error) => {
+                                    eprintln!("tenkai.trust_event outcome=failed detail={error}")
+                                }
+                            }
+                        }
                         // Failed imports the import request could not announce.
                         if let Some(staging) = &host_staging {
                             let mut ctx = host_reconciler.ctx_clone();

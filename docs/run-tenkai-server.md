@@ -352,8 +352,21 @@ named without their directories.
 **Announcements (#775).** When the worst certificate status turns
 `warning`, `critical` or `expired`, host webhooks that list `trust.expiring`
 are notified once per turn, as for `backup.stale` and `clock.drift`.
-On a multi-replica hub only the writer announces. A matching `/v1/events`
-entry is #784. Plans computed while a window is closed flag a certificate
+On a multi-replica hub only the writer announces.
+**Change events (#784).** With `TENKAI_TRUST_CHANGE_EVENTS=true` each such
+turn also appends one `trust_threshold_crossed` change event, resource
+`trust/warning`, `trust/critical` or `trust/expired`, to `/v1/events`, and
+a return to `ok` after one appends `trust/ok` once. Whether a turn is new
+is read from the store, not remembered: it is skipped while the latest
+trust event names the same status, so a restart or a writer takeover does
+not repeat it. The `trust/ok` marker lets the next turn count, including
+for an unreadable certificate, and a renewed certificate that lapsed again
+while no server ran is announced from its expiry. Only the writer appends, and the check and the append are one
+fenced transaction. The setting is off by default: releases before #775
+fail a change-event page that holds a kind they do not know, so enable it
+only once every replica, and any release you may roll back to, includes
+#775. On a tenant-mode hub the event lands in the hub partition, which
+tenant `/v1/events` pages do not include. Plans computed while a window is closed flag a certificate
 that lapses before it opens ([maintenance windows](manage-environments.md#maintenance-windows)).
 
 ### Runner certificates

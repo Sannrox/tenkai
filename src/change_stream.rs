@@ -24,6 +24,12 @@ pub enum ChangeEventKind {
     ReleasePromoted,
     ReleaseRecalled,
     CompatibilityResultRecorded,
+    // The host's worst certificate status turned `warning`, `critical` or
+    // `expired`, or back to `ok` after one (#784); the resource is
+    // `trust/<status>`. Written only when
+    // `TENKAI_TRUST_CHANGE_EVENTS` is on. A plain comment, so the contract
+    // keeps a flat string enum.
+    TrustThresholdCrossed,
 }
 
 impl ChangeEventKind {
@@ -46,6 +52,7 @@ impl ChangeEventKind {
         Self::ReleasePromoted,
         Self::ReleaseRecalled,
         Self::CompatibilityResultRecorded,
+        Self::TrustThresholdCrossed,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -62,6 +69,7 @@ impl ChangeEventKind {
             Self::ReleasePromoted => "release_promoted",
             Self::ReleaseRecalled => "release_recalled",
             Self::CompatibilityResultRecorded => "compatibility_result_recorded",
+            Self::TrustThresholdCrossed => "trust_threshold_crossed",
         }
     }
 
@@ -79,6 +87,7 @@ impl ChangeEventKind {
             "release_promoted" => Ok(Self::ReleasePromoted),
             "release_recalled" => Ok(Self::ReleaseRecalled),
             "compatibility_result_recorded" => Ok(Self::CompatibilityResultRecorded),
+            "trust_threshold_crossed" => Ok(Self::TrustThresholdCrossed),
             other => Err(ChangeStreamError::UnknownKind(other.into())),
         }
     }
@@ -184,7 +193,7 @@ mod tests {
         for kind in ChangeEventKind::ALL {
             assert_eq!(ChangeEventKind::parse(kind.as_str()).unwrap(), *kind);
         }
-        assert_eq!(ChangeEventKind::ALL.len(), 12);
+        assert_eq!(ChangeEventKind::ALL.len(), 13);
         assert!(ChangeEventKind::parse("webhook").is_err());
     }
 

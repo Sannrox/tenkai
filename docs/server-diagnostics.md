@@ -76,7 +76,8 @@ HTTP: `GET /v1/fleet/status` (management bearer). Domain type:
 ## Change events
 
 `GET /v1/events` is a read-capability page of typed change events (plan,
-hold, release, compatibility) with a resumable `cursor` and a bounded `limit`
+hold, release, compatibility, and with `TENKAI_TRUST_CHANGE_EVENTS` trust
+threshold crossings) with a resumable `cursor` and a bounded `limit`
 (default 50, max 100). Resume with the returned `next_cursor`. The stream is
 scoped to environments the caller may read. Outbound webhooks stay a separate
 integration surface.

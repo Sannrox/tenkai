@@ -687,6 +687,17 @@ impl OperationalStore for TenantPartition {
         self.store
             .append_change_event(occurred_at, kind, resource, environment_id)
     }
+    fn append_change_event_once(
+        &self,
+        occurred_at: i64,
+        kind: crate::change_stream::ChangeEventKind,
+        resource: &str,
+        since: i64,
+        only_after_another: bool,
+    ) -> Result<Option<crate::change_stream::ChangeEvent>> {
+        self.store
+            .append_change_event_once(occurred_at, kind, resource, since, only_after_another)
+    }
     fn list_change_events_after(
         &self,
         cursor: i64,

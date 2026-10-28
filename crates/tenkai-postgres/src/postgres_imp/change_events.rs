@@ -51,6 +51,58 @@ impl Inner {
         })
     }
 
+    /// See `OperationalStore::append_change_event_once`. The writer check
+    /// and the sequence lock make check and insert one fenced step.
+    pub fn append_change_event_once(
+        &self,
+        schema: &str,
+        occurred_at: i64,
+        kind: ChangeEventKind,
+        resource: &str,
+        since: i64,
+        only_after_another: bool,
+    ) -> Result<Option<ChangeEvent>> {
+        if resource.is_empty() {
+            return Err(StoreError::InvalidData {
+                kind: "change event",
+                detail: "resource must be non-empty".into(),
+            });
+        }
+        let kind_name = kind.as_str().to_string();
+        let resource = resource.to_string();
+        let lock_key = format!("{schema}:change_events");
+        self.with_writer_schema(schema, move |tx| {
+            tx.query_one(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                &[&lock_key],
+            )
+            .map_err(pg)?;
+            let row = tx
+                .query_opt(
+                    "INSERT INTO change_events(occurred_at, kind, resource, environment_id)
+                     SELECT $1, $2::text, $3::text, ''
+                     WHERE NOT EXISTS (
+                         SELECT 1 FROM (
+                             SELECT resource, occurred_at FROM change_events
+                             WHERE kind = $2::text ORDER BY seq DESC LIMIT 1
+                         ) latest
+                         WHERE latest.resource = $3::text AND latest.occurred_at >= $4
+                     )
+                     AND (NOT $5 OR EXISTS (SELECT 1 FROM change_events WHERE kind = $2::text))
+                     RETURNING seq",
+                    &[
+                        &occurred_at,
+                        &kind_name,
+                        &resource,
+                        &since,
+                        &only_after_another,
+                    ],
+                )
+                .map_err(pg)?;
+            Ok(row.map(|row| ChangeEvent::new(row.get(0), occurred_at, kind, resource, "")))
+        })
+    }
+
     /// Insert a row with an arbitrary kind, as a newer version would.
     #[cfg(test)]
     pub(crate) fn insert_raw_change_event_for_conformance(

@@ -111,6 +111,20 @@ pub trait OperationalStore: Send + Sync {
         resource: &str,
         environment_id: &str,
     ) -> Result<crate::change_stream::ChangeEvent>;
+    /// Append a host-scoped change event unless the latest event of `kind`
+    /// already names `resource` and occurred at or after `since`, or, with
+    /// `only_after_another`, unless some event of `kind` exists already.
+    /// Check and append are one fenced transaction, so writers that race,
+    /// restart or take over append once. `None` when nothing was appended
+    /// (#784).
+    fn append_change_event_once(
+        &self,
+        occurred_at: i64,
+        kind: crate::change_stream::ChangeEventKind,
+        resource: &str,
+        since: i64,
+        only_after_another: bool,
+    ) -> Result<Option<crate::change_stream::ChangeEvent>>;
     /// Events after `cursor` (exclusive), oldest first, at most `limit` rows.
     fn list_change_events_after(
         &self,
