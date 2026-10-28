@@ -1639,6 +1639,10 @@
     "EnvironmentInspectReport": {
       "description": "Detailed inspect report for one environment (no credentials).",
       "properties": {
+        "approval_policy": {
+          "description": "The plan approval policy file this environment uses, as configured,\nwhen one is set (#820).",
+          "type": "string"
+        },
         "constraints": {
           "default": [],
           "description": "Environment constraints (`version_pin`, `version_range`, `require_fact`).",
@@ -1730,6 +1734,14 @@
           "description": "Bounded terminal-outcome identities and outbox delivery state. Event\npayloads and retry errors are intentionally excluded.",
           "items": {
             "$ref": "#/$defs/TerminalOutcomeProjection"
+          },
+          "type": "array"
+        },
+        "webhooks": {
+          "default": [],
+          "description": "Configured post-deploy webhooks (#820): URL, the name of the variable\nholding the HMAC secret, and events. The secret itself is never stored\nor returned. Edits are conditional on `lease.generation`.",
+          "items": {
+            "$ref": "#/$defs/WebhookEndpoint"
           },
           "type": "array"
         }
@@ -4866,6 +4878,36 @@
         "state",
         "attempts",
         "next_attempt_at"
+      ],
+      "type": "object"
+    },
+    "WebhookEndpoint": {
+      "description": "Operator-facing endpoint configuration. The HMAC secret is never stored;\n`secret_env` names a process environment variable.",
+      "properties": {
+        "events": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/WebhookEvent"
+          },
+          "type": "array"
+        },
+        "operational": {
+          "description": "Operational events this endpoint also receives; none unless listed.",
+          "items": {
+            "$ref": "#/$defs/OperationalEvent"
+          },
+          "type": "array"
+        },
+        "secret_env": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "url",
+        "secret_env"
       ],
       "type": "object"
     },
