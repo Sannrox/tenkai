@@ -27,9 +27,10 @@ scripts in `scripts/`. The Rust toolchain is pinned at 1.96.1.
 Read `README.md`, `DESIGN.md`, and
 `docs/decisions/0001-standalone-core-and-service-evolution.md` before changing
 system boundaries or ownership. GitHub Issues are the planning source of truth.
-Project-specific Skills under `.agents/skills/` are the workflow inventory
-(shaping, delivering, verifying, assessing, documenting, releasing, operating,
-and advancing the issue frontier).
+The workflow Skills (shaping, delivering, verifying, assessing, documenting,
+releasing, and advancing the issue frontier) come from the shared agent kit
+(see `## Shared agent skills`); `.agents/skills/tenkai/` is the
+repository-only operating Skill.
 
 ## Build, Test, and Development Commands
 
@@ -40,8 +41,8 @@ and advancing the issue frontier).
   strict linting when Clippy is available (matches `make validate`).
 - `make test` runs the default test suite.
 - `make validate` runs every `scripts/validate-*.sh` (format, clippy, shell,
-  diff, make dry-run, workflow-skill parity, rust filenames, secrets,
-  issue-lane capacity, HTTP API contract, and release packaging).
+  diff, make dry-run, shared agent-kit stubs, rust filenames, secrets, HTTP API
+  contract, and release packaging).
 - `make test-integration` runs all checked-in integration-test targets.
 - `make update` formats Rust, refreshes build-generated protobuf bindings, and
   regenerates the HTTP API contract in `api/`, without changing the locked
@@ -171,30 +172,22 @@ Issues, Pull Requests, comments, or commit messages.
 
 ### Verified commits on GitHub
 
-Prefer publishing PR branch tips with GitHub-signed commits so GitHub shows
-**Verified**:
+Lane branches are published with GitHub-verified commits and landed by the
+shared lane script, from the lane worktree:
 
-1. Implement and commit locally as usual (`commit.gpgsign` may still apply).
-2. Publish the branch tip with `bash scripts/gh-verified-push.sh` instead of a plain
-   `git push` when you want the hosted commit Verified (GraphQL
-   `createCommitOnBranch`). That path creates one server-side commit with the
-   local `HEAD` tree; committer is typically **GitHub**.
-3. New branch:
-   `bash scripts/gh-verified-push.sh --create-branch-from origin/main --branch <topic> --sync-local`
-4. Existing PR branch:
-   `bash scripts/gh-verified-push.sh --branch <topic> --sync-local`
-   (uses the current remote tip as `expectedHeadOid`).
-5. Never pass `--no-gpg-sign` for local commits; if GPG fails, stop and fix it.
-6. After publish, confirm `verification.verified=true` (the script prints this).
+```sh
+bash "${AGENT_KIT_HOME:-$HOME/.agents/agent-kit}/skills/deliver-ready-issue/scripts/issue-lane.sh" push <issue>
+bash "${AGENT_KIT_HOME:-$HOME/.agents/agent-kit}/skills/deliver-ready-issue/scripts/issue-lane.sh" land <issue> --pr <pr>
+```
 
-When merging PRs, prefer **squash** (`gh pr merge --squash --delete-branch`) so
-the land commit on `main` is also GitHub-signed/Verified and history stays
-linear. Use `gh pr merge --merge` only when multi-commit history must be kept
-(original SHAs preserved). Avoid GitHub **rebase** merges when Verified history
-matters: rebase-merge rewrites commits and drops signatures. Do not rewrite
-protected `main` after merging unless the user explicitly approves; if
-protection is temporarily relaxed, restore force-push and status-check settings
-immediately after the correction.
+`push` publishes the local `HEAD` tree to the claim branch as a Verified
+commit and resets the worktree to it, so local `HEAD` is the Pull Request head.
+`land` squash-merges that reviewed head once the checks pass and confirms the
+merge and the closed Issue. Never pass `--no-gpg-sign` for local commits; if GPG
+fails, stop and fix it. Avoid GitHub **rebase** merges: they rewrite commits
+and drop signatures. Do not rewrite protected `main` after merging unless the
+user explicitly approves; if protection is temporarily relaxed, restore
+force-push and status-check settings immediately after the correction.
 
 ## Parallel delivery lanes
 
@@ -222,7 +215,7 @@ confirmation, unless the lead of the same parallel run owns the stalled lane.
 
 A lane claims before it implements, under Publish or Land authority or with an
 explicit claim authorization under Implement, using
-`bash .agents/skills/deliver-ready-issue/scripts/issue-lane.sh claim <issue>`:
+`bash "${AGENT_KIT_HOME:-$HOME/.agents/agent-kit}/skills/deliver-ready-issue/scripts/issue-lane.sh" claim <issue>`:
 
 - the branch `<type>/<issue>` is created on GitHub from the default branch by
   an atomic ref creation, so when two machines race exactly one claim
@@ -266,8 +259,9 @@ Local isolation protects lanes that share a machine; it is not a claim.
 The three-lane limit counts claims visible on GitHub per repository: open
 implementation Pull Requests plus claim branches without one. Assigned or
 planned work with neither is not a running lane.
-`bash .agents/skills/deliver-ready-issue/scripts/issue-lane.sh capacity`
-prints the count; `claim` refuses when remaining capacity is zero.
+`bash "${AGENT_KIT_HOME:-$HOME/.agents/agent-kit}/skills/deliver-ready-issue/scripts/issue-lane.sh" capacity`
+prints the count; `issue-lane.sh claim` refuses when remaining capacity is
+zero.
 `check` inspects one Issue; `release` removes a finished claim.
 
 Parallel lanes must not collide. Collision surfaces in this repository are
@@ -285,20 +279,108 @@ private agent session only. It marks the Pull Request ready when verification
 and review are complete. Immediately before publishing, the lane fetches and
 confirms that the default branch is an ancestor of its head; it refreshes onto
 `main` only for a conflict, a failing gate, an explicit request, or a sibling
-landing on a shared surface, not merely because `main` advanced. Publish the
-existing claim branch with
-`bash scripts/gh-verified-push.sh --branch <type>/<issue> --sync-local`.
+landing on a shared surface, not merely because `main` advanced. Publish and
+land with `issue-lane.sh push` and `land` (see "Verified commits on GitHub").
 
-Landing is sequential. After each merge, fetch, recompute the frontier, and let
-the remaining lanes recheck `mergeable` against the new `main`. A failed or
-timed-out merge response may still have merged; reconcile the remote state
-before retrying.
+After each merge, fetch, recompute the frontier, and let the remaining lanes
+recheck `mergeable` against the new `main`.
 
 The lead of a parallel run keeps a ledger per lane: Issue, branch, base SHA,
 owner, state, Pull Request, evidence, blockers, and cleanup. Report verified
 outcomes, not launched work. Keep hostnames and absolute checkout paths in the
 session with the maintainer, never on GitHub. The executable lead procedure is
-`.agents/skills/deliver-ready-issue/references/parallel-delivery.md`.
+`references/parallel-delivery.md` of the shared `deliver-ready-issue` Skill.
+
+## Shared agent skills
+
+The workflow Skills (`advance-issue-frontier`, `assess-change-impact`,
+`capture-project-decision`, `deliver-ready-issue`, `prepare-release`,
+`refactor-docs`, `shape-work-item`, `technical-documentation`, `verify-change`)
+are canonical in [Sannrox/agent-kit](https://github.com/Sannrox/agent-kit).
+There is no pin: this repository always uses the latest `main`.
+`.agents/skills/<name>/` holds only a generated stub that points to the shared
+skill; read the installed skill under `~/.agents/agent-kit/` (or
+`$AGENT_KIT_HOME`). Run `bash scripts/validate-workflow-skills.sh` to clone or
+update it; `make validate` runs it too.
+
+- Repository-specific facts the shared Skills need come from this file: the
+  structure, architecture, parallel-lane and testing sections, plus
+  `## Agent skill profile` below for anything they do not already say. Edit
+  this file, not the stubs.
+- Never edit the stubs or the vendored `scripts/validate-workflow-skills.sh`
+  here; change them upstream in agent-kit, then run
+  `bash scripts/validate-workflow-skills.sh --render` here when it reports
+  drift.
+- Repository-only Skills (`.agents/skills/tenkai/`) live next to the stubs as
+  full folders and stay local.
+
+## Agent skill profile
+
+Facts the shared agent-kit skills read that the sections above do not already
+state.
+
+Feature: a new observable operator or integration outcome.
+
+### Issue conventions
+
+- Issue bodies use `## Tenant or operator problem`, `## Observable outcome`,
+  `## Acceptance evidence`, `## Primary area`, `## Boundaries and
+  dependencies`, and `## Compatibility and risk`; older Issues use
+  `## Dependencies` or `## GitHub dependencies`. Read whichever of these the
+  Issue has as its dependency section. An explicit statement that a
+  prerequisite is complete counts as delivered; `None` means no dependency.
+- Labels: one `type:*`, one `status:*` (`status:triage`, `status:ready`,
+  `status:blocked`), plus relevant `area:*` and `risk:*`. The frontier uses
+  `status:ready` and `status:blocked`; do not invent new labels.
+- Documentation Skills default to report-only unless asked to apply fixes.
+
+### Compatibility and failure obligations
+
+Fresh and upgraded graph records and runtime state, audit coupling, old
+clients and manifests, error semantics, and rollback or recovery impact.
+Vendored Sekai and Chisei protocol changes need explicit versioning,
+migration, and failure semantics. Embedded and server hosts keep equivalent
+behavior.
+
+### Additional impact boundaries
+
+- immutable catalog facts versus mutable environment and deployment state;
+- planning and canary evidence versus apply, rollback, and reconciliation;
+- local execution versus the agent and disconnected execution paths;
+- Tenkai ontology records versus vendored `sekai-chisei` protocol contracts;
+- signing, approval, namespace authorization, audit, lineage, gates, and
+  secrets;
+- public `proto/`, manifest, CLI, configuration, status, and operator behavior.
+
+### Verification matrix
+
+Rows beyond `## Testing Guidelines`:
+
+| Surface | Required evidence |
+| --- | --- |
+| public or multi-component behavior | affected integration test plus the normal suite |
+| CLI or apply flow | focused command/parser tests plus deterministic local behavior |
+| protocol (`proto/`) | generated build, client/example coverage, vendored compatibility review |
+| ontology or state | fresh and upgrade behavior; graph and runtime-state compatibility |
+| configuration or manifest | parsing/default tests, examples, operator documentation |
+| `sekai-chisei` integration | deterministic CLI or local integration checks; live provider tests only with intentional prerequisites |
+| packaging, features, or binaries | `cargo build --workspace --all-targets --locked` |
+| any diff | no `.tenkai-state/`, databases, or runtime state staged |
+
+### Release audit
+
+- `docs/release-readiness.md` is the canonical gate list for versions,
+  contracts, security, and validation commands;
+- `Cargo.toml` version, lockfile, and the release workflow;
+- public CLI, vendored protocol, manifest, and `sekai-chisei` compatibility;
+- ontology, graph-record, runtime-state, and configuration migration impact;
+- environment variables, defaults, examples, and operator documentation;
+- signing, approval, security, recovery, rollback, and operator actions;
+- after an authorized `vX.Y.Z` tag, the Release binaries workflow attached the
+  community hosts for `linux-x86_64` and `darwin-aarch64` plus `SHA256SUMS`
+  (`docs/release-binaries.md`); tags before that workflow have none. Do not
+  rewrite existing Release notes when only uploading assets;
+- credit contributors through GitHub's generated release notes.
 
 ## Security & Configuration
 
