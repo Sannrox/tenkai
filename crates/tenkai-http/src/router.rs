@@ -67,6 +67,12 @@ pub(super) struct ServiceStatus {
     pub(super) capabilities: Vec<String>,
     /// API contract ids this server serves, for client compatibility checks.
     pub(super) contracts: Vec<&'static str>,
+    /// `configured` when a grant rule gives fleet management, else `missing`
+    /// (#815), for a console's first-run screen. Never names a rule. Absent
+    /// while the server is still opening.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = tenkai::schema_contract::omitted_when_none)]
+    pub(super) first_administrator: Option<tenkai::oidc_verifier::FirstAdministrator>,
     /// Backup age when backups are configured. `stale` or `missing` degrades
     /// health without failing readiness: the server can still do its work.
     #[serde(skip_serializing_if = "Option::is_none")]

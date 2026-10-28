@@ -2535,6 +2535,14 @@
       ],
       "type": "object"
     },
+    "FirstAdministrator": {
+      "description": "Whether a first administrator is configured: a `[grants]` rule that gives\nfleet management (#631). Without one, only the management token can\nadminister the server. Reported unauthenticated on `/healthz` (#815), so\nit is one coarse status and never names a rule or an identity.",
+      "enum": [
+        "configured",
+        "missing"
+      ],
+      "type": "string"
+    },
     "FleetEnvironmentRow": {
       "description": "One environment's row in a fleet posture table (no credentials).",
       "properties": {
@@ -4469,6 +4477,10 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "first_administrator": {
+          "$ref": "#/$defs/FirstAdministrator",
+          "description": "`configured` when a grant rule gives fleet management, else `missing`\n(#815), for a console's first-run screen. Never names a rule. Absent\nwhile the server is still opening."
         },
         "profile": {
           "type": "string"
