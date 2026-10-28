@@ -35,6 +35,7 @@ pub fn opening_router(profile: impl Into<String>, capabilities: Vec<String>) -> 
         contracts: SERVED_CONTRACTS.to_vec(),
         backup: None,
         clock: None,
+        first_administrator: None,
     };
     Router::new()
         .route("/healthz", get(opening_health))

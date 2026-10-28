@@ -168,6 +168,8 @@ struct EnterpriseAuthComposition {
     auth_host: AuthHostConfig,
     extension: Option<Arc<dyn EnterpriseAuthExtension>>,
     oidc_client: Option<OidcClientDiscovery>,
+    /// From the OIDC grant rules; `missing` without OIDC (#815).
+    first_administrator: tenkai::oidc_verifier::FirstAdministrator,
 }
 
 /// Paths naming enterprise verifiers. JWT and OIDC may both be set; tokens are
@@ -203,6 +205,7 @@ fn compose_enterprise_auth(
                 auth_host: AuthHostConfig::community(),
                 extension: None,
                 oidc_client: None,
+                first_administrator: Default::default(),
             })
         }
         (Some(trust_path), None) => compose_jwt_auth(trust_path, require_tenant),
@@ -247,29 +250,33 @@ fn compose_jwt_auth(
         },
         extension: Some(extension),
         oidc_client: None,
+        first_administrator: Default::default(),
     })
 }
 
 /// Load the OIDC trust config and the provider's keys before serving. Startup
 /// fails closed when no usable signing key can be loaded.
-fn load_oidc_extension(
-    config_path: &std::path::Path,
-    require_tenant: bool,
-) -> Result<(
-    String,
-    Option<OidcClientDiscovery>,
-    Arc<dyn EnterpriseAuthExtension>,
-)> {
+/// What loading the OIDC configuration yields for composition.
+struct LoadedOidc {
+    issuer: String,
+    client: Option<OidcClientDiscovery>,
+    extension: Arc<dyn EnterpriseAuthExtension>,
+    first_administrator: tenkai::oidc_verifier::FirstAdministrator,
+}
+
+fn load_oidc_extension(config_path: &std::path::Path, require_tenant: bool) -> Result<LoadedOidc> {
     let config = OidcConfig::load(config_path)
         .with_context(|| format!("loading OIDC configuration from {}", config_path.display()))?;
-    match config.fleet_administrator_values().as_slice() {
-        [] => eprintln!(
+    let first_administrator = config.first_administrator();
+    // The same status `/healthz` reports (#815); only the log names values.
+    match first_administrator {
+        tenkai::oidc_verifier::FirstAdministrator::Missing => eprintln!(
             "tenkai.auth first_administrator=missing detail=no OIDC grant rule gives fleet management; only TENKAI_MANAGEMENT_TOKEN can administer this server (see docs/configure-server-authentication.md#first-administrator)"
         ),
-        values => eprintln!(
+        tenkai::oidc_verifier::FirstAdministrator::Configured => eprintln!(
             "tenkai.auth first_administrator=configured claim={} values={}",
             config.grants.claim,
-            values.join(",")
+            config.fleet_administrator_values().join(",")
         ),
     }
     if require_tenant
@@ -298,14 +305,24 @@ fn load_oidc_extension(
         OidcAuthExtension::new(config, keys, Some(refresh), require_tenant)
             .context("composing OIDC authentication")?,
     );
-    Ok((issuer, oidc_client, extension))
+    Ok(LoadedOidc {
+        issuer,
+        client: oidc_client,
+        extension,
+        first_administrator,
+    })
 }
 
 fn compose_oidc_auth(
     config_path: &std::path::Path,
     require_tenant: bool,
 ) -> Result<EnterpriseAuthComposition> {
-    let (_issuer, oidc_client, extension) = load_oidc_extension(config_path, require_tenant)?;
+    let LoadedOidc {
+        client: oidc_client,
+        extension,
+        first_administrator,
+        ..
+    } = load_oidc_extension(config_path, require_tenant)?;
     let audience = extension.expected_audience().to_string();
     Ok(EnterpriseAuthComposition {
         auth_host: AuthHostConfig {
@@ -315,6 +332,7 @@ fn compose_oidc_auth(
         },
         extension: Some(extension),
         oidc_client,
+        first_administrator,
     })
 }
 
@@ -324,8 +342,12 @@ fn compose_issuer_auth(
     require_tenant: bool,
 ) -> Result<EnterpriseAuthComposition> {
     let (jwt_issuer, _jwt_audience, jwt_extension) = load_jwt_extension(jwt_trust, require_tenant)?;
-    let (oidc_issuer, oidc_client, oidc_extension) =
-        load_oidc_extension(oidc_path, require_tenant)?;
+    let LoadedOidc {
+        issuer: oidc_issuer,
+        client: oidc_client,
+        extension: oidc_extension,
+        first_administrator,
+    } = load_oidc_extension(oidc_path, require_tenant)?;
     anyhow::ensure!(
         jwt_issuer != oidc_issuer,
         "JWT and OIDC verifiers must use distinct issuers; both are {jwt_issuer}"
@@ -345,6 +367,7 @@ fn compose_issuer_auth(
         },
         extension: Some(extension),
         oidc_client,
+        first_administrator,
     })
 }
 
@@ -766,6 +789,7 @@ async fn main() -> Result<()> {
             auth_host: enterprise_auth.auth_host,
             enterprise_auth: enterprise_auth.extension,
             oidc_client: enterprise_auth.oidc_client,
+            first_administrator: enterprise_auth.first_administrator,
             federation: tenkai::federated_identity::FederationConfig::community(),
             identity_directory: std::sync::Arc::new(
                 tenkai::federated_identity::IdentityDirectory::new(),
@@ -1911,6 +1935,17 @@ mod tests {
         let client = composition.oidc_client.unwrap();
         assert_eq!(client.client_id, "tenkai-console");
         assert_eq!(client.scopes, vec!["openid".to_string()]);
+        // The fixture's fleet management rule makes a first administrator.
+        assert_eq!(
+            composition.first_administrator,
+            tenkai::oidc_verifier::FirstAdministrator::Configured
+        );
+        let community =
+            compose_enterprise_auth(EnterpriseAuthSources::default(), false, false).unwrap();
+        assert_eq!(
+            community.first_administrator,
+            tenkai::oidc_verifier::FirstAdministrator::Missing
+        );
     }
 
     #[test]

@@ -559,6 +559,15 @@ fn fleet_administrators_are_unbound_management_rules() {
         .rules
         .retain(|rule| rule.value != "tenkai-admins");
     assert!(readers_only.fleet_administrator_values().is_empty());
+    // The coarse status `/healthz` reports (#815) follows the same rules.
+    assert_eq!(
+        config("").first_administrator(),
+        FirstAdministrator::Configured
+    );
+    assert_eq!(
+        readers_only.first_administrator(),
+        FirstAdministrator::Missing
+    );
 }
 
 mod directory_bridge;
