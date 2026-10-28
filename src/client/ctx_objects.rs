@@ -32,22 +32,30 @@ impl Ctx {
         self.backend.object_lifecycle().put(object).await
     }
 
+    /// Write `object` with `events` and feedback `observations` atomically.
+    /// Remote application state has no observation store: there the
+    /// observations are dropped and the write goes ahead (#802).
     pub(crate) async fn put_with_provider_events(
         &mut self,
         object: Object,
         events: &[crate::storage::ProviderEventRecord],
+        observations: &[crate::feedback_observation::FeedbackObservation],
     ) -> Result<Object> {
-        if events.is_empty() {
-            return self.put(object).await;
-        }
         let Some(store) = self.embedded_arc() else {
+            if events.is_empty() {
+                return self.put(object).await;
+            }
             anyhow::bail!(
                 "remote application state cannot atomically enqueue Tenkai provider events"
             );
         };
+        if events.is_empty() && observations.is_empty() {
+            return self.put(object).await;
+        }
         let events = events.to_vec();
+        let observations = observations.to_vec();
         block_embedded(store, move |store| {
-            store.put_with_provider_events(object, &events)
+            store.put_with_provider_events(object, &events, &observations)
         })
         .await
     }
@@ -56,6 +64,7 @@ impl Ctx {
         &mut self,
         objects: &[Object],
         events: &[crate::storage::ProviderEventRecord],
+        observations: &[crate::feedback_observation::FeedbackObservation],
     ) -> Result<()> {
         let Some(store) = self.embedded_arc() else {
             anyhow::bail!(
@@ -64,8 +73,9 @@ impl Ctx {
         };
         let objects = objects.to_vec();
         let events = events.to_vec();
+        let observations = observations.to_vec();
         block_embedded(store, move |store| {
-            store.put_objects_with_provider_events(&objects, &events)
+            store.put_objects_with_provider_events(&objects, &events, &observations)
         })
         .await
     }
@@ -157,6 +167,7 @@ impl Ctx {
         lease_key: &str,
         fencing_token: &str,
         events: &[crate::storage::ProviderEventRecord],
+        observations: &[crate::feedback_observation::FeedbackObservation],
     ) -> Result<()> {
         let Some(store) = self.embedded_arc() else {
             anyhow::bail!(
@@ -168,6 +179,7 @@ impl Ctx {
         let lease_key = lease_key.to_string();
         let fencing_token = fencing_token.to_string();
         let events = events.to_vec();
+        let observations = observations.to_vec();
         block_embedded(store, move |store| {
             store.guarded_put_objects_with_provider_events(
                 &objects,
@@ -175,6 +187,7 @@ impl Ctx {
                 &lease_key,
                 &fencing_token,
                 &events,
+                &observations,
             )
         })
         .await

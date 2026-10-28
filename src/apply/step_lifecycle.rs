@@ -8,6 +8,8 @@ struct StepContext<'a> {
     environment: &'a str,
     plan_id: &'a str,
     adapters: TargetAdapters<'a>,
+    /// When this step's execution began, for its feedback observation (#802).
+    started_at_ms: i64,
 }
 
 /// Execute one immutable Plan Step and durably record its Environment outcome.
@@ -20,6 +22,7 @@ pub(super) async fn execute(
     recalled_recovery: bool,
     skip_gates: bool,
 ) -> Result<Outcome> {
+    let started_at_ms = crate::now_millis();
     let environment = plan.environment.as_str();
     let plan_id = plan.id.as_str();
     let step_context = StepContext {
@@ -27,6 +30,7 @@ pub(super) async fn execute(
         environment,
         plan_id,
         adapters: adapters.clone(),
+        started_at_ms,
     };
     let target = ReleasePin {
         release_id: step.release_id.clone(),
@@ -102,6 +106,7 @@ pub(super) async fn execute(
             );
             record(
                 ctx,
+                started_at_ms,
                 lease,
                 environment,
                 plan_id,
@@ -134,6 +139,7 @@ pub(super) async fn execute(
                     Outcome::new(step.clone(), StepOutcomeStatus::Blocked, error.to_string());
                 record(
                     ctx,
+                    started_at_ms,
                     lease,
                     environment,
                     plan_id,
@@ -164,11 +170,8 @@ pub(super) async fn execute(
                 {
                     return restore_after_health_gate(
                         ctx,
-                        lease,
-                        environment,
-                        plan_id,
+                        step_context,
                         step,
-                        adapters,
                         decision.evidence.summary(),
                     )
                     .await;
@@ -183,8 +186,16 @@ pub(super) async fn execute(
                             previous: step.from.clone(),
                         }
                     };
-                    if let Err(error) =
-                        record(ctx, lease, environment, plan_id, &outcome, transition).await
+                    if let Err(error) = record(
+                        ctx,
+                        started_at_ms,
+                        lease,
+                        environment,
+                        plan_id,
+                        &outcome,
+                        transition,
+                    )
+                    .await
                     {
                         compensate_activation(
                             ctx,
@@ -223,7 +234,16 @@ pub(super) async fn execute(
                     previous: step.from.clone(),
                 }
             };
-            if let Err(error) = record(ctx, lease, environment, plan_id, &outcome, transition).await
+            if let Err(error) = record(
+                ctx,
+                started_at_ms,
+                lease,
+                environment,
+                plan_id,
+                &outcome,
+                transition,
+            )
+            .await
             {
                 compensate_activation(
                     ctx,
@@ -261,7 +281,16 @@ pub(super) async fn execute(
 
     let (outcome, transition) = outcome;
     if let Some(transition) = transition {
-        record(ctx, lease, environment, plan_id, &outcome, transition).await?;
+        record(
+            ctx,
+            started_at_ms,
+            lease,
+            environment,
+            plan_id,
+            &outcome,
+            transition,
+        )
+        .await?;
     }
     Ok(outcome)
 }
@@ -309,6 +338,7 @@ async fn recover_activation(
     restore_content: Option<&ReleaseContent>,
     detail: String,
 ) -> Result<(Outcome, Option<crate::environment::DeploymentTransition>)> {
+    let started_at_ms = step_context.started_at_ms;
     let (cleaned, detail) = product_execution::cleanup_failed_activation(
         ctx,
         step_context.lease,
@@ -335,6 +365,7 @@ async fn recover_activation(
         );
         record(
             ctx,
+            started_at_ms,
             step_context.lease,
             step_context.environment,
             step_context.plan_id,
@@ -471,18 +502,23 @@ async fn compensate_activation(
 /// re-evaluate SLO gates (#549). Admission or pull failures leave the new
 /// release running, so bookkeeping records that live version and the failed
 /// target instead of returning with a stale prior deploy.
-pub(super) async fn restore_after_health_gate(
+async fn restore_after_health_gate(
     ctx: &mut Ctx,
-    lease: &EnvironmentLease,
-    environment: &str,
-    plan_id: &str,
+    step_context: StepContext<'_>,
     step: &Step,
-    adapters: TargetAdapters<'_>,
     detail: String,
 ) -> Result<Outcome> {
+    let StepContext {
+        lease,
+        environment,
+        plan_id,
+        adapters,
+        started_at_ms,
+    } = step_context;
     let Some(pin) = step.restore.as_ref() else {
         return record_live_restore_failure(
             ctx,
+            started_at_ms,
             lease,
             environment,
             plan_id,
@@ -509,6 +545,7 @@ pub(super) async fn restore_after_health_gate(
         Err(error) => {
             return record_live_restore_failure(
                 ctx,
+                started_at_ms,
                 lease,
                 environment,
                 plan_id,
@@ -523,6 +560,7 @@ pub(super) async fn restore_after_health_gate(
         Err(error) => {
             return record_live_restore_failure(
                 ctx,
+                started_at_ms,
                 lease,
                 environment,
                 plan_id,
@@ -537,6 +575,7 @@ pub(super) async fn restore_after_health_gate(
     {
         return record_live_restore_failure(
             ctx,
+            started_at_ms,
             lease,
             environment,
             plan_id,
@@ -550,6 +589,7 @@ pub(super) async fn restore_after_health_gate(
     {
         return record_live_restore_failure(
             ctx,
+            started_at_ms,
             lease,
             environment,
             plan_id,
@@ -568,6 +608,7 @@ pub(super) async fn restore_after_health_gate(
     {
         return record_live_restore_failure(
             ctx,
+            started_at_ms,
             lease,
             environment,
             plan_id,
@@ -583,6 +624,7 @@ pub(super) async fn restore_after_health_gate(
     {
         return record_live_restore_failure(
             ctx,
+            started_at_ms,
             lease,
             environment,
             plan_id,
@@ -613,6 +655,7 @@ pub(super) async fn restore_after_health_gate(
                 );
                 record(
                     ctx,
+                    started_at_ms,
                     lease,
                     environment,
                     plan_id,
@@ -632,6 +675,7 @@ pub(super) async fn restore_after_health_gate(
                 );
                 record(
                     ctx,
+                    started_at_ms,
                     lease,
                     environment,
                     plan_id,
@@ -660,6 +704,7 @@ pub(super) async fn restore_after_health_gate(
     );
     record(
         ctx,
+        started_at_ms,
         lease,
         environment,
         plan_id,
@@ -679,6 +724,7 @@ pub(super) async fn restore_after_health_gate(
 
 async fn record_live_restore_failure(
     ctx: &mut Ctx,
+    started_at_ms: i64,
     lease: &EnvironmentLease,
     environment: &str,
     plan_id: &str,
@@ -688,6 +734,7 @@ async fn record_live_restore_failure(
     let outcome = Outcome::new(step.clone(), StepOutcomeStatus::Failed, detail);
     record(
         ctx,
+        started_at_ms,
         lease,
         environment,
         plan_id,
@@ -718,6 +765,7 @@ async fn admit_artifact_pulls(
 
 async fn record(
     ctx: &mut Ctx,
+    started_at_ms: i64,
     lease: &EnvironmentLease,
     environment: &str,
     plan_id: &str,
@@ -734,6 +782,7 @@ async fn record(
             status: &outcome.status,
             detail: &outcome.detail,
             transition,
+            started_at_ms: Some(started_at_ms),
         },
     )
     .await

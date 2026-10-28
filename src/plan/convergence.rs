@@ -988,6 +988,98 @@ install = "true"
         .unwrap();
     }
 
+    /// Every recorded step outcome leaves one feedback observation with a
+    /// typed reason, committed with it, surviving a restart, unchanged by
+    /// later outcomes, and holding no detail text (#802).
+    #[tokio::test]
+    async fn step_outcomes_capture_feedback_observations_without_detail() {
+        use crate::feedback_observation::Reason;
+        let root = std::env::temp_dir().join(format!("tenkai-feedback-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let database = root.join("tenkai.db");
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        for version in ["1.0.0", "1.1.0"] {
+            published_software(&mut ctx, &root, version).await;
+        }
+        let actor = crate::auth_context::test_management_context("feedback-test");
+        crate::catalog::promote(&mut ctx, &actor, "api@1.1.0", "stable")
+            .await
+            .unwrap();
+        env_add(&mut ctx, "local", "fixture").await.unwrap();
+        subscribe(&mut ctx, "local", "api", "stable").await.unwrap();
+        let plan = create(&mut ctx, "local").await.unwrap();
+        let lease = crate::apply::claim_environment(&mut ctx, "local", "feedback-test")
+            .await
+            .unwrap();
+        let cases = [
+            ("succeeded", "", Reason::None),
+            (
+                "failed",
+                "deployment executor failed: spawn refused",
+                Reason::TenkaiFailed,
+            ),
+            (
+                "failed",
+                "exit 3: token=secret-value-1",
+                Reason::ProductFailed,
+            ),
+            (
+                "failed",
+                "deployment command interrupted by SIGINT",
+                Reason::Cancelled,
+            ),
+        ];
+        for (status, detail, _) in cases {
+            crate::environment::record_deployment_observation(
+                &mut ctx,
+                &lease,
+                crate::environment::DeploymentObservation {
+                    environment: "local",
+                    plan_id: &plan.id,
+                    step: &plan.steps[0],
+                    status,
+                    detail,
+                    transition: crate::environment::DeploymentTransition::Unchanged,
+                    started_at_ms: Some(crate::now_millis() - 25),
+                },
+            )
+            .await
+            .unwrap();
+            // Deployment attempts are keyed by the millisecond.
+            tokio::time::sleep(std::time::Duration::from_millis(3)).await;
+        }
+        let first = ctx
+            .embedded_arc()
+            .unwrap()
+            .feedback_observations("local")
+            .unwrap();
+        drop(ctx);
+        let ctx = Ctx::embedded(&database).unwrap();
+        let stored = ctx
+            .embedded_arc()
+            .unwrap()
+            .feedback_observations("local")
+            .unwrap();
+        assert_eq!(stored, first, "observations survive a restart unchanged");
+        assert_eq!(
+            stored.iter().map(|o| o.reason).collect::<Vec<_>>(),
+            cases
+                .iter()
+                .map(|(_, _, reason)| *reason)
+                .collect::<Vec<_>>()
+        );
+        for observation in &stored {
+            assert_eq!(observation.plan_id, plan.id);
+            assert_eq!(observation.lease_generation, lease.generation);
+            assert!(observation.duration_ms.is_some_and(|ms| ms >= 25));
+            let encoded = serde_json::to_string(observation).unwrap();
+            assert!(!encoded.contains("secret-value"), "{encoded}");
+            assert!(!encoded.contains("spawn refused"), "{encoded}");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[tokio::test]
     async fn rolled_back_target_is_durably_held_but_operator_retry_and_new_head_are_planned() {
         let root =
@@ -1026,6 +1118,7 @@ install = "true"
                 status: "rolled_back",
                 detail: "health failed; previous release restored",
                 transition: crate::environment::DeploymentTransition::Unchanged,
+                started_at_ms: None,
             },
         )
         .await
@@ -1104,6 +1197,7 @@ install = "true"
                     version: "1.1.0".into(),
                     previous: Some("1.0.0".into()),
                 },
+                started_at_ms: None,
             },
         )
         .await

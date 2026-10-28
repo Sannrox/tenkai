@@ -35,6 +35,9 @@ pub(crate) struct DeploymentObservation<'a> {
     pub status: &'a str,
     pub detail: &'a str,
     pub transition: DeploymentTransition,
+    /// When the step's execution began in this process, for the feedback
+    /// observation's duration (#802).
+    pub started_at_ms: Option<i64>,
 }
 
 /// Durable evidence explaining why an environment is no longer operational.
@@ -278,7 +281,7 @@ pub async fn reconcile_deployment(
     );
     let observed_at = crate::now_millis();
     let provider_events = if ctx.outcome_export_enabled() && was_unknown {
-        match unknown_origin {
+        match unknown_origin.clone() {
             (Some(plan_id), Some(step_id), Some(deployment_id)) => {
                 let plan = crate::plan::load(ctx, &plan_id).await?;
                 anyhow::ensure!(
@@ -308,8 +311,43 @@ pub async fn reconcile_deployment(
     } else {
         Vec::new()
     };
+    // An operator resolving an unknown state is a committed outcome too
+    // (#802); its identity is the deployment attempt that left it unknown.
+    let feedback = match (&unknown_origin, was_unknown) {
+        ((Some(plan_id), Some(step_id), Some(deployment_id)), true) => {
+            // An unreadable origin still leaves a degraded observation.
+            let action = match crate::plan::load(ctx, plan_id).await {
+                Ok(plan) => plan
+                    .steps
+                    .iter()
+                    .find(|step| &step.id == step_id)
+                    .map(|step| step.action),
+                Err(_) => None,
+            };
+            vec![crate::feedback_observation::FeedbackObservation::capture(
+                crate::feedback_observation::Capture {
+                    id: &format!("{deployment_id}:reconciled:{observed_at}"),
+                    operation: crate::feedback_observation::Operation::UnknownReconciliation,
+                    environment: env,
+                    product,
+                    plan_id,
+                    step_id,
+                    action,
+                    release_id: &deployed
+                        .map(|version| release_id(product, version))
+                        .unwrap_or_default(),
+                    status: "reconciled",
+                    reason: crate::feedback_observation::Reason::Reconciled,
+                    started_at_ms: None,
+                    lease_generation: 0,
+                    observed_at_ms: observed_at,
+                },
+            )]
+        }
+        _ => Vec::new(),
+    };
     update_reconciled_deployment_object(ctx, &mut object, product, deployed, observed_at).await?;
-    ctx.put_with_provider_events(object, &provider_events)
+    ctx.put_with_provider_events(object, &provider_events, &feedback)
         .await?;
     Ok(match deployed {
         Some(version) => format!("recorded {product}@{version} as deployed in {env}"),
@@ -635,30 +673,55 @@ pub(crate) async fn record_deployment_observation(
     }
     let environment_changed = observation.transition != DeploymentTransition::Unchanged
         || matches!(observation.status, "failed" | "rolled_back");
-    let update_result = if ctx.outcome_export_enabled() || !provider_events.is_empty() {
-        let mut objects = vec![deployment];
-        if environment_changed {
-            objects.push(environment.expect("an Environment transition loads its object"));
-        }
-        ctx.guarded_update_objects_with_provider_events(
-            &objects,
-            crate::apply::ENVIRONMENT_LEASE_NAMESPACE,
-            &lease.environment,
-            &lease.fencing_token,
-            &provider_events,
-        )
-        .await
-    } else {
-        if environment_changed {
-            guarded_update(
-                ctx,
-                lease,
-                environment.expect("an Environment transition loads its object"),
+    // Captured always, independent of outcome export, and committed with the
+    // deployment record wherever this process holds the store (#802).
+    let feedback = [crate::feedback_observation::FeedbackObservation::capture(
+        crate::feedback_observation::Capture {
+            id: &attempt_id,
+            operation: crate::feedback_observation::Operation::ApplyStep,
+            environment: observation.environment,
+            product: &observation.step.product,
+            plan_id: observation.plan_id,
+            step_id: &observation.step.id,
+            action: Some(observation.step.action),
+            release_id: &observation.step.release_id,
+            status: observation.status,
+            reason: crate::feedback_observation::controller_reason(
+                observation.status,
+                observation.detail,
+                observation.transition == DeploymentTransition::Unknown,
+            ),
+            started_at_ms: observation.started_at_ms,
+            lease_generation: lease.generation,
+            observed_at_ms: deployment.updated,
+        },
+    )];
+    let update_result =
+        if ctx.outcome_export_enabled() || !provider_events.is_empty() || ctx.is_embedded() {
+            let mut objects = vec![deployment];
+            if environment_changed {
+                objects.push(environment.expect("an Environment transition loads its object"));
+            }
+            ctx.guarded_update_objects_with_provider_events(
+                &objects,
+                crate::apply::ENVIRONMENT_LEASE_NAMESPACE,
+                &lease.environment,
+                &lease.fencing_token,
+                &provider_events,
+                &feedback,
             )
-            .await?;
-        }
-        guarded_update(ctx, lease, deployment).await
-    };
+            .await
+        } else {
+            if environment_changed {
+                guarded_update(
+                    ctx,
+                    lease,
+                    environment.expect("an Environment transition loads its object"),
+                )
+                .await?;
+            }
+            guarded_update(ctx, lease, deployment).await
+        };
     match update_result {
         Ok(()) => Ok(()),
         Err(error) => {

@@ -62,10 +62,15 @@ impl Transition {
 
 pub(crate) enum Persistence<'a> {
     Standard,
-    WithProviderEvents(&'a [crate::storage::ProviderEventRecord]),
+    /// With provider events and feedback observations, in one transaction.
+    WithProviderEvents {
+        provider_events: &'a [crate::storage::ProviderEventRecord],
+        observations: &'a [crate::feedback_observation::FeedbackObservation],
+    },
     WithEnvironmentAndProviderEvents {
         environment: Object,
         provider_events: &'a [crate::storage::ProviderEventRecord],
+        observations: &'a [crate::feedback_observation::FeedbackObservation],
     },
     Guarded {
         namespace: &'a str,
@@ -84,15 +89,23 @@ pub(crate) async fn transition(
     update.apply(plan);
     match persistence {
         Persistence::Standard => store(ctx, plan).await,
-        Persistence::WithProviderEvents(events) => {
-            store_with_provider_events(ctx, plan, events).await
-        }
+        Persistence::WithProviderEvents {
+            provider_events,
+            observations,
+        } => store_with_provider_events(ctx, plan, provider_events, observations).await,
         Persistence::WithEnvironmentAndProviderEvents {
             environment,
             provider_events,
+            observations,
         } => {
-            store_with_environment_and_provider_events(ctx, plan, environment, provider_events)
-                .await
+            store_with_environment_and_provider_events(
+                ctx,
+                plan,
+                environment,
+                provider_events,
+                observations,
+            )
+            .await
         }
         Persistence::Guarded {
             namespace,
@@ -250,16 +263,17 @@ pub(super) fn from_object(object: &Object) -> Result<Plan> {
 }
 
 pub(super) async fn store(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
-    store_with_provider_events(ctx, plan, &[]).await
+    store_with_provider_events(ctx, plan, &[], &[]).await
 }
 
 pub(super) async fn store_with_provider_events(
     ctx: &mut Ctx,
     plan: &Plan,
     provider_events: &[crate::storage::ProviderEventRecord],
+    observations: &[crate::feedback_observation::FeedbackObservation],
 ) -> Result<()> {
     let object = validated_plan_object(ctx, plan).await?;
-    ctx.put_with_provider_events(object, provider_events)
+    ctx.put_with_provider_events(object, provider_events, observations)
         .await?;
     Ok(())
 }
@@ -269,9 +283,10 @@ pub(super) async fn store_with_environment_and_provider_events(
     plan: &Plan,
     environment: Object,
     provider_events: &[crate::storage::ProviderEventRecord],
+    observations: &[crate::feedback_observation::FeedbackObservation],
 ) -> Result<()> {
     let plan_object = validated_plan_object(ctx, plan).await?;
-    ctx.put_objects_with_provider_events(&[plan_object, environment], provider_events)
+    ctx.put_objects_with_provider_events(&[plan_object, environment], provider_events, observations)
         .await
 }
 

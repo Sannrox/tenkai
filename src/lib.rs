@@ -174,6 +174,7 @@ pub mod environment;
 pub mod environment_config;
 pub mod exports;
 pub mod federated_identity;
+pub mod feedback_observation;
 pub mod fenced_mutation;
 pub mod fleet;
 pub mod fleet_budget;

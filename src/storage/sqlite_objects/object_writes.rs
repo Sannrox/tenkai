@@ -1,4 +1,5 @@
 use super::*;
+use crate::feedback_observation::FeedbackObservation;
 
 impl SqliteStore {
     pub fn get_object(&self, id: &str) -> AnyResult<Option<Object>> {
@@ -98,6 +99,7 @@ impl SqliteStore {
         &self,
         objects: &[Object],
         events: &[ProviderEventRecord],
+        observations: &[FeedbackObservation],
         lease: Option<(&str, &str, &str)>,
     ) -> AnyResult<()> {
         anyhow::ensure!(!objects.is_empty(), "embedded object update is empty");
@@ -132,16 +134,46 @@ impl SqliteStore {
         for event in events {
             enqueue_provider_event_in(&tx, event).map_err(anyhow::Error::from)?;
         }
+        for observation in observations {
+            // Usually a failed statement rolls back alone and the operation
+            // still commits (#802). Some errors, such as a full disk, roll
+            // back the whole transaction: then the operation is written
+            // again without its observations.
+            if let Err(error) = insert_feedback_observation_in(&tx, observation) {
+                eprintln!(
+                    "feedback observation {} was not stored: {error:#}",
+                    observation.id
+                );
+                if tx.is_autocommit() {
+                    drop(tx);
+                    drop(connection);
+                    return self.put_objects_inner(objects, events, &[], lease);
+                }
+            }
+        }
         tx.commit()?;
         Ok(())
     }
 
+    /// Feedback observations of `environment`, oldest first.
+    pub fn feedback_observations(&self, environment: &str) -> AnyResult<Vec<FeedbackObservation>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT body_json FROM feedback_observations
+             WHERE environment_id=?1 ORDER BY observed_at, id",
+        )?;
+        let rows = statement.query_map([environment], |row| row.get::<_, String>(0))?;
+        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    }
+
+    /// Write `object` with `events` and `observations` in one transaction.
     pub fn put_with_provider_events(
         &self,
         object: Object,
         events: &[ProviderEventRecord],
+        observations: &[FeedbackObservation],
     ) -> AnyResult<Object> {
-        self.put_objects_inner(std::slice::from_ref(&object), events, None)?;
+        self.put_objects_inner(std::slice::from_ref(&object), events, observations, None)?;
         Ok(object)
     }
 
@@ -149,8 +181,9 @@ impl SqliteStore {
         &self,
         objects: &[Object],
         events: &[ProviderEventRecord],
+        observations: &[FeedbackObservation],
     ) -> AnyResult<()> {
-        self.put_objects_inner(objects, events, None)
+        self.put_objects_inner(objects, events, observations, None)
     }
 
     pub fn guarded_put_with_provider_events(
@@ -164,6 +197,7 @@ impl SqliteStore {
         self.put_objects_inner(
             std::slice::from_ref(&object),
             events,
+            &[],
             Some((namespace, key, fencing_token)),
         )?;
         Ok(object)
@@ -176,8 +210,14 @@ impl SqliteStore {
         key: &str,
         fencing_token: &str,
         events: &[ProviderEventRecord],
+        observations: &[FeedbackObservation],
     ) -> AnyResult<()> {
-        self.put_objects_inner(objects, events, Some((namespace, key, fencing_token)))
+        self.put_objects_inner(
+            objects,
+            events,
+            observations,
+            Some((namespace, key, fencing_token)),
+        )
     }
 
     pub fn guarded_put(
@@ -211,4 +251,39 @@ impl SqliteStore {
         tx.commit()?;
         Ok(object)
     }
+}
+
+/// Store `observation` unless one with its id exists. An identical replay
+/// changes nothing; a conflicting one is refused and logged, and the
+/// operation it rides with still commits: a capture never interrupts it.
+fn insert_feedback_observation_in(
+    tx: &rusqlite::Transaction<'_>,
+    observation: &FeedbackObservation,
+) -> AnyResult<()> {
+    let body = serde_json::to_string(observation)?;
+    let inserted = tx.execute(
+        "INSERT INTO feedback_observations (id, schema, environment_id, observed_at, body_json)
+         VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(id) DO NOTHING",
+        rusqlite::params![
+            observation.id,
+            observation.schema,
+            observation.environment,
+            observation.observed_at_ms,
+            body
+        ],
+    )?;
+    if inserted == 0 {
+        let stored: String = tx.query_row(
+            "SELECT body_json FROM feedback_observations WHERE id=?1",
+            [&observation.id],
+            |row| row.get(0),
+        )?;
+        if stored != body {
+            eprintln!(
+                "feedback observation {} conflicts with the stored one; kept the stored observation",
+                observation.id
+            );
+        }
+    }
+    Ok(())
 }
