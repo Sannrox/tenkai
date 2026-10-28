@@ -2621,6 +2621,13 @@ inputs = ["docker"]
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// Budget for the fixture's one-shot job. Each fake docker call is a
+    /// Python process, which can take over a second to start on a busy
+    /// machine, and the budget runs from spawn, so a 1s budget timed out jobs
+    /// that were succeeding (#789). Tests that need a timeout and then a
+    /// successful retry on the same release wait this budget out.
+    const JOB_TIMEOUT_SECS: u64 = 10;
+
     fn write_job_release(root: &Path, version: &str) -> DockerHostTopology {
         write_release(root, version, DIGEST_B);
         let mut topology = sample_topology();
@@ -2635,7 +2642,9 @@ inputs = ["docker"]
         topology.containers[1].env_file = None;
         topology.containers[1].health = None;
         topology.containers[1].ports.clear();
-        topology.containers[1].mode = DockerContainerMode::OneShot { timeout_secs: 1 };
+        topology.containers[1].mode = DockerContainerMode::OneShot {
+            timeout_secs: JOB_TIMEOUT_SECS,
+        };
         topology.containers[1].depends_on = vec![DockerDependency::Conditional {
             container: "db".into(),
             condition: DockerDependencyCondition::Healthy,
