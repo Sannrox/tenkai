@@ -3499,6 +3499,7 @@ install = "true"
             repository: "edge/app".into(),
             digest: sha256_digest(bytes),
             media_type: "application/vnd.oci.image.layer.v1.tar".into(),
+            sbom: None,
         }
     }
 
@@ -4144,6 +4145,7 @@ install = "true"
             repository: "other/app".into(),
             digest: catalog_artifact.digest.clone(),
             media_type: catalog_artifact.media_type.clone(),
+            sbom: None,
         };
         let (toml, signature, trust, release_digest, artifact_digest) =
             sign_catalog_for_layer(&root, &catalog_artifact, "");
@@ -4489,6 +4491,7 @@ install = "true"
             repository: "other/app".into(),
             digest: catalog_artifact.digest.clone(),
             media_type: catalog_artifact.media_type.clone(),
+            sbom: None,
         };
         let plan = signed_first_install_plan(
             "dark-1",

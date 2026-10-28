@@ -323,6 +323,7 @@ impl<'a> WeightSource<'a> {
                 repository: repository.into(),
                 digest: digest.into(),
                 media_type: MODEL_WEIGHTS_MEDIA_TYPE.into(),
+                sbom: None,
             };
             reference.validate()?;
             return Ok(Self::Oci(reference));

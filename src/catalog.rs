@@ -1317,6 +1317,7 @@ install = "true"
             repository: "edge/app".into(),
             digest: format!("sha256:{:x}", Sha256::digest(bytes)),
             media_type: "application/vnd.oci.image.layer.v1.tar".into(),
+            sbom: None,
         }
     }
 
@@ -1341,8 +1342,15 @@ registry = "{}"
 repository = "{}"
 digest = "{}"
 media_type = "{}"
-"#,
-                artifact.registry, artifact.repository, artifact.digest, artifact.media_type
+{}"#,
+                artifact.registry,
+                artifact.repository,
+                artifact.digest,
+                artifact.media_type,
+                artifact.sbom.as_ref().map_or(String::new(), |sbom| format!(
+                    "sbom = {{ digest = \"{}\", media_type = \"{}\" }}\n",
+                    sbom.digest, sbom.media_type
+                ))
             ),
         )
         .unwrap();
@@ -1375,6 +1383,52 @@ media_type = "{}"
         .to_string();
         assert!(err.contains(&artifact.digest), "{err}");
         assert!(err.contains("unresolvable"), "{err}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A release can declare an SBOM per artifact (#804): it is stored with
+    /// the release, and changing only its digest changes the release identity.
+    #[tokio::test]
+    async fn publication_stores_a_declared_sbom_and_binds_it_into_the_identity() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-oci-publish-sbom-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let sbom = |byte: &str| crate::oci_artifact::SbomRef {
+            digest: format!("sha256:{}", byte.repeat(32)),
+            media_type: "application/spdx+json".into(),
+        };
+        let mut first = sample_oci_ref(b"payload-a");
+        first.sbom = Some(sbom("aa"));
+        let mut second = first.clone();
+        second.sbom = Some(sbom("bb"));
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let registry = std::sync::Arc::new(crate::oci_artifact::MemoryArtifactRegistry::new());
+        registry.put(&first, b"payload-a".to_vec()).unwrap();
+        let mut digests = Vec::new();
+        for (version, artifact) in [("1.0.0", &first), ("1.0.1", &second)] {
+            write_oci_manifest(&root, version, artifact);
+            publish(
+                &mut ctx,
+                &root.join("tenkai.toml"),
+                &PublishOptions {
+                    allow_unsigned_development: true,
+                    artifact_registry: Some(registry.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            let release = ctx.get(&release_id("api", version)).await.unwrap().unwrap();
+            let stored: Vec<crate::oci_artifact::OciArtifactRef> =
+                serde_json::from_str(&release.properties["oci_artifacts"]).unwrap();
+            assert_eq!(stored, vec![artifact.clone()]);
+            digests.push(release.properties["artifact_digest"].clone());
+        }
+        assert_ne!(digests[0], digests[1]);
         let _ = std::fs::remove_dir_all(root);
     }
 
