@@ -61,7 +61,7 @@ it ([ADR 0001](decisions/0001-standalone-core-and-service-evolution.md),
 | Fixed-replica Shikigami worker-pool lifecycle | [Worker pools](worker-pool.md); [ADR 0011](decisions/0011-shikigami-worker-pool-lifecycle.md); [ADR 0028](decisions/0028-live-worker-lifecycle-port.md); #284 / #336 |
 | Connectivity-class upgrades | [Connectivity upgrades](connectivity-upgrades.md); [ADR 0020](decisions/0020-connectivity-class-upgrade.md); #287 |
 | Governed package migrations | [Package migrations](package-migrations.md); [ADR 0024](decisions/0024-package-migration.md); #289, #334 |
-| Signed stateful upgrade crash-recovery drill | [Package migrations](package-migrations.md#signed-stateful-upgrade-drill); `./scripts/stateful-upgrade-drill.sh`; #334 |
+| Signed stateful upgrade crash-recovery drill | [Package migrations](package-migrations.md#signed-stateful-upgrade-drill); `bash scripts/stateful-upgrade-drill.sh`; #334 |
 | Runtime capability negotiation at startup | [Runtime capabilities](runtime-capabilities.md) |
 | Multi-replica / HA capability profile (decision) | [ADR 0009](decisions/0009-multi-replica-reconcile-and-ha-profile.md); #109 |
 | AuthStack management HTTP + federation accept path | [Auth context](auth-request-context.md), [federated identity](federated-identity.md); #68, #71 |
