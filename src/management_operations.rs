@@ -320,6 +320,7 @@ impl ManagementOperations {
         self.refuse_agent(&context, "backup.take")?;
         Self::require_capability(&context, DeliveryCapability::Management)?;
         self.require_environment_grant(credential, &context, None, "backup")?;
+        self.refuse_tenant_backups()?;
         let actor = &context.audit_principal();
         self.audit(actor, "backup.take.requested")?;
         let manifest = tokio::task::spawn_blocking(move || backups.take(crate::now_millis()))
@@ -339,6 +340,7 @@ impl ManagementOperations {
         let context = self.authenticate(credential)?;
         Self::require_capability(&context, DeliveryCapability::Read)?;
         self.require_environment_grant(credential, &context, None, "backup status")?;
+        self.refuse_tenant_backups()?;
         tokio::task::spawn_blocking(move || backups.status())
             .await
             .map_err(|error| ManagementError::Internal(error.to_string()))?
@@ -1229,6 +1231,18 @@ impl ManagementOperations {
                 "environment-scoped credentials cannot call fleet-wide {operation}"
             ))),
         }
+    }
+
+    /// A tenant-mode hub's backups cover every tenant, and every tenant-mode
+    /// credential belongs to one tenant: none may read or take them.
+    /// Operators record and read PostgreSQL backup evidence on the host.
+    fn refuse_tenant_backups(&self) -> Result<(), ManagementError> {
+        if self.tenant_mode {
+            return Err(ManagementError::Forbidden(
+                "tenant credentials cannot read or take hub-wide backups".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn require_community_catalog_host(&self) -> Result<(), ManagementError> {

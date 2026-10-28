@@ -119,8 +119,9 @@ Default CI does **not** require a Postgres service. Live tests are `#[ignore]`.
   `tenkai_t_*`.
 - A lab restore stops writers, restores that database, starts one server, and
   verifies `/readyz`.
-- `TENKAI_BACKUP_DIR` is refused in tenant mode; SQLite `tenkaictl backup` is
-  the community path.
+- In tenant mode `TENKAI_BACKUP_DIR` holds recorded backup evidence only
+  ([PostgreSQL backup evidence](backup-restore.md#postgresql-backup-evidence));
+  SQLite `tenkaictl backup` is the community path.
 - Do not confuse with environment runtime state or identity-plane backups.
 
 ## `tenkai-server` wiring (#127)

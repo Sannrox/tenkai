@@ -280,6 +280,25 @@ pub(crate) enum Command {
         /// Where the scratch store is created and removed again (default: the temp directory).
         #[arg(long)]
         scratch_dir: Option<PathBuf>,
+        /// Refuse unless the manifest carries a signature by one of these signers.
+        #[arg(long)]
+        trust_roots: Option<PathBuf>,
+    },
+    /// Record a database-native backup of a tenant-mode hub's PostgreSQL
+    /// store in the hub's backup directory and print the backup status.
+    /// Tenkai does not copy the database; health reports the age of this evidence.
+    BackupEvidence {
+        /// The hub's `TENKAI_BACKUP_DIR`.
+        dir: PathBuf,
+        /// The backup file; its name, sha256 and size are recorded.
+        #[arg(long)]
+        backup: PathBuf,
+        /// What took the backup, such as the dump tool and its version.
+        #[arg(long)]
+        tool: String,
+        /// When the backup was taken (default: now).
+        #[arg(long)]
+        taken_at_ms: Option<i64>,
     },
     /// Roll a product back to its previously deployed version.
     Rollback {

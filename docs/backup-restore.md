@@ -47,14 +47,41 @@ synced before they are renamed into place.
   file cannot be read (the next backup writes a new one). A stale backup degrades health
   but does not fail readiness, because the server can still do its work.
   Alert on `backup.state`.
-- Tenant-mode hubs keep their state in PostgreSQL; back it up with
-  PostgreSQL's own tools. `TENKAI_BACKUP_DIR` is refused there.
+- With `TENKAI_BACKUP_SIGNING_KEY`, each manifest gets a detached
+  `tenkai-backup-<ms>.sig` signature over its exact bytes, written before the
+  database appears and removed with it by retention.
+
+## PostgreSQL backup evidence
+
+Tenant-mode hubs keep their state in PostgreSQL. Tenkai does not copy that
+database: back it up with PostgreSQL's own tools, then record each backup as
+evidence in the hub's `TENKAI_BACKUP_DIR`:
+
+```bash
+tenkaictl backup-evidence /srv/tenkai/backups --backup /secure/hub-20261028.dump --tool "pg_dump 17"
+```
+
+The command records the file name, `sha256`, size, tool and time
+(`--taken-at-ms`, default now) as the last success in `status.json`, and
+prints the status. Evidence older than the last success changes nothing.
+`/healthz` and `/readyz` report its age as `backup.state`, `missing` until the
+first record and `stale` past `TENKAI_BACKUP_MAX_AGE_SECS` (default 172800).
+Every replica must read the same directory.
+
+Recording is a host action. Every tenant-mode credential belongs to one
+tenant, and hub backups cover all of them, so `/v1/backups` refuses tenant
+credentials. The interval, retention and signing settings are refused in
+tenant mode, because the hub takes no backups itself.
 
 ## Restore drill
 
 ```bash
 tenkaictl restore-drill /secure/backups/tenkai-backup-1761200000000.db --scratch-dir /var/tmp/tenkai-drill
 ```
+
+With `--trust-roots <release-trust.toml>` (release signer roots), the drill
+first refuses a backup whose manifest signature is missing or does not verify
+against one of those signers, so a copy moved off-host can be authenticated.
 
 The drill checks the backup against its manifest, restores it into a
 scratch store, opens it on this Tenkai version (running its migrations),
