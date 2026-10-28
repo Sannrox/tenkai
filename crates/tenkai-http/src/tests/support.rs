@@ -117,6 +117,8 @@ impl ReconcilePort for FixedReconciler {
                 latest_plan: None,
                 maintenance: None,
                 constraints: Vec::new(),
+                webhooks: Vec::new(),
+                approval_policy: None,
                 terminal_outcomes: Vec::new(),
                 execution_note: "fixture".into(),
                 observed_type_digest: None,

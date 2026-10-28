@@ -36,7 +36,9 @@ and run the same validation as the embedded commands. Every change is
 audited with the authenticated actor and the reason. An
 environment-scoped token can configure only its own environment and cannot
 register environments. The `list` and `show` commands stay embedded; remote
-`env inspect` shows the same configuration.
+`env inspect` shows the same configuration, including `webhooks` (URL,
+`secret_env` and events; never a secret value) and `approval_policy`, the
+policy file path, so a client can read what it edits (#820).
 
 ```bash
 tenkaictl --target remote env add edge --connectivity isolated --reason "new site"

@@ -1078,6 +1078,16 @@ pub struct EnvironmentInspectReport {
     /// Environment constraints (`version_pin`, `version_range`, `require_fact`).
     #[serde(default)]
     pub constraints: Vec<EnvironmentConstraint>,
+    /// Configured post-deploy webhooks (#820): URL, the name of the variable
+    /// holding the HMAC secret, and events. The secret itself is never stored
+    /// or returned. Edits are conditional on `lease.generation`.
+    #[serde(default)]
+    pub webhooks: Vec<crate::deploy_webhook::WebhookEndpoint>,
+    /// The plan approval policy file this environment uses, as configured,
+    /// when one is set (#820).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub approval_policy: Option<String>,
     /// Bounded terminal-outcome identities and outbox delivery state. Event
     /// payloads and retry errors are intentionally excluded.
     #[serde(default)]
@@ -1423,6 +1433,8 @@ pub async fn fleet_status(ctx: &mut Ctx) -> Result<FleetStatusReport> {
             latest_plan: None,
             maintenance: None,
             constraints: Vec::new(),
+            webhooks: Vec::new(),
+            approval_policy: None,
             terminal_outcomes: Vec::new(),
             execution_note: String::new(),
             observed_type_digest: None,
@@ -1487,6 +1499,12 @@ async fn inspect_environment_base(
     )
     .await?;
     let constraints = environment_constraints_from_object(&env_obj);
+    let webhooks = crate::deploy_webhook::parse_endpoints(&env_obj)
+        .with_context(|| format!("reading the webhooks of environment {env}"))?;
+    let approval_policy = env_obj
+        .properties
+        .get(crate::approval_policy::PLAN_APPROVAL_POLICY_PROPERTY)
+        .cloned();
     let now = chrono::DateTime::from_timestamp_millis(crate::now_millis())
         .context("current time is outside the supported maintenance-window range")?;
     let maintenance = maintenance_inspect(crate::maintenance::list(ctx, env).await, now);
@@ -1505,6 +1523,8 @@ async fn inspect_environment_base(
         latest_plan,
         maintenance: Some(maintenance),
         constraints,
+        webhooks,
+        approval_policy,
         terminal_outcomes: Vec::new(),
         execution_note: "Apply leases and runtime credentials are distinct; inspect never prints bearer tokens. Server-side runtime-token environments are not executed by the embedded server executor."
             .into(),

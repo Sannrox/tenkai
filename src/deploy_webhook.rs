@@ -122,7 +122,7 @@ impl WebhookEvent {
 
 /// Operator-facing endpoint configuration. The HMAC secret is never stored;
 /// `secret_env` names a process environment variable.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WebhookEndpoint {
     pub url: String,
     pub secret_env: String,
