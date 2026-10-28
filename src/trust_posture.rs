@@ -61,6 +61,18 @@ pub struct TrustSources {
     pub critical_days: u32,
     /// `TENKAI_TLS_REQUIRE_RUNTIME_CLIENT_CERT`, as the listener enforces it.
     pub runtime_client_cert_required: bool,
+    /// Trust roots a verifier loaded once at start rather than reading its
+    /// file per use (#811), shown as `source: "loaded"` beside the file.
+    pub loaded_signing: Vec<LoadedSigning>,
+}
+
+/// Signers a verifier holds in memory: `(key id, identity)` pairs.
+#[derive(Debug, Clone, Default)]
+pub struct LoadedSigning {
+    pub purpose: String,
+    /// Shown in place of a file name.
+    pub name: String,
+    pub signers: Vec<(String, String)>,
 }
 
 impl TrustSources {
@@ -169,13 +181,31 @@ pub enum TrustSource {
 pub struct SigningRoot {
     pub purpose: String,
     pub file: String,
-    /// Trust-root files are read as they are on disk.
+    /// `file`: read from disk per request, as release, bundle-import and
+    /// revocation-authority verifiers read it per use. `loaded`: what a
+    /// verifier loaded at start (package-migration approvals), which adopts
+    /// a changed file only after a restart (#811).
     pub source: TrustSource,
+    /// Trust-root files carry no signer validity period, so a signer is
+    /// trusted until removed or revoked (#811).
+    #[serde(default)]
+    pub signer_validity: SignerValidity,
     pub signers: Vec<TrustedSignerView>,
     /// Why the file could not be read, when it could not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub error: Option<String>,
+}
+
+/// Whether a trust root's format records when each signer is valid.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SignerValidity {
+    /// Trust-root format v1 has no `not_before` or `not_after` per signer.
+    #[default]
+    NotRecorded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -195,6 +225,16 @@ pub struct InstalledRevocations {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub signer_key_id: Option<String>,
+    /// When the authority signed the list, Unix milliseconds (#811).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub issued_at: Option<i64>,
+    /// When the installed file was last written, Unix milliseconds: an
+    /// install or bundle import replaces it, and the process applies it at
+    /// start (#811).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub installed_at: Option<i64>,
     pub revoked_keys: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
@@ -242,7 +282,7 @@ fn redacted(error: &anyhow::Error, path: &Path) -> String {
 /// A certificate that lapses before an environment's next maintenance window
 /// opens, so a plan waiting for that window would fail at apply time (#778).
 /// Advisory: it never blocks the plan or changes its steps.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CredentialRunway {
     /// The certificate's purpose, with its subject when readable.
     pub credential: String,
@@ -292,6 +332,73 @@ pub fn runway(
         })
 }
 
+/// The certificate that lapses before a closed environment's next window
+/// opens, when this host knows its trust sources (#778). An open or
+/// unrestricted environment applies now, so it has no runway to check. Plan
+/// creation and `GET /v1/trust/runway` both use this.
+pub(crate) fn environment_runway(
+    ctx: &crate::client::Ctx,
+    maintenance: Option<&crate::environment::EnvironmentMaintenanceInspect>,
+) -> Option<CredentialRunway> {
+    let sources = ctx.trust_sources()?;
+    let opens_at_ms = maintenance
+        .filter(|maintenance| maintenance.eligibility == "closed")?
+        .next_opens_at_ms?;
+    runway(sources, crate::now_millis(), opens_at_ms)
+}
+
+/// A plan waiting to apply and the first certificate that would lapse
+/// before it can (#811).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PlanRunway {
+    pub plan_id: String,
+    pub environment: String,
+    /// `computed` or `blocked`.
+    pub plan_state: String,
+    /// When the plan can next apply: the environment's next maintenance
+    /// window, Unix milliseconds. Absent when it may apply now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub window_opens_at_ms: Option<i64>,
+    /// The first TLS certificate to lapse at or before that window. Absent
+    /// when none does. Signers are not checked: trust roots record no
+    /// signer validity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub blocked_by: Option<CredentialRunway>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PlanRunways {
+    pub plans: Vec<PlanRunway>,
+}
+
+/// The runway of each environment's latest plan that has yet to apply,
+/// computed now with [`environment_runway`].
+pub async fn plan_runways(ctx: &mut crate::client::Ctx) -> anyhow::Result<PlanRunways> {
+    let mut plans = Vec::new();
+    for entry in crate::environment::list_environments(ctx).await? {
+        let inspect = crate::environment::inspect_environment(ctx, &entry.name).await?;
+        let Some(plan) = inspect
+            .latest_plan
+            .filter(|plan| matches!(plan.state.as_str(), "computed" | "blocked"))
+        else {
+            continue;
+        };
+        let maintenance = inspect.maintenance.as_ref();
+        plans.push(PlanRunway {
+            plan_id: plan.id,
+            environment: entry.name,
+            plan_state: plan.state,
+            window_opens_at_ms: maintenance
+                .filter(|maintenance| maintenance.eligibility == "closed")
+                .and_then(|maintenance| maintenance.next_opens_at_ms),
+            blocked_by: environment_runway(ctx, maintenance),
+        });
+    }
+    Ok(PlanRunways { plans })
+}
+
 /// The posture of `sources` at `now_secs`.
 pub fn posture(sources: &TrustSources, now_secs: i64) -> TrustPosture {
     let revoked = installed_revocations(sources);
@@ -304,6 +411,7 @@ pub fn posture(sources: &TrustSources, now_secs: i64) -> TrustPosture {
                     purpose: purpose.clone(),
                     file: file_name(path),
                     source: TrustSource::File,
+                    signer_validity: SignerValidity::NotRecorded,
                     signers: roots
                         .signers
                         .into_iter()
@@ -319,11 +427,30 @@ pub fn posture(sources: &TrustSources, now_secs: i64) -> TrustPosture {
                     purpose: purpose.clone(),
                     file: file_name(path),
                     source: TrustSource::File,
+                    signer_validity: SignerValidity::NotRecorded,
                     signers: Vec::new(),
                     error: Some(redacted(&error, path)),
                 },
             },
         )
+        .chain(sources.loaded_signing.iter().map(|loaded| {
+            SigningRoot {
+                purpose: loaded.purpose.clone(),
+                file: loaded.name.clone(),
+                source: TrustSource::Loaded,
+                signer_validity: SignerValidity::NotRecorded,
+                signers: loaded
+                    .signers
+                    .iter()
+                    .map(|(key_id, identity)| TrustedSignerView {
+                        revoked: crate::key_revocation::is_revoked(key_id),
+                        key_id: key_id.clone(),
+                        identity: identity.clone(),
+                    })
+                    .collect(),
+                error: None,
+            }
+        }))
         .collect();
     let tls: Vec<CertificateEntry> = sources
         .certificates
@@ -340,11 +467,13 @@ pub fn posture(sources: &TrustSources, now_secs: i64) -> TrustPosture {
         critical_days: sources.critical_days,
         runtime_client_cert_required: sources.runtime_client_cert_required,
         signing,
-        revocation_list: revoked.map(|(file, list)| match list {
+        revocation_list: revoked.map(|(file, installed_at, list)| match list {
             Ok(list) => InstalledRevocations {
                 file,
                 sequence: Some(list.statement.sequence),
                 signer_key_id: Some(list.key_id.clone()),
+                issued_at: Some(list.statement.issued_at),
+                installed_at,
                 revoked_keys: list.statement.revoked.len(),
                 error: None,
             },
@@ -352,6 +481,8 @@ pub fn posture(sources: &TrustSources, now_secs: i64) -> TrustPosture {
                 file,
                 sequence: None,
                 signer_key_id: None,
+                issued_at: None,
+                installed_at,
                 revoked_keys: 0,
                 error: Some(error),
             },
@@ -360,8 +491,10 @@ pub fn posture(sources: &TrustSources, now_secs: i64) -> TrustPosture {
     }
 }
 
+/// File name, when it was last written (Unix ms), and the verified list.
 type Revocations = (
     String,
+    Option<i64>,
     Result<crate::key_revocation::RevocationList, String>,
 );
 
@@ -382,10 +515,14 @@ fn installed_revocations(sources: &TrustSources) -> Option<Revocations> {
                 .map_err(|error| format!("{} does not verify: {error:#}", file_name(path)))?;
             Ok(list)
         });
-    Some((file_name(path), verified))
+    let installed_at = std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+        .and_then(|since| i64::try_from(since.as_millis()).ok());
+    Some((file_name(path), installed_at, verified))
 }
 
-/// One entry per certificate in `source`.
 /// `AB:CD:…`, the SHA-256 of `der` as `openssl x509 -fingerprint -sha256`.
 fn fingerprint(der: &[u8]) -> String {
     use sha2::Digest as _;
@@ -396,6 +533,7 @@ fn fingerprint(der: &[u8]) -> String {
         .join(":")
 }
 
+/// One entry per certificate in `source`.
 fn certificates(
     purpose: &str,
     source: &CertificateSource,
@@ -624,6 +762,96 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// #811: the revocation list reports when it was signed and when it was
+    /// installed; signers state that their validity is not recorded; a root
+    /// a verifier loaded at start is listed as `loaded` beside the file.
+    #[test]
+    fn reports_revocation_times_signer_validity_and_loaded_roots() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = scratch("trust-revocations");
+        let seed = [41u8; 32];
+        let seed_path = dir.join("authority.ed25519");
+        std::fs::write(&seed_path, seed).unwrap();
+        std::fs::set_permissions(&seed_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let public = ed25519_dalek::SigningKey::from_bytes(&seed)
+            .verifying_key()
+            .to_bytes();
+        let authorities = crate::release_signing::TrustRoots {
+            version: crate::release_signing::TRUST_ROOT_VERSION,
+            signers: vec![crate::release_signing::TrustedSigner {
+                key_id: crate::release_signing::key_id(&public),
+                identity: "revocation-authority".into(),
+                public_key: {
+                    use base64::Engine as _;
+                    base64::engine::general_purpose::STANDARD.encode(public)
+                },
+            }],
+        };
+        let roots_path = dir.join("authorities.toml");
+        std::fs::write(&roots_path, toml::to_string(&authorities).unwrap()).unwrap();
+        let list = crate::key_revocation::sign(
+            crate::key_revocation::RevocationStatement {
+                sequence: 3,
+                issued_at: 1_700_000_000_000,
+                revoked: Vec::new(),
+            },
+            &seed_path,
+        )
+        .unwrap();
+        let installed = dir.join("revocations.json");
+        let before = crate::now_millis();
+        crate::key_revocation::install(&list, &authorities, &installed).unwrap();
+        let after = crate::now_millis();
+
+        let shown = posture(
+            &TrustSources {
+                signing: vec![("key_revocation".into(), roots_path)],
+                revocations: Some((installed, dir.join("authorities.toml"))),
+                loaded_signing: vec![LoadedSigning {
+                    purpose: "package_migration_approval".into(),
+                    name: "package migration trust roots in use".into(),
+                    signers: vec![("ed25519:loaded".into(), "approver".into())],
+                }],
+                ..TrustSources::default()
+            },
+            time::OffsetDateTime::now_utc().unix_timestamp(),
+        );
+        let revocations = shown.revocation_list.unwrap();
+        assert_eq!(revocations.error, None);
+        assert_eq!(revocations.sequence, Some(3));
+        assert_eq!(revocations.issued_at, Some(1_700_000_000_000));
+        let installed_at = revocations.installed_at.unwrap();
+        // File times may round down to the second.
+        assert!(
+            (before - 1_000..=after).contains(&installed_at),
+            "{before} <= {installed_at} <= {after}"
+        );
+        let sources: Vec<_> = shown
+            .signing
+            .iter()
+            .map(|root| (root.purpose.as_str(), root.source, root.signer_validity))
+            .collect();
+        assert_eq!(
+            sources,
+            [
+                (
+                    "key_revocation",
+                    TrustSource::File,
+                    SignerValidity::NotRecorded
+                ),
+                (
+                    "package_migration_approval",
+                    TrustSource::Loaded,
+                    SignerValidity::NotRecorded
+                ),
+            ]
+        );
+        assert_eq!(shown.signing[1].signers[0].identity, "approver");
+        let body = serde_json::to_value(&shown.signing[0]).unwrap();
+        assert_eq!(body["signer_validity"], "not_recorded");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// A fixed CA and the fingerprint `openssl x509 -fingerprint -sha256`
     /// printed for it.
     const FIXTURE_CA: &str = "-----BEGIN CERTIFICATE-----
@@ -754,6 +982,7 @@ IQDZq+YO1/tDxcu5xN5Lo9z7V6C39Ey9tLwLOK4Lqlybog==
             warning_days: 30,
             critical_days: 7,
             runtime_client_cert_required: false,
+            loaded_signing: Vec::new(),
         };
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
         let shown = posture(&sources, now);

@@ -330,6 +330,11 @@ this host trusts and how long its certificates last (#676):
   `package_migration_approval`, `bundle_import`, `key_revocation`) with its
   signers' key ids and identities, each marked `revoked` when the installed
   key revocation list revokes it, and that list's sequence and signer.
+  The list also carries `issued_at`, when its authority signed it, and
+  `installed_at`, when the installed file was last written by an install
+  or bundle import (#811). Trust-root files record no signer validity, so
+  each root says `signer_validity: "not_recorded"`: a signer is trusted
+  until it is removed or revoked.
 - **TLS.** Every certificate in the listener chain (`TENKAI_TLS_CERT`), the
   TLS client CA, the runner CA and the outbound CA bundle
   (`TENKAI_CA_BUNDLE`), with subject, `not_after`, days left and a status:
@@ -343,16 +348,26 @@ this host trusts and how long its certificates last (#676):
 
 Each entry says its `source`: `loaded` is the material the server uses
 now (the listener chain, client CA and runner CA), so a renewal that
-failed to load keeps its warning; `file` is a file as it is on disk (trust
-roots, the outbound CA bundle), which a client that read it at startup
-uses only once restarted. After replacing such a file, restart the server
-for it to take effect. Signer
+failed to load keeps its warning; `file` is a file as it is on disk.
+Release, bundle-import and revocation-authority trust roots are read from
+disk on each use, so their `file` entry is what is in force. The
+package-migration approval roots are loaded once at start: they appear
+twice, as `file` and as `loaded`, and a changed file takes effect after a
+restart (#811). Outbound clients read the CA bundle at start, so restart
+after replacing it. Signer
 `revoked` flags follow the revocations this process enforces, and the
 installed list is shown only once it verifies against its authorities.
 The worst certificate status also appears on `/readyz` as `trust`, from a
 snapshot refreshed every minute, without failing readiness. Only public
 certificates and trust roots are read, never key files, and files are
 named without their directories.
+**Runway (#811).** `GET /v1/trust/runway` (same audience) lists each
+environment's latest plan that has yet to apply (`computed` or `blocked`),
+the next maintenance window it waits for (`window_opens_at_ms`, absent when
+it may apply now), and `blocked_by`: the first TLS certificate that lapses
+at or before that window. It is computed on each request with the same
+check plan creation uses ([maintenance windows](manage-environments.md#maintenance-windows)).
+Signers are not checked, as trust roots record no signer validity.
 **Announcements (#775).** When the worst certificate status turns
 `warning`, `critical` or `expired`, host webhooks that list `trust.expiring`
 are notified once per turn, as for `backup.stale` and `clock.drift`.

@@ -1352,7 +1352,7 @@ mod tests {
         let sources = crate::trust_posture::TrustSources {
             certificates: vec![(
                 "listener".into(),
-                crate::trust_posture::CertificateSource::File(listener),
+                crate::trust_posture::CertificateSource::File(listener.clone()),
             )],
             warning_days: 30,
             critical_days: 7,
@@ -1390,6 +1390,25 @@ mod tests {
             .expect("runway flagged");
         assert_eq!(flagged.credential, "listener (CN=rcgen self signed cert)");
         assert!(flagged.expires_at_ms < flagged.window_opens_at_ms);
+
+        // #811: the read route lists the waiting plan as blocked by the
+        // certificate, and once it outlasts the window, as not blocked.
+        let runways = crate::trust_posture::plan_runways(&mut ctx).await.unwrap();
+        let [listed] = runways.plans.as_slice() else {
+            panic!("one waiting plan: {runways:?}");
+        };
+        assert_eq!(listed.environment, "prod");
+        assert_eq!(listed.window_opens_at_ms, Some(flagged.window_opens_at_ms));
+        assert_eq!(listed.blocked_by.as_ref(), Some(&flagged));
+        params.not_after = now + time::Duration::days(30);
+        std::fs::write(&listener, params.self_signed(&key).unwrap().pem()).unwrap();
+        let runways = crate::trust_posture::plan_runways(&mut ctx).await.unwrap();
+        assert_eq!(runways.plans.len(), 1);
+        assert_eq!(runways.plans[0].blocked_by, None);
+        assert_eq!(
+            runways.plans[0].window_opens_at_ms,
+            Some(flagged.window_opens_at_ms)
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
