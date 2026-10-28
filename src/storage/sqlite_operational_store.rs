@@ -249,6 +249,17 @@ impl OperationalStore for SqliteStore {
         self.append_change_event_sqlite(occurred_at, kind, resource, environment_id)
     }
 
+    fn append_change_event_once(
+        &self,
+        occurred_at: i64,
+        kind: crate::change_stream::ChangeEventKind,
+        resource: &str,
+        since: i64,
+        only_after_another: bool,
+    ) -> Result<Option<crate::change_stream::ChangeEvent>> {
+        self.append_change_event_once_sqlite(occurred_at, kind, resource, since, only_after_another)
+    }
+
     fn list_change_events_after(
         &self,
         cursor: i64,

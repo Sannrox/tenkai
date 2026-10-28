@@ -207,6 +207,23 @@ impl OperationalStore for PostgresTenantPartition {
         self.inner
             .append_change_event(&self.schema, occurred_at, kind, resource, environment_id)
     }
+    fn append_change_event_once(
+        &self,
+        occurred_at: i64,
+        kind: tenkai::change_stream::ChangeEventKind,
+        resource: &str,
+        since: i64,
+        only_after_another: bool,
+    ) -> Result<Option<ChangeEvent>> {
+        self.inner.append_change_event_once(
+            &self.schema,
+            occurred_at,
+            kind,
+            resource,
+            since,
+            only_after_another,
+        )
+    }
     fn list_change_events_after(&self, cursor: i64, limit: usize) -> Result<Vec<ChangeEvent>> {
         self.inner
             .list_change_events_after(&self.schema, cursor, limit)

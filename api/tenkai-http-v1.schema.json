@@ -417,7 +417,8 @@
         "release_published",
         "release_promoted",
         "release_recalled",
-        "compatibility_result_recorded"
+        "compatibility_result_recorded",
+        "trust_threshold_crossed"
       ],
       "type": "string"
     },

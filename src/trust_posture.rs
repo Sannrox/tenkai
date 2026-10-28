@@ -80,6 +80,76 @@ pub struct TrustPosture {
     pub tls: Vec<CertificateEntry>,
 }
 
+/// The worst certificate status and when it began, kept for health probes
+/// and change-event announcements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrustSnapshot {
+    pub status: TrustStatus,
+    /// Unix milliseconds at which the earliest certificate at `status`
+    /// crossed into it, from its expiry and the threshold; `0` when unknown,
+    /// as for an unreadable certificate.
+    pub since_ms: i64,
+}
+
+impl TrustPosture {
+    pub fn snapshot(&self) -> TrustSnapshot {
+        let days = |status| match status {
+            TrustStatus::Warning => i64::from(self.warning_days),
+            TrustStatus::Critical => i64::from(self.critical_days),
+            TrustStatus::Ok | TrustStatus::Expired => 0,
+        };
+        // Grading turns `warning` once `not_after - now` falls below the
+        // threshold, so that instant is exact, not rounded to a day.
+        let since_ms = self
+            .tls
+            .iter()
+            .filter(|entry| entry.status == self.status)
+            .map(|entry| {
+                entry.not_after.map_or(0, |not_after| {
+                    (not_after - days(entry.status) * 86_400).saturating_mul(1_000)
+                })
+            })
+            .min()
+            .unwrap_or(0);
+        TrustSnapshot {
+            status: self.status,
+            since_ms,
+        }
+    }
+}
+
+/// Append one `trust_threshold_crossed` change event, resource
+/// `trust/<status>`, when the worst certificate status is `warning`,
+/// `critical` or `expired` and this crossing has not been announced, and
+/// `trust/ok` when it returns to `ok` after one (#784).
+///
+/// Nothing is remembered in memory: the store skips the append while its
+/// latest trust event names the same status, so a restart or a writer
+/// takeover does not repeat it. The `trust/ok` marker is what lets the next
+/// crossing into the same status count, even for an unreadable certificate,
+/// whose crossing time is unknown. A crossing the latest event predates (a
+/// renewed certificate that lapsed again while no writer ran) counts too.
+pub fn announce_crossing(
+    store: &dyn crate::storage::OperationalStore,
+    snapshot: TrustSnapshot,
+    now_ms: i64,
+) -> crate::storage::Result<Option<crate::change_stream::ChangeEvent>> {
+    let (status, since, only_after_another) = match snapshot.status {
+        // Recovery is recorded only after an announcement, at most once.
+        TrustStatus::Ok => ("ok", i64::MIN, true),
+        TrustStatus::Warning => ("warning", snapshot.since_ms, false),
+        TrustStatus::Critical => ("critical", snapshot.since_ms, false),
+        TrustStatus::Expired => ("expired", snapshot.since_ms, false),
+    };
+    store.append_change_event_once(
+        now_ms,
+        crate::change_stream::ChangeEventKind::TrustThresholdCrossed,
+        &format!("trust/{status}"),
+        since,
+        only_after_another,
+    )
+}
+
 /// Whether an entry shows material the server loaded and uses, or a file as
 /// it is on disk now, which a client that read it at startup adopts only
 /// once restarted.
@@ -390,6 +460,144 @@ mod tests {
         let path = dir.join(name);
         std::fs::write(&path, params.self_signed(&key).unwrap().pem()).unwrap();
         path
+    }
+
+    fn scratch(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "tenkai-{label}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// #784: each crossing into warning, critical and expired appends one
+    /// change event; a restart (a freshly opened store) does not repeat it,
+    /// and a renewed certificate that lapses again is a new crossing.
+    #[test]
+    fn each_crossing_appends_one_change_event_across_restarts() {
+        use crate::storage::OperationalStore as _;
+        let dir = scratch("trust-crossing");
+        let database = dir.join("tenkai.db");
+        let sources = TrustSources {
+            certificates: vec![(
+                "listener".into(),
+                CertificateSource::File(certificate(&dir, "listener.pem", 20)),
+            )],
+            warning_days: 30,
+            critical_days: 7,
+            ..TrustSources::default()
+        };
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        let day = 86_400;
+        let tick = |at: i64| {
+            let store = crate::storage::SqliteStore::open(&database).unwrap();
+            announce_crossing(&store, posture(&sources, at).snapshot(), at * 1_000)
+                .unwrap()
+                .map(|event| event.resource)
+        };
+        assert_eq!(tick(now).as_deref(), Some("trust/warning"));
+        assert_eq!(tick(now + 60), None);
+        assert_eq!(tick(now + 14 * day).as_deref(), Some("trust/critical"));
+        assert_eq!(tick(now + 15 * day), None);
+        assert_eq!(tick(now + 21 * day).as_deref(), Some("trust/expired"));
+        assert_eq!(tick(now + 22 * day), None);
+        // Renewed: healthy, recorded once, then inside the warning threshold again.
+        certificate(&dir, "listener.pem", 200);
+        assert_eq!(tick(now + 23 * day).as_deref(), Some("trust/ok"));
+        assert_eq!(tick(now + 24 * day), None);
+        assert_eq!(tick(now + 180 * day).as_deref(), Some("trust/warning"));
+        assert_eq!(tick(now + 181 * day), None);
+
+        let store = crate::storage::SqliteStore::open(&database).unwrap();
+        let events = store.list_change_events_after(0, 100).unwrap();
+        assert!(events.iter().all(|event| event.kind
+            == crate::change_stream::ChangeEventKind::TrustThresholdCrossed
+            && event.environment.is_none()));
+        let resources: Vec<_> = events.into_iter().map(|event| event.resource).collect();
+        assert_eq!(
+            resources,
+            [
+                "trust/warning",
+                "trust/critical",
+                "trust/expired",
+                "trust/ok",
+                "trust/warning"
+            ]
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// An unreadable certificate has no crossing time; the `trust/ok` marker
+    /// written when it recovers is what makes its next turn count. A healthy
+    /// host with nothing announced records nothing.
+    #[test]
+    fn an_unreadable_certificate_announces_each_turn_across_restarts() {
+        let dir = scratch("trust-unreadable");
+        let database = dir.join("tenkai.db");
+        let file = dir.join("outbound.pem");
+        let sources = TrustSources {
+            certificates: vec![("outbound_ca".into(), CertificateSource::File(file.clone()))],
+            warning_days: 30,
+            critical_days: 7,
+            ..TrustSources::default()
+        };
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        // Each tick opens the store afresh, as a restarted server would.
+        let tick = |at: i64| {
+            let store = crate::storage::SqliteStore::open(&database).unwrap();
+            announce_crossing(&store, posture(&sources, at).snapshot(), at * 1_000)
+                .unwrap()
+                .map(|event| event.resource)
+        };
+        certificate(&dir, "outbound.pem", 200);
+        assert_eq!(tick(now), None);
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(tick(now + 60).as_deref(), Some("trust/critical"));
+        assert_eq!(tick(now + 120), None);
+        certificate(&dir, "outbound.pem", 200);
+        assert_eq!(tick(now + 180).as_deref(), Some("trust/ok"));
+        assert_eq!(tick(now + 240), None);
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(tick(now + 300).as_deref(), Some("trust/critical"));
+        assert_eq!(tick(now + 360), None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Writers racing on one store, as an old and a new writer across a
+    /// takeover can, append a crossing once.
+    #[test]
+    fn racing_writers_append_a_crossing_once() {
+        use crate::storage::OperationalStore as _;
+        let dir = scratch("trust-race");
+        let database = dir.join("tenkai.db");
+        drop(crate::storage::SqliteStore::open(&database).unwrap());
+        let snapshot = TrustSnapshot {
+            status: TrustStatus::Critical,
+            since_ms: 1_000,
+        };
+        let start = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let appended: usize = (0..4)
+            .map(|writer| {
+                let database = database.clone();
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    let store = crate::storage::SqliteStore::open(&database).unwrap();
+                    start.wait();
+                    announce_crossing(&store, snapshot, 2_000 + writer)
+                        .unwrap()
+                        .is_some()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|writer| usize::from(writer.join().unwrap()))
+            .sum();
+        assert_eq!(appended, 1);
+        let store = crate::storage::SqliteStore::open(&database).unwrap();
+        assert_eq!(store.list_change_events_after(0, 10).unwrap().len(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// A window opening after a certificate lapses is flagged with the first

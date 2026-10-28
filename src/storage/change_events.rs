@@ -37,6 +37,49 @@ impl SqliteStore {
         ))
     }
 
+    /// See [`OperationalStore::append_change_event_once`]: one statement, so
+    /// the check and the insert cannot interleave with another writer.
+    pub(super) fn append_change_event_once_sqlite(
+        &self,
+        occurred_at: i64,
+        kind: ChangeEventKind,
+        resource: &str,
+        since: i64,
+        only_after_another: bool,
+    ) -> Result<Option<ChangeEvent>> {
+        if resource.is_empty() {
+            return Err(StoreError::InvalidData {
+                kind: "change event",
+                detail: "resource must be non-empty".into(),
+            });
+        }
+        let seq: Option<i64> = self
+            .connection()?
+            .query_row(
+                "INSERT INTO change_events(occurred_at, kind, resource, environment_id)
+                 SELECT ?1, ?2, ?3, ''
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM (
+                         SELECT resource, occurred_at FROM change_events
+                         WHERE kind = ?2 ORDER BY seq DESC LIMIT 1
+                     ) latest
+                     WHERE latest.resource = ?3 AND latest.occurred_at >= ?4
+                 )
+                 AND (NOT ?5 OR EXISTS (SELECT 1 FROM change_events WHERE kind = ?2))
+                 RETURNING seq",
+                params![
+                    occurred_at,
+                    kind.as_str(),
+                    resource,
+                    since,
+                    only_after_another
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(seq.map(|seq| ChangeEvent::new(seq, occurred_at, kind, resource, "")))
+    }
+
     pub(super) fn list_change_events_after_sqlite(
         &self,
         cursor: i64,

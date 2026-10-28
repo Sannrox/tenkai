@@ -324,7 +324,7 @@ fn refresh_trust_status(config: &ServerConfig) {
     }
     let compute = {
         let sources = config.trust_sources.clone();
-        move || tenkai::trust_posture::posture(&sources, tenkai::now_millis() / 1_000).status
+        move || tenkai::trust_posture::posture(&sources, tenkai::now_millis() / 1_000).snapshot()
     };
     if let Ok(mut status) = config.trust_status.write() {
         *status = Some(compute());
