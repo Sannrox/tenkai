@@ -18,6 +18,7 @@ mod package_migration_scope;
 mod remote_catalog;
 mod remote_failure;
 mod remote_plan;
+mod runner_attestation;
 mod runtime;
 mod runtime_unknown_fields;
 mod software_compatibility;

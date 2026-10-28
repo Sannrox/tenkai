@@ -4,6 +4,40 @@
 use super::*;
 use super::{Inner, pg};
 
+/// The runner attestation upsert, in the caller's transaction (#675).
+fn upsert_attestation(
+    tx: &mut postgres::Transaction<'_>,
+    record: &RuntimeAttestationRecord,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO runtime_attestations(runner_id,environment_id,evidence_digest,
+             key_fingerprint,checked_at,bound_at,refusal_reason,refused_at)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+         ON CONFLICT(runner_id) DO UPDATE SET
+             environment_id=excluded.environment_id,
+             evidence_digest=COALESCE(excluded.evidence_digest, runtime_attestations.evidence_digest),
+             key_fingerprint=CASE WHEN excluded.evidence_digest IS NULL
+                 THEN runtime_attestations.key_fingerprint ELSE excluded.key_fingerprint END,
+             checked_at=CASE WHEN excluded.evidence_digest IS NULL
+                 THEN runtime_attestations.checked_at ELSE excluded.checked_at END,
+             bound_at=CASE WHEN excluded.evidence_digest IS NULL
+                 THEN runtime_attestations.bound_at ELSE excluded.bound_at END,
+             refusal_reason=excluded.refusal_reason, refused_at=excluded.refused_at",
+        &[
+            &record.runner_id,
+            &record.environment_id,
+            &record.evidence_digest,
+            &record.key_fingerprint,
+            &record.checked_at,
+            &record.bound_at,
+            &record.refusal_reason,
+            &record.refused_at,
+        ],
+    )
+    .map_err(pg)?;
+    Ok(())
+}
+
 fn refused(detail: &str) -> StoreError {
     StoreError::InvalidData {
         kind: "runtime enrollment",
@@ -48,10 +82,12 @@ impl Inner {
         token_digest: &str,
         credential_digest: &str,
         now: i64,
+        attestation: Option<&RuntimeAttestationRecord>,
     ) -> Result<RuntimeCredentialRecord> {
         let environment_id = environment.to_owned();
         let token_digest = token_digest.to_owned();
         let credential_digest = credential_digest.to_owned();
+        let attestation = attestation.cloned();
         self.with_writer_schema(schema, move |tx| {
             let spent = tx
                 .execute(
@@ -70,6 +106,9 @@ impl Inner {
                 &[&credential_digest, &environment_id, &token_digest, &now],
             )
             .map_err(pg)?;
+            if let Some(attestation) = &attestation {
+                upsert_attestation(tx, attestation)?;
+            }
             Ok(RuntimeCredentialRecord {
                 credential_digest,
                 environment_id,
@@ -255,6 +294,67 @@ impl Inner {
                     last_work_at: row.get(5),
                     last_heartbeat_at: row.get(6),
                     last_inventory_at: row.get(7),
+                })
+                .collect())
+        })
+    }
+
+    /// See [`RuntimeAttestationRecord`]: a binding replaces the bound fields
+    /// and clears the refusal; a refusal keeps the binding (#675).
+    /// See [`RuntimeAttestationRecord`]: a binding replaces the bound fields
+    /// and clears the refusal; a refusal keeps the binding (#675).
+    pub fn record_runtime_attestation(
+        &self,
+        schema: &str,
+        record: &RuntimeAttestationRecord,
+    ) -> Result<()> {
+        let record = record.clone();
+        self.with_writer_schema(schema, move |tx| upsert_attestation(tx, &record))
+    }
+
+    pub fn runtime_enrollment_usable(
+        &self,
+        schema: &str,
+        environment: &str,
+        token_digest: &str,
+        now: i64,
+    ) -> Result<bool> {
+        let environment = environment.to_owned();
+        let token_digest = token_digest.to_owned();
+        self.with_schema(schema, move |tx| {
+            Ok(tx
+                .query_opt(
+                    "SELECT 1 FROM runtime_enrollments
+                     WHERE token_digest=$1 AND environment_id=$2
+                       AND redeemed_at IS NULL AND expires_at>$3",
+                    &[&token_digest, &environment, &now],
+                )
+                .map_err(pg)?
+                .is_some())
+        })
+    }
+
+    pub fn runtime_attestations(&self, schema: &str) -> Result<Vec<RuntimeAttestationRecord>> {
+        self.with_schema(schema, move |tx| {
+            let rows = tx
+                .query(
+                    "SELECT runner_id,environment_id,evidence_digest,key_fingerprint,checked_at,
+                            bound_at,refusal_reason,refused_at
+                     FROM runtime_attestations ORDER BY runner_id",
+                    &[],
+                )
+                .map_err(pg)?;
+            Ok(rows
+                .into_iter()
+                .map(|row| RuntimeAttestationRecord {
+                    runner_id: row.get(0),
+                    environment_id: row.get(1),
+                    evidence_digest: row.get(2),
+                    key_fingerprint: row.get(3),
+                    checked_at: row.get(4),
+                    bound_at: row.get(5),
+                    refusal_reason: row.get(6),
+                    refused_at: row.get(7),
                 })
                 .collect())
         })

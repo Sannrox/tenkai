@@ -160,6 +160,18 @@ impl RunnerCa {
     /// from `now_secs` for [`RUNNER_CERTIFICATE_TTL_SECS`]. Whatever names
     /// or extensions the CSR asks for are ignored: the identity is ours.
     pub fn issue(&self, csr_pem: &str, identity: &RunnerIdentity, now_secs: i64) -> Result<String> {
+        self.issue_bound(csr_pem, identity, now_secs, None)
+    }
+
+    /// [`Self::issue`], carrying an attestation `binding` (#675) in the
+    /// private runner-attestation extension when given.
+    pub fn issue_bound(
+        &self,
+        csr_pem: &str,
+        identity: &RunnerIdentity,
+        now_secs: i64,
+        binding: Option<&crate::runner_attestation::Binding>,
+    ) -> Result<String> {
         let csr = rcgen::CertificateSigningRequestParams::from_pem(csr_pem)
             .context("the CSR is not a valid, self-signed certificate request")?;
         let uri = identity.uri()?;
@@ -177,6 +189,14 @@ impl RunnerCa {
         params.serial_number = Some(rcgen::SerialNumber::from_slice(
             &uuid::Uuid::new_v4().into_bytes(),
         ));
+        if let Some(binding) = binding {
+            params
+                .custom_extensions
+                .push(rcgen::CustomExtension::from_oid_content(
+                    crate::runner_attestation::BINDING_OID,
+                    crate::runner_attestation::binding_extension(binding)?,
+                ));
+        }
         Ok(params.signed_by(&csr.public_key, &self.issuer)?.pem())
     }
 

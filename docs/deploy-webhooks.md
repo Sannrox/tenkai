@@ -108,6 +108,7 @@ stored in its field.
 | `plan.held` | Environment webhooks | A reconcile tick finds the environment's plan paused by a delivery hold. `code` is the hold scope |
 | `plan.awaiting_approval` | Environment webhooks | A reconcile tick finds the plan waiting for a signed approval |
 | `import.failed` | Environment webhooks | A server-side bundle import is refused. `resource` is the import job id |
+| `runner.attestation_refused` | Environment webhooks | An attested enrollment or certificate renewal, or a runtime inventory report under the runner attestation policy, is refused. `resource` is the runner id (`enrollment` before one exists) and `code` the reason, once per runner, reason and bound evidence ([attested runners](run-tenkai-server.md#attested-runners)) |
 | `backup.stale` | Host webhooks | Backup age turns `stale`, `missing` or `unreadable` |
 | `clock.drift` | Host webhooks | The clock guard turns `warn` or `refuse` |
 | `trust.expiring` | Host webhooks | The worst certificate status turns `warning`, `critical` or `expired` ([trust posture](run-tenkai-server.md#trust-posture)) |

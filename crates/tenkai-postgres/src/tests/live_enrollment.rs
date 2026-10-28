@@ -12,8 +12,8 @@ fn live_postgres_runtime_enrollment_is_single_use_across_replicas() {
         TenantDerivationAuthority,
     };
     use tenkai::storage::{
-        OperationalStore as _, RuntimeActivityRecord, RuntimeEnrollmentRecord, RuntimeRevocation,
-        StoreError,
+        OperationalStore as _, RuntimeActivityRecord, RuntimeAttestationRecord,
+        RuntimeEnrollmentRecord, RuntimeRevocation, StoreError,
     };
 
     let suffix = uuid::Uuid::new_v4().simple().to_string();
@@ -54,7 +54,8 @@ fn live_postgres_runtime_enrollment_is_single_use_across_replicas() {
         "stage",
         &token.token_digest,
         "c0",
-        10
+        10,
+        None
     )));
     let barrier = Arc::new(Barrier::new(2));
     let digest = token.token_digest.clone();
@@ -62,11 +63,11 @@ fn live_postgres_runtime_enrollment_is_single_use_across_replicas() {
     let results = std::thread::scope(|scope| {
         let left = scope.spawn(|| {
             barrier.wait();
-            a.redeem_runtime_enrollment("prod", &digest, &credential_a, 10)
+            a.redeem_runtime_enrollment("prod", &digest, &credential_a, 10, None)
         });
         let right = scope.spawn(|| {
             barrier.wait();
-            b.redeem_runtime_enrollment("prod", &digest, &credential_b, 10)
+            b.redeem_runtime_enrollment("prod", &digest, &credential_b, 10, None)
         });
         [left.join().unwrap(), right.join().unwrap()]
     });
@@ -87,8 +88,49 @@ fn live_postgres_runtime_enrollment_is_single_use_across_replicas() {
         "prod",
         &expired.token_digest,
         "cx",
-        100
+        100,
+        None
     )));
+    // Runner attestation (#675): a usable-token check spends nothing, and
+    // a redemption commits its binding with the credential.
+    let attested = enrollment("attested", i64::MAX);
+    a.create_runtime_enrollment(&attested).unwrap();
+    assert!(
+        b.runtime_enrollment_usable("prod", &attested.token_digest, 10)
+            .unwrap()
+    );
+    assert!(
+        !b.runtime_enrollment_usable("stage", &attested.token_digest, 10)
+            .unwrap()
+    );
+    let bound_runner = format!("bound-{suffix}");
+    b.redeem_runtime_enrollment(
+        "prod",
+        &attested.token_digest,
+        &bound_runner,
+        10,
+        Some(&RuntimeAttestationRecord {
+            runner_id: bound_runner.clone(),
+            environment_id: "prod".into(),
+            evidence_digest: Some("sha256:e0".into()),
+            key_fingerprint: Some("sha256:key".into()),
+            checked_at: Some(5),
+            bound_at: Some(10),
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+    assert!(
+        !a.runtime_enrollment_usable("prod", &attested.token_digest, 10)
+            .unwrap()
+    );
+    assert!(
+        a.runtime_attestations()
+            .unwrap()
+            .iter()
+            .any(|record| record.runner_id == bound_runner
+                && record.evidence_digest.as_deref() == Some("sha256:e0"))
+    );
 
     let first = RuntimeRevocation {
         reason: "host retired".into(),
@@ -146,4 +188,34 @@ fn live_postgres_runtime_enrollment_is_single_use_across_replicas() {
     assert_eq!(recorded.last_work_at, Some(100));
     assert_eq!(recorded.last_heartbeat_at, Some(120));
     assert_eq!(recorded.runtime_version.as_deref(), Some("0.5.0"));
+    // Runner attestation (#675): a refusal from one replica keeps the
+    // binding another wrote; a later binding clears the refusal.
+    let attestation = |digest: Option<&str>, refusal: Option<&str>| RuntimeAttestationRecord {
+        runner_id: winner.credential_digest.clone(),
+        environment_id: runner.credential.environment_id.clone(),
+        evidence_digest: digest.map(str::to_string),
+        key_fingerprint: digest.map(|_| "sha256:key".to_string()),
+        checked_at: digest.map(|_| 10),
+        bound_at: digest.map(|_| 11),
+        refusal_reason: refusal.map(str::to_string),
+        refused_at: refusal.map(|_| 12),
+    };
+    let bound = || {
+        a.runtime_attestations()
+            .unwrap()
+            .into_iter()
+            .find(|record| record.runner_id == winner.credential_digest)
+            .unwrap()
+    };
+    a.record_runtime_attestation(&attestation(Some("sha256:e1"), None))
+        .unwrap();
+    b.record_runtime_attestation(&attestation(None, Some("fact_mismatch")))
+        .unwrap();
+    assert_eq!(bound().evidence_digest.as_deref(), Some("sha256:e1"));
+    assert_eq!(bound().key_fingerprint.as_deref(), Some("sha256:key"));
+    assert_eq!(bound().refusal_reason.as_deref(), Some("fact_mismatch"));
+    b.record_runtime_attestation(&attestation(Some("sha256:e2"), None))
+        .unwrap();
+    assert_eq!(bound().evidence_digest.as_deref(), Some("sha256:e2"));
+    assert_eq!(bound().refusal_reason, None);
 }

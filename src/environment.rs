@@ -1645,7 +1645,8 @@ pub(crate) fn validate_fact_value(key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-/// Set a capability/inventory fact on an environment.
+/// Set a capability/inventory fact on an environment, as declared by an
+/// operator (`env facts set`, the facts route).
 pub async fn set_environment_fact(
     ctx: &mut Ctx,
     env: &str,
@@ -1655,18 +1656,36 @@ pub async fn set_environment_fact(
     validate_fact_key(key)?;
     validate_fact_value(key, value)?;
     let mut env_obj = environment(ctx, env).await?;
-    env_obj
-        .properties
-        .insert(format!("{ENVIRONMENT_FACT_PREFIX}{key}"), value.to_string());
+    record_fact(
+        &mut env_obj,
+        key,
+        value,
+        crate::runner_attestation::OPERATOR_FACT_SOURCE,
+    );
     env_obj.updated = crate::now_millis();
     ctx.put(env_obj).await?;
     Ok(format!("set {env} fact {key}={value}"))
 }
 
+/// Write fact `key` with its provenance (#675).
+fn record_fact(env_obj: &mut Object, key: &str, value: &str, source: &str) {
+    env_obj
+        .properties
+        .insert(format!("{ENVIRONMENT_FACT_PREFIX}{key}"), value.to_string());
+    env_obj.properties.insert(
+        format!("{}{key}", crate::runner_attestation::FACT_SOURCE_PREFIX),
+        source.to_string(),
+    );
+}
+
 /// Apply admitted inventory facts from a runtime heartbeat report (#136).
 ///
-/// Only [`ENVIRONMENT_FACT_KEYS`] are accepted (via [`set_environment_fact`]).
-/// Unknown keys and credential-like values fail closed before any write.
+/// Only [`ENVIRONMENT_FACT_KEYS`] are accepted. Unknown keys and
+/// credential-like values fail closed before any write. While the
+/// environment requires runner attestation (#675), a report that
+/// contradicts an operator-declared fact is refused whole with
+/// [`crate::runner_attestation::AttestationRefusal::InventoryContradictsDeclaredFact`]
+/// and overwrites nothing.
 pub async fn apply_runtime_inventory_facts(
     ctx: &mut Ctx,
     env: &str,
@@ -1677,11 +1696,45 @@ pub async fn apply_runtime_inventory_facts(
         validate_fact_key(key)?;
         validate_fact_value(key, value)?;
     }
+    if facts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut env_obj = environment(ctx, env).await?;
+    if crate::runner_attestation::policy_from_properties(&env_obj.properties)?.is_some() {
+        let declared = crate::runner_attestation::declared_facts(&env_obj.properties);
+        if let Some(key) = facts
+            .iter()
+            .find(|(key, value)| {
+                declared
+                    .get(*key)
+                    .is_some_and(|declared| declared != *value)
+            })
+            .map(|(key, _)| key.clone())
+        {
+            return Err(
+                crate::runner_attestation::AttestationRefusal::InventoryContradictsDeclaredFact {
+                    key,
+                }
+                .into(),
+            );
+        }
+    }
+    let declared = crate::runner_attestation::declared_facts(&env_obj.properties);
     let mut applied = Vec::with_capacity(facts.len());
     for (key, value) in facts {
-        set_environment_fact(ctx, env, key, value).await?;
+        // An equal operator declaration keeps its provenance.
+        if declared.get(key) != Some(value) {
+            record_fact(
+                &mut env_obj,
+                key,
+                value,
+                crate::runner_attestation::RUNTIME_FACT_SOURCE,
+            );
+        }
         applied.push(key.clone());
     }
+    env_obj.updated = crate::now_millis();
+    ctx.put(env_obj).await?;
     applied.sort();
     Ok(applied)
 }
@@ -1694,6 +1747,10 @@ pub async fn clear_environment_fact(ctx: &mut Ctx, env: &str, key: &str) -> Resu
     if env_obj.properties.remove(&property).is_none() {
         bail!("environment {env} has no fact {key}");
     }
+    env_obj.properties.remove(&format!(
+        "{}{key}",
+        crate::runner_attestation::FACT_SOURCE_PREFIX
+    ));
     env_obj.updated = crate::now_millis();
     ctx.put(env_obj).await?;
     Ok(format!("cleared {env} fact {key}"))

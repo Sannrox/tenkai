@@ -4,8 +4,8 @@ use tenkai::storage::{
     AuditRecord, ChannelRecord, EnvironmentRecord, LeaseRecord, OfflineImportRecord,
     OfflineStepImportRecord, OperationalStore, PlanRecord, PlanStatus, ProviderEventRecord,
     ReceiptRecord, ReleaseRecord, Result, RollbackRecord, RollbackStatus, RuntimeActivityRecord,
-    RuntimeClaim, RuntimeCredentialRecord, RuntimeEnrollmentRecord, RuntimeRevocation,
-    RuntimeRunnerRecord,
+    RuntimeAttestationRecord, RuntimeClaim, RuntimeCredentialRecord, RuntimeEnrollmentRecord,
+    RuntimeRevocation, RuntimeRunnerRecord,
 };
 
 use super::PostgresTenantPartition;
@@ -311,6 +311,7 @@ impl OperationalStore for PostgresTenantPartition {
         token_digest: &str,
         credential_digest: &str,
         now: i64,
+        attestation: Option<&RuntimeAttestationRecord>,
     ) -> Result<RuntimeCredentialRecord> {
         self.inner.redeem_runtime_enrollment(
             &self.schema,
@@ -318,7 +319,18 @@ impl OperationalStore for PostgresTenantPartition {
             token_digest,
             credential_digest,
             now,
+            attestation,
         )
+    }
+
+    fn runtime_enrollment_usable(
+        &self,
+        environment: &str,
+        token_digest: &str,
+        now: i64,
+    ) -> Result<bool> {
+        self.inner
+            .runtime_enrollment_usable(&self.schema, environment, token_digest, now)
     }
 
     fn runtime_credential(
@@ -353,5 +365,13 @@ impl OperationalStore for PostgresTenantPartition {
 
     fn live_runtime_claim_owners(&self, now: i64) -> Result<Vec<String>> {
         self.inner.live_runtime_claim_owners(&self.schema, now)
+    }
+
+    fn record_runtime_attestation(&self, record: &RuntimeAttestationRecord) -> Result<()> {
+        self.inner.record_runtime_attestation(&self.schema, record)
+    }
+
+    fn runtime_attestations(&self) -> Result<Vec<RuntimeAttestationRecord>> {
+        self.inner.runtime_attestations(&self.schema)
     }
 }

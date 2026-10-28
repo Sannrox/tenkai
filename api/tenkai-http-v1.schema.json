@@ -1541,6 +1541,39 @@
             "kind"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Require attested runner enrollment and renewal (#675) with evidence\nat most `max_age_ms` old.",
+          "properties": {
+            "kind": {
+              "const": "set_runner_attestation",
+              "type": "string"
+            },
+            "max_age_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "max_age_ms"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "clear_runner_attestation",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -3268,6 +3301,11 @@
           "const": "trust.expiring",
           "description": "A certificate the host serves or trusts entered a warning, critical\nor expired status (#775).",
           "type": "string"
+        },
+        {
+          "const": "runner.attestation_refused",
+          "description": "A runner's attested enrollment or renewal, or its inventory under\nthe attestation policy, was refused (#675). The code names why.",
+          "type": "string"
         }
       ]
     },
@@ -4177,6 +4215,10 @@
     "RuntimeRunner": {
       "description": "One runner of the registry: an enrolled credential, or a static token\nconfigured on the server. Never carries a secret.",
       "properties": {
+        "attestation": {
+          "$ref": "#/$defs/RuntimeRunnerAttestation",
+          "description": "The latest bound runner attestation and the latest refusal (#675),\nonce the runner was attested or refused."
+        },
         "auth": {
           "$ref": "#/$defs/RunnerAuth",
           "description": "Always sent; optional so a newer client still reads an older server."
@@ -4223,6 +4265,36 @@
         "state",
         "instances"
       ],
+      "type": "object"
+    },
+    "RuntimeRunnerAttestation": {
+      "description": "A runner's attestation state (#675). Digests only, never evidence content.",
+      "properties": {
+        "bound_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "checked_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "evidence_digest": {
+          "description": "`sha256:` digest of the latest bound evidence.",
+          "type": "string"
+        },
+        "key_fingerprint": {
+          "description": "`sha256:` fingerprint of the bound runner key.",
+          "type": "string"
+        },
+        "last_refusal": {
+          "description": "The code of the latest refusal since the last binding, for example\n`fact_mismatch`.",
+          "type": "string"
+        },
+        "last_refused_at": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
       "type": "object"
     },
     "RuntimeRunnerInstance": {
@@ -5103,6 +5175,28 @@
       "auth": "management",
       "method": "DELETE",
       "path": "/v1/environments/{environment}/approval-policy",
+      "request": {
+        "$ref": "#/$defs/EnvironmentConfigRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "PUT",
+      "path": "/v1/environments/{environment}/runner-attestation",
+      "request": {
+        "$ref": "#/$defs/EnvironmentConfigRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "DELETE",
+      "path": "/v1/environments/{environment}/runner-attestation",
       "request": {
         "$ref": "#/$defs/EnvironmentConfigRequest"
       },

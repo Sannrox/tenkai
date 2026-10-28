@@ -124,6 +124,11 @@ pub(crate) enum EnvCommand {
         #[command(subcommand)]
         command: ApprovalPolicyCommand,
     },
+    /// Require attested runner enrollment and renewal (#675).
+    RunnerAttestation {
+        #[command(subcommand)]
+        command: RunnerAttestationCommand,
+    },
     /// Manage signed post-deploy webhook endpoints. Never secret bytes.
     Webhooks {
         #[command(subcommand)]
@@ -236,6 +241,28 @@ pub(crate) enum ApprovalPolicyCommand {
         remote: RemoteChange,
     },
     /// Clear the stored plan approval policy path.
+    Clear {
+        env: String,
+        #[command(flatten)]
+        remote: RemoteChange,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum RunnerAttestationCommand {
+    /// Show the stored runner attestation policy.
+    Show { env: String },
+    /// Require runner attestation: every enrollment and certificate renewal
+    /// carries host evidence signed with the runner key, at most
+    /// --max-age-ms old, that matches the operator-declared facts.
+    Set {
+        env: String,
+        #[arg(long)]
+        max_age_ms: u64,
+        #[command(flatten)]
+        remote: RemoteChange,
+    },
+    /// Stop requiring runner attestation.
     Clear {
         env: String,
         #[command(flatten)]

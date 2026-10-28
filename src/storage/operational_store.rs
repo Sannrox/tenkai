@@ -211,16 +211,30 @@ pub trait OperationalStore: Send + Sync {
     }
     /// Spend the enrollment `token_digest` of `environment` once, before it
     /// expires at `now`,
-    /// and record `credential_digest` as its credential, in one transaction:
-    /// of two concurrent redemptions, one wins. Unknown, spent and expired
-    /// enrollments are all `InvalidData`.
+    /// and record `credential_digest` as its credential, and, when given,
+    /// the runner's attestation binding (#675), in one transaction: of two
+    /// concurrent redemptions, one wins, and any failure leaves the token
+    /// unspent. Unknown, spent and expired enrollments are all `InvalidData`.
     fn redeem_runtime_enrollment(
         &self,
         _environment: &str,
         _token_digest: &str,
         _credential_digest: &str,
         _now: i64,
+        _attestation: Option<&RuntimeAttestationRecord>,
     ) -> Result<RuntimeCredentialRecord> {
+        Err(StoreError::AdapterUnavailable(
+            "runtime enrollment is not implemented by this store".into(),
+        ))
+    }
+    /// Whether `token_digest` is an enrollment of `environment` that is
+    /// unredeemed and unexpired at `now`. Read-only: nothing is spent.
+    fn runtime_enrollment_usable(
+        &self,
+        _environment: &str,
+        _token_digest: &str,
+        _now: i64,
+    ) -> Result<bool> {
         Err(StoreError::AdapterUnavailable(
             "runtime enrollment is not implemented by this store".into(),
         ))
@@ -280,6 +294,18 @@ pub trait OperationalStore: Send + Sync {
     fn certified_runtime_runners(&self) -> Result<Vec<String>> {
         Err(StoreError::AdapterUnavailable(
             "the runner registry is not implemented by this store".into(),
+        ))
+    }
+    /// Bind a runner's attestation or record its refusal (#675); see
+    /// [`RuntimeAttestationRecord`].
+    fn record_runtime_attestation(&self, _record: &RuntimeAttestationRecord) -> Result<()> {
+        Err(StoreError::AdapterUnavailable(
+            "runner attestation is not implemented by this store".into(),
+        ))
+    }
+    fn runtime_attestations(&self) -> Result<Vec<RuntimeAttestationRecord>> {
+        Err(StoreError::AdapterUnavailable(
+            "runner attestation is not implemented by this store".into(),
         ))
     }
     /// Owners holding an unexpired runtime plan claim at `now`.

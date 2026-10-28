@@ -2,7 +2,8 @@
 //!
 //! `POST /v1/environments` registers an environment. Generation-fenced
 //! `PUT`/`DELETE` routes under `/v1/environments/{environment}/` change its
-//! facts, constraints, maintenance windows, webhooks and approval policy. Every
+//! facts, constraints, maintenance windows, webhooks, approval policy and
+//! runner attestation policy (#675). Every
 //! change runs the same embedded function, and so the same validation, as the
 //! CLI. Every change also appends an immutable audit event that records the
 //! actor and the reason.
@@ -97,6 +98,12 @@ pub enum EnvironmentConfigChange {
         path: String,
     },
     ClearApprovalPolicy,
+    /// Require attested runner enrollment and renewal (#675) with evidence
+    /// at most `max_age_ms` old.
+    SetRunnerAttestation {
+        max_age_ms: u64,
+    },
+    ClearRunnerAttestation,
 }
 
 /// The configuration resource a route serves.
@@ -107,6 +114,7 @@ pub enum ConfigResource {
     MaintenanceWindow,
     Webhooks,
     ApprovalPolicy,
+    RunnerAttestation,
 }
 
 impl ConfigResource {
@@ -117,6 +125,7 @@ impl ConfigResource {
             Self::MaintenanceWindow => "maintenance-windows",
             Self::Webhooks => "webhooks",
             Self::ApprovalPolicy => "approval-policy",
+            Self::RunnerAttestation => "runner-attestation",
         }
     }
 }
@@ -135,6 +144,9 @@ impl EnvironmentConfigChange {
             Self::SetApprovalPolicy { .. } | Self::ClearApprovalPolicy => {
                 ConfigResource::ApprovalPolicy
             }
+            Self::SetRunnerAttestation { .. } | Self::ClearRunnerAttestation => {
+                ConfigResource::RunnerAttestation
+            }
         }
     }
 
@@ -147,6 +159,7 @@ impl EnvironmentConfigChange {
                 | Self::RemoveMaintenanceWindow { .. }
                 | Self::ClearWebhooks { .. }
                 | Self::ClearApprovalPolicy
+                | Self::ClearRunnerAttestation
         )
     }
 
@@ -182,6 +195,8 @@ impl EnvironmentConfigChange {
             Self::ClearWebhooks { .. } => "clear_webhooks",
             Self::SetApprovalPolicy { .. } => "set_approval_policy",
             Self::ClearApprovalPolicy => "clear_approval_policy",
+            Self::SetRunnerAttestation { .. } => "set_runner_attestation",
+            Self::ClearRunnerAttestation => "clear_runner_attestation",
         }
     }
 }
@@ -264,7 +279,12 @@ pub fn validate(change: &EnvironmentConfigChange) -> Result<()> {
             operational: operational.clone(),
         }
         .validate(),
-        Change::ClearWebhooks { .. } | Change::ClearApprovalPolicy => Ok(()),
+        Change::ClearWebhooks { .. }
+        | Change::ClearApprovalPolicy
+        | Change::ClearRunnerAttestation => Ok(()),
+        Change::SetRunnerAttestation { max_age_ms } => {
+            crate::runner_attestation::RunnerAttestationPolicy::required(*max_age_ms).map(drop)
+        }
         Change::SetApprovalPolicy { path } => {
             crate::approval_policy::validate_policy_file_path(std::path::Path::new(path))
         }
@@ -481,6 +501,12 @@ async fn mutate(
         }
         Change::ClearApprovalPolicy => {
             crate::environment::clear_plan_approval_policy(ctx, environment).await?
+        }
+        Change::SetRunnerAttestation { max_age_ms } => {
+            crate::runner_attestation::set_policy(ctx, environment, *max_age_ms).await?
+        }
+        Change::ClearRunnerAttestation => {
+            crate::runner_attestation::clear_policy(ctx, environment).await?
         }
     })
 }

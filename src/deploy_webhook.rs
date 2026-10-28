@@ -64,6 +64,10 @@ pub enum OperationalEvent {
     /// or expired status (#775).
     #[serde(rename = "trust.expiring")]
     TrustExpiring,
+    /// A runner's attested enrollment or renewal, or its inventory under
+    /// the attestation policy, was refused (#675). The code names why.
+    #[serde(rename = "runner.attestation_refused")]
+    RunnerAttestationRefused,
 }
 
 impl OperationalEvent {
@@ -75,6 +79,7 @@ impl OperationalEvent {
             Self::BackupStale => "backup.stale",
             Self::ClockDrift => "clock.drift",
             Self::TrustExpiring => "trust.expiring",
+            Self::RunnerAttestationRefused => "runner.attestation_refused",
         }
     }
 
@@ -86,6 +91,7 @@ impl OperationalEvent {
             "backup.stale" => Some(Self::BackupStale),
             "clock.drift" => Some(Self::ClockDrift),
             "trust.expiring" => Some(Self::TrustExpiring),
+            "runner.attestation_refused" => Some(Self::RunnerAttestationRefused),
             _ => None,
         }
     }

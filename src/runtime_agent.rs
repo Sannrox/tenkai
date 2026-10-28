@@ -43,12 +43,18 @@ fn protected_base_url(base_url: String) -> Result<String> {
 /// With `certificate_dir` (#674), enrollment also gets a runner certificate:
 /// the agent generates its key there (owner-only), sends only a CSR, and
 /// writes the issued `cert.pem` and the runner `ca.pem` beside it.
+///
+/// A server that requires runner attestation (#675) answers
+/// `attestation_missing` (HTTP 428) without spending the token; the agent
+/// then signs host evidence (the checks of `preflight`, when given, and its
+/// probed facts) with its runner key and enrolls again.
 pub async fn enrolled_credential(
     base_url: &str,
     environment: &str,
     enrollment_token: impl FnOnce() -> Result<Option<String>>,
     credential_file: &std::path::Path,
     certificate_dir: Option<&std::path::Path>,
+    preflight: Option<&std::path::Path>,
 ) -> Result<String> {
     match std::fs::read_to_string(credential_file) {
         Ok(stored) => {
@@ -81,19 +87,28 @@ pub async fn enrolled_credential(
     }
     let csr = certificate_dir.map(runner_csr).transpose()?;
     // No redirects: the token goes only to the protected URL checked above.
-    let response = crate::outbound_tls::client()?
+    let client = crate::outbound_tls::client()?
         .timeout(Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
-        .build()?
-        .post(format!(
-            "{base_url}/v1/runtime/environments/{environment}/enroll"
-        ))
-        .json(&crate::runtime_delivery::RuntimeEnrollRequest { token, csr })
-        .send()
-        .await?;
+        .build()?;
+    let url = format!("{base_url}/v1/runtime/environments/{environment}/enroll");
+    let mut request = crate::runtime_delivery::RuntimeEnrollRequest {
+        token,
+        csr,
+        attestation: None,
+    };
+    let mut response = client.post(&url).json(&request).send().await?;
+    if response.status() == reqwest::StatusCode::PRECONDITION_REQUIRED {
+        let (Some(dir), Some(csr)) = (certificate_dir, &request.csr) else {
+            bail!("the server requires runner attestation, which needs --certificate-dir");
+        };
+        request.attestation = Some(host_attestation(dir, environment, csr, preflight)?);
+        response = client.post(&url).json(&request).send().await?;
+    }
     let status = response.status();
     if !status.is_success() {
-        bail!("runtime enrollment refused: {status}");
+        let detail = response.text().await.unwrap_or_default();
+        bail!("runtime enrollment refused: {status} {detail}");
     }
     let enrolled: crate::runtime_delivery::RuntimeEnrolled = response.json().await?;
     if let Some(dir) = certificate_dir {
@@ -138,6 +153,28 @@ fn runner_csr(dir: &std::path::Path) -> Result<String> {
     Ok(rcgen::CertificateParams::new(Vec::<String>::new())?
         .serialize_request(&key)?
         .pem()?)
+}
+
+/// Host evidence for `environment`, signed with the runner key in `dir`
+/// for the key of `csr` (#675): the checks of the preflight config at
+/// `preflight` (none without one) and the probed inventory facts.
+fn host_attestation(
+    dir: &std::path::Path,
+    environment: &str,
+    csr: &str,
+    preflight: Option<&std::path::Path>,
+) -> Result<crate::runner_attestation::RunnerAttestation> {
+    let now = crate::now_millis();
+    let checks = match preflight {
+        Some(path) => crate::host_preflight::run_checks(
+            &crate::host_preflight::PreflightConfig::load(path)?,
+            now,
+        ),
+        None => Vec::new(),
+    };
+    let facts = inventory::facts_map(&inventory::probe_local_inventory()?);
+    let key = std::fs::read_to_string(dir.join(RUNNER_KEY)).context("reading the runner key")?;
+    crate::runner_attestation::sign(environment, checks, facts, &key, csr, now)
 }
 
 /// The agent's runner certificate, its issuing CA and key from `dir` as a
@@ -249,6 +286,8 @@ pub struct RuntimeClient {
     /// Set once the agent switched to a new version of itself: it stops so
     /// the supervisor starts that version.
     restart: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The host preflight config whose checks runner attestation carries.
+    preflight: Option<PathBuf>,
 }
 
 impl RuntimeClient {
@@ -291,7 +330,15 @@ impl RuntimeClient {
             certified: Default::default(),
             home: None,
             restart: Default::default(),
+            preflight: None,
         })
+    }
+
+    /// Run the checks of the preflight config at `path` for runner
+    /// attestation (#675).
+    pub fn with_preflight(mut self, path: PathBuf) -> Self {
+        self.preflight = Some(path);
+        self
     }
 
     /// Run the agent's own releases with versions kept under `home` (#685).
@@ -374,19 +421,31 @@ impl RuntimeClient {
             return Ok(());
         }
         let client = self.certified_client().unwrap_or_else(|| self.http.clone());
-        let response = client
-            .post(format!(
-                "{}/v1/runtime/environments/{}/certificate",
-                self.base_url, self.environment
-            ))
-            .bearer_auth(&self.token)
-            .header("x-tenkai-runtime-instance", &self.instance_id)
-            .header("x-tenkai-runtime-version", env!("CARGO_PKG_VERSION"))
-            .json(&crate::runtime_delivery::RuntimeCertificateRequest {
-                csr: runner_csr(dir)?,
-            })
-            .send()
-            .await?;
+        let csr = runner_csr(dir)?;
+        let attest =
+            |csr: &str| host_attestation(dir, &self.environment, csr, self.preflight.as_deref());
+        let send = |attestation| {
+            client
+                .post(format!(
+                    "{}/v1/runtime/environments/{}/certificate",
+                    self.base_url, self.environment
+                ))
+                .bearer_auth(&self.token)
+                .header("x-tenkai-runtime-instance", &self.instance_id)
+                .header("x-tenkai-runtime-version", env!("CARGO_PKG_VERSION"))
+                .json(&crate::runtime_delivery::RuntimeCertificateRequest {
+                    csr: csr.clone(),
+                    attestation,
+                })
+                .send()
+        };
+        // Evidence only when this server asks for it on this request (#675):
+        // a server of an earlier release, during a rolling deploy or after a
+        // rollback, refuses the unknown field.
+        let mut response = send(None).await?;
+        if response.status() == reqwest::StatusCode::PRECONDITION_REQUIRED {
+            response = send(Some(attest(&csr)?)).await?;
+        }
         let renewed: crate::runtime_delivery::RuntimeCertificate =
             decode_response(response, "renewing the runner certificate").await?;
         replace_file(&dir.join(RUNNER_CA), &renewed.ca)?;
@@ -1061,10 +1120,11 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("credential");
-        let missing = enrolled_credential("http://127.0.0.1:9", "prod", || Ok(None), &file, None)
-            .await
-            .unwrap_err()
-            .to_string();
+        let missing =
+            enrolled_credential("http://127.0.0.1:9", "prod", || Ok(None), &file, None, None)
+                .await
+                .unwrap_err()
+                .to_string();
         assert!(
             missing.contains("enrollment token is required"),
             "{missing}"
@@ -1083,13 +1143,14 @@ mod tests {
             || anyhow::bail!("not read when a credential is kept"),
             &file,
             None,
+            None,
         )
         .await
         .unwrap();
         assert_eq!(kept, "tkr_first");
         std::fs::write(&file, "not a credential").unwrap();
         assert!(
-            enrolled_credential("http://127.0.0.1:9", "prod", || Ok(None), &file, None)
+            enrolled_credential("http://127.0.0.1:9", "prod", || Ok(None), &file, None, None)
                 .await
                 .is_err()
         );
@@ -1139,6 +1200,79 @@ mod tests {
         write_owner_only(&dir.join(RUNNER_CERT), &issued).unwrap();
         let (_, not_after) = runner_identity(&dir).unwrap().unwrap();
         assert!(not_after > crate::now_millis() / 1_000);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Renewal sends evidence only after a 428 on that request (#675): an
+    /// agent that attested to one server still renews against a server of
+    /// an earlier release, which refuses the unknown `attestation` field.
+    #[tokio::test]
+    async fn an_agent_that_attested_renews_against_a_server_without_attestation() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let (cert, ca_key) = crate::runner_ca::RunnerCa::generate("runner CA").unwrap();
+        let ca = Arc::new(crate::runner_ca::RunnerCa::from_pem(&cert, &ca_key).unwrap());
+        // True: the server requires attestation; false: an earlier release.
+        let requires = Arc::new(AtomicBool::new(true));
+        let attested = Arc::new(AtomicUsize::new(0));
+        let app = {
+            let (ca, requires, attested) = (ca.clone(), requires.clone(), attested.clone());
+            axum::Router::new().route(
+                "/v1/runtime/environments/prod/certificate",
+                axum::routing::post(move |body: axum::body::Bytes| {
+                    let (ca, requires, attested) = (ca.clone(), requires.clone(), attested.clone());
+                    async move {
+                        use axum::http::StatusCode;
+                        let raw: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let has = raw.get("attestation").is_some();
+                        match (requires.load(Ordering::SeqCst), has) {
+                            (true, false) => return (StatusCode::PRECONDITION_REQUIRED, String::new()),
+                            (false, true) => {
+                                return (StatusCode::BAD_REQUEST, "unknown field `attestation`".into());
+                            }
+                            (true, true) => {
+                                attested.fetch_add(1, Ordering::SeqCst);
+                            }
+                            (false, false) => {}
+                        }
+                        let csr = raw["csr"].as_str().unwrap();
+                        let certificate = ca
+                            .issue(
+                                csr,
+                                &crate::runner_ca::RunnerIdentity {
+                                    environment: "prod".into(),
+                                    runner_id: format!("sha256:{}", "cd".repeat(32)),
+                                },
+                                crate::now_millis() / 1_000,
+                            )
+                            .unwrap();
+                        let body = serde_json::json!({"certificate": certificate, "ca": ca.trust_bundle()});
+                        (StatusCode::OK, body.to_string())
+                    }
+                }),
+            )
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        let dir =
+            std::env::temp_dir().join(format!("tenkai-attest-renew-{}", uuid::Uuid::new_v4()));
+        let client = RuntimeClient::new(
+            format!("http://{address}"),
+            "prod",
+            "tkc_bearer",
+            PathBuf::from("/bin/true"),
+        )
+        .unwrap()
+        .with_certificate_dir(dir.clone())
+        .unwrap();
+        client.renew_certificate_if_due().await.unwrap();
+        assert_eq!(attested.load(Ordering::SeqCst), 1, "attested after the 428");
+        // Rolled back to a server without attestation: renew again.
+        requires.store(false, Ordering::SeqCst);
+        *client.certified.write().unwrap() = None;
+        client.renew_certificate_if_due().await.unwrap();
+        assert_eq!(attested.load(Ordering::SeqCst), 1);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

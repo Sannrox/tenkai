@@ -1,0 +1,4 @@
+interface:
+  display_name: "Advance Issue Frontier"
+  short_description: "Recompute dependency-ready GitHub issues"
+  default_prompt: "Use $advance-issue-frontier to evaluate the issue frontier and report or apply authorized status changes."

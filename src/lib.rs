@@ -225,6 +225,7 @@ pub mod release_provenance;
 pub mod release_signing;
 pub mod rollout_time;
 pub mod routing;
+pub mod runner_attestation;
 pub mod runner_ca;
 pub mod runtime_agent;
 pub mod runtime_capabilities;
