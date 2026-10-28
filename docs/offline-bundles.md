@@ -15,6 +15,51 @@ Bundle export signs the root through the same content signer as releases and
 plan approvals. A production deploy profile refuses file-based signing keys;
 see [release signing](release-signing.md#production-signer).
 
+## Build
+
+`tenkaictl bundle build` takes one or more published releases and writes one
+signed v1 archive plus its companion chunk store. The same inputs produce
+byte-identical checksum and SBOM manifests. The archive carries images by
+digest, host binaries when `--hosts-dir` is set, release configs, public trust
+roots, model weights, `checksums/manifest.json`
+(`tenkai.offline-checksum-manifest.v1`), and `sbom/<component>.json`
+(`tenkai.offline-sbom.v1`) per component. Those two manifests are ordinary
+signed entries: the bundle signature covers them. A missing image, weight, or
+schema fails the build and names the item. Private keys and credentials are
+refused.
+
+```bash
+tenkaictl bundle build \
+  --release edge-app@1.0.0 \
+  --release weights@1.0.0 \
+  --env site-c \
+  --out site-c.bundle.json \
+  --signing-key exporter.seed \
+  --trust-roots offline-trust.toml \
+  --hosts-dir tenkai-hosts \
+  --host-tag v0.5.0 \
+  --host-git-sha 0123456789abcdef0123456789abcdef01234567 \
+  --host-workflow release
+```
+
+`--issued-at-unix-ms` pins the statement clock so two operator rebuilds can
+match. `--out` must be a new path; an existing archive is refused. Chunk files
+land in `site-c.bundle.chunks/` beside the archive. Images
+are read from `TENKAI_OCI_STORE`; weights from `TENKAI_WEIGHT_CACHE`. The
+command is embedded-only. The v1 envelope binds `plans/content.json` and
+`approvals/content.json` as the signed release-set identity; those entries are
+not an executable Plan. First install through `upgrade install-bundle` remains
+#623.
+
+Rehearsal: `cargo test --locked two_builds_of_the_same_inputs_produce_byte_identical_manifests`
+builds the same release set twice and compares checksum and SBOM bytes.
+`cargo test --locked sbom_and_checksum_are_covered_by_the_bundle_signature`
+verifies the signed archive, then tampers an SBOM entry and confirms
+verification fails. `cargo test --locked missing_image_fails_the_build_and_names_the_digest`,
+`missing_weight_fails_the_build_and_names_the_digest`, and
+`missing_schema_fails_the_build_and_names_the_path` refuse the build while
+naming the missing item.
+
 Bundle verification requires current Ed25519 trust roots, the configured tenant
 and environment identities, and a time inside the signed validity interval.
 Removing an exporter key prevents a not-yet-executed bundle from being trusted.

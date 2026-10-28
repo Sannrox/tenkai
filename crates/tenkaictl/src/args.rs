@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
+use crate::bundle_args::BundleCommand;
 use crate::catalog_args::{
     ApprovalCommand, CanaryCommand, ChannelCommand, EvalEvidenceCommand, ReleaseCommand,
 };
@@ -217,6 +218,11 @@ pub(crate) enum Command {
     Upgrade {
         #[command(subcommand)]
         command: UpgradeCommand,
+    },
+    /// Build a signed full-stack offline bundle from published releases.
+    Bundle {
+        #[command(subcommand)]
+        command: BundleCommand,
     },
     /// Immutable source-to-target package migration plans.
     Migrate {

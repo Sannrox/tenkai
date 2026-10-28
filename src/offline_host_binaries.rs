@@ -44,7 +44,7 @@ impl HostBinaryRole {
         }
     }
 
-    fn all() -> [Self; 3] {
+    pub fn all() -> [Self; 3] {
         [Self::Cli, Self::Server, Self::Executor]
     }
 }
@@ -89,6 +89,7 @@ pub struct HostBinaryManifest {
 }
 
 /// Bytes and provenance to insert for one host.
+#[derive(Clone)]
 pub struct HostBinaryInput {
     pub role: HostBinaryRole,
     pub platform: String,
