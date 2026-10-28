@@ -1,4 +1,5 @@
 use super::lifecycle_support::{lifecycle_router, signed_catalog_fixture};
+use super::support::current_generation;
 use super::*;
 
 fn hold_body(environment: &str, operation: &str, generation: u64, reason: Option<&str>) -> Vec<u8> {
@@ -138,7 +139,7 @@ async fn remote_hold_set_release_retry_and_stale_generation() {
         tenkai::now_millis()
     ));
     std::fs::create_dir_all(&root).unwrap();
-    let (app, _config, store) = lifecycle_router(&root).await;
+    let (app, _config, _store) = lifecycle_router(&root).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -149,13 +150,15 @@ async fn remote_hold_set_release_retry_and_stale_generation() {
     let first = signed_catalog_fixture(&root, "1.0.0");
     client.publish_release(&first).await.unwrap();
     client.promote_release("api@1.0.0", "stable").await.unwrap();
+    let current = current_generation(&client, "stage").await;
+    let not_current = current + 1;
     client
-        .subscribe_environment("stage", "api=stable", 0)
+        .subscribe_environment("stage", "api=stable", current)
         .await
         .unwrap();
 
     let held = client
-        .set_environment_hold("stage", "change freeze", 0)
+        .set_environment_hold("stage", "change freeze", current)
         .await
         .unwrap();
     assert!(held.message.contains("change freeze"), "{}", held.message);
@@ -170,12 +173,8 @@ async fn remote_hold_set_release_retry_and_stale_generation() {
         "change freeze"
     );
 
-    store
-        .acquire_lease("stage", "hold-fence", tenkai::now_millis() + 60_000)
-        .unwrap();
-    let current = store.current_lease("stage").unwrap().unwrap().generation;
     let stale = client
-        .release_environment_hold("stage", 0)
+        .release_environment_hold("stage", not_current)
         .await
         .unwrap_err()
         .to_string();
@@ -215,7 +214,7 @@ async fn remote_hold_set_release_retry_and_stale_generation() {
         .to_string();
     assert!(missing.contains("no held failed target"), "{missing}");
     let stale_retry = client
-        .retry_failed_target("stage", "api", "retry after fix", 0)
+        .retry_failed_target("stage", "api", "retry after fix", not_current)
         .await
         .unwrap_err()
         .to_string();

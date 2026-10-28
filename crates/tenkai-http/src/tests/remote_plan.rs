@@ -1,6 +1,7 @@
 use super::lifecycle_support::{
     deployed_version, lifecycle_router, signed_catalog_fixture, signed_plan_requests,
 };
+use super::support::current_generation;
 use super::*;
 
 #[tokio::test]
@@ -11,7 +12,7 @@ async fn remote_plan_apply_rollback_a_to_b_through_a_real_hub() {
         tenkai::now_millis()
     ));
     std::fs::create_dir_all(&root).unwrap();
-    let (app, _config, store) = lifecycle_router(&root).await;
+    let (app, _config, _store) = lifecycle_router(&root).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -23,16 +24,18 @@ async fn remote_plan_apply_rollback_a_to_b_through_a_real_hub() {
     let first = signed_catalog_fixture(&root, "1.0.0");
     client.publish_release(&first).await.unwrap();
     client.promote_release("api@1.0.0", "stable").await.unwrap();
+    let read = current_generation(&client, "stage").await;
     client
-        .subscribe_environment("stage", "api=stable", 0)
+        .subscribe_environment("stage", "api=stable", read)
         .await
         .unwrap();
 
-    let plan_a = client.plan_environment("stage", 0).await.unwrap();
+    let plan_a = client.plan_environment("stage", read).await.unwrap();
     let plan_a_id = plan_a.resource.clone().expect("plan id");
     let plan_a_digest = plan_a.digest.clone().expect("plan digest");
     assert!(plan_a_digest.starts_with("sha256:"));
-    let (approve_a, apply_a) = signed_plan_requests(&root, "approve-a", "stage", &plan_a_digest, 0);
+    let (approve_a, apply_a) =
+        signed_plan_requests(&root, "approve-a", "stage", &plan_a_digest, read);
     let approved = client.approve_plan(&plan_a_id, &approve_a).await.unwrap();
     assert_eq!(approved.digest.as_deref(), Some(plan_a_digest.as_str()));
     let approvals = client.plan_approvals(&plan_a_id).await.unwrap();
@@ -84,13 +87,10 @@ async fn remote_plan_apply_rollback_a_to_b_through_a_real_hub() {
         .unwrap();
     assert_eq!(bypass.status(), StatusCode::BAD_REQUEST);
 
-    store
-        .acquire_lease("stage", "fence-test", tenkai::now_millis() + 60_000)
-        .unwrap();
-    let current = store.current_lease("stage").unwrap().unwrap().generation;
-    assert_ne!(current, 0);
+    let applied_a = client.apply_plan(&plan_a_id, &apply_a).await.unwrap();
+    // The apply advanced the fence, so the value read before it is stale (#703).
     let stale_err = client
-        .apply_plan(&plan_a_id, &apply_a)
+        .plan_environment("stage", read)
         .await
         .unwrap_err()
         .to_string();
@@ -98,10 +98,8 @@ async fn remote_plan_apply_rollback_a_to_b_through_a_real_hub() {
         stale_err.contains("stale fencing generation"),
         "{stale_err}"
     );
-
-    let mut apply_a = apply_a;
-    apply_a.expected_generation = current;
-    let applied_a = client.apply_plan(&plan_a_id, &apply_a).await.unwrap();
+    let current = current_generation(&client, "stage").await;
+    assert_ne!(current, read);
     assert_eq!(applied_a.digest.as_deref(), Some(plan_a_digest.as_str()));
     assert_eq!(deployed_version(&client, "stage", "api").await, "1.0.0");
 
@@ -126,6 +124,7 @@ async fn remote_plan_apply_rollback_a_to_b_through_a_real_hub() {
     apply_b.expected_generation = current;
     client.apply_plan(&plan_b_id, &apply_b).await.unwrap();
     assert_eq!(deployed_version(&client, "stage", "api").await, "1.1.0");
+    let current = current_generation(&client, "stage").await;
 
     let rollback = client
         .rollback_environment("stage", "api", current, None)

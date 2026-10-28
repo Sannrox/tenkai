@@ -1406,14 +1406,8 @@ impl ManagementOperations {
         .map_err(map_lifecycle_error)?;
         self.require_environment_visible(&context, environment)
             .await?;
-        let current = management_lifecycle::environment_fence_generation(
-            self.store
-                .current_lease(environment)
-                .map_err(|error| ManagementError::Unavailable(error.to_string()))?
-                .map(|lease| lease.generation),
-        );
-        management_lifecycle::require_expected_generation(request.expected_generation, current)
-            .map_err(map_lifecycle_error)?;
+        self.require_current_generation(environment, request.expected_generation)
+            .await?;
         let Some((product, channel)) = request.spec.split_once('=') else {
             return Err(ManagementError::BadRequest(
                 "subscribe requires <product>=<channel>".into(),
@@ -1491,7 +1485,8 @@ impl ManagementOperations {
         .map_err(map_lifecycle_error)?;
         self.require_environment_visible(&context, environment)
             .await?;
-        self.require_current_generation(environment, request.expected_generation)?;
+        self.require_current_generation(environment, request.expected_generation)
+            .await?;
         let actor = &context.audit_principal();
         let action = request.change.action();
         self.audit(actor, &format!("environment.configure.{action}.requested"))?;
@@ -1503,10 +1498,7 @@ impl ManagementOperations {
             &request.change,
             &request.reason,
             actor,
-            || {
-                self.require_current_generation(environment, expected)
-                    .map_err(|error| anyhow::anyhow!("{error}"))
-            },
+            |superseded| management_lifecycle::require_expected_generation(expected, superseded),
         )
         .await
         .map_err(map_config_error)?;
@@ -1587,7 +1579,8 @@ impl ManagementOperations {
         .map_err(map_lifecycle_error)?;
         self.require_environment_visible(&context, environment)
             .await?;
-        self.require_current_generation(environment, request.expected_generation)?;
+        self.require_current_generation(environment, request.expected_generation)
+            .await?;
         let actor = &context.audit_principal();
         let verb = operation.as_str();
         self.audit(actor, &format!("delivery.hold.{verb}.requested"))?;
@@ -1784,7 +1777,8 @@ impl ManagementOperations {
         .map_err(map_lifecycle_error)?;
         self.require_environment_visible(&context, environment)
             .await?;
-        self.require_current_generation(environment, request.expected_generation)?;
+        self.require_current_generation(environment, request.expected_generation)
+            .await?;
         let actor = &context.audit_principal();
         self.audit(actor, "delivery.failed_target.retry.requested")?;
         let mut ctx = self.application_ctx()?;
@@ -1848,7 +1842,8 @@ impl ManagementOperations {
         .map_err(map_lifecycle_error)?;
         self.require_environment_visible(&context, environment)
             .await?;
-        self.require_current_generation(environment, request.expected_generation)?;
+        self.require_current_generation(environment, request.expected_generation)
+            .await?;
         let actor = &context.audit_principal();
         self.audit(actor, "plan.requested")?;
         let mut ctx = self.application_ctx()?;
@@ -1910,7 +1905,8 @@ impl ManagementOperations {
         .map_err(map_lifecycle_error)?;
         self.require_environment_visible(&context, &request.environment)
             .await?;
-        self.require_current_generation(&request.environment, request.expected_generation)?;
+        self.require_current_generation(&request.environment, request.expected_generation)
+            .await?;
         let files = management_lifecycle::RemoteApprovalFiles::materialize(
             &request.approval,
             &request.trust_roots,
@@ -2005,7 +2001,8 @@ impl ManagementOperations {
         .map_err(map_lifecycle_error)?;
         self.require_environment_visible(&context, &request.environment)
             .await?;
-        self.require_current_generation(&request.environment, request.expected_generation)?;
+        self.require_current_generation(&request.environment, request.expected_generation)
+            .await?;
         let files = management_lifecycle::RemoteApprovalFiles::materialize_set(
             &request.approval,
             &request.approvals,
@@ -2107,7 +2104,8 @@ impl ManagementOperations {
         .map_err(map_lifecycle_error)?;
         self.require_environment_visible(&context, environment)
             .await?;
-        self.require_current_generation(environment, request.expected_generation)?;
+        self.require_current_generation(environment, request.expected_generation)
+            .await?;
         let actor = &context.audit_principal();
         self.audit(actor, "plan.rollback.requested")?;
         let mut ctx = self.application_ctx()?;
@@ -2149,17 +2147,20 @@ impl ManagementOperations {
         .with_digest(digest))
     }
 
-    fn require_current_generation(
+    /// Refuse `expected` unless it is the environment's current execution
+    /// lease generation: the value `env inspect` reports and every apply
+    /// advances, so remote `--generation` and inspect share one counter
+    /// (#703). Callers are community-host routes.
+    async fn require_current_generation(
         &self,
         environment: &str,
         expected: u64,
     ) -> Result<(), ManagementError> {
-        let current = management_lifecycle::environment_fence_generation(
-            self.store
-                .current_lease(environment)
-                .map_err(|error| ManagementError::Unavailable(error.to_string()))?
-                .map(|lease| lease.generation),
-        );
+        let mut ctx = self.application_ctx()?;
+        let lease = crate::apply::inspect_environment_lease(&mut ctx, environment)
+            .await
+            .map_err(|error| ManagementError::Unavailable(error.to_string()))?;
+        let current = management_lifecycle::environment_fence_generation(lease.generation);
         management_lifecycle::require_expected_generation(expected, current)
             .map_err(map_lifecycle_error)
     }
@@ -3082,13 +3083,27 @@ mod tests {
                 version: 1,
                 operation: "subscribe".into(),
                 environment: "stage".into(),
-                expected_generation: 0,
+                expected_generation: current_generation(&ops, &credential, "stage").await,
                 spec: "api=stable".into(),
             },
         )
         .await
         .unwrap();
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The generation `env inspect` reports, which remote mutations pass (#703).
+    async fn current_generation(
+        ops: &ManagementOperations,
+        credential: &CredentialMaterial,
+        environment: &str,
+    ) -> u64 {
+        ops.inspect_environment(credential, environment)
+            .await
+            .unwrap()
+            .lease
+            .generation
+            .unwrap_or(0)
     }
 
     fn agent_refused(error: ManagementError) {
@@ -3141,7 +3156,7 @@ mod tests {
                 version: 1,
                 operation: "subscribe".into(),
                 environment: "stage".into(),
-                expected_generation: 0,
+                expected_generation: current_generation(&ops, &human, "stage").await,
                 spec: "api=stable".into(),
             },
         )
@@ -3153,7 +3168,7 @@ mod tests {
             version: 1,
             operation: "plan".into(),
             environment: "stage".into(),
-            expected_generation: 0,
+            expected_generation: current_generation(&ops, &human, "stage").await,
         };
         let planned = ops
             .plan_environment(&agent, "stage", plan_request.clone())

@@ -220,3 +220,34 @@ pub(super) fn app_with_reconciler(
     .unwrap();
     (app, store)
 }
+
+/// The fencing generation `env inspect` reports, which remote mutations must
+/// pass (#703).
+pub(super) async fn current_generation(client: &RemoteClient, environment: &str) -> u64 {
+    client
+        .inspect_environment(environment)
+        .await
+        .unwrap()
+        .lease
+        .generation
+        .unwrap_or(0)
+}
+
+/// [`current_generation`] for a test that drives the router directly.
+pub(super) async fn router_generation(app: &Router, environment: &str) -> u64 {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get(format!("/v1/environments/{environment}"))
+                .header("authorization", "Bearer management-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let report: tenkai::plan::EnvironmentInspectReport = serde_json::from_slice(&bytes).unwrap();
+    report.lease.generation.unwrap_or(0)
+}

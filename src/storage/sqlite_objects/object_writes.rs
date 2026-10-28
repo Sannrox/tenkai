@@ -190,7 +190,9 @@ impl SqliteStore {
     ) -> AnyResult<Object> {
         let previous = self.get_object(&object.id)?;
         let mut connection = self.connection()?;
-        let tx = connection.transaction()?;
+        // Immediate: the lease is read before the object is written, so a concurrent
+        // writer waits on the busy timeout instead of failing the lock upgrade.
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         require_active_lease_in(&tx, namespace, key, fencing_token)?;
         if create && previous.is_some() {
             return Err(StoreError::already_exists("object", object.id.clone()).into());

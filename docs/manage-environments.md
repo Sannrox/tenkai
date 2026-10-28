@@ -28,8 +28,9 @@ digests, work directories, payloads, and bearer tokens are not returned.
 
 With `tenkaictl --target remote`, `env add` needs `--reason`. `facts`,
 `constraints`, `maintenance`, `webhooks` and `approval-policy` `set`,
-`clear` and `remove` need `--generation` (the current environment lease
-generation, or `0` when no lease is held) and `--reason`. They call the
+`clear` and `remove` need `--generation`, the `lease.generation` that remote
+`env inspect` reports (`0` only before the environment's first apply or
+change), and `--reason`. They call the
 management routes in [management lifecycle](management-lifecycle.md#operations)
 and run the same validation as the embedded commands. Every change is
 audited with the authenticated actor and the reason. An
@@ -39,7 +40,8 @@ register environments. The `list` and `show` commands stay embedded; remote
 
 ```bash
 tenkaictl --target remote env add edge --connectivity isolated --reason "new site"
-tenkaictl --target remote env facts set edge architecture=arm64 --generation 0 --reason inventory
+tenkaictl --target remote env inspect edge   # read lease.generation, for example 1
+tenkaictl --target remote env facts set edge architecture=arm64 --generation 1 --reason inventory
 ```
 
 For a scripted two-environment walkthrough (list/inspect/status), run:
