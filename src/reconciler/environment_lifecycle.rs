@@ -357,6 +357,29 @@ async fn recover_or_detect_active_plan(ctx: &mut Ctx, environment: &str) -> Resu
         return Ok(true);
     }
     for mut abandoned in running {
+        // The run began in a process that is gone, so its duration is
+        // unknown (#803).
+        let observation = crate::feedback_observation::FeedbackObservation::capture(
+            crate::feedback_observation::Capture {
+                id: &format!("tenkai:plan:{}:orphan_recovery", abandoned.id),
+                operation: crate::feedback_observation::Operation::OrphanRecovery,
+                environment: &abandoned.environment,
+                product: "",
+                plan_id: &abandoned.id,
+                step_id: "",
+                action: None,
+                release_id: "",
+                status: "failed",
+                reason: crate::feedback_observation::Reason::Abandoned,
+                started_at_ms: None,
+                lease_generation: 0,
+                observed_at_ms: crate::now_millis(),
+                context: crate::feedback_observation::RetryContext {
+                    recovery_reason: abandoned.recalled_recovery_reason.clone(),
+                    ..Default::default()
+                },
+            },
+        );
         plan::transition(
             ctx,
             &mut abandoned,
@@ -364,7 +387,10 @@ async fn recover_or_detect_active_plan(ctx: &mut Ctx, environment: &str) -> Resu
                 PlanState::Failed,
                 "controller stopped after execution began; lease expired before recovery",
             ),
-            plan::Persistence::Standard,
+            plan::Persistence::WithProviderEvents {
+                provider_events: &[],
+                observations: &[observation],
+            },
         )
         .await?;
     }
@@ -375,6 +401,79 @@ async fn recover_or_detect_active_plan(ctx: &mut Ctx, environment: &str) -> Resu
 mod tests {
     use super::*;
     use crate::plan::{Action, Step};
+
+    /// A plan left running by a controller that stopped is failed on
+    /// recovery after a restart, leaving an observation with no duration:
+    /// the run began in a process that is gone (#803).
+    #[tokio::test]
+    async fn orphan_recovery_after_a_restart_leaves_an_observation() {
+        let root = std::env::temp_dir().join(format!("tenkai-orphan-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let database = root.join("state.db");
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        plan::env_add(&mut ctx, "local", "orphan fixture")
+            .await
+            .unwrap();
+        let step = Step {
+            id: String::new(),
+            order: 0,
+            product: "api".into(),
+            action: Action::Install,
+            from: None,
+            to: "1.0.0".into(),
+            release_id: "tenkai:release:api@1.0.0".into(),
+            release_digest: "fixture".into(),
+            artifact_digest: "fixture".into(),
+            workdir: ".".into(),
+            restore: None,
+        };
+        let mut running = plan::create_from_steps(&mut ctx, "local", vec![step])
+            .await
+            .unwrap();
+        plan::transition(
+            &mut ctx,
+            &mut running,
+            plan::Transition::new(PlanState::Running, "claimed"),
+            plan::Persistence::Standard,
+        )
+        .await
+        .unwrap();
+        drop(ctx);
+
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        assert!(
+            !recover_or_detect_active_plan(&mut ctx, "local")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !recover_or_detect_active_plan(&mut ctx, "local")
+                .await
+                .unwrap()
+        );
+        let observations = ctx
+            .embedded_arc()
+            .unwrap()
+            .feedback_observations("local")
+            .unwrap();
+        assert_eq!(observations.len(), 1, "{observations:?}");
+        let recovered = &observations[0];
+        assert_eq!(
+            (recovered.operation, recovered.reason),
+            (
+                crate::feedback_observation::Operation::OrphanRecovery,
+                crate::feedback_observation::Reason::Abandoned
+            )
+        );
+        assert_eq!(recovered.plan_id, running.id);
+        assert_eq!(recovered.duration_ms, None);
+        assert_eq!(
+            plan::load(&mut ctx, &running.id).await.unwrap().state,
+            PlanState::Failed
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[tokio::test]
     async fn failed_target_hold_precedes_human_and_auto_approval_and_admits_new_retry() {

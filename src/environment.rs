@@ -341,6 +341,7 @@ pub async fn reconcile_deployment(
                     started_at_ms: None,
                     lease_generation: 0,
                     observed_at_ms: observed_at,
+                    context: Default::default(),
                 },
             )]
         }
@@ -568,6 +569,12 @@ pub(crate) async fn record_deployment_observation(
     } else {
         None
     };
+    let failed_target_before = environment.as_ref().and_then(|environment| {
+        environment
+            .properties
+            .get(&failed_target_key(&observation.step.product))
+            .cloned()
+    });
     if let Some(environment) = environment.as_mut() {
         transition_deployment(
             environment,
@@ -673,6 +680,19 @@ pub(crate) async fn record_deployment_observation(
     }
     let environment_changed = observation.transition != DeploymentTransition::Unchanged
         || matches!(observation.status, "failed" | "rolled_back");
+    // Retry and recovery context (#803): whether this step retried the
+    // release the environment held as failed, read before this outcome
+    // changed it, and the reason that admitted a recalled rollback.
+    let failed_target_retry =
+        failed_target_before.as_deref() == Some(observation.step.release_id.as_str());
+    let recovery_reason = match (&plan, observation.step.action) {
+        (Some(plan), _) => plan.recalled_recovery_reason.clone(),
+        (None, crate::plan::Action::Rollback) => crate::plan::load(ctx, observation.plan_id)
+            .await
+            .ok()
+            .and_then(|plan| plan.recalled_recovery_reason),
+        _ => None,
+    };
     // Captured always, independent of outcome export, and committed with the
     // deployment record wherever this process holds the store (#802).
     let feedback = [crate::feedback_observation::FeedbackObservation::capture(
@@ -694,6 +714,12 @@ pub(crate) async fn record_deployment_observation(
             started_at_ms: observation.started_at_ms,
             lease_generation: lease.generation,
             observed_at_ms: deployment.updated,
+            context: crate::feedback_observation::RetryContext {
+                takeover: lease.took_over,
+                failed_target_retry,
+                recovery_reason,
+                ..Default::default()
+            },
         },
     )];
     let update_result =

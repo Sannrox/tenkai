@@ -1202,6 +1202,19 @@ install = "true"
         )
         .await
         .unwrap();
+        // The retry's observation says it retried the held target (#803);
+        // the rollback that set the hold did not.
+        let observations = ctx
+            .embedded_arc()
+            .unwrap()
+            .feedback_observations("local")
+            .unwrap();
+        let retried = observations
+            .iter()
+            .map(|observation| observation.context.failed_target_retry)
+            .collect::<Vec<_>>();
+        assert_eq!(retried.first(), Some(&false), "{observations:?}");
+        assert_eq!(retried.last(), Some(&true), "{observations:?}");
         let environment = crate::environment::environment(&mut ctx, "local")
             .await
             .unwrap();

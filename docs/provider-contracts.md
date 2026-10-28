@@ -133,16 +133,31 @@ no-op; a conflicting one keeps the stored record. A capture that cannot be
 built keeps only the outcome's identity (`reason: degraded`), and one that
 cannot be stored never interrupts the deployment or rollback.
 
-Fields: `id` (the outcome's identity), `operation` (`apply_step`,
-`runtime_completion` or `unknown_reconciliation`), `environment`, `product`,
-`plan_id`, `step_id`, `action`, `release_id`, `status`, `reason`,
-`duration_ms` (from execution entry, when this process saw it start),
-`controller_version`, `lease_generation` and `observed_at_ms`.
+Fields: `id` (the outcome's identity), `operation`, `environment`,
+`product`, `plan_id`, `step_id`, `action`, `release_id`, `status`, `reason`,
+`duration_ms` (from execution entry, when this process saw it start; absent
+after a restart), `controller_version`, `lease_generation`, `observed_at_ms`,
+and an optional `context`.
+
+`operation` is `apply_step`, `runtime_completion`, `unknown_reconciliation`,
+or, for outcomes no step commits (#803), `plan_blocked` (a maintenance window
+or release gate held the plan), `plan_failed` (the plan failed before or
+around its steps) or `orphan_recovery` (a plan left running by a stopped
+controller was failed on recovery).
 
 `reason` is one of `none`, `product_failed`, `product_failed_restored`,
-`tenkai_failed`, `tenkai_failed_restored`, `cancelled`, `blocked`, `state_unknown`, `reconciled` and
-`degraded`. A record holds no detail text: no command output, credentials,
-signing material, environment facts or content. Identifiers are bounded.
+`tenkai_failed`, `tenkai_failed_restored`, `cancelled`, `blocked`,
+`state_unknown`, `reconciled`, `maintenance_blocked`, `gate_blocked`,
+`plan_failed`, `abandoned` and `degraded`.
+
+`context` carries what a retry or recovery is attributable to, each part only
+when set: `takeover` (the lease was taken over from an expired holder),
+`runtime_claim_generation`, `failed_target_retry` (the step retried a release
+held as failed) and `recovery_reason` (the audited reason that admitted a
+recalled rollback, bounded).
+
+A record holds no detail text: no command output, credentials, signing
+material, environment facts or content. Identifiers are bounded.
 
 ## Standalone operation and external adapters
 

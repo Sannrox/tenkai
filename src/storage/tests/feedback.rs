@@ -32,6 +32,7 @@ fn observation(id: &str, status: &str) -> FeedbackObservation {
         started_at_ms: Some(1_000),
         lease_generation: 1,
         observed_at_ms: 2_000,
+        context: Default::default(),
     })
 }
 
@@ -69,6 +70,16 @@ fn observations_commit_with_their_operation_and_never_change() {
         assert!(error.to_string().contains("immutable"), "{error}");
     }
     let reopened = SqliteStore::open(&path).unwrap();
+    // A record this version cannot read is skipped, not fatal.
+    reopened
+        .connection()
+        .unwrap()
+        .execute(
+            "INSERT INTO feedback_observations (id, schema, environment_id, observed_at, body_json)
+             VALUES ('newer', 'tenkai.feedback_observation.v1', 'prod', 3000, '{\"unknown\":1}')",
+            [],
+        )
+        .unwrap();
     assert_eq!(reopened.feedback_observations("prod").unwrap(), vec![first]);
     drop(reopened);
     let _ = std::fs::remove_dir_all(dir);

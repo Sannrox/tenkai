@@ -29,6 +29,13 @@ pub enum Operation {
     RuntimeCompletion,
     /// An operator resolved an unknown deployment state.
     UnknownReconciliation,
+    /// A plan was held before or between steps: maintenance or a gate (#803).
+    PlanBlocked,
+    /// A plan failed outside any step outcome (#803).
+    PlanFailed,
+    /// A plan left running by a controller that stopped was recovered
+    /// after a restart (#803).
+    OrphanRecovery,
 }
 
 /// Why the outcome is what it is. Closed: a new reason is a schema change.
@@ -56,6 +63,40 @@ pub enum Reason {
     /// The observation could not be built from the outcome; only its
     /// identity is kept.
     Degraded,
+    /// A maintenance window held the plan.
+    MaintenanceBlocked,
+    /// A release gate (such as an evaluation suite) held the plan.
+    GateBlocked,
+    /// The plan failed before or around its steps.
+    PlanFailed,
+    /// The controller running the plan stopped; it was failed on recovery.
+    Abandoned,
+}
+
+/// Retry and recovery facts an outcome is attributable to (#803). All
+/// optional, so records without them are unchanged.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetryContext {
+    /// The environment lease was taken over from an expired holder.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub takeover: bool,
+    /// The runtime claim generation that completed the steps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_claim_generation: Option<u64>,
+    /// The step retried a release the environment held as a failed target.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub failed_target_retry: bool,
+    /// The audited reason that admitted rollback onto recalled content,
+    /// bounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_reason: Option<String>,
+}
+
+impl RetryContext {
+    fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
 }
 
 /// One immutable observation. `id` is the committed outcome's identity, so
@@ -83,6 +124,8 @@ pub struct FeedbackObservation {
     /// retries and takeovers of one step are told apart.
     pub lease_generation: u64,
     pub observed_at_ms: i64,
+    #[serde(default, skip_serializing_if = "RetryContext::is_empty")]
+    pub context: RetryContext,
 }
 
 /// The facts an observation is built from.
@@ -93,8 +136,9 @@ pub struct Capture<'a> {
     pub product: &'a str,
     pub plan_id: &'a str,
     pub step_id: &'a str,
-    /// `None` when the step could not be read; the observation is then
-    /// degraded.
+    /// `None` for a plan-level operation that names no step; for a step
+    /// operation, `None` means the step could not be read and degrades the
+    /// observation.
     pub action: Option<Action>,
     pub release_id: &'a str,
     pub status: &'a str,
@@ -102,6 +146,7 @@ pub struct Capture<'a> {
     pub started_at_ms: Option<i64>,
     pub lease_generation: u64,
     pub observed_at_ms: i64,
+    pub context: RetryContext,
 }
 
 impl FeedbackObservation {
@@ -130,8 +175,18 @@ impl FeedbackObservation {
             controller_version: crate::version_skew::SERVER_VERSION.into(),
             lease_generation: capture.lease_generation,
             observed_at_ms: capture.observed_at_ms,
+            context: RetryContext {
+                recovery_reason: capture.context.recovery_reason.as_deref().map(bounded),
+                ..capture.context
+            },
         };
-        if capture.action.is_some() && observation.within_bounds() {
+        // Step operations need their step; plan-level ones may have none.
+        let step_known = capture.action.is_some()
+            || matches!(
+                capture.operation,
+                Operation::PlanBlocked | Operation::PlanFailed | Operation::OrphanRecovery
+            );
+        if step_known && observation.within_bounds() {
             return observation;
         }
         Self {
@@ -240,6 +295,7 @@ mod tests {
             started_at_ms: Some(1_500),
             lease_generation: 3,
             observed_at_ms: 2_000,
+            context: RetryContext::default(),
         }
     }
 

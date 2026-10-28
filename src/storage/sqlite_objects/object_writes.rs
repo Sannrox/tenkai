@@ -116,7 +116,14 @@ impl SqliteStore {
             .map(|object| self.get_object(&object.id))
             .collect::<AnyResult<Vec<_>>>()?;
         let mut connection = self.connection()?;
-        let tx = connection.transaction()?;
+        // Immediate under a lease, like `guarded_put`: the lease is read before
+        // the objects are written, so a concurrent writer waits on the busy
+        // timeout instead of failing the lock upgrade.
+        let tx = if lease.is_some() {
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?
+        } else {
+            connection.transaction()?
+        };
         if let Some((namespace, key, token)) = lease {
             require_active_lease_in(&tx, namespace, key, token)?;
         }
@@ -155,15 +162,27 @@ impl SqliteStore {
         Ok(())
     }
 
-    /// Feedback observations of `environment`, oldest first.
+    /// Feedback observations of `environment`, oldest first. A record this
+    /// version cannot read, such as one a newer version wrote with fields it
+    /// does not know, is skipped and logged rather than failing the query.
     pub fn feedback_observations(&self, environment: &str) -> AnyResult<Vec<FeedbackObservation>> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT body_json FROM feedback_observations
+            "SELECT id, body_json FROM feedback_observations
              WHERE environment_id=?1 ORDER BY observed_at, id",
         )?;
-        let rows = statement.query_map([environment], |row| row.get::<_, String>(0))?;
-        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+        let rows = statement.query_map([environment], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut observations = Vec::new();
+        for row in rows {
+            let (id, body) = row?;
+            match serde_json::from_str(&body) {
+                Ok(observation) => observations.push(observation),
+                Err(error) => eprintln!("skipping unreadable feedback observation {id}: {error}"),
+            }
+        }
+        Ok(observations)
     }
 
     /// Write `object` with `events` and `observations` in one transaction.

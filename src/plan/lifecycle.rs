@@ -77,6 +77,8 @@ pub(crate) enum Persistence<'a> {
         key: &'a str,
         fencing_token: &'a str,
         confirm_ambiguous: bool,
+        /// Committed with the plan where this process holds the store (#803).
+        observations: &'a [crate::feedback_observation::FeedbackObservation],
     },
 }
 
@@ -112,6 +114,7 @@ pub(crate) async fn transition(
             key,
             fencing_token,
             confirm_ambiguous,
+            observations,
         } => {
             let intended = (
                 plan.state,
@@ -119,10 +122,22 @@ pub(crate) async fn transition(
                 plan.status_detail.clone(),
                 plan.maintenance_blocked,
             );
-            if let Err(error) = ctx
-                .guarded_update(plan.to_object()?, namespace, key, fencing_token)
+            let written = if observations.is_empty() || !ctx.is_embedded() {
+                ctx.guarded_update(plan.to_object()?, namespace, key, fencing_token)
+                    .await
+                    .map(|_| ())
+            } else {
+                ctx.guarded_update_objects_with_provider_events(
+                    &[plan.to_object()?],
+                    namespace,
+                    key,
+                    fencing_token,
+                    &[],
+                    observations,
+                )
                 .await
-            {
+            };
+            if let Err(error) = written {
                 if !confirm_ambiguous {
                     return Err(error);
                 }

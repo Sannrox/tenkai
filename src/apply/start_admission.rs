@@ -96,6 +96,14 @@ pub(super) async fn admit(
                 GateDecision::Denied(detail) | GateDecision::Unavailable(detail) => detail,
             };
             let outcome = Outcome::new(step.clone(), StepOutcomeStatus::Blocked, detail.clone());
+            let observation = plan_completion::plan_observation(
+                lease,
+                plan,
+                Some(step),
+                crate::feedback_observation::Operation::PlanBlocked,
+                "blocked",
+                crate::feedback_observation::Reason::GateBlocked,
+            );
             plan_completion::transition_confirmed(
                 ctx,
                 lease,
@@ -103,6 +111,7 @@ pub(super) async fn admit(
                 PlanState::Blocked,
                 policy.skip_gates,
                 detail,
+                &[observation],
             )
             .await?;
             return Ok(Some(vec![outcome]));
@@ -132,6 +141,7 @@ pub(super) async fn admit(
         PlanState::Running,
         policy.skip_gates,
         "",
+        &[],
     )
     .await?;
     let running_maintenance = maintenance_decision(ctx, plan, policy.emergency_reason).await?;
@@ -217,6 +227,14 @@ async fn block_for_maintenance(
     skip_gates: bool,
     detail: &str,
 ) -> Result<()> {
+    let observation = plan_completion::plan_observation(
+        lease,
+        plan,
+        None,
+        crate::feedback_observation::Operation::PlanBlocked,
+        "blocked",
+        crate::feedback_observation::Reason::MaintenanceBlocked,
+    );
     plan::transition(
         ctx,
         plan,
@@ -226,6 +244,7 @@ async fn block_for_maintenance(
             key: &lease.environment,
             fencing_token: &lease.fencing_token,
             confirm_ambiguous: false,
+            observations: &[observation],
         },
     )
     .await?;
@@ -367,6 +386,100 @@ fn gate_config_ref(release_digest: &str, artifact_digest: &str, suite_digest: &s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixture_step() -> crate::plan::Step {
+        crate::plan::Step {
+            id: String::new(),
+            order: 0,
+            product: "api".into(),
+            action: crate::plan::Action::Rollback,
+            from: Some("1.1.0".into()),
+            to: "1.0.0".into(),
+            release_id: "tenkai:release:api@1.0.0".into(),
+            release_digest: "fixture".into(),
+            artifact_digest: "fixture".into(),
+            workdir: ".".into(),
+            restore: None,
+        }
+    }
+
+    /// Blocks and plan-level failures commit no step outcome; each leaves
+    /// one observation with its retry and recovery context, and repeating
+    /// the same transition under the same lease adds nothing (#803).
+    #[tokio::test]
+    async fn plan_blocks_and_failures_leave_observations_with_context() {
+        use crate::feedback_observation::{Operation, Reason};
+        let root =
+            std::env::temp_dir().join(format!("tenkai-plan-feedback-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::plan::env_add(&mut ctx, "local", "feedback fixture")
+            .await
+            .unwrap();
+        let mut blocked = crate::plan::create_from_steps_with_recovery(
+            &mut ctx,
+            "local",
+            vec![fixture_step()],
+            "incident 7: recalled release is the last good one".into(),
+        )
+        .await
+        .unwrap();
+        let lease = crate::apply::claim_environment(&mut ctx, "local", "feedback-test")
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            let error =
+                block_for_maintenance(&mut ctx, &lease, &mut blocked, false, "window closed")
+                    .await
+                    .unwrap_err();
+            assert!(is_maintenance_block_error(&error));
+        }
+        let mut failed = crate::plan::create_from_steps(&mut ctx, "local", vec![fixture_step()])
+            .await
+            .unwrap();
+        plan_completion::fail(
+            &mut ctx,
+            &lease,
+            &mut failed,
+            false,
+            "executor refused: secret=x",
+        )
+        .await
+        .unwrap();
+
+        let observations = ctx
+            .embedded_arc()
+            .unwrap()
+            .feedback_observations("local")
+            .unwrap();
+        assert_eq!(observations.len(), 2, "{observations:?}");
+        let block = &observations[0];
+        assert_eq!(
+            (block.operation, block.reason, block.plan_id.as_str()),
+            (
+                Operation::PlanBlocked,
+                Reason::MaintenanceBlocked,
+                blocked.id.as_str()
+            )
+        );
+        assert_eq!(block.lease_generation, lease.generation);
+        assert_eq!(
+            block.context.recovery_reason.as_deref(),
+            Some("incident 7: recalled release is the last good one")
+        );
+        let failure = &observations[1];
+        assert_eq!(
+            (failure.operation, failure.reason, failure.plan_id.as_str()),
+            (
+                Operation::PlanFailed,
+                Reason::PlanFailed,
+                failed.id.as_str()
+            )
+        );
+        assert!(!serde_json::to_string(failure).unwrap().contains("secret"));
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn emergency_override_requires_a_reason() {
