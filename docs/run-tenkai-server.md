@@ -211,8 +211,12 @@ download the files the CLI otherwise writes there (#682):
   create nor list exports. An environment-scoped credential creates and sees
   only its own environment's recovery bundles and offline receipts.
 - **Durability.** An export is assembled in a staging directory and renamed
-  into place, so a crash never leaves a partial export. Exports are never
-  deleted by the server. If the audit chain advanced but an entry's export was
+  into place, so a crash never leaves a partial export. Without
+  `TENKAI_EXPORT_RETENTION_DAYS` exports are never deleted by the server.
+  With it, each export reports `expires_at_ms`; past it the export cannot
+  be downloaded, is listed with `expired: true`, and its artifact is removed
+  the next time exports are listed (#818). The record and its events stay,
+  and the audit chain and backups are never removed. If the audit chain advanced but an entry's export was
   not stored, audit-export requests store such entries, oldest first, before
   the chain advances again, so the downloaded chain has no gap. A lock on the
   export directory serializes this across overlapping server processes.

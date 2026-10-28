@@ -279,8 +279,15 @@
     },
     "BackupStatus": {
       "additionalProperties": false,
-      "description": "`GET /v1/backups`: `status.json` plus the newest drill.",
+      "description": "`GET /v1/backups`: `status.json` plus the newest drill and the drill\nhistory.",
       "properties": {
+        "drills": {
+          "description": "The kept restore drills, newest first, at most [`DRILL_HISTORY`]\n(#818). Never written to `status.json`, so older versions read it.",
+          "items": {
+            "$ref": "#/$defs/DrillEvidence"
+          },
+          "type": "array"
+        },
         "last_drill": {
           "$ref": "#/$defs/DrillEvidence"
         },
@@ -2395,6 +2402,15 @@
           },
           "type": "array"
         },
+        "expired": {
+          "description": "Past `expires_at_ms`, or its artifact already removed (a retention\nthat was later raised or unset does not bring it back): listed, never\ndownloadable.",
+          "type": "boolean"
+        },
+        "expires_at_ms": {
+          "description": "When it stops being downloadable, with a retention configured (#818).",
+          "format": "int64",
+          "type": "integer"
+        },
         "file_name": {
           "description": "The name the download carries, as the CLI would name the file.",
           "type": "string"
@@ -2425,7 +2441,8 @@
         "sha256",
         "size_bytes",
         "created_at_ms",
-        "events"
+        "events",
+        "expired"
       ],
       "type": "object"
     },

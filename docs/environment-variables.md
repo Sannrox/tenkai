@@ -46,6 +46,7 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | `TENKAI_EXPORT_DIR` | unset | `tenkai-server` only: directory of exports created and downloaded over HTTP ([exports over HTTP](run-tenkai-server.md#exports-over-http)). Set with `TENKAI_EXPORT_SIGNING_KEY`. Refused in tenant mode |
 | `TENKAI_EXPORT_SIGNING_KEY` | unset | Ed25519 seed file that signs support bundles and audit exports made over HTTP |
 | `TENKAI_EXPORT_TRUST_ROOTS` | unset | Trust roots for audit exports made over HTTP and signed before an export key rotation |
+| `TENKAI_EXPORT_RETENTION_DAYS` | unset | Days an export made over HTTP stays downloadable; unset keeps exports for good ([exports over HTTP](run-tenkai-server.md#exports-over-http)) |
 | `TENKAI_IMPORT_SCANNER` | unset | Absolute path of a scanner run on every offline bundle import after signature verification and before any write ([offline bundles](offline-bundles.md#content-scanner)) |
 | `TENKAI_IMPORT_SCANNER_TIMEOUT_SECS` | `600` | Seconds the import scanner may run before the import is refused |
 | `TENKAI_IMPORT_SCANNER_SNAPSHOT_DIR` | the temp directory | Writable directory for the private copy of a bundle the scanner reads and the import then uses |
