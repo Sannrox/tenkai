@@ -691,6 +691,7 @@ async fn main() -> Result<()> {
         imports.as_ref(),
         tls.as_ref(),
         runner_ca.as_ref(),
+        cli.tls_require_runtime_client_cert,
     )?);
     let ctx = match cli.provider_mode {
         ProviderMode::Embedded if cli.tenant_mode => tenkai::client::Ctx::tenant_hub(),
@@ -1629,6 +1630,7 @@ fn trust_sources(
     imports: Option<&tenkai::offline_import::ImportSettings>,
     tls: Option<&Arc<tenkai_http::tls::ReloadingTls>>,
     runner_ca: Option<&Arc<tenkai::runner_ca::RunnerCa>>,
+    runtime_client_cert_required: bool,
 ) -> Result<tenkai::trust_posture::TrustSources> {
     use tenkai::trust_posture::CertificateSource;
     let path = |name: &str| std::env::var_os(name).map(PathBuf::from);
@@ -1712,6 +1714,7 @@ fn trust_sources(
             .collect(),
         warning_days: days("TENKAI_TRUST_WARNING_DAYS", 30)?,
         critical_days: days("TENKAI_TRUST_CRITICAL_DAYS", 7)?,
+        runtime_client_cert_required,
     };
     anyhow::ensure!(
         sources.critical_days <= sources.warning_days,

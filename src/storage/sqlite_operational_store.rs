@@ -384,6 +384,19 @@ impl OperationalStore for SqliteStore {
         self.runtime_activity_sqlite()
     }
 
+    fn record_runtime_certificate(
+        &self,
+        runner_id: &str,
+        environment_id: &str,
+        issued_at: i64,
+    ) -> Result<()> {
+        self.record_runtime_certificate_sqlite(runner_id, environment_id, issued_at)
+    }
+
+    fn certified_runtime_runners(&self) -> Result<Vec<String>> {
+        self.certified_runtime_runners_sqlite()
+    }
+
     fn live_runtime_claim_owners(&self, now: i64) -> Result<Vec<String>> {
         self.live_runtime_claim_owners_sqlite(now)
     }

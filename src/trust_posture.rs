@@ -59,6 +59,8 @@ pub struct TrustSources {
     pub certificates: Vec<(String, CertificateSource)>,
     pub warning_days: u32,
     pub critical_days: u32,
+    /// `TENKAI_TLS_REQUIRE_RUNTIME_CLIENT_CERT`, as the listener enforces it.
+    pub runtime_client_cert_required: bool,
 }
 
 impl TrustSources {
@@ -73,6 +75,9 @@ pub struct TrustPosture {
     pub status: TrustStatus,
     pub warning_days: u32,
     pub critical_days: u32,
+    /// Runtime routes refuse a connection without a verified client
+    /// certificate, enrollment and renewal aside (#809).
+    pub runtime_client_cert_required: bool,
     pub signing: Vec<SigningRoot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
@@ -211,6 +216,11 @@ pub struct CertificateEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub days_left: Option<i64>,
+    /// SHA-256 of the certificate's DER, as `openssl x509 -fingerprint
+    /// -sha256` prints it: uppercase hex pairs joined by colons (#809).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub sha256_fingerprint: Option<String>,
     /// An unreadable certificate file is `critical`.
     pub status: TrustStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -328,6 +338,7 @@ pub fn posture(sources: &TrustSources, now_secs: i64) -> TrustPosture {
             .unwrap_or(TrustStatus::Ok),
         warning_days: sources.warning_days,
         critical_days: sources.critical_days,
+        runtime_client_cert_required: sources.runtime_client_cert_required,
         signing,
         revocation_list: revoked.map(|(file, list)| match list {
             Ok(list) => InstalledRevocations {
@@ -375,6 +386,16 @@ fn installed_revocations(sources: &TrustSources) -> Option<Revocations> {
 }
 
 /// One entry per certificate in `source`.
+/// `AB:CD:…`, the SHA-256 of `der` as `openssl x509 -fingerprint -sha256`.
+fn fingerprint(der: &[u8]) -> String {
+    use sha2::Digest as _;
+    sha2::Sha256::digest(der)
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
 fn certificates(
     purpose: &str,
     source: &CertificateSource,
@@ -392,6 +413,7 @@ fn certificates(
         subject: None,
         not_after: None,
         days_left: None,
+        sha256_fingerprint: None,
         status: TrustStatus::Critical,
         error: Some(error),
     };
@@ -412,10 +434,11 @@ fn certificates(
             Ok(Some((
                 certificate.subject().to_string(),
                 certificate.validity().not_after.timestamp(),
+                fingerprint(&pem.contents),
             )))
         });
         match parsed {
-            Ok(Some((subject, not_after))) => {
+            Ok(Some((subject, not_after, sha256_fingerprint))) => {
                 let days_left = (not_after - now_secs).div_euclid(86_400);
                 let status = if not_after <= now_secs {
                     TrustStatus::Expired
@@ -433,6 +456,7 @@ fn certificates(
                     subject: Some(subject),
                     not_after: Some(not_after),
                     days_left: Some(days_left),
+                    sha256_fingerprint: Some(sha256_fingerprint),
                     status,
                     error: None,
                 });
@@ -600,6 +624,51 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// A fixed CA and the fingerprint `openssl x509 -fingerprint -sha256`
+    /// printed for it.
+    const FIXTURE_CA: &str = "-----BEGIN CERTIFICATE-----
+MIIBbjCCARSgAwIBAgIUSL3R77cFh5zussulS58Eu9/GUMEwCgYIKoZIzj0EAwIw
+HDEaMBgGA1UEAwwRZml4dHVyZSBydW5uZXIgQ0EwIBcNMjYxMDI4MTk1NjM1WhgP
+MjEyNjEwMDQxOTU2MzVaMBwxGjAYBgNVBAMMEWZpeHR1cmUgcnVubmVyIENBMFkw
+EwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEymXf4tcRPPXy+MDoVDr9l6S6eG2xJpNA
+qSQIlFuXsypjV6r9Miw/a62izR116OyE6WMCprjvHcdDj1LMZHrojaMyMDAwHQYD
+VR0OBBYEFBFAo5iZFA+K3SLLnyP5+umyOViJMA8GA1UdEwEB/wQFMAMBAf8wCgYI
+KoZIzj0EAwIDSAAwRQIga23B1ZgmpD7dXwJ/GxcxpghJ6tw7jrMiz2CyaOz3cp4C
+IQDZq+YO1/tDxcu5xN5Lo9z7V6C39Ey9tLwLOK4Lqlybog==
+-----END CERTIFICATE-----
+";
+
+    /// #809: the runner CA's fingerprint is the one openssl prints, and the
+    /// client-certificate requirement is reported as configured.
+    #[test]
+    fn reports_the_runner_ca_fingerprint_and_the_client_certificate_requirement() {
+        for required in [true, false] {
+            let shown = posture(
+                &TrustSources {
+                    certificates: vec![(
+                        "runner_ca".into(),
+                        CertificateSource::Loaded {
+                            name: "runner CA in use".into(),
+                            pem: std::sync::Arc::new(|| FIXTURE_CA.as_bytes().to_vec()),
+                        },
+                    )],
+                    warning_days: 30,
+                    critical_days: 7,
+                    runtime_client_cert_required: required,
+                    ..TrustSources::default()
+                },
+                time::OffsetDateTime::now_utc().unix_timestamp(),
+            );
+            assert_eq!(shown.runtime_client_cert_required, required);
+            assert_eq!(
+                shown.tls[0].sha256_fingerprint.as_deref(),
+                Some(
+                    "C6:32:71:27:76:BC:88:A0:E8:D2:EC:76:3A:DF:E0:49:68:D4:E0:A0:B7:A5:C8:45:7C:F2:0D:0D:34:47:86:06"
+                )
+            );
+        }
+    }
+
     /// A window opening after a certificate lapses is flagged with the first
     /// certificate to lapse; one opening before every expiry is not (#778).
     #[test]
@@ -684,6 +753,7 @@ mod tests {
             ],
             warning_days: 30,
             critical_days: 7,
+            runtime_client_cert_required: false,
         };
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
         let shown = posture(&sources, now);

@@ -335,7 +335,11 @@ this host trusts and how long its certificates last (#676):
   (`TENKAI_CA_BUNDLE`), with subject, `not_after`, days left and a status:
   `ok`, `warning` (fewer than `TENKAI_TRUST_WARNING_DAYS`, default 30),
   `critical` (fewer than `TENKAI_TRUST_CRITICAL_DAYS`, default 7) or
-  `expired`. An unreadable file is `critical`.
+  `expired`. An unreadable file is `critical`. Each readable certificate
+  carries `sha256_fingerprint`, as `openssl x509 -fingerprint -sha256`
+  prints it (#809).
+- **Runner client certificates.** `runtime_client_cert_required` is `true`
+  when `TENKAI_TLS_REQUIRE_RUNTIME_CLIENT_CERT` is in force (#809).
 
 Each entry says its `source`: `loaded` is the material the server uses
 now (the listener chain, client CA and runner CA), so a renewal that
@@ -464,6 +468,14 @@ environment-scoped credential sees only its environment's runners.
   most every 30 seconds per
   instance and kind, so it can trail by that much, and a failed write never
   fails the runtime's request.
+- **Auth (#809).** `client_certificate` once the runner CA has issued the
+  runner a certificate, at enrollment with a CSR or at a renewal; `bearer`
+  for a static token or an enrolled credential never issued one. It is
+  read from what the server issued, not from what a request presented: an
+  agent with a certificate never uses its bearer for work, though the
+  bearer stays valid for renewal unless certificates are required. A
+  runner certified before this release, or by a replica one release
+  behind, reads `bearer` until its next renewal, within a day.
 - **Revocation.** A reason is required, and it and the revoking principal
   are shown on inspect. The earlier bodyless
   `POST /v1/runtime-credentials/{id}/revoke` keeps working for released

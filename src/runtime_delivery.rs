@@ -737,6 +737,19 @@ impl RuntimeDeliveryOperations {
         }
     }
 
+    /// Record that `runner_id` was issued a certificate, which the registry
+    /// reports as its `auth` (#809). Like activity it is an operator view:
+    /// a failed write is reported, the certificate still returned, and the
+    /// runner reads as `bearer` until its next renewal records it.
+    fn note_certificate(&self, runner_id: &str, environment: &str) {
+        if let Err(error) =
+            self.store
+                .record_runtime_certificate(runner_id, environment, crate::now_millis())
+        {
+            eprintln!("recording a runner certificate failed (continuing): {error}");
+        }
+    }
+
     pub async fn claim_work(
         &self,
         token: Option<&str>,
@@ -1184,11 +1197,12 @@ impl RuntimeDeliveryOperations {
                 &request.csr,
                 &crate::runner_ca::RunnerIdentity {
                     environment: environment.into(),
-                    runner_id: identity.runner_id,
+                    runner_id: identity.runner_id.clone(),
                 },
                 crate::now_millis() / 1_000,
             )
             .map_err(|error| RuntimeDeliveryError::InvalidRequest(format!("{error:#}")))?;
+        self.note_certificate(&identity.runner_id, environment);
         Ok(RuntimeCertificate {
             certificate,
             ca: ca.trust_bundle(),
@@ -1285,6 +1299,9 @@ impl RuntimeDeliveryOperations {
             ),
             _ => None,
         };
+        if certificate.is_some() {
+            self.note_certificate(&record.credential_digest, &record.environment_id);
+        }
         Ok(RuntimeEnrolled {
             environment: record.environment_id,
             credential,
@@ -1939,5 +1956,59 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.applied, vec!["architecture"]);
+    }
+
+    /// #809: a runner enrolled without a CSR, or before certificates were
+    /// recorded, reads as certified once a renewal issues it one.
+    #[test]
+    fn a_renewal_records_the_runner_as_certified() {
+        use crate::runtime_credentials::{ENROLLMENT_TOKEN_PREFIX, digest, mint};
+        let (operations, _) = operations();
+        let (cert, key) = crate::runner_ca::RunnerCa::generate("test runner CA").unwrap();
+        let operations = operations.with_runner_ca(Arc::new(
+            crate::runner_ca::RunnerCa::from_pem(&cert, &key).unwrap(),
+        ));
+        let token = mint(ENROLLMENT_TOKEN_PREFIX).unwrap();
+        operations
+            .store
+            .create_runtime_enrollment(&crate::storage::RuntimeEnrollmentRecord {
+                token_digest: digest(&token),
+                environment_id: "prod".into(),
+                expires_at: i64::MAX,
+                created_by: "operator".into(),
+            })
+            .unwrap();
+        let enrolled = operations
+            .enroll("prod", &RuntimeEnrollRequest { token, csr: None })
+            .unwrap();
+        assert!(
+            operations
+                .store
+                .certified_runtime_runners()
+                .unwrap()
+                .is_empty()
+        );
+        let csr = rcgen::CertificateParams::new(Vec::<String>::new())
+            .unwrap()
+            .serialize_request(&rcgen::KeyPair::generate().unwrap())
+            .unwrap()
+            .pem()
+            .unwrap();
+        operations
+            .renew_certificate(
+                Some(&enrolled.credential),
+                RuntimeCaller {
+                    instance: Some("instance-a"),
+                    version: None,
+                    certificate: None,
+                },
+                "prod",
+                &RuntimeCertificateRequest { csr },
+            )
+            .unwrap();
+        assert_eq!(
+            operations.store.certified_runtime_runners().unwrap(),
+            [enrolled.credential_id]
+        );
     }
 }
