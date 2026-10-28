@@ -211,6 +211,8 @@ impl FixtureEnvironmentProjection {
             }),
             maintenance: None,
             constraints: Vec::new(),
+            webhooks: Vec::new(),
+            approval_policy: None,
             terminal_outcomes: Vec::new(),
             execution_note: "Development fixture projection; execution is disabled.".into(),
             observed_type_digest: None,

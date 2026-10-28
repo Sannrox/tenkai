@@ -393,3 +393,126 @@ async fn remote_configuration_matches_embedded_and_refuses_like_the_cli() {
     assert!(stale.contains("stale fencing generation"), "{stale}");
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// #820: inspect reports the configured webhooks (never a secret value) and
+/// the approval-policy path, as `tenkaictl env inspect` prints the same
+/// report; an edit with the reported generation applies, a stale one is
+/// refused.
+#[tokio::test]
+async fn inspect_reports_webhooks_and_the_policy_path_for_conditional_edits() {
+    let root = temp_root("inspect-config");
+    let (app, _config, _store) = lifecycle_router(&root).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let client = RemoteClient::new(format!("http://{addr}"), "management-secret").unwrap();
+    let policy = root.join("policy.toml");
+    std::fs::write(
+        &policy,
+        "version = 1\nmode = \"manual\"\nttl_ms = 3600000\n",
+    )
+    .unwrap();
+    client
+        .register_environment("edge", "edge site", None, "new site")
+        .await
+        .unwrap();
+    for change in [
+        Change::SetWebhook {
+            url: "https://hooks.example/deploy".into(),
+            secret_env: "EDGE_HOOK_SECRET_820".into(),
+            events: vec![tenkai::deploy_webhook::WebhookEvent::ApplyFailed],
+            operational: Vec::new(),
+        },
+        Change::SetWebhook {
+            url: "https://hooks.example/audit".into(),
+            secret_env: "AUDIT_HOOK_SECRET".into(),
+            events: Vec::new(),
+            operational: vec![tenkai::deploy_webhook::OperationalEvent::PlanHeld],
+        },
+        Change::SetApprovalPolicy {
+            path: policy.to_string_lossy().into_owned(),
+        },
+    ] {
+        let generation = current_generation(&client, "edge").await;
+        client
+            .configure_environment("edge", change, "site setup", generation)
+            .await
+            .unwrap();
+    }
+
+    let report = client.inspect_environment("edge").await.unwrap();
+    let webhooks: Vec<_> = report
+        .webhooks
+        .iter()
+        .map(|hook| (hook.url.as_str(), hook.secret_env.as_str()))
+        .collect();
+    assert_eq!(
+        webhooks,
+        [
+            ("https://hooks.example/deploy", "EDGE_HOOK_SECRET_820"),
+            ("https://hooks.example/audit", "AUDIT_HOOK_SECRET"),
+        ]
+    );
+    assert_eq!(
+        report.webhooks[0].events,
+        [tenkai::deploy_webhook::WebhookEvent::ApplyFailed]
+    );
+    assert_eq!(
+        report.webhooks[1].operational,
+        [tenkai::deploy_webhook::OperationalEvent::PlanHeld]
+    );
+    let canonical = policy.canonicalize().unwrap();
+    assert_eq!(
+        report.approval_policy.as_deref(),
+        Some(canonical.to_str().unwrap())
+    );
+    // Only the variable name travels: no field could carry a secret value.
+    let body = serde_json::to_value(&report).unwrap();
+    for hook in body["webhooks"].as_array().unwrap() {
+        let mut keys: Vec<_> = hook.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert!(
+            keys.iter()
+                .all(|key| ["events", "operational", "secret_env", "url"].contains(&key.as_str())),
+            "{keys:?}"
+        );
+    }
+
+    // The embedded report `tenkaictl env inspect` prints is the same.
+    let mut ctx = tenkai::client::Ctx::embedded(root.join("tenkai.db")).unwrap();
+    let embedded = tenkai::plan::inspect_environment_with_outcomes(&mut ctx, "edge")
+        .await
+        .unwrap();
+    assert_eq!(embedded.webhooks, report.webhooks);
+    assert_eq!(embedded.approval_policy, report.approval_policy);
+
+    // An edit with the generation inspect reports applies; reusing it after
+    // that edit advanced the generation is refused.
+    let generation = report.lease.generation.unwrap_or(0);
+    client
+        .configure_environment(
+            "edge",
+            Change::ClearWebhooks {
+                url: Some("https://hooks.example/audit".into()),
+            },
+            "retire audit hook",
+            generation,
+        )
+        .await
+        .unwrap();
+    let stale = client
+        .configure_environment("edge", Change::ClearApprovalPolicy, "late edit", generation)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(stale.contains("generation"), "{stale}");
+    let after = client.inspect_environment("edge").await.unwrap();
+    assert_eq!(after.webhooks.len(), 1);
+    assert!(
+        after.approval_policy.is_some(),
+        "the stale edit wrote nothing"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
