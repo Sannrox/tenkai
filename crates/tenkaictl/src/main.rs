@@ -300,11 +300,34 @@ async fn run(cli: Cli) -> Result<()> {
     if let Command::RestoreDrill {
         backup,
         scratch_dir,
+        trust_roots,
     } = &cli.command
     {
         let scratch = scratch_dir.clone().unwrap_or_else(std::env::temp_dir);
-        let evidence = tenkai::backup::drill(backup, &scratch, tenkai::now_millis())?;
+        let roots = trust_roots
+            .as_deref()
+            .map(tenkai::release_signing::TrustRoots::load)
+            .transpose()?;
+        let evidence =
+            tenkai::backup::drill(backup, &scratch, tenkai::now_millis(), roots.as_ref())?;
         println!("{}", serde_json::to_string_pretty(&evidence)?);
+        return Ok(());
+    }
+    // Local only: evidence goes into the backup directory the hub reads.
+    if let Command::BackupEvidence {
+        dir,
+        backup,
+        tool,
+        taken_at_ms,
+    } = &cli.command
+    {
+        let now = tenkai::now_millis();
+        let evidence = tenkai::backup::evidence_for_file(backup, tool, taken_at_ms.unwrap_or(now))?;
+        tenkai::backup::record_evidence(dir, evidence, now)?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&tenkai::backup::read_status(dir)?)?
+        );
         return Ok(());
     }
     if cli.target == Target::Remote {

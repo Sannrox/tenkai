@@ -105,6 +105,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         Command::Restore { .. }
         | Command::SupportBundle { .. }
         | Command::RestoreDrill { .. }
+        | Command::BackupEvidence { .. }
         | Command::Audit { .. }
         | Command::Dev { .. }
         | Command::ExecutorGuard { .. }

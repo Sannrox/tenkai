@@ -163,6 +163,7 @@ async fn backups_are_fleet_management_and_their_age_shows_in_health() {
                 dir: root.join("backups"),
                 retain: 3,
                 max_age_ms: 3_600_000,
+                signing_key: None,
             },
         )
         .unwrap(),

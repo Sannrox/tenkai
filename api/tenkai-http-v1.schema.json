@@ -262,6 +262,10 @@
         "taken_at_ms": {
           "format": "int64",
           "type": "integer"
+        },
+        "tool": {
+          "description": "The tool that took a recorded database-native backup. Absent on\nbackups this module takes, so their manifests are unchanged.",
+          "type": "string"
         }
       },
       "required": [

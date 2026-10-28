@@ -1530,9 +1530,12 @@ fn export_settings(tenant_mode: bool) -> Result<Option<Arc<tenkai::exports::Expo
 
 /// Server-mode backups from `TENKAI_BACKUP_DIR` (unset: off) and, when set,
 /// `TENKAI_BACKUP_INTERVAL_SECS` (default 86400; 0 takes backups only on
-/// demand), `TENKAI_BACKUP_RETAIN` (default 7) and
-/// `TENKAI_BACKUP_MAX_AGE_SECS` (default twice the interval, else 172800).
-/// Tenant-mode hubs keep their state in PostgreSQL and refuse the setting.
+/// demand), `TENKAI_BACKUP_RETAIN` (default 7),
+/// `TENKAI_BACKUP_MAX_AGE_SECS` (default twice the interval, else 172800) and
+/// `TENKAI_BACKUP_SIGNING_KEY` (an Ed25519 seed that signs each manifest).
+/// Tenant-mode hubs keep their state in PostgreSQL, which Tenkai does not
+/// copy: there the directory holds recorded backup evidence only, and the
+/// settings for taking backups are refused.
 fn backup_settings(
     tenant_mode: bool,
     store: Option<&Arc<SqliteStore>>,
@@ -1540,11 +1543,6 @@ fn backup_settings(
     let Some(dir) = std::env::var_os("TENKAI_BACKUP_DIR") else {
         return Ok(None);
     };
-    anyhow::ensure!(
-        !tenant_mode,
-        "TENKAI_BACKUP_DIR backs up the SQLite store; tenant-mode hubs back up PostgreSQL with its own tools"
-    );
-    let store = store.context("community backups require the SQLite operational store")?;
     let number = |name: &str, default: u64| -> Result<u64> {
         std::env::var(name)
             .ok()
@@ -1553,6 +1551,28 @@ fn backup_settings(
             .with_context(|| format!("{name} must be a whole number"))
             .map(|value| value.unwrap_or(default))
     };
+    if tenant_mode {
+        for name in [
+            "TENKAI_BACKUP_INTERVAL_SECS",
+            "TENKAI_BACKUP_RETAIN",
+            "TENKAI_BACKUP_SIGNING_KEY",
+        ] {
+            anyhow::ensure!(
+                std::env::var_os(name).is_none(),
+                "{name} configures backups of the SQLite store; a tenant-mode hub records PostgreSQL backup evidence instead"
+            );
+        }
+        let backups = tenkai::backup::Backups::evidence_only(tenkai::backup::BackupPolicy {
+            dir: dir.into(),
+            retain: 1,
+            max_age_ms: i64::try_from(
+                number("TENKAI_BACKUP_MAX_AGE_SECS", 172_800)?.saturating_mul(1000),
+            )?,
+            signing_key: None,
+        })?;
+        return Ok(Some((Arc::new(backups), None)));
+    }
+    let store = store.context("community backups require the SQLite operational store")?;
     let interval = number("TENKAI_BACKUP_INTERVAL_SECS", 86_400)?;
     let max_age = number(
         "TENKAI_BACKUP_MAX_AGE_SECS",
@@ -1565,6 +1585,7 @@ fn backup_settings(
             dir: dir.into(),
             retain: usize::try_from(retain)?,
             max_age_ms: i64::try_from(max_age.saturating_mul(1000))?,
+            signing_key: std::env::var_os("TENKAI_BACKUP_SIGNING_KEY").map(PathBuf::from),
         },
     )?;
     let every = (interval > 0).then(|| Duration::from_secs(interval));

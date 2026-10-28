@@ -169,7 +169,8 @@ pg_restore -d "$TENKAI_POSTGRES_URL" --clean --if-exists tenkai-hub-YYYYMMDD.dum
 5. Only then start additional lab peers.
 
 SQLite `tenkaictl backup` / `restore` remains the community embedded path.
-Tenant-mode hubs refuse `TENKAI_BACKUP_DIR`.
+Tenant-mode hubs back up PostgreSQL with its own tools and record each backup as
+[evidence](backup-restore.md#postgresql-backup-evidence) in `TENKAI_BACKUP_DIR`.
 
 ## Hub writer lease (#748)
 

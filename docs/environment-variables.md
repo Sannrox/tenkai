@@ -55,10 +55,11 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | `TENKAI_CLOCK_CHECK_SECS` | `60` | Seconds between clock measurements |
 | `TENKAI_CA_BUNDLE` | unset | PEM file of CA certificates every outbound TLS client trusts in addition to the built-in roots: registry and model downloads, OIDC, webhooks, telemetry, remote gates, the runtime agent, the remote CLI and its login, the gRPC outcome provider, the remote backend and PostgreSQL. Unreadable or empty fails closed. Kubernetes clients use their kubeconfig CA |
 | `TENKAI_TLS_SYSTEM_ROOTS` | `true` | `false` drops the built-in and platform roots, so only `TENKAI_CA_BUNDLE` is trusted; requires the bundle. A remote HTTPS backend (`TENKAI_SEKAI_URL`) is refused with `false` until its client can drop its built-in roots |
-| `TENKAI_BACKUP_DIR` | unset | `tenkai-server` only: directory for scheduled and on-demand backups ([backup and restore](backup-restore.md#server-mode-backups)). Refused in tenant mode |
+| `TENKAI_BACKUP_DIR` | unset | `tenkai-server` only: directory for scheduled and on-demand backups ([backup and restore](backup-restore.md#server-mode-backups)). In tenant mode, the directory of recorded PostgreSQL backup evidence ([evidence](backup-restore.md#postgresql-backup-evidence)) |
 | `TENKAI_BACKUP_INTERVAL_SECS` | `86400` | Seconds between scheduled backups; `0` takes backups only on demand |
 | `TENKAI_BACKUP_RETAIN` | `7` | Backups kept; older ones are removed after each backup |
 | `TENKAI_BACKUP_MAX_AGE_SECS` | twice the interval, else `172800` | Backup age after which health reports `backup.state` as `stale` |
+| `TENKAI_BACKUP_SIGNING_KEY` | unset | Ed25519 seed file (32 bytes, mode 0600) that signs each backup manifest; `tenkaictl restore-drill --trust-roots` verifies it. Refused in tenant mode, as are the interval and retention |
 | `TENKAI_IMPORT_STAGING_DIR` | unset | `tenkai-server` only: server-owned directory of staged offline bundles for `/v1/imports` ([offline bundles](offline-bundles.md#server-side-import)). Set with `TENKAI_BUNDLE_TRUST_ROOTS` |
 | `TENKAI_BUNDLE_TRUST_ROOTS` | unset | Trust roots that must authenticate an exporter of a bundle imported through the server |
 | `TENKAI_STATE_DIR` | `<workdir-parent>/.tenkai-state` | Immutable deploy-input snapshots and per-environment runtime directories; must be outside the source workdir |
