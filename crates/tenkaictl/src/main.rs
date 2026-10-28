@@ -154,7 +154,7 @@ async fn run(cli: Cli) -> Result<()> {
         command,
     } = &cli.command
     {
-        return tenkai::fenced_mutation::supervise(
+        let code = tenkai::fenced_mutation::guard(
             tenkai::fenced_mutation::MutationCommand {
                 lock_path: lock,
                 workdir,
@@ -165,6 +165,8 @@ async fn run(cli: Cli) -> Result<()> {
             *generation,
         )
         .await;
+        // The exit code carries the command's status or the guard's failure.
+        std::process::exit(i32::from(code));
     }
     if matches!(cli.command, Command::Login { .. } | Command::Logout) {
         return login::run(cli).await;
