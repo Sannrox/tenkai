@@ -44,7 +44,7 @@ impl Default for Config {
             skip_gates: false,
             unapproved_development_reason: None,
             approval_directory: std::env::var_os("TENKAI_PLAN_APPROVAL_DIR").map(PathBuf::from),
-            approval_trust_roots: std::env::var_os("TENKAI_PLAN_APPROVAL_TRUST_ROOTS")
+            approval_trust_roots: std::env::var_os(crate::plan_approval::TRUST_ROOTS_ENV)
                 .map(PathBuf::from),
             fence_ttl_ms: 30_000,
             instance_id: format!("reconciler-{}", uuid::Uuid::new_v4()),

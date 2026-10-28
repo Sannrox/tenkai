@@ -1768,6 +1768,14 @@ n = 2
         .await
         .unwrap();
         assert_eq!(complete.missing, 0);
+        // #817: each collected approval carries its signed statement's time.
+        assert!(
+            complete
+                .collected
+                .iter()
+                .all(|approval| approval.signed_at == Some(now.saturating_sub(1))),
+            "{complete:?}"
+        );
         let loaded_bob = crate::plan_approval::TrustRoots::load(&bob_only).unwrap();
         let partial = crate::plan_approval::approvals_view(
             &mut ctx,
