@@ -165,6 +165,12 @@ impl ManagementOperations {
         let Some(entry) = readable else {
             return Err(export_not_found());
         };
+        // Refused before any download is recorded (#818).
+        if entry.expired {
+            return Err(ManagementError::NotFound(crate::exports::expired_message(
+                &entry,
+            )));
+        }
         let principal = context.audit_principal();
         let operation = format!("export.{}.downloaded", entry.export.kind.as_str());
         let event = ExportEvent {
