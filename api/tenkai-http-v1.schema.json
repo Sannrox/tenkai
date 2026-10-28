@@ -356,6 +356,10 @@
         "purpose": {
           "type": "string"
         },
+        "sha256_fingerprint": {
+          "description": "SHA-256 of the certificate's DER, as `openssl x509 -fingerprint\n-sha256` prints it: uppercase hex pairs joined by colons (#809).",
+          "type": "string"
+        },
         "source": {
           "$ref": "#/$defs/TrustSource"
         },
@@ -4008,6 +4012,21 @@
       ],
       "type": "object"
     },
+    "RunnerAuth": {
+      "description": "How a runner authenticates (#809), from what the server issued it, not\nfrom what a request presented.",
+      "oneOf": [
+        {
+          "const": "client_certificate",
+          "description": "The runner CA issued this runner a certificate, at enrollment with a\nCSR or at a renewal. Such an agent never uses its bearer for work;\nthe bearer stays valid for renewal after the certificate expires.",
+          "type": "string"
+        },
+        {
+          "const": "bearer",
+          "description": "A static token, or an enrolled credential never issued a certificate.",
+          "type": "string"
+        }
+      ]
+    },
     "RuntimeCredentialRevoked": {
       "properties": {
         "credential_id": {
@@ -4081,6 +4100,10 @@
     "RuntimeRunner": {
       "description": "One runner of the registry: an enrolled credential, or a static token\nconfigured on the server. Never carries a secret.",
       "properties": {
+        "auth": {
+          "$ref": "#/$defs/RunnerAuth",
+          "description": "Always sent; optional so a newer client still reads an older server."
+        },
         "created_at": {
           "format": "int64",
           "type": "integer"
@@ -4552,6 +4575,10 @@
         "revocation_list": {
           "$ref": "#/$defs/InstalledRevocations"
         },
+        "runtime_client_cert_required": {
+          "description": "Runtime routes refuse a connection without a verified client\ncertificate, enrollment and renewal aside (#809).",
+          "type": "boolean"
+        },
         "signing": {
           "items": {
             "$ref": "#/$defs/SigningRoot"
@@ -4578,6 +4605,7 @@
         "status",
         "warning_days",
         "critical_days",
+        "runtime_client_cert_required",
         "signing",
         "tls"
       ],

@@ -368,3 +368,108 @@ async fn an_agent_enrolls_once_works_with_its_credential_and_stops_when_revoked(
         "a revoked credential is refused"
     );
 }
+
+/// #809: a runner enrolled with a CSR, which the runner CA certified,
+/// reports `client_certificate`; one enrolled without a CSR and a static
+/// token report `bearer`.
+#[tokio::test]
+async fn the_registry_reports_how_each_runner_authenticates() {
+    let store = Arc::new(tenkai::storage::SqliteStore::open_in_memory().unwrap());
+    store
+        .put_environment(&tenkai::storage::EnvironmentRecord {
+            id: "prod".into(),
+            revision: 0,
+            configuration_json: "{}".into(),
+        })
+        .unwrap();
+    let mut config = ServerConfig::community(
+        "management-secret",
+        HashMap::from([("runtime-secret".into(), "prod".into())]),
+    );
+    let (ca_cert, ca_key) = tenkai::runner_ca::RunnerCa::generate("test runner CA").unwrap();
+    config.runner_ca = Some(Arc::new(
+        tenkai::runner_ca::RunnerCa::from_pem(&ca_cert, &ca_key).unwrap(),
+    ));
+    let app = router(
+        config,
+        Arc::new(FixedReconciler::for_runtime()),
+        store.clone(),
+    )
+    .unwrap();
+    let call = |method: &str, path: &str, bearer: Option<&str>, body: serde_json::Value| {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("content-type", "application/json");
+        if let Some(bearer) = bearer {
+            request = request.header("authorization", format!("Bearer {bearer}"));
+        }
+        let app = app.clone();
+        async move {
+            let response = app
+                .oneshot(request.body(Body::from(body.to_string())).unwrap())
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (
+                status,
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_default(),
+            )
+        }
+    };
+    let enroll = async |csr: Option<String>| {
+        let (status, issued) = call(
+            "POST",
+            "/v1/environments/prod/runtime-enrollments",
+            Some("management-secret"),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{issued}");
+        let (status, enrolled) = call(
+            "POST",
+            "/v1/runtime/environments/prod/enroll",
+            None,
+            serde_json::json!({"token": issued["token"], "csr": csr}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{enrolled}");
+        enrolled["credential_id"].as_str().unwrap().to_string()
+    };
+    let key = rcgen::KeyPair::generate().unwrap();
+    let csr = rcgen::CertificateParams::new(Vec::<String>::new())
+        .unwrap()
+        .serialize_request(&key)
+        .unwrap()
+        .pem()
+        .unwrap();
+    let certified = enroll(Some(csr)).await;
+    let bearer = enroll(None).await;
+
+    let (status, listed) = call(
+        "GET",
+        "/v1/runners",
+        Some("management-secret"),
+        serde_json::json!(null),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let auth = |id: &str| {
+        listed["runners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|runner| runner["id"] == id)
+            .map(|runner| runner["auth"].clone())
+            .unwrap()
+    };
+    assert_eq!(auth(&certified), "client_certificate");
+    assert_eq!(auth(&bearer), "bearer");
+    assert_eq!(
+        auth(&tenkai::runtime_credentials::digest("runtime-secret")),
+        "bearer"
+    );
+}

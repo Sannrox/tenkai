@@ -264,6 +264,24 @@ pub trait OperationalStore: Send + Sync {
             "the runner registry is not implemented by this store".into(),
         ))
     }
+    /// Note that the runner CA issued `runner_id` a certificate (#809), at
+    /// enrollment with a CSR or at renewal.
+    fn record_runtime_certificate(
+        &self,
+        _runner_id: &str,
+        _environment_id: &str,
+        _issued_at: i64,
+    ) -> Result<()> {
+        Err(StoreError::AdapterUnavailable(
+            "the runner registry is not implemented by this store".into(),
+        ))
+    }
+    /// Runners the runner CA has issued a certificate to (#809).
+    fn certified_runtime_runners(&self) -> Result<Vec<String>> {
+        Err(StoreError::AdapterUnavailable(
+            "the runner registry is not implemented by this store".into(),
+        ))
+    }
     /// Owners holding an unexpired runtime plan claim at `now`.
     fn live_runtime_claim_owners(&self, _now: i64) -> Result<Vec<String>> {
         Err(StoreError::AdapterUnavailable(

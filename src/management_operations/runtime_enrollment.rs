@@ -37,6 +37,19 @@ pub struct RuntimeRevokeRequest {
     pub reason: String,
 }
 
+/// How a runner authenticates (#809), from what the server issued it, not
+/// from what a request presented.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerAuth {
+    /// The runner CA issued this runner a certificate, at enrollment with a
+    /// CSR or at a renewal. Such an agent never uses its bearer for work;
+    /// the bearer stays valid for renewal after the certificate expires.
+    ClientCertificate,
+    /// A static token, or an enrolled credential never issued a certificate.
+    Bearer,
+}
+
 /// One runner of the registry: an enrolled credential, or a static token
 /// configured on the server. Never carries a secret.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -47,6 +60,10 @@ pub struct RuntimeRunner {
     /// `active`, `revoked`, or `static` for a configured token, which only
     /// server configuration changes.
     pub state: String,
+    /// Always sent; optional so a newer client still reads an older server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub auth: Option<RunnerAuth>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub created_by: Option<String>,
@@ -247,6 +264,12 @@ impl ManagementOperations {
         let unavailable = |error: StoreError| ManagementError::Unavailable(error.to_string());
         let enrolled = self.store.runtime_runners().map_err(unavailable)?;
         let activity = self.store.runtime_activity().map_err(unavailable)?;
+        let certified: std::collections::BTreeSet<String> = self
+            .store
+            .certified_runtime_runners()
+            .map_err(unavailable)?
+            .into_iter()
+            .collect();
         let leases: std::collections::BTreeSet<String> = self
             .store
             .live_runtime_claim_owners(crate::now_millis())
@@ -288,6 +311,11 @@ impl ManagementOperations {
                 let id = runner.credential.credential_digest;
                 RuntimeRunner {
                     instances: instances(&id),
+                    auth: Some(if certified.contains(&id) {
+                        RunnerAuth::ClientCertificate
+                    } else {
+                        RunnerAuth::Bearer
+                    }),
                     state: if runner.credential.revoked_at.is_some() {
                         "revoked"
                     } else {
@@ -315,6 +343,7 @@ impl ManagementOperations {
                     id: id.clone(),
                     environment: environment.clone(),
                     state: "static".into(),
+                    auth: Some(RunnerAuth::Bearer),
                     created_by: None,
                     created_at: None,
                     revoked_at: None,
