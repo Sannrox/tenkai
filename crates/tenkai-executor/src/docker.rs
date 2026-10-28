@@ -2318,6 +2318,7 @@ mod tests {
                 repository: image_repository(name),
                 digest: digest.into(),
                 media_type: "application/vnd.oci.image.manifest.v1+json".into(),
+                sbom: None,
             }
         };
         let mut unchanged = sample_topology();

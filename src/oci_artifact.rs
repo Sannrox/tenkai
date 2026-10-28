@@ -23,6 +23,18 @@ pub struct OciArtifactRef {
     pub repository: String,
     pub digest: String,
     pub media_type: String,
+    /// The artifact's SBOM, declared by the release (#804). An offline
+    /// bundle carries it instead of generating one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sbom: Option<SbomRef>,
+}
+
+/// A digest-bound SBOM document for one artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SbomRef {
+    pub digest: String,
+    pub media_type: String,
 }
 
 pub fn validate_registry_host(label: &str, host: &str) -> Result<()> {
@@ -66,6 +78,16 @@ impl OciArtifactRef {
         crate::signature_verification::validate_prefixed_digest("artifact digest", &self.digest)?;
         if self.media_type.is_empty() || self.media_type.chars().any(char::is_control) {
             bail!("artifact media type must be a non-empty media type");
+        }
+        if let Some(sbom) = &self.sbom {
+            let artifact = self.identity_key();
+            crate::signature_verification::validate_prefixed_digest(
+                &format!("SBOM digest of artifact {artifact}"),
+                &sbom.digest,
+            )?;
+            if sbom.media_type.is_empty() || sbom.media_type.chars().any(char::is_control) {
+                bail!("SBOM media type of artifact {artifact} must be a non-empty media type");
+            }
         }
         Ok(())
     }
@@ -384,20 +406,43 @@ pub fn validate_all(artifacts: &[OciArtifactRef]) -> Result<()> {
     Ok(())
 }
 
+/// Bind the artifacts into a release identity. An artifact without an SBOM
+/// hashes as before #804, so existing identities are unchanged. A declared
+/// SBOM follows its artifact's fields behind an empty field, which no
+/// artifact's registry can be, so the encoding stays unambiguous.
 pub fn bind_identity(hasher: &mut Sha256, artifacts: &[OciArtifactRef]) {
+    fn field(hasher: &mut Sha256, value: &[u8]) {
+        hasher.update((value.len() as u64).to_le_bytes());
+        hasher.update(value);
+    }
+    let mut ordered = artifacts.to_vec();
+    ordered.sort_by(|left, right| {
+        let key = |artifact: &OciArtifactRef| {
+            (
+                artifact.identity_key(),
+                artifact
+                    .sbom
+                    .as_ref()
+                    .map(|sbom| (sbom.digest.clone(), sbom.media_type.clone())),
+            )
+        };
+        key(left).cmp(&key(right))
+    });
     hasher.update(ARTIFACT_REF_SCHEMA.as_bytes());
     hasher.update((artifacts.len() as u64).to_le_bytes());
-    let mut ordered = artifacts.to_vec();
-    ordered.sort_by_key(|left| left.identity_key());
     for artifact in ordered {
-        for field in [
+        for value in [
             artifact.registry.as_bytes(),
             artifact.repository.as_bytes(),
             artifact.digest.as_bytes(),
             artifact.media_type.as_bytes(),
         ] {
-            hasher.update((field.len() as u64).to_le_bytes());
-            hasher.update(field);
+            field(hasher, value);
+        }
+        if let Some(sbom) = &artifact.sbom {
+            field(hasher, b"");
+            field(hasher, sbom.digest.as_bytes());
+            field(hasher, sbom.media_type.as_bytes());
         }
     }
 }
@@ -433,6 +478,7 @@ pub fn pull_reference(
         repository: reference.repository.clone(),
         digest: reference.digest.clone(),
         media_type: reference.media_type.clone(),
+        sbom: None,
     })
 }
 
@@ -582,6 +628,7 @@ pub fn image_closure_except(
                 repository: artifact.repository.clone(),
                 digest,
                 media_type,
+                sbom: None,
             });
         }
         closure.push(artifact);
@@ -696,6 +743,82 @@ pub fn selected_registry() -> Result<Option<std::sync::Arc<dyn ArtifactRegistry>
 mod tests {
     use super::*;
 
+    fn artifact(sbom: Option<&str>) -> OciArtifactRef {
+        OciArtifactRef {
+            registry: "ghcr.io".into(),
+            repository: "edge/app".into(),
+            digest: format!("sha256:{}", "aa".repeat(32)),
+            media_type: "application/vnd.oci.image.layer.v1.tar".into(),
+            sbom: sbom.map(|digest| SbomRef {
+                digest: digest.into(),
+                media_type: "application/spdx+json".into(),
+            }),
+        }
+    }
+
+    fn bound(artifacts: &[OciArtifactRef]) -> String {
+        let mut hasher = Sha256::new();
+        bind_identity(&mut hasher, artifacts);
+        format!("{:x}", hasher.finalize())
+    }
+
+    /// An artifact without an SBOM hashes as it did before SBOMs existed, so
+    /// published release identities are unchanged; a declared SBOM, and any
+    /// change to it, changes the identity (#804).
+    #[test]
+    fn a_declared_sbom_binds_into_the_identity_and_its_absence_changes_nothing() {
+        let plain = artifact(None);
+        let mut legacy = Sha256::new();
+        legacy.update(ARTIFACT_REF_SCHEMA.as_bytes());
+        legacy.update(1_u64.to_le_bytes());
+        for field in [
+            &plain.registry,
+            &plain.repository,
+            &plain.digest,
+            &plain.media_type,
+        ] {
+            legacy.update((field.len() as u64).to_le_bytes());
+            legacy.update(field.as_bytes());
+        }
+        assert_eq!(
+            bound(std::slice::from_ref(&plain)),
+            format!("{:x}", legacy.finalize())
+        );
+
+        let first = artifact(Some(&format!("sha256:{}", "11".repeat(32))));
+        let second = artifact(Some(&format!("sha256:{}", "22".repeat(32))));
+        assert_ne!(bound(std::slice::from_ref(&first)), bound(&[plain]));
+        assert_ne!(
+            bound(std::slice::from_ref(&first)),
+            bound(std::slice::from_ref(&second))
+        );
+        // Order does not matter, even between artifacts that differ only by
+        // an SBOM field.
+        assert_eq!(
+            bound(&[first.clone(), second.clone()]),
+            bound(&[second, first.clone()])
+        );
+        let mut other_media_type = first.clone();
+        other_media_type.sbom.as_mut().unwrap().media_type =
+            "application/vnd.cyclonedx+json".into();
+        assert_eq!(
+            bound(&[first.clone(), other_media_type.clone()]),
+            bound(&[other_media_type, first])
+        );
+    }
+
+    /// A malformed SBOM reference is refused naming its artifact.
+    #[test]
+    fn a_malformed_sbom_is_refused_naming_the_artifact() {
+        let named = artifact(None).identity_key();
+        let mut no_media_type = artifact(Some(&format!("sha256:{}", "11".repeat(32))));
+        no_media_type.sbom.as_mut().unwrap().media_type.clear();
+        for invalid in [artifact(Some("sha256:short")), no_media_type] {
+            let error = format!("{:#}", invalid.validate().unwrap_err());
+            assert!(error.contains(&named) && error.contains("SBOM"), "{error}");
+        }
+    }
+
     fn digest_for(bytes: &[u8]) -> String {
         format!("sha256:{:x}", Sha256::digest(bytes))
     }
@@ -706,6 +829,7 @@ mod tests {
             repository: "edge/app".into(),
             digest: digest_for(bytes),
             media_type: "application/vnd.oci.image.layer.v1.tar".into(),
+            sbom: None,
         }
     }
 

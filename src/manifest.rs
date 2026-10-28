@@ -1214,6 +1214,7 @@ max_startup_seconds = 30
             repository: "edge/app".into(),
             digest: format!("sha256:{}", "aa".repeat(32)),
             media_type: "application/vnd.oci.image.layer.v1.tar".into(),
+            sbom: None,
         };
         let mut second = first.clone();
         second.digest = format!("sha256:{}", "bb".repeat(32));

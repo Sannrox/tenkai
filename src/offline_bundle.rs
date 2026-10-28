@@ -748,6 +748,7 @@ fn chunked_layers(
             repository: layer.repository.clone(),
             digest: layer.digest.clone(),
             media_type: layer.media_type.clone(),
+            sbom: None,
         };
         reference.validate()?;
         let Some(artifact) = index.get(&layer.digest) else {
@@ -799,6 +800,7 @@ pub fn plan_artifact_layers<'a>(
             repository: layer.repository.clone(),
             digest: layer.digest.clone(),
             media_type: layer.media_type.clone(),
+            sbom: None,
         };
         reference.validate()?;
         if layer.path != reference.layer_entry_path()? {
@@ -914,6 +916,7 @@ pub fn delta_base(
             repository: layer.repository,
             digest: layer.digest,
             media_type: layer.media_type,
+            sbom: None,
         })
         .collect();
     let Some(raw) = bundle.entry(DELTA_BASE_PATH) else {
@@ -1248,6 +1251,7 @@ fn layer_instruction_index(bundle: &VerifiedBundle) -> Result<BTreeMap<String, I
                     repository: layer.repository,
                     digest: layer.digest,
                     media_type: layer.media_type,
+                    sbom: None,
                 },
             },
         );
@@ -1841,6 +1845,7 @@ mod tests {
             repository: "edge/app".into(),
             digest: digest(bytes),
             media_type: "application/vnd.oci.image.layer.v1.tar".into(),
+            sbom: None,
         }
     }
 

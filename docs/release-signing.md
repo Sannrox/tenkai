@@ -55,6 +55,24 @@ declared digest against a live registry adapter (`TENKAI_OCI_STORE` for the
 filesystem adapter). Unresolvable or mismatched bytes fail closed and name the
 digest. The Catalog stores the reference; it is not a second registry.
 
+An entry may also declare the artifact's SBOM:
+
+```toml
+[[artifacts]]
+registry = "registry.example.com"
+repository = "edge/app"
+digest = "sha256:<image digest>"
+media_type = "application/vnd.oci.image.manifest.v1+json"
+sbom = { digest = "sha256:<sbom digest>", media_type = "application/spdx+json" }
+```
+
+The SBOM digest and media type are bound into the release identity, so
+changing either changes the release, and the release stores the reference. A
+malformed SBOM reference is refused naming its artifact. An artifact without
+an SBOM binds exactly as before, so existing release identities do not change.
+Releases do not need SBOMs; an offline bundle build that carries them may
+require them.
+
 Apply pulls those artifacts only from the environment's
 `artifact_mirror.<registry>` host (`tenkaictl env artifact-mirror set`). A
 missing mirror refuses origin pull. Cached files and retained references do
