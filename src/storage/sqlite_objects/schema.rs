@@ -58,6 +58,16 @@ pub(in crate::storage) fn ensure_typed_schema_tables(connection: &Connection) ->
              resource TEXT NOT NULL, outcome TEXT NOT NULL
          );
          CREATE INDEX IF NOT EXISTS audit_events_time ON audit_events(occurred_at, id);
+         CREATE TABLE IF NOT EXISTS feedback_observations (
+             id TEXT PRIMARY KEY, schema TEXT NOT NULL,
+             environment_id TEXT NOT NULL, observed_at INTEGER NOT NULL,
+             body_json TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS feedback_observations_environment
+             ON feedback_observations(environment_id, observed_at, id);
+         CREATE TRIGGER IF NOT EXISTS feedback_observations_immutable
+             BEFORE UPDATE ON feedback_observations
+             BEGIN SELECT RAISE(ABORT, 'feedback observations are immutable'); END;
          CREATE TABLE IF NOT EXISTS change_events (
              seq INTEGER PRIMARY KEY AUTOINCREMENT,
              occurred_at INTEGER NOT NULL,

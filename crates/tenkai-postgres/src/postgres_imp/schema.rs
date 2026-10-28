@@ -87,6 +87,16 @@ pub(crate) fn migrate_tenant_schema(tx: &mut Transaction<'_>) -> Result<()> {
             resource TEXT NOT NULL, outcome TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS audit_events_time ON audit_events(occurred_at, id);
+        -- Feedback observations (#802): immutable once written.
+        CREATE TABLE IF NOT EXISTS feedback_observations (
+            id TEXT PRIMARY KEY, schema TEXT NOT NULL,
+            environment_id TEXT NOT NULL, observed_at BIGINT NOT NULL,
+            body_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS feedback_observations_environment
+            ON feedback_observations(environment_id, observed_at, id);
+        CREATE OR REPLACE RULE feedback_observations_immutable AS
+            ON UPDATE TO feedback_observations DO INSTEAD NOTHING;
         CREATE TABLE IF NOT EXISTS change_events (
             seq BIGSERIAL PRIMARY KEY,
             occurred_at BIGINT NOT NULL,

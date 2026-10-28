@@ -121,6 +121,29 @@ same terminal transaction. A later explicit reconciliation exports
 unknown state without an attributable origin is cleared without inventing
 learning evidence.
 
+### Feedback observation v1
+
+Every committed deployment outcome also leaves one
+`tenkai.feedback_observation.v1` record (#802). It is captured always,
+whether or not outcome export is on, and is never sent anywhere; it is not a
+provider event, and `tenkai.terminal_outcome.v1` is unchanged. It is written
+in the same transaction as the outcome, into a dedicated
+`feedback_observations` table that refuses updates. An identical replay is a
+no-op; a conflicting one keeps the stored record. A capture that cannot be
+built keeps only the outcome's identity (`reason: degraded`), and one that
+cannot be stored never interrupts the deployment or rollback.
+
+Fields: `id` (the outcome's identity), `operation` (`apply_step`,
+`runtime_completion` or `unknown_reconciliation`), `environment`, `product`,
+`plan_id`, `step_id`, `action`, `release_id`, `status`, `reason`,
+`duration_ms` (from execution entry, when this process saw it start),
+`controller_version`, `lease_generation` and `observed_at_ms`.
+
+`reason` is one of `none`, `product_failed`, `product_failed_restored`,
+`tenkai_failed`, `tenkai_failed_restored`, `cancelled`, `blocked`, `state_unknown`, `reconciled` and
+`degraded`. A record holds no detail text: no command output, credentials,
+signing material, environment facts or content. Identifiers are bounded.
+
 ## Standalone operation and external adapters
 
 The built-in local gate consumes explicitly configured evidence, and the local

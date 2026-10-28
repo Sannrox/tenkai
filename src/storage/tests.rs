@@ -1,5 +1,6 @@
 use super::*;
 
+mod feedback;
 mod fencing;
 mod lifecycle;
 mod migrations;

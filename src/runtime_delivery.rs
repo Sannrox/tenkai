@@ -398,6 +398,50 @@ pub(crate) async fn complete_runtime_work(
     } else {
         Vec::new()
     };
+    // One observation per step the runtime reports a terminal result for,
+    // committed with the completion (#802). The runtime's start time is not
+    // observed here, so no duration is recorded.
+    let observations = stored
+        .steps
+        .iter()
+        .filter_map(|step| {
+            let receipt = completion
+                .receipts
+                .iter()
+                .find(|receipt| receipt.step_id == step.id)?;
+            crate::terminal_outcome::classify(
+                step.action,
+                crate::terminal_outcome::Observation::Runtime {
+                    succeeded: receipt.succeeded,
+                    detail: &receipt.detail,
+                },
+            )?;
+            Some(crate::feedback_observation::FeedbackObservation::capture(
+                crate::feedback_observation::Capture {
+                    id: &format!(
+                        "tenkai:runtime-deployment:{}:{}:{}",
+                        stored.id, completion.generation, step.id
+                    ),
+                    operation: crate::feedback_observation::Operation::RuntimeCompletion,
+                    environment,
+                    product: &step.product,
+                    plan_id: &stored.id,
+                    step_id: &step.id,
+                    action: Some(step.action),
+                    release_id: &step.release_id,
+                    status: if receipt.succeeded {
+                        "succeeded"
+                    } else {
+                        "failed"
+                    },
+                    reason: crate::feedback_observation::runtime_reason(receipt.succeeded),
+                    started_at_ms: None,
+                    lease_generation: completion.generation,
+                    observed_at_ms: observed_at,
+                },
+            ))
+        })
+        .collect::<Vec<_>>();
     if let Some(environment) = environment_object {
         if !ctx.is_embedded() {
             ctx.put(environment).await?;
@@ -417,6 +461,7 @@ pub(crate) async fn complete_runtime_work(
             crate::plan::Persistence::WithEnvironmentAndProviderEvents {
                 environment,
                 provider_events: &provider_events,
+                observations: &observations,
             },
         )
         .await?;
@@ -425,7 +470,10 @@ pub(crate) async fn complete_runtime_work(
             ctx,
             &mut stored,
             crate::plan::Transition::new(terminal, completion.detail.clone()),
-            crate::plan::Persistence::WithProviderEvents(&provider_events),
+            crate::plan::Persistence::WithProviderEvents {
+                provider_events: &provider_events,
+                observations: &observations,
+            },
         )
         .await?;
     }

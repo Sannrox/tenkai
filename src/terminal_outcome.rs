@@ -42,17 +42,20 @@ pub(crate) fn classify(
     }
 }
 
+/// Whether a controller detail records a cancelled deployment command.
+pub(crate) fn is_cancellation(detail: &str) -> bool {
+    CANCELLATION_PREFIXES
+        .iter()
+        .any(|marker| detail.starts_with(marker))
+}
+
 fn classify_controller(
     action: Action,
     status: &str,
     detail: &str,
     had_previous_release: bool,
 ) -> Option<TerminalOutcomeState> {
-    if status == "failed"
-        && CANCELLATION_PREFIXES
-            .iter()
-            .any(|marker| detail.starts_with(marker))
-    {
+    if status == "failed" && is_cancellation(detail) {
         return Some(TerminalOutcomeState::ExecutionCancelled);
     }
     match (action, status) {
