@@ -162,6 +162,8 @@ outbound CA). If one lapses before the window opens, the plan records it as
 `credential_runway` and the plan message names the certificate, its expiry
 and the window's opening, so it can be renewed first. The check is advisory
 and runs only on a server with those certificates configured.
+`GET /v1/trust/runway` repeats it for every plan still waiting, as of now
+([trust posture](run-tenkai-server.md#trust-posture)).
 
 Per-product windows use `tenkaictl product maintenance`; see
 [ADR 0016](decisions/0016-same-version-remediation.md).

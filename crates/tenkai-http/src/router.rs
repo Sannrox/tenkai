@@ -18,7 +18,7 @@ use super::environment_config::{
 use super::exports::{create_export, download_export, inspect_export, list_exports};
 use super::imports::{
     content_inventory, environment_webhook_deliveries, host_webhook_deliveries, import_bundle,
-    import_job, staged_imports, trust_posture,
+    import_job, staged_imports, trust_posture, trust_runway,
 };
 use super::inspect::{
     backup_status, change_events, environment_approval_policy, environment_status, fleet_status,
@@ -105,6 +105,23 @@ pub fn router(
         Some(path) => Some(tenkai::package_migration::load_trust_roots(path)?),
         None => None,
     };
+    // Loaded once here, unlike the roots verifiers read per use, so
+    // `/v1/trust` shows what is in force beside the file (#811).
+    let mut config = config;
+    if let Some(roots) = &package_migration_trust_roots {
+        config
+            .trust_sources
+            .loaded_signing
+            .push(tenkai::trust_posture::LoadedSigning {
+                purpose: "package_migration_approval".into(),
+                name: "package migration trust roots in use".into(),
+                signers: roots
+                    .signers
+                    .iter()
+                    .map(|signer| (signer.key_id.clone(), signer.identity.clone()))
+                    .collect(),
+            });
+    }
     let management = Arc::new(
         ManagementOperations::new(
             auth,
@@ -135,6 +152,7 @@ pub fn router(
         .route("/v1/imports/{id}", get(import_job))
         .route("/v1/content/inventory", get(content_inventory))
         .route("/v1/trust", get(trust_posture))
+        .route("/v1/trust/runway", get(trust_runway))
         .route("/v1/webhooks/deliveries", get(host_webhook_deliveries))
         .route(
             "/v1/environments/{environment}/webhooks/deliveries",

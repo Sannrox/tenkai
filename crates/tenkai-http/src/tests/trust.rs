@@ -30,6 +30,28 @@ async fn trust_posture_grades_certificates_for_fleet_readers() {
         critical_days: 7,
         ..Default::default()
     };
+    // #811: package-migration roots load once at start and show as `loaded`.
+    let public = ed25519_dalek::SigningKey::from_bytes(&[5; 32])
+        .verifying_key()
+        .to_bytes();
+    let migration_roots = dir.join("migration-trust.toml");
+    std::fs::write(
+        &migration_roots,
+        toml::to_string(&tenkai::package_migration::ApprovalTrustRoots {
+            version: 1,
+            signers: vec![tenkai::package_migration::ApprovalTrustedSigner {
+                key_id: tenkai::release_signing::key_id(&public),
+                identity: "migration-approver".into(),
+                public_key: {
+                    use base64::Engine as _;
+                    base64::engine::general_purpose::STANDARD.encode(public)
+                },
+            }],
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    config.package_migration_trust_roots = Some(migration_roots);
     let app = router(config, Arc::new(FixedReconciler::default()), store).unwrap();
     let get = |path: &'static str, bearer: Option<&'static str>| {
         let app = app.clone();
@@ -57,6 +79,20 @@ async fn trust_posture_grades_certificates_for_fleet_readers() {
     assert_eq!(posture["status"], "critical");
     assert_eq!(posture["tls"][0]["purpose"], "listener");
     assert_eq!(posture["tls"][0]["file"], "listener.pem");
+    assert_eq!(
+        posture["signing"][0]["purpose"],
+        "package_migration_approval"
+    );
+    assert_eq!(posture["signing"][0]["source"], "loaded");
+    assert_eq!(
+        posture["signing"][0]["signers"][0]["identity"],
+        "migration-approver"
+    );
+    // The runway route has the same audience.
+    let (status, _) = get("/v1/trust/runway", Some("prod-secret")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = get("/v1/trust/runway", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
     let (status, _) = get("/v1/trust", Some("prod-secret")).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     let (status, _) = get("/v1/trust", None).await;

@@ -1123,6 +1123,29 @@
       ],
       "type": "object"
     },
+    "CredentialRunway": {
+      "description": "A certificate that lapses before an environment's next maintenance window\nopens, so a plan waiting for that window would fail at apply time (#778).\nAdvisory: it never blocks the plan or changes its steps.",
+      "properties": {
+        "credential": {
+          "description": "The certificate's purpose, with its subject when readable.",
+          "type": "string"
+        },
+        "expires_at_ms": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "window_opens_at_ms": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "credential",
+        "expires_at_ms",
+        "window_opens_at_ms"
+      ],
+      "type": "object"
+    },
     "DeliveryHold": {
       "description": "Durable evidence that delivery is paused for a scope.",
       "properties": {
@@ -2710,6 +2733,16 @@
         "file": {
           "type": "string"
         },
+        "installed_at": {
+          "description": "When the installed file was last written, Unix milliseconds: an\ninstall or bundle import replaces it, and the process applies it at\nstart (#811).",
+          "format": "int64",
+          "type": "integer"
+        },
+        "issued_at": {
+          "description": "When the authority signed the list, Unix milliseconds (#811).",
+          "format": "int64",
+          "type": "integer"
+        },
         "revoked_keys": {
           "format": "uint",
           "minimum": 0,
@@ -3562,6 +3595,50 @@
       ],
       "type": "object"
     },
+    "PlanRunway": {
+      "description": "A plan waiting to apply and the first certificate that would lapse\nbefore it can (#811).",
+      "properties": {
+        "blocked_by": {
+          "$ref": "#/$defs/CredentialRunway",
+          "description": "The first TLS certificate to lapse at or before that window. Absent\nwhen none does. Signers are not checked: trust roots record no\nsigner validity."
+        },
+        "environment": {
+          "type": "string"
+        },
+        "plan_id": {
+          "type": "string"
+        },
+        "plan_state": {
+          "description": "`computed` or `blocked`.",
+          "type": "string"
+        },
+        "window_opens_at_ms": {
+          "description": "When the plan can next apply: the environment's next maintenance\nwindow, Unix milliseconds. Absent when it may apply now.",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "plan_id",
+        "environment",
+        "plan_state"
+      ],
+      "type": "object"
+    },
+    "PlanRunways": {
+      "properties": {
+        "plans": {
+          "items": {
+            "$ref": "#/$defs/PlanRunway"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "plans"
+      ],
+      "type": "object"
+    },
     "PreviewInspect": {
       "properties": {
         "expires_at": {
@@ -4306,6 +4383,16 @@
       ],
       "type": "object"
     },
+    "SignerValidity": {
+      "description": "Whether a trust root's format records when each signer is valid.",
+      "oneOf": [
+        {
+          "const": "not_recorded",
+          "description": "Trust-root format v1 has no `not_before` or `not_after` per signer.",
+          "type": "string"
+        }
+      ]
+    },
     "SigningRoot": {
       "properties": {
         "error": {
@@ -4318,6 +4405,11 @@
         "purpose": {
           "type": "string"
         },
+        "signer_validity": {
+          "$ref": "#/$defs/SignerValidity",
+          "default": "not_recorded",
+          "description": "Trust-root files carry no signer validity period, so a signer is\ntrusted until removed or revoked (#811)."
+        },
         "signers": {
           "items": {
             "$ref": "#/$defs/TrustedSignerView"
@@ -4326,7 +4418,7 @@
         },
         "source": {
           "$ref": "#/$defs/TrustSource",
-          "description": "Trust-root files are read as they are on disk."
+          "description": "`file`: read from disk per request, as release, bundle-import and\nrevocation-authority verifiers read it per use. `loaded`: what a\nverifier loaded at start (package-migration approvals), which adopts\na changed file only after a restart (#811)."
         }
       },
       "required": [
@@ -5228,6 +5320,15 @@
       "request": null,
       "response": {
         "$ref": "#/$defs/TrustPosture"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/trust/runway",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/PlanRunways"
       }
     },
     {

@@ -475,6 +475,22 @@ impl ManagementOperations {
         ))
     }
 
+    /// `GET /v1/trust/runway` (#811): each environment's plan waiting to
+    /// apply and the first certificate that lapses before it can.
+    pub async fn trust_runway(
+        &self,
+        credential: &CredentialMaterial,
+    ) -> Result<crate::trust_posture::PlanRunways, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        self.require_environment_grant(credential, &context, None, "trust runway")?;
+        self.require_community_catalog_host()?;
+        let mut ctx = self.application_ctx()?;
+        crate::trust_posture::plan_runways(&mut ctx)
+            .await
+            .map_err(internal)
+    }
+
     pub async fn content_inventory(
         &self,
         credential: &CredentialMaterial,

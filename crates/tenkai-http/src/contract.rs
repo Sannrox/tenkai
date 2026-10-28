@@ -436,6 +436,13 @@ pub fn http_contract() -> Value {
         },
         Route {
             method: "GET",
+            path: "/v1/trust/runway",
+            auth: Auth::Read,
+            request: None,
+            response: schema::<tenkai::trust_posture::PlanRunways>(&mut g),
+        },
+        Route {
+            method: "GET",
             path: "/v1/runners",
             auth: Auth::Management,
             request: None,

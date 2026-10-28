@@ -86,6 +86,19 @@ pub(super) async fn content_inventory(
     manage_result(state.management.content_inventory(&credential).await)
 }
 
+/// `GET /v1/trust/runway` (#811): per waiting plan, the first certificate
+/// to lapse before it can apply.
+pub(super) async fn trust_runway(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    manage_result(state.management.trust_runway(&credential).await)
+}
+
 /// `GET /v1/trust` (#676): signing trust and certificate expiry of this host.
 pub(super) async fn trust_posture(
     State(state): State<Arc<AppState>>,

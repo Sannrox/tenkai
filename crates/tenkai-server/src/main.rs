@@ -1715,6 +1715,8 @@ fn trust_sources(
         warning_days: days("TENKAI_TRUST_WARNING_DAYS", 30)?,
         critical_days: days("TENKAI_TRUST_CRITICAL_DAYS", 7)?,
         runtime_client_cert_required,
+        // Filled by the router with the roots it loads at start.
+        loaded_signing: Vec::new(),
     };
     anyhow::ensure!(
         sources.critical_days <= sources.warning_days,
