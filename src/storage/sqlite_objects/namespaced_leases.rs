@@ -1,5 +1,8 @@
 use super::*;
 
+// Lease writes read the row and then write it, so each runs in an immediate
+// transaction: a concurrent writer waits on the busy timeout instead of
+// failing when its read lock cannot be upgraded (#713).
 impl SqliteStore {
     pub fn acquire_namespaced_lease(
         &self,
@@ -11,7 +14,7 @@ impl SqliteStore {
         anyhow::ensure!(ttl_ms > 0, "embedded lease TTL must be positive");
         let now = crate::now_millis();
         let mut connection = self.connection()?;
-        let tx = connection.transaction()?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         if namespace == crate::apply::ENVIRONMENT_LEASE_NAMESPACE {
             crate::storage::ensure_environment_active_in(&tx, key, "new apply leases")?;
         }
@@ -73,7 +76,7 @@ impl SqliteStore {
     ) -> AnyResult<Lease> {
         anyhow::ensure!(ttl_ms > 0, "embedded lease TTL must be positive");
         let mut connection = self.connection()?;
-        let tx = connection.transaction()?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let mut lease = require_active_lease_in(&tx, namespace, key, fencing_token)?;
         let now = crate::now_millis();
         lease.refreshed_at_ms = now;
@@ -90,7 +93,7 @@ impl SqliteStore {
         fencing_token: &str,
     ) -> AnyResult<Lease> {
         let mut connection = self.connection()?;
-        let tx = connection.transaction()?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let mut lease = require_active_lease_in(&tx, namespace, key, fencing_token)?;
         lease.status = "released".into();
         lease.released_at_ms = crate::now_millis();
@@ -110,7 +113,7 @@ impl SqliteStore {
     ) -> AnyResult<Lease> {
         anyhow::ensure!(ttl_ms > 0, "embedded lease TTL must be positive");
         let mut connection = self.connection()?;
-        let tx = connection.transaction()?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let current = decode_lease(
             tx.query_row(
                 "SELECT payload FROM catalog_leases WHERE namespace=?1 AND lease_key=?2",

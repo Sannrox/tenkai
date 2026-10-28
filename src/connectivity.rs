@@ -6,6 +6,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -300,12 +302,14 @@ pub async fn load_upgrade(ctx: &mut Ctx, name: &str) -> Result<UpgradeRecord> {
     record_from_object(&object)
 }
 
-pub async fn interrupt_transfer(
+async fn interrupt_transfer_locked(
     ctx: &mut Ctx,
+    held: &HeldEnvironments,
     name: &str,
     environment: &str,
 ) -> Result<UpgradeRecord> {
     let mut record = load_upgrade(ctx, name).await?;
+    let base = record.clone();
     let index = env_index(&record, environment)?;
     if record.environments[index].class != ConnectivityClass::Intermittent {
         bail!("environment {environment} is not intermittent");
@@ -328,16 +332,18 @@ pub async fn interrupt_transfer(
     record.environments[index].detail =
         "transfer interrupted before verified content boundary".into();
     record.status = UpgradeStatus::Interrupted;
-    persist(ctx, &record).await?;
+    let record = persist(ctx, held, &base, &record).await?;
     Ok(record)
 }
 
-pub async fn resume_transfer(
+async fn resume_transfer_locked(
     ctx: &mut Ctx,
+    held: &HeldEnvironments,
     name: &str,
     environment: &str,
 ) -> Result<UpgradeRecord> {
     let mut record = load_upgrade(ctx, name).await?;
+    let base = record.clone();
     revalidate(&record, ctx).await?;
     let index = env_index(&record, environment)?;
     if record.environments[index].class != ConnectivityClass::Intermittent {
@@ -352,7 +358,7 @@ pub async fn resume_transfer(
         record.environments[index].detail =
             "stale fencing generation cannot resume an interrupted transfer".into();
         record.status = UpgradeStatus::Conflicted;
-        persist(ctx, &record).await?;
+        let record = persist(ctx, held, &base, &record).await?;
         bail!("{}", record.environments[index].detail);
     }
     if checkpoint.release_digest != record.release_digest
@@ -364,34 +370,42 @@ pub async fn resume_transfer(
     checkpoint.verified = true;
     record.environments[index].transfer = Some(checkpoint);
     record.environments[index].detail = "transfer verified; ready to apply".into();
-    persist(ctx, &record).await?;
+    let record = persist(ctx, held, &base, &record).await?;
     Ok(record)
 }
 
-pub async fn advance(
+async fn advance_locked(
     ctx: &mut Ctx,
+    held: &HeldEnvironments,
     name: &str,
+    target: &str,
     authorization: ExecutionAuthorization<'_>,
 ) -> Result<UpgradeRecord> {
     let mut record = load_upgrade(ctx, name).await?;
+    let base = record.clone();
     revalidate(&record, ctx).await?;
+    // The environment chosen before its lease was taken, if it still needs
+    // work now that the record is read under that lease.
     let Some(index) = record.environments.iter().position(|environment| {
-        matches!(
-            environment.status,
-            UpgradeEnvironmentStatus::Pending | UpgradeEnvironmentStatus::Interrupted
-        )
+        environment.name == target
+            && matches!(
+                environment.status,
+                UpgradeEnvironmentStatus::Pending | UpgradeEnvironmentStatus::Interrupted
+            )
     }) else {
         record.status = summarize(&record);
-        persist(ctx, &record).await?;
+        let record = persist(ctx, held, &base, &record).await?;
         return Ok(record);
     };
     record.status = UpgradeStatus::Running;
     let environment = record.environments[index].name.clone();
     let class = record.environments[index].class;
+    held.ensure_held()?;
     let plan = ensure_plan(ctx, &record, &environment).await?;
     record.environments[index].plan_id = Some(plan.id.clone());
     match class {
         ConnectivityClass::Connected => {
+            held.ensure_held()?;
             apply_plan(ctx, &plan.id, authorization).await?;
             mark_applied(&mut record, index, "connected apply completed");
         }
@@ -423,10 +437,11 @@ pub async fn advance(
                     record.environments[index].detail =
                         "stale fencing generation rejected reconnecting runtime".into();
                     record.status = UpgradeStatus::Conflicted;
-                    persist(ctx, &record).await?;
+                    let record = persist(ctx, held, &base, &record).await?;
                     bail!("{}", record.environments[index].detail);
                 }
                 Some(_) => {
+                    held.ensure_held()?;
                     apply_plan(ctx, &plan.id, authorization).await?;
                     mark_applied(
                         &mut record,
@@ -452,6 +467,7 @@ pub async fn advance(
                     "isolated environment requires a signed receipt import".into();
                 record.status = UpgradeStatus::Interrupted;
             } else {
+                held.ensure_held()?;
                 apply_plan(ctx, &plan.id, authorization).await?;
                 mark_applied(&mut record, index, "isolated receipt imported and applied");
             }
@@ -469,7 +485,7 @@ pub async fn advance(
     ) {
         record.status = summarize(&record);
     }
-    persist(ctx, &record).await?;
+    let record = persist(ctx, held, &base, &record).await?;
     Ok(record)
 }
 
@@ -668,8 +684,9 @@ async fn preflight_delta(
     )
 }
 
-pub async fn bind_isolated_bundle(
+async fn bind_isolated_bundle_locked(
     ctx: &mut Ctx,
+    held: &HeldEnvironments,
     name: &str,
     environment: &str,
     bundle: &crate::offline_bundle::BundleEnvelope,
@@ -684,6 +701,7 @@ pub async fn bind_isolated_bundle(
     };
     let scan = scanned.as_ref().map(|(evidence, _)| evidence.clone());
     // A bundle may carry key revocations; apply them before trusting it.
+    held.ensure_held()?;
     crate::key_revocation::import_from_bundle(bundle)?;
     let verified = bundle.verify(
         trust_roots,
@@ -694,6 +712,7 @@ pub async fn bind_isolated_bundle(
     crate::offline_host_binaries::preflight(&verified)?;
     let (mut record, index, bundle_digest) =
         admit_isolated_bind(ctx, name, environment, &verified).await?;
+    let base = record.clone();
     if crate::offline_bundle::stack_manifest(&verified)?.is_some() {
         crate::offline_bundle::preflight_full_stack(&verified, bundle_path)?;
     }
@@ -702,6 +721,7 @@ pub async fn bind_isolated_bundle(
     // Content collection waits until this import has stored everything.
     let _content = crate::content_inventory::ContentLock::shared_from_env().await?;
     preflight_delta(ctx, &verified, &mirrors).await?;
+    held.ensure_held()?;
     crate::offline_bundle::import_artifact_layers(
         &verified,
         bundle_path,
@@ -739,7 +759,7 @@ pub async fn bind_isolated_bundle(
             .and_then(|evidence| evidence.receipt.clone()),
     });
     record.environments[index].detail = "verified offline bundle bound".into();
-    persist(ctx, &record).await?;
+    let record = persist(ctx, held, &base, &record).await?;
     Ok(record)
 }
 
@@ -974,8 +994,9 @@ async fn reinstall_isolated_stack(
     Ok(record)
 }
 
-pub async fn import_isolated_receipt(
+async fn import_isolated_receipt_locked(
     ctx: &mut Ctx,
+    held: &HeldEnvironments,
     name: &str,
     environment: &str,
     receipt: &crate::offline_bundle::ReceiptEnvelope,
@@ -1011,6 +1032,7 @@ pub async fn import_isolated_receipt(
     let bundle_digest = verified_bundle.digest().to_string();
     let receipt_digest = verified_receipt.statement().digest()?;
     let mut record = load_upgrade(ctx, name).await?;
+    let base = record.clone();
     revalidate(&record, ctx).await?;
     let index = env_index(&record, environment)?;
     if record.environments[index].class != ConnectivityClass::Isolated {
@@ -1035,7 +1057,7 @@ pub async fn import_isolated_receipt(
             record.environments[index].detail =
                 format!("conflicting isolated receipt cannot overwrite first accepted {existing}");
             record.status = UpgradeStatus::Conflicted;
-            persist(ctx, &record).await?;
+            let record = persist(ctx, held, &base, &record).await?;
             bail!("{}", record.environments[index].detail);
         }
         None => {
@@ -1055,24 +1077,32 @@ pub async fn import_isolated_receipt(
             record.environments[index].detail = "isolated receipt accepted".into();
         }
     }
-    persist(ctx, &record).await?;
+    let record = persist(ctx, held, &base, &record).await?;
     Ok(record)
 }
 
-pub async fn rollback_upgrade(
+async fn rollback_upgrade_locked(
     ctx: &mut Ctx,
+    held: &HeldEnvironments,
     name: &str,
+    locked: &[String],
     authorization: ExecutionAuthorization<'_>,
 ) -> Result<UpgradeRecord> {
     let mut record = load_upgrade(ctx, name).await?;
+    let base = record.clone();
     for index in (0..record.environments.len()).rev() {
-        if record.environments[index].status != UpgradeEnvironmentStatus::Applied {
+        if record.environments[index].status != UpgradeEnvironmentStatus::Applied
+            || !locked.contains(&record.environments[index].name)
+        {
             continue;
         }
+        // Stop before the next environment's rollback if ownership is lost.
+        held.ensure_held()?;
         let environment = record.environments[index].name.clone();
         match plan::rollback_step(ctx, &environment, &record.product).await {
             Ok(step) => {
                 let rollback = plan::create_from_steps(ctx, &environment, vec![step]).await?;
+                held.ensure_held()?;
                 match apply_plan(ctx, &rollback.id, authorization).await {
                     Ok(()) => {
                         record.environments[index].status = UpgradeEnvironmentStatus::RolledBack;
@@ -1085,7 +1115,7 @@ pub async fn rollback_upgrade(
                         record.environments[index].detail =
                             format!("rollback failed; recovery-required: {error}");
                         record.status = UpgradeStatus::RecoveryRequired;
-                        persist(ctx, &record).await?;
+                        let record = persist(ctx, held, &base, &record).await?;
                         return Ok(record);
                     }
                 }
@@ -1095,13 +1125,13 @@ pub async fn rollback_upgrade(
                 record.environments[index].detail =
                     format!("rollback plan unavailable; recovery-required: {error}");
                 record.status = UpgradeStatus::RecoveryRequired;
-                persist(ctx, &record).await?;
+                let record = persist(ctx, held, &base, &record).await?;
                 return Ok(record);
             }
         }
     }
     record.status = UpgradeStatus::RolledBack;
-    persist(ctx, &record).await?;
+    let record = persist(ctx, held, &base, &record).await?;
     Ok(record)
 }
 
@@ -1964,11 +1994,404 @@ async fn commit_isolated_catalog(
     Ok(pin)
 }
 
-async fn persist(ctx: &mut Ctx, record: &UpgradeRecord) -> Result<()> {
-    let mut object = upgrade_object(record)?;
-    object.updated = crate::now_millis();
-    ctx.put(object).await?;
-    Ok(())
+/// Operations on one environment of an upgrade run one at a time (#713):
+/// each takes that environment's lease before any effect and holds it until
+/// the record is written, so a second operation on the same environment is
+/// refused before it acts. Operations on different environments run
+/// concurrently and their record writes merge.
+const UPGRADE_ENVIRONMENT_NAMESPACE: &str = "connectivity-upgrade-environment";
+/// A held environment lease is renewed every third of this while its
+/// operation runs, so a crashed operation frees the environment quickly.
+const UPGRADE_ENVIRONMENT_TTL_MS: i64 = 120_000;
+
+/// Environment leases one operation holds, renewed on a thread of its own
+/// until released. The operation stops before its next effect, and its
+/// record write is refused, once a renewal failed (`lost`) or the leases
+/// may have lapsed: `valid_until_ms` is when the last renewal was asked for
+/// plus the lease lifetime, so a process that was paused past it cannot act
+/// before the renewal thread notices.
+struct HeldEnvironments {
+    leases: Vec<(String, String)>,
+    lost: Arc<AtomicBool>,
+    valid_until_ms: Arc<std::sync::atomic::AtomicI64>,
+    stop_renewal: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+/// Stop acting this long before a held lease could lapse.
+const UPGRADE_ENVIRONMENT_MARGIN_MS: i64 = 10_000;
+
+impl HeldEnvironments {
+    fn none() -> Self {
+        Self {
+            leases: Vec::new(),
+            lost: Arc::default(),
+            valid_until_ms: Arc::new(std::sync::atomic::AtomicI64::new(i64::MAX)),
+            stop_renewal: None,
+        }
+    }
+
+    /// Fail when ownership of any held environment was lost or may have
+    /// lapsed.
+    fn ensure_held(&self) -> Result<()> {
+        if self.lost.load(Ordering::SeqCst)
+            || crate::now_millis().saturating_add(UPGRADE_ENVIRONMENT_MARGIN_MS)
+                >= self.valid_until_ms.load(Ordering::SeqCst)
+        {
+            bail!("operation lease on an upgrade environment was lost; stopping");
+        }
+        Ok(())
+    }
+}
+
+fn environment_lease_key(upgrade: &str, environment: &str) -> String {
+    format!("{upgrade}/{environment}")
+}
+
+/// Lease every environment in `environments`, or none: a busy one releases
+/// the leases already taken and refuses.
+async fn lock_environments(
+    ctx: &mut Ctx,
+    upgrade: &str,
+    environments: &[String],
+) -> Result<HeldEnvironments> {
+    let owner = format!("upgrade-op-{}", uuid::Uuid::new_v4().simple());
+    // Asked for before the first lease, so no lease outlives this deadline.
+    let valid_until = Arc::new(std::sync::atomic::AtomicI64::new(
+        crate::now_millis().saturating_add(UPGRADE_ENVIRONMENT_TTL_MS),
+    ));
+    let mut held = Vec::new();
+    for environment in environments {
+        let key = environment_lease_key(upgrade, environment);
+        match ctx
+            .acquire_lease(
+                UPGRADE_ENVIRONMENT_NAMESPACE,
+                &key,
+                &owner,
+                UPGRADE_ENVIRONMENT_TTL_MS,
+            )
+            .await
+        {
+            Ok(lease) => held.push((key, lease.fencing_token)),
+            Err(error) => {
+                release_environment_leases(ctx, held).await;
+                return match error {
+                    crate::client::LeaseError::AlreadyExists => Err(anyhow::anyhow!(
+                        "environment {environment} of upgrade {upgrade} has an operation in progress; retry"
+                    )),
+                    error => Err(error.into()),
+                };
+            }
+        }
+    }
+    let lost: Arc<AtomicBool> = Arc::default();
+    let (stop, mut stopped) = tokio::sync::oneshot::channel::<()>();
+    let mut renewing = ctx.clone();
+    let leases = held.clone();
+    let flag = Arc::clone(&lost);
+    let deadline = Arc::clone(&valid_until);
+    // A thread of its own, so an operation that blocks its runtime (a
+    // synchronous bundle import) cannot starve the renewal.
+    let started = std::thread::Builder::new()
+        .name("upgrade-lease-renewal".into())
+        .spawn(move || {
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                flag.store(true, Ordering::SeqCst);
+                return;
+            };
+            runtime.block_on(async move {
+                let period =
+                    std::time::Duration::from_millis((UPGRADE_ENVIRONMENT_TTL_MS / 3) as u64);
+                loop {
+                    tokio::select! {
+                        _ = &mut stopped => return,
+                        () = tokio::time::sleep(period) => {}
+                    }
+                    let asked = crate::now_millis();
+                    for (key, token) in &leases {
+                        if renewing
+                            .refresh_lease(
+                                UPGRADE_ENVIRONMENT_NAMESPACE,
+                                key,
+                                token,
+                                UPGRADE_ENVIRONMENT_TTL_MS,
+                            )
+                            .await
+                            .is_err()
+                        {
+                            flag.store(true, Ordering::SeqCst);
+                            return;
+                        }
+                    }
+                    deadline.store(
+                        asked.saturating_add(UPGRADE_ENVIRONMENT_TTL_MS),
+                        Ordering::SeqCst,
+                    );
+                }
+            });
+        });
+    if started.is_err() {
+        release_environment_leases(ctx, held).await;
+        bail!("could not start the upgrade lease renewal");
+    }
+    Ok(HeldEnvironments {
+        leases: held,
+        lost,
+        valid_until_ms: valid_until,
+        stop_renewal: Some(stop),
+    })
+}
+
+async fn unlock_environments(ctx: &mut Ctx, mut held: HeldEnvironments) {
+    // The renewal thread exits once told; a renewal racing the release fails
+    // harmlessly.
+    if let Some(stop) = held.stop_renewal.take() {
+        let _ = stop.send(());
+    }
+    release_environment_leases(ctx, held.leases).await;
+}
+
+async fn release_environment_leases(ctx: &mut Ctx, leases: Vec<(String, String)>) {
+    for (key, token) in leases {
+        let _ = ctx
+            .release_lease(UPGRADE_ENVIRONMENT_NAMESPACE, &key, &token)
+            .await;
+    }
+}
+
+pub async fn interrupt_transfer(
+    ctx: &mut Ctx,
+    name: &str,
+    environment: &str,
+) -> Result<UpgradeRecord> {
+    let held = lock_environments(ctx, name, &[environment.to_string()]).await?;
+    let result = interrupt_transfer_locked(ctx, &held, name, environment).await;
+    unlock_environments(ctx, held).await;
+    result
+}
+
+pub async fn resume_transfer(
+    ctx: &mut Ctx,
+    name: &str,
+    environment: &str,
+) -> Result<UpgradeRecord> {
+    let held = lock_environments(ctx, name, &[environment.to_string()]).await?;
+    let result = resume_transfer_locked(ctx, &held, name, environment).await;
+    unlock_environments(ctx, held).await;
+    result
+}
+
+/// Advance the first environment that still needs work.
+pub async fn advance(
+    ctx: &mut Ctx,
+    name: &str,
+    authorization: ExecutionAuthorization<'_>,
+) -> Result<UpgradeRecord> {
+    let record = load_upgrade(ctx, name).await?;
+    let target = record
+        .environments
+        .iter()
+        .find(|environment| {
+            matches!(
+                environment.status,
+                UpgradeEnvironmentStatus::Pending | UpgradeEnvironmentStatus::Interrupted
+            )
+        })
+        .map(|environment| environment.name.clone())
+        .unwrap_or_default();
+    let held = if target.is_empty() {
+        HeldEnvironments::none()
+    } else {
+        lock_environments(ctx, name, std::slice::from_ref(&target)).await?
+    };
+    let result = advance_locked(ctx, &held, name, &target, authorization).await;
+    unlock_environments(ctx, held).await;
+    result
+}
+
+pub async fn bind_isolated_bundle(
+    ctx: &mut Ctx,
+    name: &str,
+    environment: &str,
+    bundle: &crate::offline_bundle::BundleEnvelope,
+    trust_roots: &crate::release_signing::TrustRoots,
+    bundle_path: Option<&Path>,
+) -> Result<UpgradeRecord> {
+    let held = lock_environments(ctx, name, &[environment.to_string()]).await?;
+    let result = bind_isolated_bundle_locked(
+        ctx,
+        &held,
+        name,
+        environment,
+        bundle,
+        trust_roots,
+        bundle_path,
+    )
+    .await;
+    unlock_environments(ctx, held).await;
+    result
+}
+
+pub async fn import_isolated_receipt(
+    ctx: &mut Ctx,
+    name: &str,
+    environment: &str,
+    receipt: &crate::offline_bundle::ReceiptEnvelope,
+    bundle: &crate::offline_bundle::BundleEnvelope,
+    trust_roots: &crate::release_signing::TrustRoots,
+) -> Result<UpgradeRecord> {
+    let held = lock_environments(ctx, name, &[environment.to_string()]).await?;
+    let result =
+        import_isolated_receipt_locked(ctx, &held, name, environment, receipt, bundle, trust_roots)
+            .await;
+    unlock_environments(ctx, held).await;
+    result
+}
+
+/// Roll back every applied environment. All of the upgrade's environments
+/// are leased before the applied ones are chosen, so none is applied
+/// meanwhile and left out.
+pub async fn rollback_upgrade(
+    ctx: &mut Ctx,
+    name: &str,
+    authorization: ExecutionAuthorization<'_>,
+) -> Result<UpgradeRecord> {
+    let record = load_upgrade(ctx, name).await?;
+    let environments: Vec<String> = record
+        .environments
+        .iter()
+        .map(|environment| environment.name.clone())
+        .collect();
+    let held = lock_environments(ctx, name, &environments).await?;
+    let result = rollback_upgrade_locked(ctx, &held, name, &environments, authorization).await;
+    unlock_environments(ctx, held).await;
+    result
+}
+
+const UPGRADE_WRITE_NAMESPACE: &str = "connectivity-upgrade-write";
+/// A record write holds its lease only while it reads and writes the record.
+const UPGRADE_WRITE_TTL_MS: i64 = 30_000;
+const UPGRADE_WRITE_ATTEMPTS: u32 = 50;
+const UPGRADE_WRITE_RETRY: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Write `modified` back as a change to `base`, the record as this operation
+/// read it (#713). Under a short lease on the upgrade, the stored record is
+/// read again and only what the operation changed is applied: the
+/// environment entries it changed (it holds their leases) and the status,
+/// so concurrent operations on different environments both persist.
+/// Returns the stored record.
+async fn persist(
+    ctx: &mut Ctx,
+    held: &HeldEnvironments,
+    base: &UpgradeRecord,
+    modified: &UpgradeRecord,
+) -> Result<UpgradeRecord> {
+    let owner = format!("upgrade-write-{}", uuid::Uuid::new_v4().simple());
+    let mut attempt = 0;
+    let lease = loop {
+        match ctx
+            .acquire_lease(
+                UPGRADE_WRITE_NAMESPACE,
+                &modified.name,
+                &owner,
+                UPGRADE_WRITE_TTL_MS,
+            )
+            .await
+        {
+            Ok(lease) => break lease,
+            Err(crate::client::LeaseError::AlreadyExists) if attempt < UPGRADE_WRITE_ATTEMPTS => {
+                attempt += 1;
+                tokio::time::sleep(UPGRADE_WRITE_RETRY).await;
+            }
+            Err(crate::client::LeaseError::AlreadyExists) => bail!(
+                "upgrade {} is being updated by another writer; retry",
+                modified.name
+            ),
+            Err(error) => return Err(error.into()),
+        }
+    };
+    let written = async {
+        // The operation must still hold each environment it changes. Renewing
+        // under the record lease fences an operation whose lease lapsed or
+        // was taken over: it cannot record over its successor.
+        held.ensure_held()?;
+        for (key, token) in &held.leases {
+            ctx.refresh_lease(
+                UPGRADE_ENVIRONMENT_NAMESPACE,
+                key,
+                token,
+                UPGRADE_ENVIRONMENT_TTL_MS,
+            )
+            .await
+            .with_context(|| format!("operation lease on {key} was lost; not recording"))?;
+        }
+        let current = load_upgrade(ctx, &modified.name).await?;
+        let merged = merge_upgrade(base, modified, current)?;
+        let mut object = upgrade_object(&merged)?;
+        object.updated = crate::now_millis();
+        // Fenced by the lease: a writer whose lease expired while it held the
+        // record is refused by storage, not applied over its successor.
+        ctx.guarded_update(
+            object,
+            UPGRADE_WRITE_NAMESPACE,
+            &modified.name,
+            &lease.fencing_token,
+        )
+        .await?;
+        Ok(merged)
+    }
+    .await;
+    let _ = ctx
+        .release_lease(
+            UPGRADE_WRITE_NAMESPACE,
+            &modified.name,
+            &lease.fencing_token,
+        )
+        .await;
+    written
+}
+
+/// Apply `modified`'s changes to `base` onto `current`. Environments are
+/// fixed when the upgrade is created, so they merge by position.
+fn merge_upgrade(
+    base: &UpgradeRecord,
+    modified: &UpgradeRecord,
+    current: UpgradeRecord,
+) -> Result<UpgradeRecord> {
+    if base.environments.len() != modified.environments.len()
+        || current.environments.len() != base.environments.len()
+    {
+        bail!("upgrade {} environments changed shape", base.name);
+    }
+    // Whether another writer changed any environment since `base`.
+    let concurrent = current.environments != base.environments;
+    let mut merged = current;
+    // An operation holds the lease of each environment it changes, so its
+    // entry replaces the stored one whole.
+    for (index, changed) in modified.environments.iter().enumerate() {
+        if *changed != base.environments[index] {
+            merged.environments[index] = changed.clone();
+        }
+    }
+    // The aggregate status follows the environments. With no concurrent
+    // environment change, this operation's status stands; otherwise it is
+    // derived from the merged environments, whatever order the writers
+    // persisted in.
+    if concurrent {
+        if modified.status != base.status || merged.status != base.status {
+            merged.status = summarize(&merged);
+        }
+    } else if modified.status != base.status {
+        merged.status = modified.status;
+    }
+    // As before #713, `updated_at` moves only when the operation moved it,
+    // so replaying the same state stores the same record.
+    if modified.updated_at != base.updated_at {
+        merged.updated_at = merged.updated_at.max(modified.updated_at);
+    }
+    Ok(merged)
 }
 
 pub fn export_isolated_bundle(
@@ -2862,6 +3285,165 @@ install = "true"
             "{:?}",
             rolled.status
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// An operation stops acting once its leases may have lapsed, even before
+    /// the renewal thread reports a failure.
+    #[test]
+    fn held_environments_stop_near_their_deadline() {
+        let held = HeldEnvironments::none();
+        held.ensure_held().unwrap();
+        held.valid_until_ms.store(
+            crate::now_millis() + UPGRADE_ENVIRONMENT_MARGIN_MS / 2,
+            Ordering::SeqCst,
+        );
+        assert!(held.ensure_held().is_err());
+        held.valid_until_ms.store(i64::MAX, Ordering::SeqCst);
+        held.lost.store(true, Ordering::SeqCst);
+        assert!(held.ensure_held().is_err());
+    }
+
+    /// Two writers that read the same upgrade record and each bind a
+    /// different environment both persist (#713); a second operation on an
+    /// environment another operation holds is refused before it acts.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_binds_for_different_environments_both_persist() {
+        let root = temp_root("concurrent-bind");
+        let db = root.join("tenkai.db");
+        let mut ctx = Ctx::embedded(&db).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        published_software(&mut ctx, &root, "1.0.0").await;
+        let actor = crate::auth_context::test_management_context("concurrent-bind");
+        for site in ["site-a", "site-b"] {
+            prepare_env(&mut ctx, site, ConnectivityClass::Isolated, &actor).await;
+        }
+        let spec = UpgradeSpec {
+            name: "bind-race".into(),
+            product: "edge-app".into(),
+            version: "1.0.0".into(),
+            channel: "stable".into(),
+            environments: vec!["site-a".into(), "site-b".into()],
+        };
+        let base = start_or_resume(&mut ctx, &spec).await.unwrap();
+        let bound = |environment: &str| {
+            let mut record = base.clone();
+            let index = env_index(&record, environment).unwrap();
+            record.environments[index].isolated = Some(IsolatedEvidence {
+                bundle_digest: format!("sha256:{environment}"),
+                receipt_digest: None,
+                plan_digest: None,
+                approval_digest: None,
+                scan: None,
+                receipt: None,
+            });
+            record.environments[index].detail = "verified offline bundle bound".into();
+            record
+        };
+        let (a, b) = (bound("site-a"), bound("site-b"));
+        let mut ctx_a = Ctx::embedded(&db).unwrap();
+        let mut ctx_b = Ctx::embedded(&db).unwrap();
+        let unleased = HeldEnvironments::none();
+        let (written_a, written_b) = tokio::join!(
+            persist(&mut ctx_a, &unleased, &base, &a),
+            persist(&mut ctx_b, &unleased, &base, &b)
+        );
+        written_a.unwrap();
+        written_b.unwrap();
+        let stored = load_upgrade(&mut ctx, "bind-race").await.unwrap();
+        for environment in ["site-a", "site-b"] {
+            let index = env_index(&stored, environment).unwrap();
+            assert_eq!(
+                stored.environments[index]
+                    .isolated
+                    .as_ref()
+                    .map(|evidence| evidence.bundle_digest.clone()),
+                Some(format!("sha256:{environment}")),
+                "{stored:?}"
+            );
+        }
+
+        // While one operation holds site-a, a second one on site-a is
+        // refused before it acts; site-b stays free.
+        let held = lock_environments(&mut ctx_a, "bind-race", &["site-a".to_string()])
+            .await
+            .unwrap();
+        let refused = interrupt_transfer(&mut ctx_b, "bind-race", "site-a")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("operation in progress"), "{refused}");
+        let free = lock_environments(&mut ctx_b, "bind-race", &["site-b".to_string()])
+            .await
+            .unwrap();
+        unlock_environments(&mut ctx_b, free).await;
+        // The same leases, as an operation still holding them would see them.
+        let stale = HeldEnvironments {
+            leases: held.leases.clone(),
+            lost: Arc::default(),
+            valid_until_ms: Arc::new(std::sync::atomic::AtomicI64::new(i64::MAX)),
+            stop_renewal: None,
+        };
+        unlock_environments(&mut ctx_a, held).await;
+
+        // An operation whose lease was taken over (as after expiry) cannot
+        // record over its successor.
+        let successor = lock_environments(&mut ctx_b, "bind-race", &["site-a".to_string()])
+            .await
+            .unwrap();
+        let current = load_upgrade(&mut ctx, "bind-race").await.unwrap();
+        let mut late = current.clone();
+        let index = env_index(&late, "site-a").unwrap();
+        late.environments[index].detail = "late writer".into();
+        let refused = persist(&mut ctx_a, &stale, &current, &late)
+            .await
+            .unwrap_err();
+        assert!(format!("{refused:#}").contains("was lost"), "{refused:#}");
+        unlock_environments(&mut ctx_b, successor).await;
+
+        // Two writers move the aggregate status differently while changing
+        // different environments: both persist and the status follows the
+        // merged environments.
+        let base = stored;
+        let mut applied = base.clone();
+        let index_a = env_index(&applied, "site-a").unwrap();
+        applied.environments[index_a].status = UpgradeEnvironmentStatus::Applied;
+        applied.status = UpgradeStatus::Running;
+        let mut interrupted = base.clone();
+        let index_b = env_index(&interrupted, "site-b").unwrap();
+        interrupted.environments[index_b].status = UpgradeEnvironmentStatus::Interrupted;
+        interrupted.status = UpgradeStatus::Interrupted;
+        persist(&mut ctx, &HeldEnvironments::none(), &base, &interrupted)
+            .await
+            .unwrap();
+        let merged = persist(&mut ctx, &HeldEnvironments::none(), &base, &applied)
+            .await
+            .unwrap();
+        assert_eq!(
+            merged.environments[index_a].status,
+            UpgradeEnvironmentStatus::Applied
+        );
+        assert_eq!(
+            merged.environments[index_b].status,
+            UpgradeEnvironmentStatus::Interrupted
+        );
+        assert_eq!(merged.status, UpgradeStatus::Interrupted);
+
+        // A writer that keeps the status while changing another environment
+        // still makes the status follow the merged environments.
+        let base = merged;
+        let mut running = base.clone();
+        running.environments[index_b].status = UpgradeEnvironmentStatus::Pending;
+        running.status = UpgradeStatus::Running;
+        let mut kept = base.clone();
+        kept.environments[index_a].detail = "detail only".into();
+        persist(&mut ctx, &HeldEnvironments::none(), &base, &kept)
+            .await
+            .unwrap();
+        let merged = persist(&mut ctx, &HeldEnvironments::none(), &base, &running)
+            .await
+            .unwrap();
+        assert_eq!(merged.status, summarize(&merged));
         let _ = std::fs::remove_dir_all(root);
     }
 
