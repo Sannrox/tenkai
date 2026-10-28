@@ -1,4 +1,5 @@
 use super::lifecycle_support::lifecycle_router;
+use super::support::{current_generation, router_generation};
 use super::*;
 use tenkai::environment_config::EnvironmentConfigChange as Change;
 
@@ -33,12 +34,12 @@ async fn send(
         .status()
 }
 
-fn fact_body(environment: &str, kind: &str) -> Vec<u8> {
+fn fact_body(environment: &str, kind: &str, generation: u64) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
         "version": 1,
         "operation": "configure",
         "environment": environment,
-        "expected_generation": 0,
+        "expected_generation": generation,
         "reason": "inventory",
         "change": {"kind": kind, "key": "architecture", "value": "arm64"}
     }))
@@ -54,9 +55,17 @@ async fn configuration_routes_require_management_and_stay_in_scope() {
     }))
     .unwrap();
     let facts = "/v1/environments/stage/facts";
+    let stage = router_generation(&app, "stage").await;
 
     assert_eq!(
-        send(&app, "PUT", facts, None, fact_body("stage", "set_fact")).await,
+        send(
+            &app,
+            "PUT",
+            facts,
+            None,
+            fact_body("stage", "set_fact", stage)
+        )
+        .await,
         StatusCode::UNAUTHORIZED
     );
     assert_eq!(
@@ -65,7 +74,7 @@ async fn configuration_routes_require_management_and_stay_in_scope() {
             "PUT",
             facts,
             Some("runtime-secret"),
-            fact_body("stage", "set_fact")
+            fact_body("stage", "set_fact", stage)
         )
         .await,
         StatusCode::FORBIDDEN
@@ -88,7 +97,7 @@ async fn configuration_routes_require_management_and_stay_in_scope() {
             "PUT",
             "/v1/environments/prod/facts",
             Some("stage-secret"),
-            fact_body("prod", "set_fact")
+            fact_body("prod", "set_fact", stage)
         )
         .await,
         StatusCode::FORBIDDEN
@@ -99,7 +108,7 @@ async fn configuration_routes_require_management_and_stay_in_scope() {
             "PUT",
             facts,
             Some("stage-secret"),
-            fact_body("stage", "set_fact")
+            fact_body("stage", "set_fact", stage)
         )
         .await,
         StatusCode::OK
@@ -111,7 +120,7 @@ async fn configuration_routes_require_management_and_stay_in_scope() {
             "DELETE",
             facts,
             Some("stage-secret"),
-            fact_body("stage", "set_fact")
+            fact_body("stage", "set_fact", stage)
         )
         .await,
         StatusCode::BAD_REQUEST
@@ -135,7 +144,7 @@ async fn configuration_routes_require_management_and_stay_in_scope() {
 #[tokio::test]
 async fn remote_configuration_matches_embedded_and_refuses_like_the_cli() {
     let root = temp_root("parity");
-    let (app, _config, store) = lifecycle_router(&root).await;
+    let (app, _config, _store) = lifecycle_router(&root).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -180,7 +189,7 @@ async fn remote_configuration_matches_embedded_and_refuses_like_the_cli() {
         .await
         .unwrap();
     for change in changes.clone() {
-        let generation = generation(&store, "edge");
+        let generation = current_generation(&client, "edge").await;
         client
             .configure_environment("edge", change, "site setup", generation)
             .await
@@ -209,7 +218,7 @@ async fn remote_configuration_matches_embedded_and_refuses_like_the_cli() {
             change,
             "site setup",
             "operator",
-            || Ok(()),
+            |_| Ok(()),
         )
         .await
         .unwrap();
@@ -324,7 +333,12 @@ async fn remote_configuration_matches_embedded_and_refuses_like_the_cli() {
         ),
     ] {
         let error = client
-            .configure_environment("edge", change, "bad input", generation(&store, "edge"))
+            .configure_environment(
+                "edge",
+                change,
+                "bad input",
+                current_generation(&client, "edge").await,
+            )
             .await
             .unwrap_err()
             .to_string();
@@ -344,7 +358,7 @@ async fn remote_configuration_matches_embedded_and_refuses_like_the_cli() {
                 path: not_a_policy.display().to_string(),
             },
             "policy",
-            generation(&store, "edge"),
+            current_generation(&client, "edge").await,
         )
         .await
         .unwrap_err()
@@ -355,31 +369,27 @@ async fn remote_configuration_matches_embedded_and_refuses_like_the_cli() {
     );
     assert!(!refused.contains("hunter2"), "{refused}");
 
-    // The operational-store record is fixture state, as for stage and prod.
-    store
-        .put_environment(&tenkai::storage::EnvironmentRecord {
-            id: "edge".into(),
-            revision: 0,
-            configuration_json: "{}".into(),
-        })
+    // A generation read from inspect is admitted once; the change advances
+    // it, so the same value is then stale (#703).
+    let read = current_generation(&client, "edge").await;
+    client
+        .configure_environment(
+            "edge",
+            Change::SetFact {
+                key: "zone".into(),
+                value: "zone-b".into(),
+            },
+            "inventory",
+            read,
+        )
+        .await
         .unwrap();
-    store
-        .acquire_lease("edge", "config-fence", tenkai::now_millis() + 60_000)
-        .unwrap();
+    assert_ne!(current_generation(&client, "edge").await, read);
     let stale = client
-        .configure_environment("edge", Change::ClearWebhooks { url: None }, "cleanup", 0)
+        .configure_environment("edge", Change::ClearWebhooks { url: None }, "cleanup", read)
         .await
         .unwrap_err()
         .to_string();
     assert!(stale.contains("stale fencing generation"), "{stale}");
     let _ = std::fs::remove_dir_all(root);
-}
-
-fn generation(store: &tenkai::storage::SqliteStore, environment: &str) -> u64 {
-    tenkai::management_lifecycle::environment_fence_generation(
-        store
-            .current_lease(environment)
-            .unwrap()
-            .map(|lease| lease.generation),
-    )
 }

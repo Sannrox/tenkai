@@ -1,4 +1,5 @@
 use super::lifecycle_support::{catalog_router, signed_catalog_fixture};
+use super::support::router_generation;
 use super::*;
 
 #[tokio::test]
@@ -103,6 +104,7 @@ async fn remote_catalog_lifecycle_publish_promote_subscribe_and_recall() {
         .unwrap();
     assert_eq!(promoted.status(), StatusCode::OK);
 
+    let generation = router_generation(&app, "stage").await;
     let subscribed = app
         .clone()
         .oneshot(
@@ -114,7 +116,7 @@ async fn remote_catalog_lifecycle_publish_promote_subscribe_and_recall() {
                         version: 1,
                         operation: "subscribe".into(),
                         environment: "stage".into(),
-                        expected_generation: 0,
+                        expected_generation: generation,
                         spec: "api=stable".into(),
                     })
                     .unwrap(),

@@ -1,6 +1,7 @@
 use super::lifecycle_support::{
     lifecycle_router, signed_catalog_fixture_installing, signed_plan_requests,
 };
+use super::support::current_generation;
 use super::*;
 use crate::RemoteFailure;
 
@@ -67,14 +68,15 @@ async fn failed_apply_steps_are_rejected_not_reported_as_applied() {
         .unwrap();
     assert_eq!(published.resource.as_deref(), Some("api@1.0.0"));
     client.promote_release("api@1.0.0", "stable").await.unwrap();
+    let generation = current_generation(&client, "stage").await;
     client
-        .subscribe_environment("stage", "api=stable", 0)
+        .subscribe_environment("stage", "api=stable", generation)
         .await
         .unwrap();
-    let plan = client.plan_environment("stage", 0).await.unwrap();
+    let plan = client.plan_environment("stage", generation).await.unwrap();
     let plan_id = plan.resource.clone().unwrap();
     let (approve, apply) =
-        signed_plan_requests(&root, "approve", "stage", &plan.digest.unwrap(), 0);
+        signed_plan_requests(&root, "approve", "stage", &plan.digest.unwrap(), generation);
     client.approve_plan(&plan_id, &approve).await.unwrap();
 
     let error = client.apply_plan(&plan_id, &apply).await.unwrap_err();

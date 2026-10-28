@@ -349,8 +349,9 @@ async fn initialize_connectivity(
 /// command.
 ///
 /// The change runs under the environment apply lease, so concurrent changes
-/// and an active apply are serialized. `fence` runs inside the lease and
-/// refuses a stale generation before any write. A `requested` audit event
+/// and an active apply are serialized. `fence` runs inside the lease with the
+/// generation that claiming it superseded, the one `env inspect` showed, and
+/// refuses a stale generation before any write (#703). A `requested` audit event
 /// with the actor and reason is durable before the write, and a `completed`
 /// or `failed` event follows it, so no effective change is unaudited.
 pub async fn apply(
@@ -359,14 +360,14 @@ pub async fn apply(
     change: &EnvironmentConfigChange,
     reason: &str,
     actor: &str,
-    fence: impl FnOnce() -> Result<()>,
+    fence: impl FnOnce(u64) -> Result<()>,
 ) -> Result<String> {
     require_reason(reason)?;
     validate_identifier("environment", environment)?;
     let owner = format!("environment-config:{}", crate::now_millis());
     let lease = crate::apply::claim_environment(ctx, environment, &owner).await?;
     let result = async {
-        fence()?;
+        fence(lease.generation.saturating_sub(1))?;
         let action = change.action();
         append_audit(ctx, environment, action, "requested", actor, reason).await?;
         let result = mutate(ctx, environment, change).await;
