@@ -195,7 +195,7 @@ pub async fn run(
         .kill_on_drop(true)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     let mut guard = guard_command
         .spawn()
         .context("spawning deployment command guard")?;
@@ -207,6 +207,7 @@ pub async fn run(
         .stdout
         .take()
         .context("deployment guard has no readiness pipe")?;
+    let guard_stderr = guard.stderr.take();
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     let mut ready = [0_u8; 1];
     let mut ready_read = Box::pin(readiness.read_exact(&mut ready));
@@ -244,11 +245,23 @@ pub async fn run(
     }
     fence.refresh().await?;
     let status = status.expect("completed command has an exit status");
-    Ok(if status.success() {
-        Ok(())
-    } else {
-        Err(format!("deployment command exited with {status}"))
-    })
+    if status.success() {
+        return Ok(Ok(()));
+    }
+    // The deployment command's own output is discarded, so anything here is
+    // the guard's reason for failing itself.
+    let mut reason = String::new();
+    if let Some(stderr) = guard_stderr {
+        let _ = stderr.take(4096).read_to_string(&mut reason).await;
+    }
+    let reason = reason.trim();
+    Ok(Err(
+        if status.code() == Some(i32::from(GUARD_FAILED_EXIT)) && !reason.is_empty() {
+            format!("deployment command guard failed: {reason}")
+        } else {
+            format!("deployment command exited with {status}")
+        },
+    ))
 }
 
 /// Run in-process `work` while holding the mutation lock, the same flock the
@@ -301,7 +314,35 @@ pub fn with_mutation_lock_authorized<T>(
     Ok(result)
 }
 
-pub async fn supervise(mutation: MutationCommand<'_>, generation: u64) -> Result<()> {
+/// Exit code of a guard that failed itself, as distinct from the deployment
+/// command's own status. The guard writes the reason to stderr (#794).
+pub const GUARD_FAILED_EXIT: u8 = 125;
+
+/// A guard process's whole job: run [`supervise`] and return the exit code,
+/// the deployment command's own status or [`GUARD_FAILED_EXIT`].
+pub async fn guard(mutation: MutationCommand<'_>, generation: u64) -> u8 {
+    use std::os::unix::process::ExitStatusExt as _;
+    match supervise(mutation, generation).await {
+        Ok(status) => match (status.code(), status.signal()) {
+            (Some(code), _) => u8::try_from(code).unwrap_or(1),
+            (None, Some(signal)) => u8::try_from(128 + signal).unwrap_or(1),
+            (None, None) => 1,
+        },
+        Err(error) => {
+            // One line: the controller reports it as the step's failure.
+            eprintln!("{}", format!("{error:#}").replace('\n', " "));
+            GUARD_FAILED_EXIT
+        }
+    }
+}
+
+/// Take the mutation lock, wait for the controller's go, and run the
+/// deployment command, returning its exit status. An error is the guard's
+/// own failure, never the command's.
+pub async fn supervise(
+    mutation: MutationCommand<'_>,
+    generation: u64,
+) -> Result<std::process::ExitStatus> {
     let lock = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -342,7 +383,7 @@ pub async fn supervise(mutation: MutationCommand<'_>, generation: u64) -> Result
         let _ = closed_tx.send(result);
     });
     tokio::select! {
-        status = child.wait() => { let status = status?; unsafe { libc::kill(-process_group, libc::SIGKILL) }; wait_for_process_group_exit(process_group).await?; if status.success() { Ok(()) } else { bail!("deployment command exited with {status}") } }
+        status = child.wait() => { let status = status?; unsafe { libc::kill(-process_group, libc::SIGKILL) }; wait_for_process_group_exit(process_group).await?; Ok(status) }
         _ = &mut controller_closed => { unsafe { libc::kill(-process_group, libc::SIGKILL) }; let _ = child.wait().await; wait_for_process_group_exit(process_group).await?; bail!("deployment controller exited") }
     }
 }
@@ -486,6 +527,62 @@ mod tests {
         assert!(dumped.contains("TENKAI_PRODUCT=app"));
         assert!(dumped.contains("TENKAI_FENCING_GENERATION=3"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    struct StaticFence;
+
+    impl MutationFence for StaticFence {
+        fn generation(&self) -> u64 {
+            1
+        }
+
+        fn refresh(&mut self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    /// The command's own exit status survives the guard, and a guard that
+    /// fails itself says so instead of posing as the command (#794).
+    #[tokio::test]
+    async fn command_status_survives_and_guard_failure_names_itself() {
+        let dir = std::env::temp_dir().join(format!(
+            "tenkai-guard-status-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lock_path = dir.join("mutation.lock");
+        let command = |workdir: &Path, command: &str| {
+            let workdir = workdir.to_path_buf();
+            let command = command.to_string();
+            let lock_path = lock_path.clone();
+            async move {
+                run(
+                    &mut StaticFence,
+                    MutationCommand {
+                        lock_path: &lock_path,
+                        workdir: &workdir,
+                        environment: "lab",
+                        product: "app",
+                        command: &command,
+                    },
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        assert_eq!(command(&dir, "true").await, Ok(()));
+        assert_eq!(
+            command(&dir, "exit 3").await,
+            Err("deployment command exited with exit status: 3".into())
+        );
+        let missing = command(&dir.join("absent"), "true").await.unwrap_err();
+        assert!(
+            missing.starts_with("deployment command guard failed: spawning deployment command"),
+            "{missing}"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

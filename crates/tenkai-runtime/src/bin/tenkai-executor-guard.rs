@@ -2,7 +2,6 @@
 
 use std::path::PathBuf;
 
-use anyhow::Result;
 use clap::Parser;
 
 #[derive(Parser)]
@@ -23,9 +22,9 @@ struct Args {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> std::process::ExitCode {
     let args = Args::parse();
-    tenkai::fenced_mutation::supervise(
+    let code = tenkai::fenced_mutation::guard(
         tenkai::fenced_mutation::MutationCommand {
             lock_path: &args.lock,
             workdir: &args.workdir,
@@ -35,5 +34,6 @@ async fn main() -> Result<()> {
         },
         args.generation,
     )
-    .await
+    .await;
+    std::process::ExitCode::from(code)
 }
