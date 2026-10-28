@@ -5,9 +5,10 @@ use std::thread::{self, JoinHandle};
 pub(crate) use tenkai::storage::{
     AuditRecord, ChannelRecord, EnvironmentRecord, LeaseRecord, OfflineImportRecord,
     OfflineStepImportRecord, PlanRecord, PlanStatus, ProviderEventRecord, ReceiptRecord,
-    ReleaseRecord, Result, RollbackRecord, RollbackStatus, RuntimeActivityRecord, RuntimeClaim,
-    RuntimeCredentialRecord, RuntimeEnrollmentRecord, RuntimeRevocation, RuntimeRunnerRecord,
-    SCHEMA_VERSION, StoreError, provider_event_payloads_match, rollback_intent_digest,
+    ReleaseRecord, Result, RollbackRecord, RollbackStatus, RuntimeActivityRecord,
+    RuntimeAttestationRecord, RuntimeClaim, RuntimeCredentialRecord, RuntimeEnrollmentRecord,
+    RuntimeRevocation, RuntimeRunnerRecord, SCHEMA_VERSION, StoreError,
+    provider_event_payloads_match, rollback_intent_digest,
 };
 
 pub struct Inner {

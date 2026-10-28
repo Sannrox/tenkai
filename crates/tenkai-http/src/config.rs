@@ -60,6 +60,10 @@ pub struct ServerConfig {
     /// The runner CA (#674): issues runner certificates at enrollment and
     /// admits runners by them.
     pub runner_ca: Option<Arc<tenkai::runner_ca::RunnerCa>>,
+    /// Runner certificates reach the server: a runner CA and native TLS
+    /// with a client CA. Behind a TLS-terminating proxy they never do, so
+    /// runner attestation (#675) cannot be enabled through this server.
+    pub runner_certificates_admitted: bool,
     /// The hub writer role on multi-replica hubs (#748): a standby reports
     /// not ready. `None` on single-replica hosts.
     pub writer_fence: Option<Arc<tenkai::writer_fence::WriterFence>>,
@@ -102,6 +106,7 @@ impl ServerConfig {
             imports: None,
             exports: None,
             runner_ca: None,
+            runner_certificates_admitted: false,
             writer_fence: None,
             trust_sources: Default::default(),
             trust_status: Default::default(),

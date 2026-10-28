@@ -266,3 +266,18 @@ pub struct RuntimeActivityRecord {
     pub last_heartbeat_at: Option<i64>,
     pub last_inventory_at: Option<i64>,
 }
+
+/// A runner's latest bound attestation and latest attestation refusal
+/// (#675). A write with `evidence_digest` binds and clears the refusal; a
+/// write without it records only the refusal and keeps the binding.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeAttestationRecord {
+    pub runner_id: String,
+    pub environment_id: String,
+    pub evidence_digest: Option<String>,
+    pub key_fingerprint: Option<String>,
+    pub checked_at: Option<i64>,
+    pub bound_at: Option<i64>,
+    pub refusal_reason: Option<String>,
+    pub refused_at: Option<i64>,
+}

@@ -21,8 +21,8 @@ use crate::storage::{
     AuditRecord, ChannelRecord, EnvironmentRecord, LeaseRecord, OfflineImportRecord,
     OfflineStepImportRecord, OperationalStore, PlanRecord, PlanStatus, ProviderEventRecord,
     ReceiptRecord, ReleaseRecord, Result, RollbackRecord, RollbackStatus, RuntimeActivityRecord,
-    RuntimeClaim, RuntimeCredentialRecord, RuntimeEnrollmentRecord, RuntimeRevocation,
-    RuntimeRunnerRecord, SCHEMA_VERSION, SqliteStore,
+    RuntimeAttestationRecord, RuntimeClaim, RuntimeCredentialRecord, RuntimeEnrollmentRecord,
+    RuntimeRevocation, RuntimeRunnerRecord, SCHEMA_VERSION, SqliteStore,
 };
 use crate::tenant_isolation::{
     IsolationError, TenantIsolationHarness, TenantResources, TwoTenantFixture,
@@ -792,9 +792,24 @@ impl OperationalStore for TenantPartition {
         token_digest: &str,
         credential_digest: &str,
         now: i64,
+        attestation: Option<&RuntimeAttestationRecord>,
     ) -> Result<RuntimeCredentialRecord> {
+        self.store.redeem_runtime_enrollment(
+            environment,
+            token_digest,
+            credential_digest,
+            now,
+            attestation,
+        )
+    }
+    fn runtime_enrollment_usable(
+        &self,
+        environment: &str,
+        token_digest: &str,
+        now: i64,
+    ) -> Result<bool> {
         self.store
-            .redeem_runtime_enrollment(environment, token_digest, credential_digest, now)
+            .runtime_enrollment_usable(environment, token_digest, now)
     }
     fn runtime_credential(
         &self,
@@ -822,6 +837,12 @@ impl OperationalStore for TenantPartition {
     }
     fn live_runtime_claim_owners(&self, now: i64) -> Result<Vec<String>> {
         self.store.live_runtime_claim_owners(now)
+    }
+    fn record_runtime_attestation(&self, record: &RuntimeAttestationRecord) -> Result<()> {
+        self.store.record_runtime_attestation(record)
+    }
+    fn runtime_attestations(&self) -> Result<Vec<RuntimeAttestationRecord>> {
+        self.store.runtime_attestations()
     }
 }
 

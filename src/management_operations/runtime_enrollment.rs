@@ -81,6 +81,38 @@ pub struct RuntimeRunner {
     pub revoke_reason: Option<String>,
     /// Instances that presented this runner's credential, most recent first.
     pub instances: Vec<RuntimeRunnerInstance>,
+    /// The latest bound runner attestation and the latest refusal (#675),
+    /// once the runner was attested or refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub attestation: Option<RuntimeRunnerAttestation>,
+}
+
+/// A runner's attestation state (#675). Digests only, never evidence content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RuntimeRunnerAttestation {
+    /// `sha256:` digest of the latest bound evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub evidence_digest: Option<String>,
+    /// `sha256:` fingerprint of the bound runner key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub key_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub checked_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub bound_at: Option<i64>,
+    /// The code of the latest refusal since the last binding, for example
+    /// `fact_mismatch`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub last_refusal: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub last_refused_at: Option<i64>,
 }
 
 /// What one instance of a runner last did. Activity is recorded at most
@@ -270,6 +302,20 @@ impl ManagementOperations {
             .map_err(unavailable)?
             .into_iter()
             .collect();
+        let attestations = self.store.runtime_attestations().map_err(unavailable)?;
+        let attestation = |id: &str| {
+            attestations
+                .iter()
+                .find(|record| record.runner_id == id)
+                .map(|record| RuntimeRunnerAttestation {
+                    evidence_digest: record.evidence_digest.clone(),
+                    key_fingerprint: record.key_fingerprint.clone(),
+                    checked_at: record.checked_at,
+                    bound_at: record.bound_at,
+                    last_refusal: record.refusal_reason.clone(),
+                    last_refused_at: record.refused_at,
+                })
+        };
         let leases: std::collections::BTreeSet<String> = self
             .store
             .live_runtime_claim_owners(crate::now_millis())
@@ -316,6 +362,7 @@ impl ManagementOperations {
                     } else {
                         RunnerAuth::Bearer
                     }),
+                    attestation: attestation(&id),
                     state: if runner.credential.revoked_at.is_some() {
                         "revoked"
                     } else {
@@ -340,6 +387,7 @@ impl ManagementOperations {
                 .iter()
                 .map(|(id, environment)| RuntimeRunner {
                     instances: instances(id),
+                    attestation: None,
                     id: id.clone(),
                     environment: environment.clone(),
                     state: "static".into(),

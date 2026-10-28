@@ -10,8 +10,20 @@ There is no served gRPC `RuntimeService`.
 | `POST /v1/runtime/environments/{environment}/complete` | JSON `RuntimeCompletion` (`plan_id`, `generation`, `succeeded`, `detail`, `receipts`) | `204` |
 | `POST /v1/runtime/environments/{environment}/heartbeat` | JSON `RuntimeHeartbeat` (`plan_id`, `generation`) | JSON claim |
 | `POST /v1/runtime/environments/{environment}/inventory` | JSON `RuntimeInventoryReport` (`facts`, `source`) | JSON `RuntimeInventoryResponse` |
-| `POST /v1/runtime/environments/{environment}/enroll` | No bearer. JSON `RuntimeEnrollRequest` (`token`: a single-use enrollment token; optional `csr`) | `201`, JSON `RuntimeEnrolled` (`environment`, `credential`, `credential_id`); `403` for an unknown, spent, expired or foreign token |
-| `POST /v1/runtime/environments/{environment}/certificate` | Runner certificate (or, once it expired, the enrolled bearer) and `x-tenkai-runtime-instance`. JSON `RuntimeCertificateRequest` (`csr`) | JSON `RuntimeCertificate` (`certificate`, `ca`) ([runner certificates](run-tenkai-server.md#runner-certificates)) |
+| `POST /v1/runtime/environments/{environment}/enroll` | No bearer. JSON `RuntimeEnrollRequest` (`token`: a single-use enrollment token; optional `csr`; optional `attestation`) | `201`, JSON `RuntimeEnrolled` (`environment`, `credential`, `credential_id`); `403` for an unknown, spent, expired or foreign token |
+| `POST /v1/runtime/environments/{environment}/certificate` | Runner certificate (or, once it expired, the enrolled bearer) and `x-tenkai-runtime-instance`. JSON `RuntimeCertificateRequest` (`csr`; optional `attestation`) | JSON `RuntimeCertificate` (`certificate`, `ca`) ([runner certificates](run-tenkai-server.md#runner-certificates)) |
+
+An environment that requires runner attestation (#675) answers an
+enrollment or renewal without `attestation` with `428` and
+`runner attestation required: attestation_missing`, spending no token; the
+agent then sends a `tenkai.runner-attestation.v1` statement signed with its
+CSR key. Other attestation refusals are `403` with a named reason, and a
+work request (work, heartbeat, self-release, completion, inventory) admitted
+by a bearer alone is `403` `attestation_requires_client_certificate`, and a
+runtime inventory report contradicting an operator-declared fact is `409`
+([attested runners](run-tenkai-server.md#attested-runners)). An agent sends
+`attestation` only after a `428`, so agents and servers without it are
+unchanged.
 
 The other endpoints take either a configured runtime token or an enrolled
 credential as the bearer

@@ -43,6 +43,11 @@ struct Cli {
     /// server with a runner CA and `--credential-file`.
     #[arg(long, env = "TENKAI_RUNTIME_CERTIFICATE_DIR")]
     certificate_dir: Option<PathBuf>,
+    /// Host preflight config (`tenkai.preflight` TOML) whose checks the
+    /// agent runs and signs when the server requires runner attestation
+    /// (#675). Without it, attestation carries only the probed host facts.
+    #[arg(long, env = "TENKAI_RUNTIME_PREFLIGHT_CONFIG")]
+    preflight_config: Option<PathBuf>,
 }
 
 /// Manage the agent's own versions under `--home`.
@@ -109,6 +114,7 @@ async fn main() -> Result<()> {
                 || tenkai::secret_source::read("TENKAI_RUNTIME_ENROLLMENT_TOKEN"),
                 file,
                 cli.certificate_dir.as_deref(),
+                cli.preflight_config.as_deref(),
             )
             .await?
         }
@@ -128,6 +134,9 @@ async fn main() -> Result<()> {
             "--certificate-dir needs --credential-file: the certificate is issued at enrollment"
         );
         client = client.with_certificate_dir(dir.clone())?;
+    }
+    if let Some(path) = cli.preflight_config {
+        client = client.with_preflight(path);
     }
     if let Some(home) = cli.home {
         client = client.with_home(tenkai::runtime_self_upgrade::Home::new(home))?;

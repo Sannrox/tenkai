@@ -132,6 +132,11 @@ pub(crate) fn migrate_tenant_schema(tx: &mut Transaction<'_>) -> Result<()> {
             last_heartbeat_at BIGINT, last_inventory_at BIGINT,
             PRIMARY KEY (runner_id, instance_id)
         );
+        CREATE TABLE IF NOT EXISTS runtime_attestations (
+            runner_id TEXT PRIMARY KEY, environment_id TEXT NOT NULL,
+            evidence_digest TEXT, key_fingerprint TEXT, checked_at BIGINT,
+            bound_at BIGINT, refusal_reason TEXT, refused_at BIGINT
+        );
         CREATE TABLE IF NOT EXISTS offline_imports (
             bundle_digest TEXT PRIMARY KEY, environment_id TEXT NOT NULL,
             plan_id TEXT NOT NULL, receipt_json TEXT NOT NULL

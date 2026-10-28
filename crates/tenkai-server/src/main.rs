@@ -789,6 +789,7 @@ async fn main() -> Result<()> {
             exports,
             writer_fence: writer_fence.clone(),
             runner_ca: runner_ca.clone(),
+            runner_certificates_admitted: runner_ca.is_some() && cli.tls_client_ca.is_some(),
             trust_sources: (*trust_sources).clone(),
             trust_status: trust_status.clone(),
         },

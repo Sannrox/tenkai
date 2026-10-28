@@ -614,6 +614,9 @@ pub enum RuntimeDeliveryError {
     Unavailable(String),
     #[error("{0}")]
     Internal(String),
+    /// A runner attestation refusal (#675), named by its code.
+    #[error(transparent)]
+    Attestation(#[from] crate::runner_attestation::AttestationRefusal),
 }
 
 struct RuntimeIdentity {
@@ -757,7 +760,7 @@ impl RuntimeDeliveryOperations {
         environment: &str,
     ) -> Result<RuntimeWork, RuntimeDeliveryError> {
         let caller = caller.into();
-        let identity = self.admit(token, &caller, environment)?;
+        let identity = self.admit_work(token, &caller, environment).await?;
         self.note_activity(&identity, environment, caller.version, Activity::Work);
         // While the server may still run a plan it began before a runtime
         // enrolled (#630), no plan is handed out. Checked before the plan is
@@ -920,7 +923,7 @@ impl RuntimeDeliveryOperations {
         completion: RuntimeCompletion,
     ) -> Result<(), RuntimeDeliveryError> {
         let caller = caller.into();
-        let identity = self.admit(token, &caller, environment)?;
+        let identity = self.admit_work(token, &caller, environment).await?;
         let completion_json = serde_json::to_string(&completion)
             .map_err(|error| RuntimeDeliveryError::InvalidRequest(error.to_string()))?;
         self.reconciler
@@ -949,7 +952,7 @@ impl RuntimeDeliveryOperations {
         heartbeat: &RuntimeHeartbeat,
     ) -> Result<RuntimeClaim, RuntimeDeliveryError> {
         let caller = caller.into();
-        let identity = self.admit(token, &caller, environment)?;
+        let identity = self.admit_work(token, &caller, environment).await?;
         self.note_activity(&identity, environment, caller.version, Activity::Heartbeat);
         let Some(mut ctx) = self.reconciler.application_ctx() else {
             return Err(RuntimeDeliveryError::Unavailable(
@@ -1070,19 +1073,58 @@ impl RuntimeDeliveryOperations {
         report: RuntimeInventoryReport,
     ) -> Result<RuntimeInventoryResponse, RuntimeDeliveryError> {
         let caller = caller.into();
-        let identity = self.admit(token, &caller, environment)?;
+        let identity = self.admit_work(token, &caller, environment).await?;
         self.note_activity(&identity, environment, caller.version, Activity::Inventory);
         validate_inventory_source(&report.source)?;
         let applied = self
             .reconciler
             .apply_inventory_facts(environment.to_string(), report.facts)
-            .await
-            .map_err(|error| RuntimeDeliveryError::InvalidRequest(format!("{error:#}")))?;
+            .await;
+        let applied = match applied {
+            Ok(applied) => applied,
+            Err(error) => {
+                if let Some(refusal) =
+                    error.downcast_ref::<crate::runner_attestation::AttestationRefusal>()
+                {
+                    let refusal = refusal.clone();
+                    self.refuse_attestation(environment, Some(&identity.runner_id), &refusal)
+                        .await;
+                    return Err(refusal.into());
+                }
+                return Err(RuntimeDeliveryError::InvalidRequest(format!("{error:#}")));
+            }
+        };
         Ok(RuntimeInventoryResponse {
             environment: environment.into(),
             source: report.source,
             applied,
         })
+    }
+
+    /// [`Self::admit`] for the work routes (claim, heartbeat and with it
+    /// self-release, completion, inventory). While the environment requires
+    /// runner attestation (#675), only a runner certificate admits: a bearer
+    /// alone, enrolled or static, is refused with
+    /// `attestation_requires_client_certificate`, so a copied bearer cannot
+    /// outlive one certificate. The bearer still renews a certificate.
+    async fn admit_work(
+        &self,
+        token: Option<&str>,
+        caller: &RuntimeCaller<'_>,
+        environment: &str,
+    ) -> Result<RuntimeIdentity, RuntimeDeliveryError> {
+        let identity = self.admit(token, caller, environment)?;
+        let certified = caller.certificate.is_some() && self.runner_ca.is_some();
+        // The policy lives in the application core; a host without one (a
+        // custom port) holds no policy, and its work routes are unchanged.
+        let has_core = self.reconciler.application_ctx().is_some();
+        if !certified && has_core && self.attestation_policy(environment).await?.is_some() {
+            let refusal = crate::runner_attestation::AttestationRefusal::ClientCertificateRequired;
+            self.refuse_attestation(environment, Some(&identity.runner_id), &refusal)
+                .await;
+            return Err(refusal.into());
+        }
+        Ok(identity)
     }
 
     fn admit(
@@ -1160,6 +1202,10 @@ impl RuntimeDeliveryOperations {
 #[serde(deny_unknown_fields)]
 pub struct RuntimeCertificateRequest {
     pub csr: String,
+    /// Host evidence signed with the CSR key (#675). Sent only once the
+    /// server asked for it with `attestation_missing`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation: Option<crate::runner_attestation::RunnerAttestation>,
 }
 
 /// A renewed runner certificate and the runner CA that issued it.
@@ -1173,7 +1219,12 @@ impl RuntimeDeliveryOperations {
     /// A new runner certificate for the runner calling: named by its current
     /// runner certificate, or, once that has expired, by its enrolled bearer
     /// credential. Static tokens name no registry runner and get none.
-    pub fn renew_certificate<'a>(
+    ///
+    /// Under the environment's runner attestation policy (#675), the request
+    /// must carry evidence signed by the CSR key, and that key must be the
+    /// presented certificate's, or, on the bearer path, the runner's last
+    /// bound key: no key rotation under the policy.
+    pub async fn renew_certificate<'a>(
         &self,
         token: Option<&str>,
         caller: impl Into<RuntimeCaller<'a>>,
@@ -1192,14 +1243,35 @@ impl RuntimeDeliveryOperations {
                 "a static runtime token names no enrolled runner to certify".into(),
             ));
         }
+        let binding = match self
+            .renewal_binding(
+                environment,
+                &identity.runner_id,
+                caller.certificate,
+                request,
+            )
+            .await
+        {
+            Ok(binding) => binding,
+            Err(RuntimeDeliveryError::Attestation(refusal)) => {
+                self.refuse_attestation(environment, Some(&identity.runner_id), &refusal)
+                    .await;
+                return Err(refusal.into());
+            }
+            Err(error) => return Err(error),
+        };
+        if let Some(binding) = &binding {
+            self.bind_attestation(environment, &identity.runner_id, binding)?;
+        }
         let certificate = ca
-            .issue(
+            .issue_bound(
                 &request.csr,
                 &crate::runner_ca::RunnerIdentity {
                     environment: environment.into(),
                     runner_id: identity.runner_id.clone(),
                 },
                 crate::now_millis() / 1_000,
+                binding.as_ref(),
             )
             .map_err(|error| RuntimeDeliveryError::InvalidRequest(format!("{error:#}")))?;
         self.note_certificate(&identity.runner_id, environment);
@@ -1219,6 +1291,10 @@ pub struct RuntimeEnrollRequest {
     /// the response then carries its runner certificate (#674).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub csr: Option<String>,
+    /// Host evidence signed with the CSR key (#675). Sent only once the
+    /// server asked for it with `attestation_missing`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation: Option<crate::runner_attestation::RunnerAttestation>,
 }
 
 /// The agent's own credential, shown only in this response. `credential_id`
@@ -1239,8 +1315,10 @@ pub struct RuntimeEnrolled {
 impl RuntimeDeliveryOperations {
     /// Exchange a single-use enrollment token of `environment` for a runtime
     /// credential. An unknown, spent, expired or foreign token is refused
-    /// alike, and a refused token is not spent.
-    pub fn enroll(
+    /// alike, and a refused token is not spent. Under the environment's
+    /// runner attestation policy (#675), evidence signed by the CSR key is
+    /// verified before the token is spent.
+    pub async fn enroll(
         &self,
         environment: &str,
         request: &RuntimeEnrollRequest,
@@ -1271,13 +1349,40 @@ impl RuntimeDeliveryOperations {
                 Some(ca)
             }
         };
+        // The token is checked, without spending it, before any evidence is
+        // judged: an unauthenticated caller gets the token error and causes
+        // no refusal event or registry write.
+        match self.store.runtime_enrollment_usable(
+            environment,
+            &digest(&request.token),
+            crate::now_millis(),
+        ) {
+            Ok(true) => {}
+            Ok(false) => return Err(RuntimeDeliveryError::InvalidCredential),
+            Err(error) => return Err(RuntimeDeliveryError::Unavailable(error.to_string())),
+        }
         let credential = mint(CREDENTIAL_PREFIX)
             .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))?;
+        let binding = match self.enrollment_binding(environment, request).await {
+            Ok(binding) => binding,
+            Err(RuntimeDeliveryError::Attestation(refusal)) => {
+                self.refuse_attestation(environment, None, &refusal).await;
+                return Err(refusal.into());
+            }
+            Err(error) => return Err(error),
+        };
+        // Spent, registered and bound in one transaction: a failure leaves
+        // the token usable and no runner.
+        let now = crate::now_millis();
+        let bound = binding
+            .as_ref()
+            .map(|binding| binding_record(environment, &digest(&credential), binding, now));
         let record = match self.store.redeem_runtime_enrollment(
             environment,
             &digest(&request.token),
             &digest(&credential),
-            crate::now_millis(),
+            now,
+            bound.as_ref(),
         ) {
             Ok(record) => record,
             Err(crate::storage::StoreError::InvalidData { .. }) => {
@@ -1287,13 +1392,14 @@ impl RuntimeDeliveryOperations {
         };
         let certificate = match (ca, &request.csr) {
             (Some(ca), Some(csr)) => Some(
-                ca.issue(
+                ca.issue_bound(
                     csr,
                     &crate::runner_ca::RunnerIdentity {
                         environment: record.environment_id.clone(),
                         runner_id: record.credential_digest.clone(),
                     },
                     crate::now_millis() / 1_000,
+                    binding.as_ref(),
                 )
                 .map_err(|error| RuntimeDeliveryError::Internal(format!("{error:#}")))?,
             ),
@@ -1325,6 +1431,210 @@ impl RuntimeDeliveryOperations {
             Ok(_) => Err(RuntimeDeliveryError::InvalidCredential),
             Err(error) => Err(RuntimeDeliveryError::Unavailable(error.to_string())),
         }
+    }
+}
+
+/// Runner attestation (#675) on enrollment, renewal and inventory.
+impl RuntimeDeliveryOperations {
+    /// The environment's policy and operator-declared facts. Without the
+    /// application core the policy is unknown, so the caller is refused.
+    async fn attestation_policy(
+        &self,
+        environment: &str,
+    ) -> Result<
+        Option<(
+            crate::runner_attestation::RunnerAttestationPolicy,
+            BTreeMap<String, String>,
+        )>,
+        RuntimeDeliveryError,
+    > {
+        let Some(mut ctx) = self.reconciler.application_ctx() else {
+            return Err(RuntimeDeliveryError::Unavailable(
+                "application core is not available on this host".into(),
+            ));
+        };
+        crate::runner_attestation::environment_policy(&mut ctx, environment)
+            .await
+            .map_err(|error| RuntimeDeliveryError::Unavailable(format!("{error:#}")))
+    }
+
+    /// `None` with the policy off; else the verified binding of the
+    /// enrollment's evidence over its CSR key.
+    async fn enrollment_binding(
+        &self,
+        environment: &str,
+        request: &RuntimeEnrollRequest,
+    ) -> Result<Option<crate::runner_attestation::Binding>, RuntimeDeliveryError> {
+        use crate::runner_attestation::AttestationRefusal;
+        let Some((policy, declared)) = self.attestation_policy(environment).await? else {
+            return Ok(None);
+        };
+        let csr = request
+            .csr
+            .as_deref()
+            .ok_or(AttestationRefusal::CertificateRequired)?;
+        crate::runner_attestation::verify(
+            request.attestation.as_ref(),
+            csr,
+            environment,
+            &declared,
+            &policy,
+            crate::now_millis(),
+        )
+        .map(Some)
+        .map_err(Into::into)
+    }
+
+    /// `None` with the policy off; else the verified binding of a renewal:
+    /// evidence present, the CSR key the presented certificate's (or, on
+    /// the bearer path, the last bound one), and the evidence valid.
+    async fn renewal_binding(
+        &self,
+        environment: &str,
+        runner_id: &str,
+        certificate: Option<&[u8]>,
+        request: &RuntimeCertificateRequest,
+    ) -> Result<Option<crate::runner_attestation::Binding>, RuntimeDeliveryError> {
+        use crate::runner_attestation::AttestationRefusal;
+        let Some((policy, declared)) = self.attestation_policy(environment).await? else {
+            return Ok(None);
+        };
+        if request.attestation.is_none() {
+            return Err(AttestationRefusal::Missing.into());
+        }
+        let malformed = |error: anyhow::Error| AttestationRefusal::Malformed(format!("{error:#}"));
+        let requested =
+            crate::runner_attestation::csr_fingerprint(&request.csr).map_err(malformed)?;
+        let expected = match certificate {
+            Some(certificate) => crate::runner_attestation::certificate_fingerprint(certificate)
+                .map_err(malformed)?,
+            None => self
+                .store
+                .runtime_attestations()
+                .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))?
+                .into_iter()
+                .find(|record| record.runner_id == runner_id)
+                .and_then(|record| record.key_fingerprint)
+                .ok_or(AttestationRefusal::NoBoundKey)?,
+        };
+        if requested != expected {
+            return Err(AttestationRefusal::KeyChanged.into());
+        }
+        crate::runner_attestation::verify(
+            request.attestation.as_ref(),
+            &request.csr,
+            environment,
+            &declared,
+            &policy,
+            crate::now_millis(),
+        )
+        .map(Some)
+        .map_err(Into::into)
+    }
+
+    /// Record `binding` as the runner's latest bound attestation. A store
+    /// that cannot record it refuses: no unrecorded binding is certified.
+    fn bind_attestation(
+        &self,
+        environment: &str,
+        runner_id: &str,
+        binding: &crate::runner_attestation::Binding,
+    ) -> Result<(), RuntimeDeliveryError> {
+        self.store
+            .record_runtime_attestation(&binding_record(
+                environment,
+                runner_id,
+                binding,
+                crate::now_millis(),
+            ))
+            .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))
+    }
+
+    /// Show a refusal: as the runner's last refusal in the registry, and
+    /// as one `runner.attestation_refused` event per runner, reason and
+    /// binding, since the agent retries every poll. `attestation_missing`
+    /// is how the policy is advertised, so it is not announced. Best
+    /// effort: the refusal stands whatever happens here.
+    async fn refuse_attestation(
+        &self,
+        environment: &str,
+        runner_id: Option<&str>,
+        refusal: &crate::runner_attestation::AttestationRefusal,
+    ) {
+        let now = crate::now_millis();
+        let mut bound = "none".to_string();
+        if let Some(runner_id) = runner_id {
+            if let Ok(records) = self.store.runtime_attestations()
+                && let Some(digest) = records
+                    .into_iter()
+                    .find(|record| record.runner_id == runner_id)
+                    .and_then(|record| record.evidence_digest)
+            {
+                bound = digest;
+            }
+            let record = crate::storage::RuntimeAttestationRecord {
+                runner_id: runner_id.into(),
+                environment_id: environment.into(),
+                refusal_reason: Some(refusal.code().into()),
+                refused_at: Some(now),
+                ..Default::default()
+            };
+            if let Err(error) = self.store.record_runtime_attestation(&record) {
+                eprintln!("recording a runner attestation refusal failed: {error}");
+            }
+        }
+        eprintln!(
+            "tenkai.runner_attestation outcome=refused environment={environment} runner={} code={}",
+            runner_id.unwrap_or("enrollment"),
+            refusal.code()
+        );
+        if matches!(
+            refusal,
+            crate::runner_attestation::AttestationRefusal::Missing
+        ) {
+            return;
+        }
+        let Some(mut ctx) = self.reconciler.application_ctx() else {
+            return;
+        };
+        let Ok(endpoints) =
+            crate::deploy_webhook::list_environment_webhooks(&mut ctx, environment).await
+        else {
+            return;
+        };
+        let resource = runner_id.unwrap_or("enrollment");
+        let key = format!("{resource}|{}|{bound}", refusal.code());
+        crate::operational_events::announce(
+            self.store.as_ref(),
+            &endpoints,
+            &crate::operational_events::Transition {
+                event: crate::deploy_webhook::OperationalEvent::RunnerAttestationRefused,
+                scope: environment,
+                resource,
+                code: refusal.code(),
+                key: &key,
+            },
+            now,
+        );
+    }
+}
+
+/// The registry record that binds `binding` to `runner_id` at `now`.
+fn binding_record(
+    environment: &str,
+    runner_id: &str,
+    binding: &crate::runner_attestation::Binding,
+    now: i64,
+) -> crate::storage::RuntimeAttestationRecord {
+    crate::storage::RuntimeAttestationRecord {
+        runner_id: runner_id.into(),
+        environment_id: environment.into(),
+        evidence_digest: Some(binding.evidence_digest.clone()),
+        key_fingerprint: Some(binding.key_fingerprint.clone()),
+        checked_at: Some(binding.checked_at),
+        bound_at: Some(now),
+        refusal_reason: None,
+        refused_at: None,
     }
 }
 
@@ -1527,8 +1837,8 @@ mod tests {
     /// certificate; it admits its runner only in its environment and only
     /// until the credential is revoked; one from another CA claims nothing;
     /// a CSR the server cannot sign is refused before the token is spent.
-    #[test]
-    fn a_runner_certificate_admits_only_its_runner_in_its_environment() {
+    #[tokio::test]
+    async fn a_runner_certificate_admits_only_its_runner_in_its_environment() {
         use crate::runtime_credentials::{ENROLLMENT_TOKEN_PREFIX, digest, mint};
         let (operations, _) = operations();
         let issue = |operations: &RuntimeDeliveryOperations| {
@@ -1557,15 +1867,16 @@ mod tests {
         let request = RuntimeEnrollRequest {
             token,
             csr: Some(csr.clone()),
+            attestation: None,
         };
         assert!(matches!(
-            operations.enroll("prod", &request),
+            operations.enroll("prod", &request).await,
             Err(RuntimeDeliveryError::InvalidRequest(_))
         ));
         let (cert, ca_key) = crate::runner_ca::RunnerCa::generate("runner CA").unwrap();
         let ca = Arc::new(crate::runner_ca::RunnerCa::from_pem(&cert, &ca_key).unwrap());
         let operations = operations.with_runner_ca(ca);
-        let enrolled = operations.enroll("prod", &request).unwrap();
+        let enrolled = operations.enroll("prod", &request).await.unwrap();
         assert_eq!(enrolled.ca.as_deref(), Some(cert.as_str()));
         let leaf = x509_parser::pem::parse_x509_pem(enrolled.certificate.unwrap().as_bytes())
             .unwrap()
@@ -1609,19 +1920,25 @@ mod tests {
         ));
         // Renewal (#674): by the current certificate, or by the enrolled
         // bearer once it has expired; static tokens name no runner.
-        let renew = |token: Option<&str>, certificate: Option<&[u8]>| {
-            operations.renew_certificate(
-                token,
-                RuntimeCaller {
-                    instance: Some("instance-a"),
-                    version: None,
-                    certificate,
-                },
-                "prod",
-                &RuntimeCertificateRequest { csr: csr.clone() },
-            )
+        let renew = async |token: Option<&str>, certificate: Option<&[u8]>| {
+            let request = RuntimeCertificateRequest {
+                csr: csr.clone(),
+                attestation: None,
+            };
+            operations
+                .renew_certificate(
+                    token,
+                    RuntimeCaller {
+                        instance: Some("instance-a"),
+                        version: None,
+                        certificate,
+                    },
+                    "prod",
+                    &request,
+                )
+                .await
         };
-        let renewed = renew(None, Some(&leaf)).unwrap();
+        let renewed = renew(None, Some(&leaf)).await.unwrap();
         let renewed_leaf = x509_parser::pem::parse_x509_pem(renewed.certificate.as_bytes())
             .unwrap()
             .1
@@ -1631,9 +1948,9 @@ mod tests {
             admitted.owner,
             "a renewed certificate keeps its runner's lease identity"
         );
-        renew(Some(&enrolled.credential), None).unwrap();
+        renew(Some(&enrolled.credential), None).await.unwrap();
         assert!(matches!(
-            renew(Some("runtime-secret"), None),
+            renew(Some("runtime-secret"), None).await,
             Err(RuntimeDeliveryError::InvalidRequest(_))
         ));
         // Revoked in the registry, the certificate is refused from the next request.
@@ -1652,12 +1969,327 @@ mod tests {
             admit(&leaf, "prod"),
             Err(RuntimeDeliveryError::InvalidCredential)
         ));
-        assert!(renew(None, Some(&leaf)).is_err());
-        assert!(renew(Some(&enrolled.credential), None).is_err());
+        assert!(renew(None, Some(&leaf)).await.is_err());
+        assert!(renew(Some(&enrolled.credential), None).await.is_err());
     }
 
-    #[test]
-    fn an_enrolled_agent_is_admitted_to_its_environment_until_revoked() {
+    /// Runner attestation (#675): under the policy, enrollment and renewal
+    /// need evidence signed by the CSR key that is fresh, passed and agrees
+    /// with the operator-declared facts; the certificate binds it, the
+    /// registry keeps it, and every refusal is named. Cleared, renewal is
+    /// as before.
+    #[tokio::test]
+    async fn attested_enrollment_and_renewal_bind_host_evidence() {
+        use crate::runner_attestation::tests::{attest, runner_key};
+        use crate::runner_attestation::{AttestationRefusal, certificate_binding};
+        use crate::runtime_credentials::{ENROLLMENT_TOKEN_PREFIX, digest, mint};
+        let (operations, port) = operations();
+        let (cert, ca_key) = crate::runner_ca::RunnerCa::generate("runner CA").unwrap();
+        let operations = operations.with_runner_ca(Arc::new(
+            crate::runner_ca::RunnerCa::from_pem(&cert, &ca_key).unwrap(),
+        ));
+        let mut ctx = port.ctx.clone().unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::environment::env_add(&mut ctx, "prod", "attested")
+            .await
+            .unwrap();
+        crate::environment::set_environment_fact(&mut ctx, "prod", "architecture", "arm64")
+            .await
+            .unwrap();
+        crate::runner_attestation::set_policy(&mut ctx, "prod", 600_000)
+            .await
+            .unwrap();
+        fn code<T>(result: Result<T, RuntimeDeliveryError>) -> &'static str {
+            match result {
+                Err(RuntimeDeliveryError::Attestation(refusal)) => refusal.code(),
+                Err(other) => panic!("not an attestation refusal: {other}"),
+                Ok(_) => panic!("not refused"),
+            }
+        }
+        let der = |pem: &str| {
+            x509_parser::pem::parse_x509_pem(pem.as_bytes())
+                .unwrap()
+                .1
+                .contents
+        };
+        let key = runner_key();
+        let other = runner_key();
+        let arm =
+            |key: &(String, String), at: i64| attest("prod", &[("architecture", "arm64")], key, at);
+        let now = crate::now_millis();
+
+        let token = mint(ENROLLMENT_TOKEN_PREFIX).unwrap();
+        operations
+            .store
+            .create_runtime_enrollment(&crate::storage::RuntimeEnrollmentRecord {
+                token_digest: digest(&token),
+                environment_id: "prod".into(),
+                expires_at: i64::MAX,
+                created_by: "operator".into(),
+            })
+            .unwrap();
+        let enroll = |attestation| RuntimeEnrollRequest {
+            token: token.clone(),
+            csr: Some(key.1.clone()),
+            attestation,
+        };
+        // Refused enrollments spend no token: missing, then contradicting.
+        assert_eq!(
+            code(operations.enroll("prod", &enroll(None)).await),
+            "attestation_missing"
+        );
+        let x86 = attest("prod", &[("architecture", "x86_64")], &key, now);
+        assert_eq!(
+            code(operations.enroll("prod", &enroll(Some(x86))).await),
+            "fact_mismatch"
+        );
+        // A forged token is refused as a token before any evidence is
+        // judged: missing, contradicting or valid-looking, no attestation
+        // refusal (so no event) and no attestation row.
+        let forged_token = mint(ENROLLMENT_TOKEN_PREFIX).unwrap();
+        for attestation in [
+            None,
+            Some(attest("prod", &[("architecture", "x86_64")], &key, now)),
+            Some(arm(&key, now)),
+        ] {
+            let forged = RuntimeEnrollRequest {
+                token: forged_token.clone(),
+                csr: Some(key.1.clone()),
+                attestation,
+            };
+            assert!(matches!(
+                operations.enroll("prod", &forged).await,
+                Err(RuntimeDeliveryError::InvalidCredential)
+            ));
+        }
+        // Nor for another environment's valid token.
+        assert!(matches!(
+            operations.enroll("stage", &enroll(None)).await,
+            Err(RuntimeDeliveryError::InvalidCredential)
+        ));
+        assert!(operations.store.runtime_attestations().unwrap().is_empty());
+        let enrolled = operations
+            .enroll("prod", &enroll(Some(arm(&key, now))))
+            .await
+            .unwrap();
+        let leaf = der(enrolled.certificate.as_deref().unwrap());
+        let (bound, fingerprint) = certificate_binding(&leaf).unwrap().unwrap();
+        assert_eq!(
+            fingerprint,
+            crate::runner_attestation::csr_fingerprint(&key.1).unwrap()
+        );
+        let registry = || {
+            operations
+                .store
+                .runtime_attestations()
+                .unwrap()
+                .into_iter()
+                .find(|record| record.runner_id == enrolled.credential_id)
+                .unwrap()
+        };
+        assert_eq!(registry().evidence_digest.as_deref(), Some(bound.as_str()));
+
+        let renew =
+            async |certificate: Option<&[u8]>,
+                   csr: &str,
+                   attestation: Option<crate::runner_attestation::RunnerAttestation>| {
+                let request = RuntimeCertificateRequest {
+                    csr: csr.into(),
+                    attestation,
+                };
+                let token = certificate
+                    .is_none()
+                    .then_some(enrolled.credential.as_str());
+                operations
+                    .renew_certificate(
+                        token,
+                        RuntimeCaller {
+                            instance: Some("instance-a"),
+                            version: None,
+                            certificate,
+                        },
+                        "prod",
+                        &request,
+                    )
+                    .await
+            };
+        let renewed = renew(Some(&leaf), &key.1, Some(arm(&key, now)))
+            .await
+            .unwrap();
+        assert!(
+            certificate_binding(&der(&renewed.certificate))
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            code(renew(Some(&leaf), &key.1, None).await),
+            "attestation_missing"
+        );
+        // Evidence signed by a key other than the certificate key.
+        assert_eq!(
+            code(renew(Some(&leaf), &key.1, Some(arm(&other, now))).await),
+            "signature_invalid"
+        );
+        // A CSR over another key: no key rotation under the policy.
+        assert_eq!(
+            code(renew(Some(&leaf), &other.1, Some(arm(&other, now))).await),
+            "key_changed"
+        );
+        // Architecture drift blocks renewal with a named reason.
+        let moved = attest("prod", &[("architecture", "x86_64")], &key, now);
+        let refusal = renew(Some(&leaf), &key.1, Some(moved)).await.unwrap_err();
+        assert!(matches!(
+            refusal,
+            RuntimeDeliveryError::Attestation(AttestationRefusal::FactMismatch { ref key })
+                if key == "architecture"
+        ));
+        assert_eq!(registry().refusal_reason.as_deref(), Some("fact_mismatch"));
+        assert!(
+            registry().evidence_digest.is_some(),
+            "a refusal keeps the binding"
+        );
+        assert_eq!(
+            code(renew(Some(&leaf), &key.1, Some(arm(&key, now - 700_000))).await),
+            "evidence_stale"
+        );
+        let failed = crate::runner_attestation::sign(
+            "prod",
+            vec![crate::host_preflight::CheckResult {
+                check: "disk /var".into(),
+                passed: false,
+                reason: "full".into(),
+            }],
+            BTreeMap::new(),
+            &key.0,
+            &key.1,
+            now,
+        )
+        .unwrap();
+        assert_eq!(
+            code(renew(Some(&leaf), &key.1, Some(failed)).await),
+            "evidence_failed"
+        );
+        // The expired-certificate bearer path needs the last bound key.
+        renew(None, &key.1, Some(arm(&key, now))).await.unwrap();
+        assert_eq!(registry().refusal_reason, None, "a binding clears it");
+        assert_eq!(
+            code(renew(None, &other.1, Some(arm(&other, now))).await),
+            "key_changed"
+        );
+        // Under the policy only the certificate admits work routes; the
+        // bearer is refused with a named reason (it only renews).
+        let inventory = async |token: Option<&str>, certificate: Option<&[u8]>| {
+            operations
+                .report_inventory(
+                    token,
+                    RuntimeCaller {
+                        instance: Some("instance-a"),
+                        version: None,
+                        certificate,
+                    },
+                    "prod",
+                    RuntimeInventoryReport {
+                        facts: BTreeMap::from([("architecture".into(), "arm64".into())]),
+                        source: "runtime-probe".into(),
+                    },
+                )
+                .await
+        };
+        assert_eq!(
+            code(inventory(Some(&enrolled.credential), None).await),
+            "attestation_requires_client_certificate"
+        );
+        inventory(None, Some(&leaf)).await.unwrap();
+        // With the policy cleared, renewal is as before: no evidence, no binding.
+        crate::runner_attestation::clear_policy(&mut ctx, "prod")
+            .await
+            .unwrap();
+        inventory(Some(&enrolled.credential), None).await.unwrap();
+        let plain = renew(Some(&leaf), &other.1, None).await.unwrap();
+        assert!(
+            certificate_binding(&der(&plain.certificate))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// While the policy is on, a runtime inventory report cannot overwrite
+    /// an operator-declared fact; with it off, inventory is as before.
+    #[tokio::test]
+    async fn inventory_under_the_policy_never_overwrites_a_declared_fact() {
+        use crate::runner_attestation::AttestationRefusal;
+        let (_, port) = operations();
+        let mut ctx = port.ctx.clone().unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::environment::env_add(&mut ctx, "prod", "attested")
+            .await
+            .unwrap();
+        crate::environment::set_environment_fact(&mut ctx, "prod", "architecture", "arm64")
+            .await
+            .unwrap();
+        crate::runner_attestation::set_policy(&mut ctx, "prod", 600_000)
+            .await
+            .unwrap();
+        let report = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+            pairs
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                .collect()
+        };
+        let refused = crate::environment::apply_runtime_inventory_facts(
+            &mut ctx,
+            "prod",
+            &report(&[("architecture", "x86_64"), ("memory_gib", "8")]),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            refused.downcast_ref::<AttestationRefusal>(),
+            Some(&AttestationRefusal::InventoryContradictsDeclaredFact {
+                key: "architecture".into()
+            })
+        );
+        let facts = crate::environment::list_environment_facts(&mut ctx, "prod")
+            .await
+            .unwrap();
+        assert_eq!(facts.get("architecture").map(String::as_str), Some("arm64"));
+        assert!(!facts.contains_key("memory_gib"), "refused whole");
+        crate::environment::apply_runtime_inventory_facts(
+            &mut ctx,
+            "prod",
+            &report(&[("architecture", "arm64"), ("memory_gib", "8")]),
+        )
+        .await
+        .unwrap();
+        let object = crate::environment::environment(&mut ctx, "prod")
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::runner_attestation::declared_facts(&object.properties),
+            report(&[("architecture", "arm64")]),
+            "an agreeing report keeps the declaration; reported facts are not declarations"
+        );
+        crate::runner_attestation::clear_policy(&mut ctx, "prod")
+            .await
+            .unwrap();
+        crate::environment::apply_runtime_inventory_facts(
+            &mut ctx,
+            "prod",
+            &report(&[("architecture", "x86_64")]),
+        )
+        .await
+        .unwrap();
+        let facts = crate::environment::list_environment_facts(&mut ctx, "prod")
+            .await
+            .unwrap();
+        assert_eq!(
+            facts.get("architecture").map(String::as_str),
+            Some("x86_64")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_enrolled_agent_is_admitted_to_its_environment_until_revoked() {
         use crate::runtime_credentials::{ENROLLMENT_TOKEN_PREFIX, digest, mint};
         let (operations, _) = operations();
         let issue = || {
@@ -1671,18 +2303,22 @@ mod tests {
                     created_by: "operator".into(),
                 })
                 .unwrap();
-            RuntimeEnrollRequest { token, csr: None }
+            RuntimeEnrollRequest {
+                token,
+                csr: None,
+                attestation: None,
+            }
         };
         let request = issue();
         // Presented to another environment, the token is refused and kept.
         assert!(matches!(
-            operations.enroll("stage", &request),
+            operations.enroll("stage", &request).await,
             Err(RuntimeDeliveryError::InvalidCredential)
         ));
-        let enrolled = operations.enroll("prod", &request).unwrap();
+        let enrolled = operations.enroll("prod", &request).await.unwrap();
         assert_eq!(enrolled.credential_id, digest(&enrolled.credential));
         assert!(matches!(
-            operations.enroll("prod", &request),
+            operations.enroll("prod", &request).await,
             Err(RuntimeDeliveryError::InvalidCredential)
         ));
         let admit = |token: &str, environment: &str| {
@@ -1713,13 +2349,16 @@ mod tests {
         // Token-configured runtimes keep working.
         admit("runtime-secret", "prod").unwrap();
         assert!(matches!(
-            operations.enroll(
-                "prod",
-                &RuntimeEnrollRequest {
-                    token: "runtime-secret".into(),
-                    csr: None,
-                }
-            ),
+            operations
+                .enroll(
+                    "prod",
+                    &RuntimeEnrollRequest {
+                        token: "runtime-secret".into(),
+                        csr: None,
+                        attestation: None,
+                    }
+                )
+                .await,
             Err(RuntimeDeliveryError::InvalidCredential)
         ));
     }
@@ -1960,8 +2599,8 @@ mod tests {
 
     /// #809: a runner enrolled without a CSR, or before certificates were
     /// recorded, reads as certified once a renewal issues it one.
-    #[test]
-    fn a_renewal_records_the_runner_as_certified() {
+    #[tokio::test]
+    async fn a_renewal_records_the_runner_as_certified() {
         use crate::runtime_credentials::{ENROLLMENT_TOKEN_PREFIX, digest, mint};
         let (operations, _) = operations();
         let (cert, key) = crate::runner_ca::RunnerCa::generate("test runner CA").unwrap();
@@ -1979,7 +2618,15 @@ mod tests {
             })
             .unwrap();
         let enrolled = operations
-            .enroll("prod", &RuntimeEnrollRequest { token, csr: None })
+            .enroll(
+                "prod",
+                &RuntimeEnrollRequest {
+                    token,
+                    csr: None,
+                    attestation: None,
+                },
+            )
+            .await
             .unwrap();
         assert!(
             operations
@@ -2003,8 +2650,12 @@ mod tests {
                     certificate: None,
                 },
                 "prod",
-                &RuntimeCertificateRequest { csr },
+                &RuntimeCertificateRequest {
+                    csr,
+                    attestation: None,
+                },
             )
+            .await
             .unwrap();
         assert_eq!(
             operations.store.certified_runtime_runners().unwrap(),

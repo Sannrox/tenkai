@@ -3,7 +3,8 @@ use tenkai::{client, inventory, maintenance, plan};
 
 use crate::env_args::{
     ApprovalPolicyCommand, ArtifactMirrorCommand, ClusterConfigCommand, ConstraintsCommand,
-    DockerSecretsCommand, FactsCommand, MaintenanceCommand, OverlayCommand, WebhooksCommand,
+    DockerSecretsCommand, FactsCommand, MaintenanceCommand, OverlayCommand,
+    RunnerAttestationCommand, WebhooksCommand,
 };
 
 pub(crate) async fn maintenance(ctx: &mut client::Ctx, command: MaintenanceCommand) -> Result<()> {
@@ -325,6 +326,26 @@ pub(crate) fn parse_webhook_events(
         }
     }
     Ok((events, operational))
+}
+
+pub(crate) async fn runner_attestation(
+    ctx: &mut client::Ctx,
+    command: RunnerAttestationCommand,
+) -> Result<()> {
+    use tenkai::runner_attestation as attestation;
+    match command {
+        RunnerAttestationCommand::Show { env } => match attestation::policy(ctx, &env).await? {
+            Some(policy) => println!("{}", serde_json::to_string_pretty(&policy)?),
+            None => println!("{env} does not require runner attestation"),
+        },
+        RunnerAttestationCommand::Set {
+            env, max_age_ms, ..
+        } => println!("{}", attestation::set_policy(ctx, &env, max_age_ms).await?),
+        RunnerAttestationCommand::Clear { env, .. } => {
+            println!("{}", attestation::clear_policy(ctx, &env).await?)
+        }
+    }
+    Ok(())
 }
 
 pub(crate) async fn approval_policy(

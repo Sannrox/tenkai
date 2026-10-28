@@ -1,5 +1,6 @@
 //! Runtime agent enrollments and credentials in SQLite (#630), and the
-//! runner registry's revocation reasons and activity (#673). The tables are
+//! runner registry's revocation reasons and activity (#673), and runner
+//! attestation bindings and refusals (#675). The tables are
 //! additive, so an older binary on the same database ignores them.
 
 use super::*;
@@ -26,7 +27,44 @@ pub(super) fn ensure_runtime_enrollment_tables(connection: &Connection) -> Resul
              runtime_version TEXT, last_work_at INTEGER,
              last_heartbeat_at INTEGER, last_inventory_at INTEGER,
              PRIMARY KEY (runner_id, instance_id)
+         );
+         CREATE TABLE IF NOT EXISTS runtime_attestations (
+             runner_id TEXT PRIMARY KEY, environment_id TEXT NOT NULL,
+             evidence_digest TEXT, key_fingerprint TEXT, checked_at INTEGER,
+             bound_at INTEGER, refusal_reason TEXT, refused_at INTEGER
          );",
+    )?;
+    Ok(())
+}
+
+/// Bind a runner's attestation or record its refusal: a binding (evidence
+/// present) replaces the bound fields and clears the refusal; a refusal
+/// keeps the binding (#675).
+fn upsert_attestation(connection: &Connection, record: &RuntimeAttestationRecord) -> Result<()> {
+    connection.execute(
+        "INSERT INTO runtime_attestations(runner_id,environment_id,evidence_digest,
+             key_fingerprint,checked_at,bound_at,refusal_reason,refused_at)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
+         ON CONFLICT(runner_id) DO UPDATE SET
+             environment_id=excluded.environment_id,
+             evidence_digest=COALESCE(excluded.evidence_digest, evidence_digest),
+             key_fingerprint=CASE WHEN excluded.evidence_digest IS NULL
+                 THEN key_fingerprint ELSE excluded.key_fingerprint END,
+             checked_at=CASE WHEN excluded.evidence_digest IS NULL
+                 THEN checked_at ELSE excluded.checked_at END,
+             bound_at=CASE WHEN excluded.evidence_digest IS NULL
+                 THEN bound_at ELSE excluded.bound_at END,
+             refusal_reason=excluded.refusal_reason, refused_at=excluded.refused_at",
+        params![
+            record.runner_id,
+            record.environment_id,
+            record.evidence_digest,
+            record.key_fingerprint,
+            record.checked_at,
+            record.bound_at,
+            record.refusal_reason,
+            record.refused_at
+        ],
     )?;
     Ok(())
 }
@@ -79,6 +117,7 @@ impl SqliteStore {
         token_digest: &str,
         credential_digest: &str,
         now: i64,
+        attestation: Option<&RuntimeAttestationRecord>,
     ) -> Result<RuntimeCredentialRecord> {
         let mut connection = self.connection()?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -98,6 +137,9 @@ impl SqliteStore {
              VALUES(?1,?2,?3,?4)",
             params![credential_digest, environment_id, token_digest, now],
         )?;
+        if let Some(attestation) = attestation {
+            upsert_attestation(&tx, attestation)?;
+        }
         tx.commit()?;
         Ok(RuntimeCredentialRecord {
             credential_digest: credential_digest.into(),
@@ -106,6 +148,25 @@ impl SqliteStore {
             created_at: now,
             revoked_at: None,
         })
+    }
+
+    pub(super) fn runtime_enrollment_usable_sqlite(
+        &self,
+        environment: &str,
+        token_digest: &str,
+        now: i64,
+    ) -> Result<bool> {
+        Ok(self
+            .connection()?
+            .query_row(
+                "SELECT 1 FROM runtime_enrollments
+                 WHERE token_digest=?1 AND environment_id=?2
+                   AND redeemed_at IS NULL AND expires_at>?3",
+                params![token_digest, environment, now],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
     }
 
     pub(super) fn lapsed_runtime_completion_sqlite(
@@ -247,6 +308,35 @@ impl SqliteStore {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    pub(super) fn record_runtime_attestation_sqlite(
+        &self,
+        record: &RuntimeAttestationRecord,
+    ) -> Result<()> {
+        upsert_attestation(&*self.connection()?, record)
+    }
+
+    pub(super) fn runtime_attestations_sqlite(&self) -> Result<Vec<RuntimeAttestationRecord>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT runner_id,environment_id,evidence_digest,key_fingerprint,checked_at,
+                    bound_at,refusal_reason,refused_at
+             FROM runtime_attestations ORDER BY runner_id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(RuntimeAttestationRecord {
+                runner_id: row.get(0)?,
+                environment_id: row.get(1)?,
+                evidence_digest: row.get(2)?,
+                key_fingerprint: row.get(3)?,
+                checked_at: row.get(4)?,
+                bound_at: row.get(5)?,
+                refusal_reason: row.get(6)?,
+                refused_at: row.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub(super) fn live_runtime_claim_owners_sqlite(&self, now: i64) -> Result<Vec<String>> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
@@ -286,17 +376,17 @@ mod tests {
         ));
         // Another environment's redemption refuses and does not spend it.
         assert!(refused(
-            store.redeem_runtime_enrollment("stage", "t1", "c0", 10)
+            store.redeem_runtime_enrollment("stage", "t1", "c0", 10, None)
         ));
         let credential = store
-            .redeem_runtime_enrollment("prod", "t1", "c1", 10)
+            .redeem_runtime_enrollment("prod", "t1", "c1", 10, None)
             .unwrap();
         assert_eq!(
             (credential.environment_id.as_str(), credential.revoked_at),
             ("prod", None)
         );
         assert!(refused(
-            store.redeem_runtime_enrollment("prod", "t1", "c2", 20)
+            store.redeem_runtime_enrollment("prod", "t1", "c2", 20, None)
         ));
         assert!(store.runtime_credential("c2").unwrap().is_none());
 
@@ -304,10 +394,10 @@ mod tests {
             .create_runtime_enrollment(&enrollment("t2", "prod", 100))
             .unwrap();
         assert!(refused(
-            store.redeem_runtime_enrollment("prod", "t2", "c3", 100)
+            store.redeem_runtime_enrollment("prod", "t2", "c3", 100, None)
         ));
         assert!(refused(
-            store.redeem_runtime_enrollment("prod", "unknown", "c4", 10)
+            store.redeem_runtime_enrollment("prod", "unknown", "c4", 10, None)
         ));
 
         let first = RuntimeRevocation {
@@ -388,6 +478,93 @@ mod tests {
         assert!(store.live_runtime_claim_owners(expires).unwrap().is_empty());
     }
 
+    /// Runner attestation (#675): a refusal keeps the binding; a binding
+    /// replaces it and clears the refusal.
+    #[test]
+    fn a_refusal_keeps_the_binding_and_a_binding_clears_the_refusal() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let record = |digest: Option<&str>, refusal: Option<&str>| RuntimeAttestationRecord {
+            runner_id: "sha256:r1".into(),
+            environment_id: "prod".into(),
+            evidence_digest: digest.map(str::to_string),
+            key_fingerprint: digest.map(|_| "sha256:key".into()),
+            checked_at: digest.map(|_| 10),
+            bound_at: digest.map(|_| 11),
+            refusal_reason: refusal.map(str::to_string),
+            refused_at: refusal.map(|_| 12),
+        };
+        store
+            .record_runtime_attestation(&record(None, Some("attestation_missing")))
+            .unwrap();
+        store
+            .record_runtime_attestation(&record(Some("sha256:e1"), None))
+            .unwrap();
+        store
+            .record_runtime_attestation(&record(None, Some("fact_mismatch")))
+            .unwrap();
+        let [kept] = store.runtime_attestations().unwrap().try_into().unwrap();
+        assert_eq!(kept.evidence_digest.as_deref(), Some("sha256:e1"));
+        assert_eq!(kept.key_fingerprint.as_deref(), Some("sha256:key"));
+        assert_eq!(kept.refusal_reason.as_deref(), Some("fact_mismatch"));
+        store
+            .record_runtime_attestation(&record(Some("sha256:e2"), None))
+            .unwrap();
+        let [bound] = store.runtime_attestations().unwrap().try_into().unwrap();
+        assert_eq!(bound.evidence_digest.as_deref(), Some("sha256:e2"));
+        assert_eq!((bound.refusal_reason, bound.refused_at), (None, None));
+    }
+
+    /// Redemption, credential and attestation binding commit together
+    /// (#675): a binding that fails leaves the token unspent and no runner,
+    /// and a usable-token check spends nothing.
+    #[test]
+    fn a_failed_binding_rolls_back_the_redemption() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        store
+            .create_runtime_enrollment(&enrollment("t1", "prod", 1_000))
+            .unwrap();
+        assert!(store.runtime_enrollment_usable("prod", "t1", 10).unwrap());
+        assert!(!store.runtime_enrollment_usable("stage", "t1", 10).unwrap());
+        assert!(
+            !store
+                .runtime_enrollment_usable("prod", "t1", 1_000)
+                .unwrap()
+        );
+        let binding = RuntimeAttestationRecord {
+            runner_id: "c1".into(),
+            environment_id: "prod".into(),
+            evidence_digest: Some("sha256:e1".into()),
+            key_fingerprint: Some("sha256:key".into()),
+            checked_at: Some(5),
+            bound_at: Some(10),
+            ..Default::default()
+        };
+        // Inject a failing binding write.
+        store
+            .connection()
+            .unwrap()
+            .execute_batch("ALTER TABLE runtime_attestations RENAME TO runtime_attestations_away")
+            .unwrap();
+        assert!(
+            store
+                .redeem_runtime_enrollment("prod", "t1", "c1", 10, Some(&binding))
+                .is_err()
+        );
+        assert!(store.runtime_credential("c1").unwrap().is_none());
+        assert!(store.runtime_enrollment_usable("prod", "t1", 10).unwrap());
+        store
+            .connection()
+            .unwrap()
+            .execute_batch("ALTER TABLE runtime_attestations_away RENAME TO runtime_attestations")
+            .unwrap();
+        store
+            .redeem_runtime_enrollment("prod", "t1", "c1", 10, Some(&binding))
+            .unwrap();
+        let [bound] = store.runtime_attestations().unwrap().try_into().unwrap();
+        assert_eq!(bound.evidence_digest.as_deref(), Some("sha256:e1"));
+        assert!(!store.runtime_enrollment_usable("prod", "t1", 10).unwrap());
+    }
+
     #[test]
     fn of_two_instances_redeeming_one_token_one_wins() {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -402,8 +579,8 @@ mod tests {
             .create_runtime_enrollment(&enrollment("t1", "prod", i64::MAX))
             .unwrap();
         let results = std::thread::scope(|scope| {
-            let a = scope.spawn(|| first.redeem_runtime_enrollment("prod", "t1", "ca", 10));
-            let b = scope.spawn(|| second.redeem_runtime_enrollment("prod", "t1", "cb", 10));
+            let a = scope.spawn(|| first.redeem_runtime_enrollment("prod", "t1", "ca", 10, None));
+            let b = scope.spawn(|| second.redeem_runtime_enrollment("prod", "t1", "cb", 10, None));
             [a.join().unwrap(), b.join().unwrap()]
         });
         assert_eq!(

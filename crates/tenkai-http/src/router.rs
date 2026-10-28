@@ -13,7 +13,8 @@ use super::auth::{import_development_fixture, reset_development_fixture};
 use super::config::ServerConfig;
 use super::environment_config::{
     configure_approval_policy, configure_constraints, configure_facts,
-    configure_maintenance_window, configure_webhooks, register_environment,
+    configure_maintenance_window, configure_runner_attestation, configure_webhooks,
+    register_environment,
 };
 use super::exports::{create_export, download_export, inspect_export, list_exports};
 use super::imports::{
@@ -134,7 +135,8 @@ pub fn router(
             config.environment_management_assignments.clone(),
         )
         .with_agent_actor_policy(config.agent_actor_policy)
-        .with_static_runtime_runners(&config.runtime_assignments),
+        .with_static_runtime_runners(&config.runtime_assignments)
+        .with_runner_certificates_admitted(config.runner_certificates_admitted),
     );
     refresh_trust_status(&config);
     let mut router = Router::new()
@@ -188,6 +190,10 @@ pub fn router(
         .route(
             "/v1/environments/{environment}/facts",
             put(configure_facts).delete(configure_facts),
+        )
+        .route(
+            "/v1/environments/{environment}/runner-attestation",
+            put(configure_runner_attestation).delete(configure_runner_attestation),
         )
         .route(
             "/v1/environments/{environment}/constraints",

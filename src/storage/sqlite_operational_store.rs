@@ -352,8 +352,24 @@ impl OperationalStore for SqliteStore {
         token_digest: &str,
         credential_digest: &str,
         now: i64,
+        attestation: Option<&RuntimeAttestationRecord>,
     ) -> Result<RuntimeCredentialRecord> {
-        self.redeem_runtime_enrollment_sqlite(environment, token_digest, credential_digest, now)
+        self.redeem_runtime_enrollment_sqlite(
+            environment,
+            token_digest,
+            credential_digest,
+            now,
+            attestation,
+        )
+    }
+
+    fn runtime_enrollment_usable(
+        &self,
+        environment: &str,
+        token_digest: &str,
+        now: i64,
+    ) -> Result<bool> {
+        self.runtime_enrollment_usable_sqlite(environment, token_digest, now)
     }
 
     fn runtime_credential(
@@ -399,5 +415,13 @@ impl OperationalStore for SqliteStore {
 
     fn live_runtime_claim_owners(&self, now: i64) -> Result<Vec<String>> {
         self.live_runtime_claim_owners_sqlite(now)
+    }
+
+    fn record_runtime_attestation(&self, record: &RuntimeAttestationRecord) -> Result<()> {
+        self.record_runtime_attestation_sqlite(record)
+    }
+
+    fn runtime_attestations(&self) -> Result<Vec<RuntimeAttestationRecord>> {
+        self.runtime_attestations_sqlite()
     }
 }

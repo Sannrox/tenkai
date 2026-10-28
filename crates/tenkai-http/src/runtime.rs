@@ -6,6 +6,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 
 use tenkai::management_operations::ManagementError;
+use tenkai::runner_attestation::AttestationRefusal;
 use tenkai::runtime_delivery::{RuntimeDeliveryError, RuntimeHeartbeat, RuntimeInventoryReport};
 
 use super::router::{AppState, ErrorBody};
@@ -120,12 +121,16 @@ pub(super) async fn runtime_certificate(
     certificate: Option<axum::Extension<crate::tls::ClientCertificate>>,
     Json(request): Json<tenkai::runtime_delivery::RuntimeCertificateRequest>,
 ) -> Response {
-    match state.runtime_delivery.renew_certificate(
-        bearer(&headers),
-        runtime_caller(&headers, certificate.as_ref()),
-        &environment,
-        &request,
-    ) {
+    match state
+        .runtime_delivery
+        .renew_certificate(
+            bearer(&headers),
+            runtime_caller(&headers, certificate.as_ref()),
+            &environment,
+            &request,
+        )
+        .await
+    {
         Ok(renewed) => Json(renewed).into_response(),
         Err(error) => runtime_delivery_error(error),
     }
@@ -205,6 +210,13 @@ fn runtime_delivery_error(error: RuntimeDeliveryError) -> Response {
         RuntimeDeliveryError::Conflict(_) => StatusCode::CONFLICT,
         RuntimeDeliveryError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
         RuntimeDeliveryError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        // 428 advertises the runner attestation policy (#675): the agent
+        // then sends evidence. Every other refusal is final for the request.
+        RuntimeDeliveryError::Attestation(ref refusal) => match refusal {
+            AttestationRefusal::Missing => StatusCode::PRECONDITION_REQUIRED,
+            AttestationRefusal::InventoryContradictsDeclaredFact { .. } => StatusCode::CONFLICT,
+            _ => StatusCode::FORBIDDEN,
+        },
     };
     error_response(status, error.to_string())
 }
@@ -260,7 +272,7 @@ pub(super) async fn runtime_enroll(
     Path(environment): Path<String>,
     Json(request): Json<tenkai::runtime_delivery::RuntimeEnrollRequest>,
 ) -> Response {
-    match state.runtime_delivery.enroll(&environment, &request) {
+    match state.runtime_delivery.enroll(&environment, &request).await {
         Ok(enrolled) => (StatusCode::CREATED, Json(enrolled)).into_response(),
         Err(error) => runtime_delivery_error(error),
     }

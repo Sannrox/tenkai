@@ -459,6 +459,74 @@ export TENKAI_RUNTIME_CERTIFICATE_DIR=/var/lib/tenkai-runtime/certificate
   meanwhile has its stored completion applied by the server's lapsed
   completion recovery.
 
+### Attested runners
+
+An environment may require each enrollment and certificate renewal to carry
+host evidence its runner signed with its own key (#675). Off by default.
+
+```sh
+tenkaictl env runner-attestation set prod --max-age-ms 600000   # embedded
+tenkaictl --target remote env runner-attestation set prod --max-age-ms 600000 \
+  --generation <n> --reason "bind runners to their hosts"
+tenkaictl env facts set prod architecture arm64                  # what to compare
+# On the runner host, optionally, the checks to run and sign:
+export TENKAI_RUNTIME_PREFLIGHT_CONFIG=/etc/tenkai/runner-preflight.toml
+```
+
+- **Evidence.** The agent runs the host preflight checks of
+  `TENKAI_RUNTIME_PREFLIGHT_CONFIG` (none without it) on its own host, adds
+  its probed host facts, and signs a `tenkai.runner-attestation.v1`
+  statement with its runner key (ECDSA P-256, `ecdsa-p256-sha256`): the key
+  of its CSR. The runner key never becomes a plan approval or `preflight`
+  trust root; operator-signed `preflight_evidence` is unchanged.
+- **Checks.** The server verifies the signature against the CSR key and
+  refuses evidence that is missing, older than `max_age_ms`, failed, signed
+  by another key, for another environment, or whose facts contradict the
+  environment's operator-declared facts. On renewal the CSR key must be the
+  presented certificate's key, and on the expired-certificate bearer path
+  the runner's last bound key: no key rotation under the policy. Each
+  refusal names its reason (`attestation_missing`, `evidence_stale`,
+  `evidence_failed`, `signature_invalid`, `key_changed`, `no_bound_key`,
+  `fact_mismatch (architecture)`, ...); an enrollment refusal spends no
+  token.
+- **Declared facts.** Each fact records who set it. Only facts set with
+  `env facts set` or the facts route are declarations; facts a runtime
+  reports, or set before this release, are not, so declare the facts to
+  compare after upgrading. While the policy is on, a runtime inventory
+  report that contradicts a declared fact is refused whole (`409`,
+  `inventory_contradicts_declared_fact`) and overwrites nothing.
+- **Certificates only.** While the policy is on, the environment's work
+  routes (work, heartbeat, self-release, completion, inventory) admit only
+  a runner certificate. A bearer alone, enrolled or static, is refused
+  with `attestation_requires_client_certificate`; it still renews an
+  expired certificate on the renewal route, under the same evidence
+  checks. So a copied bearer cannot outlive one certificate. Runner
+  certificates reach the server only with native TLS: the policy needs a
+  runner CA (`TENKAI_RUNNER_CA_CERT`) and `TENKAI_TLS_CLIENT_CA`, and the
+  server refuses to enable it otherwise. Behind a TLS-terminating proxy it
+  cannot be enabled. `tenkaictl env runner-attestation set` against
+  embedded state does not check this; use the remote route.
+- **Binding.** The certificate carries the evidence digest and the runner
+  key fingerprint in a private, non-critical extension (OID under 2.25).
+  The runner registry shows the latest bound evidence and the latest
+  refusal per runner, and each refusal other than `attestation_missing`
+  raises one `runner.attestation_refused` operational event per runner,
+  reason and binding ([operational events](deploy-webhooks.md#operational-events)).
+- **Compatibility.** The server advertises the policy only by answering
+  `428` to a request without evidence, and the agent sends evidence only
+  then. With the policy off nothing changes, and agents of earlier releases
+  keep working. Enable the policy only once the environment's agents run
+  this release and have a certificate directory: an older agent cannot
+  attest, so it fails renewal (registry: `attestation_missing`) and, once its
+  certificate expires, stops claiming work. An agent without a certificate
+  directory, or a static `TENKAI_RUNTIME_TOKENS` runtime, stops claiming
+  work at once.
+- **Limit.** A file key copied with its certificate directory has the same
+  fingerprint. The policy catches fact drift and bounds a copied credential
+  to one certificate lifetime (24 hours) unless the copy also passes
+  attested renewal. It does not prove the same host; that needs
+  non-exportable keys (#785).
+
 ### Runner registry
 
 `tenkaictl --target remote runner list` (`runner` is an alias of `runtime`)

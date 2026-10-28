@@ -11,7 +11,8 @@ mod runtime_enrollment;
 pub use exports::ExportRequest;
 pub use runtime_enrollment::{
     RuntimeCredentialRevoked, RuntimeEnrollmentIssued, RuntimeEnrollmentRequest,
-    RuntimeRevokeRequest, RuntimeRunner, RuntimeRunnerInstance, RuntimeRunnerList,
+    RuntimeRevokeRequest, RuntimeRunner, RuntimeRunnerAttestation, RuntimeRunnerInstance,
+    RuntimeRunnerList,
 };
 
 use crate::auth_context::{
@@ -139,6 +140,9 @@ pub struct ManagementOperations {
     /// `(token digest, environment)` of each configured static runtime
     /// token, listed read-only by the runner registry (#673).
     static_runtime_runners: Vec<(String, String)>,
+    /// Runner certificates reach this server (#675); without them runner
+    /// attestation cannot be enabled through it.
+    runner_certificates_admitted: bool,
 }
 
 impl ManagementOperations {
@@ -172,6 +176,7 @@ impl ManagementOperations {
             release_trust_roots,
             environment_grants,
             static_runtime_runners: Vec::new(),
+            runner_certificates_admitted: false,
         }
     }
 
@@ -218,6 +223,13 @@ impl ManagementOperations {
 
     /// List the configured static runtime tokens (token to environment) in
     /// the runner registry, by digest; the tokens themselves are not kept.
+    /// Whether runner certificates reach this server: a runner CA and
+    /// native TLS with a client CA (#675).
+    pub fn with_runner_certificates_admitted(mut self, admitted: bool) -> Self {
+        self.runner_certificates_admitted = admitted;
+        self
+    }
+
     pub fn with_static_runtime_runners(
         mut self,
         assignments: &std::collections::HashMap<String, String>,
@@ -1517,6 +1529,21 @@ impl ManagementOperations {
             .await?;
         self.require_current_generation(environment, request.expected_generation)
             .await?;
+        // Under the policy only runner certificates admit work, and behind a
+        // TLS-terminating proxy none reach this server: every runner would
+        // be locked out.
+        if matches!(
+            request.change,
+            crate::environment_config::EnvironmentConfigChange::SetRunnerAttestation { .. }
+        ) && !self.runner_certificates_admitted
+        {
+            return Err(ManagementError::BadRequest(
+                "runner attestation needs runner certificates to reach this server: \
+                 a runner CA (TENKAI_RUNNER_CA_CERT) and native TLS with TENKAI_TLS_CLIENT_CA; \
+                 behind a TLS-terminating proxy it cannot be enabled"
+                    .into(),
+            ));
+        }
         let actor = &context.audit_principal();
         let action = request.change.action();
         self.audit(actor, &format!("environment.configure.{action}.requested"))?;

@@ -126,6 +126,26 @@ pub(super) async fn configure_approval_policy(
     .await
 }
 
+/// The runner attestation policy (#675): `PUT` requires it, `DELETE` clears it.
+pub(super) async fn configure_runner_attestation(
+    state: State<Arc<AppState>>,
+    method: Method,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    configure(
+        state,
+        method,
+        environment,
+        None,
+        ConfigResource::RunnerAttestation,
+        headers,
+        body,
+    )
+    .await
+}
+
 /// Shared body of every configuration route: `PUT` sets, `DELETE` clears.
 async fn configure(
     State(state): State<Arc<AppState>>,
