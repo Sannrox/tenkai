@@ -633,6 +633,11 @@
         "key_id": {
           "type": "string"
         },
+        "signed_at": {
+          "description": "When the signer signed it: the statement's `issued_at`, Unix\nmilliseconds (#817).",
+          "format": "int64",
+          "type": "integer"
+        },
         "signer_identity": {
           "type": "string"
         }
@@ -1316,6 +1321,26 @@
       "required": [
         "configured",
         "mode"
+      ],
+      "type": "object"
+    },
+    "EligibleApprover": {
+      "properties": {
+        "collected": {
+          "description": "An approval from this key is among `collected`.",
+          "type": "boolean"
+        },
+        "identity": {
+          "type": "string"
+        },
+        "key_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "identity",
+        "key_id",
+        "collected"
       ],
       "type": "object"
     },
@@ -2658,6 +2683,25 @@
       ],
       "type": "object"
     },
+    "GroupApprovers": {
+      "description": "Who may approve for one group of the plan's rule (#817): identities and\nkey ids from the plan-approval trust roots, never key material.",
+      "properties": {
+        "approvers": {
+          "items": {
+            "$ref": "#/$defs/EligibleApprover"
+          },
+          "type": "array"
+        },
+        "group": {
+          "description": "The rule's group; absent when the rule names none, so any trusted\nsigner counts.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "approvers"
+      ],
+      "type": "object"
+    },
     "HoldAuditEvent": {
       "description": "One immutable set, clear, or retry transition.",
       "properties": {
@@ -3599,6 +3643,13 @@
           "default": [],
           "items": {
             "$ref": "#/$defs/CollectedApproval"
+          },
+          "type": "array"
+        },
+        "eligible": {
+          "description": "Eligible human approvers per group of the rule, from the trust roots\nthis host verifies plan approvals with (#817). Absent when the host\nhas none configured. The rule stays N signers from any listed group.",
+          "items": {
+            "$ref": "#/$defs/GroupApprovers"
           },
           "type": "array"
         },

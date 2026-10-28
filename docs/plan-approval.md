@@ -102,8 +102,14 @@ tenkaictl apply <plan-id> \
 ```
 
 `POST /v1/plans/{plan_id}/approve` accepts one envelope at a time.
-`GET /v1/plans/{plan_id}/approvals` lists collected envelopes and how many
-are still missing. Apply unions those stored envelopes with the request set
+`GET /v1/plans/{plan_id}/approvals` lists collected envelopes, each with
+when it was signed (`signed_at`) and when it expires, and how many are
+still missing. With `TENKAI_PLAN_APPROVAL_TRUST_ROOTS` set on the server it
+also lists, per group the rule names, the identities and key ids that may
+approve this environment's plan by hand, each marked once its approval is
+collected (#817). Signers scoped to other environments, or only to
+automatic or preflight signing, are left out. The rule is unchanged: N
+signers from any listed group. Apply unions those stored envelopes with the request set
 and refuses until N valid, unexpired envelopes are present; the refusal lists
 what is missing. See [ADR 0037](decisions/0037-multi-party-plan-approval.md).
 

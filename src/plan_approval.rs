@@ -89,6 +89,31 @@ pub struct CollectedApproval {
     #[serde(default)]
     pub groups: Vec<String>,
     pub expires_at: i64,
+    /// When the signer signed it: the statement's `issued_at`, Unix
+    /// milliseconds (#817).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub signed_at: Option<i64>,
+}
+
+/// Who may approve for one group of the plan's rule (#817): identities and
+/// key ids from the plan-approval trust roots, never key material.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupApprovers {
+    /// The rule's group; absent when the rule names none, so any trusted
+    /// signer counts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub group: Option<String>,
+    pub approvers: Vec<EligibleApprover>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct EligibleApprover {
+    pub identity: String,
+    pub key_id: String,
+    /// An approval from this key is among `collected`.
+    pub collected: bool,
 }
 
 /// Collected versus missing approvals for one plan and purpose.
@@ -104,6 +129,72 @@ pub struct PlanApprovalsView {
     #[serde(default)]
     pub collected: Vec<CollectedApproval>,
     pub missing: u32,
+    /// Eligible human approvers per group of the rule, from the trust roots
+    /// this host verifies plan approvals with (#817). Absent when the host
+    /// has none configured. The rule stays N signers from any listed group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub eligible: Option<Vec<GroupApprovers>>,
+}
+
+/// The server's plan-approval trust roots, which also verify execution.
+pub const TRUST_ROOTS_ENV: &str = "TENKAI_PLAN_APPROVAL_TRUST_ROOTS";
+
+impl PlanApprovalsView {
+    /// Fill `eligible` from `roots`: per rule group, the signers that may
+    /// approve a plan of `environment` by hand. A signer scoped to other
+    /// environments, or only to automatic or preflight signing, is not one,
+    /// nor is `requester` when the rule excludes the requester.
+    pub fn with_eligible(
+        mut self,
+        roots: &TrustRoots,
+        environment: &str,
+        requester: Option<&str>,
+    ) -> Self {
+        let exclude_requester = self.exclude_requester;
+        let human = |signer: &&TrustedSigner| {
+            (signer.environments.is_empty() || signer.environments.iter().any(|e| e == environment))
+                && (signer.providers.is_empty()
+                    || signer.providers.iter().any(|provider| {
+                        provider != "builtin-auto"
+                            && provider != crate::host_preflight::PREFLIGHT_PROVIDER
+                    }))
+        };
+        let groups: Vec<Option<String>> = if self.groups.is_empty() {
+            vec![None]
+        } else {
+            self.groups.iter().cloned().map(Some).collect()
+        };
+        let collected = &self.collected;
+        let eligible = groups
+            .into_iter()
+            .map(|group| GroupApprovers {
+                approvers: roots
+                    .signers
+                    .iter()
+                    .filter(human)
+                    .filter(|signer| {
+                        !(exclude_requester && requester.is_some_and(|id| id == signer.identity))
+                    })
+                    .filter(|signer| {
+                        group
+                            .as_ref()
+                            .is_none_or(|group| signer.groups.contains(group))
+                    })
+                    .map(|signer| EligibleApprover {
+                        identity: signer.identity.clone(),
+                        key_id: signer.key_id.clone(),
+                        collected: collected
+                            .iter()
+                            .any(|approval| approval.key_id == signer.key_id),
+                    })
+                    .collect(),
+                group,
+            })
+            .collect();
+        self.eligible = Some(eligible);
+        self
+    }
 }
 
 pub fn canonical_bytes(statement: &ApprovalStatement) -> Result<Vec<u8>> {
@@ -754,6 +845,12 @@ pub async fn collect_envelope(
                     .and_then(|raw| serde_json::from_str(raw).ok())
                     .unwrap_or_else(|| signer.groups.clone()),
                 expires_at,
+                // The envelope already collected, not the one just sent.
+                signed_at: existing
+                    .properties
+                    .get("envelope")
+                    .and_then(|raw| serde_json::from_str::<ApprovalEnvelope>(raw).ok())
+                    .map(|stored| stored.statement.issued_at),
             });
         }
     }
@@ -763,6 +860,7 @@ pub async fn collect_envelope(
         signer_identity: signer.identity.clone(),
         groups: signer.groups.clone(),
         expires_at: envelope.statement.expires_at,
+        signed_at: Some(envelope.statement.issued_at),
     })
 }
 
@@ -869,6 +967,7 @@ pub async fn approvals_view(
             signer_identity: identity,
             groups,
             expires_at,
+            signed_at: Some(envelope.statement.issued_at),
         });
     }
     let tally = count_quorum(&rule, &candidates, requester);
@@ -881,12 +980,119 @@ pub async fn approvals_view(
         exclude_requester: rule.exclude_requester,
         collected,
         missing: tally.missing,
+        eligible: None,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #817: per rule group, the trust roots' human approvers for this
+    /// environment, each marked once its approval is collected; signers
+    /// scoped elsewhere or only to automatic signing are not eligible.
+    #[test]
+    fn eligible_approvers_are_listed_per_group_and_marked_when_collected() {
+        let signer =
+            |identity: &str, groups: &[&str], environments: &[&str], providers: &[&str]| {
+                TrustedSigner {
+                    key_id: format!("ed25519:{identity}"),
+                    identity: identity.into(),
+                    public_key: "unused".into(),
+                    environments: environments.iter().map(|value| value.to_string()).collect(),
+                    providers: providers.iter().map(|value| value.to_string()).collect(),
+                    groups: groups.iter().map(|value| value.to_string()).collect(),
+                }
+            };
+        let roots = TrustRoots {
+            version: 1,
+            signers: vec![
+                signer("alice", &["quality"], &[], &[]),
+                signer("bob", &["ops", "quality"], &["prod"], &["builtin"]),
+                signer("carol", &["quality"], &["lab"], &[]),
+                signer("robot", &["ops"], &["prod"], &["builtin-auto"]),
+                signer("dave", &[], &[], &[]),
+            ],
+        };
+        let view = PlanApprovalsView {
+            plan_id: "p".into(),
+            plan_digest: "sha256:x".into(),
+            purpose: "execute_plan".into(),
+            required: 2,
+            groups: vec!["quality".into(), "ops".into()],
+            exclude_requester: false,
+            collected: vec![CollectedApproval {
+                key_id: "ed25519:alice".into(),
+                signer_identity: "alice".into(),
+                groups: vec!["quality".into()],
+                expires_at: 10,
+                signed_at: Some(5),
+            }],
+            missing: 1,
+            eligible: None,
+        };
+        let listed: Vec<_> = view
+            .clone()
+            .with_eligible(&roots, "prod", None)
+            .eligible
+            .unwrap()
+            .into_iter()
+            .map(|group| {
+                (
+                    group.group,
+                    group
+                        .approvers
+                        .into_iter()
+                        .map(|approver| (approver.identity, approver.collected))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                (
+                    Some("quality".to_string()),
+                    vec![("alice".to_string(), true), ("bob".to_string(), false)]
+                ),
+                (Some("ops".to_string()), vec![("bob".to_string(), false)]),
+            ]
+        );
+        // A rule naming no group: every eligible signer, under no group.
+        let any_view = PlanApprovalsView {
+            groups: Vec::new(),
+            ..view
+        };
+        let any = any_view
+            .clone()
+            .with_eligible(&roots, "prod", None)
+            .eligible
+            .unwrap();
+        assert_eq!(any.len(), 1);
+        assert_eq!(any[0].group, None);
+        let names: Vec<_> = any[0]
+            .approvers
+            .iter()
+            .map(|a| a.identity.as_str())
+            .collect();
+        assert_eq!(names, ["alice", "bob", "dave"]);
+        // A rule excluding the requester does not list the requester.
+        let excluded = PlanApprovalsView {
+            exclude_requester: true,
+            ..any_view.clone()
+        }
+        .with_eligible(&roots, "prod", Some("alice"))
+        .eligible
+        .unwrap();
+        let names: Vec<_> = excluded[0]
+            .approvers
+            .iter()
+            .map(|a| a.identity.as_str())
+            .collect();
+        assert_eq!(names, ["bob", "dave"]);
+        let body = serde_json::to_string(&any).unwrap();
+        assert!(!body.contains("public_key") && !body.contains("unused"));
+    }
     use ed25519_dalek::{Signer as _, SigningKey, Verifier as _};
 
     fn statement() -> ApprovalStatement {
