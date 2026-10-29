@@ -153,3 +153,205 @@ fn assert_graph(graph: &dyn CatalogGraph, tenant: Option<&str>) {
     graph.delete(tenant, id).unwrap();
     assert_eq!(graph.get(tenant, id).unwrap(), None);
 }
+
+fn sample_event(id: &str, environment: &str) -> tenkai::storage::ProviderEventRecord {
+    tenkai::storage::ProviderEventRecord {
+        id: id.into(),
+        provider_kind: "outcome".into(),
+        binding_digest: "digest".into(),
+        payload_json: format!(
+            r#"{{"binding":{{"environment_id":"{environment}"}},"payload_json":"{{}}" }}"#
+        ),
+        attempts: 0,
+        next_attempt_at: 1,
+        delivered_at: None,
+        last_error: String::new(),
+        claim_token: None,
+        claim_until: None,
+    }
+}
+
+/// Live outbox drill. Requires feature `postgres` and `TENKAI_POSTGRES_URL`.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+#[ignore = "requires Postgres; set TENKAI_POSTGRES_URL and cargo test --features postgres -- --ignored"]
+async fn live_postgres_catalog_enqueues_provider_events_atomically_and_exports() {
+    let config = PostgresTenantConfig::from_env().expect("TENKAI_POSTGRES_URL");
+    let store = config.open().expect("connect");
+    let suffix = format!(
+        "{}{}",
+        std::process::id(),
+        &uuid::Uuid::new_v4().simple().to_string()[..8]
+    );
+    let tenant_a = format!("oa{suffix}");
+    let tenant_b = format!("ob{suffix}");
+    let id = format!("tenkai:conformance:outbox:{suffix}");
+    let original = sample(&id, "tenkai.conformance", "original");
+    store.create(Some(&tenant_a), original.clone()).unwrap();
+    let mut updated = original.clone();
+    updated.name = "terminal".into();
+    let event = sample_event(&format!("event-{suffix}"), "prod");
+    store
+        .put_with_provider_events(
+            Some(&tenant_a),
+            updated.clone(),
+            std::slice::from_ref(&event),
+        )
+        .unwrap();
+    let partition_a = store.partition_by_id(&tenant_a).unwrap();
+    assert_eq!(
+        partition_a
+            .list_provider_events("outcome", "prod", 8)
+            .unwrap()
+            .len(),
+        1
+    );
+    let partition_b = store.partition_by_id(&tenant_b).unwrap();
+    assert!(
+        partition_b
+            .list_provider_events("outcome", "prod", 8)
+            .unwrap()
+            .is_empty()
+    );
+
+    let mut conflicting = event.clone();
+    conflicting.payload_json =
+        r#"{"binding":{"environment_id":"prod"},"payload_json":"{\"different\":true}"}"#.into();
+    let mut rolled = updated.clone();
+    rolled.name = "must-roll-back".into();
+    assert!(
+        store
+            .put_with_provider_events(Some(&tenant_a), rolled.clone(), &[conflicting])
+            .is_err()
+    );
+    assert_eq!(
+        store.get(Some(&tenant_a), &id).unwrap().unwrap().name,
+        "terminal"
+    );
+
+    let mut invalid = event;
+    invalid.id.clear();
+    rolled.name = "invalid-must-roll-back".into();
+    assert!(
+        store
+            .put_with_provider_events(Some(&tenant_a), rolled, &[invalid])
+            .is_err()
+    );
+    assert_eq!(
+        store.get(Some(&tenant_a), &id).unwrap().unwrap().name,
+        "terminal"
+    );
+
+    let tenant_export = format!("oe{suffix}");
+    let export_id = format!("tenkai:conformance:export:{suffix}");
+    let export_object = sample(&export_id, "tenkai.conformance", "export");
+    store
+        .create(Some(&tenant_export), export_object.clone())
+        .unwrap();
+    let provider_event = tenkai::providers::terminal_outcome_event(
+        &format!("tenkai:deployment:{suffix}"),
+        &format!("tenkai:plan:{suffix}"),
+        "sha256:plan",
+        "tenkai:release:api@2.0.0",
+        "sha256:release",
+        "api",
+        "prod",
+        "tenkai:environment:prod",
+        "sha256:config",
+        tenkai::providers::TerminalOutcomeState::DeploymentSucceeded,
+        100,
+    )
+    .unwrap();
+    let export_event =
+        tenkai::providers::provider_event_record("outcome", &provider_event, 100).unwrap();
+    store
+        .put_with_provider_events(
+            Some(&tenant_export),
+            export_object,
+            std::slice::from_ref(&export_event),
+        )
+        .unwrap();
+    let partition_export = store.partition_by_id(&tenant_export).unwrap();
+    let stored_export = partition_export
+        .list_provider_events("outcome", "prod", 8)
+        .unwrap();
+    assert_eq!(stored_export.len(), 1);
+    assert_ne!(stored_export[0].id, export_event.id);
+    let sink = tenkai::providers::LocalEventSink::default();
+    assert_eq!(
+        tenkai::providers::deliver_outcome_batch(
+            &partition_export,
+            &sink,
+            std::time::Duration::from_secs(1),
+            100,
+            10,
+        )
+        .await
+        .unwrap(),
+        (1, 0)
+    );
+    let tenant_export_b = format!("of{suffix}");
+    let export_b_id = format!("tenkai:conformance:export-b:{suffix}");
+    let export_b_object = sample(&export_b_id, "tenkai.conformance", "export-b");
+    store
+        .create(Some(&tenant_export_b), export_b_object.clone())
+        .unwrap();
+    let provider_event_b = tenkai::providers::terminal_outcome_event(
+        &format!("tenkai:deployment:{suffix}-b"),
+        &format!("tenkai:plan:{suffix}-b"),
+        "sha256:plan",
+        "tenkai:release:api@2.0.0",
+        "sha256:release",
+        "api",
+        "prod",
+        "tenkai:environment:prod",
+        "sha256:config",
+        tenkai::providers::TerminalOutcomeState::DeploymentSucceeded,
+        100,
+    )
+    .unwrap();
+    let export_event_b =
+        tenkai::providers::provider_event_record("outcome", &provider_event_b, 100).unwrap();
+    store
+        .put_with_provider_events(
+            Some(&tenant_export_b),
+            export_b_object,
+            std::slice::from_ref(&export_event_b),
+        )
+        .unwrap();
+    let partition_export_b = store.partition_by_id(&tenant_export_b).unwrap();
+    assert_eq!(
+        tenkai::providers::deliver_outcome_batch(
+            &partition_export_b,
+            &sink,
+            std::time::Duration::from_secs(1),
+            100,
+            10,
+        )
+        .await
+        .unwrap(),
+        (1, 0)
+    );
+    let sequences = sink
+        .received()
+        .into_iter()
+        .filter_map(|event| event.source_sequence)
+        .collect::<Vec<_>>();
+    assert_eq!(sequences.len(), 2);
+    assert!(
+        sequences[0] > 0 && sequences[1] > sequences[0],
+        "{sequences:?}"
+    );
+    assert_eq!(
+        tenkai::providers::deliver_outcome_batch(
+            &partition_export,
+            &sink,
+            std::time::Duration::from_secs(1),
+            100,
+            10,
+        )
+        .await
+        .unwrap(),
+        (0, 0)
+    );
+}

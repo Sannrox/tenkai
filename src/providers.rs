@@ -201,6 +201,10 @@ pub struct TerminalOutcomePayload {
     pub configuration_id: String,
     pub terminal_state: TerminalOutcomeState,
     pub observed_at: i64,
+    /// Tenant that owns the outcome. Empty on community hosts; required in
+    /// tenant-mode export so two tenants cannot share a producer identity.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tenant_id: String,
 }
 
 impl TerminalOutcomePayload {
@@ -227,6 +231,11 @@ impl TerminalOutcomePayload {
         if self.environment_id != event.binding.environment_id {
             return Err(ProviderError::InvalidEvidence(
                 "terminal outcome environment does not match its evidence binding".into(),
+            ));
+        }
+        if self.tenant_id.len() > MAX_PROVIDER_EVENT_ID_BYTES {
+            return Err(ProviderError::InvalidEvidence(
+                "terminal outcome tenant identity exceeds the bounded contract".into(),
             ));
         }
         Ok(())
@@ -466,6 +475,7 @@ pub fn terminal_outcome_event(
         configuration_id: configuration_id.into(),
         terminal_state,
         observed_at,
+        tenant_id: String::new(),
     };
     let event = ProviderEvent {
         id: terminal_outcome_event_id(&binding, &payload)?,
@@ -477,6 +487,80 @@ pub fn terminal_outcome_event(
     event.validate()?;
     payload.validate_for_event(&event)?;
     Ok(event)
+}
+
+/// Bind `tenant` into terminal-outcome records so export identities cannot
+/// collide across tenant partitions that share one producer.
+pub fn bind_tenant_to_provider_events(
+    tenant: Option<&str>,
+    events: &[ProviderEventRecord],
+) -> Result<Vec<ProviderEventRecord>, ProviderError> {
+    let Some(tenant) = tenant.map(str::trim).filter(|tenant| !tenant.is_empty()) else {
+        return Ok(events.to_vec());
+    };
+    if tenant.len() > MAX_PROVIDER_EVENT_ID_BYTES {
+        return Err(ProviderError::InvalidEvidence(
+            "terminal outcome tenant identity exceeds the bounded contract".into(),
+        ));
+    }
+    events
+        .iter()
+        .map(|record| bind_tenant_to_provider_event(record, tenant))
+        .collect()
+}
+
+fn bind_tenant_to_provider_event(
+    record: &ProviderEventRecord,
+    tenant: &str,
+) -> Result<ProviderEventRecord, ProviderError> {
+    if record.provider_kind != OUTCOME_PROVIDER_KIND {
+        return Ok(record.clone());
+    }
+    let Ok(mut event) = serde_json::from_str::<ProviderEvent>(&record.payload_json) else {
+        return Ok(record.clone());
+    };
+    if event.validate().is_err() {
+        return Ok(record.clone());
+    }
+    let Ok(payload_value) = serde_json::from_str::<serde_json::Value>(&event.payload_json) else {
+        return Ok(record.clone());
+    };
+    if payload_value
+        .get("schema")
+        .and_then(serde_json::Value::as_str)
+        != Some(TERMINAL_OUTCOME_SCHEMA)
+    {
+        return Ok(record.clone());
+    }
+    let mut payload: TerminalOutcomePayload = serde_json::from_value(payload_value)?;
+    if payload.tenant_id.is_empty() {
+        payload.tenant_id = tenant.to_owned();
+    } else if payload.tenant_id != tenant {
+        return Err(ProviderError::InvalidEvidence(
+            "terminal outcome tenant does not match the catalog tenant".into(),
+        ));
+    }
+    event.payload_json = serde_json::to_string(&payload)?;
+    event.id = terminal_outcome_event_id(&event.binding, &payload)?;
+    event.validate()?;
+    payload.validate_for_event(&event)?;
+    if event.binding.digest() != record.binding_digest {
+        return Err(ProviderError::InvalidEvidence(
+            "durable event binding or identity does not match its envelope".into(),
+        ));
+    }
+    Ok(ProviderEventRecord {
+        id: event.id.clone(),
+        provider_kind: record.provider_kind.clone(),
+        binding_digest: record.binding_digest.clone(),
+        payload_json: serde_json::to_string(&event)?,
+        attempts: record.attempts,
+        next_attempt_at: record.next_attempt_at,
+        delivered_at: record.delivered_at,
+        last_error: record.last_error.clone(),
+        claim_token: record.claim_token.clone(),
+        claim_until: record.claim_until,
+    })
 }
 
 pub fn terminal_outcome_record(
@@ -831,7 +915,11 @@ impl ChiseiOutcomeProvider {
                 )
             })?,
             namespace: self.namespace.clone(),
-            target_external_id: payload.deployment_id,
+            target_external_id: if payload.tenant_id.is_empty() {
+                payload.deployment_id.clone()
+            } else {
+                format!("{}:{}", payload.tenant_id, payload.deployment_id)
+            },
             target_kind: "tenkai.deployment".into(),
             evidence_type: "operations.terminal_outcome".into(),
             signal: "other".into(),
@@ -850,25 +938,31 @@ impl ChiseiOutcomeProvider {
             producer_identity: self.principal.clone(),
             confidence_bps: 10_000,
             classification: "internal".into(),
-            provenance: HashMap::from([
-                (
-                    "environment_id".into(),
-                    event.binding.environment_id.clone(),
-                ),
-                (
-                    "release_digest".into(),
-                    event.binding.release_digest.clone(),
-                ),
-                ("plan_digest".into(), event.binding.plan_digest.clone()),
-                (
-                    "configuration_digest".into(),
-                    event.binding.configuration_digest.clone(),
-                ),
-                (
-                    "provider_contract_version".into(),
-                    PROVIDER_CONTRACT_VERSION.to_string(),
-                ),
-            ]),
+            provenance: {
+                let mut provenance = HashMap::from([
+                    (
+                        "environment_id".into(),
+                        event.binding.environment_id.clone(),
+                    ),
+                    (
+                        "release_digest".into(),
+                        event.binding.release_digest.clone(),
+                    ),
+                    ("plan_digest".into(), event.binding.plan_digest.clone()),
+                    (
+                        "configuration_digest".into(),
+                        event.binding.configuration_digest.clone(),
+                    ),
+                    (
+                        "provider_contract_version".into(),
+                        PROVIDER_CONTRACT_VERSION.to_string(),
+                    ),
+                ]);
+                if !payload.tenant_id.is_empty() {
+                    provenance.insert("tenant_id".into(), payload.tenant_id.clone());
+                }
+                provenance
+            },
             idempotency_key: event.id.clone(),
             content_digest,
             intent: "upsert".into(),
@@ -1114,6 +1208,73 @@ mod tests {
         .unwrap()
     }
 
+    #[tokio::test]
+    async fn tenant_binding_separates_identical_terminal_outcomes() {
+        let event = terminal_event();
+        let record = provider_event_record(OUTCOME_PROVIDER_KIND, &event, 1_000).unwrap();
+        let bound_a =
+            bind_tenant_to_provider_events(Some("tenant-a"), std::slice::from_ref(&record))
+                .unwrap();
+        let bound_b =
+            bind_tenant_to_provider_events(Some("tenant-b"), std::slice::from_ref(&record))
+                .unwrap();
+        assert_ne!(bound_a[0].id, bound_b[0].id);
+        assert_ne!(bound_a[0].id, record.id);
+        assert_eq!(
+            bind_tenant_to_provider_events(Some("tenant-a"), &bound_a).unwrap()[0].id,
+            bound_a[0].id
+        );
+        assert!(bind_tenant_to_provider_events(Some("tenant-b"), &bound_a).is_err());
+
+        let generic = ProviderEvent {
+            id: "generic-outcome-destination-event".into(),
+            binding: event.binding.clone(),
+            payload_json: "{}".into(),
+            collected_at_ms: None,
+            source_sequence: None,
+        };
+        let generic_record = provider_event_record(OUTCOME_PROVIDER_KIND, &generic, 1_000).unwrap();
+        assert_eq!(
+            bind_tenant_to_provider_events(Some("tenant-a"), std::slice::from_ref(&generic_record))
+                .unwrap()[0]
+                .id,
+            generic_record.id
+        );
+
+        let provider = ChiseiOutcomeProvider::new(
+            "http://127.0.0.1:50051",
+            "tenkai-prod",
+            "tenkai.outcome",
+            None,
+        )
+        .unwrap();
+        let mut collected_a: ProviderEvent =
+            serde_json::from_str(&bound_a[0].payload_json).unwrap();
+        collected_a.collected_at_ms = Some(1_000);
+        collected_a.source_sequence = Some(1);
+        let evidence_a = provider.evidence(&collected_a).unwrap();
+        assert_eq!(
+            evidence_a.target_external_id,
+            "tenant-a:tenkai:deployment:prod:api:1"
+        );
+        assert_eq!(
+            evidence_a.provenance.get("tenant_id").map(String::as_str),
+            Some("tenant-a")
+        );
+        assert_eq!(evidence_a.source_record_id, bound_a[0].id);
+        assert_eq!(evidence_a.idempotency_key, bound_a[0].id);
+
+        let mut collected_community = event.clone();
+        collected_community.collected_at_ms = Some(1_000);
+        collected_community.source_sequence = Some(1);
+        let evidence_community = provider.evidence(&collected_community).unwrap();
+        assert_eq!(
+            evidence_community.target_external_id,
+            "tenkai:deployment:prod:api:1"
+        );
+        assert!(!evidence_community.provenance.contains_key("tenant_id"));
+    }
+
     #[test]
     fn terminal_outcome_projections_filter_and_order_records() {
         let first = terminal_event_for("prod", "tenkai:deployment:prod:first", 1_000);
@@ -1348,6 +1509,7 @@ mod tests {
         assert_eq!(evidence.intent, "upsert");
         assert!(!format!("{provider:?}").contains("secret-token"));
         assert!(provider.record(&event).await.is_err());
+        assert!(!evidence.provenance.contains_key("tenant_id"));
 
         let registration =
             outcome_provider_registration_attestation("tenkai.outcome", "tenkai-prod");

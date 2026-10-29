@@ -23,9 +23,11 @@ When terminal-outcome export is configured, `SqliteStore` updates the
 authoritative plan, deployment, or reconciled environment record and inserts
 the `provider_events` row through the same SQLite transaction. A failed insert
 rolls back the object update; a committed object update therefore cannot lose
-its outcome row. PostgreSQL retains the same kind-filtered outbox contract, but
-tenant-mode hubs refuse `--outcome-provider chisei` until PostgreSQL atomic
-outbox wiring exists.
+its outcome row. Tenant-mode hubs enqueue the same outbox row in the tenant
+PostgreSQL schema in the same catalog write, with the tenant identity bound
+into the outcome payload; the host export worker drains
+each tenant partition and allocates `source_sequence` from the hub producer
+identity so export stays monotonic.
 
 Software compatibility observations are immutable content-addressed operational
 records (`tenkai.software_compatibility_evidence`), indexed by environment and

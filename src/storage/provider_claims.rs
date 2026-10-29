@@ -139,6 +139,30 @@ impl SqliteStore {
         claimed
     }
 
+    pub(crate) fn require_claimed_undelivered_provider_event(
+        &self,
+        provider_kind: &str,
+        id: &str,
+        claim_token: &str,
+    ) -> Result<()> {
+        let connection = self.connection()?;
+        let claimed: bool = connection.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM provider_events
+                 WHERE provider_kind=?1 AND id=?2 AND claim_token=?3 AND delivered_at IS NULL
+             )",
+            params![provider_kind, id, claim_token],
+            |row| row.get(0),
+        )?;
+        if !claimed {
+            return Err(StoreError::NotFound {
+                kind: "claimed provider event",
+                id: id.into(),
+            });
+        }
+        Ok(())
+    }
+
     pub(super) fn reserve_provider_event_sequence_sqlite(
         &self,
         provider_kind: &str,
@@ -181,7 +205,7 @@ impl SqliteStore {
     }
 }
 
-pub(super) fn validate_new_provider_event(event: &ProviderEventRecord) -> Result<()> {
+pub(crate) fn validate_new_provider_event(event: &ProviderEventRecord) -> Result<()> {
     if event.id.trim().is_empty()
         || event.provider_kind.trim().is_empty()
         || event.binding_digest.trim().is_empty()

@@ -123,3 +123,39 @@ async fn tenant_hub_catalog_serves_bound_tenant() {
     assert_eq!(ctx.get(&object.id).await.unwrap(), Some(object.clone()));
     assert_eq!(ctx.list_kind(&object.kind).await.unwrap(), vec![object]);
 }
+
+#[tokio::test]
+async fn tenant_hub_catalog_enqueues_provider_events() {
+    use crate::storage::{CatalogGraph, MemoryCatalogGraph};
+    use std::sync::Arc;
+
+    let graph = Arc::new(MemoryCatalogGraph::new());
+    let object = Object {
+        id: "tenkai:conformance:outbox".into(),
+        kind: "tenkai.conformance".into(),
+        name: "original".into(),
+        ..Default::default()
+    };
+    graph.create(Some("tenant-a"), object.clone()).unwrap();
+    let mut updated = object.clone();
+    updated.name = "terminal".into();
+    let event = crate::storage::ProviderEventRecord {
+        id: "event-1".into(),
+        provider_kind: "outcome".into(),
+        binding_digest: "digest".into(),
+        payload_json: r#"{"binding":{"environment_id":"prod"},"payload_json":"{}"}"#.into(),
+        attempts: 0,
+        next_attempt_at: 1,
+        delivered_at: None,
+        last_error: String::new(),
+        claim_token: None,
+        claim_until: None,
+    };
+    let mut ctx =
+        Ctx::tenant_hub_catalog_with_outcome_export(graph, true).with_catalog_tenant("tenant-a");
+    assert!(ctx.outcome_export_enabled());
+    ctx.put_with_provider_events(updated.clone(), std::slice::from_ref(&event), &[])
+        .await
+        .unwrap();
+    assert_eq!(ctx.get(&object.id).await.unwrap().unwrap().name, "terminal");
+}

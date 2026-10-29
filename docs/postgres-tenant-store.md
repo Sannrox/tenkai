@@ -11,7 +11,8 @@ profiles. The default `local` profile and experimental single-server `fleet`
 profile use SQLite. Tenant-mode hubs assemble diagnostic profile
 `enterprise-experimental` from PostgreSQL plus authentication. Catalog
 object-graph lifecycle lives in each tenant schema (ADR 0038). Terminal-outcome
-export remains unavailable until the tenant outbox lands (#765).
+export enqueues `provider_events` in that same tenant schema with the catalog
+write.
 
 | Role | Store |
 | --- | --- |
@@ -45,7 +46,7 @@ shared application store, or supported failover. It does **not** advertise
 | --- | --- |
 | `shared_replica_state` | Shared durable state for this adapter; sufficient for single-active-writer component tests |
 | Tick fence table | `tenkai_reconcile_tick_claims` for multi-host reconcile (#135); not a HA product claim |
-| Not claimed yet | Product `high_availability`, terminal-outcome export |
+| Not claimed yet | Product `high_availability` |
 
 Community SQLite never advertises `shared_replica_state`.
 The two-connection mutation and lease-handoff proof is documented in
@@ -155,7 +156,10 @@ In-memory adapter remains for unit tests (`ServerConfig.tenant_store = Some(Arc:
 
 `--replica-count > 1` passes capability negotiation when the Postgres hub store
 is composed (#128). Multi-active reconcile uses tick fencing (#129). Catalog
-lifecycle stays fail-closed in tenant mode. `--outcome-provider chisei` is
-refused until PostgreSQL atomic outbox wiring exists. Product
+lifecycle and terminal-outcome export share one tenant-schema transaction.
+`--outcome-provider chisei` starts on a tenant-mode hub and drains each tenant
+outbox, allocating `source_sequence` from the hub producer identity. Catalog
+enqueue stamps the tenant into the outcome payload so exported event IDs stay
+distinct across tenants. Product
 `high_availability` remains unclaimed. Lab steps:
 [multi-replica-hub-runbook.md](multi-replica-hub-runbook.md) (#130).

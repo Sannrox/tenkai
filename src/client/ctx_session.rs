@@ -43,23 +43,33 @@ impl Ctx {
     /// does not open SQLite. Writes fail closed until a catalog and tenant
     /// are bound.
     pub fn tenant_hub() -> Self {
-        Self::tenant_hub_backend(None, None)
+        Self::tenant_hub_backend(None, None, false)
     }
 
     /// Tenant-mode hub with a catalog adapter. Bind the tenant from the
     /// authenticated request before catalog writes.
     pub fn tenant_hub_catalog(catalog: Arc<dyn crate::storage::CatalogGraph>) -> Self {
-        Self::tenant_hub_backend(Some(catalog), None)
+        Self::tenant_hub_catalog_with_outcome_export(catalog, false)
+    }
+
+    /// Tenant-mode hub that enqueues terminal outcomes in the tenant catalog
+    /// transaction when `outcome_export_enabled` is set.
+    pub fn tenant_hub_catalog_with_outcome_export(
+        catalog: Arc<dyn crate::storage::CatalogGraph>,
+        outcome_export_enabled: bool,
+    ) -> Self {
+        Self::tenant_hub_backend(Some(catalog), None, outcome_export_enabled)
     }
 
     fn tenant_hub_backend(
         catalog: Option<Arc<dyn crate::storage::CatalogGraph>>,
         tenant: Option<String>,
+        outcome_export_enabled: bool,
     ) -> Self {
         Self {
             backend: Backend::TenantHub { catalog, tenant },
             canary_schema_preflight: Arc::new(OnceCell::new()),
-            outcome_export_enabled: false,
+            outcome_export_enabled,
             outcome_inspection_enabled: true,
             release_trust_roots: None,
             require_host_release_trust: false,

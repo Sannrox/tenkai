@@ -1,7 +1,7 @@
 use anyhow::Context as _;
 use tenkai::pb::graph_action::{ActionResult, ActionTypeDef};
 use tenkai::pb::sekai::{Decision, Lease, Link, Object, ObjectChange, ObjectType};
-use tenkai::storage::{CatalogGraph, Result, StoreError};
+use tenkai::storage::{CatalogGraph, ProviderEventRecord, Result, StoreError};
 
 use super::PostgresTenantOperationalStore;
 use super::tenant_schema_name;
@@ -371,6 +371,82 @@ impl CatalogGraph for PostgresTenantOperationalStore {
         #[cfg(not(feature = "postgres"))]
         {
             let _ = (schema, objects, namespace, key, fencing_token);
+            Err(postgres_disabled().into())
+        }
+    }
+
+    fn put_with_provider_events(
+        &self,
+        tenant: Option<&str>,
+        object: Object,
+        events: &[ProviderEventRecord],
+    ) -> anyhow::Result<Object> {
+        let schema = self.catalog_schema(tenant)?;
+        #[cfg(feature = "postgres")]
+        {
+            let events = tenkai::providers::bind_tenant_to_provider_events(tenant, events)?;
+            self.inner.catalog_put_objects_with_provider_events(
+                &schema,
+                std::slice::from_ref(&object),
+                &events,
+            )?;
+            Ok(object)
+        }
+        #[cfg(not(feature = "postgres"))]
+        {
+            let _ = (schema, object, events);
+            Err(postgres_disabled().into())
+        }
+    }
+
+    fn put_objects_with_provider_events(
+        &self,
+        tenant: Option<&str>,
+        objects: &[Object],
+        events: &[ProviderEventRecord],
+    ) -> anyhow::Result<()> {
+        let schema = self.catalog_schema(tenant)?;
+        #[cfg(feature = "postgres")]
+        {
+            let events = tenkai::providers::bind_tenant_to_provider_events(tenant, events)?;
+            Ok(self
+                .inner
+                .catalog_put_objects_with_provider_events(&schema, objects, &events)?)
+        }
+        #[cfg(not(feature = "postgres"))]
+        {
+            let _ = (schema, objects, events);
+            Err(postgres_disabled().into())
+        }
+    }
+
+    fn guarded_put_objects_with_provider_events(
+        &self,
+        tenant: Option<&str>,
+        objects: Vec<Object>,
+        namespace: &str,
+        key: &str,
+        fencing_token: &str,
+        events: &[ProviderEventRecord],
+    ) -> anyhow::Result<()> {
+        let schema = self.catalog_schema(tenant)?;
+        #[cfg(feature = "postgres")]
+        {
+            let events = tenkai::providers::bind_tenant_to_provider_events(tenant, events)?;
+            Ok(self
+                .inner
+                .catalog_guarded_put_objects_with_provider_events(
+                    &schema,
+                    objects,
+                    namespace,
+                    key,
+                    fencing_token,
+                    &events,
+                )?)
+        }
+        #[cfg(not(feature = "postgres"))]
+        {
+            let _ = (schema, objects, namespace, key, fencing_token, events);
             Err(postgres_disabled().into())
         }
     }

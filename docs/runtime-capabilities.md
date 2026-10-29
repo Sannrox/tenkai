@@ -169,8 +169,9 @@ Automated coverage lives in `community_sqlite_compatibility_matrix()` and the
 
 ## Non-goals
 
-This contract does **not** implement product high availability, catalog
-object-graph lifecycle on PostgreSQL, or terminal-outcome export. Adapters
+This contract does **not** implement product high availability. Catalog
+object-graph lifecycle and terminal-outcome export live in each PostgreSQL
+tenant schema. Adapters
 add component capabilities by implementing
 `OperationalStore::runtime_capabilities` and composing auth extension claims;
 ADR 0010 separately governs operator support.

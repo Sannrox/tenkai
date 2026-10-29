@@ -41,6 +41,17 @@ impl Ctx {
         events: &[crate::storage::ProviderEventRecord],
         observations: &[crate::feedback_observation::FeedbackObservation],
     ) -> Result<Object> {
+        if let Some((catalog, Some(tenant))) = self.catalog_binding() {
+            let _ = observations;
+            if events.is_empty() {
+                return self.put(object).await;
+            }
+            let events = events.to_vec();
+            return super::block_catalog(catalog, move |catalog| {
+                catalog.put_with_provider_events(Some(&tenant), object, &events)
+            })
+            .await;
+        }
         let Some(store) = self.embedded_arc() else {
             if events.is_empty() {
                 return self.put(object).await;
@@ -66,6 +77,15 @@ impl Ctx {
         events: &[crate::storage::ProviderEventRecord],
         observations: &[crate::feedback_observation::FeedbackObservation],
     ) -> Result<()> {
+        if let Some((catalog, Some(tenant))) = self.catalog_binding() {
+            let _ = observations;
+            let objects = objects.to_vec();
+            let events = events.to_vec();
+            return super::block_catalog(catalog, move |catalog| {
+                catalog.put_objects_with_provider_events(Some(&tenant), &objects, &events)
+            })
+            .await;
+        }
         let Some(store) = self.embedded_arc() else {
             anyhow::bail!(
                 "remote application state cannot atomically update objects and enqueue Tenkai provider events"
@@ -202,24 +222,23 @@ impl Ctx {
         observations: &[crate::feedback_observation::FeedbackObservation],
     ) -> Result<()> {
         if let Some((catalog, Some(tenant))) = self.catalog_binding() {
-            if !events.is_empty() {
-                anyhow::bail!("remote catalog cannot atomically enqueue Tenkai provider events");
-            }
             // CatalogGraph is the object graph. Feedback rows stay on the
-            // operational store; empty-event catalog writes drop observations
-            // the same way remote application state does.
+            // operational store; catalog writes drop observations the same way
+            // remote application state does (#802).
             let _ = observations;
             let objects = objects.to_vec();
             let lease_namespace = lease_namespace.to_string();
             let lease_key = lease_key.to_string();
             let fencing_token = fencing_token.to_string();
+            let events = events.to_vec();
             return super::block_catalog(catalog, move |catalog| {
-                catalog.guarded_put_many(
+                catalog.guarded_put_objects_with_provider_events(
                     Some(&tenant),
                     objects,
                     &lease_namespace,
                     &lease_key,
                     &fencing_token,
+                    &events,
                 )
             })
             .await;

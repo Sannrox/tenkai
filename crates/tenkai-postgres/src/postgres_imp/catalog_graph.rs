@@ -9,6 +9,7 @@ use tenkai::storage::{
     release_record_to_object,
 };
 
+use super::provider_queue::enqueue_provider_event_in;
 use super::*;
 use super::{Inner, ensure_environment_active, pg};
 
@@ -490,6 +491,54 @@ impl Inner {
         })
     }
 
+    pub fn catalog_put_objects_with_provider_events(
+        &self,
+        schema: &str,
+        objects: &[Object],
+        events: &[ProviderEventRecord],
+    ) -> Result<()> {
+        if objects.is_empty() {
+            return Err(StoreError::InvalidData {
+                kind: "catalog",
+                detail: "object update is empty".into(),
+            });
+        }
+        let objects = objects.to_vec();
+        let events = events.to_vec();
+        self.with_writer_schema(schema, move |tx| {
+            catalog_put_objects_with_provider_events_in(tx, &objects, &events, None)
+        })
+    }
+
+    pub fn catalog_guarded_put_objects_with_provider_events(
+        &self,
+        schema: &str,
+        objects: Vec<Object>,
+        namespace: &str,
+        key: &str,
+        fencing_token: &str,
+        events: &[ProviderEventRecord],
+    ) -> Result<()> {
+        if objects.is_empty() {
+            return Err(StoreError::InvalidData {
+                kind: "catalog",
+                detail: "object update is empty".into(),
+            });
+        }
+        let namespace = namespace.to_owned();
+        let key = key.to_owned();
+        let fencing_token = fencing_token.to_owned();
+        let events = events.to_vec();
+        self.with_writer_schema(schema, move |tx| {
+            catalog_put_objects_with_provider_events_in(
+                tx,
+                &objects,
+                &events,
+                Some((namespace.as_str(), key.as_str(), fencing_token.as_str())),
+            )
+        })
+    }
+
     pub fn catalog_register_schema(&self, schema: &str, object_type: &ObjectType) -> Result<()> {
         let object_type = object_type.clone();
         self.with_writer_schema(schema, move |tx| {
@@ -823,6 +872,52 @@ fn catalog_list_kind_in(tx: &mut Transaction<'_>, kind: &str) -> Result<Vec<Obje
     ids.into_iter()
         .map(|id| catalog_get_in(tx, &id)?.ok_or(StoreError::NotFound { kind: "object", id }))
         .collect()
+}
+
+fn catalog_put_objects_with_provider_events_in(
+    tx: &mut Transaction<'_>,
+    objects: &[Object],
+    events: &[ProviderEventRecord],
+    lease: Option<(&str, &str, &str)>,
+) -> Result<()> {
+    let unique = objects
+        .iter()
+        .map(|object| object.id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    if unique.len() != objects.len() {
+        return Err(StoreError::InvalidData {
+            kind: "catalog",
+            detail: "object update contains duplicate identities".into(),
+        });
+    }
+    if let Some((namespace, key, fencing_token)) = lease {
+        if namespace == ENVIRONMENT_LEASE_NAMESPACE {
+            lock_typed_environment_if_present(tx, key)?;
+            lock_catalog_apply_leases(tx, key)?;
+        } else {
+            lock_catalog_lease(tx, namespace, key)?;
+        }
+        require_active_lease_in(tx, namespace, key, fencing_token)?;
+    }
+    for object in objects {
+        lock_environment_writes(tx, object)?;
+        lock_catalog_object(tx, &object.id)?;
+        let previous = catalog_get_in(tx, &object.id)?;
+        if previous.is_none() {
+            return Err(StoreError::NotFound {
+                kind: "object",
+                id: object.id.clone(),
+            });
+        }
+        catalog_put_in(tx, object)?;
+        if let Some(previous) = previous {
+            record_changes_in(tx, &previous, object)?;
+        }
+    }
+    for event in events {
+        enqueue_provider_event_in(tx, event)?;
+    }
+    Ok(())
 }
 
 fn catalog_put_in(tx: &mut Transaction<'_>, object: &Object) -> Result<()> {

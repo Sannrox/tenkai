@@ -1,6 +1,10 @@
+use std::sync::Arc;
+
 use tenkai::auth_context::AuthenticatedRequestContext;
 use tenkai::runtime_capabilities::ComponentCapabilities;
-use tenkai::storage::EnvironmentRecord;
+use tenkai::storage::{
+    EnvironmentRecord, OperationalStore, ProviderEventRecord, Result as StoreResult,
+};
 use tenkai::tenant_isolation::IsolationError;
 use tenkai::tenant_store::TenantOperationalStore;
 
@@ -118,6 +122,41 @@ impl TenantOperationalStore for PostgresTenantOperationalStore {
         partition
             .list_change_events_after(cursor, limit)
             .map_err(|error| IsolationError::Contract(error.to_string()))
+    }
+
+    fn list_provider_events_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        provider_kind: &str,
+        environment_id: &str,
+        limit: usize,
+    ) -> std::result::Result<Vec<ProviderEventRecord>, IsolationError> {
+        let partition = self.partition_for(context)?;
+        partition
+            .list_provider_events(provider_kind, environment_id, limit)
+            .map_err(|error| IsolationError::Contract(error.to_string()))
+    }
+
+    fn provider_event_partitions(&self) -> StoreResult<Vec<Arc<dyn OperationalStore>>> {
+        #[cfg(feature = "postgres")]
+        {
+            let mut partitions: Vec<Arc<dyn OperationalStore>> =
+                vec![Arc::new(self.hub_partition()?)];
+            for schema in self.inner.list_tenant_schemas()? {
+                partitions.push(Arc::new(super::PostgresTenantPartition {
+                    tenant_id: schema.clone(),
+                    schema,
+                    inner: self.inner.clone(),
+                }));
+            }
+            Ok(partitions)
+        }
+        #[cfg(not(feature = "postgres"))]
+        {
+            Err(tenkai::storage::StoreError::AdapterUnavailable(
+                "postgres feature is disabled".into(),
+            ))
+        }
     }
 }
 
