@@ -98,7 +98,12 @@ pub(super) async fn content_inventory(
         Ok(credential) => credential,
         Err(error) => return *error,
     };
-    manage_result(state.management.content_inventory(&credential).await)
+    manage_result(
+        state
+            .management
+            .content_inventory(&credential, state.config.imports.as_ref())
+            .await,
+    )
 }
 
 /// `GET /v1/trust/runway` (#811): per waiting plan, the first certificate

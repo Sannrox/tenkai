@@ -816,7 +816,7 @@ pub fn copy_referenced_chunks(
     Ok(())
 }
 
-fn chunk_path(chunk_dir: &Path, digest: &str) -> Result<PathBuf> {
+pub(crate) fn chunk_path(chunk_dir: &Path, digest: &str) -> Result<PathBuf> {
     let hex = digest
         .strip_prefix("sha256:")
         .context("chunk digest must be sha256-prefixed")?;
@@ -926,6 +926,46 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("tenkai-chunks-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// #827: the inventory lists a staged weight's chunks, each marked by
+    /// whether its file sits in the staged chunk store.
+    #[test]
+    fn staged_chunks_are_listed_under_their_weight() {
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let dir = sandbox();
+        let source = dir.join("weight.bin");
+        write_pattern(&source, 3 * 1024 * 1024);
+        let chunks = dir.join("delivery.chunks");
+        let artifact = export_weight_chunks(&source, &chunks, 1024 * 1024).unwrap();
+        sample_bundle(&key, artifact.clone())
+            .save(&dir.join("delivery.json"))
+            .unwrap();
+        fs::remove_file(chunk_path(&chunks, &artifact.chunks[1].digest).unwrap()).unwrap();
+        let index = crate::content_inventory::staged_chunk_index(&dir).unwrap();
+        let listed = &index[&artifact.digest];
+        assert_eq!(
+            listed
+                .iter()
+                .map(|chunk| (
+                    chunk.index,
+                    chunk.digest.as_str(),
+                    chunk.size_bytes,
+                    chunk.staged
+                ))
+                .collect::<Vec<_>>(),
+            artifact
+                .chunks
+                .iter()
+                .map(|chunk| (
+                    chunk.index,
+                    chunk.digest.as_str(),
+                    chunk.size,
+                    chunk.index != 1
+                ))
+                .collect::<Vec<_>>()
+        );
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

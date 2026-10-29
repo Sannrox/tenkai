@@ -376,7 +376,11 @@ their transfer process. The server never accepts bundle bytes over HTTP.
   environment, plan, expiry, whether a chunk store sits beside them, why
   a file is not a readable bundle, and `archive_digest`, the SHA-256 of the
   archive file. A file is hashed once and rehashed only after it changes
-  (size, modification or change time, or inode).
+  (size, modification or change time, or inode). `upgrade` names the
+  upgrade the bundle serves, derived from the upgrade records: the one
+  upgrade whose release the bundle carries and whose plan for the bundle's
+  environment is the bundle's plan. The bundle itself names no upgrade, so
+  with no match, or more than one, `upgrade` is absent.
 - `POST /v1/imports` takes `{version, operation: "import", bundle, upgrade,
   environment, dry_run}`. `bundle` is a file name in the staging directory.
   Paths, hidden files and links are refused. The import binds the bundle to
@@ -421,7 +425,13 @@ their transfer process. The server never accepts bundle bytes over HTTP.
   digest names and not re-hashed for the listing; import, apply and fetch
   verify the bytes. It also shows what
   references the release (channel heads and deployed versions), the
-  referenced content that is missing, and the bytes each store uses.
+  referenced content that is missing, and the bytes each store uses and has
+  free (`oci_store_free_bytes`, `weight_cache_free_bytes`: what the
+  filesystem holding the store has available). A layer or weight that a
+  staged archive carries in chunks lists those chunks, each with whether
+  its file sits in the staged chunk store. `pending_plans` lists every plan
+  waiting to apply (`computed` or `blocked`) with its releases and the
+  content it still needs here; the list empties as the content is imported.
 
 Import needs the management capability. An environment-scoped credential
 can import only for its own environment, sees only its environment's

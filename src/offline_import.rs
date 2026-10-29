@@ -84,6 +84,13 @@ pub struct StagedBundle {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub archive_digest: Option<String>,
+    /// The upgrade this bundle serves (#827), derived from the upgrade
+    /// records: the one upgrade with this bundle's environment on its plan
+    /// and its release among the bundle's releases. Absent when none or
+    /// more than one matches; the bundle itself names no upgrade.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub upgrade: Option<String>,
 }
 
 /// Body of `POST /v1/imports`.
@@ -187,7 +194,50 @@ impl FileStamp {
 struct ArchiveReading {
     stamp: FileStamp,
     digest: Option<String>,
-    statement: std::result::Result<(String, String, i64), String>,
+    statement: std::result::Result<StagedStatement, String>,
+}
+
+/// What the listing reads from a staged archive, unverified: signatures are
+/// checked only by an import.
+#[derive(Debug, Clone)]
+struct StagedStatement {
+    environment: String,
+    plan_id: String,
+    expires_at_ms: i64,
+    release_ids: Vec<String>,
+    /// Chunked layers and weights the archive indexes (#827).
+    chunks: Vec<crate::offline_chunk_store::OfflineChunkArtifact>,
+}
+
+impl StagedStatement {
+    fn of(envelope: BundleEnvelope) -> Self {
+        use base64::Engine as _;
+        let chunks = envelope
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.path == crate::offline_chunk_store::CHUNK_MANIFEST_PATH
+                    || entry.path == crate::offline_bundle::IMAGE_CHUNKS_PATH
+            })
+            .filter_map(|entry| {
+                base64::engine::general_purpose::STANDARD
+                    .decode(&entry.content_base64)
+                    .ok()
+            })
+            .filter_map(|raw| {
+                serde_json::from_slice::<crate::offline_chunk_store::OfflineChunkManifest>(&raw)
+                    .ok()
+            })
+            .flat_map(|manifest| manifest.artifacts)
+            .collect();
+        Self {
+            environment: envelope.statement.environment_id,
+            plan_id: envelope.statement.plan_id,
+            expires_at_ms: envelope.statement.expires_at_unix_ms,
+            release_ids: envelope.statement.release_ids,
+            chunks,
+        }
+    }
 }
 
 /// Process-local and only an optimization: a restarted process hashes each
@@ -215,13 +265,7 @@ fn reading(path: &Path, stamp: FileStamp) -> ArchiveReading {
         Ok(raw) => (
             Some(archive_digest(&raw)),
             BundleEnvelope::parse(&raw)
-                .map(|envelope| {
-                    (
-                        envelope.statement.environment_id,
-                        envelope.statement.plan_id,
-                        envelope.statement.expires_at_unix_ms,
-                    )
-                })
+                .map(StagedStatement::of)
                 .map_err(|error| format!("{error:#}")),
         ),
         Err(error) => (None, Err(format!("{error:#}"))),
@@ -242,6 +286,78 @@ pub struct ImportJobList {
 /// Bundles in `staging`, by file name. Files that do not parse are listed
 /// with the reason, so an operator sees why a transfer is unusable.
 pub fn list_staged(staging: &Path) -> Result<Vec<StagedBundle>> {
+    Ok(scan_staged(staging)?
+        .into_iter()
+        .map(|(bundle, _, _)| bundle)
+        .collect())
+}
+
+/// [`list_staged`], each bundle with the upgrade it serves (#827).
+pub async fn list_staged_with_upgrades(ctx: &mut Ctx, staging: &Path) -> Result<Vec<StagedBundle>> {
+    let upgrades = crate::connectivity::list_upgrades(ctx).await?;
+    Ok(scan_staged(staging)?
+        .into_iter()
+        .map(|(mut bundle, _, read)| {
+            if let Ok(statement) = &read.statement {
+                bundle.upgrade = upgrade_of(statement, &upgrades);
+            }
+            bundle
+        })
+        .collect())
+}
+
+/// The one upgrade with `statement`'s environment on its plan and its
+/// release among the statement's; `None` when none or several match.
+fn upgrade_of(
+    statement: &StagedStatement,
+    upgrades: &[crate::connectivity::UpgradeRecord],
+) -> Option<String> {
+    let mut matching = upgrades.iter().filter(|upgrade| {
+        // Bundles name a release by id or `product@version`, either as is or
+        // with `:` and `@` replaced, as the bind accepts them.
+        let short = format!("{}@{}", upgrade.product, upgrade.version);
+        let names = [upgrade.release_id.as_str(), short.as_str()];
+        statement.release_ids.iter().any(|id| {
+            names
+                .iter()
+                .any(|name| id == name || *id == name.replace([':', '@'], "-"))
+        }) && upgrade.environments.iter().any(|environment| {
+            environment.name == statement.environment
+                && environment.plan_id.as_deref() == Some(statement.plan_id.as_str())
+        })
+    });
+    match (matching.next(), matching.next()) {
+        (Some(upgrade), None) => Some(upgrade.name.clone()),
+        _ => None,
+    }
+}
+
+/// Each chunked layer or weight the staged archives index, with the chunk
+/// store beside its archive (#827). Read from the listing's cached readings.
+pub fn staged_chunks(
+    staging: &Path,
+) -> Result<Vec<(PathBuf, crate::offline_chunk_store::OfflineChunkArtifact)>> {
+    let mut chunks = Vec::new();
+    for (_, path, read) in scan_staged(staging)? {
+        let (Ok(statement), Ok(dir)) = (
+            read.statement,
+            crate::offline_chunk_store::chunk_dir_beside(&path),
+        ) else {
+            continue;
+        };
+        chunks.extend(
+            statement
+                .chunks
+                .into_iter()
+                .map(|artifact| (dir.clone(), artifact)),
+        );
+    }
+    Ok(chunks)
+}
+
+/// Every staged archive with its path and reading, by file name. A file
+/// that vanishes while the directory is read is skipped.
+fn scan_staged(staging: &Path) -> Result<Vec<(StagedBundle, PathBuf, ArchiveReading)>> {
     let mut staged = Vec::new();
     let mut readings = HashMap::new();
     for entry in
@@ -251,7 +367,12 @@ pub fn list_staged(staging: &Path) -> Result<Vec<StagedBundle>> {
         let Some(file) = entry.file_name().to_str().map(str::to_string) else {
             continue;
         };
-        let metadata = entry.metadata()?;
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            // Removed or replaced while the directory was read: not staged now.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
         if !metadata.is_file() || !file.ends_with(".json") || file.starts_with('.') {
             continue;
         }
@@ -267,24 +388,25 @@ pub fn list_staged(staging: &Path) -> Result<Vec<StagedBundle>> {
             expires_at_ms: None,
             unreadable: None,
             archive_digest: read.digest.clone(),
+            upgrade: None,
         };
         match &read.statement {
-            Ok((environment, plan_id, expires_at_ms)) => {
-                bundle.environment = Some(environment.clone());
-                bundle.plan_id = Some(plan_id.clone());
-                bundle.expires_at_ms = Some(*expires_at_ms);
+            Ok(statement) => {
+                bundle.environment = Some(statement.environment.clone());
+                bundle.plan_id = Some(statement.plan_id.clone());
+                bundle.expires_at_ms = Some(statement.expires_at_ms);
             }
             Err(error) => bundle.unreadable = Some(error.clone()),
         }
-        readings.insert(path, read);
-        staged.push(bundle);
+        readings.insert(path.clone(), read.clone());
+        staged.push((bundle, path, read));
     }
     // Keep only this directory's current files; other directories' entries stay.
     let mut cache = READINGS.lock().unwrap_or_else(PoisonError::into_inner);
     let cache = cache.get_or_insert_with(HashMap::new);
     cache.retain(|path, _| path.parent() != Some(staging));
     cache.extend(readings);
-    staged.sort_by(|left, right| left.file.cmp(&right.file));
+    staged.sort_by(|left, right| left.0.file.cmp(&right.0.file));
     Ok(staged)
 }
 

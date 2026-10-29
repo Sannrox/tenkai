@@ -1381,6 +1381,15 @@ fn upgrade_object(record: &UpgradeRecord) -> Result<Object> {
     })
 }
 
+/// Every upgrade record (#827).
+pub async fn list_upgrades(ctx: &mut Ctx) -> Result<Vec<UpgradeRecord>> {
+    ctx.list_kind(KIND_CONNECTIVITY_UPGRADE)
+        .await?
+        .iter()
+        .map(record_from_object)
+        .collect()
+}
+
 /// `(product, version)` of every upgrade that has not finished: its target
 /// release must stay applicable here (#635).
 pub async fn unfinished_upgrade_releases(ctx: &mut Ctx) -> Result<Vec<(String, String)>> {
@@ -2958,6 +2967,28 @@ install = "true"
             ]
         );
         assert_ne!(imported.id, preview.id);
+        // #827: the staged bundle reports the upgrade it serves, derived from
+        // the upgrade records; none for an environment no upgrade plans.
+        let staged = crate::offline_import::list_staged_with_upgrades(&mut ctx, &staging)
+            .await
+            .unwrap();
+        assert_eq!(staged[0].upgrade.as_deref(), Some("fleet-staged"));
+        let stray = export_isolated_bundle(
+            "site-z",
+            started.environments[0].plan_id.as_deref().unwrap(),
+            &started.release_id,
+            b"immutable payload",
+            &exporter,
+            crate::now_millis(),
+        )
+        .unwrap();
+        stray.save(&staging.join("stray.json")).unwrap();
+        let staged = crate::offline_import::list_staged_with_upgrades(&mut ctx, &staging)
+            .await
+            .unwrap();
+        assert_eq!(staged[1].file, "stray.json");
+        assert_eq!(staged[1].upgrade, None);
+        std::fs::remove_file(staging.join("stray.json")).unwrap();
         // #830: the listing reports the staged archive's digest, and the dry
         // run and the import both record it.
         let staged_digest = |staging: &std::path::Path| {
@@ -3045,7 +3076,9 @@ install = "true"
         assert_eq!(refused.state, ImportState::Failed);
         assert!(refused.refusal.unwrap().contains("scope"));
 
-        let inventory = crate::content_inventory::inventory(&mut ctx).await.unwrap();
+        let inventory = crate::content_inventory::inventory(&mut ctx, Some(&staging))
+            .await
+            .unwrap();
         let release = inventory
             .releases
             .iter()

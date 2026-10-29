@@ -8,6 +8,12 @@
 //! referenced content the host holds no bytes for, which is what an operator
 //! must transfer before those releases can apply here.
 //!
+//! Additive since #827: each store's free bytes (what the filesystem holding
+//! it has available), each layer's or weight's chunks staged for import
+//! (from the staged archives' chunk indexes, unverified, with whether the
+//! chunk file is beside the archive), and per pending plan the content it
+//! still needs. Nothing here re-hashes a file.
+//!
 //! [`collect`] removes the content only releases nothing keeps name (#635):
 //! a release is kept while a channel heads it, an environment has it
 //! deployed or as its previous deployment (N-1, so rollback needs no
@@ -36,6 +42,49 @@ pub struct ContentInventory {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub weight_cache_bytes: Option<u64>,
+    /// Bytes available to this process on the filesystem of the OCI store;
+    /// absent when no store is configured or it cannot be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub oci_store_free_bytes: Option<u64>,
+    /// The same for the weight cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub weight_cache_free_bytes: Option<u64>,
+    /// Plans waiting to apply (`computed` or `blocked`) and the content each
+    /// still needs here (#827).
+    #[serde(default)]
+    pub pending_plans: Vec<PendingPlanContent>,
+    /// Why staged chunks are not listed when the staging directory could
+    /// not be read; the rest of the inventory stands without them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub staging_unavailable: Option<String>,
+}
+
+/// One plan waiting to apply and the content of its releases this host
+/// holds no bytes for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PendingPlanContent {
+    pub plan_id: String,
+    pub environment: String,
+    pub state: String,
+    /// The releases its steps apply.
+    pub releases: Vec<String>,
+    /// As `<release> <digest>`; empty once everything is here. Content of a
+    /// store that is not configured is not counted.
+    pub missing: Vec<String>,
+}
+
+/// One chunk of a chunked layer or weight, as a staged archive indexes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ContentChunk {
+    pub index: u32,
+    pub digest: String,
+    pub size_bytes: u64,
+    /// Whether the chunk file sits in a staged chunk store. Found by name,
+    /// not re-hashed; import verifies every chunk.
+    pub staged: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -64,6 +113,10 @@ pub struct ContentItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub size_bytes: Option<u64>,
+    /// Its chunks staged for import, in order (#827); empty when no staged
+    /// archive carries it chunked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chunks: Vec<ContentChunk>,
 }
 
 impl ContentInventory {
@@ -81,11 +134,18 @@ impl ContentInventory {
                 .split_once(' ')
                 .is_some_and(|(release, _)| kept.contains(release))
         });
+        // A plan is shown only when every release it applies is admitted.
+        self.pending_plans.retain(|plan| {
+            plan.releases
+                .iter()
+                .all(|release| kept.contains(release.as_str()))
+        });
     }
 }
 
-/// Inventory of the content stores configured in this process's environment.
-pub async fn inventory(ctx: &mut Ctx) -> Result<ContentInventory> {
+/// Inventory of the content stores configured in this process's environment,
+/// with the chunks staged in `staging` when imports are configured.
+pub async fn inventory(ctx: &mut Ctx, staging: Option<&Path>) -> Result<ContentInventory> {
     let oci_root = crate::host_env::var_os("TENKAI_OCI_STORE")
         .filter(|root| !root.is_empty())
         .map(std::path::PathBuf::from);
@@ -98,6 +158,11 @@ pub async fn inventory(ctx: &mut Ctx) -> Result<ContentInventory> {
             .map(|(digest, files)| (digest, files[0].1))
             .collect::<HashMap<_, _>>()
     });
+    let (staged_chunks, staging_unavailable) = match staging.map(staged_chunk_index) {
+        None => (HashMap::new(), None),
+        Some(Ok(index)) => (index, None),
+        Some(Err(error)) => (HashMap::new(), Some(format!("{error:#}"))),
+    };
     let mut references: Vec<(String, String, String)> = Vec::new();
     for channel in crate::catalog::list_channels(ctx).await? {
         references.push((
@@ -106,7 +171,8 @@ pub async fn inventory(ctx: &mut Ctx) -> Result<ContentInventory> {
             format!("channel {}/{}", channel.product, channel.name),
         ));
     }
-    for environment in crate::environment::list_environments(ctx).await? {
+    let environments = crate::environment::list_environments(ctx).await?;
+    for environment in &environments {
         for row in crate::environment::status(ctx, &environment.name).await? {
             if let Some(deployed) = row.deployed {
                 references.push((
@@ -173,12 +239,124 @@ pub async fn inventory(ctx: &mut Ctx) -> Result<ContentInventory> {
         });
     }
     releases.sort_by(|left, right| left.id.cmp(&right.id));
+    for release in &mut releases {
+        for item in &mut release.content {
+            item.chunks = staged_chunks.get(&item.digest).cloned().unwrap_or_default();
+        }
+    }
+    let mut pending_plans = Vec::new();
+    for environment in &environments {
+        let waiting = crate::plan::list_for_environment(
+            ctx,
+            &environment.name,
+            Some(&[
+                crate::plan::PlanState::Computed,
+                crate::plan::PlanState::Blocked,
+            ]),
+        )
+        .await?;
+        for plan in waiting {
+            pending_plans.push(pending_plan(&plan, &releases));
+        }
+    }
     Ok(ContentInventory {
         releases,
         missing,
         oci_store_bytes: oci_root.as_deref().map(directory_bytes),
         weight_cache_bytes: weights.as_ref().map(|cache| directory_bytes(cache.root())),
+        oci_store_free_bytes: oci_root.as_deref().and_then(free_bytes),
+        weight_cache_free_bytes: weights.as_ref().and_then(|cache| free_bytes(cache.root())),
+        pending_plans,
+        staging_unavailable,
     })
+}
+
+/// `plan`, its releases, and their content this host holds no bytes for.
+fn pending_plan(plan: &crate::plan::Plan, releases: &[ReleaseContent]) -> PendingPlanContent {
+    let applied: BTreeSet<&str> = plan
+        .steps
+        .iter()
+        .map(|step| step.release_id.as_str())
+        .collect();
+    let missing = releases
+        .iter()
+        .filter(|release| applied.contains(release.id.as_str()))
+        .flat_map(|release| {
+            release
+                .content
+                .iter()
+                .filter(|item| item.stored == Some(false))
+                .map(|item| format!("{} {}", release.id, item.digest))
+        })
+        .collect();
+    PendingPlanContent {
+        plan_id: plan.id.clone(),
+        environment: plan.environment.clone(),
+        state: plan.state.to_string(),
+        releases: applied.into_iter().map(str::to_string).collect(),
+        missing,
+    }
+}
+
+/// Chunks staged for each chunked layer or weight, by its digest, as the
+/// first archive carrying it chunks it. A chunk counts as staged when any
+/// staged chunk store holds a file for its digest.
+pub(crate) fn staged_chunk_index(staging: &Path) -> Result<HashMap<String, Vec<ContentChunk>>> {
+    let artifacts = crate::offline_import::staged_chunks(staging)?;
+    let held: BTreeSet<&str> = artifacts
+        .iter()
+        .flat_map(|(dir, artifact)| artifact.chunks.iter().map(move |chunk| (dir, chunk)))
+        .filter(|(dir, chunk)| {
+            crate::offline_chunk_store::chunk_path(dir, &chunk.digest)
+                .is_ok_and(|path| path.is_file())
+        })
+        .map(|(_, chunk)| chunk.digest.as_str())
+        .collect();
+    let mut index = HashMap::new();
+    for (_, artifact) in &artifacts {
+        index.entry(artifact.digest.clone()).or_insert_with(|| {
+            artifact
+                .chunks
+                .iter()
+                .map(|chunk| ContentChunk {
+                    index: chunk.index,
+                    digest: chunk.digest.clone(),
+                    size_bytes: chunk.size,
+                    staged: held.contains(chunk.digest.as_str()),
+                })
+                .collect()
+        });
+    }
+    Ok(index)
+}
+
+/// Bytes available to this process on the filesystem holding `path`, or
+/// its nearest existing ancestor when the store is not created yet.
+fn free_bytes(path: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt as _;
+    // A relative path's last ancestor is empty: the working directory.
+    let existing = path
+        .ancestors()
+        .map(|candidate| {
+            if candidate.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                candidate
+            }
+        })
+        .find(|candidate| candidate.exists())?;
+    let raw = std::ffi::CString::new(existing.as_os_str().as_bytes()).ok()?;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: `raw` is a NUL-terminated path, and `stats` is read only after
+    // statvfs succeeded and filled it.
+    let stats = unsafe {
+        if libc::statvfs(raw.as_ptr(), stats.as_mut_ptr()) != 0 {
+            return None;
+        }
+        stats.assume_init()
+    };
+    #[allow(clippy::useless_conversion)] // the field widths differ by platform
+    Some(u64::from(stats.f_bavail).saturating_mul(u64::from(stats.f_frsize)))
 }
 
 fn item(digest: String, kind: &str, size: Option<Option<u64>>) -> ContentItem {
@@ -187,6 +365,7 @@ fn item(digest: String, kind: &str, size: Option<Option<u64>>) -> ContentItem {
         kind: kind.into(),
         stored: size.map(|size| size.is_some()),
         size_bytes: size.flatten(),
+        chunks: Vec::new(),
     }
 }
 
@@ -568,4 +747,153 @@ fn release_digests(
         digests.insert(("weights", digest));
     }
     Ok(digests)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pb::sekai::Object;
+
+    fn temp_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-inventory-{name}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// #827: a pending plan lists the layer this host lacks until it is
+    /// stored, and free space is the filesystem's available bytes.
+    #[tokio::test]
+    async fn a_pending_plan_lists_its_missing_layer_until_it_is_stored() {
+        let root = temp_root("pending");
+        let oci = root.join("oci");
+        std::fs::create_dir_all(&oci).unwrap();
+        let _stores = crate::host_env::overlay::set([
+            ("TENKAI_OCI_STORE", Some(oci.as_os_str())),
+            ("TENKAI_WEIGHT_CACHE", None),
+        ]);
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let bytes = b"layer-a".to_vec();
+        let layer = OciArtifactRef {
+            registry: "ghcr.io".into(),
+            repository: "edge/app".into(),
+            digest: format!("sha256:{:x}", Sha256::digest(&bytes)),
+            media_type: "application/vnd.oci.image.layer.v1.tar".into(),
+            sbom: None,
+        };
+        let release = crate::ontology::release_id("edge-app", "1.0.0");
+        ctx.create_once(Object {
+            id: release.clone(),
+            kind: crate::ontology::KIND_RELEASE.into(),
+            name: "edge-app@1.0.0".into(),
+            namespace: crate::ontology::NS.into(),
+            external_id: String::new(),
+            properties: HashMap::from([
+                ("product".into(), "edge-app".into()),
+                ("version".into(), "1.0.0".into()),
+                (
+                    "oci_artifacts".into(),
+                    serde_json::to_string(&[&layer]).unwrap(),
+                ),
+            ]),
+            created: 1,
+            updated: 1,
+        })
+        .await
+        .unwrap();
+        crate::plan::env_add(&mut ctx, "site", "isolated")
+            .await
+            .unwrap();
+        let plan = crate::plan::create_from_steps(
+            &mut ctx,
+            "site",
+            vec![crate::plan::Step {
+                id: "s1".into(),
+                order: 0,
+                product: "edge-app".into(),
+                action: crate::plan::Action::Install,
+                from: None,
+                to: "1.0.0".into(),
+                release_id: release.clone(),
+                release_digest: String::new(),
+                artifact_digest: String::new(),
+                workdir: String::new(),
+                restore: None,
+            }],
+        )
+        .await
+        .unwrap();
+
+        let before = inventory(&mut ctx, None).await.unwrap();
+        assert_eq!(
+            before.pending_plans,
+            [PendingPlanContent {
+                plan_id: plan.id.clone(),
+                environment: "site".into(),
+                state: "computed".into(),
+                releases: vec![release.clone()],
+                missing: vec![format!("{release} {}", layer.digest)],
+            }]
+        );
+        crate::oci_artifact::FilesystemArtifactRegistry::new(oci.clone())
+            .put(&layer, bytes)
+            .unwrap();
+        let after = inventory(&mut ctx, None).await.unwrap();
+        assert_eq!(after.pending_plans[0].plan_id, plan.id);
+        assert!(after.pending_plans[0].missing.is_empty());
+
+        // Free space is what `df` reports available for the store, give or
+        // take what concurrent writers on the filesystem change meanwhile.
+        let reported = after.oci_store_free_bytes.unwrap();
+        let df = std::process::Command::new("df")
+            .args(["-Pk"])
+            .arg(&oci)
+            .output()
+            .unwrap();
+        let df = String::from_utf8(df.stdout).unwrap();
+        let available_kib: u64 = df
+            .lines()
+            .nth(1)
+            .and_then(|line| line.split_whitespace().nth(3))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let tolerance = 256 * 1024 * 1024;
+        assert!(
+            reported.abs_diff(available_kib * 1024) < tolerance,
+            "{reported} vs {available_kib} KiB"
+        );
+        assert_eq!(after.weight_cache_free_bytes, None);
+        assert_eq!(after.staging_unavailable, None);
+
+        // An unreadable staging directory leaves the rest of the inventory.
+        let degraded = inventory(&mut ctx, Some(&root.join("no-such-staging")))
+            .await
+            .unwrap();
+        assert!(
+            degraded
+                .staging_unavailable
+                .as_deref()
+                .is_some_and(|reason| reason.contains("no-such-staging")),
+            "{:?}",
+            degraded.staging_unavailable
+        );
+        assert_eq!(degraded.pending_plans, after.pending_plans);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A relative store path none of whose parts exist yet measures the
+    /// working directory's filesystem.
+    #[test]
+    fn free_space_of_an_uncreated_relative_store_is_the_working_directory() {
+        let missing = PathBuf::from(format!("tenkai-missing-{}/oci", uuid::Uuid::new_v4()));
+        assert!(!missing.exists());
+        let free = free_bytes(&missing).unwrap();
+        let here = free_bytes(Path::new(".")).unwrap();
+        assert!(free.abs_diff(here) < 256 * 1024 * 1024, "{free} vs {here}");
+    }
 }

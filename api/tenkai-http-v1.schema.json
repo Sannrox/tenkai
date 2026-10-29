@@ -1096,6 +1096,35 @@
       ],
       "type": "string"
     },
+    "ContentChunk": {
+      "description": "One chunk of a chunked layer or weight, as a staged archive indexes it.",
+      "properties": {
+        "digest": {
+          "type": "string"
+        },
+        "index": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "size_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "staged": {
+          "description": "Whether the chunk file sits in a staged chunk store. Found by name,\nnot re-hashed; import verifies every chunk.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "index",
+        "digest",
+        "size_bytes",
+        "staged"
+      ],
+      "type": "object"
+    },
     "ContentInventory": {
       "properties": {
         "missing": {
@@ -1111,14 +1140,38 @@
           "minimum": 0,
           "type": "integer"
         },
+        "oci_store_free_bytes": {
+          "description": "Bytes available to this process on the filesystem of the OCI store;\nabsent when no store is configured or it cannot be read.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "pending_plans": {
+          "default": [],
+          "description": "Plans waiting to apply (`computed` or `blocked`) and the content each\nstill needs here (#827).",
+          "items": {
+            "$ref": "#/$defs/PendingPlanContent"
+          },
+          "type": "array"
+        },
         "releases": {
           "items": {
             "$ref": "#/$defs/ReleaseContent"
           },
           "type": "array"
         },
+        "staging_unavailable": {
+          "description": "Why staged chunks are not listed when the staging directory could\nnot be read; the rest of the inventory stands without them.",
+          "type": "string"
+        },
         "weight_cache_bytes": {
           "description": "Bytes under the weight cache; absent when no cache is configured.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "weight_cache_free_bytes": {
+          "description": "The same for the weight cache.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -1132,6 +1185,13 @@
     },
     "ContentItem": {
       "properties": {
+        "chunks": {
+          "description": "Its chunks staged for import, in order (#827); empty when no staged\narchive carries it chunked.",
+          "items": {
+            "$ref": "#/$defs/ContentChunk"
+          },
+          "type": "array"
+        },
         "digest": {
           "type": "string"
         },
@@ -3656,6 +3716,42 @@
       },
       "type": "object"
     },
+    "PendingPlanContent": {
+      "description": "One plan waiting to apply and the content of its releases this host\nholds no bytes for.",
+      "properties": {
+        "environment": {
+          "type": "string"
+        },
+        "missing": {
+          "description": "As `<release> <digest>`; empty once everything is here. Content of a\nstore that is not configured is not counted.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "plan_id": {
+          "type": "string"
+        },
+        "releases": {
+          "description": "The releases its steps apply.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "plan_id",
+        "environment",
+        "state",
+        "releases",
+        "missing"
+      ],
+      "type": "object"
+    },
     "PlanApprovalTrustRoots": {
       "additionalProperties": false,
       "properties": {
@@ -4723,6 +4819,10 @@
         },
         "unreadable": {
           "description": "Why the file is not a readable bundle.",
+          "type": "string"
+        },
+        "upgrade": {
+          "description": "The upgrade this bundle serves (#827), derived from the upgrade\nrecords: the one upgrade with this bundle's environment on its plan\nand its release among the bundle's releases. Absent when none or\nmore than one matches; the bundle itself names no upgrade.",
           "type": "string"
         }
       },
