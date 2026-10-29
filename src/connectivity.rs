@@ -2958,6 +2958,80 @@ install = "true"
             ]
         );
         assert_ne!(imported.id, preview.id);
+        // #830: the listing reports the staged archive's digest, and the dry
+        // run and the import both record it.
+        let staged_digest = |staging: &std::path::Path| {
+            crate::offline_import::list_staged(staging).unwrap()[0]
+                .archive_digest
+                .clone()
+                .unwrap()
+        };
+        let first_digest = staged_digest(&staging);
+        assert_eq!(
+            staged_digest(&staging),
+            first_digest,
+            "stable while unchanged"
+        );
+        assert_eq!(
+            preview.archive_digest.as_deref(),
+            Some(first_digest.as_str())
+        );
+        assert_eq!(
+            imported.archive_digest.as_deref(),
+            Some(first_digest.as_str())
+        );
+        // A different archive staged under the same name: a new digest that
+        // no earlier job carries.
+        let replacement = export_isolated_bundle(
+            "site-c",
+            started.environments[0].plan_id.as_deref().unwrap(),
+            &started.release_id,
+            b"immutable-payload",
+            &exporter,
+            crate::now_millis(),
+        )
+        .unwrap();
+        replacement.save(&staging.join("site-c.json")).unwrap();
+        let replaced_digest = staged_digest(&staging);
+        assert_ne!(replaced_digest, first_digest);
+        assert!(
+            crate::offline_import::list_jobs(&staging)
+                .unwrap()
+                .iter()
+                .all(|job| job.archive_digest.as_deref() != Some(replaced_digest.as_str()))
+        );
+        bundle.save(&staging.join("site-c.json")).unwrap();
+        assert_eq!(staged_digest(&staging), first_digest);
+        // A record of another attempt is not reported: an older binary's
+        // retry rewrote the job file but left the record, or the record is
+        // newer than the job file read.
+        let record_path = staging.join(format!("imports/{}.archive.json", imported.id));
+        let job_path = staging.join(format!("imports/{}.json", imported.id));
+        let mut retried: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&job_path).unwrap()).unwrap();
+        retried["started_at_ms"] = (imported.started_at_ms + 5).into();
+        std::fs::write(&job_path, serde_json::to_vec(&retried).unwrap()).unwrap();
+        let job_of = |id: &str| crate::offline_import::job(&staging, id).unwrap();
+        assert_eq!(job_of(&imported.id).archive_digest, None);
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&record_path).unwrap()).unwrap();
+        record["started_at_ms"] = (imported.started_at_ms + 9).into();
+        std::fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
+        assert_eq!(job_of(&imported.id).archive_digest, None);
+        record["started_at_ms"] = (imported.started_at_ms + 5).into();
+        std::fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
+        assert_eq!(
+            job_of(&imported.id).archive_digest.as_deref(),
+            Some(first_digest.as_str())
+        );
+        // A job file written before #830 carries no digest and still reads.
+        std::fs::remove_file(staging.join(format!("imports/{}.archive.json", preview.id))).unwrap();
+        assert_eq!(
+            crate::offline_import::job(&staging, &preview.id)
+                .unwrap()
+                .archive_digest,
+            None
+        );
 
         let refused = crate::offline_import::run(
             &mut ctx,

@@ -2806,6 +2806,10 @@
         "actor": {
           "type": "string"
         },
+        "archive_digest": {
+          "description": "`sha256:<hex>` of the archive bytes this job read (#830), from the\njob's archive file; never in the job file. Absent before the archive\nwas read, and on jobs from earlier versions.",
+          "type": "string"
+        },
         "bundle": {
           "type": "string"
         },
@@ -4690,6 +4694,10 @@
     "StagedBundle": {
       "description": "One archive in the staging directory.",
       "properties": {
+        "archive_digest": {
+          "description": "`sha256:<hex>` of the archive file (#830); absent when it could not\nbe read.",
+          "type": "string"
+        },
         "chunked": {
           "description": "True when a `<stem>.chunks/` store sits beside the archive.",
           "type": "boolean"

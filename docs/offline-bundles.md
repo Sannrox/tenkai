@@ -373,8 +373,10 @@ archive and its `<stem>.chunks/` store in the staging directory through
 their transfer process. The server never accepts bundle bytes over HTTP.
 
 - `GET /v1/imports/staged` lists the staged archives with size, target
-  environment, plan, expiry, whether a chunk store sits beside them, and why
-  a file is not a readable bundle.
+  environment, plan, expiry, whether a chunk store sits beside them, why
+  a file is not a readable bundle, and `archive_digest`, the SHA-256 of the
+  archive file. A file is hashed once and rehashed only after it changes
+  (size, modification or change time, or inode).
 - `POST /v1/imports` takes `{version, operation: "import", bundle, upgrade,
   environment, dry_run}`. `bundle` is a file name in the staging directory.
   Paths, hidden files and links are refused. The import binds the bundle to
@@ -402,6 +404,11 @@ their transfer process. The server never accepts bundle bytes over HTTP.
   running job or a failure not yet announced. Jobs live in the staging
   directory of the host that ran them, so the list is per host: each
   replica lists only the imports it ran.
+- Every dry run and import records `archive_digest`, the SHA-256 of the
+  archive bytes it read and verified. Compare it with the staged archive's
+  digest to tell whether a job ran against the file staged now; a file
+  swapped after it was listed shows a different digest on the job. Jobs
+  from before this field carry none.
 - While an import runs, `GET /v1/imports/{id}` carries `progress`: for each
   layer and weight it stores, the digest, `kind`, `bytes_done` and
   `bytes_total`, updated as chunks land (a layer carried whole in the
