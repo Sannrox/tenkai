@@ -91,3 +91,15 @@ is refused before any destination write, and the refusal names that file.
 Release binaries fit the 64 MiB entry limit, so they do not use the chunk
 store. Bundles without a host index stay valid. Replacing an already installed
 host is a later operation.
+
+## Amendment (Issue #626)
+
+`tenkaictl bundle build` is the single producer of a full-stack v1 archive
+from a published release set. It adds signed `tenkai.offline-checksum-manifest.v1`
+(`checksums/manifest.json`) and per-component `tenkai.offline-sbom.v1` entries.
+Those entries use the existing statement index; the archive schema does not
+change. Two builds of the same inputs produce byte-identical checksum and SBOM
+payloads. A missing image, weight, or schema fails the build and names the
+item. Public trust roots may travel in the archive; private keys and
+credentials do not. The envelope still binds a content identity under
+`plans/content.json`; an executable first-install Plan is a later operation.
