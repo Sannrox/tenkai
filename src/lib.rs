@@ -255,6 +255,7 @@ pub mod tenant_isolation;
 pub mod tenant_store;
 mod terminal_outcome;
 pub mod topology;
+pub mod topology_drill;
 pub mod trust_posture;
 pub mod version_skew;
 pub mod wave;

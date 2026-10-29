@@ -23,6 +23,7 @@ use crate::ontology::{
 };
 use crate::pb::sekai::Object;
 use crate::plan::{self, Action, Plan, PlanState};
+use crate::topology::TOPOLOGY_LEASE_NAMESPACE;
 
 pub const WAVE_FORMAT_VERSION: u32 = 1;
 const WAVE_LEASE_NAMESPACE: &str = "tenkai/wave-execution";
@@ -632,8 +633,6 @@ struct WaveLease {
     name: String,
     fencing_token: String,
 }
-
-const TOPOLOGY_LEASE_NAMESPACE: &str = "tenkai/topology-availability";
 
 /// Every topology with `min_available` that lists `environment`, declared by
 /// the wave's release, a release `plan` deploys (a rollback restores an

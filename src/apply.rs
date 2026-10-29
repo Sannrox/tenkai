@@ -29,8 +29,9 @@ mod step_lifecycle;
 
 pub(crate) use execution_admission::{CandidateAdmission, classify_candidate};
 pub(crate) use execution_lease::{
-    ENVIRONMENT_LEASE_NAMESPACE, EnvironmentLease, claim_environment, environment_lease_status,
-    is_execution_fence_lost, refresh_environment_lease, release_environment, runtime_may_take_over,
+    ENVIRONMENT_LEASE_NAMESPACE, EnvironmentLease, claim_environment, claim_environment_for_drill,
+    environment_lease_status, is_execution_fence_lost, refresh_environment_lease,
+    release_environment, release_environment_fence, runtime_may_take_over,
 };
 pub use execution_lease::{EnvironmentLeaseInspect, inspect_environment_lease, unlock_environment};
 use execution_lease::{claim_execution_environment, run_guarded_mutation, run_mutation_command};

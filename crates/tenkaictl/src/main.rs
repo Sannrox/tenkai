@@ -19,6 +19,7 @@ mod embedded_preflight;
 mod embedded_product;
 mod embedded_reconcile;
 mod embedded_rollback;
+mod embedded_topology;
 mod embedded_upgrade;
 mod embedded_wave;
 mod env_args;
@@ -40,6 +41,7 @@ mod self_upgrade;
 #[cfg(test)]
 mod tests;
 mod token_cache;
+mod topology_args;
 mod upgrade_args;
 mod wave_args;
 

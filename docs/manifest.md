@@ -121,8 +121,28 @@ lasts two hours and is refreshed with the environment apply fence while a
 plan runs, so an execution longer than that stays exclusive; a lost lease
 stops the run before its next mutation (#834). Upgrading a replica that is not
 serving takes nothing down, so a first install and the repair of a failed
-replica proceed. This can slow upgrades by design. Failover drills follow
-separately (#650).
+replica proceed. This can slow upgrades by design.
+
+## Failover drill
+
+`tenkaictl topology drill <release> <replica> --signing-key <seed> --out <file>`
+takes one serving replica out of service on explicit request, checks that
+`min_available` still holds and the remaining replicas stay healthy, restores
+the replica, and writes signed evidence of the loss, the measured recovery,
+and the restore. Out of service is Tenkai's serving signal
+(`deployment_health.<product>`), the same one a rolling wave reads; remaining
+replicas staying healthy is the traffic observation. A drill that would leave
+fewer than `min_available` replicas healthy is refused before anything is
+taken down. The outage and the previous health are written together, so a
+crash mid-drill leaves a restartable record, including the apply-lease
+token; the next drill releases that leftover lease, restores the replica
+only while it is still out of service, then starts. The
+drill holds the same topology lease as a rolling wave, so it cannot run
+while a wave is already changing a replica of that topology. It holds the
+replica's apply lease while it changes `deployment_health`, so a concurrent
+apply cannot overwrite the outage.
+It records the latest evidence on the drilled environment. It does not run
+unless requested.
 
 ## Gates
 

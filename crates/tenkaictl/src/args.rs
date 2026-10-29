@@ -12,6 +12,7 @@ use crate::flags::{ApprovalFileFlags, DevelopmentBypassFlags};
 use crate::fleet_args::FleetCommand;
 use crate::migrate_args::MigrateCommand;
 use crate::product_args::ProductCommand;
+use crate::topology_args::TopologyCommand;
 use crate::upgrade_args::UpgradeCommand;
 use crate::wave_args::WaveCommand;
 
@@ -202,6 +203,11 @@ pub(crate) enum Command {
     Wave {
         #[command(subcommand)]
         command: WaveCommand,
+    },
+    /// Failover-drill a replica of a declared topology (explicit request only).
+    Topology {
+        #[command(subcommand)]
+        command: TopologyCommand,
     },
     /// Create a runner certificate authority (local only, #674).
     RunnerCa {
