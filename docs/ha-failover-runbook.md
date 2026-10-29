@@ -9,9 +9,9 @@ and undo it.
 
 Status: the procedure is exercised by the kill-the-leader drill
 ([#749](https://github.com/Sannrox/tenkai/issues/749)) on every change. The
-`enterprise-experimental` profile it belongs to is still gated (ADR 0010,
-amendment of 2026-10-27): until that gate passes, run multi-replica hubs as a
-lab, not as a supported profile. Product `high_availability` is not claimed.
+`enterprise-experimental` profile it belongs to is selectable
+(`--require-enterprise-profile`) and remains experimental (ADR 0010,
+amendment of 2026-10-29, #647). Product `high_availability` is not claimed.
 
 ## Before you start
 
@@ -97,8 +97,8 @@ replica clock skew does not change who leads.
 | One fenced writer, takeover at the next generation, stale writes refused | `live_writer_lease` test (#748) |
 | Leader killed, and stopped then resumed, inside a write; takeover within the bound; one receipt per step; the resumed commit refused | `live_failover_drill` (#749), CI job `Failover drill` |
 | Standby is live and not ready | `a_standby_replica_is_live_but_not_ready` (#748) |
-| PostgreSQL is the sole store for the surfaces it owns; startup names the missing ones | `--require-enterprise-profile` (#747) |
+| PostgreSQL is the sole store; catalog and terminal-outcome export live in each tenant schema; startup names any missing surface | `--require-enterprise-profile` (#747, #764, #765) |
 
-Related: [multi-replica lab runbook](multi-replica-hub-runbook.md),
+Related: [multi-replica compose steps](multi-replica-hub-runbook.md),
 [reconcile tick fencing](reconcile-tick-fencing.md),
 [ADR 0010](decisions/0010-supported-operating-profiles.md).

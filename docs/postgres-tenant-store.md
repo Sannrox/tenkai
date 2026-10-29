@@ -35,12 +35,12 @@ store.tenant_postgres:
   - operational_store_migration:v1:levelN
 ```
 
-**Writer model (locked first slice):** `SingleActiveWriter` — one active
-control-plane writer against the shared PostgreSQL tenant-state component, with
-a cold lab peer available for conformance drills. It does **not** mean
-multi-active concurrent reconcile without tick fencing (#129), a complete
-shared application store, or supported failover. It does **not** advertise
-`high_availability` (product HA remains separate per ADR 0009).
+**Writer model:** `SingleActiveWriter` — one active control-plane writer
+against shared PostgreSQL, with standbys sharing the same URL. Failover is
+the hub writer lease moving to a standby; see the
+[hub failover runbook](ha-failover-runbook.md). It does **not** mean
+multi-active concurrent reconcile without tick fencing (#129). It does **not**
+advertise `high_availability` (product HA remains separate per ADR 0009).
 
 | Claim | Meaning |
 | --- | --- |
@@ -161,5 +161,6 @@ lifecycle and terminal-outcome export share one tenant-schema transaction.
 outbox, allocating `source_sequence` from the hub producer identity. Catalog
 enqueue stamps the tenant into the outcome payload so exported event IDs stay
 distinct across tenants. Product
-`high_availability` remains unclaimed. Lab steps:
+`high_availability` remains unclaimed. Failover:
+[ha-failover-runbook.md](ha-failover-runbook.md). Compose steps:
 [multi-replica-hub-runbook.md](multi-replica-hub-runbook.md) (#130).

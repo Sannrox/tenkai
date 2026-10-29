@@ -156,7 +156,7 @@ These are intentional product rules, not minikube quirks:
 ## Out of scope for this dogfood path
 
 - Inventory fact probe → `env facts` automation
-- Multi-replica `tenkai-server` + Postgres hub HA ([runbook](multi-replica-hub-runbook.md))
+- Multi-replica `tenkai-server` + Postgres hub HA ([failover](ha-failover-runbook.md))
 - OpenMetrics scrape on a hub process
 - Remote GateProvider / outcome→priors intelligence loop
 - This dogfood script still forces `TENKAI_SOFTWARE_EXECUTOR=kubernetes`

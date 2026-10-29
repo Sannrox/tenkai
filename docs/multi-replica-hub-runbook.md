@@ -1,10 +1,11 @@
-# Multi-replica PostgreSQL integration lab (#130)
+# Multi-replica PostgreSQL compose steps (#130)
 
-This runbook exercises component-level PostgreSQL tenant isolation, shared
-replica state, and reconcile fencing for the **Tenkai hub** (`tenkai-server`),
-not environment runtimes. It is a conformance lab, not a supported operating
-profile, product HA claim, failover procedure, or complete backup and recovery
-contract.
+Local two-hub recipe for the **Tenkai hub** (`tenkai-server`): PostgreSQL
+tenant isolation, shared replica state, and reconcile fencing. Environment
+runtimes are out of scope. Failover detection, takeover, verification, and
+rollback live in the [hub failover runbook](ha-failover-runbook.md). This
+page is the compose and dump/restore companion, not a product
+`high_availability` claim.
 
 The commands open PostgreSQL as the sole hub store (`tenkai_hub` plus
 `tenkai_t_*`). Mixed `--database` / `TENKAI_DATABASE` with `TENKAI_POSTGRES_URL`
@@ -12,8 +13,8 @@ is refused. Catalog object-graph lifecycle and terminal-outcome export live in
 each tenant schema (ADR 0038). The supported
 profile contract remains `local` by
 default and experimental single-server `fleet` for remote runtime operation.
-`--require-enterprise-profile` (with `--tenant-mode`) asks for the supported
-`enterprise-experimental` profile instead of this lab. It refuses to start
+`--require-enterprise-profile` (with `--tenant-mode`) asks for the
+`enterprise-experimental` profile. It refuses to start
 while PostgreSQL does not own every authoritative surface, and names each
 missing one.
 
@@ -30,13 +31,13 @@ The lab assumes:
 
 ## Component guarantees and limits
 
-| Component evidence exercised by this lab | **Not** guaranteed |
+| Component evidence exercised here | **Not** guaranteed |
 | --- | --- |
-| Shared durable hub and tenant state in Postgres | Catalog object-graph lifecycle |
-| Capability gate for `--replica-count > 1` | Multi-active concurrent writers without fencing |
-| Tick fence so two hosts do not double-reconcile the same env | Automatic multi-AZ product packaging |
-| Manual role-switch and PostgreSQL dump/restore exercises | Product HA or automatic failover |
-| Tenant isolation conformance | Terminal-outcome export |
+| Shared durable hub and tenant state in Postgres | Multi-active concurrent writers without fencing |
+| Capability gate for `--replica-count > 1` | Automatic multi-AZ product packaging |
+| Tick fence so two hosts do not double-reconcile the same env | Product `high_availability` |
+| Catalog object-graph lifecycle and terminal-outcome export | Zero-downtime migration |
+| Tenant isolation conformance | Stable enterprise recovery without the failover runbook |
 
 **Single-active writer component model:** at most one control-plane process
 should actively reconcile and mutate the tested tenant state. Lab peers share
@@ -91,8 +92,9 @@ cargo run -p tenkai-server --features postgres,ui -- \
 ```
 
 Expect diagnostic profile `enterprise-experimental` and capabilities including
-`tenant_isolation` and `shared_replica_state`. Catalog lifecycle stays
-unavailable. Product `high_availability` is not claimed.
+`tenant_isolation` and `shared_replica_state`. Catalog lifecycle and
+terminal-outcome export run in each tenant schema. Product
+`high_availability` is not claimed.
 
 ### 3. Start secondary lab peer
 

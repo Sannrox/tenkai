@@ -89,7 +89,7 @@ continues to fail the affected operation closed.
 | Upgrade path | Take and verify a PostgreSQL recovery point, migrate under the documented compatibility window, keep server/runtime protocol minors compatible, and restore the prior binary plus database recovery point if migration fails. |
 | Guarantees | Tenant isolation, federated assertion verification, PostgreSQL durability, leases/fencing, and single-store recovery once every required PostgreSQL capability passes startup validation and conformance. |
 | Non-guarantees | Multiple server replicas, automatic failover, multi-AZ packaging, multi-active writers, zero-downtime migration, browser OIDC sessions, or product `high_availability`. |
-| Stability | **Experimental and gated.** Authoritative surfaces are implemented. The profile stays experimental until enterprise recovery and usability drills pass. `tenkai-server --tenant-mode --require-enterprise-profile` checks the gate at startup and names each missing surface (#747). |
+| Stability | **Experimental, selectable.** Authoritative surfaces pass `--require-enterprise-profile` (#647). The profile stays experimental until enterprise backup, restore, and operator usability drills pass. Product `high_availability` stays fail-closed. |
 
 ## Backend and recovery rules
 
@@ -133,7 +133,7 @@ until the PostgreSQL implementation and evidence exist.
 | Offline bundle/receipt contract |  |  |  | Unexposed library contract; unsupported until a shipped workflow exists |
 | Local gate/policy provider | ✓ | ✓ | gated | Fails closed when required inputs are absent |
 | Explicit remote provider adapters |  | ✓ | gated | Experimental; never on recovery path |
-| Durable optional-provider outbox |  | terminal outcomes | gated | Fleet can transactionally export terminal outcomes from SQLite; audit/planning-event export and complete enterprise PostgreSQL wiring remain gated |
+| Durable optional-provider outbox |  | terminal outcomes | terminal outcomes | Fleet SQLite and tenant-mode PostgreSQL export terminal outcomes; audit and planning-event export stay unwired |
 | OpenMetrics endpoint |  | ✓ | gated | Optional, disabled by default, protected at network boundary |
 | Development fixture surface |  |  |  | Lab-only, disabled by default |
 | Fleet status/watch/waves | ✓ embedded view | ✓ | gated | Waves observe; they do not execute or authorize |
@@ -167,8 +167,8 @@ silently rewritten.
 ## Documentation and release contract
 
 1. README quick paths lead with `local`, then `fleet`, and describe
-   `enterprise-experimental` as gated until its PostgreSQL readiness checks
-   pass.
+   `enterprise-experimental` as experimental until its backup, restore, and
+   operator usability drills pass.
 2. `docs/runtime-capabilities.md` distinguishes profile readiness from
    component capability claims.
 3. `tenkai-server --help` shows profile selection first and groups low-level
@@ -278,3 +278,26 @@ pass: the fenced writer removes the split-brain objection. Product
 
 Revisit when the step 5 drills have results; that change, not this one,
 promotes the profile.
+
+## Amendment: hub HA stack closed (2026-10-29, #647)
+
+[#647](https://github.com/Sannrox/tenkai/issues/647) closes the hub HA stack.
+Several `tenkai-server` replicas over one PostgreSQL database run with one
+fenced writer, a kill-the-leader drill, and a published failover procedure.
+
+Evidence added since the #750 amendment:
+
+| Requirement | Evidence |
+| --- | --- |
+| Catalog object-graph lifecycle | Tenant-schema catalog with SQLite conformance ([#764](https://github.com/Sannrox/tenkai/issues/764)) |
+| Terminal-outcome export | Tenant-schema outbox in the same catalog transaction ([#765](https://github.com/Sannrox/tenkai/issues/765)) |
+| Startup gate | `--require-enterprise-profile` sees all five authoritative surfaces |
+
+The operator procedure is the [hub failover runbook](../ha-failover-runbook.md).
+The [multi-replica compose steps](../multi-replica-hub-runbook.md) remain the
+local two-hub recipe.
+
+Status: **experimental, selectable.** Authoritative surfaces pass the startup
+gate. Backup, restore, and independent operator usability drills
+(implementation sequence step 5) have not run, so the profile is not stable.
+Product `high_availability` remains unclaimed and fail-closed.
