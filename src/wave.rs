@@ -581,6 +581,147 @@ document = "suite.json"
         }
     }
 
+    /// #690: a wave runs a plan that changes a serving replica of a topology
+    /// only while the declared minimum of the others stay healthy and no
+    /// other wave is changing a replica of it; it refuses before executing.
+    #[tokio::test]
+    async fn a_wave_keeps_a_topology_at_its_minimum_available() {
+        let root = temp_root("min-available");
+        let database = root.join("tenkai.db");
+        let keys = root.join("keys");
+        crate::dev_sign::init_dev_keys(&keys).unwrap();
+        let product = root.join("product");
+        write_software_manifest(
+            &product,
+            "ledger",
+            "1.0.0",
+            "\n[topology]\nname = \"ledger-ha\"\nenvironments = [\"ledger-a\", \"ledger-b\", \"ledger-c\"]\nanti_affinity = \"host\"\nmin_available = 2\n",
+        );
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let (_, trust) = signed_release(&keys, &product.join("tenkai.toml"), &mut ctx).await;
+        let actor = crate::auth_context::test_management_context("wave-min-available");
+        crate::catalog::promote(&mut ctx, &actor, "ledger@1.0.0", "stable")
+            .await
+            .unwrap();
+        for (env, host) in [("ledger-a", "h1"), ("ledger-b", "h2"), ("ledger-c", "h3")] {
+            plan::env_add(&mut ctx, env, "replica").await.unwrap();
+            plan::subscribe(&mut ctx, env, "ledger", "stable")
+                .await
+                .unwrap();
+            crate::environment::set_environment_fact(&mut ctx, env, "host", host)
+                .await
+                .unwrap();
+        }
+        let mark = async |ctx: &mut Ctx, env: &str, health: &str| {
+            let mut object = crate::environment::environment(ctx, env).await.unwrap();
+            object
+                .properties
+                .insert("deployment_health.ledger".into(), health.into());
+            ctx.put(object).await.unwrap();
+        };
+        for env in ["ledger-a", "ledger-c"] {
+            mark(&mut ctx, env, "healthy").await;
+        }
+        mark(&mut ctx, "ledger-b", "unhealthy").await;
+
+        let spec = ExecutableWaveSpec::new(
+            "ledger-roll",
+            "ledger",
+            "1.0.0",
+            "stable",
+            [
+                "ledger-a".to_string(),
+                "ledger-b".to_string(),
+                "ledger-c".to_string(),
+            ],
+            true,
+        )
+        .unwrap();
+        start_or_resume(&mut ctx, &spec).await.unwrap();
+        let approvals = root.join("approvals");
+        let authorization = WaveAuthorization::Signed {
+            approval_dir: &approvals,
+            trust_roots: &trust,
+        };
+        let planned = advance(&mut ctx, "ledger-roll", authorization)
+            .await
+            .unwrap();
+        assert_eq!(planned.status, WaveStatus::AwaitingApproval);
+        sign_current_approvals(&keys, &database, &approvals, &trust, &planned).await;
+
+        // ledger-a serves, and only ledger-c of the others is healthy.
+        let err = advance(&mut ctx, "ledger-roll", authorization)
+            .await
+            .unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::topology::AvailabilityRefused>()
+                .is_some_and(|refused| refused.0.contains("not healthy: ledger-b")),
+            "{err:#}"
+        );
+        let record = load_wave(&mut ctx, "ledger-roll").await.unwrap();
+        assert_ne!(
+            record.environments[0].status,
+            WaveEnvironmentStatus::Running
+        );
+
+        // Another wave holds the topology: refused until it finishes.
+        mark(&mut ctx, "ledger-b", "healthy").await;
+        let held = ctx
+            .acquire_lease(
+                "tenkai/topology-availability",
+                "ledger-ha",
+                "other-wave",
+                60_000,
+            )
+            .await
+            .unwrap();
+        let err = advance(&mut ctx, "ledger-roll", authorization)
+            .await
+            .unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::topology::AvailabilityRefused>()
+                .is_some_and(|refused| refused.0.contains("upgrading another replica")),
+            "{err:#}"
+        );
+        ctx.release_lease(
+            "tenkai/topology-availability",
+            "ledger-ha",
+            &held.fencing_token,
+        )
+        .await
+        .unwrap();
+
+        // A run left in progress on ledger-c, as a crash would leave it,
+        // records no outcome: ledger-c is not counted as available.
+        let mut interrupted = plan::create(&mut ctx, "ledger-c").await.unwrap();
+        interrupted.state = crate::plan::PlanState::Running;
+        ctx.put(interrupted.to_object().unwrap()).await.unwrap();
+        let err = advance(&mut ctx, "ledger-roll", authorization)
+            .await
+            .unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::topology::AvailabilityRefused>()
+                .is_some_and(|refused| refused.0.contains("not healthy: ledger-c")),
+            "{err:#}"
+        );
+        interrupted.state = crate::plan::PlanState::Failed;
+        ctx.put(interrupted.to_object().unwrap()).await.unwrap();
+
+        let record = advance(&mut ctx, "ledger-roll", authorization)
+            .await
+            .unwrap();
+        assert_ne!(
+            record.environments[0].status,
+            WaveEnvironmentStatus::AwaitingApproval
+        );
+        // The run released the topology: another holder can take it.
+        ctx.acquire_lease("tenkai/topology-availability", "ledger-ha", "probe", 60_000)
+            .await
+            .unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[tokio::test]
     async fn observe_does_not_create_executable_wave_records() {
         let root = temp_root("observe-no-persist");

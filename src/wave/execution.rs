@@ -633,6 +633,91 @@ struct WaveLease {
     fencing_token: String,
 }
 
+const TOPOLOGY_LEASE_NAMESPACE: &str = "tenkai/topology-availability";
+
+/// Every topology with `min_available` that lists `environment`, declared by
+/// the wave's release, a release `plan` deploys (a rollback restores an
+/// earlier one) or a release a step would restore on failure: takes each
+/// topology's lease once, in name order so two runs never wait on each other,
+/// then checks every such release's policy under it, answering the leases
+/// held. The leases live as long as a wave lease (two hours) and are not
+/// renewed during the run; an execution that outlasts them is no longer
+/// exclusive, as a wave lease would not be either (#834).
+async fn claim_topology_leases(
+    ctx: &mut Ctx,
+    record: &WaveRecord,
+    plan: &plan::Plan,
+    environment: &str,
+) -> Result<Vec<(String, String)>> {
+    if plan.steps.is_empty() {
+        return Ok(Vec::new());
+    }
+    let releases: std::collections::BTreeSet<String> = std::iter::once(record.release_id.clone())
+        .chain(plan.steps.iter().flat_map(|step| {
+            std::iter::once(step.release_id.clone())
+                .chain(step.restore.iter().map(|pin| pin.release_id.clone()))
+        }))
+        .filter(|release| !release.is_empty())
+        .collect();
+    // Releases may declare one topology name with different minima; every
+    // release's policy is checked under that one lease.
+    let mut topologies: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for release in &releases {
+        if let Some(topology) = crate::topology::availability_topology(ctx, release).await?
+            && topology
+                .environments
+                .iter()
+                .any(|member| member == environment)
+        {
+            topologies
+                .entry(topology.name.clone())
+                .or_default()
+                .push(release.clone());
+        }
+    }
+    let owner = format!("wave:{}:{environment}", record.name);
+    let mut held = Vec::new();
+    for (topology, policies) in &topologies {
+        let checked = match ctx
+            .acquire_lease(TOPOLOGY_LEASE_NAMESPACE, topology, &owner, WAVE_LEASE_MS)
+            .await
+        {
+            Ok(lease) => {
+                held.push((topology.clone(), lease.fencing_token));
+                let mut checked = Ok(());
+                for release in policies {
+                    checked =
+                        crate::topology::require_availability(ctx, environment, release).await;
+                    if checked.is_err() {
+                        break;
+                    }
+                }
+                checked
+            }
+            Err(_) => Err(crate::topology::AvailabilityRefused(format!(
+                "topology {topology} is upgrading another replica; retry once it finishes"
+            ))
+            .into()),
+        };
+        if let Err(error) = checked {
+            release_topology_leases(ctx, &held).await;
+            return Err(error);
+        }
+    }
+    Ok(held)
+}
+
+/// Best effort: a lease that cannot be released expires, and the next start
+/// checks availability again.
+async fn release_topology_leases(ctx: &mut Ctx, held: &[(String, String)]) {
+    for (topology, fencing_token) in held {
+        let _ = ctx
+            .release_lease(TOPOLOGY_LEASE_NAMESPACE, topology, fencing_token)
+            .await;
+    }
+}
+
 async fn claim_wave_lease(ctx: &mut Ctx, name: &str) -> Result<WaveLease> {
     let owner = format!("wave:{name}:{}", crate::now_millis());
     let lease = ctx
@@ -993,10 +1078,22 @@ async fn advance_locked(
                 }
             },
         };
+        // Before a plan that changes this replica runs, the rest of its
+        // topology must keep the declared minimum healthy (#690). The check
+        // and the execution hold the topology's lease, so two waves cannot
+        // take two of its replicas down at once.
+        let topology_leases = claim_topology_leases(ctx, &record, &plan, &environment).await?;
         record.environments[index].status = WaveEnvironmentStatus::Running;
         record.status = WaveStatus::Running;
-        persist(ctx, &mut record, lease).await?;
-        match execute_plan(ctx, &plan.id, execution_authorization).await {
+        let executed = match persist(ctx, &mut record, lease).await {
+            Ok(()) => execute_plan(ctx, &plan.id, execution_authorization).await,
+            Err(error) => {
+                release_topology_leases(ctx, &topology_leases).await;
+                return Err(error);
+            }
+        };
+        release_topology_leases(ctx, &topology_leases).await;
+        match executed {
             Ok(outcomes) => {
                 capture_plan_evidence(ctx, &mut record, index, &outcomes).await?;
             }
@@ -1204,7 +1301,11 @@ async fn rollback_locked(
                 }
             },
         };
-        match execute_plan(ctx, &plan.id, execution_authorization).await {
+        // A rollback takes a replica down like an upgrade does (#690).
+        let topology_leases = claim_topology_leases(ctx, &record, &plan, &environment).await?;
+        let executed = execute_plan(ctx, &plan.id, execution_authorization).await;
+        release_topology_leases(ctx, &topology_leases).await;
+        match executed {
             Ok(outcomes) => {
                 let plan = plan::load(ctx, &plan.id).await?;
                 let (_, _, terminal, status, detail) = evidence_from_outcomes(&plan, &outcomes)?;
