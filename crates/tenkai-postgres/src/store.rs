@@ -256,22 +256,27 @@ impl tenkai::grant_rules::GrantRuleStore for PostgresTenantOperationalStore {
     fn insert_grant_rule(
         &self,
         rule: &tenkai::grant_rules::StoredGrantRule,
-    ) -> Result<Option<i64>> {
+        expected: Option<i64>,
+    ) -> Result<tenkai::grant_rules::GrantRuleWrite> {
         #[cfg(feature = "postgres")]
-        return self.inner.insert_grant_rule(rule);
+        return self.inner.insert_grant_rule(rule, expected);
         #[cfg(not(feature = "postgres"))]
         {
-            let _ = rule;
+            let _ = (rule, expected);
             Err(unavailable())
         }
     }
 
-    fn delete_grant_rule(&self, value: &str) -> Result<Option<i64>> {
+    fn delete_grant_rule(
+        &self,
+        value: &str,
+        expected: Option<i64>,
+    ) -> Result<tenkai::grant_rules::GrantRuleWrite> {
         #[cfg(feature = "postgres")]
-        return self.inner.delete_grant_rule(value);
+        return self.inner.delete_grant_rule(value, expected);
         #[cfg(not(feature = "postgres"))]
         {
-            let _ = value;
+            let _ = (value, expected);
             Err(unavailable())
         }
     }

@@ -7,8 +7,10 @@
 use std::sync::Arc;
 
 mod exports;
+mod grant_rules;
 mod runtime_enrollment;
 pub use exports::ExportRequest;
+pub use grant_rules::{CreateGrantRuleRequest, GrantRuleList, RemoveGrantRuleRequest};
 pub use runtime_enrollment::{
     RuntimeCredentialRevoked, RuntimeEnrollmentIssued, RuntimeEnrollmentRequest,
     RuntimeRevokeRequest, RuntimeRunner, RuntimeRunnerAttestation, RuntimeRunnerInstance,

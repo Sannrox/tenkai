@@ -225,7 +225,38 @@ without editing the file and restarting every replica (#836). The
   rules too (`stored_rules=` on the startup line).
 - Rolling deploys: releases before this one ignore stored rules. Change
   stored rules only once every replica runs a release with this change,
-  or a request on an older replica will not see them.
+  or a request on an older replica will not see them. The console's
+  first-run form uses the API below; use it only once every replica runs
+  this release.
+
+Manage them over HTTP (#837):
+
+- `GET /v1/grant-rules` lists the stored rules with their `generation`,
+  who created each, when and why, and `declared_by_config` for a rule the
+  file now overrides.
+- `POST /v1/grant-rules` with `{"rule": {"value": ..., "capabilities":
+  [...], ...}, "reason": ..., "generation": ...}` stores one rule (the same
+  fields as a `[[grants.rules]]` entry) and answers `201` with the new
+  list. `DELETE /v1/grant-rules` with `{"value": ..., "reason": ...,
+  "generation": ...}` removes one.
+- A change names the `generation` it listed and is refused with `409` when
+  the rules changed since. A claim value the file declares is refused with
+  `400`; one already stored with `409`.
+- Listing and every change need fleet management: the
+  `TENKAI_MANAGEMENT_TOKEN` for that request (recorded as `management`,
+  never stored or logged), or a signed-in principal whose grants give
+  management with no environment. A signed-in user without it, an
+  environment-scoped credential, a tenant credential and an agent are
+  refused, and nothing is written.
+- Each change is audited before and after it is written
+  (`grant_rule.create.*`, `grant_rule.remove.*`) with its principal and
+  reason (`grant-rule/<value> reason=<reason>`).
+
+To set up the first administrator with no rule in the file, list with the
+management token, then create `tenkai-admins` with `read` and
+`management` using the listed generation. `/healthz` reports
+`first_administrator: "configured"` on that replica at once and on the
+others within 5 seconds.
 
 
 ### CLI sign-in

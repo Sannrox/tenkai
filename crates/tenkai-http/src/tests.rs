@@ -7,6 +7,7 @@ mod delivery_hold;
 mod environment_config;
 mod exports;
 mod fixtures;
+mod grant_rules;
 mod health;
 mod imports;
 mod lifecycle_support;

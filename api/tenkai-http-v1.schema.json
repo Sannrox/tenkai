@@ -1215,6 +1215,30 @@
       ],
       "type": "object"
     },
+    "CreateGrantRuleRequest": {
+      "additionalProperties": false,
+      "description": "`POST /v1/grant-rules`.",
+      "properties": {
+        "generation": {
+          "description": "The generation the caller listed.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "reason": {
+          "description": "Why; recorded with the rule and in the audit log.",
+          "type": "string"
+        },
+        "rule": {
+          "$ref": "#/$defs/OidcGrantRule"
+        }
+      },
+      "required": [
+        "rule",
+        "reason",
+        "generation"
+      ],
+      "type": "object"
+    },
     "CredentialRunway": {
       "description": "A certificate that lapses before an environment's next maintenance window\nopens, so a plan waiting for that window would fail at apply time (#778).\nAdvisory: it never blocks the plan or changes its steps.",
       "properties": {
@@ -2815,6 +2839,58 @@
       ],
       "type": "object"
     },
+    "GrantRuleList": {
+      "description": "`GET /v1/grant-rules`: the stored rules and their generation.",
+      "properties": {
+        "generation": {
+          "description": "Pass it back with a change; a change against another generation is\nrefused.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/$defs/GrantRuleView"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "generation",
+        "rules"
+      ],
+      "type": "object"
+    },
+    "GrantRuleView": {
+      "description": "A stored rule: the rule as the configuration file would hold it, and who\ncreated it, when and why.",
+      "properties": {
+        "created_at_ms": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "created_by": {
+          "description": "The principal, or the management token's use, that created it.",
+          "type": "string"
+        },
+        "declared_by_config": {
+          "description": "The configuration file declares this claim value, so the stored\nrule is ignored.",
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "rule": {
+          "$ref": "#/$defs/OidcGrantRule"
+        }
+      },
+      "required": [
+        "rule",
+        "created_by",
+        "created_at_ms",
+        "reason",
+        "declared_by_config"
+      ],
+      "type": "object"
+    },
     "GroupApprovers": {
       "description": "Who may approve for one group of the plan's rule (#817): identities and\nkey ids from the plan-approval trust roots, never key material.",
       "properties": {
@@ -3520,6 +3596,59 @@
         "audience",
         "client_id",
         "scopes"
+      ],
+      "type": "object"
+    },
+    "OidcGrantRule": {
+      "additionalProperties": false,
+      "description": "One claim value and the grants it confers.",
+      "properties": {
+        "capabilities": {
+          "description": "`read`, `management`, and/or `publish`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "channels": {
+          "default": [],
+          "description": "When non-empty and the token has no fleet management, promote is\nconfined to these channels. Publish ignores channel bindings.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "environment": {
+          "default": null,
+          "description": "When set, management from this rule is confined to one environment.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "default": null,
+          "description": "Principal kind for this rule. Default remains human; `service` is for CI.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "products": {
+          "default": [],
+          "description": "Products this rule may publish or promote.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "value",
+        "capabilities"
       ],
       "type": "object"
     },
@@ -4308,6 +4437,29 @@
         "key_id",
         "identity",
         "public_key"
+      ],
+      "type": "object"
+    },
+    "RemoveGrantRuleRequest": {
+      "additionalProperties": false,
+      "description": "`DELETE /v1/grant-rules`.",
+      "properties": {
+        "generation": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "value": {
+          "description": "The claim value of the rule to remove.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "value",
+        "reason",
+        "generation"
       ],
       "type": "object"
     },
@@ -5286,6 +5438,37 @@
       "request": null,
       "response": {
         "$ref": "#/$defs/BackupManifest"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "GET",
+      "path": "/v1/grant-rules",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/GrantRuleList"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/grant-rules",
+      "request": {
+        "$ref": "#/$defs/CreateGrantRuleRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/GrantRuleList"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "DELETE",
+      "path": "/v1/grant-rules",
+      "request": {
+        "$ref": "#/$defs/RemoveGrantRuleRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/GrantRuleList"
       }
     },
     {

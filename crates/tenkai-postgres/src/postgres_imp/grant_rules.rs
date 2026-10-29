@@ -1,7 +1,7 @@
 //! Stored OIDC grant rules (#836) in the hub-wide PostgreSQL tables.
 
 use postgres::Transaction;
-use tenkai::grant_rules::{MAX_STORED_RULES, StoredGrantRule, decode, encode};
+use tenkai::grant_rules::{GrantRuleWrite, MAX_STORED_RULES, StoredGrantRule, decode, encode};
 
 use super::{Inner, Result, pg};
 
@@ -58,17 +58,24 @@ impl Inner {
         })
     }
 
-    pub(crate) fn insert_grant_rule(&self, rule: &StoredGrantRule) -> Result<Option<i64>> {
+    pub(crate) fn insert_grant_rule(
+        &self,
+        rule: &StoredGrantRule,
+        expected: Option<i64>,
+    ) -> Result<GrantRuleWrite> {
         let json = encode(rule)?;
         let value = rule.rule.value.clone();
         self.with_writer_schema("public", move |tx| {
             serialize_changes(tx)?;
+            if let Some(stale) = GrantRuleWrite::check_expected(expected, generation(tx)?) {
+                return Ok(stale);
+            }
             let count: i64 = tx
                 .query_one("SELECT count(*) FROM tenkai_grant_rules", &[])
                 .map_err(pg)?
                 .get(0);
             if count >= MAX_STORED_RULES as i64 {
-                return Ok(None);
+                return Ok(GrantRuleWrite::Refused);
             }
             let inserted = tx
                 .execute(
@@ -78,23 +85,30 @@ impl Inner {
                 )
                 .map_err(pg)?;
             if inserted == 0 {
-                return Ok(None);
+                return Ok(GrantRuleWrite::Refused);
             }
-            bump(tx).map(Some)
+            bump(tx).map(GrantRuleWrite::Applied)
         })
     }
 
-    pub(crate) fn delete_grant_rule(&self, value: &str) -> Result<Option<i64>> {
+    pub(crate) fn delete_grant_rule(
+        &self,
+        value: &str,
+        expected: Option<i64>,
+    ) -> Result<GrantRuleWrite> {
         let value = value.to_owned();
         self.with_writer_schema("public", move |tx| {
             serialize_changes(tx)?;
+            if let Some(stale) = GrantRuleWrite::check_expected(expected, generation(tx)?) {
+                return Ok(stale);
+            }
             let deleted = tx
                 .execute("DELETE FROM tenkai_grant_rules WHERE value = $1", &[&value])
                 .map_err(pg)?;
             if deleted == 0 {
-                return Ok(None);
+                return Ok(GrantRuleWrite::Refused);
             }
-            bump(tx).map(Some)
+            bump(tx).map(GrantRuleWrite::Applied)
         })
     }
 }
