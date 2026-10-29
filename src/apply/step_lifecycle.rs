@@ -96,6 +96,7 @@ pub(super) async fn execute(
             match product_execution::deactivate(ctx, lease, outgoing, adapters.clone()).await {
                 Ok(Ok(())) => None,
                 Ok(Err(detail)) => Some(detail),
+                Err(error) if is_execution_fence_lost(&error) => return Err(error),
                 Err(error) => Some(format!("cleanup executor failed: {error}")),
             };
         if let Some(detail) = cleanup_failure {
@@ -150,6 +151,7 @@ pub(super) async fn execute(
             }
             return Err(error);
         }
+        Err(error) if is_execution_fence_lost(&error) => return Err(error),
         Err(error) => Err(format!("deployment executor failed: {error}")),
     };
     let outcome = match activation {
@@ -197,32 +199,30 @@ pub(super) async fn execute(
                     )
                     .await
                     {
-                        compensate_activation(
+                        return Err(compensate_or_fence(
                             ctx,
                             lease,
                             environment,
                             step,
                             &content,
-                            &error,
                             adapters.clone(),
+                            error,
                         )
-                        .await;
-                        return Err(error);
+                        .await);
                     }
                     return Ok(outcome);
                 }
                 Err(error) => {
-                    compensate_activation(
+                    return Err(compensate_or_fence(
                         ctx,
                         lease,
                         environment,
                         step,
                         &content,
-                        &error,
                         adapters.clone(),
+                        error,
                     )
-                    .await;
-                    return Err(error);
+                    .await);
                 }
             }
             let outcome = Outcome::new(step.clone(), StepOutcomeStatus::Succeeded, String::new());
@@ -245,17 +245,16 @@ pub(super) async fn execute(
             )
             .await
             {
-                compensate_activation(
+                return Err(compensate_or_fence(
                     ctx,
                     lease,
                     environment,
                     step,
                     &content,
-                    &error,
                     adapters.clone(),
+                    error,
                 )
-                .await;
-                return Err(error);
+                .await);
             }
             return Ok(outcome);
         }
@@ -302,16 +301,18 @@ async fn recover_restart(
     content: &ReleaseContent,
     detail: String,
 ) -> Result<(Outcome, Option<crate::environment::DeploymentTransition>)> {
-    let reapplied = matches!(
-        product_execution::activate(
-            ctx,
-            step_context.lease,
-            content,
-            step_context.adapters.clone()
-        )
-        .await,
-        Ok(Ok(()))
-    );
+    let reapplied = match product_execution::activate(
+        ctx,
+        step_context.lease,
+        content,
+        step_context.adapters.clone(),
+    )
+    .await
+    {
+        Ok(Ok(())) => true,
+        Err(error) if is_execution_fence_lost(&error) => return Err(error),
+        Ok(Err(_)) | Err(_) => false,
+    };
     Ok((
         Outcome::new(
             step.clone(),
@@ -421,6 +422,7 @@ async fn restore_previous(
             &content.environment,
             &detail,
         ))),
+        Err(error) if is_execution_fence_lost(&error) => return Err(error),
         Err(error) => Err(error),
     };
     Ok(match restore_result {
@@ -450,6 +452,24 @@ async fn restore_previous(
     })
 }
 
+async fn compensate_or_fence(
+    ctx: &mut Ctx,
+    lease: &EnvironmentLease,
+    environment: &str,
+    step: &Step,
+    content: &ReleaseContent,
+    adapters: TargetAdapters<'_>,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    if is_execution_fence_lost(&error) {
+        return error;
+    }
+    match compensate_activation(ctx, lease, environment, step, content, &error, adapters).await {
+        Err(compensate) if is_execution_fence_lost(&compensate) => compensate,
+        _ => error,
+    }
+}
+
 async fn compensate_activation(
     ctx: &mut Ctx,
     lease: &EnvironmentLease,
@@ -458,40 +478,44 @@ async fn compensate_activation(
     content: &ReleaseContent,
     failure: &anyhow::Error,
     adapters: TargetAdapters<'_>,
-) {
+) -> Result<()> {
     if step.action == Action::Restart {
-        return;
+        return Ok(());
     }
     let failure = format!("deployment bookkeeping failed after activation: {failure}");
-    let cleaned = matches!(
-        product_execution::deactivate(ctx, lease, content, adapters.clone()).await,
-        Ok(Ok(()))
-    );
+    let cleaned = match product_execution::deactivate(ctx, lease, content, adapters.clone()).await {
+        Ok(Ok(())) => true,
+        Err(error) if is_execution_fence_lost(&error) => return Err(error),
+        Ok(Err(_)) | Err(_) => false,
+    };
     let mut restored = step.from.is_none();
     if let (Some(previous), Some(pin)) = (step.from.as_deref(), step.restore.as_ref())
         && let Ok(previous_content) =
             admit_release(ctx, pin, environment, &step.product, false).await
-        && matches!(
-            product_execution::activate(ctx, lease, &previous_content, adapters).await,
-            Ok(Ok(()))
-        )
     {
-        restored = crate::environment::record_deployed(
-            ctx,
-            lease,
-            environment,
-            &step.product,
-            previous,
-            Some(&step.to),
-        )
-        .await
-        .is_ok();
+        match product_execution::activate(ctx, lease, &previous_content, adapters).await {
+            Ok(Ok(())) => {
+                restored = crate::environment::record_deployed(
+                    ctx,
+                    lease,
+                    environment,
+                    &step.product,
+                    previous,
+                    Some(&step.to),
+                )
+                .await
+                .is_ok();
+            }
+            Err(error) if is_execution_fence_lost(&error) => return Err(error),
+            Ok(Err(_)) | Err(_) => {}
+        }
     }
     if !cleaned || !restored || step.from.is_none() {
         let _ =
             crate::environment::record_unknown(ctx, lease, environment, &step.product, &failure)
                 .await;
     }
+    Ok(())
 }
 
 /// Restore the plan's previous signed pin after a failing SLO gate (#590).
@@ -665,6 +689,7 @@ async fn restore_after_health_gate(
                 .await?;
                 return Ok(outcome);
             }
+            Err(error) if is_execution_fence_lost(&error) => return Err(error),
             Err(error) => {
                 let outcome = Outcome::new(
                     step.clone(),
