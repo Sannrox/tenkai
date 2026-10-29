@@ -168,8 +168,11 @@ struct EnterpriseAuthComposition {
     auth_host: AuthHostConfig,
     extension: Option<Arc<dyn EnterpriseAuthExtension>>,
     oidc_client: Option<OidcClientDiscovery>,
-    /// From the OIDC grant rules; `missing` without OIDC (#815).
+    /// From the OIDC file's grant rules; `missing` without OIDC (#815).
+    /// Stored rules are combined per request (#836).
     first_administrator: tenkai::oidc_verifier::FirstAdministrator,
+    /// Grant rules stored in the hub's store (#836); with OIDC only.
+    stored_grants: Option<Arc<tenkai::grant_rules::StoredGrants>>,
 }
 
 /// Paths naming enterprise verifiers. JWT and OIDC may both be set; tokens are
@@ -178,6 +181,9 @@ struct EnterpriseAuthComposition {
 struct EnterpriseAuthSources<'a> {
     jwt_trust: Option<&'a std::path::Path>,
     oidc: Option<&'a std::path::Path>,
+    /// The hub's stored grant rules (#836), granted alongside the OIDC
+    /// file's rules.
+    grant_rules: Option<&'a Arc<dyn tenkai::grant_rules::GrantRuleStore>>,
 }
 
 async fn run_blocking_startup<T, F>(operation: &'static str, work: F) -> Result<T>
@@ -206,12 +212,15 @@ fn compose_enterprise_auth(
                 extension: None,
                 oidc_client: None,
                 first_administrator: Default::default(),
+                stored_grants: None,
             })
         }
         (Some(trust_path), None) => compose_jwt_auth(trust_path, require_tenant),
-        (None, Some(oidc_path)) => compose_oidc_auth(oidc_path, require_tenant),
+        (None, Some(oidc_path)) => {
+            compose_oidc_auth(oidc_path, require_tenant, sources.grant_rules)
+        }
         (Some(trust_path), Some(oidc_path)) => {
-            compose_issuer_auth(trust_path, oidc_path, require_tenant)
+            compose_issuer_auth(trust_path, oidc_path, require_tenant, sources.grant_rules)
         }
     }
 }
@@ -251,6 +260,7 @@ fn compose_jwt_auth(
         extension: Some(extension),
         oidc_client: None,
         first_administrator: Default::default(),
+        stored_grants: None,
     })
 }
 
@@ -262,21 +272,50 @@ struct LoadedOidc {
     client: Option<OidcClientDiscovery>,
     extension: Arc<dyn EnterpriseAuthExtension>,
     first_administrator: tenkai::oidc_verifier::FirstAdministrator,
+    stored_grants: Option<Arc<tenkai::grant_rules::StoredGrants>>,
 }
 
-fn load_oidc_extension(config_path: &std::path::Path, require_tenant: bool) -> Result<LoadedOidc> {
+fn load_oidc_extension(
+    config_path: &std::path::Path,
+    require_tenant: bool,
+    grant_rules: Option<&Arc<dyn tenkai::grant_rules::GrantRuleStore>>,
+) -> Result<LoadedOidc> {
     let config = OidcConfig::load(config_path)
         .with_context(|| format!("loading OIDC configuration from {}", config_path.display()))?;
+    // Rules stored in the hub's store (#836), checked again every few
+    // seconds so a change on any replica reaches this one.
+    let stored_grants = grant_rules
+        .map(|store| {
+            tenkai::grant_rules::StoredGrants::load(
+                store.clone(),
+                config.grants.rules.iter().map(|rule| rule.value.clone()),
+            )
+            .context("loading stored grant rules")
+        })
+        .transpose()?;
+    if let Some(stored) = &stored_grants {
+        stored.spawn_refresher(tenkai::grant_rules::REFRESH_INTERVAL);
+    }
+    // The file's status; `/healthz` combines it with the stored rules on
+    // each request (#836), so a removed stored rule stops counting.
     let first_administrator = config.first_administrator();
-    // The same status `/healthz` reports (#815); only the log names values.
-    match first_administrator {
+    let at_startup = first_administrator.either(stored_grants.as_ref().map_or(
+        tenkai::oidc_verifier::FirstAdministrator::Missing,
+        |stored| stored.first_administrator(),
+    ));
+    // The status `/healthz` reports at startup (#815); only the log names
+    // values.
+    match at_startup {
         tenkai::oidc_verifier::FirstAdministrator::Missing => eprintln!(
             "tenkai.auth first_administrator=missing detail=no OIDC grant rule gives fleet management; only TENKAI_MANAGEMENT_TOKEN can administer this server (see docs/configure-server-authentication.md#first-administrator)"
         ),
         tenkai::oidc_verifier::FirstAdministrator::Configured => eprintln!(
-            "tenkai.auth first_administrator=configured claim={} values={}",
+            "tenkai.auth first_administrator=configured claim={} values={} stored_rules={}",
             config.grants.claim,
-            config.fleet_administrator_values().join(",")
+            config.fleet_administrator_values().join(","),
+            stored_grants
+                .as_ref()
+                .map_or(0, |stored| stored.rules().len())
         ),
     }
     if require_tenant
@@ -301,28 +340,33 @@ fn load_oidc_extension(config_path: &std::path::Path, require_tenant: bool) -> R
     let refresh = spawn_refresher(keys.clone(), Duration::from_secs(config.jwks_refresh_secs));
     let issuer = config.issuer.clone();
     let oidc_client = OidcClientDiscovery::from_config(&config);
-    let extension: Arc<dyn EnterpriseAuthExtension> = Arc::new(
-        OidcAuthExtension::new(config, keys, Some(refresh), require_tenant)
-            .context("composing OIDC authentication")?,
-    );
+    let mut extension = OidcAuthExtension::new(config, keys, Some(refresh), require_tenant)
+        .context("composing OIDC authentication")?;
+    if let Some(stored) = &stored_grants {
+        extension = extension.with_stored_grants(stored.clone());
+    }
+    let extension: Arc<dyn EnterpriseAuthExtension> = Arc::new(extension);
     Ok(LoadedOidc {
         issuer,
         client: oidc_client,
         extension,
         first_administrator,
+        stored_grants,
     })
 }
 
 fn compose_oidc_auth(
     config_path: &std::path::Path,
     require_tenant: bool,
+    grant_rules: Option<&Arc<dyn tenkai::grant_rules::GrantRuleStore>>,
 ) -> Result<EnterpriseAuthComposition> {
     let LoadedOidc {
         client: oidc_client,
         extension,
         first_administrator,
+        stored_grants,
         ..
-    } = load_oidc_extension(config_path, require_tenant)?;
+    } = load_oidc_extension(config_path, require_tenant, grant_rules)?;
     let audience = extension.expected_audience().to_string();
     Ok(EnterpriseAuthComposition {
         auth_host: AuthHostConfig {
@@ -333,6 +377,7 @@ fn compose_oidc_auth(
         extension: Some(extension),
         oidc_client,
         first_administrator,
+        stored_grants,
     })
 }
 
@@ -340,6 +385,7 @@ fn compose_issuer_auth(
     jwt_trust: &std::path::Path,
     oidc_path: &std::path::Path,
     require_tenant: bool,
+    grant_rules: Option<&Arc<dyn tenkai::grant_rules::GrantRuleStore>>,
 ) -> Result<EnterpriseAuthComposition> {
     let (jwt_issuer, _jwt_audience, jwt_extension) = load_jwt_extension(jwt_trust, require_tenant)?;
     let LoadedOidc {
@@ -347,7 +393,8 @@ fn compose_issuer_auth(
         client: oidc_client,
         extension: oidc_extension,
         first_administrator,
-    } = load_oidc_extension(oidc_path, require_tenant)?;
+        stored_grants,
+    } = load_oidc_extension(oidc_path, require_tenant, grant_rules)?;
     anyhow::ensure!(
         jwt_issuer != oidc_issuer,
         "JWT and OIDC verifiers must use distinct issuers; both are {jwt_issuer}"
@@ -368,6 +415,7 @@ fn compose_issuer_auth(
         extension: Some(extension),
         oidc_client,
         first_administrator,
+        stored_grants,
     })
 }
 
@@ -607,6 +655,7 @@ async fn main() -> Result<()> {
         }
     };
     let sqlite_store = opened.sqlite;
+    let opened_grant_rules = opened.grant_rules;
     let store = opened.operational;
     let tenant_store = opened.tenant;
     let tenant_store_for_lease = tenant_store.clone();
@@ -662,6 +711,7 @@ async fn main() -> Result<()> {
         EnterpriseAuthSources {
             jwt_trust: jwt_trust_path.as_deref(),
             oidc: oidc_config_path.as_deref(),
+            grant_rules: Some(&opened_grant_rules),
         },
         cli.with_enterprise_auth || cli.require_enterprise_auth || cli.tenant_mode,
         cli.tenant_mode,
@@ -790,6 +840,7 @@ async fn main() -> Result<()> {
             enterprise_auth: enterprise_auth.extension,
             oidc_client: enterprise_auth.oidc_client,
             first_administrator: enterprise_auth.first_administrator,
+            stored_grants: enterprise_auth.stored_grants.clone(),
             federation: tenkai::federated_identity::FederationConfig::community(),
             identity_directory: std::sync::Arc::new(
                 tenkai::federated_identity::IdentityDirectory::new(),
@@ -1506,6 +1557,9 @@ struct OpenedHostStore {
     sqlite: Option<Arc<SqliteStore>>,
     operational: Arc<dyn OperationalStore>,
     tenant: Option<Arc<dyn TenantOperationalStore>>,
+    /// Stored OIDC grant rules (#836): the SQLite store, or the hub-wide
+    /// PostgreSQL tables.
+    grant_rules: Arc<dyn tenkai::grant_rules::GrantRuleStore>,
 }
 
 fn refuse_tenant_remote_provider(tenant_mode: bool, provider_mode: ProviderMode) -> Result<()> {
@@ -1540,6 +1594,7 @@ fn open_host_store(
             sqlite: None,
             operational: hub.operational,
             tenant: Some(hub.tenant),
+            grant_rules: hub.grant_rules,
         });
     }
     let database = database.context("community hosts require a SQLite database path")?;
@@ -1548,6 +1603,7 @@ fn open_host_store(
     );
     Ok(OpenedHostStore {
         operational: sqlite.clone(),
+        grant_rules: sqlite.clone(),
         sqlite: Some(sqlite),
         tenant: None,
     })
@@ -1844,6 +1900,7 @@ mod tests {
             EnterpriseAuthSources {
                 jwt_trust: Some(&path),
                 oidc: None,
+                grant_rules: None,
             },
             true,
             true,
@@ -1877,6 +1934,7 @@ mod tests {
             EnterpriseAuthSources {
                 jwt_trust: Some(&path),
                 oidc: None,
+                grant_rules: None,
             },
             true,
             true,
@@ -1926,6 +1984,7 @@ mod tests {
             EnterpriseAuthSources {
                 jwt_trust: None,
                 oidc: Some(&config),
+                grant_rules: None,
             },
             true,
             false,
@@ -1964,6 +2023,7 @@ mod tests {
             EnterpriseAuthSources {
                 jwt_trust: Some(&jwt),
                 oidc: Some(&config),
+                grant_rules: None,
             },
             true,
             false,
@@ -2012,6 +2072,7 @@ mod tests {
             EnterpriseAuthSources {
                 jwt_trust: Some(&jwt),
                 oidc: Some(&config),
+                grant_rules: None,
             },
             true,
             false,
@@ -2027,6 +2088,7 @@ mod tests {
             EnterpriseAuthSources {
                 jwt_trust: None,
                 oidc: Some(&config),
+                grant_rules: None,
             },
             true,
             false,
@@ -2047,6 +2109,7 @@ mod tests {
             EnterpriseAuthSources {
                 jwt_trust: None,
                 oidc: Some(&config),
+                grant_rules: None,
             },
             true,
             true,

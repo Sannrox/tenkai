@@ -180,6 +180,7 @@ pub mod fleet;
 pub mod fleet_budget;
 pub mod fleet_fairness;
 pub mod fleet_workload;
+pub mod grant_rules;
 pub mod health_gate;
 pub mod host_env;
 pub mod host_preflight;

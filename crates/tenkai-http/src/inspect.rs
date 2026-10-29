@@ -192,7 +192,14 @@ fn service_status(status: &'static str, config: &ServerConfig) -> ServiceStatus 
         profile: config.capabilities.profile.clone(),
         capabilities: config.capabilities.diagnostic_names(),
         contracts: super::contract::SERVED_CONTRACTS.to_vec(),
-        first_administrator: Some(config.first_administrator),
+        first_administrator: Some(config.stored_grants.as_ref().map_or(
+            config.first_administrator,
+            |stored| {
+                config
+                    .first_administrator
+                    .either(stored.first_administrator())
+            },
+        )),
         backup: config
             .backups
             .as_ref()
@@ -272,6 +279,19 @@ pub(super) async fn ready(State(state): State<Arc<AppState>>) -> Response {
         return error_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "standby: another replica holds the hub writer lease",
+        );
+    }
+    // Stored grant rules (#836) this replica cannot keep current are
+    // suspended; it is not ready until a check succeeds.
+    if state
+        .config
+        .stored_grants
+        .as_ref()
+        .is_some_and(|stored| stored.is_stale())
+    {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "stored grant rules are stale: the store has not answered recent checks",
         );
     }
     let operational_store = state.store.clone();

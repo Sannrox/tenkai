@@ -97,6 +97,16 @@ pub enum FirstAdministrator {
 }
 
 impl FirstAdministrator {
+    /// Configured when either source configures one: the file's rules and
+    /// the stored ones (#836).
+    pub fn either(self, other: Self) -> Self {
+        if self == Self::Configured || other == Self::Configured {
+            Self::Configured
+        } else {
+            Self::Missing
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Configured => "configured",
@@ -152,7 +162,7 @@ pub struct OidcGrantMapping {
 }
 
 /// One claim value and the grants it confers.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OidcGrantRule {
     pub value: String,
@@ -171,6 +181,62 @@ pub struct OidcGrantRule {
     /// Principal kind for this rule. Default remains human; `service` is for CI.
     #[serde(default)]
     pub kind: Option<String>,
+}
+
+impl OidcGrantRule {
+    /// The checks every rule passes, from the config file or the store.
+    pub fn validate(&self) -> Result<(), AuthError> {
+        let invalid = |detail: &str| Err(AuthError::InvalidCredential(detail.into()));
+        let rule = self;
+        if rule
+            .products
+            .iter()
+            .any(|product| product.trim().is_empty() || product.trim() != product)
+        {
+            return invalid(
+                "OIDC grant rule products must be nonempty names without surrounding whitespace",
+            );
+        }
+        if rule.value.trim().is_empty() {
+            return invalid("OIDC grant rule value must not be empty");
+        }
+        if parse_delivery_capabilities(&rule.capabilities)?.is_empty() {
+            return invalid("OIDC grant rule must grant at least one capability");
+        }
+        if rule
+            .environment
+            .as_ref()
+            .is_some_and(|environment| environment.trim().is_empty())
+        {
+            return invalid("OIDC grant rule environment must not be empty when set");
+        }
+        if rule
+            .channels
+            .iter()
+            .any(|channel| channel.trim().is_empty())
+        {
+            return invalid("OIDC grant rule channels must not contain empty values");
+        }
+        match rule.kind.as_deref() {
+            None | Some("human") | Some("service") => {}
+            Some(other) => {
+                return invalid(&format!(
+                    "OIDC grant rule kind {other:?} must be \"human\" or \"service\""
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether this rule gives fleet management: `management` with no
+    /// environment binding.
+    pub fn grants_fleet_management(&self) -> bool {
+        self.environment.is_none()
+            && self
+                .capabilities
+                .iter()
+                .any(|capability| capability == "management")
+    }
 }
 
 fn default_algorithms() -> Vec<String> {
@@ -215,13 +281,7 @@ impl OidcConfig {
         self.grants
             .rules
             .iter()
-            .filter(|rule| {
-                rule.environment.is_none()
-                    && rule
-                        .capabilities
-                        .iter()
-                        .any(|capability| capability == "management")
-            })
+            .filter(|rule| rule.grants_fleet_management())
             .map(|rule| rule.value.as_str())
             .collect()
     }
@@ -295,47 +355,10 @@ impl OidcConfig {
         if self.grants.claim.trim().is_empty() {
             return invalid("OIDC grants.claim must not be empty");
         }
-        if self.grants.rules.is_empty() {
-            return invalid("OIDC grants.rules must name at least one claim value");
-        }
+        // Rules may also be stored in the hub's store (#836); a config with
+        // none grants nothing by itself.
         for rule in &self.grants.rules {
-            if rule
-                .products
-                .iter()
-                .any(|product| product.trim().is_empty() || product.trim() != product)
-            {
-                return invalid(
-                    "OIDC grant rule products must be nonempty names without surrounding whitespace",
-                );
-            }
-            if rule.value.trim().is_empty() {
-                return invalid("OIDC grant rule value must not be empty");
-            }
-            if parse_delivery_capabilities(&rule.capabilities)?.is_empty() {
-                return invalid("OIDC grant rule must grant at least one capability");
-            }
-            if rule
-                .environment
-                .as_ref()
-                .is_some_and(|environment| environment.trim().is_empty())
-            {
-                return invalid("OIDC grant rule environment must not be empty when set");
-            }
-            if rule
-                .channels
-                .iter()
-                .any(|channel| channel.trim().is_empty())
-            {
-                return invalid("OIDC grant rule channels must not contain empty values");
-            }
-            match rule.kind.as_deref() {
-                None | Some("human") | Some("service") => {}
-                Some(other) => {
-                    return invalid(&format!(
-                        "OIDC grant rule kind {other:?} must be \"human\" or \"service\""
-                    ));
-                }
-            }
+            rule.validate()?;
         }
         Ok(())
     }
@@ -713,6 +736,8 @@ pub struct OidcAuthExtension {
     keys: Arc<JwksCache>,
     refresh: Option<SyncSender<()>>,
     require_tenant: bool,
+    /// Rules stored in the hub's store (#836), matched after the file's.
+    stored: Option<Arc<crate::grant_rules::StoredGrants>>,
 }
 
 impl OidcAuthExtension {
@@ -735,11 +760,29 @@ impl OidcAuthExtension {
             keys,
             refresh,
             require_tenant,
+            stored: None,
         })
+    }
+
+    /// Also grant from the rules stored in the hub's store (#836).
+    pub fn with_stored_grants(mut self, stored: Arc<crate::grant_rules::StoredGrants>) -> Self {
+        self.stored = Some(stored);
+        self
     }
 
     pub fn config(&self) -> &OidcConfig {
         &self.config
+    }
+
+    /// Whether the file's rules or the stored ones give fleet management.
+    pub fn first_administrator(&self) -> FirstAdministrator {
+        let stored = self
+            .stored
+            .as_ref()
+            .map_or(FirstAdministrator::Missing, |stored| {
+                stored.first_administrator()
+            });
+        self.config.first_administrator().either(stored)
     }
 
     fn verify(&self, token: &[u8], now: i64) -> Result<Grants, AuthError> {
@@ -809,7 +852,12 @@ impl OidcAuthExtension {
         let mut product_bindings = BTreeSet::new();
         let mut unrestricted_publication = false;
         let mut principal_kind = PrincipalKind::Human;
-        for rule in &self.config.grants.rules {
+        let stored = self
+            .stored
+            .as_ref()
+            .map(|stored| stored.rules())
+            .unwrap_or_default();
+        for rule in self.config.grants.rules.iter().chain(stored.iter()) {
             if !values.contains(rule.value.as_str()) {
                 continue;
             }

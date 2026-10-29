@@ -366,9 +366,14 @@ fn config_validation_fails_closed() {
         local.validate().is_ok(),
         "loopback http is allowed for development"
     );
+    // Rules may all be stored in the hub's store (#836): a file with none
+    // is valid and grants nothing by itself.
     let mut no_rules = config("");
     no_rules.grants.rules.clear();
-    assert!(no_rules.validate().is_err());
+    assert!(no_rules.validate().is_ok());
+    let mut empty_rule = config("");
+    empty_rule.grants.rules[0].capabilities.clear();
+    assert!(empty_rule.validate().is_err());
     let named = config("[client]\nclient_id = \"tenkai-console\"\ndisplay_name = \"Example Org\"");
     assert!(named.validate().is_ok());
     assert_eq!(
@@ -571,3 +576,67 @@ fn fleet_administrators_are_unbound_management_rules() {
 }
 
 mod directory_bridge;
+
+/// Stored rules (#836) grant like the file's, change the first
+/// administrator status, and never override a value the file declares.
+#[test]
+fn stored_rules_grant_after_the_file_and_set_the_first_administrator() {
+    let signer = Signer::new("k1");
+    let cache =
+        JwksCache::with_min_interval(static_source(jwks(&[&signer])), Duration::ZERO).unwrap();
+    let mut file = config("");
+    file.grants
+        .rules
+        .retain(|rule| rule.value == "tenkai-viewers");
+    let dir = std::env::temp_dir().join(format!(
+        "tenkai-oidc-stored-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let store = Arc::new(crate::storage::SqliteStore::open(dir.join("tenkai.db")).unwrap());
+    let stored = crate::grant_rules::StoredGrants::load(
+        store,
+        file.grants.rules.iter().map(|rule| rule.value.clone()),
+    )
+    .unwrap();
+    let ext = OidcAuthExtension::new(file, Arc::new(cache), None, false)
+        .unwrap()
+        .with_stored_grants(stored.clone());
+    assert_eq!(ext.first_administrator(), FirstAdministrator::Missing);
+    let admin = || signer.sign(&far_future(serde_json::json!(["tenkai-admins"])));
+    assert!(
+        !authenticate(&ext, admin())
+            .unwrap()
+            .has_delivery_capability(DeliveryCapability::Management)
+    );
+    let rule = OidcGrantRule {
+        value: "tenkai-admins".into(),
+        capabilities: vec!["read".into(), "management".into()],
+        environment: None,
+        channels: Vec::new(),
+        products: Vec::new(),
+        kind: None,
+    };
+    stored
+        .create(rule.clone(), "management-token", "first administrator", 1)
+        .unwrap();
+    assert_eq!(ext.first_administrator(), FirstAdministrator::Configured);
+    let context = authenticate(&ext, admin()).unwrap();
+    assert!(context.has_delivery_capability(DeliveryCapability::Management));
+    assert!(context.has_delivery_capability(DeliveryCapability::Read));
+    // The file's value cannot be stored again with more capabilities.
+    let mut escalate = rule;
+    escalate.value = "tenkai-viewers".into();
+    assert!(matches!(
+        stored.create(escalate, "management-token", "escalate", 2),
+        Err(crate::grant_rules::GrantRuleError::DeclaredByConfig(_))
+    ));
+    let viewer = authenticate(
+        &ext,
+        signer.sign(&far_future(serde_json::json!(["tenkai-viewers"]))),
+    )
+    .unwrap();
+    assert!(!viewer.has_delivery_capability(DeliveryCapability::Management));
+    let _ = std::fs::remove_dir_all(dir);
+}

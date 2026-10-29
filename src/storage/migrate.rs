@@ -269,6 +269,7 @@ pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
     ensure_provider_event_sequence_table(connection)?;
     super::runtime_enrollment::ensure_runtime_enrollment_tables(connection)?;
     super::runtime_certificates::ensure_runtime_certificate_table(connection)?;
+    super::grant_rules::ensure_grant_rule_tables(connection)?;
     let current: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if current < 10 {
         let tx = connection.transaction()?;

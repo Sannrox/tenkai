@@ -235,3 +235,51 @@ impl PostgresTenantOperationalStore {
             .map_err(|error| IsolationError::Contract(error.to_string()))
     }
 }
+
+/// Stored OIDC grant rules (#836), in the hub-wide tables every replica
+/// shares. Writes need the writer lease on a fenced hub.
+impl tenkai::grant_rules::GrantRuleStore for PostgresTenantOperationalStore {
+    fn grant_rule_generation(&self) -> Result<i64> {
+        #[cfg(feature = "postgres")]
+        return self.inner.grant_rule_generation();
+        #[cfg(not(feature = "postgres"))]
+        Err(unavailable())
+    }
+
+    fn grant_rules(&self) -> Result<(i64, Vec<tenkai::grant_rules::StoredGrantRule>)> {
+        #[cfg(feature = "postgres")]
+        return self.inner.grant_rules();
+        #[cfg(not(feature = "postgres"))]
+        Err(unavailable())
+    }
+
+    fn insert_grant_rule(
+        &self,
+        rule: &tenkai::grant_rules::StoredGrantRule,
+    ) -> Result<Option<i64>> {
+        #[cfg(feature = "postgres")]
+        return self.inner.insert_grant_rule(rule);
+        #[cfg(not(feature = "postgres"))]
+        {
+            let _ = rule;
+            Err(unavailable())
+        }
+    }
+
+    fn delete_grant_rule(&self, value: &str) -> Result<Option<i64>> {
+        #[cfg(feature = "postgres")]
+        return self.inner.delete_grant_rule(value);
+        #[cfg(not(feature = "postgres"))]
+        {
+            let _ = value;
+            Err(unavailable())
+        }
+    }
+}
+
+#[cfg(not(feature = "postgres"))]
+fn unavailable() -> StoreError {
+    StoreError::AdapterUnavailable(
+        "rebuild tenkai with --features postgres to use the PostgreSQL hub store".into(),
+    )
+}
