@@ -347,10 +347,47 @@ async fn reject_foreign_migration_lock(
     Ok(())
 }
 
+/// Named wave or topology lease the current plan execution lost (#834).
+#[derive(Debug)]
+pub(crate) struct ExecutionFenceLost {
+    namespace: String,
+    key: String,
+    detail: String,
+}
+
+impl std::fmt::Display for ExecutionFenceLost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "lost {} lease {}: {}",
+            self.namespace, self.key, self.detail
+        )
+    }
+}
+
+impl std::error::Error for ExecutionFenceLost {}
+
+pub(crate) fn is_execution_fence_lost(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| cause.is::<ExecutionFenceLost>())
+}
+
 pub(crate) async fn refresh_environment_lease(
     ctx: &mut Ctx,
     lease: &EnvironmentLease,
 ) -> Result<()> {
+    for held in ctx.held_execution_leases.clone() {
+        if let Err(error) = ctx
+            .refresh_lease(&held.namespace, &held.key, &held.fencing_token, held.ttl_ms)
+            .await
+        {
+            return Err(ExecutionFenceLost {
+                namespace: held.namespace,
+                key: held.key,
+                detail: error.to_string(),
+            }
+            .into());
+        }
+    }
     let refreshed = ctx
         .refresh_lease(
             ENVIRONMENT_LEASE_NAMESPACE,
@@ -790,5 +827,89 @@ mod tests {
         // Other environment work, such as a configuration change, still runs.
         let lease = claim_environment(&mut ctx, "prod", "config").await.unwrap();
         release_environment(&mut ctx, &lease).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_held_execution_lease_is_refreshed_with_the_environment_fence() {
+        let mut ctx = context("held-refresh");
+        let held = ctx
+            .acquire_lease("tenkai/topology-availability", "ledger-ha", "wave", 60_000)
+            .await
+            .unwrap();
+        ctx.held_execution_leases = vec![crate::client::HeldExecutionLease {
+            namespace: "tenkai/topology-availability".into(),
+            key: "ledger-ha".into(),
+            fencing_token: held.fencing_token.clone(),
+            ttl_ms: 120_000,
+        }];
+        let before = ctx
+            .get_lease("tenkai/topology-availability", "ledger-ha")
+            .await
+            .unwrap()
+            .unwrap();
+        let lease = claim_environment(&mut ctx, "prod", "plan-1").await.unwrap();
+        refresh_environment_lease(&mut ctx, &lease).await.unwrap();
+        let after = ctx
+            .get_lease("tenkai/topology-availability", "ledger-ha")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            after.expires_at_ms > before.expires_at_ms,
+            "before={} after={}",
+            before.expires_at_ms,
+            after.expires_at_ms
+        );
+        let err = ctx
+            .acquire_lease("tenkai/topology-availability", "ledger-ha", "other", 1_000)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("already exists") || err.contains("held"),
+            "{err}"
+        );
+        release_environment(&mut ctx, &lease).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_lost_held_execution_lease_fails_closed_naming_it() {
+        let mut ctx = context("held-lost");
+        let held = ctx
+            .acquire_lease("tenkai/topology-availability", "ledger-ha", "wave", 60_000)
+            .await
+            .unwrap();
+        ctx.release_lease(
+            "tenkai/topology-availability",
+            "ledger-ha",
+            &held.fencing_token,
+        )
+        .await
+        .unwrap();
+        ctx.held_execution_leases = vec![crate::client::HeldExecutionLease {
+            namespace: "tenkai/topology-availability".into(),
+            key: "ledger-ha".into(),
+            fencing_token: held.fencing_token,
+            ttl_ms: 60_000,
+        }];
+        let lease = claim_environment(&mut ctx, "prod", "plan-1").await.unwrap();
+        let err = refresh_environment_lease(&mut ctx, &lease)
+            .await
+            .unwrap_err();
+        assert!(is_execution_fence_lost(&err), "{err:#}");
+        assert!(err.to_string().contains("ledger-ha"), "{err:#}");
+        release_environment(&mut ctx, &lease).await.unwrap();
+    }
+
+    #[test]
+    fn fence_loss_is_visible_through_anyhow_context() {
+        let err = anyhow::Error::from(ExecutionFenceLost {
+            namespace: "tenkai/wave-execution".into(),
+            key: "ledger-roll".into(),
+            detail: "lease not held".into(),
+        })
+        .context("refreshing environment apply lease during SLO sampling");
+        assert!(is_execution_fence_lost(&err), "{err:#}");
+        assert!(format!("{err:#}").contains("ledger-roll"), "{err:#}");
     }
 }

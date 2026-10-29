@@ -30,7 +30,7 @@ mod step_lifecycle;
 pub(crate) use execution_admission::{CandidateAdmission, classify_candidate};
 pub(crate) use execution_lease::{
     ENVIRONMENT_LEASE_NAMESPACE, EnvironmentLease, claim_environment, environment_lease_status,
-    refresh_environment_lease, release_environment, runtime_may_take_over,
+    is_execution_fence_lost, refresh_environment_lease, release_environment, runtime_may_take_over,
 };
 pub use execution_lease::{EnvironmentLeaseInspect, inspect_environment_lease, unlock_environment};
 use execution_lease::{claim_execution_environment, run_guarded_mutation, run_mutation_command};
@@ -353,6 +353,10 @@ async fn execute_locked(
     for step in steps {
         if let Err(error) = refresh_environment_lease(ctx, lease).await {
             let detail = format!("refreshing environment apply lease failed: {error}");
+            if is_execution_fence_lost(&error) {
+                // Leave the plan Running so min_available still refuses (#690).
+                return Err(error);
+            }
             plan_completion::fail(ctx, lease, &mut stored_plan, skip_gates, &detail).await?;
             return Err(error.context(detail));
         }
@@ -380,6 +384,9 @@ async fn execute_locked(
         {
             Ok(outcome) => outcome,
             Err(error) => {
+                if is_execution_fence_lost(&error) {
+                    return Err(error);
+                }
                 plan_completion::fail(ctx, lease, &mut stored_plan, skip_gates, error.to_string())
                     .await?;
                 return Err(error);

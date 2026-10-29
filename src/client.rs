@@ -42,6 +42,16 @@ pub(crate) use transport::{
     token_transport_is_safe,
 };
 
+/// A lease a plan execution must keep, refreshed with the environment apply
+/// fence so a long run cannot outlast its wave or topology (#834).
+#[derive(Clone, Debug)]
+pub(crate) struct HeldExecutionLease {
+    pub namespace: String,
+    pub key: String,
+    pub fencing_token: String,
+    pub ttl_ms: i64,
+}
+
 #[derive(Clone)]
 pub struct Ctx {
     pub(crate) release_trust_roots: Option<std::path::PathBuf>,
@@ -53,6 +63,7 @@ pub struct Ctx {
     plan_kind_list: Arc<PlanKindListTick>,
     health_metrics: Option<Arc<dyn crate::health_gate::HealthMetricsSource>>,
     trust_sources: Option<Arc<crate::trust_posture::TrustSources>>,
+    pub(crate) held_execution_leases: Vec<HeldExecutionLease>,
 }
 
 #[derive(Clone)]
@@ -166,6 +177,7 @@ pub async fn connect() -> Result<Ctx> {
         plan_kind_list: Arc::new(PlanKindListTick::default()),
         health_metrics: None,
         trust_sources: None,
+        held_execution_leases: Vec::new(),
     })
 }
 

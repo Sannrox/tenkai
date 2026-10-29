@@ -52,6 +52,7 @@ impl Ctx {
             plan_kind_list: Arc::new(PlanKindListTick::default()),
             health_metrics: None,
             trust_sources: None,
+            held_execution_leases: Vec::new(),
         }
     }
 
@@ -76,6 +77,7 @@ impl Ctx {
             plan_kind_list: Arc::new(PlanKindListTick::default()),
             health_metrics: None,
             trust_sources: None,
+            held_execution_leases: Vec::new(),
         })
     }
 
