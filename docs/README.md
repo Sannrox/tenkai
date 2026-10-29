@@ -42,6 +42,7 @@ will be split over time. Contributor and agent workflow live in
 | Run the on-site key ceremony | [key-ceremony.md](key-ceremony.md) |
 | Diagnose a server and watch fleet drift | [server-diagnostics.md](server-diagnostics.md) |
 | Observe and execute rollout waves | [rollout-waves.md](rollout-waves.md) |
+| Run a topology failover drill | [manifest.md#failover-drill](manifest.md#failover-drill) |
 | Run a stateful package migration | [package-migrations.md](package-migrations.md) |
 | Upgrade across connected, intermittent, and isolated environments | [connectivity-upgrades.md](connectivity-upgrades.md) |
 | Build a signed full-stack offline bundle | [offline-bundles.md](offline-bundles.md#build) |

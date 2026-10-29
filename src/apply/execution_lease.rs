@@ -130,6 +130,45 @@ pub(crate) async fn claim_environment(
     claim_environment_with_options(ctx, environment, owner, ENVIRONMENT_LEASE_MS, false).await
 }
 
+/// Apply lease for a topology drill. An expired holder owned by another
+/// drill is taken over so crash recovery does not wait on `env unlock`.
+pub(crate) async fn claim_environment_for_drill(
+    ctx: &mut Ctx,
+    environment: &str,
+    owner: &str,
+) -> Result<EnvironmentLease> {
+    let now = crate::now_millis();
+    let expired_drill = get_environment_lease(ctx, environment)
+        .await?
+        .is_some_and(|existing| {
+            existing.status == "active"
+                && existing.expires_at_ms <= now
+                && existing.owner.starts_with("drill:")
+        });
+    claim_environment_with_options(ctx, environment, owner, ENVIRONMENT_LEASE_MS, expired_drill)
+        .await
+}
+
+/// Release a leftover drill apply lease from its durable fencing token.
+pub(crate) async fn release_environment_fence(
+    ctx: &mut Ctx,
+    environment: &str,
+    fencing_token: &str,
+) -> Result<()> {
+    release_environment(
+        ctx,
+        &EnvironmentLease {
+            environment: environment.into(),
+            owner: "released".into(),
+            generation: 0,
+            fencing_token: fencing_token.into(),
+            ttl_ms: 0,
+            took_over: false,
+        },
+    )
+    .await
+}
+
 pub(super) async fn claim_execution_environment(
     ctx: &mut Ctx,
     environment: &str,

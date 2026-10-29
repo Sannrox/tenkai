@@ -4,6 +4,7 @@ use clap::Parser;
 
 use crate::args::{Cli, Command, KeysCommand, Target};
 use crate::env_args::{EnvCommand, MaintenanceCommand, OverlayCommand};
+use crate::topology_args::TopologyCommand;
 use crate::wave_args::WaveCommand;
 
 #[test]
@@ -528,4 +529,33 @@ fn parses_shared_apply_and_wave_approval_flags() {
     assert!(approval.approval_dir.is_none());
     assert!(approval.allow_unapproved_development);
     assert_eq!(approval.development_reason.as_deref(), Some("local drill"));
+
+    let drill = Cli::try_parse_from([
+        "tenkaictl",
+        "topology",
+        "drill",
+        "ledger@1.0.0",
+        "ledger-a",
+        "--signing-key",
+        "drill.seed",
+        "--out",
+        "drill.json",
+    ])
+    .unwrap();
+    let Command::Topology {
+        command:
+            TopologyCommand::Drill {
+                ref release,
+                ref replica,
+                ref signing_key,
+                ref out,
+            },
+    } = drill.command
+    else {
+        panic!("expected topology drill");
+    };
+    assert_eq!(release, "ledger@1.0.0");
+    assert_eq!(replica, "ledger-a");
+    assert_eq!(signing_key, &PathBuf::from("drill.seed"));
+    assert_eq!(out, &PathBuf::from("drill.json"));
 }

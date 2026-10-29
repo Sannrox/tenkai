@@ -10,7 +10,9 @@
 //! A topology may also declare `min_available` (#690): a rolling wave starts
 //! upgrading a serving replica only while at least that many of the other
 //! replicas are healthy for the product, so an upgrade never takes more
-//! replicas down than the topology can spare.
+//! replicas down than the topology can spare. An explicit failover drill
+//! (#691) takes one serving replica out of service under the same lease,
+//! proves the minimum still holds, restores it, and signs the evidence.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -18,6 +20,12 @@ use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::client::Ctx;
+
+/// Shared with rolling waves so a drill cannot take a replica down while a
+/// wave is already changing one, and the other way around.
+pub const TOPOLOGY_LEASE_NAMESPACE: &str = "tenkai/topology-availability";
+/// Same two-hour bound as a wave lease.
+pub const TOPOLOGY_LEASE_MS: i64 = 2 * 60 * 60 * 1000;
 
 /// `[topology]` in a release manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -188,10 +196,22 @@ pub async fn require_availability(ctx: &mut Ctx, environment: &str, release: &st
     let Some((topology, product)) = availability_manifest(ctx, release).await? else {
         return Ok(());
     };
-    let key = format!("deployment_health.{product}");
-    // Serving reads the product's health alone, so doubt about a replica
-    // never waives the guard on it; available also needs no plan of it left
-    // running, since a run interrupted mid-way records no outcome.
+    let (serving, available) = replica_availability(ctx, &topology, &product).await?;
+    topology.check_availability(environment, &serving, &available)
+}
+
+pub(crate) fn deployment_health_key(product: &str) -> String {
+    format!("deployment_health.{product}")
+}
+
+/// Serving is healthy for the product; available is serving with no plan
+/// left running. Doubt about a replica never waives the guard on it.
+pub(crate) async fn replica_availability(
+    ctx: &mut Ctx,
+    topology: &TopologySection,
+    product: &str,
+) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
+    let key = deployment_health_key(product);
     let mut serving = BTreeSet::new();
     let mut available = BTreeSet::new();
     for member in &topology.environments {
@@ -216,7 +236,7 @@ pub async fn require_availability(ctx: &mut Ctx, environment: &str, release: &st
             available.insert(member.clone());
         }
     }
-    topology.check_availability(environment, &serving, &available)
+    Ok((serving, available))
 }
 
 /// The topology `release` declares when it sets `min_available`.
@@ -229,7 +249,7 @@ pub async fn availability_topology(
         .map(|(topology, _)| topology))
 }
 
-async fn availability_manifest(
+pub(crate) async fn availability_manifest(
     ctx: &mut Ctx,
     release: &str,
 ) -> Result<Option<(TopologySection, String)>> {
