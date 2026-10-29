@@ -57,7 +57,8 @@ will be split over time. Contributor and agent workflow live in
 | Task | Page |
 | --- | --- |
 | Tag a release | [release-readiness.md](release-readiness.md) |
-| Run the Postgres multi-replica hub lab | [multi-replica-hub-runbook.md](multi-replica-hub-runbook.md) |
+| Fail over a multi-replica Postgres hub | [ha-failover-runbook.md](ha-failover-runbook.md) |
+| Compose two local Postgres hubs | [multi-replica-hub-runbook.md](multi-replica-hub-runbook.md) |
 | Run the 1,000-environment scale drill | [fleet-workload.md](fleet-workload.md) |
 | Check rollout-time budgets | [software-executor.md](software-executor.md#rollout-time-budget) |
 

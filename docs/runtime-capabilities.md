@@ -44,13 +44,14 @@ composition, not an operator support contract:
   single-server `fleet` profile.
 - `enterprise-experimental` identifies the tenant-mode hub composition:
   PostgreSQL is the sole authoritative store (`store.tenant_postgres` plus
-  authentication). SQLite is not opened. Catalog object-graph lifecycle lives
-  in each tenant schema (ADR 0038). Terminal-outcome export remains
-  unavailable. Product `high_availability` is not claimed.
+  authentication). SQLite is not opened. Catalog object-graph lifecycle and
+  terminal-outcome export live in each tenant schema (ADR 0038). Product
+  `high_availability` is not claimed.
 
 Multi-replica tenant-mode hubs fence writes on one hub writer lease; the
 [hub failover runbook](ha-failover-runbook.md) covers detection, takeover,
-verification and rollback. The profile stays gated (ADR 0010 amendment, #750).
+verification and rollback. The profile is experimental and selectable
+(ADR 0010 amendment, #647).
 
 ADR 0010 defines complete operating profiles. Capability negotiation remains
 useful component evidence; a set of component claims is not by itself a
@@ -87,10 +88,10 @@ a store honestly advertises the matching capabilities. Decision:
 
 The optional Postgres hub store (`--features postgres`, `--tenant-mode`)
 advertises `shared_replica_state` under a **single-active-writer** model.
-Multi-host conformance uses tick fencing. Product failover, HA, and
-catalog-lifecycle guarantees remain out of this claim. See
+Multi-host hubs use the writer lease and tick fencing. Product
+`high_availability` stays unclaimed. See
 [postgres-tenant-store.md](postgres-tenant-store.md#shared-replica-state-128)
-and [multi-replica-hub-runbook.md](multi-replica-hub-runbook.md).
+and the [hub failover runbook](ha-failover-runbook.md).
 
 ## Host requirements
 

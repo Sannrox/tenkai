@@ -76,7 +76,8 @@ it ([ADR 0001](decisions/0001-standalone-core-and-service-evolution.md),
 | Postgres hub `shared_replica_state` (single-active writer) | [Shared replica state](postgres-tenant-store.md#shared-replica-state-128); #128 |
 | Multi-host reconcile tick fencing | [Tick fencing](reconcile-tick-fencing.md); #129 |
 | Fenced multi-replica delivery effects | [Conformance](delivery-effect-conformance.md); #180 |
-| Multi-replica hub ops runbook | [Multi-replica hub runbook](multi-replica-hub-runbook.md); #130 |
+| Hub failover runbook | [Hub failover](ha-failover-runbook.md); #647, #750 |
+| Multi-replica hub compose steps | [Multi-replica hub runbook](multi-replica-hub-runbook.md); #130 |
 | Durable Postgres tick fence + inventory heartbeat + OpenMetrics + outcome priors | #135–#138; [tick fencing](reconcile-tick-fencing.md), [plan priors](plan-priors.md) |
 | Local minikube dogfood (embedded, no remote server) | [ops note](local-dogfood-minikube.md); #145–#146, #152 |
 | Dogfood `tenkaictl dev` release/plan signing (not production KMS) | [ops note](local-dogfood-minikube.md#first-class-dogfood-signing-149); #149 |
