@@ -22,6 +22,12 @@ pub struct ExportRequest {
     /// The connectivity upgrade of an `offline-receipt`.
     #[serde(default)]
     pub upgrade: Option<String>,
+    /// With `to_sequence`, an `audit-export` of the chain's existing exports
+    /// `from_sequence..=to_sequence` (#825) instead of the next entry.
+    #[serde(default)]
+    pub from_sequence: Option<u64>,
+    #[serde(default)]
+    pub to_sequence: Option<u64>,
 }
 
 impl ManagementOperations {
@@ -65,6 +71,15 @@ impl ManagementOperations {
                 )));
             }
         };
+        let audit_range = match (request.from_sequence, request.to_sequence) {
+            (None, None) => None,
+            (Some(from), Some(to)) if request.kind == ExportKind::AuditExport => Some((from, to)),
+            _ => {
+                return Err(ManagementError::BadRequest(
+                    "from_sequence and to_sequence go together, on an audit-export only".into(),
+                ));
+            }
+        };
         self.require_environment_grant(credential, &context, environment, "export")?;
         let principal = context.audit_principal();
         let operation = format!("export.{}", request.kind.as_str());
@@ -76,7 +91,12 @@ impl ManagementOperations {
             action: ExportAction::Created,
             reason: reason.into(),
         };
-        let entry = if request.kind == ExportKind::AuditExport {
+        let entry = if let Some((from, to)) = audit_range {
+            tokio::task::spawn_blocking(move || exports.audit_range_export(from, to, &event))
+                .await
+                .map_err(|error| ManagementError::Internal(error.to_string()))?
+                .map_err(|error| ManagementError::BadRequest(format!("{error:#}")))?
+        } else if request.kind == ExportKind::AuditExport {
             // Advancing the chain and storing the export happen together.
             let store = self.store.clone();
             tokio::task::spawn_blocking(move || exports.next_audit_export(store.as_ref(), &event))

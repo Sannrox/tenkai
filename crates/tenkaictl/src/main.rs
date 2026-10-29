@@ -280,12 +280,40 @@ async fn run(cli: Cli) -> Result<()> {
                 );
                 Ok(())
             }
+            args::AuditCommand::ExportRange {
+                dir,
+                from,
+                to,
+                out,
+                trust_roots,
+            } => {
+                let roots = tenkai::release_signing::TrustRoots::load(trust_roots)?;
+                let range = tenkai::audit_export::range(dir, *from, *to, &roots)?;
+                tenkai::audit_export::write_range(&range, out)?;
+                println!(
+                    "audit range {from} to {to} holds {} exports",
+                    range.exports.len()
+                );
+                Ok(())
+            }
             args::AuditCommand::Verify {
                 exports,
                 trust_roots,
                 anchor,
             } => {
                 let roots = tenkai::release_signing::TrustRoots::load(trust_roots)?;
+                if let [single] = exports.as_slice() {
+                    let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(single)?)?;
+                    if raw["schema"] == tenkai::audit_export::AUDIT_RANGE_SCHEMA {
+                        let range = tenkai::audit_export::AuditRange::load(single)?;
+                        tenkai::audit_export::verify_range(&range, &roots, anchor.as_deref())?;
+                        println!(
+                            "audit range {} to {} verifies as one chain",
+                            range.from, range.to
+                        );
+                        return Ok(());
+                    }
+                }
                 let loaded = exports
                     .iter()
                     .map(|path| tenkai::audit_export::AuditExport::load(path))

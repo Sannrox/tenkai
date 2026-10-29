@@ -199,6 +199,26 @@
       ],
       "type": "object"
     },
+    "AuditSequences": {
+      "description": "Inclusive chain sequences.",
+      "properties": {
+        "from": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "to": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ],
+      "type": "object"
+    },
     "BackupFailure": {
       "additionalProperties": false,
       "properties": {
@@ -2417,6 +2437,10 @@
     "ExportEntry": {
       "description": "An export with its events, oldest first.",
       "properties": {
+        "audit_range": {
+          "$ref": "#/$defs/AuditSequences",
+          "description": "The chain sequences an audit export covers (#825); one for the next\nentry, `from..=to` for a range."
+        },
         "created_at_ms": {
           "format": "int64",
           "type": "integer"
@@ -2510,7 +2534,7 @@
         },
         {
           "const": "audit-export",
-          "description": "Hub-wide: the next signed `tenkai.audit-export.v1` of this host's chain.",
+          "description": "Hub-wide: the next signed `tenkai.audit-export.v1` of this host's\nchain, or a `tenkai.audit-range.v1` of exports already in it.",
           "type": "string"
         },
         {
@@ -2551,6 +2575,16 @@
             "null"
           ]
         },
+        "from_sequence": {
+          "default": null,
+          "description": "With `to_sequence`, an `audit-export` of the chain's existing exports\n`from_sequence..=to_sequence` (#825) instead of the next entry.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "kind": {
           "$ref": "#/$defs/ExportKind"
         },
@@ -2565,6 +2599,15 @@
         "reason": {
           "description": "Why the export is made; recorded with the creator.",
           "type": "string"
+        },
+        "to_sequence": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "upgrade": {
           "default": null,

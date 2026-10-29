@@ -490,7 +490,21 @@ pub(crate) enum AuditCommand {
         #[arg(long)]
         trust_roots: Option<PathBuf>,
     },
+    /// Write the chain's existing exports `--from..=--to` in `dir` to
+    /// `--out` as one ranged export. The range must verify first.
+    ExportRange {
+        dir: PathBuf,
+        #[arg(long)]
+        from: u64,
+        #[arg(long)]
+        to: u64,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long)]
+        trust_roots: PathBuf,
+    },
     /// Verify exports in order: signatures, contiguous cursors, chaining.
+    /// A single ranged export verifies as the chain it holds.
     Verify {
         #[arg(required = true, num_args = 1..)]
         exports: Vec<PathBuf>,
