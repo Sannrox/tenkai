@@ -102,6 +102,11 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | `TENKAI_TRUST_CHANGE_EVENTS` | `false` | `tenkai-server` only: `true` appends a `trust_threshold_crossed` change event on `/v1/events` per certificate threshold crossing, and `trust/ok` on recovery. Enable only once every replica, and any rollback target, runs a release whose change-event readers skip unknown kinds (#775) ([trust posture](run-tenkai-server.md#trust-posture)) |
 | `TENKAI_RUNNER_CA_CERT`, `TENKAI_RUNNER_CA_KEY` | unset | `tenkai-server` only: the [runner CA](run-tenkai-server.md#runner-certificates) (PEM files, set together) that issues and admits runner certificates; during rotation the certificate file lists the new CA first, then the old |
 | `TENKAI_RUNTIME_CERTIFICATE_DIR` | unset | `tenkai-runtime`: keeps the runner key, certificate and CA; needs `TENKAI_RUNTIME_CREDENTIAL_FILE` |
+| `TENKAI_RUNTIME_KEY_STORE` | `file` | `tenkai-runtime`: `file` writes `key.pem` in the certificate directory; `hardware` generates a non-exportable PKCS#11 key (TPM 2.0 on Linux) and writes only a locator ([attested runners](run-tenkai-server.md#attested-runners)) |
+| `TENKAI_RUNTIME_PKCS11_MODULE` | TPM PKCS#11 if present | PKCS#11 module for `TENKAI_RUNTIME_KEY_STORE=hardware`; required unless a TPM 2.0 module is on the default Linux path |
+| `TENKAI_RUNTIME_PKCS11_TOKEN` | unset | PKCS#11 token label for the hardware runner key |
+| `TENKAI_RUNTIME_PKCS11_PIN` | unset | Secret setting: PIN for that token (`TENKAI_RUNTIME_PKCS11_PIN_FILE` or the secret directory) |
+| `TENKAI_RUNTIME_PKCS11_KEY_LABEL` | `tenkai-runner` | PKCS#11 object label of the hardware runner key |
 | `TENKAI_RUNTIME_PREFLIGHT_CONFIG` | unset | `tenkai-runtime`: host preflight config whose checks the agent runs and signs when its environment requires runner attestation; without it, attestation carries only the probed host facts ([attested runners](run-tenkai-server.md#attested-runners)) |
 | `TENKAI_TLS_MIN_VERSION` | `1.3` | Lowest TLS version accepted: `1.3` or `1.2` |
 | `TENKAI_ENABLE_METRICS` | `false` | Enable the Prometheus scrape endpoint (`--enable-metrics`) |
