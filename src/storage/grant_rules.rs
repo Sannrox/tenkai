@@ -2,7 +2,9 @@
 //! older binary on the same database ignores them.
 
 use super::*;
-use crate::grant_rules::{GrantRuleStore, MAX_STORED_RULES, StoredGrantRule, decode, encode};
+use crate::grant_rules::{
+    GrantRuleStore, GrantRuleWrite, MAX_STORED_RULES, StoredGrantRule, decode, encode,
+};
 
 pub(super) fn ensure_grant_rule_tables(connection: &Connection) -> Result<()> {
     connection.execute_batch(
@@ -58,35 +60,45 @@ impl GrantRuleStore for SqliteStore {
         Ok((current, rules))
     }
 
-    fn insert_grant_rule(&self, rule: &StoredGrantRule) -> Result<Option<i64>> {
+    fn insert_grant_rule(
+        &self,
+        rule: &StoredGrantRule,
+        expected: Option<i64>,
+    ) -> Result<GrantRuleWrite> {
         let json = encode(rule)?;
         let mut connection = self.connection()?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if let Some(stale) = GrantRuleWrite::check_expected(expected, generation(&tx)?) {
+            return Ok(stale);
+        }
         let count: i64 = tx.query_row("SELECT count(*) FROM grant_rules", [], |row| row.get(0))?;
         if count >= MAX_STORED_RULES as i64 {
-            return Ok(None);
+            return Ok(GrantRuleWrite::Refused);
         }
         let inserted = tx.execute(
             "INSERT INTO grant_rules(value, rule_json) VALUES(?1, ?2) ON CONFLICT(value) DO NOTHING",
             params![rule.rule.value, json],
         )?;
         if inserted == 0 {
-            return Ok(None);
+            return Ok(GrantRuleWrite::Refused);
         }
         let next = bump(&tx)?;
         tx.commit()?;
-        Ok(Some(next))
+        Ok(GrantRuleWrite::Applied(next))
     }
 
-    fn delete_grant_rule(&self, value: &str) -> Result<Option<i64>> {
+    fn delete_grant_rule(&self, value: &str, expected: Option<i64>) -> Result<GrantRuleWrite> {
         let mut connection = self.connection()?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if let Some(stale) = GrantRuleWrite::check_expected(expected, generation(&tx)?) {
+            return Ok(stale);
+        }
         if tx.execute("DELETE FROM grant_rules WHERE value = ?1", params![value])? == 0 {
-            return Ok(None);
+            return Ok(GrantRuleWrite::Refused);
         }
         let next = bump(&tx)?;
         tx.commit()?;
-        Ok(Some(next))
+        Ok(GrantRuleWrite::Applied(next))
     }
 }
 

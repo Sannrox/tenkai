@@ -140,6 +140,32 @@ pub fn http_contract() -> Value {
             request: None,
             response: schema::<BackupManifest>(&mut g),
         },
+        // Stored grant rules (#837): fleet management only.
+        Route {
+            method: "GET",
+            path: "/v1/grant-rules",
+            auth: Auth::Management,
+            request: None,
+            response: schema::<tenkai::management_operations::GrantRuleList>(&mut g),
+        },
+        Route {
+            method: "POST",
+            path: "/v1/grant-rules",
+            auth: Auth::Management,
+            request: Some(schema::<
+                tenkai::management_operations::CreateGrantRuleRequest,
+            >(&mut g)),
+            response: schema::<tenkai::management_operations::GrantRuleList>(&mut g),
+        },
+        Route {
+            method: "DELETE",
+            path: "/v1/grant-rules",
+            auth: Auth::Management,
+            request: Some(schema::<
+                tenkai::management_operations::RemoveGrantRuleRequest,
+            >(&mut g)),
+            response: schema::<tenkai::management_operations::GrantRuleList>(&mut g),
+        },
         Route {
             method: "POST",
             path: "/v1/exports",

@@ -5,6 +5,7 @@ mod config;
 pub mod contract;
 mod environment_config;
 mod exports;
+mod grant_rules;
 mod imports;
 mod inspect;
 mod lifecycle;

@@ -40,7 +40,7 @@ const MAX_REASON: usize = 1024;
 
 /// A stored rule: the rule as the configuration file would hold it, and who
 /// created it, when and why.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StoredGrantRule {
     pub rule: OidcGrantRule,
@@ -57,13 +57,39 @@ pub trait GrantRuleStore: Send + Sync {
     /// Every stored rule with the generation they are current at, read
     /// together.
     fn grant_rules(&self) -> Result<(i64, Vec<StoredGrantRule>)>;
-    /// Store `rule` unless a rule for its claim value exists or the store
-    /// already holds [`MAX_STORED_RULES`]; the new generation, or `None`
-    /// when refused.
-    fn insert_grant_rule(&self, rule: &StoredGrantRule) -> Result<Option<i64>>;
-    /// Remove the rule for `value`; the new generation, or `None` when there
-    /// is none.
-    fn delete_grant_rule(&self, value: &str) -> Result<Option<i64>>;
+    /// Store `rule` unless a rule for its claim value exists, the store
+    /// already holds [`MAX_STORED_RULES`], or the generation is not
+    /// `expected` (when given).
+    fn insert_grant_rule(
+        &self,
+        rule: &StoredGrantRule,
+        expected: Option<i64>,
+    ) -> Result<GrantRuleWrite>;
+    /// Remove the rule for `value`, unless there is none or the generation
+    /// is not `expected` (when given).
+    fn delete_grant_rule(&self, value: &str, expected: Option<i64>) -> Result<GrantRuleWrite>;
+}
+
+/// What a conditional write did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrantRuleWrite {
+    /// Written; the new generation.
+    Applied(i64),
+    /// Nothing written: the value exists (insert) or does not (delete), or
+    /// the store is full.
+    Refused,
+    /// Nothing written: the rules changed since the caller read them.
+    Stale { current: i64 },
+}
+
+impl GrantRuleWrite {
+    /// The outcome of a write at generation `current`: `Stale` unless it is
+    /// `expected` (when given).
+    pub fn check_expected(expected: Option<i64>, current: i64) -> Option<Self> {
+        expected
+            .filter(|expected| *expected != current)
+            .map(|_| Self::Stale { current })
+    }
 }
 
 /// Why a stored rule was refused.
@@ -75,6 +101,8 @@ pub enum GrantRuleError {
     DeclaredByConfig(String),
     #[error("a stored grant rule for claim value {0:?} already exists, or the store is full")]
     Exists(String),
+    #[error("the stored grant rules changed (generation {current}); read them again")]
+    StaleGeneration { current: i64 },
     #[error(transparent)]
     Store(#[from] StoreError),
 }
@@ -215,13 +243,15 @@ impl StoredGrants {
         Ok(())
     }
 
-    /// Store a rule and apply it on this replica at once.
+    /// Store a rule and apply it on this replica at once. With `expected`,
+    /// only while the rules are still at that generation.
     pub fn create(
         &self,
         rule: OidcGrantRule,
         created_by: &str,
         reason: &str,
         now_ms: i64,
+        expected: Option<i64>,
     ) -> std::result::Result<StoredGrantRule, GrantRuleError> {
         rule.validate()
             .map_err(|error| GrantRuleError::Invalid(error.to_string()))?;
@@ -243,19 +273,45 @@ impl StoredGrants {
             created_at_ms: now_ms,
             reason: reason.into(),
         };
-        if self.store.insert_grant_rule(&stored)?.is_none() {
-            return Err(GrantRuleError::Exists(stored.rule.value));
+        match self.store.insert_grant_rule(&stored, expected)? {
+            GrantRuleWrite::Applied(_) => {}
+            GrantRuleWrite::Refused => return Err(GrantRuleError::Exists(stored.rule.value)),
+            GrantRuleWrite::Stale { current } => {
+                return Err(GrantRuleError::StaleGeneration { current });
+            }
         }
         self.reload()?;
         Ok(stored)
     }
 
     /// Remove the stored rule for `value` and apply it on this replica at
-    /// once; whether there was one.
-    pub fn remove(&self, value: &str) -> Result<bool> {
-        let removed = self.store.delete_grant_rule(value)?.is_some();
+    /// once; whether there was one. With `expected`, only while the rules
+    /// are still at that generation.
+    pub fn remove(
+        &self,
+        value: &str,
+        expected: Option<i64>,
+    ) -> std::result::Result<bool, GrantRuleError> {
+        let removed = match self.store.delete_grant_rule(value, expected)? {
+            GrantRuleWrite::Applied(_) => true,
+            GrantRuleWrite::Refused => false,
+            GrantRuleWrite::Stale { current } => {
+                return Err(GrantRuleError::StaleGeneration { current });
+            }
+        };
         self.reload()?;
         Ok(removed)
+    }
+
+    /// Every stored rule as the store holds it, with its generation: what
+    /// an administrator lists, including rules the file overrides.
+    pub fn stored(&self) -> Result<(i64, Vec<StoredGrantRule>)> {
+        self.store.grant_rules()
+    }
+
+    /// Whether the configuration file declares `value`.
+    pub fn declared_by_config(&self, value: &str) -> bool {
+        self.config_values.contains(value)
     }
 
     /// Check the generation every `interval` on a background thread, until
@@ -319,16 +375,16 @@ pub fn assert_grant_rule_store_contract(
 
     // A value the configuration file declares is refused.
     assert!(matches!(
-        first.create(rule(&declared, &["read"]), "token", "setup", 1),
+        first.create(rule(&declared, &["read"]), "token", "setup", 1, None),
         Err(GrantRuleError::DeclaredByConfig(_))
     ));
     // A rule without a capability, or without a reason, is refused.
     assert!(matches!(
-        first.create(rule(&admins, &[]), "token", "setup", 1),
+        first.create(rule(&admins, &[]), "token", "setup", 1, None),
         Err(GrantRuleError::Invalid(_))
     ));
     assert!(matches!(
-        first.create(rule(&admins, &["read"]), "token", " ", 1),
+        first.create(rule(&admins, &["read"]), "token", " ", 1, None),
         Err(GrantRuleError::Invalid(_))
     ));
 
@@ -338,9 +394,19 @@ pub fn assert_grant_rule_store_contract(
             "management-token",
             "first administrator",
             10,
+            Some(start),
         )
         .unwrap();
     assert_eq!(created.created_by, "management-token");
+    // A write against a generation that moved is refused, writing nothing.
+    assert!(matches!(
+        second.create(rule(&readers, &["read"]), "admin", "stale", 11, Some(start)),
+        Err(GrantRuleError::StaleGeneration { current }) if current == start + 1
+    ));
+    assert!(matches!(
+        second.remove(&admins, Some(start)),
+        Err(GrantRuleError::StaleGeneration { .. })
+    ));
     // The writing replica applies it at once.
     assert!(first.rules().iter().any(|r| r.value == admins));
     assert_eq!(first.first_administrator(), FirstAdministrator::Configured);
@@ -360,21 +426,21 @@ pub fn assert_grant_rule_store_contract(
 
     // One rule per claim value, also across replicas.
     assert!(matches!(
-        second.create(rule(&admins, &["read"]), "someone", "again", 11),
+        second.create(rule(&admins, &["read"]), "someone", "again", 11, None),
         Err(GrantRuleError::Exists(_))
     ));
     second
-        .create(rule(&readers, &["read"]), "admin", "readers", 12)
+        .create(rule(&readers, &["read"]), "admin", "readers", 12, None)
         .unwrap();
     assert_eq!(store.grant_rule_generation().unwrap(), start + 2);
 
-    assert!(first.remove(&admins).unwrap());
-    assert!(!first.remove(&admins).unwrap());
+    assert!(first.remove(&admins, None).unwrap());
+    assert!(!first.remove(&admins, None).unwrap());
     assert!(first.rules().iter().all(|r| r.value != admins));
     assert!(second.refresh().unwrap());
     assert!(second.rules().iter().all(|r| r.value != admins));
     assert!(second.rules().iter().any(|r| r.value == readers));
-    assert!(second.remove(&readers).unwrap());
+    assert!(second.remove(&readers, None).unwrap());
     assert_eq!(store.grant_rule_generation().unwrap(), start + 4);
 }
 
@@ -422,13 +488,17 @@ mod tests {
             }
             read
         }
-        fn insert_grant_rule(&self, rule: &StoredGrantRule) -> Result<Option<i64>> {
+        fn insert_grant_rule(
+            &self,
+            rule: &StoredGrantRule,
+            expected: Option<i64>,
+        ) -> Result<GrantRuleWrite> {
             self.check()?;
-            self.inner.insert_grant_rule(rule)
+            self.inner.insert_grant_rule(rule, expected)
         }
-        fn delete_grant_rule(&self, value: &str) -> Result<Option<i64>> {
+        fn delete_grant_rule(&self, value: &str, expected: Option<i64>) -> Result<GrantRuleWrite> {
             self.check()?;
-            self.inner.delete_grant_rule(value)
+            self.inner.delete_grant_rule(value, expected)
         }
     }
 
@@ -461,7 +531,7 @@ mod tests {
             kind: None,
         };
         grants
-            .create(rule, "management-token", "first administrator", 1)
+            .create(rule, "management-token", "first administrator", 1, None)
             .unwrap();
         assert_eq!(grants.rules().len(), 1);
         store.down.store(true, Ordering::SeqCst);
@@ -517,7 +587,7 @@ mod tests {
         )
         .unwrap();
         writer
-            .create(rule("tenkai-admins"), "token", "first", 1)
+            .create(rule("tenkai-admins"), "token", "first", 1, None)
             .unwrap();
         *store.slow.lock().unwrap() = Some(Duration::from_millis(150));
         assert!(grants.refresh().unwrap());
@@ -535,7 +605,7 @@ mod tests {
         };
         std::thread::sleep(Duration::from_millis(20));
         *store.slow.lock().unwrap() = None;
-        writer.remove("tenkai-admins").unwrap();
+        writer.remove("tenkai-admins", None).unwrap();
         assert!(grants.refresh().unwrap());
         assert!(grants.rules().is_empty());
         slow.join().unwrap().unwrap();

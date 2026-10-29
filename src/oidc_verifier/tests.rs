@@ -619,7 +619,13 @@ fn stored_rules_grant_after_the_file_and_set_the_first_administrator() {
         kind: None,
     };
     stored
-        .create(rule.clone(), "management-token", "first administrator", 1)
+        .create(
+            rule.clone(),
+            "management-token",
+            "first administrator",
+            1,
+            None,
+        )
         .unwrap();
     assert_eq!(ext.first_administrator(), FirstAdministrator::Configured);
     let context = authenticate(&ext, admin()).unwrap();
@@ -629,7 +635,7 @@ fn stored_rules_grant_after_the_file_and_set_the_first_administrator() {
     let mut escalate = rule;
     escalate.value = "tenkai-viewers".into();
     assert!(matches!(
-        stored.create(escalate, "management-token", "escalate", 2),
+        stored.create(escalate, "management-token", "escalate", 2, None),
         Err(crate::grant_rules::GrantRuleError::DeclaredByConfig(_))
     ));
     let viewer = authenticate(

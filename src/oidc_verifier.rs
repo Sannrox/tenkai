@@ -162,7 +162,7 @@ pub struct OidcGrantMapping {
 }
 
 /// One claim value and the grants it confers.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OidcGrantRule {
     pub value: String,
