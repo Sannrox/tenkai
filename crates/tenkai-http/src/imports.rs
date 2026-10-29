@@ -31,6 +31,21 @@ pub(super) async fn staged_imports(
     manage_result(state.management.staged_imports(&credential, settings).await)
 }
 
+/// `GET /v1/imports` (#821): import jobs, newest first.
+pub(super) async fn import_jobs(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let Some(settings) = &state.config.imports else {
+        return not_configured();
+    };
+    manage_result(state.management.import_jobs(&credential, settings).await)
+}
+
 pub(super) async fn import_bundle(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

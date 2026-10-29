@@ -837,6 +837,18 @@ pub fn import_artifact_layers(
     dest: Option<&dyn ArtifactRegistry>,
     mirrors: &BTreeMap<String, String>,
 ) -> Result<Vec<OciArtifactRef>> {
+    import_artifact_layers_reporting(bundle, bundle_path, dest, mirrors, None)
+}
+
+/// [`import_artifact_layers`], reporting each layer's bytes to `progress`
+/// (#821).
+pub fn import_artifact_layers_reporting(
+    bundle: &VerifiedBundle,
+    bundle_path: Option<&Path>,
+    dest: Option<&dyn ArtifactRegistry>,
+    mirrors: &BTreeMap<String, String>,
+    progress: Option<&crate::import_progress::ImportProgress>,
+) -> Result<Vec<OciArtifactRef>> {
     let planned = plan_artifact_layers(bundle, mirrors)?;
     preflight_image_closure(bundle)?;
     // A delta's base layers are not carried; they must already be here.
@@ -862,14 +874,32 @@ pub fn import_artifact_layers(
     };
     let mut pulled = Vec::with_capacity(planned.len() + chunked.len());
     for (pull, bytes) in planned {
+        let total = bytes.len() as u64;
+        if let Some(progress) = progress {
+            progress.report(&pull.digest, "layer", 0, total);
+        }
         dest.store(&pull, bytes.to_vec())?;
         dest.verify(&pull)?;
+        if let Some(progress) = progress {
+            progress.report(&pull.digest, "layer", total, total);
+        }
         pulled.push(pull);
     }
     if let Some(path) = bundle_path.filter(|_| !chunked.is_empty()) {
         let chunk_dir = crate::offline_chunk_store::chunk_dir_beside(path)?;
         for (pull, reference, artifact) in chunked {
-            let mut reader = crate::offline_chunk_store::chunk_reader(&artifact, &chunk_dir)?;
+            let reader = crate::offline_chunk_store::chunk_reader(&artifact, &chunk_dir)?;
+            let mut reader: Box<dyn std::io::Read + '_> = match progress {
+                Some(progress) => Box::new(crate::import_progress::Counted {
+                    inner: reader,
+                    progress,
+                    digest: &artifact.digest,
+                    kind: "layer",
+                    done: 0,
+                    total: artifact.size,
+                }),
+                None => reader,
+            };
             dest.store_reader(&pull, &mut reader).with_context(|| {
                 format!(
                     "importing layer {} of image {}/{}",
@@ -877,6 +907,11 @@ pub fn import_artifact_layers(
                 )
             })?;
             dest.verify(&pull)?;
+            // A layer already in the store returns without reading the
+            // chunks, so completion is recorded here, not by the reader.
+            if let Some(progress) = progress {
+                progress.report(&artifact.digest, "layer", artifact.size, artifact.size);
+            }
             pulled.push(pull);
         }
     }
@@ -2027,8 +2062,25 @@ mod tests {
         assert_eq!(pulled.len(), 1);
         assert_eq!(pulled[0].registry, "mirror.internal");
         assert_eq!(dest.stored(&pulled[0]).unwrap(), Some(true));
-        // Importing again is a no-op.
-        import_artifact_layers(&verified, Some(&archive), Some(&dest), &mirrors).unwrap();
+        // Importing again is a no-op that still reports the layer complete.
+        let progress_file = dir.join("progress.json");
+        let progress = crate::import_progress::ImportProgress::new(progress_file.clone());
+        import_artifact_layers_reporting(
+            &verified,
+            Some(&archive),
+            Some(&dest),
+            &mirrors,
+            Some(&progress),
+        )
+        .unwrap();
+        let reported = crate::import_progress::read(&progress_file);
+        assert_eq!(reported.len(), 1, "{reported:?}");
+        assert_eq!(reported[0].digest, artifact.digest);
+        let size = bytes.len() as u64;
+        assert_eq!(
+            (reported[0].bytes_done, reported[0].bytes_total),
+            (size, size)
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

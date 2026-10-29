@@ -21,6 +21,11 @@
 //! idempotent, so overlapping processes may both run it. Expiry is derived
 //! from the creation time and the configured retention, not stored, so the
 //! on-disk records keep the shape older versions read.
+//!
+//! A ranged audit export (#825) is an `audit-export` too: a
+//! `tenkai.audit-range.v1` of the chain's exports `from..=to`, named
+//! `audit-range-<from>-<to>.json`. Every audit export's entry carries the
+//! sequences it covers, read from that name for the same reason.
 
 use std::path::{Path, PathBuf};
 
@@ -42,7 +47,8 @@ pub const MAX_REASON: usize = 512;
 pub enum ExportKind {
     /// Hub-wide: redacted, signed `tenkai.support-bundle.v1`.
     SupportBundle,
-    /// Hub-wide: the next signed `tenkai.audit-export.v1` of this host's chain.
+    /// Hub-wide: the next signed `tenkai.audit-export.v1` of this host's
+    /// chain, or a `tenkai.audit-range.v1` of exports already in it.
     AuditExport,
     /// One environment's plan: `tenkai.recovery_bundle.v1`.
     RecoveryBundle,
@@ -112,10 +118,42 @@ pub struct ExportEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub expires_at_ms: Option<i64>,
+    /// The chain sequences an audit export covers (#825); one for the next
+    /// entry, `from..=to` for a range.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub audit_range: Option<AuditSequences>,
     /// Past `expires_at_ms`, or its artifact already removed (a retention
     /// that was later raised or unset does not bring it back): listed, never
     /// downloadable.
     pub expired: bool,
+}
+
+/// Inclusive chain sequences.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+pub struct AuditSequences {
+    pub from: u64,
+    pub to: u64,
+}
+
+impl AuditSequences {
+    /// From `audit-<sequence>.json` or `audit-range-<from>-<to>.json`.
+    fn from_file_name(name: &str) -> Option<Self> {
+        if let Some(sequence) = crate::audit_export::chain_sequence(name) {
+            return Some(Self {
+                from: sequence,
+                to: sequence,
+            });
+        }
+        let (from, to) = name
+            .strip_prefix("audit-range-")?
+            .strip_suffix(".json")?
+            .split_once('-')?;
+        Some(Self {
+            from: from.parse().ok()?,
+            to: to.parse().ok()?,
+        })
+    }
 }
 
 /// `GET /v1/exports`, newest first.
@@ -228,6 +266,26 @@ impl Exports {
         self.store(ExportKind::AuditExport, None, &name, &artifact, event)
     }
 
+    /// Store the chain's exports `from..=to` as one ranged audit export,
+    /// created by `event`. The chain must already hold the whole range and
+    /// verify; the next-entry export is not advanced.
+    pub fn audit_range_export(
+        &self,
+        from: u64,
+        to: u64,
+        event: &ExportEvent,
+    ) -> Result<ExportEntry> {
+        let roots = crate::audit_export::exporter_roots(&self.seed, self.rotated.as_ref())?;
+        let range = crate::audit_export::range(&self.dir.join(AUDIT_CHAIN_DIR), from, to, &roots)?;
+        self.store(
+            ExportKind::AuditExport,
+            None,
+            &crate::audit_export::range_file_name(from, to),
+            &serde_json::to_vec_pretty(&range)?,
+            event,
+        )
+    }
+
     /// Store `artifact` as a new export, created by `event`.
     pub fn store(
         &self,
@@ -275,14 +333,18 @@ impl Exports {
                 export,
                 events: vec![event.clone()],
                 expires_at_ms: None,
+                audit_range: None,
                 expired: false,
             },
             crate::now_millis(),
         ))
     }
 
-    /// `entry` with its expiry as of `now_ms`.
+    /// `entry` with its expiry as of `now_ms` and its audit range.
     fn with_expiry(&self, mut entry: ExportEntry, now_ms: i64) -> ExportEntry {
+        entry.audit_range = (entry.export.kind == ExportKind::AuditExport)
+            .then(|| AuditSequences::from_file_name(&entry.export.file_name))
+            .flatten();
         entry.expires_at_ms = self
             .retention_ms
             .map(|retention| entry.export.created_at_ms.saturating_add(retention));
@@ -409,6 +471,7 @@ impl Exports {
             export,
             events,
             expires_at_ms: None,
+            audit_range: None,
             expired: false,
         })
     }
@@ -433,11 +496,7 @@ fn chain_entries(chain: &Path) -> Result<Vec<String>> {
     let mut entries = Vec::new();
     for entry in std::fs::read_dir(chain)? {
         let name = entry?.file_name().to_string_lossy().into_owned();
-        let sequence = name
-            .strip_prefix("audit-")
-            .and_then(|rest| rest.strip_suffix(".json"))
-            .and_then(|digits| digits.parse::<u64>().ok());
-        if let Some(sequence) = sequence {
+        if let Some(sequence) = crate::audit_export::chain_sequence(&name) {
             entries.push((sequence, name));
         }
     }

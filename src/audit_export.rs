@@ -21,6 +21,15 @@
 //! reordered or missing export, and any change to a signed statement. The
 //! first export of a chain has sequence 1 and no predecessor. The same
 //! period exported twice is byte-identical.
+//!
+//! A ranged export (#825) is an [`AuditRange`]: the existing signed exports
+//! with sequences `from..=to`, unchanged. There is no new signed statement:
+//! each export verifies on its own with [`verify_chain`]'s rules, and
+//! [`verify_range`] adds that they are exactly the range, contiguous, and
+//! chain to each other. Range files are named `audit-range-<from>-<to>.json`,
+//! never taken for chain entries. The range bounds sit outside any signature, so a
+//! range shortened at either end reads as a different range; the export
+//! record that delivered it names the range it was asked for.
 
 use std::path::Path;
 
@@ -35,6 +44,9 @@ use crate::release_signing::TrustRoots;
 use crate::storage::OperationalStore;
 
 pub const AUDIT_EXPORT_SCHEMA: &str = "tenkai.audit-export.v1";
+pub const AUDIT_RANGE_SCHEMA: &str = "tenkai.audit-range.v1";
+/// Most exports one ranged export carries.
+pub const MAX_RANGE_EXPORTS: u64 = 1_000;
 const SIGNING_DOMAIN: &[u8] = b"TENKAI-AUDIT-EXPORT-V1\0";
 const PAGE: usize = 1_000;
 const USAGE_SOURCE: &str = "usage";
@@ -115,6 +127,85 @@ impl AuditExport {
             .with_context(|| format!("reading audit export {}", path.display()))?;
         serde_json::from_slice(&raw).with_context(|| format!("parsing {}", path.display()))
     }
+}
+
+/// The signed exports with sequences `from..=to` of one chain, oldest
+/// first, each byte-for-byte as the chain holds it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditRange {
+    pub schema: String,
+    pub from: u64,
+    pub to: u64,
+    pub exports: Vec<AuditExport>,
+}
+
+impl AuditRange {
+    pub fn load(path: &Path) -> Result<Self> {
+        let raw = std::fs::read(path)
+            .with_context(|| format!("reading audit range {}", path.display()))?;
+        serde_json::from_slice(&raw).with_context(|| format!("parsing {}", path.display()))
+    }
+}
+
+/// Whether `from..=to` is a range a ranged export may cover.
+fn check_bounds(from: u64, to: u64) -> Result<()> {
+    if from == 0 || to < from {
+        bail!("an audit range runs from sequence 1 or later through a sequence no lower");
+    }
+    if to - from + 1 > MAX_RANGE_EXPORTS {
+        bail!("an audit range covers at most {MAX_RANGE_EXPORTS} exports");
+    }
+    Ok(())
+}
+
+/// The exports `from..=to` of the chain in `dir`, verified against `roots`.
+/// Refuses a range the chain does not hold in full.
+pub fn range(dir: &Path, from: u64, to: u64, roots: &TrustRoots) -> Result<AuditRange> {
+    check_bounds(from, to)?;
+    let exports = (from..=to)
+        .map(|sequence| {
+            let path = dir.join(format!("audit-{sequence:08}.json"));
+            if !path.is_file() {
+                bail!("the audit chain holds no export {sequence}");
+            }
+            AuditExport::load(&path)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let range = AuditRange {
+        schema: AUDIT_RANGE_SCHEMA.into(),
+        from,
+        to,
+        exports,
+    };
+    verify_range(&range, roots, None)?;
+    Ok(range)
+}
+
+/// Verify a ranged export: exactly the exports `from..=to`, each signed by a
+/// trusted key, contiguous and chained as [`verify_chain`] checks. With
+/// `anchor` the first export must name that digest (the export before
+/// `from`); without it the range is anchored on itself.
+pub fn verify_range(range: &AuditRange, roots: &TrustRoots, anchor: Option<&str>) -> Result<()> {
+    if range.schema != AUDIT_RANGE_SCHEMA {
+        bail!("unsupported audit range schema {}", range.schema);
+    }
+    check_bounds(range.from, range.to)?;
+    let first = range
+        .exports
+        .first()
+        .context("an audit range holds no exports")?;
+    if first.statement.sequence != range.from
+        || range.exports.len() as u64 != range.to - range.from + 1
+    {
+        bail!(
+            "the audit range {}..={} does not hold exactly those exports",
+            range.from,
+            range.to
+        );
+    }
+    let anchor = anchor.or(first.statement.previous_digest.as_deref());
+    verify_chain(&range.exports, roots, anchor)
 }
 
 fn canonical_bytes(statement: &AuditStatement) -> Result<Vec<u8>> {
@@ -394,12 +485,73 @@ pub fn export_next(
         let is_export = path
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("audit-") && name.ends_with(".json"));
+            .and_then(chain_sequence)
+            .is_some();
         if is_export {
             chain.push(AuditExport::load(&path)?);
         }
     }
     chain.sort_by_key(|export| export.statement.sequence);
+    let roots = exporter_roots(seed_path, extra_roots)?;
+    if !chain.is_empty() {
+        verify_chain(&chain, &roots, None)
+            .with_context(|| format!("the audit chain in {} does not verify", dir.display()))?;
+    }
+    let next = export(store, chain.last(), end, seed_path)?;
+    let path = dir.join(format!("audit-{:08}.json", next.statement.sequence));
+    publish_new(&path, &serde_json::to_vec_pretty(&next)?)?;
+    Ok(next)
+}
+
+/// The sequence of a chain entry file, `audit-<digits>.json`. Anything
+/// else, such as an `audit-range-<from>-<to>.json` beside the chain, is not
+/// part of it.
+pub fn chain_sequence(name: &str) -> Option<u64> {
+    let digits = name.strip_prefix("audit-")?.strip_suffix(".json")?;
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// The file name of the ranged export `from..=to`.
+pub fn range_file_name(from: u64, to: u64) -> String {
+    format!("audit-range-{from:08}-{to:08}.json")
+}
+
+/// Write `range` to `path` as [`export_next`] writes a chain entry: whole
+/// and synced before it appears, never replacing an existing file.
+pub fn write_range(range: &AuditRange, path: &Path) -> Result<()> {
+    publish_new(path, &serde_json::to_vec_pretty(range)?)
+}
+
+/// Publish `bytes` at `path`: written and synced under a unique temporary
+/// name beside it, then hard-linked into place, so a crash never leaves a
+/// partial file at `path`, a leftover temporary never blocks a retry, and a
+/// file another writer published is never replaced.
+fn publish_new(path: &Path, bytes: &[u8]) -> Result<()> {
+    let dir = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let temporary = dir.join(format!(".audit-{}.tmp", uuid::Uuid::new_v4()));
+    let written = (|| {
+        use std::io::Write as _;
+        let mut file = std::fs::File::create_new(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::hard_link(&temporary, path)
+            .with_context(|| format!("{} already exists", path.display()))?;
+        std::fs::File::open(dir)?.sync_all()?;
+        Ok::<_, anyhow::Error>(())
+    })();
+    let _ = std::fs::remove_file(&temporary);
+    written
+}
+
+/// The roots a chain signed with `seed_path` verifies against: its key, plus
+/// `extra_roots` for exports made before a key rotation.
+pub fn exporter_roots(seed_path: &Path, extra_roots: Option<&TrustRoots>) -> Result<TrustRoots> {
     let key = SigningKey::from_bytes(&crate::approval_policy::load_signer_seed(seed_path)?);
     let public = key.verifying_key().to_bytes();
     let mut roots = extra_roots.cloned().unwrap_or(TrustRoots {
@@ -411,27 +563,7 @@ pub fn export_next(
         identity: "this audit exporter".into(),
         public_key: STANDARD.encode(public),
     });
-    if !chain.is_empty() {
-        verify_chain(&chain, &roots, None)
-            .with_context(|| format!("the audit chain in {} does not verify", dir.display()))?;
-    }
-    let next = export(store, chain.last(), end, seed_path)?;
-    let path = dir.join(format!("audit-{:08}.json", next.statement.sequence));
-    let temporary = dir.join(format!(".audit-{}.tmp", uuid::Uuid::new_v4()));
-    let written = (|| {
-        use std::io::Write as _;
-        let mut file = std::fs::File::create_new(&temporary)?;
-        file.write_all(&serde_json::to_vec_pretty(&next)?)?;
-        file.sync_all()?;
-        // A hard link never replaces an export another writer published.
-        std::fs::hard_link(&temporary, &path)
-            .with_context(|| format!("audit export {} already exists", path.display()))?;
-        std::fs::File::open(dir)?.sync_all()?;
-        Ok::<_, anyhow::Error>(())
-    })();
-    let _ = std::fs::remove_file(&temporary);
-    written?;
-    Ok(next)
+    Ok(roots)
 }
 
 /// Verify one chain of exports, in order: every signature by a trusted key,
@@ -689,6 +821,85 @@ mod tests {
         for leak in ["price", "invoice", "currency", "bill"] {
             assert!(!body.contains(leak), "{leak} in {body}");
         }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_ranged_export_holds_exactly_its_range_and_refuses_gaps_and_edits() {
+        let dir = std::env::temp_dir().join(format!(
+            "tenkai-audit-range-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (seed_path, roots) = seed(&dir);
+        let store = SqliteStore::open(dir.join("tenkai.db")).unwrap();
+        let chain = dir.join("chain");
+        let mut written = Vec::new();
+        for at in [100, 200, 300, 400] {
+            audit(&store, at, &format!("step-{at}.completed"));
+            written.push(export_next(&store, &chain, at + 50, &seed_path, None).unwrap());
+        }
+
+        let range = range(&chain, 2, 3, &roots).unwrap();
+        assert_eq!(range.exports, written[1..3]);
+        assert_eq!(
+            range
+                .exports
+                .iter()
+                .flat_map(observed)
+                .map(|entry| entry.action.as_str())
+                .collect::<Vec<_>>(),
+            ["step-200.completed", "step-300.completed"]
+        );
+        verify_range(&range, &roots, None).unwrap();
+        verify_range(&range, &roots, Some(&written[0].digest().unwrap())).unwrap();
+        assert!(verify_range(&range, &roots, Some(&written[1].digest().unwrap())).is_err());
+        assert!(
+            super::range(&chain, 3, 5, &roots).is_err(),
+            "beyond the chain"
+        );
+        assert!(super::range(&chain, 0, 1, &roots).is_err());
+
+        // A range file beside the chain is not a chain entry: the chain
+        // still continues.
+        let beside = chain.join(range_file_name(2, 3));
+        write_range(&range, &beside).unwrap();
+        audit(&store, 500, "step-500.completed");
+        let next = export_next(&store, &chain, 550, &seed_path, None).unwrap();
+        assert_eq!(next.statement.sequence, 5);
+
+        // Written like a chain entry: a leftover partial temporary does not
+        // block it, and an existing file is refused, not truncated.
+        let out_dir = dir.join("out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        std::fs::write(out_dir.join(".audit-crashed.tmp"), b"{\"part").unwrap();
+        let out = out_dir.join("range.json");
+        write_range(&range, &out).unwrap();
+        assert_eq!(AuditRange::load(&out).unwrap(), range);
+        let before = std::fs::read(&out).unwrap();
+        let other = super::range(&chain, 1, 1, &roots).unwrap();
+        let error = write_range(&other, &out).unwrap_err();
+        assert!(error.to_string().contains("already exists"), "{error:#}");
+        assert_eq!(std::fs::read(&out).unwrap(), before);
+
+        // An export missing from inside the range.
+        let wide = super::range(&chain, 1, 4, &roots).unwrap();
+        let mut missing = wide.clone();
+        missing.exports.remove(2);
+        assert!(verify_range(&missing, &roots, None).is_err());
+        missing.to = 3;
+        let error = verify_range(&missing, &roots, None).unwrap_err();
+        assert!(error.to_string().contains("out of order"), "{error:#}");
+        // An altered or dropped record inside an export.
+        let mut altered = wide.clone();
+        altered.exports[1].statement.entries[0].principal = "someone-else".into();
+        let error = verify_range(&altered, &roots, None).unwrap_err();
+        assert!(format!("{error:#}").contains("was changed"), "{error:#}");
+        let mut dropped = wide;
+        dropped.exports[2].statement.entries.remove(0);
+        let error = verify_range(&dropped, &roots, None).unwrap_err();
+        assert!(format!("{error:#}").contains("was changed"), "{error:#}");
         let _ = std::fs::remove_dir_all(dir);
     }
 

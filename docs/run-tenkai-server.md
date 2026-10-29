@@ -190,7 +190,7 @@ download the files the CLI otherwise writes there (#682):
 | `kind` | Scope | Artifact |
 | --- | --- | --- |
 | `support-bundle` | hub | signed [support bundle](support-bundle.md), without log events |
-| `audit-export` | hub | the next signed [audit export](audit-export.md) of the chain kept under `TENKAI_EXPORT_DIR/audit-chain` |
+| `audit-export` | hub | the next signed [audit export](audit-export.md) of the chain kept under `TENKAI_EXPORT_DIR/audit-chain`, or with `from_sequence` and `to_sequence` a [ranged export](audit-export.md#ranged-export) of entries already in it |
 | `recovery-bundle` | `environment`, `plan_id` | ADR 0027 recovery diagnostic |
 | `offline-receipt` | `environment`, `upgrade` | the accepted `tenkai.offline-receipt.v1` of an isolated environment |
 

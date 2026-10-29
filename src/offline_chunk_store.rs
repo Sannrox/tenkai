@@ -189,6 +189,17 @@ pub fn import_weight_chunks(
     chunk_dir: &Path,
     cache: &WeightCache,
 ) -> Result<Vec<PathBuf>> {
+    import_weight_chunks_reporting(bundle, chunk_dir, cache, None)
+}
+
+/// [`import_weight_chunks`], reporting each weight's bytes to `progress`
+/// chunk by chunk (#821).
+pub fn import_weight_chunks_reporting(
+    bundle: &VerifiedBundle,
+    chunk_dir: &Path,
+    cache: &WeightCache,
+    progress: Option<&crate::import_progress::ImportProgress>,
+) -> Result<Vec<PathBuf>> {
     let Some(raw) = bundle.entry(CHUNK_MANIFEST_PATH) else {
         return Ok(Vec::new());
     };
@@ -202,7 +213,7 @@ pub fn import_weight_chunks(
     }
     let mut admitted = Vec::with_capacity(manifest.artifacts.len());
     for artifact in &manifest.artifacts {
-        admitted.push(import_one_artifact(artifact, chunk_dir, cache)?);
+        admitted.push(import_one_artifact(artifact, chunk_dir, cache, progress)?);
     }
     Ok(admitted)
 }
@@ -458,6 +469,16 @@ pub fn import_weight_chunks_for_bundle(
     bundle_path: Option<&Path>,
     cache: Option<&WeightCache>,
 ) -> Result<Vec<PathBuf>> {
+    import_weight_chunks_for_bundle_reporting(bundle, bundle_path, cache, None)
+}
+
+/// [`import_weight_chunks_for_bundle`], reporting progress (#821).
+pub fn import_weight_chunks_for_bundle_reporting(
+    bundle: &VerifiedBundle,
+    bundle_path: Option<&Path>,
+    cache: Option<&WeightCache>,
+    progress: Option<&crate::import_progress::ImportProgress>,
+) -> Result<Vec<PathBuf>> {
     if bundle.entry(CHUNK_MANIFEST_PATH).is_none() {
         return Ok(Vec::new());
     }
@@ -465,7 +486,7 @@ pub fn import_weight_chunks_for_bundle(
         "chunked offline bundle requires the archive path so companion chunks can be imported",
     )?;
     let cache = cache.context("TENKAI_WEIGHT_CACHE is required to import chunked weights")?;
-    import_weight_chunks(bundle, &chunk_dir_beside(path)?, cache)
+    import_weight_chunks_reporting(bundle, &chunk_dir_beside(path)?, cache, progress)
 }
 
 /// Weight cache selected by `TENKAI_WEIGHT_CACHE`.
@@ -544,7 +565,13 @@ fn import_one_artifact(
     artifact: &OfflineChunkArtifact,
     chunk_dir: &Path,
     cache: &WeightCache,
+    progress: Option<&crate::import_progress::ImportProgress>,
 ) -> Result<PathBuf> {
+    let report = |done: u64| {
+        if let Some(progress) = progress {
+            progress.report(&artifact.digest, "weights", done, artifact.size);
+        }
+    };
     signature_verification::validate_prefixed_digest("weight digest", &artifact.digest)?;
     if artifact.size > MAX_REASONABLE_WEIGHT {
         bail!(
@@ -554,7 +581,9 @@ fn import_one_artifact(
     }
     let destination = cache.blob_path(&artifact.digest)?;
     if destination.is_file() {
-        return cache.admit_file(&artifact.digest, &destination);
+        let admitted = cache.admit_file(&artifact.digest, &destination)?;
+        report(artifact.size);
+        return Ok(admitted);
     }
     let mut expected_prefix = 0_u64;
     for chunk in &artifact.chunks {
@@ -599,9 +628,18 @@ fn import_one_artifact(
             whole.update(&buffer[..read]);
         }
     }
+    let mut done: u64 = artifact
+        .chunks
+        .iter()
+        .take(skip)
+        .map(|chunk| chunk.size)
+        .sum();
+    report(done);
     for chunk in artifact.chunks.iter().skip(skip) {
         copy_verified_chunk(chunk_dir, chunk, &mut output, &mut whole)?;
         output.sync_all()?;
+        done = done.saturating_add(chunk.size);
+        report(done);
     }
     drop(output);
     let actual = format!("sha256:{:x}", whole.finalize());
@@ -612,7 +650,9 @@ fn import_one_artifact(
             artifact.digest
         );
     }
-    cache.admit_file(&artifact.digest, &partial)
+    let admitted = cache.admit_file(&artifact.digest, &partial)?;
+    report(artifact.size);
+    Ok(admitted)
 }
 
 /// Chunks of `artifact` already verified at the start of `partial`. When the
@@ -964,6 +1004,43 @@ mod tests {
             import_weight_chunks_for_bundle(&verified, Some(&archive_path), Some(&cache)).unwrap();
         assert_eq!(digest_file(&imported[0]).unwrap(), artifact.digest);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// #821: a weight import reports its bytes chunk by chunk and reaches
+    /// the weight's total.
+    #[test]
+    fn a_weight_import_reports_progress_up_to_its_total() {
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let dir = sandbox();
+        let source = dir.join("weight.bin");
+        write_pattern(&source, 3 * 1024 * 1024);
+        let chunks = dir.join("delivery.chunks");
+        let artifact = export_weight_chunks(&source, &chunks, 1024 * 1024).unwrap();
+        let verified = sample_bundle(&key, artifact.clone())
+            .verify(&roots(&key, "exporter"), "tenant-1", "airgap-1", 2_000)
+            .unwrap();
+        let cache = WeightCache::new(dir.join("cache"));
+        let progress_file = dir.join("progress.json");
+        let progress = crate::import_progress::ImportProgress::new(progress_file.clone());
+        import_weight_chunks_reporting(&verified, &chunks, &cache, Some(&progress)).unwrap();
+        let reported = crate::import_progress::read(&progress_file);
+        assert_eq!(reported.len(), 1, "{reported:?}");
+        assert_eq!(reported[0].digest, artifact.digest);
+        assert_eq!(reported[0].kind, "weights");
+        assert_eq!(
+            (reported[0].bytes_done, reported[0].bytes_total),
+            (artifact.size, artifact.size)
+        );
+        // A re-import finds the weight cached and still reports it complete.
+        let again_file = dir.join("progress-again.json");
+        let again = crate::import_progress::ImportProgress::new(again_file.clone());
+        import_weight_chunks_reporting(&verified, &chunks, &cache, Some(&again)).unwrap();
+        let reported = crate::import_progress::read(&again_file);
+        assert_eq!(reported.len(), 1, "{reported:?}");
+        assert_eq!(
+            (reported[0].bytes_done, reported[0].bytes_total),
+            (artifact.size, artifact.size)
+        );
     }
 
     #[test]

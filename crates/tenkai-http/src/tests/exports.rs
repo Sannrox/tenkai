@@ -152,7 +152,63 @@ async fn exports_download_verifiably_and_stay_inside_their_scope() {
     .await;
     let export: tenkai::audit_export::AuditExport = serde_json::from_slice(&bytes).unwrap();
     let roots = trust_roots(&export.key_id);
-    tenkai::audit_export::verify_chain(&[export], &roots, None).unwrap();
+    tenkai::audit_export::verify_chain(std::slice::from_ref(&export), &roots, None).unwrap();
+    assert_eq!(
+        json(&audit)["audit_range"],
+        serde_json::json!({"from": 1, "to": 1})
+    );
+
+    // #825: a second entry, then a ranged export of both. The next-entry
+    // export is not advanced by it, and the download verifies offline.
+    let (status, _) = call(
+        "POST",
+        "/v1/exports",
+        "management-secret",
+        Some(create("audit-export", None)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let mut ranged = create("audit-export", None);
+    ranged["from_sequence"] = 1.into();
+    ranged["to_sequence"] = 2.into();
+    let (status, range) = call("POST", "/v1/exports", "management-secret", Some(ranged)).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "{}",
+        String::from_utf8_lossy(&range)
+    );
+    let range = json(&range);
+    assert_eq!(
+        range["audit_range"],
+        serde_json::json!({"from": 1, "to": 2})
+    );
+    let (_, bytes) = call(
+        "GET",
+        &format!(
+            "/v1/exports/{}/download?reason=review",
+            range["id"].as_str().unwrap()
+        ),
+        "management-secret",
+        None,
+    )
+    .await;
+    let range: tenkai::audit_export::AuditRange = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(range.exports[0], export);
+    tenkai::audit_export::verify_range(&range, &roots, None).unwrap();
+    let mut beyond = create("audit-export", None);
+    beyond["from_sequence"] = 2.into();
+    beyond["to_sequence"] = 3.into();
+    let (status, _) = call("POST", "/v1/exports", "management-secret", Some(beyond)).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "the chain holds no export 3"
+    );
+    let mut half = create("support-bundle", None);
+    half["from_sequence"] = 1.into();
+    let (status, _) = call("POST", "/v1/exports", "management-secret", Some(half)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 
     // The environment-scoped token: hub-wide exports and other environments
     // are refused or invisible; its own environment's recovery bundle is not.
@@ -206,7 +262,7 @@ async fn exports_download_verifiably_and_stay_inside_their_scope() {
     assert_eq!(listed["exports"].as_array().unwrap().len(), 1);
     assert_eq!(listed["exports"][0]["environment"], "prod");
     let (_, listed) = call("GET", "/v1/exports", "management-secret", None).await;
-    assert_eq!(json(&listed)["exports"].as_array().unwrap().len(), 3);
+    assert_eq!(json(&listed)["exports"].as_array().unwrap().len(), 5);
 
     let (status, inspected) = call(
         "GET",

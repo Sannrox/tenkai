@@ -684,6 +684,7 @@ async fn preflight_delta(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn bind_isolated_bundle_locked(
     ctx: &mut Ctx,
     held: &HeldEnvironments,
@@ -692,6 +693,7 @@ async fn bind_isolated_bundle_locked(
     bundle: &crate::offline_bundle::BundleEnvelope,
     trust_roots: &crate::release_signing::TrustRoots,
     bundle_path: Option<&Path>,
+    progress: Option<&crate::import_progress::ImportProgress>,
 ) -> Result<UpgradeRecord> {
     let scanned = scan_before_mutation(bundle, trust_roots, environment, bundle_path)?;
     // With a scanner, the import reads the snapshot it scanned.
@@ -722,11 +724,12 @@ async fn bind_isolated_bundle_locked(
     let _content = crate::content_inventory::ContentLock::shared_from_env().await?;
     preflight_delta(ctx, &verified, &mirrors).await?;
     held.ensure_held()?;
-    crate::offline_bundle::import_artifact_layers(
+    crate::offline_bundle::import_artifact_layers_reporting(
         &verified,
         bundle_path,
         crate::oci_artifact::selected_registry()?.as_deref(),
         &mirrors,
+        progress,
     )?;
     let weight_cache = crate::offline_chunk_store::weight_cache_from_env()?;
     if scan.is_some() {
@@ -739,10 +742,11 @@ async fn bind_isolated_bundle_locked(
         )?;
         crate::offline_chunk_store::discard_partial_weights(&verified, weight_cache.as_ref())?;
     }
-    crate::offline_chunk_store::import_weight_chunks_for_bundle(
+    crate::offline_chunk_store::import_weight_chunks_for_bundle_reporting(
         &verified,
         bundle_path,
         weight_cache.as_ref(),
+        progress,
     )?;
     record.environments[index].isolated = Some(IsolatedEvidence {
         bundle_digest,
@@ -2219,6 +2223,29 @@ pub async fn bind_isolated_bundle(
     trust_roots: &crate::release_signing::TrustRoots,
     bundle_path: Option<&Path>,
 ) -> Result<UpgradeRecord> {
+    bind_isolated_bundle_reporting(
+        ctx,
+        name,
+        environment,
+        bundle,
+        trust_roots,
+        bundle_path,
+        None,
+    )
+    .await
+}
+
+/// [`bind_isolated_bundle`], reporting each stored layer and weight to
+/// `progress` (#821).
+pub async fn bind_isolated_bundle_reporting(
+    ctx: &mut Ctx,
+    name: &str,
+    environment: &str,
+    bundle: &crate::offline_bundle::BundleEnvelope,
+    trust_roots: &crate::release_signing::TrustRoots,
+    bundle_path: Option<&Path>,
+    progress: Option<&crate::import_progress::ImportProgress>,
+) -> Result<UpgradeRecord> {
     let held = lock_environments(ctx, name, &[environment.to_string()]).await?;
     let result = bind_isolated_bundle_locked(
         ctx,
@@ -2228,6 +2255,7 @@ pub async fn bind_isolated_bundle(
         bundle,
         trust_roots,
         bundle_path,
+        progress,
     )
     .await;
     unlock_environments(ctx, held).await;
@@ -2915,6 +2943,21 @@ install = "true"
             crate::offline_import::job(&staging, &imported.id).unwrap(),
             imported
         );
+        // #821: the list, read back from the job files as after a restart,
+        // shows the dry run and the import of the same bundle as two jobs
+        // with their own states, newest first.
+        let listed = crate::offline_import::list_jobs(&staging).unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .map(|job| (job.id.as_str(), job.dry_run, job.state))
+                .collect::<Vec<_>>(),
+            [
+                (imported.id.as_str(), false, ImportState::Succeeded),
+                (preview.id.as_str(), true, ImportState::Previewed),
+            ]
+        );
+        assert_ne!(imported.id, preview.id);
 
         let refused = crate::offline_import::run(
             &mut ctx,
