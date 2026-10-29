@@ -640,9 +640,8 @@ const TOPOLOGY_LEASE_NAMESPACE: &str = "tenkai/topology-availability";
 /// earlier one) or a release a step would restore on failure: takes each
 /// topology's lease once, in name order so two runs never wait on each other,
 /// then checks every such release's policy under it, answering the leases
-/// held. The leases live as long as a wave lease (two hours) and are not
-/// renewed during the run; an execution that outlasts them is no longer
-/// exclusive, as a wave lease would not be either (#834).
+/// held. The leases live as long as a wave lease (two hours) and are
+/// refreshed with the environment apply fence while the plan runs (#834).
 async fn claim_topology_leases(
     ctx: &mut Ctx,
     record: &WaveRecord,
@@ -860,12 +859,38 @@ fn signed_approval_path(approval_dir: &Path, plan_id: &str) -> Option<PathBuf> {
     approval.is_file().then_some(approval)
 }
 
+fn held_execution_leases(
+    wave: &WaveLease,
+    topology: &[(String, String)],
+) -> Vec<crate::client::HeldExecutionLease> {
+    std::iter::once(crate::client::HeldExecutionLease {
+        namespace: WAVE_LEASE_NAMESPACE.into(),
+        key: wave.name.clone(),
+        fencing_token: wave.fencing_token.clone(),
+        ttl_ms: WAVE_LEASE_MS,
+    })
+    .chain(
+        topology
+            .iter()
+            .map(|(name, token)| crate::client::HeldExecutionLease {
+                namespace: TOPOLOGY_LEASE_NAMESPACE.into(),
+                key: name.clone(),
+                fencing_token: token.clone(),
+                ttl_ms: WAVE_LEASE_MS,
+            }),
+    )
+    .collect()
+}
+
 async fn execute_plan(
     ctx: &mut Ctx,
     plan_id: &str,
     authorization: ExecutionAuthorization<'_>,
+    wave: &WaveLease,
+    topology: &[(String, String)],
 ) -> Result<Vec<Outcome>> {
-    apply::execute_with_options(
+    ctx.held_execution_leases = held_execution_leases(wave, topology);
+    let result = apply::execute_with_options(
         ctx,
         plan_id,
         ExecutionOptions {
@@ -881,7 +906,9 @@ async fn execute_plan(
             delivery_fence: None,
         },
     )
-    .await
+    .await;
+    ctx.held_execution_leases.clear();
+    result
 }
 
 async fn capture_plan_evidence(
@@ -1086,7 +1113,16 @@ async fn advance_locked(
         record.environments[index].status = WaveEnvironmentStatus::Running;
         record.status = WaveStatus::Running;
         let executed = match persist(ctx, &mut record, lease).await {
-            Ok(()) => execute_plan(ctx, &plan.id, execution_authorization).await,
+            Ok(()) => {
+                execute_plan(
+                    ctx,
+                    &plan.id,
+                    execution_authorization,
+                    lease,
+                    &topology_leases,
+                )
+                .await
+            }
             Err(error) => {
                 release_topology_leases(ctx, &topology_leases).await;
                 return Err(error);
@@ -1303,7 +1339,14 @@ async fn rollback_locked(
         };
         // A rollback takes a replica down like an upgrade does (#690).
         let topology_leases = claim_topology_leases(ctx, &record, &plan, &environment).await?;
-        let executed = execute_plan(ctx, &plan.id, execution_authorization).await;
+        let executed = execute_plan(
+            ctx,
+            &plan.id,
+            execution_authorization,
+            lease,
+            &topology_leases,
+        )
+        .await;
         release_topology_leases(ctx, &topology_leases).await;
         match executed {
             Ok(outcomes) => {

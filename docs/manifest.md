@@ -117,8 +117,9 @@ the second is told to retry. Rollback runs under the same guard, applying the
 topology of each release the plan deploys or would restore on failure as well
 as the wave's, and every such release's minimum. A replica
 whose plan changes nothing is not held. The topology lease, like the wave lease,
-lasts two hours and is not renewed while a plan runs, so an execution longer
-than that is not exclusive; fencing both through execution is #834. Upgrading a replica that is not
+lasts two hours and is refreshed with the environment apply fence while a
+plan runs, so an execution longer than that stays exclusive; a lost lease
+stops the run before its next mutation (#834). Upgrading a replica that is not
 serving takes nothing down, so a first install and the repair of a failed
 replica proceed. This can slow upgrades by design. Failover drills follow
 separately (#650).

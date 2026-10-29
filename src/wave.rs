@@ -723,6 +723,134 @@ document = "suite.json"
     }
 
     #[tokio::test]
+    async fn a_lost_topology_lease_stops_execution_and_keeps_the_replica_unavailable() {
+        let root = temp_root("lost-topology-fence");
+        let database = root.join("tenkai.db");
+        let keys = root.join("keys");
+        crate::dev_sign::init_dev_keys(&keys).unwrap();
+        let product = root.join("product");
+        write_software_manifest(
+            &product,
+            "ledger",
+            "1.0.0",
+            "\n[topology]\nname = \"ledger-ha\"\nenvironments = [\"ledger-a\", \"ledger-b\", \"ledger-c\"]\nanti_affinity = \"host\"\nmin_available = 2\n",
+        );
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let (_, trust) = signed_release(&keys, &product.join("tenkai.toml"), &mut ctx).await;
+        let actor = crate::auth_context::test_management_context("wave-lost-fence");
+        crate::catalog::promote(&mut ctx, &actor, "ledger@1.0.0", "stable")
+            .await
+            .unwrap();
+        for (env, host) in [("ledger-a", "h1"), ("ledger-b", "h2"), ("ledger-c", "h3")] {
+            plan::env_add(&mut ctx, env, "replica").await.unwrap();
+            plan::subscribe(&mut ctx, env, "ledger", "stable")
+                .await
+                .unwrap();
+            crate::environment::set_environment_fact(&mut ctx, env, "host", host)
+                .await
+                .unwrap();
+            let mut object = crate::environment::environment(&mut ctx, env)
+                .await
+                .unwrap();
+            object
+                .properties
+                .insert("deployment_health.ledger".into(), "healthy".into());
+            ctx.put(object).await.unwrap();
+        }
+        let spec = ExecutableWaveSpec::new(
+            "ledger-roll",
+            "ledger",
+            "1.0.0",
+            "stable",
+            [
+                "ledger-a".to_string(),
+                "ledger-b".to_string(),
+                "ledger-c".to_string(),
+            ],
+            true,
+        )
+        .unwrap();
+        start_or_resume(&mut ctx, &spec).await.unwrap();
+        let approvals = root.join("approvals");
+        let authorization = WaveAuthorization::Signed {
+            approval_dir: &approvals,
+            trust_roots: &trust,
+        };
+        let planned = advance(&mut ctx, "ledger-roll", authorization)
+            .await
+            .unwrap();
+        assert_eq!(planned.status, WaveStatus::AwaitingApproval);
+        sign_current_approvals(&keys, &database, &approvals, &trust, &planned).await;
+        let plan_id = planned.environments[0].plan_id.clone().unwrap();
+        let approval = approvals.join(format!("{plan_id}.json"));
+        ctx.held_execution_leases = vec![crate::client::HeldExecutionLease {
+            namespace: "tenkai/topology-availability".into(),
+            key: "ledger-ha".into(),
+            fencing_token: "stale".into(),
+            ttl_ms: 60_000,
+        }];
+        let err = crate::apply::execute_with_options(
+            &mut ctx,
+            &plan_id,
+            crate::apply::ExecutionOptions {
+                skip_gates: false,
+                emergency_reason: None,
+                authorization: crate::apply::ExecutionAuthorization::Signed {
+                    approval: &approval,
+                    trust_roots: &trust,
+                    requester: None,
+                },
+                software_executor: Some(std::sync::Arc::new(
+                    crate::software_executor::FakeSoftwareExecutor::new(),
+                )),
+                model_runtime_executor: None,
+                worker_lifecycle: None,
+                artifact_registry: None,
+                delivery_adapter: None,
+                delivery_fence: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(crate::apply::is_execution_fence_lost(&err), "{err:#}");
+        assert!(
+            err.to_string().contains("ledger-ha"),
+            "lost lease must be named: {err:#}"
+        );
+        let plan = plan::load(&mut ctx, &plan_id).await.unwrap();
+        assert_eq!(plan.state, crate::plan::PlanState::Running);
+        ctx.held_execution_leases.clear();
+        let other = ExecutableWaveSpec::new(
+            "ledger-other",
+            "ledger",
+            "1.0.0",
+            "stable",
+            [
+                "ledger-b".to_string(),
+                "ledger-c".to_string(),
+                "ledger-a".to_string(),
+            ],
+            true,
+        )
+        .unwrap();
+        start_or_resume(&mut ctx, &other).await.unwrap();
+        let planned_other = advance(&mut ctx, "ledger-other", authorization)
+            .await
+            .unwrap();
+        sign_current_approvals(&keys, &database, &approvals, &trust, &planned_other).await;
+        let err = advance(&mut ctx, "ledger-other", authorization)
+            .await
+            .unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::topology::AvailabilityRefused>()
+                .is_some_and(|refused| refused.0.contains("not healthy: ledger-a")),
+            "{err:#}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn observe_does_not_create_executable_wave_records() {
         let root = temp_root("observe-no-persist");
         let database = root.join("tenkai.db");
