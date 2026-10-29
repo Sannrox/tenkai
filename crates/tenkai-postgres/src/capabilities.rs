@@ -67,17 +67,12 @@ pub fn enterprise_authoritative_surfaces() -> [AuthoritativeSurface; 5] {
         available: true,
         tracked_by: None,
     };
-    let missing = |name, issue| AuthoritativeSurface {
-        name,
-        available: false,
-        tracked_by: Some(issue),
-    };
     [
         available("operational store"),
         available("tenant isolation"),
         available("shared replica state"),
-        missing("catalog object graph", "#764"),
-        missing("terminal-outcome export", "#765"),
+        available("catalog object graph"),
+        available("terminal-outcome export"),
     ]
 }
 
@@ -127,19 +122,21 @@ mod tests {
 
     #[test]
     fn the_enterprise_profile_names_every_missing_surface() {
-        let error = require_enterprise_profile(&enterprise_authoritative_surfaces())
+        require_enterprise_profile(&enterprise_authoritative_surfaces()).unwrap();
+        assert!(
+            enterprise_authoritative_surfaces()
+                .iter()
+                .all(|surface| surface.available)
+        );
+        let missing = [AuthoritativeSurface {
+            name: "terminal-outcome export",
+            available: false,
+            tracked_by: Some("#765"),
+        }];
+        let error = require_enterprise_profile(&missing)
             .unwrap_err()
             .to_string();
-        assert!(
-            error.contains("catalog object graph (#764)")
-                && error.contains("terminal-outcome export (#765)"),
-            "{error}"
-        );
+        assert!(error.contains("terminal-outcome export (#765)"), "{error}");
         assert!(!error.contains("tenant isolation"), "{error}");
-        let complete = enterprise_authoritative_surfaces().map(|surface| AuthoritativeSurface {
-            available: true,
-            ..surface
-        });
-        require_enterprise_profile(&complete).unwrap();
     }
 }

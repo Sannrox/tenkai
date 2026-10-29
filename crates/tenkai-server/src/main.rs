@@ -673,10 +673,6 @@ async fn main() -> Result<()> {
         }
         OutcomeProviderMode::Chisei => {
             anyhow::ensure!(
-                !cli.tenant_mode,
-                "enterprise hub does not advertise terminal-outcome export until PostgreSQL atomic outbox wiring exists"
-            );
-            anyhow::ensure!(
                 matches!(cli.provider_mode, ProviderMode::Embedded),
                 "outcome export requires embedded Tenkai application state so terminal state and outbox enqueue share one transaction"
             );
@@ -769,7 +765,10 @@ async fn main() -> Result<()> {
     )?);
     let ctx = match cli.provider_mode {
         ProviderMode::Embedded if cli.tenant_mode => match catalog {
-            Some(catalog) => tenkai::client::Ctx::tenant_hub_catalog(catalog),
+            Some(catalog) => tenkai::client::Ctx::tenant_hub_catalog_with_outcome_export(
+                catalog,
+                outcome_provider.is_some(),
+            ),
             None => tenkai::client::Ctx::tenant_hub(),
         },
         ProviderMode::Embedded => {
@@ -825,6 +824,7 @@ async fn main() -> Result<()> {
     // Shared with the host watch, which announces trust.expiring (#775).
     let trust_status: Arc<std::sync::RwLock<Option<tenkai::trust_posture::TrustSnapshot>>> =
         Default::default();
+    let tenant_store_for_outcomes = tenant_store.clone();
     let import_staging = imports.as_ref().map(|settings| settings.staging.clone());
     let clock_every = clock_settings()?;
     let audit_export = audit_export_settings(cli.tenant_mode)?;
@@ -912,6 +912,7 @@ async fn main() -> Result<()> {
     );
     let outcome_task = outcome_provider.map(|provider| {
         let outcome_store = store.clone();
+        let tenant_store = tenant_store_for_outcomes;
         let mut outcome_shutdown_rx = shutdown_tx.subscribe();
         tokio::spawn(async move {
             let mut timer = tokio::time::interval(Duration::from_secs(5));
@@ -924,25 +925,52 @@ async fn main() -> Result<()> {
                         }
                     }
                     _ = timer.tick() => {
-                        match deliver_outcome_batch(
-                            &*outcome_store,
-                            &provider,
-                            Duration::from_secs(5),
-                            tenkai::now_millis(),
-                            10,
-                        ).await {
-                            Ok((delivered, deferred)) if delivered > 0 || deferred > 0 => {
-                                eprintln!(
-                                    "tenkai.outcome_export delivered={} deferred={}",
-                                    delivered, deferred
-                                );
+                        let partitions = match &tenant_store {
+                            Some(tenant) => {
+                                let tenant = Arc::clone(tenant);
+                                match tokio::task::spawn_blocking(move || {
+                                    tenant.provider_event_partitions()
+                                })
+                                .await
+                                {
+                                    Ok(Ok(partitions)) => partitions,
+                                    Ok(Err(error)) => {
+                                        eprintln!(
+                                            "tenkai.outcome_export outcome=degraded detail={error}"
+                                        );
+                                        continue;
+                                    }
+                                    Err(error) => {
+                                        eprintln!(
+                                            "tenkai.outcome_export outcome=degraded detail={error}"
+                                        );
+                                        continue;
+                                    }
+                                }
                             }
-                            Ok(_) => {}
-                            Err(error) => {
-                                eprintln!(
-                                    "tenkai.outcome_export outcome=degraded detail={}",
-                                    error
-                                );
+                            None => vec![Arc::clone(&outcome_store)],
+                        };
+                        for partition in partitions {
+                            match deliver_outcome_batch(
+                                partition.as_ref(),
+                                &provider,
+                                Duration::from_secs(5),
+                                tenkai::now_millis(),
+                                10,
+                            ).await {
+                                Ok((delivered, deferred)) if delivered > 0 || deferred > 0 => {
+                                    eprintln!(
+                                        "tenkai.outcome_export delivered={} deferred={}",
+                                        delivered, deferred
+                                    );
+                                }
+                                Ok(_) => {}
+                                Err(error) => {
+                                    eprintln!(
+                                        "tenkai.outcome_export outcome=degraded detail={}",
+                                        error
+                                    );
+                                }
                             }
                         }
                     }

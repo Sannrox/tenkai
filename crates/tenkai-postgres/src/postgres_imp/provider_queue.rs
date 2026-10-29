@@ -1,72 +1,90 @@
 use super::*;
 use super::{Inner, pg};
+use postgres::Transaction;
+
+pub(crate) fn enqueue_provider_event_in(
+    tx: &mut Transaction<'_>,
+    event: &ProviderEventRecord,
+) -> Result<()> {
+    if event.id.trim().is_empty()
+        || event.provider_kind.trim().is_empty()
+        || event.binding_digest.trim().is_empty()
+        || event.payload_json.is_empty()
+        || event.attempts != 0
+        || event.delivered_at.is_some()
+        || !event.last_error.is_empty()
+        || event.claim_token.is_some()
+        || event.claim_until.is_some()
+    {
+        return Err(StoreError::InvalidData {
+            kind: "provider event",
+            detail: "new events require identities, content, and pristine delivery state".into(),
+        });
+    }
+    let existing = tx
+        .query_opt(
+            "SELECT provider_kind,binding_digest,payload_json FROM provider_events
+             WHERE provider_kind = $1 AND id = $2",
+            &[&event.provider_kind, &event.id],
+        )
+        .map_err(pg)?;
+    if let Some(row) = existing {
+        let kind: String = row.get(0);
+        let digest: String = row.get(1);
+        let payload: String = row.get(2);
+        if kind != event.provider_kind
+            || digest != event.binding_digest
+            || !provider_event_payloads_match(&payload, &event.payload_json)
+        {
+            return Err(StoreError::ImmutableConflict {
+                kind: "provider event",
+                id: event.id.clone(),
+            });
+        }
+        return Ok(());
+    }
+    let attempts = event.attempts as i32;
+    let environment_id =
+        tenkai::storage::provider_event_environment_id(&event.payload_json).unwrap_or_default();
+    let observed_at =
+        tenkai::storage::provider_event_observed_at(&event.payload_json, event.next_attempt_at);
+    tx.execute(
+        "INSERT INTO provider_events(id,provider_kind,binding_digest,payload_json,attempts,next_attempt_at,delivered_at,last_error,claim_token,claim_until,environment_id,observed_at)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+        &[
+            &event.id,
+            &event.provider_kind,
+            &event.binding_digest,
+            &event.payload_json,
+            &attempts,
+            &event.next_attempt_at,
+            &event.delivered_at,
+            &event.last_error,
+            &event.claim_token,
+            &event.claim_until,
+            &environment_id,
+            &observed_at,
+        ],
+    )
+    .map_err(pg)?;
+    Ok(())
+}
 
 impl Inner {
     pub fn enqueue_provider_event(&self, schema: &str, event: &ProviderEventRecord) -> Result<()> {
-        if event.attempts != 0
-            || event.delivered_at.is_some()
-            || !event.last_error.is_empty()
-            || event.claim_token.is_some()
-            || event.claim_until.is_some()
-        {
-            return Err(StoreError::InvalidData {
-                kind: "provider event",
-                detail: "new events must have pristine delivery state".into(),
-            });
-        }
         let event = event.clone();
-        self.with_writer_schema(schema, move |tx| {
-            let existing = tx
-                .query_opt(
-                    "SELECT provider_kind,binding_digest,payload_json FROM provider_events
-                     WHERE provider_kind = $1 AND id = $2",
-                    &[&event.provider_kind, &event.id],
+        self.with_writer_schema(schema, move |tx| enqueue_provider_event_in(tx, &event))
+    }
+
+    pub fn list_tenant_schemas(&self) -> Result<Vec<String>> {
+        self.with_schema("public", move |tx| {
+            let rows = tx
+                .query(
+                    "SELECT nspname FROM pg_namespace WHERE nspname LIKE 'tenkai_t_%' ORDER BY nspname",
+                    &[],
                 )
                 .map_err(pg)?;
-            if let Some(row) = existing {
-                let kind: String = row.get(0);
-                let digest: String = row.get(1);
-                let payload: String = row.get(2);
-                if kind != event.provider_kind
-                    || digest != event.binding_digest
-                    || !provider_event_payloads_match(&payload, &event.payload_json)
-                {
-                    return Err(StoreError::ImmutableConflict {
-                        kind: "provider event",
-                        id: event.id.clone(),
-                    });
-                }
-                return Ok(());
-            }
-            let attempts = event.attempts as i32;
-            let environment_id = tenkai::storage::provider_event_environment_id(
-                &event.payload_json,
-            )
-            .unwrap_or_default();
-            let observed_at = tenkai::storage::provider_event_observed_at(
-                &event.payload_json,
-                event.next_attempt_at,
-            );
-            tx.execute(
-                "INSERT INTO provider_events(id,provider_kind,binding_digest,payload_json,attempts,next_attempt_at,delivered_at,last_error,claim_token,claim_until,environment_id,observed_at)
-                 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
-                &[
-                    &event.id,
-                    &event.provider_kind,
-                    &event.binding_digest,
-                    &event.payload_json,
-                    &attempts,
-                    &event.next_attempt_at,
-                    &event.delivered_at,
-                    &event.last_error,
-                    &event.claim_token,
-                    &event.claim_until,
-                    &environment_id,
-                    &observed_at,
-                ],
-            )
-            .map_err(pg)?;
-            Ok(())
+            Ok(rows.into_iter().map(|row| row.get(0)).collect())
         })
     }
 

@@ -104,6 +104,17 @@ pub trait TenantOperationalStore: Send + Sync {
         cursor: i64,
         limit: usize,
     ) -> std::result::Result<Vec<crate::change_stream::ChangeEvent>, IsolationError>;
+
+    fn list_provider_events_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        provider_kind: &str,
+        environment_id: &str,
+        limit: usize,
+    ) -> std::result::Result<Vec<ProviderEventRecord>, IsolationError>;
+
+    /// Host-scoped outbox partitions the outcome worker drains.
+    fn provider_event_partitions(&self) -> Result<Vec<Arc<dyn OperationalStore>>>;
 }
 
 /// Capability advertisement for the in-memory tenant-isolating store adapter.
@@ -128,6 +139,9 @@ pub fn tenant_memory_store_capabilities() -> ComponentCapabilities {
 #[derive(Clone)]
 pub struct InMemoryTenantOperationalStore {
     partitions: Arc<Mutex<BTreeMap<String, Arc<SqliteStore>>>>,
+    /// Shared producer sequences for every tenant partition. Export uses one
+    /// outcome producer identity, so counters cannot restart per tenant.
+    producer_sequences: Arc<Mutex<BTreeMap<String, i64>>>,
     #[cfg(any(test, feature = "test-support"))]
     healthy: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -136,6 +150,7 @@ impl Default for InMemoryTenantOperationalStore {
     fn default() -> Self {
         Self {
             partitions: Arc::new(Mutex::new(BTreeMap::new())),
+            producer_sequences: Arc::new(Mutex::new(BTreeMap::new())),
             #[cfg(any(test, feature = "test-support"))]
             healthy: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         }
@@ -184,19 +199,21 @@ impl InMemoryTenantOperationalStore {
             .lock()
             .map_err(|_| IsolationError::Contract("tenant store mutex poisoned".into()))?;
         if let Some(store) = partitions.get(tenant_id) {
-            return Ok(TenantPartition {
-                tenant_id: tenant_id.to_string(),
-                store: store.clone(),
-            });
+            return Ok(tenant_partition(
+                tenant_id.to_string(),
+                store.clone(),
+                &self.producer_sequences,
+            ));
         }
         let store = Arc::new(SqliteStore::open_in_memory().map_err(|error| {
             IsolationError::Contract(format!("opening tenant partition: {error}"))
         })?);
         partitions.insert(tenant_id.to_string(), store.clone());
-        Ok(TenantPartition {
-            tenant_id: tenant_id.to_string(),
+        Ok(tenant_partition(
+            tenant_id.to_string(),
             store,
-        })
+            &self.producer_sequences,
+        ))
     }
 
     /// Deny cross-tenant environment access with the harness non-disclosing posture.
@@ -331,6 +348,36 @@ impl InMemoryTenantOperationalStore {
             .store
             .list_change_events_after(cursor, limit)
             .map_err(|error| IsolationError::Contract(error.to_string()))
+    }
+
+    pub fn list_provider_events_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        provider_kind: &str,
+        environment_id: &str,
+        limit: usize,
+    ) -> std::result::Result<Vec<ProviderEventRecord>, IsolationError> {
+        self.partition_for(context)?
+            .store
+            .list_provider_events(provider_kind, environment_id, limit)
+            .map_err(|error| IsolationError::Contract(error.to_string()))
+    }
+
+    pub fn provider_event_partitions(&self) -> Result<Vec<Arc<dyn OperationalStore>>> {
+        let partitions = self
+            .partitions
+            .lock()
+            .map_err(|_| crate::storage::StoreError::Poisoned)?;
+        Ok(partitions
+            .iter()
+            .map(|(tenant_id, store)| {
+                Arc::new(tenant_partition(
+                    tenant_id.clone(),
+                    Arc::clone(store),
+                    &self.producer_sequences,
+                )) as Arc<dyn OperationalStore>
+            })
+            .collect())
     }
 
     /// Run the isolation harness plus store-partition isolation checks.
@@ -491,6 +538,38 @@ impl TenantOperationalStore for InMemoryTenantOperationalStore {
     ) -> std::result::Result<Vec<crate::change_stream::ChangeEvent>, IsolationError> {
         InMemoryTenantOperationalStore::list_change_events_for(self, context, cursor, limit)
     }
+
+    fn list_provider_events_for(
+        &self,
+        context: &AuthenticatedRequestContext,
+        provider_kind: &str,
+        environment_id: &str,
+        limit: usize,
+    ) -> std::result::Result<Vec<ProviderEventRecord>, IsolationError> {
+        InMemoryTenantOperationalStore::list_provider_events_for(
+            self,
+            context,
+            provider_kind,
+            environment_id,
+            limit,
+        )
+    }
+
+    fn provider_event_partitions(&self) -> Result<Vec<Arc<dyn OperationalStore>>> {
+        InMemoryTenantOperationalStore::provider_event_partitions(self)
+    }
+}
+
+fn tenant_partition(
+    tenant_id: String,
+    store: Arc<SqliteStore>,
+    producer_sequences: &Arc<Mutex<BTreeMap<String, i64>>>,
+) -> TenantPartition {
+    TenantPartition {
+        tenant_id,
+        store,
+        producer_sequences: Arc::clone(producer_sequences),
+    }
 }
 
 fn context_for(
@@ -507,6 +586,7 @@ fn context_for(
 pub struct TenantPartition {
     tenant_id: String,
     store: Arc<SqliteStore>,
+    producer_sequences: Arc<Mutex<BTreeMap<String, i64>>>,
 }
 
 impl TenantPartition {
@@ -635,7 +715,15 @@ impl OperationalStore for TenantPartition {
         claim_token: &str,
     ) -> Result<i64> {
         self.store
-            .reserve_provider_event_sequence(provider_kind, id, claim_token)
+            .require_claimed_undelivered_provider_event(provider_kind, id, claim_token)?;
+        let mut sequences = self
+            .producer_sequences
+            .lock()
+            .map_err(|_| crate::storage::StoreError::Poisoned)?;
+        let next = sequences.entry(provider_kind.to_string()).or_insert(1);
+        let value = *next;
+        *next += 1;
+        Ok(value)
     }
     fn bind_provider_event_collection_time(
         &self,

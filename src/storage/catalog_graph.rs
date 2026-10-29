@@ -10,7 +10,7 @@ use anyhow::{Context as _, Result as AnyResult, bail};
 
 use crate::pb::graph_action::{ActionResult, ActionTypeDef};
 use crate::pb::sekai::{Decision, Lease, Link, Object, ObjectChange, ObjectType};
-use crate::storage::{Result, SqliteStore, StoreError};
+use crate::storage::{ProviderEventRecord, Result, SqliteStore, StoreError};
 
 /// Catalog object, link, lease, schema, and action contract.
 pub trait CatalogGraph: Send + Sync {
@@ -105,6 +105,46 @@ pub trait CatalogGraph: Send + Sync {
         }
         Ok(())
     }
+    /// Write `object` and enqueue `events` in one catalog transaction.
+    fn put_with_provider_events(
+        &self,
+        tenant: Option<&str>,
+        object: Object,
+        events: &[ProviderEventRecord],
+    ) -> AnyResult<Object> {
+        if events.is_empty() {
+            return self.put(tenant, object);
+        }
+        anyhow::bail!("catalog cannot atomically enqueue Tenkai provider events")
+    }
+    fn put_objects_with_provider_events(
+        &self,
+        tenant: Option<&str>,
+        objects: &[Object],
+        events: &[ProviderEventRecord],
+    ) -> AnyResult<()> {
+        if events.is_empty() {
+            for object in objects {
+                self.put(tenant, object.clone())?;
+            }
+            return Ok(());
+        }
+        anyhow::bail!("catalog cannot atomically enqueue Tenkai provider events")
+    }
+    fn guarded_put_objects_with_provider_events(
+        &self,
+        tenant: Option<&str>,
+        objects: Vec<Object>,
+        namespace: &str,
+        key: &str,
+        fencing_token: &str,
+        events: &[ProviderEventRecord],
+    ) -> AnyResult<()> {
+        if events.is_empty() {
+            return self.guarded_put_many(tenant, objects, namespace, key, fencing_token);
+        }
+        anyhow::bail!("catalog cannot atomically enqueue Tenkai provider events")
+    }
     fn register_schema(&self, tenant: Option<&str>, schema: ObjectType) -> Result<()>;
     fn schemas(&self, tenant: Option<&str>) -> AnyResult<Vec<ObjectType>>;
     fn register_action(&self, tenant: Option<&str>, action: ActionTypeDef) -> Result<()>;
@@ -132,7 +172,7 @@ pub struct MemoryCatalogGraph {
     principal: String,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Partition {
     objects: BTreeMap<String, Object>,
     links: BTreeMap<String, Link>,
@@ -141,6 +181,7 @@ struct Partition {
     actions: BTreeMap<String, ActionTypeDef>,
     decisions: Vec<Decision>,
     changes: BTreeMap<String, Vec<ObjectChange>>,
+    events: BTreeMap<(String, String), ProviderEventRecord>,
 }
 
 impl MemoryCatalogGraph {
@@ -512,23 +553,50 @@ impl CatalogGraph for MemoryCatalogGraph {
         key: &str,
         fencing_token: &str,
     ) -> AnyResult<()> {
-        let mut partitions = self.lock()?;
-        let partition = partitions.entry(Self::key(tenant)).or_default();
-        require_memory_lease(partition, namespace, key, fencing_token)?;
-        let previous: Vec<Object> =
-            objects
-                .iter()
-                .map(|object| {
-                    partition.objects.get(&object.id).cloned().ok_or_else(|| {
-                        anyhow::anyhow!("embedded object {} does not exist", object.id)
-                    })
-                })
-                .collect::<AnyResult<_>>()?;
-        for (object, previous) in objects.into_iter().zip(previous) {
-            record_memory_changes(partition, &previous, &object, &self.principal);
-            partition.objects.insert(object.id.clone(), object);
-        }
-        Ok(())
+        self.guarded_put_objects_with_provider_events(
+            tenant,
+            objects,
+            namespace,
+            key,
+            fencing_token,
+            &[],
+        )
+    }
+
+    fn put_with_provider_events(
+        &self,
+        tenant: Option<&str>,
+        object: Object,
+        events: &[ProviderEventRecord],
+    ) -> AnyResult<Object> {
+        self.put_objects_with_provider_events(tenant, std::slice::from_ref(&object), events)?;
+        Ok(object)
+    }
+
+    fn put_objects_with_provider_events(
+        &self,
+        tenant: Option<&str>,
+        objects: &[Object],
+        events: &[ProviderEventRecord],
+    ) -> AnyResult<()> {
+        self.apply_objects_with_provider_events(tenant, objects, events, None)
+    }
+
+    fn guarded_put_objects_with_provider_events(
+        &self,
+        tenant: Option<&str>,
+        objects: Vec<Object>,
+        namespace: &str,
+        key: &str,
+        fencing_token: &str,
+        events: &[ProviderEventRecord],
+    ) -> AnyResult<()> {
+        self.apply_objects_with_provider_events(
+            tenant,
+            &objects,
+            events,
+            Some((namespace, key, fencing_token)),
+        )
     }
 
     fn register_schema(&self, tenant: Option<&str>, schema: ObjectType) -> Result<()> {
@@ -676,6 +744,75 @@ impl CatalogGraph for MemoryCatalogGraph {
 }
 
 impl MemoryCatalogGraph {
+    fn apply_objects_with_provider_events(
+        &self,
+        tenant: Option<&str>,
+        objects: &[Object],
+        events: &[ProviderEventRecord],
+        lease: Option<(&str, &str, &str)>,
+    ) -> AnyResult<()> {
+        anyhow::ensure!(!objects.is_empty(), "embedded object update is empty");
+        let unique = objects
+            .iter()
+            .map(|object| object.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        anyhow::ensure!(
+            unique.len() == objects.len(),
+            "embedded object update contains duplicate identities"
+        );
+        let events = crate::providers::bind_tenant_to_provider_events(tenant, events)?;
+        let mut partitions = self.lock()?;
+        let key = Self::key(tenant);
+        let mut partition = partitions.get(&key).cloned().unwrap_or_default();
+        if let Some((namespace, lease_key, token)) = lease {
+            require_memory_lease(&partition, namespace, lease_key, token)?;
+        }
+        let previous: Vec<Object> =
+            objects
+                .iter()
+                .map(|object| {
+                    partition.objects.get(&object.id).cloned().ok_or_else(|| {
+                        anyhow::anyhow!("embedded object {} does not exist", object.id)
+                    })
+                })
+                .collect::<AnyResult<_>>()?;
+        for (object, previous) in objects.iter().zip(previous) {
+            record_memory_changes(&mut partition, &previous, object, &self.principal);
+            partition.objects.insert(object.id.clone(), object.clone());
+        }
+        for event in &events {
+            enqueue_memory_provider_event(&mut partition, event)?;
+        }
+        partitions.insert(key, partition);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn listed_provider_events(
+        &self,
+        tenant: Option<&str>,
+        provider_kind: &str,
+        environment_id: &str,
+    ) -> AnyResult<Vec<ProviderEventRecord>> {
+        let partitions = self.lock()?;
+        Ok(partitions
+            .get(&Self::key(tenant))
+            .map(|partition| {
+                partition
+                    .events
+                    .values()
+                    .filter(|event| {
+                        event.provider_kind == provider_kind
+                            && crate::storage::provider_event_environment_id(&event.payload_json)
+                                .as_deref()
+                                == Some(environment_id)
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
     fn record_decision(
         &self,
         tenant: Option<&str>,
@@ -705,6 +842,29 @@ impl MemoryCatalogGraph {
             .push(decision);
         Ok(())
     }
+}
+
+fn enqueue_memory_provider_event(
+    partition: &mut Partition,
+    event: &ProviderEventRecord,
+) -> AnyResult<()> {
+    super::provider_claims::validate_new_provider_event(event).map_err(anyhow::Error::from)?;
+    let key = (event.provider_kind.clone(), event.id.clone());
+    if let Some(existing) = partition.events.get(&key) {
+        if existing.provider_kind != event.provider_kind
+            || existing.binding_digest != event.binding_digest
+            || !super::provider_event_payloads_match(&existing.payload_json, &event.payload_json)
+        {
+            return Err(StoreError::ImmutableConflict {
+                kind: "provider event",
+                id: event.id.clone(),
+            }
+            .into());
+        }
+        return Ok(());
+    }
+    partition.events.insert(key, event.clone());
+    Ok(())
 }
 
 fn require_memory_lease(
@@ -913,6 +1073,44 @@ impl CatalogGraph for SqliteStore {
             key,
             fencing_token,
             &[],
+            &[],
+        )
+    }
+
+    fn put_with_provider_events(
+        &self,
+        _tenant: Option<&str>,
+        object: Object,
+        events: &[ProviderEventRecord],
+    ) -> AnyResult<Object> {
+        SqliteStore::put_with_provider_events(self, object, events, &[])
+    }
+
+    fn put_objects_with_provider_events(
+        &self,
+        _tenant: Option<&str>,
+        objects: &[Object],
+        events: &[ProviderEventRecord],
+    ) -> AnyResult<()> {
+        SqliteStore::put_objects_with_provider_events(self, objects, events, &[])
+    }
+
+    fn guarded_put_objects_with_provider_events(
+        &self,
+        _tenant: Option<&str>,
+        objects: Vec<Object>,
+        namespace: &str,
+        key: &str,
+        fencing_token: &str,
+        events: &[ProviderEventRecord],
+    ) -> AnyResult<()> {
+        SqliteStore::guarded_put_objects_with_provider_events(
+            self,
+            &objects,
+            namespace,
+            key,
+            fencing_token,
+            events,
             &[],
         )
     }
@@ -1210,6 +1408,151 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let store = SqliteStore::open(&path).unwrap();
         assert_environment_retire_refuses_active_apply_lease(&store, None);
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn sample_event(id: &str, environment: &str) -> ProviderEventRecord {
+        ProviderEventRecord {
+            id: id.into(),
+            provider_kind: "outcome".into(),
+            binding_digest: "digest".into(),
+            payload_json: format!(
+                r#"{{"binding":{{"environment_id":"{environment}"}},"payload_json":"{{}}" }}"#
+            ),
+            attempts: 0,
+            next_attempt_at: 1,
+            delivered_at: None,
+            last_error: String::new(),
+            claim_token: None,
+            claim_until: None,
+        }
+    }
+
+    fn assert_atomic_outbox(
+        graph: &dyn CatalogGraph,
+        tenant: Option<&str>,
+        list: impl Fn() -> Vec<ProviderEventRecord>,
+    ) {
+        let id = "tenkai:conformance:outbox";
+        let _ = graph.delete(tenant, id);
+        let original = sample(id, "tenkai.conformance", "original");
+        graph.create(tenant, original.clone()).unwrap();
+        let mut updated = original.clone();
+        updated.name = "terminal".into();
+        let event = sample_event("event-1", "prod");
+        graph
+            .put_with_provider_events(tenant, updated.clone(), std::slice::from_ref(&event))
+            .unwrap();
+        assert_eq!(graph.get(tenant, id).unwrap().unwrap().name, "terminal");
+        assert_eq!(list().len(), 1);
+        graph
+            .put_with_provider_events(tenant, updated.clone(), std::slice::from_ref(&event))
+            .unwrap();
+        assert_eq!(list().len(), 1);
+
+        let mut conflicting = event.clone();
+        conflicting.payload_json =
+            r#"{"binding":{"environment_id":"prod"},"payload_json":"{\"different\":true}"}"#.into();
+        let mut rolled = updated.clone();
+        rolled.name = "must-roll-back".into();
+        assert!(
+            graph
+                .put_with_provider_events(tenant, rolled.clone(), &[conflicting])
+                .is_err()
+        );
+        assert_eq!(graph.get(tenant, id).unwrap().unwrap().name, "terminal");
+        assert_eq!(list().len(), 1);
+
+        let mut invalid = event;
+        invalid.id.clear();
+        rolled.name = "invalid-must-roll-back".into();
+        assert!(
+            graph
+                .put_with_provider_events(tenant, rolled, &[invalid])
+                .is_err()
+        );
+        assert_eq!(graph.get(tenant, id).unwrap().unwrap().name, "terminal");
+        let _ = graph.delete(tenant, id);
+    }
+
+    #[test]
+    fn memory_catalog_enqueues_provider_events_atomically() {
+        let graph = MemoryCatalogGraph::new();
+        assert_atomic_outbox(&graph, Some("tenant-a"), || {
+            graph
+                .listed_provider_events(Some("tenant-a"), "outcome", "prod")
+                .unwrap()
+        });
+        let other = graph
+            .listed_provider_events(Some("tenant-b"), "outcome", "prod")
+            .unwrap();
+        assert!(other.is_empty());
+    }
+
+    #[test]
+    fn memory_catalog_stamps_tenant_on_terminal_outcomes() {
+        let graph = MemoryCatalogGraph::new();
+        let id = "tenkai:conformance:outbox-tenant";
+        let original = sample(id, "tenkai.conformance", "original");
+        graph.create(Some("tenant-a"), original.clone()).unwrap();
+        graph.create(Some("tenant-b"), original.clone()).unwrap();
+        let event = crate::providers::terminal_outcome_event(
+            "tenkai:deployment:prod:api:1",
+            "tenkai:plan:prod:1",
+            "sha256:plan",
+            "tenkai:release:api@2.0.0",
+            "sha256:release",
+            "api",
+            "prod",
+            "tenkai:environment:prod",
+            "sha256:config",
+            crate::providers::TerminalOutcomeState::DeploymentSucceeded,
+            100,
+        )
+        .unwrap();
+        let record = crate::providers::provider_event_record("outcome", &event, 100).unwrap();
+        let mut updated = original;
+        updated.name = "terminal".into();
+        graph
+            .put_with_provider_events(
+                Some("tenant-a"),
+                updated.clone(),
+                std::slice::from_ref(&record),
+            )
+            .unwrap();
+        graph
+            .put_with_provider_events(Some("tenant-b"), updated, std::slice::from_ref(&record))
+            .unwrap();
+        let listed_a = graph
+            .listed_provider_events(Some("tenant-a"), "outcome", "prod")
+            .unwrap();
+        let listed_b = graph
+            .listed_provider_events(Some("tenant-b"), "outcome", "prod")
+            .unwrap();
+        assert_eq!(listed_a.len(), 1);
+        assert_eq!(listed_b.len(), 1);
+        assert_ne!(listed_a[0].id, listed_b[0].id);
+        let payload_a: crate::providers::TerminalOutcomePayload = {
+            let event: crate::providers::ProviderEvent =
+                serde_json::from_str(&listed_a[0].payload_json).unwrap();
+            serde_json::from_str(&event.payload_json).unwrap()
+        };
+        assert_eq!(payload_a.tenant_id, "tenant-a");
+    }
+
+    #[test]
+    fn sqlite_catalog_enqueues_provider_events_atomically() {
+        let path = std::env::temp_dir().join(format!(
+            "tenkai-765-sqlite-outbox-{}-{}.db",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let store = SqliteStore::open(&path).unwrap();
+        assert_atomic_outbox(&store, None, || {
+            crate::storage::OperationalStore::list_provider_events(&store, "outcome", "prod", 8)
+                .unwrap()
+        });
         let _ = std::fs::remove_file(path);
     }
 }

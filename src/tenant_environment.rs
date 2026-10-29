@@ -2,7 +2,7 @@
 //!
 //! This deep module resolves authenticated tenant visibility before reads or
 //! bounded reconciliation. It also hides synchronous tenant-store adaptation,
-//! development-fixture projections, tenant-free outcome suppression, and
+//! development-fixture projections, tenant-partition outcome inspection, and
 //! non-disclosing failures from transport adapters.
 
 use std::future::Future;
@@ -135,6 +135,21 @@ impl TenantEnvironmentOperations {
         }
         let mut report = partition_local_inspect(environment);
         report.retirement = retirement;
+        let store = self.store.clone();
+        let context = context.clone();
+        let environment_id = environment.to_string();
+        let records = run_store(move || {
+            store.list_provider_events_for(
+                &context,
+                crate::providers::OUTCOME_PROVIDER_KIND,
+                &environment_id,
+                128,
+            )
+        })
+        .await?;
+        report.terminal_outcomes =
+            crate::providers::project_terminal_outcomes(&records, environment, crate::now_millis())
+                .map_err(|error| internal(anyhow::anyhow!("{error}")))?;
         Ok(report)
     }
 
@@ -562,6 +577,113 @@ mod tests {
 
         let error = operations.inspect(&tenant_a, "env-b").await.unwrap_err();
         assert!(matches!(error, TenantEnvironmentError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn inspect_projects_tenant_partition_terminal_outcomes() {
+        let store = Arc::new(InMemoryTenantOperationalStore::new());
+        let tenant_a = context("tenant-a");
+        store
+            .put_environment_for(
+                &tenant_a,
+                &EnvironmentRecord {
+                    id: "prod".into(),
+                    revision: 0,
+                    configuration_json: "{}".into(),
+                },
+            )
+            .unwrap();
+        let provider_event = crate::providers::terminal_outcome_event(
+            "tenkai:deployment:prod:api:1",
+            "tenkai:plan:prod:1",
+            "sha256:plan",
+            "tenkai:release:api@2.0.0",
+            "sha256:release",
+            "api",
+            "prod",
+            "tenkai:environment:prod",
+            "sha256:config",
+            crate::providers::TerminalOutcomeState::DeploymentSucceeded,
+            100,
+        )
+        .unwrap();
+        let event =
+            crate::providers::provider_event_record("outcome", &provider_event, 100).unwrap();
+        let partition = store.partition_for(&tenant_a).unwrap();
+        crate::storage::OperationalStore::enqueue_provider_event(&partition, &event).unwrap();
+        let operations = TenantEnvironmentOperations::new(store.clone(), Arc::new(View::default()));
+        let report = operations.inspect(&tenant_a, "prod").await.unwrap();
+        assert_eq!(report.terminal_outcomes.len(), 1);
+        assert_eq!(report.terminal_outcomes[0].environment_id, "prod");
+        assert_eq!(store.provider_event_partitions().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn tenant_partitions_share_one_outcome_producer_sequence() {
+        let store = Arc::new(InMemoryTenantOperationalStore::new());
+        let tenant_a = context("tenant-a");
+        let tenant_b = context("tenant-b");
+        enqueue_tenant_outcome(&store, &tenant_a, "tenkai:deployment:a", 100);
+        enqueue_tenant_outcome(&store, &tenant_b, "tenkai:deployment:b", 100);
+        let sink = crate::providers::LocalEventSink::default();
+        let partition_a = store.partition_for(&tenant_a).unwrap();
+        let partition_b = store.partition_for(&tenant_b).unwrap();
+        assert_eq!(
+            crate::providers::deliver_outcome_batch(
+                &partition_a,
+                &sink,
+                std::time::Duration::from_secs(1),
+                100,
+                10,
+            )
+            .await
+            .unwrap(),
+            (1, 0)
+        );
+        assert_eq!(
+            crate::providers::deliver_outcome_batch(
+                &partition_b,
+                &sink,
+                std::time::Duration::from_secs(1),
+                100,
+                10,
+            )
+            .await
+            .unwrap(),
+            (1, 0)
+        );
+        let sequences = sink
+            .received()
+            .into_iter()
+            .map(|event| event.source_sequence)
+            .collect::<Vec<_>>();
+        assert_eq!(sequences, vec![Some(1), Some(2)]);
+    }
+
+    fn enqueue_tenant_outcome(
+        store: &InMemoryTenantOperationalStore,
+        tenant: &AuthenticatedRequestContext,
+        deployment: &str,
+        at: i64,
+    ) {
+        let provider_event = crate::providers::terminal_outcome_event(
+            deployment,
+            &format!("tenkai:plan:{deployment}"),
+            "sha256:plan",
+            "tenkai:release:api@2.0.0",
+            "sha256:release",
+            "api",
+            "prod",
+            "tenkai:environment:prod",
+            "sha256:config",
+            crate::providers::TerminalOutcomeState::DeploymentSucceeded,
+            at,
+        )
+        .unwrap();
+        let event =
+            crate::providers::provider_event_record("outcome", &provider_event, at).unwrap();
+        let partition = store.partition_for(tenant).unwrap();
+        crate::storage::OperationalStore::enqueue_provider_event(&partition, &event).unwrap();
     }
 
     struct SharedNameView;

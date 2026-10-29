@@ -30,22 +30,28 @@ impl Inner {
                     id,
                 });
             }
+            // One producer identity exports every tenant partition, so the
+            // monotonic sequence lives in the hub schema, not the tenant outbox.
+            let sequences = format!("{}.provider_event_sequences", crate::HUB_SCHEMA);
             tx.execute(
-                "INSERT INTO provider_event_sequences(provider_kind,next_sequence)
-                 VALUES($1,1) ON CONFLICT(provider_kind) DO NOTHING",
+                &format!(
+                    "INSERT INTO {sequences}(provider_kind,next_sequence)
+                     VALUES($1,1) ON CONFLICT(provider_kind) DO NOTHING"
+                ),
                 &[&provider_kind],
             )
             .map_err(pg)?;
             tx.execute(
-                "UPDATE provider_event_sequences SET next_sequence=next_sequence+1
-                 WHERE provider_kind=$1",
+                &format!(
+                    "UPDATE {sequences} SET next_sequence=next_sequence+1
+                     WHERE provider_kind=$1"
+                ),
                 &[&provider_kind],
             )
             .map_err(pg)?;
             let sequence: i64 = tx
                 .query_one(
-                    "SELECT next_sequence-1 FROM provider_event_sequences
-                     WHERE provider_kind=$1",
+                    &format!("SELECT next_sequence-1 FROM {sequences} WHERE provider_kind=$1"),
                     &[&provider_kind],
                 )
                 .map_err(pg)?

@@ -7,7 +7,9 @@ use super::PostgresTenantOperationalStore;
 use super::postgres_feature_enabled;
 
 /// Hub-wide PostgreSQL schema for host-scoped operational records (audit,
-/// runtime claims, provider outbox). Distinct from per-tenant `tenkai_t_*`.
+/// runtime claims, and the shared outcome producer sequence). Distinct from
+/// per-tenant `tenkai_t_*`, which own the catalog object graph and the
+/// terminal-outcome outbox.
 pub const HUB_SCHEMA: &str = "tenkai_hub";
 
 /// Enterprise hub composition: tenant partitions plus the hub operational store.

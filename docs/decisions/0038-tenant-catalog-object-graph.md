@@ -44,8 +44,8 @@ isolation applies.
 - `enterprise-experimental` can publish, promote, plan, and apply without
   opening SQLite.
 - New tables only; SQLite is unchanged.
-- Outbox wiring for tenant-mode outcome export stays a later slice (#765)
-  in the same tenant schema.
+- Terminal-outcome export enqueues `provider_events` in the same tenant schema
+  as the catalog write (#765).
 
 ## Alternatives considered
 

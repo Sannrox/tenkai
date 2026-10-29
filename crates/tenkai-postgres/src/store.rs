@@ -34,8 +34,9 @@ impl PostgresTenantOperationalStore {
 
     /// Host-scoped operational store in schema [`crate::HUB_SCHEMA`].
     ///
-    /// Audit, runtime claims, and the hub outbox live here so the enterprise
-    /// process does not open SQLite for authoritative state.
+    /// Audit, runtime claims, and the shared outcome producer sequence live
+    /// here so the enterprise process does not open SQLite for authoritative
+    /// state.
     pub fn hub_partition(&self) -> Result<PostgresTenantPartition> {
         #[cfg(feature = "postgres")]
         {
@@ -56,9 +57,11 @@ impl PostgresTenantOperationalStore {
 
     #[cfg(feature = "postgres")]
     pub(crate) fn connect(config: &PostgresTenantConfig) -> Result<Self> {
-        Ok(Self {
+        let store = Self {
             inner: std::sync::Arc::new(postgres_imp::Inner::connect(&config.url)?),
-        })
+        };
+        store.inner.ensure_tenant_schema(crate::HUB_SCHEMA)?;
+        Ok(store)
     }
 
     /// Refuse this store's authoritative writes unless `fence` is leader and
@@ -95,7 +98,7 @@ impl PostgresTenantOperationalStore {
         self.partition_by_id(&tenant_id)
     }
 
-    fn partition_by_id(
+    pub(crate) fn partition_by_id(
         &self,
         tenant_id: &str,
     ) -> std::result::Result<PostgresTenantPartition, IsolationError> {

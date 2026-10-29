@@ -126,6 +126,26 @@ impl PostgresTenantPartition {
         }
     }
 
+    pub fn list_provider_events(
+        &self,
+        provider_kind: &str,
+        environment_id: &str,
+        limit: usize,
+    ) -> Result<Vec<tenkai::storage::ProviderEventRecord>> {
+        #[cfg(feature = "postgres")]
+        {
+            self.inner
+                .list_provider_events(&self.schema, provider_kind, environment_id, limit)
+        }
+        #[cfg(not(feature = "postgres"))]
+        {
+            let _ = (provider_kind, environment_id, limit);
+            Err(StoreError::AdapterUnavailable(
+                "postgres feature disabled".into(),
+            ))
+        }
+    }
+
     pub fn list_change_events_after(
         &self,
         cursor: i64,

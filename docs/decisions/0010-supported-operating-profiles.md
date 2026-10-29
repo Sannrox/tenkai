@@ -85,11 +85,11 @@ continues to fail the affected operation closed.
 | Authentication | Verified enterprise JWT assertions establish management and tenant context; distinct environment runtime credentials scope execution. Caller metadata never establishes tenant authority. |
 | Execution ownership | Tenkai remains sole operational owner. Enterprise identity and optional provider systems cannot mint plans, mutate receipts, or enter recovery. |
 | Recovery | PostgreSQL-native consistent backup and restore covers the complete authoritative state. Restore one compatible database point, start a compatible Tenkai version, re-inject credentials, and verify migrations, tenant isolation, fencing, readiness, and fleet posture before admitting writes. |
-| Provider behavior | Required evidence fails the affected operation closed. The PostgreSQL adapter retains the durable outbox contract, but this gated profile does not advertise terminal-outcome, audit, or planning-event export until PostgreSQL owns all authoritative state and the corresponding atomic wiring and recovery evidence exist; providers never own recovery. |
+| Provider behavior | Required evidence fails the affected operation closed. Terminal-outcome export uses the tenant-schema outbox in the same catalog transaction; audit and planning-event export stay unwired. Providers never own recovery. |
 | Upgrade path | Take and verify a PostgreSQL recovery point, migrate under the documented compatibility window, keep server/runtime protocol minors compatible, and restore the prior binary plus database recovery point if migration fails. |
 | Guarantees | Tenant isolation, federated assertion verification, PostgreSQL durability, leases/fencing, and single-store recovery once every required PostgreSQL capability passes startup validation and conformance. |
 | Non-guarantees | Multiple server replicas, automatic failover, multi-AZ packaging, multi-active writers, zero-downtime migration, browser OIDC sessions, or product `high_availability`. |
-| Stability | **Experimental and gated.** The profile is unavailable until PostgreSQL implements every required authoritative surface and passes enterprise recovery and usability drills. Component-level PostgreSQL evidence alone does not activate it. `tenkai-server --tenant-mode --require-enterprise-profile` checks the gate at startup and names each missing surface (#747). |
+| Stability | **Experimental and gated.** Authoritative surfaces are implemented. The profile stays experimental until enterprise recovery and usability drills pass. `tenkai-server --tenant-mode --require-enterprise-profile` checks the gate at startup and names each missing surface (#747). |
 
 ## Backend and recovery rules
 
@@ -231,7 +231,7 @@ in favor of the single-backend model already used by Sekai-Chisei.
 | Operational persistence | Enterprise moves all authoritative state behind PostgreSQL application ports | Shared SQLite/PostgreSQL conformance, migration, backup, restore, and cutover drills |
 | Authentication/trust | Each profile has one documented authority posture | Enterprise verifier and tenant-scope negative tests |
 | Runtime protocol/execution | Remote profiles retain scoped pull execution and fencing | Same-minor compatibility until a wider window is proven |
-| Providers | Provider requirements do not change by profile | SQLite terminal-outcome wiring is shipped; audit/planning-event export and complete PostgreSQL host wiring remain pre-activation evidence; recovery remains provider-independent |
+| Providers | Provider requirements do not change by profile | SQLite and PostgreSQL terminal-outcome wiring is shipped; audit/planning-event export remain unwired; recovery remains provider-independent |
 | HA/replicas | Shared state remains distinct from product HA | Preserve explicit non-guarantee and fail-closed HA requirement |
 | Ontology | This repository has no tracked portable ontology artifact | Add portable definitions only if a later decision adopts one |
 | Security | Dual-store fallback and caller-selected tenant authority are prohibited | Fail-closed startup and authorization tests |
@@ -266,20 +266,15 @@ Evidence in place:
 | Replica loss | Kill-the-leader drill in CI against an ephemeral PostgreSQL: takeover within the lease bound, at most one receipt per step, a resumed stale leader's commit refused ([#749](https://github.com/Sannrox/tenkai/issues/749)) |
 | Failover procedure | [Hub failover runbook](../ha-failover-runbook.md): detection, takeover, verification, rollback |
 
-Status: **unchanged, experimental and gated.** Catalog object-graph
-lifecycle lives in each tenant schema
-([ADR 0038](0038-tenant-catalog-object-graph.md) /
-[#764](https://github.com/Sannrox/tenkai/issues/764)). The gate still reports
-terminal-outcome export ([#765](https://github.com/Sannrox/tenkai/issues/765)).
+Status: **experimental and gated.** Catalog object-graph lifecycle and
+terminal-outcome export live in each tenant schema
+([ADR 0038](0038-tenant-catalog-object-graph.md)).
+`--require-enterprise-profile` now sees those surfaces as available.
 Enterprise backup and restore and independent operator usability drills
-(implementation sequence step 5) have not run. Multiple server replicas move
-from "no complete profile admits them" to "admitted by
-`enterprise-experimental` once its gate passes": the fenced writer removes
-the split-brain objection, but the profile is not selectable until then.
-When it is, the profile's non-guarantees drop "multiple server replicas" and
-"automatic failover" for the writer role, and keep multi-active writers,
-multi-AZ packaging and zero-downtime migration. Product `high_availability`
-remains unclaimed and fail-closed.
+(implementation sequence step 5) have not run. Multiple server replicas are
+admitted by `enterprise-experimental` once its remaining recovery drills
+pass: the fenced writer removes the split-brain objection. Product
+`high_availability` remains unclaimed and fail-closed.
 
-Revisit when #765 lands and the step 5 drills have results; that change, not
-this one, promotes the profile.
+Revisit when the step 5 drills have results; that change, not this one,
+promotes the profile.

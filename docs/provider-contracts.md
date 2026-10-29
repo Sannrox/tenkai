@@ -99,7 +99,8 @@ Delivery retries use the durable outbox; apply does not wait.
 `ProviderEvent.payload_json` contains `tenkai.terminal_outcome.v1` with:
 
 - stable deployment, plan, release, product, environment, and configuration
-  identities;
+  identities, plus the owning tenant on tenant-mode hubs (omitted on community
+  hosts);
 - one of `deployment_succeeded`, `deployment_failed`,
   `automatic_rollback_succeeded`, `rollback_succeeded`, `rollback_failed`,
   `execution_cancelled`, or `unknown_reconciled`; and
@@ -243,16 +244,18 @@ retry error text, event payloads, credentials, source content, and executor logs
 are never returned. An unconfigured outcome provider produces no new rows;
 embedded inspection may show already durable rows. The absence of a row is not
 inferred to mean that an outcome was delivered.
-Tenant-mode hosts suppress the community embedded projection until the
-authenticated tenant partition exposes the same bounded read, so one tenant
-cannot observe another tenant's outcome identities.
+Tenant-mode hosts project terminal outcomes from the authenticated tenant
+partition, so one tenant cannot observe another tenant's outcome identities.
 Pre-v2 outcome rows remain durable for delivery but are omitted from this
 projection because their historical identity did not bind every returned field.
 
 The PostgreSQL adapter exposes the same kind-filtered queue contract.
-Tenant-mode hubs refuse `--outcome-provider chisei` until PostgreSQL atomic
-outbox wiring exists, so the profile does not advertise terminal-outcome,
-audit, or planning-event export.
+Tenant-mode hubs enqueue terminal outcomes in the tenant schema with the
+catalog write and export them with `--outcome-provider chisei`. Catalog enqueue
+stamps the tenant into the payload so two tenants with the same environment and
+deployment identities export distinct event IDs and Chisei targets. The hub
+allocates one monotonic `source_sequence` for that producer identity across
+tenant partitions. Audit and planning-event export stay unwired.
 
 ## Remote gate HTTP JSON contract (#113)
 
