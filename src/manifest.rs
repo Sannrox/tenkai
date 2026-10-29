@@ -58,9 +58,20 @@ pub struct Manifest {
     /// Signed delivery signals used by unattended approval policy.
     #[serde(default)]
     pub delivery: DeliverySection,
+    /// Optional signed component inventory (`[inventory]`, #692).
+    #[serde(default)]
+    pub inventory: Option<InventorySection>,
     /// Replica environments and their anti-affinity (`[topology]`, #689).
     #[serde(default)]
     pub topology: Option<crate::topology::TopologySection>,
+}
+
+/// Component inventory document covered by the release signature.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InventorySection {
+    /// Inventory JSON relative to `deploy.workdir`.
+    pub document: String,
 }
 
 /// Optional release metadata covered by the content digest.
@@ -630,6 +641,9 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
             }
         }
     }
+    if let Some(inventory) = &manifest.inventory {
+        validate_input_path("inventory.document", &inventory.document)?;
+    }
     crate::ontology::validate_identifier("product.name", &manifest.product.name)?;
     crate::ontology::validate_identifier("product.version", &manifest.product.version)?;
     let workdir = base
@@ -711,6 +725,11 @@ impl Manifest {
             && !inputs.contains(&module.document)
         {
             inputs.push(module.document.clone());
+        }
+        if let Some(inventory) = &self.inventory
+            && !inputs.contains(&inventory.document)
+        {
+            inputs.push(inventory.document.clone());
         }
         if let Some(model) = self.model.as_ref() {
             for path in [&model.registry_descriptor, &model.registry_attestation] {
@@ -1094,9 +1113,49 @@ mod tests {
             artifacts: Vec::new(),
             gate: GateSection::default(),
             delivery: Default::default(),
+            inventory: None,
             topology: None,
         };
         assert_eq!(manifest.immutable_inputs(), vec!["routing.json"]);
+    }
+
+    #[test]
+    fn inventory_document_is_an_immutable_input() {
+        let mut manifest = Manifest {
+            compatibility: None,
+            product: ProductSection {
+                name: "api".into(),
+                version: "1.0.0".into(),
+                description: String::new(),
+                kind: ProductKind::Software,
+            },
+            deploy: DeploySection::default(),
+            routing: None,
+            model: None,
+            runtime: None,
+            requirements: None,
+            model_health: None,
+            policy: None,
+            eval_suite_product: None,
+            agent: None,
+            prompt: None,
+            module: None,
+            change_set_pin: None,
+            worker_pool: None,
+            artifacts: Vec::new(),
+            gate: GateSection::default(),
+            delivery: Default::default(),
+            inventory: Some(InventorySection {
+                document: "sbom.json".into(),
+            }),
+            topology: None,
+        };
+        assert_eq!(manifest.immutable_inputs(), vec!["sbom.json"]);
+        manifest.deploy.inputs = vec!["bin".into()];
+        assert_eq!(
+            manifest.immutable_inputs(),
+            vec!["bin".to_string(), "sbom.json".to_string()]
+        );
     }
 
     #[test]

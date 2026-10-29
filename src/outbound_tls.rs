@@ -102,6 +102,16 @@ impl OutboundTrust {
     /// speak (SMTP STARTTLS): the bundle plus, unless system roots are off,
     /// the platform store and the Mozilla roots.
     pub fn rustls_client_config(&self) -> Result<rustls::ClientConfig> {
+        self.rustls_client_config_with_auth(None)
+    }
+
+    /// [`Self::rustls_client_config`] presenting `client_auth` as the client
+    /// certificate, for a hardware-backed runner key that cannot be loaded
+    /// as PEM.
+    pub fn rustls_client_config_with_auth(
+        &self,
+        client_auth: Option<std::sync::Arc<dyn rustls::client::ResolvesClientCert>>,
+    ) -> Result<rustls::ClientConfig> {
         use rustls::pki_types::CertificateDer;
         use rustls::pki_types::pem::PemObject as _;
         let mut roots = rustls::RootCertStore::empty();
@@ -116,15 +126,16 @@ impl OutboundTrust {
                     .with_context(|| format!("{CA_BUNDLE_ENV} holds an unusable certificate"))?;
             }
         }
-        Ok(
-            rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
-                rustls::crypto::ring::default_provider(),
-            ))
-            .with_safe_default_protocol_versions()
-            .context("TLS client setup")?
-            .with_root_certificates(roots)
-            .with_no_client_auth(),
-        )
+        let builder = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .context("TLS client setup")?
+        .with_root_certificates(roots);
+        Ok(match client_auth {
+            None => builder.with_no_client_auth(),
+            Some(resolver) => builder.with_client_cert_resolver(resolver),
+        })
     }
 
     /// gRPC client TLS with the same trust.

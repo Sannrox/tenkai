@@ -1996,7 +1996,7 @@ mod tests {
         crate::environment::set_environment_fact(&mut ctx, "prod", "architecture", "arm64")
             .await
             .unwrap();
-        crate::runner_attestation::set_policy(&mut ctx, "prod", 600_000)
+        crate::runner_attestation::set_policy(&mut ctx, "prod", 600_000, false)
             .await
             .unwrap();
         fn code<T>(result: Result<T, RuntimeDeliveryError>) -> &'static str {
@@ -2227,7 +2227,7 @@ mod tests {
         crate::environment::set_environment_fact(&mut ctx, "prod", "architecture", "arm64")
             .await
             .unwrap();
-        crate::runner_attestation::set_policy(&mut ctx, "prod", 600_000)
+        crate::runner_attestation::set_policy(&mut ctx, "prod", 600_000, false)
             .await
             .unwrap();
         let report = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {

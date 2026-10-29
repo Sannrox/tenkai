@@ -88,6 +88,21 @@ async fn catalog_lists_require_read_and_empty_catalog_is_an_empty_page() {
         assert_eq!(body["items"], serde_json::json!([]), "{path}");
         assert!(body.get("next_cursor").is_none(), "{path} {body}");
     }
+    let (status, _) = get_json(
+        &app,
+        "/v1/exposures?component=openssl&range=%3E%3D1.0.0",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, body) = get_json(
+        &app,
+        "/v1/exposures?component=openssl&range=%3E%3D1.0.0",
+        Some("management-secret"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["matches"], serde_json::json!([]), "{body}");
     let _ = std::fs::remove_dir_all(root);
 }
 

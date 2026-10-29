@@ -1698,6 +1698,7 @@ mod tests {
             artifacts: Vec::new(),
             gate: GateSection::default(),
             delivery: Default::default(),
+            inventory: None,
             topology: None,
         };
         let descriptor = ModelRuntimeDescriptor::from_manifest(&manifest).unwrap();

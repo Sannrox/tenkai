@@ -700,7 +700,7 @@ pub(crate) fn next_software_token() -> Option<(PathBuf, String)> {
             let mut labels = Vec::new();
             if !module.as_os_str().is_empty() {
                 let _ = softhsm_conf();
-                for _ in 0..4 {
+                for _ in 0..8 {
                     let label = uuid::Uuid::new_v4().simple().to_string();
                     let status = Command::new("softhsm2-util")
                         .args([

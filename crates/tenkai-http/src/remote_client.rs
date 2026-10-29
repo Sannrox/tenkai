@@ -164,6 +164,19 @@ impl RemoteClient {
             .await
     }
 
+    pub async fn query_exposures(
+        &self,
+        component: &str,
+        range: &str,
+    ) -> anyhow::Result<tenkai::exposure::ExposureQueryResult> {
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("component", component)
+            .append_pair("range", range)
+            .finish();
+        self.request_json(reqwest::Method::GET, &format!("/v1/exposures?{query}"))
+            .await
+    }
+
     pub(super) async fn request_json<T: serde::de::DeserializeOwned>(
         &self,
         method: reqwest::Method,

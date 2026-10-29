@@ -99,9 +99,12 @@ pub enum EnvironmentConfigChange {
     },
     ClearApprovalPolicy,
     /// Require attested runner enrollment and renewal (#675) with evidence
-    /// at most `max_age_ms` old.
+    /// at most `max_age_ms` old. `require_hardware_key` (#785) refuses a
+    /// file runner key.
     SetRunnerAttestation {
         max_age_ms: u64,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        require_hardware_key: bool,
     },
     ClearRunnerAttestation,
 }
@@ -282,9 +285,14 @@ pub fn validate(change: &EnvironmentConfigChange) -> Result<()> {
         Change::ClearWebhooks { .. }
         | Change::ClearApprovalPolicy
         | Change::ClearRunnerAttestation => Ok(()),
-        Change::SetRunnerAttestation { max_age_ms } => {
-            crate::runner_attestation::RunnerAttestationPolicy::required(*max_age_ms).map(drop)
-        }
+        Change::SetRunnerAttestation {
+            max_age_ms,
+            require_hardware_key,
+        } => crate::runner_attestation::RunnerAttestationPolicy::required_with(
+            *max_age_ms,
+            *require_hardware_key,
+        )
+        .map(drop),
         Change::SetApprovalPolicy { path } => {
             crate::approval_policy::validate_policy_file_path(std::path::Path::new(path))
         }
@@ -502,8 +510,17 @@ async fn mutate(
         Change::ClearApprovalPolicy => {
             crate::environment::clear_plan_approval_policy(ctx, environment).await?
         }
-        Change::SetRunnerAttestation { max_age_ms } => {
-            crate::runner_attestation::set_policy(ctx, environment, *max_age_ms).await?
+        Change::SetRunnerAttestation {
+            max_age_ms,
+            require_hardware_key,
+        } => {
+            crate::runner_attestation::set_policy(
+                ctx,
+                environment,
+                *max_age_ms,
+                *require_hardware_key,
+            )
+            .await?
         }
         Change::ClearRunnerAttestation => {
             crate::runner_attestation::clear_policy(ctx, environment).await?

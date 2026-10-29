@@ -25,7 +25,8 @@ use super::imports::{
 use super::inspect::{
     backup_status, change_events, environment_approval_policy, environment_status, fleet_status,
     health, inspect_environment, list_channels, list_environments, list_migrations, list_releases,
-    observed_runtime, oidc_client, openmetrics, plan_approvals, ready, reconcile, take_backup,
+    observed_runtime, oidc_client, openmetrics, plan_approvals, query_exposures, ready, reconcile,
+    take_backup,
 };
 use super::lifecycle::{
     apply_plan, approve_plan, channel_hold, environment_hold, install_model_evaluation_trust,
@@ -179,6 +180,7 @@ pub fn router(
             get(list_environments).post(register_environment),
         )
         .route("/v1/releases", get(list_releases).post(publish_release))
+        .route("/v1/exposures", get(query_exposures))
         .route("/v1/channels", get(list_channels))
         .route("/v1/migrations", get(list_migrations))
         .route(

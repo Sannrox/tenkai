@@ -41,7 +41,8 @@ fn protected_base_url(base_url: String) -> Result<String> {
 /// before the write needs a new token.
 ///
 /// With `certificate_dir` (#674), enrollment also gets a runner certificate:
-/// the agent generates its key there (owner-only), sends only a CSR, and
+/// the agent generates its key there (owner-only, or in a hardware store
+/// when `TENKAI_RUNTIME_KEY_STORE=hardware`, #785), sends only a CSR, and
 /// writes the issued `cert.pem` and the runner `ca.pem` beside it.
 ///
 /// A server that requires runner attestation (#675) answers
@@ -85,7 +86,9 @@ pub async fn enrolled_credential(
             crate::atomic_state::remove_if_exists(&dir.join(name))?;
         }
     }
-    let csr = certificate_dir.map(runner_csr).transpose()?;
+    let csr = certificate_dir
+        .map(|dir| crate::runner_key::RunnerKey::open_or_generate(dir)?.csr())
+        .transpose()?;
     // No redirects: the token goes only to the protected URL checked above.
     let client = crate::outbound_tls::client()?
         .timeout(Duration::from_secs(10))
@@ -127,32 +130,14 @@ pub async fn enrolled_credential(
 }
 
 /// File names in a runner certificate directory (#674).
-const RUNNER_KEY: &str = "key.pem";
 const RUNNER_CERT: &str = "cert.pem";
 const RUNNER_CA: &str = "ca.pem";
 
 /// A CSR over the agent's own key in `dir`, generating the key (kept
 /// owner-only, never sent) when there is none yet.
+#[cfg(test)]
 fn runner_csr(dir: &std::path::Path) -> Result<String> {
-    use std::os::unix::fs::DirBuilderExt as _;
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)
-        .with_context(|| format!("creating {}", dir.display()))?;
-    let key_path = dir.join(RUNNER_KEY);
-    let key = match std::fs::read_to_string(&key_path) {
-        Ok(pem) => rcgen::KeyPair::from_pem(&pem).context("reading the runner key")?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let key = rcgen::KeyPair::generate()?;
-            write_owner_only(&key_path, &key.serialize_pem())?;
-            key
-        }
-        Err(error) => return Err(error).with_context(|| format!("reading {}", key_path.display())),
-    };
-    Ok(rcgen::CertificateParams::new(Vec::<String>::new())?
-        .serialize_request(&key)?
-        .pem()?)
+    crate::runner_key::RunnerKey::open_or_generate(dir)?.csr()
 }
 
 /// Host evidence for `environment`, signed with the runner key in `dir`
@@ -173,45 +158,20 @@ fn host_attestation(
         None => Vec::new(),
     };
     let facts = inventory::facts_map(&inventory::probe_local_inventory()?);
-    let key = std::fs::read_to_string(dir.join(RUNNER_KEY)).context("reading the runner key")?;
-    crate::runner_attestation::sign(environment, checks, facts, &key, csr, now)
+    let key = crate::runner_key::RunnerKey::open(dir)?
+        .with_context(|| format!("reading the runner key in {}", dir.display()))?;
+    key.sign_attestation(environment, checks, facts, csr, now)
 }
 
-/// The agent's runner certificate, its issuing CA and key from `dir` as a
-/// client identity with the certificate's expiry (unix seconds), when
-/// enrollment issued one (#674).
-pub fn runner_identity(dir: &std::path::Path) -> Result<Option<(reqwest::Identity, i64)>> {
-    let read = |name: &str| std::fs::read(dir.join(name));
-    match (read(RUNNER_CERT), read(RUNNER_KEY)) {
-        (Ok(mut certificate), Ok(key)) => {
-            let (_, pem) = x509_parser::pem::parse_x509_pem(&certificate)
-                .map_err(|error| anyhow::anyhow!("reading the runner certificate: {error}"))?;
-            let not_after = pem
-                .parse_x509()
-                .map_err(|error| anyhow::anyhow!("reading the runner certificate: {error}"))?
-                .validity()
-                .not_after
-                .timestamp();
-            // The issuing runner CA follows the leaf, so a server that
-            // trusts only a root above an intermediate runner CA can build
-            // the chain.
-            if let Ok(ca) = read(RUNNER_CA) {
-                certificate.extend_from_slice(b"\n");
-                certificate.extend_from_slice(&ca);
-            }
-            certificate.extend_from_slice(b"\n");
-            certificate.extend_from_slice(&key);
-            let identity = reqwest::Identity::from_pem(&certificate)
-                .context("loading the runner certificate")?;
-            Ok(Some((identity, not_after)))
-        }
-        (Err(error), _) | (_, Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok(None)
-        }
-        (Err(error), _) | (_, Err(error)) => {
-            Err(error).with_context(|| format!("reading {}", dir.display()))
-        }
-    }
+/// The agent's runner certificate from `dir` as a client identity with the
+/// certificate's expiry (unix seconds), when enrollment issued one (#674).
+pub fn runner_identity(
+    dir: &std::path::Path,
+) -> Result<Option<(crate::runner_key::ClientAuth, i64)>> {
+    let Some(key) = crate::runner_key::RunnerKey::open(dir)? else {
+        return Ok(None);
+    };
+    key.tls_identity(dir)
 }
 
 /// Replace `path` with `contents`, owner-only, in one rename: a reader sees
@@ -276,6 +236,8 @@ pub struct RuntimeClient {
     http: reqwest::Client,
     /// Where the runner certificate lives, when the agent has one (#674).
     certificate_dir: Option<PathBuf>,
+    /// The runner key kept with the certificate directory (#674, #785).
+    runner_key: Option<crate::runner_key::RunnerKey>,
     /// A client presenting the runner certificate, and the certificate's
     /// expiry (unix seconds). Replaced on renewal.
     certified: std::sync::Arc<std::sync::RwLock<Option<(reqwest::Client, i64)>>>,
@@ -327,6 +289,7 @@ impl RuntimeClient {
                 .build()?,
             inventory_report,
             certificate_dir: None,
+            runner_key: None,
             certified: Default::default(),
             home: None,
             restart: Default::default(),
@@ -356,19 +319,37 @@ impl RuntimeClient {
     /// directory the agent never falls back to its bearer for work, so its
     /// lease identity stays the runner's.
     pub fn with_certificate_dir(mut self, dir: PathBuf) -> Result<Self> {
-        let loaded = runner_identity(&dir)?;
+        let key = crate::runner_key::RunnerKey::open_or_generate(&dir)?;
+        let loaded = key.tls_identity(&dir)?;
         self.certificate_dir = Some(dir);
+        self.runner_key = Some(key);
         if let Some((identity, not_after)) = loaded {
             self.install_identity(identity, not_after)?;
         }
         Ok(self)
     }
 
-    fn install_identity(&self, identity: reqwest::Identity, not_after: i64) -> Result<()> {
-        let client = crate::outbound_tls::client()?
-            .timeout(Duration::from_secs(10))
-            .identity(identity)
-            .build()?;
+    fn install_identity(
+        &self,
+        identity: crate::runner_key::ClientAuth,
+        not_after: i64,
+    ) -> Result<()> {
+        let client = match identity {
+            crate::runner_key::ClientAuth::Pem(identity) => crate::outbound_tls::client()?
+                .timeout(Duration::from_secs(10))
+                .identity(identity)
+                .build()?,
+            crate::runner_key::ClientAuth::Rustls(resolver) => {
+                let mut config = crate::outbound_tls::OutboundTrust::from_env()?
+                    .rustls_client_config_with_auth(Some(resolver))?;
+                // reqwest is built without the http2 feature, so advertise HTTP/1.1 only.
+                config.alpn_protocols = vec![b"http/1.1".to_vec()];
+                reqwest::Client::builder()
+                    .use_preconfigured_tls(config)
+                    .timeout(Duration::from_secs(10))
+                    .build()?
+            }
+        };
         *self
             .certified
             .write()
@@ -421,9 +402,23 @@ impl RuntimeClient {
             return Ok(());
         }
         let client = self.certified_client().unwrap_or_else(|| self.http.clone());
-        let csr = runner_csr(dir)?;
-        let attest =
-            |csr: &str| host_attestation(dir, &self.environment, csr, self.preflight.as_deref());
+        let key = self
+            .runner_key
+            .as_ref()
+            .context("the runner key is missing from the certificate directory")?;
+        let csr = key.csr()?;
+        let attest = |csr: &str| {
+            let now = crate::now_millis();
+            let checks = match self.preflight.as_deref() {
+                Some(path) => crate::host_preflight::run_checks(
+                    &crate::host_preflight::PreflightConfig::load(path)?,
+                    now,
+                ),
+                None => Vec::new(),
+            };
+            let facts = inventory::facts_map(&inventory::probe_local_inventory()?);
+            key.sign_attestation(&self.environment, checks, facts, csr, now)
+        };
         let send = |attestation| {
             client
                 .post(format!(
@@ -450,8 +445,9 @@ impl RuntimeClient {
             decode_response(response, "renewing the runner certificate").await?;
         replace_file(&dir.join(RUNNER_CA), &renewed.ca)?;
         replace_file(&dir.join(RUNNER_CERT), &renewed.certificate)?;
-        let (identity, not_after) =
-            runner_identity(dir)?.context("the renewed runner certificate did not load")?;
+        let (identity, not_after) = key
+            .tls_identity(dir)?
+            .context("the renewed runner certificate did not load")?;
         self.install_identity(identity, not_after)
     }
 
@@ -1176,7 +1172,7 @@ mod tests {
         assert!(runner_identity(&dir).unwrap().is_none());
         let csr = runner_csr(&dir).unwrap();
         assert!(csr.contains("CERTIFICATE REQUEST") && !csr.contains("PRIVATE KEY"));
-        let key = dir.join(RUNNER_KEY);
+        let key = dir.join(crate::runner_key::RUNNER_KEY);
         assert_eq!(
             std::fs::metadata(&key).unwrap().permissions().mode() & 0o777,
             0o600

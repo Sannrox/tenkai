@@ -55,6 +55,7 @@ fn http_exposed_tenant_rpcs_are_subset_of_registry() {
     // mode refuses them instead of listing the shared catalog.
     assert!(!http_exposed_tenant_rpc_ids().contains(&"catalog.list_releases"));
     assert!(!http_exposed_tenant_rpc_ids().contains(&"catalog.list_channels"));
+    assert!(!http_exposed_tenant_rpc_ids().contains(&"catalog.query_exposures"));
     assert!(!http_exposed_tenant_rpc_ids().contains(&"catalog.list_products"));
     assert!(!http_exposed_tenant_rpc_ids().contains(&"plan.list"));
     assert!(!http_exposed_tenant_rpc_ids().contains(&"aggregate.audit_list"));

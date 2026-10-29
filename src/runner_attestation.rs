@@ -21,7 +21,10 @@
 //! Limit: a file key copied together with its certificate directory carries
 //! the same fingerprint. This catches fact drift and bounds a copied
 //! credential to one certificate lifetime unless the copy also passes
-//! attested renewal; proving the same host needs non-exportable keys.
+//! attested renewal. Proving the same host needs a non-exportable hardware
+//! key (#785): the policy may require one, a file key is then refused as
+//! `hardware_key_required`, and the certificate records whether the key is
+//! hardware-backed.
 
 use std::collections::BTreeMap;
 
@@ -61,17 +64,25 @@ pub const RUNTIME_FACT_SOURCE: &str = "runtime";
 #[serde(deny_unknown_fields)]
 pub struct RunnerAttestationPolicy {
     pub require_runner_attestation: bool,
+    /// When true, a file runner key is refused (`hardware_key_required`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_hardware_backed_key: bool,
     /// The oldest evidence accepted, in milliseconds.
     pub max_age_ms: u64,
 }
 
 impl RunnerAttestationPolicy {
     pub fn required(max_age_ms: u64) -> Result<Self> {
+        Self::required_with(max_age_ms, false)
+    }
+
+    pub fn required_with(max_age_ms: u64, require_hardware_backed_key: bool) -> Result<Self> {
         if max_age_ms == 0 || max_age_ms > MAX_POLICY_AGE_MS {
             bail!("runner attestation max_age_ms must be 1..={MAX_POLICY_AGE_MS}");
         }
         Ok(Self {
             require_runner_attestation: true,
+            require_hardware_backed_key,
             max_age_ms,
         })
     }
@@ -90,6 +101,12 @@ pub struct RunnerAttestationStatement {
     pub facts: BTreeMap<String, String>,
     /// `sha256:<hex>` of the signing key's SubjectPublicKeyInfo.
     pub key_fingerprint: String,
+    /// True when this runtime generated the key in a hardware store (#785).
+    /// Signed with the CSR key, same trust as probed host facts. Omitted
+    /// when false so a file-key agent of this release still attests to a
+    /// server that does not know the field.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hardware_backed: bool,
 }
 
 /// Signed runner attestation, as sent with an enrollment or a renewal.
@@ -135,6 +152,10 @@ pub enum AttestationRefusal {
         "runtime request refused: attestation_requires_client_certificate (present the runner certificate; a bearer only renews it)"
     )]
     ClientCertificateRequired,
+    #[error(
+        "runner attestation refused: hardware_key_required (file runner keys are not admitted)"
+    )]
+    HardwareKeyRequired,
 }
 
 impl AttestationRefusal {
@@ -153,6 +174,7 @@ impl AttestationRefusal {
             Self::FactMismatch { .. } => "fact_mismatch",
             Self::InventoryContradictsDeclaredFact { .. } => "inventory_contradicts_declared_fact",
             Self::ClientCertificateRequired => "attestation_requires_client_certificate",
+            Self::HardwareKeyRequired => "hardware_key_required",
         }
     }
 }
@@ -165,6 +187,7 @@ pub struct Binding {
     /// `sha256:<hex>` of the runner key's SubjectPublicKeyInfo.
     pub key_fingerprint: String,
     pub checked_at: i64,
+    pub hardware_backed: bool,
 }
 
 fn canonical_bytes(statement: &RunnerAttestationStatement) -> Result<Vec<u8>> {
@@ -203,7 +226,8 @@ pub fn certificate_fingerprint(certificate_der: &[u8]) -> Result<String> {
 }
 
 /// Sign `checks` and `facts` for `environment` with the runner key
-/// `key_pem` (PKCS#8 P-256, as the agent stores it), for the key of `csr_pem`.
+/// `key_pem` (PKCS#8 P-256, as the agent stores a file key), for the key of
+/// `csr_pem`. File keys are not hardware-backed.
 pub fn sign(
     environment: &str,
     checks: Vec<CheckResult>,
@@ -212,13 +236,42 @@ pub fn sign(
     csr_pem: &str,
     now_ms: i64,
 ) -> Result<RunnerAttestation> {
-    use ring::signature::{ECDSA_P256_SHA256_ASN1_SIGNING, EcdsaKeyPair};
-    crate::ontology::validate_identifier("environment", environment)?;
-    let key = rcgen::KeyPair::from_pem(key_pem).context("reading the runner key")?;
-    let rng = ring::rand::SystemRandom::new();
-    let signer =
-        EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &key.serialize_der(), &rng)
+    sign_with(
+        environment,
+        checks,
+        facts,
+        csr_pem,
+        now_ms,
+        false,
+        |message| {
+            use ring::signature::{ECDSA_P256_SHA256_ASN1_SIGNING, EcdsaKeyPair};
+            let key = rcgen::KeyPair::from_pem(key_pem).context("reading the runner key")?;
+            let rng = ring::rand::SystemRandom::new();
+            let signer = EcdsaKeyPair::from_pkcs8(
+                &ECDSA_P256_SHA256_ASN1_SIGNING,
+                &key.serialize_der(),
+                &rng,
+            )
             .map_err(|error| anyhow::anyhow!("the runner key is not ECDSA P-256: {error}"))?;
+            let signature = signer
+                .sign(&rng, message)
+                .map_err(|_| anyhow::anyhow!("signing the runner attestation failed"))?;
+            Ok(signature.as_ref().to_vec())
+        },
+    )
+}
+
+/// [`sign`] with a caller-supplied signature and hardware-backed flag (#785).
+pub fn sign_with(
+    environment: &str,
+    checks: Vec<CheckResult>,
+    facts: BTreeMap<String, String>,
+    csr_pem: &str,
+    now_ms: i64,
+    hardware_backed: bool,
+    sign: impl FnOnce(&[u8]) -> Result<Vec<u8>>,
+) -> Result<RunnerAttestation> {
+    crate::ontology::validate_identifier("environment", environment)?;
     let statement = RunnerAttestationStatement {
         environment: environment.into(),
         checked_at: now_ms,
@@ -226,15 +279,14 @@ pub fn sign(
         checks,
         facts,
         key_fingerprint: csr_fingerprint(csr_pem)?,
+        hardware_backed,
     };
-    let signature = signer
-        .sign(&rng, &canonical_bytes(&statement)?)
-        .map_err(|_| anyhow::anyhow!("signing the runner attestation failed"))?;
+    let signature = sign(&canonical_bytes(&statement)?)?;
     Ok(RunnerAttestation {
         schema: ATTESTATION_SCHEMA.into(),
         algorithm: ATTESTATION_ALGORITHM.into(),
         statement,
-        signature: STANDARD.encode(signature.as_ref()),
+        signature: STANDARD.encode(signature),
     })
 }
 
@@ -297,12 +349,17 @@ pub fn verify(
             return Err(AttestationRefusal::FactMismatch { key: key.clone() });
         }
     }
+    // Agent-reported, signed by the CSR key (same trust as facts).
+    if policy.require_hardware_backed_key && !statement.hardware_backed {
+        return Err(AttestationRefusal::HardwareKeyRequired);
+    }
     let encoded = serde_json::to_vec(evidence)
         .map_err(|error| AttestationRefusal::Malformed(error.to_string()))?;
     Ok(Binding {
         evidence_digest: sha256_label(&encoded),
         key_fingerprint,
         checked_at: statement.checked_at,
+        hardware_backed: statement.hardware_backed,
     })
 }
 
@@ -320,11 +377,17 @@ pub(crate) fn binding_extension(binding: &Binding) -> Result<Vec<u8>> {
             })
             .collect()
     };
-    // SEQUENCE { OCTET STRING (32), OCTET STRING (32) }
+    // SEQUENCE { OCTET STRING (32), OCTET STRING (32) } and, when the key is
+    // hardware-backed, BOOLEAN TRUE. File-key certificates keep the #675
+    // two-field encoding so older parsers still read them.
     let mut content = vec![0x30, 68, 0x04, 32];
     content.extend(raw(&binding.evidence_digest)?);
     content.extend([0x04, 32]);
     content.extend(raw(&binding.key_fingerprint)?);
+    if binding.hardware_backed {
+        content[1] = 71;
+        content.extend([0x01, 0x01, 0xff]);
+    }
     Ok(content)
 }
 
@@ -359,7 +422,14 @@ pub fn certificate_binding(certificate_der: &[u8]) -> Result<Option<(String, Str
         return Ok(None);
     };
     let value = extension.value;
-    if value.len() != 70 || value[..4] != [0x30, 68, 0x04, 32] || value[36..38] != [0x04, 32] {
+    let two_field =
+        value.len() == 70 && value[..4] == [0x30, 68, 0x04, 32] && value[36..38] == [0x04, 32];
+    let three_field = value.len() == 73
+        && value[..4] == [0x30, 71, 0x04, 32]
+        && value[36..38] == [0x04, 32]
+        && value[70..72] == [0x01, 0x01]
+        && (value[72] == 0x00 || value[72] == 0xff);
+    if !two_field && !three_field {
         bail!("the runner attestation extension is malformed");
     }
     let hex = |bytes: &[u8]| {
@@ -372,6 +442,24 @@ pub fn certificate_binding(certificate_der: &[u8]) -> Result<Option<(String, Str
         )
     };
     Ok(Some((hex(&value[4..36]), hex(&value[38..70]))))
+}
+
+/// Whether a runner certificate's attestation extension records a
+/// hardware-backed key. Certificates without the third field are file keys.
+pub fn certificate_hardware_backed(certificate_der: &[u8]) -> Result<bool> {
+    use x509_parser::prelude::FromDer as _;
+    let (_, certificate) = x509_parser::certificate::X509Certificate::from_der(certificate_der)
+        .map_err(|error| anyhow::anyhow!("parsing the certificate: {error}"))?;
+    let oid = binding_oid_der();
+    let Some(extension) = certificate
+        .extensions()
+        .iter()
+        .find(|extension| extension.oid.as_bytes() == oid.as_slice())
+    else {
+        return Ok(false);
+    };
+    let value = extension.value;
+    Ok(value.len() == 73 && value.get(72) == Some(&0xff))
 }
 
 /// The policy stored on an environment object, if any.
@@ -427,17 +515,26 @@ pub fn declared_facts(
 }
 
 /// Require runner attestation for `environment`'s enrollments and renewals.
-pub async fn set_policy(ctx: &mut Ctx, environment: &str, max_age_ms: u64) -> Result<String> {
-    let policy = RunnerAttestationPolicy::required(max_age_ms)?;
+pub async fn set_policy(
+    ctx: &mut Ctx,
+    environment: &str,
+    max_age_ms: u64,
+    require_hardware_backed_key: bool,
+) -> Result<String> {
+    let policy = RunnerAttestationPolicy::required_with(max_age_ms, require_hardware_backed_key)?;
     let mut object = crate::environment::environment(ctx, environment).await?;
     object
         .properties
         .insert(POLICY_PROPERTY.into(), serde_json::to_string(&policy)?);
     object.updated = crate::now_millis();
     ctx.put(object).await?;
-    Ok(format!(
-        "{environment} requires runner attestation, evidence at most {max_age_ms} ms old"
-    ))
+    Ok(if require_hardware_backed_key {
+        format!(
+            "{environment} requires a hardware-backed runner key and runner attestation, evidence at most {max_age_ms} ms old"
+        )
+    } else {
+        format!("{environment} requires runner attestation, evidence at most {max_age_ms} ms old")
+    })
 }
 
 /// Stop requiring runner attestation for `environment`.
@@ -502,6 +599,7 @@ pub(crate) mod tests {
     const NOW: i64 = 1_800_000_000_000;
     const POLICY: RunnerAttestationPolicy = RunnerAttestationPolicy {
         require_runner_attestation: true,
+        require_hardware_backed_key: false,
         max_age_ms: 600_000,
     };
 
@@ -529,6 +627,11 @@ pub(crate) mod tests {
         assert!(binding.evidence_digest.starts_with("sha256:"));
         let extension = binding_extension(&binding).unwrap();
         assert_eq!(extension.len(), 70);
+        let mut hardware = binding;
+        hardware.hardware_backed = true;
+        let extension = binding_extension(&hardware).unwrap();
+        assert_eq!(extension.len(), 73);
+        assert_eq!(&extension[70..], [0x01, 0x01, 0xff]);
     }
 
     /// Each refusal is named: another signer, another environment, stale,
@@ -608,6 +711,21 @@ pub(crate) mod tests {
                 NOW
             )
             .is_ok()
+        );
+        let mut hardware_policy = POLICY;
+        hardware_policy.require_hardware_backed_key = true;
+        assert_eq!(
+            verify(
+                Some(&good),
+                &key.1,
+                "prod",
+                &BTreeMap::new(),
+                &hardware_policy,
+                NOW
+            )
+            .unwrap_err()
+            .code(),
+            "hardware_key_required"
         );
     }
 

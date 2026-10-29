@@ -67,6 +67,7 @@ pub(super) async fn admit(
         crate::now_millis(),
     )?;
     let verification = verify_publication(options, &digest, &artifact_digest)?;
+    let inventory_signed = matches!(verification, PublicationTrust::Verified(_));
     let verification_properties = verification.properties()?;
     let versioned_workdir = manifest::snapshot_workdir_in(
         &loaded.workdir,
@@ -91,12 +92,19 @@ pub(super) async fn admit(
             && (existing_artifact_digest.is_empty() || existing_artifact_digest == artifact_digest)
         {
             validate_stored_release_content(&existing, &digest, &artifact_digest)?;
+            crate::exposure::validate_stored_inventory(&existing, Some(&versioned_workdir))?;
             validate_stored_provenance(&existing, &provenance_properties)?;
             change_set_pin::validate_stored(&existing, admitted_pin.as_ref())?;
             existing
                 .properties
                 .insert("artifact_digest".into(), artifact_digest.clone());
             persist_oci_artifacts(&mut existing.properties, &loaded.manifest.artifacts)?;
+            crate::exposure::persist_inventory(
+                &mut existing.properties,
+                &loaded.manifest,
+                &versioned_workdir,
+                inventory_signed,
+            )?;
             existing
                 .properties
                 .insert("workdir".into(), versioned_workdir.display().to_string());
@@ -118,6 +126,12 @@ pub(super) async fn admit(
             ("workdir".into(), versioned_workdir.display().to_string()),
         ]);
         persist_oci_artifacts(&mut properties, &loaded.manifest.artifacts)?;
+        crate::exposure::persist_inventory(
+            &mut properties,
+            &loaded.manifest,
+            &versioned_workdir,
+            inventory_signed,
+        )?;
         persist_delivery_properties(&mut properties, &loaded.manifest.delivery);
         properties.extend(provenance_properties.clone());
         properties.extend(pin_properties.clone());
@@ -147,6 +161,7 @@ pub(super) async fn admit(
                     );
                 }
                 validate_stored_release_content(&existing, &digest, &artifact_digest)?;
+                crate::exposure::validate_stored_inventory(&existing, Some(&versioned_workdir))?;
                 validate_stored_provenance(&existing, &provenance_properties)?;
                 change_set_pin::validate_stored(&existing, admitted_pin.as_ref())?;
                 let mut pinned = existing;
@@ -154,6 +169,12 @@ pub(super) async fn admit(
                     .properties
                     .insert("artifact_digest".into(), artifact_digest.clone());
                 persist_oci_artifacts(&mut pinned.properties, &loaded.manifest.artifacts)?;
+                crate::exposure::persist_inventory(
+                    &mut pinned.properties,
+                    &loaded.manifest,
+                    &versioned_workdir,
+                    inventory_signed,
+                )?;
                 pinned
                     .properties
                     .insert("workdir".into(), versioned_workdir.display().to_string());

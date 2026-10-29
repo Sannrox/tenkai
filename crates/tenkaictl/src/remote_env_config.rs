@@ -132,11 +132,13 @@ pub(crate) fn change(command: &EnvCommand) -> Option<Result<(&str, Change, &Remo
             RunnerAttestationCommand::Set {
                 env,
                 max_age_ms,
+                require_hardware_key,
                 remote,
             } => Ok((
                 env.as_str(),
                 Change::SetRunnerAttestation {
                     max_age_ms: *max_age_ms,
+                    require_hardware_key: *require_hardware_key,
                 },
                 remote,
             )),
