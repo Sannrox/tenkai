@@ -339,8 +339,14 @@ pub(crate) async fn runner_attestation(
             None => println!("{env} does not require runner attestation"),
         },
         RunnerAttestationCommand::Set {
-            env, max_age_ms, ..
-        } => println!("{}", attestation::set_policy(ctx, &env, max_age_ms).await?),
+            env,
+            max_age_ms,
+            require_hardware_key,
+            ..
+        } => println!(
+            "{}",
+            attestation::set_policy(ctx, &env, max_age_ms, require_hardware_key).await?
+        ),
         RunnerAttestationCommand::Clear { env, .. } => {
             println!("{}", attestation::clear_policy(ctx, &env).await?)
         }

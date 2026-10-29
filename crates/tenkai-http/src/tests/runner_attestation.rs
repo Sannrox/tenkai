@@ -228,3 +228,94 @@ async fn an_environment_requiring_attestation_enrolls_only_attested_runners() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[tokio::test]
+async fn hardware_key_policy_refuses_a_file_runner_key() {
+    let root = std::env::temp_dir().join(format!(
+        "tenkai-hardware-runner-key-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let (_, mut config, store) = lifecycle_router(&root).await;
+    let (cert, key) = tenkai::runner_ca::RunnerCa::generate("runner CA").unwrap();
+    config.runner_ca = Some(Arc::new(
+        tenkai::runner_ca::RunnerCa::from_pem(&cert, &key).unwrap(),
+    ));
+    config.runner_certificates_admitted = true;
+    let ctx = tenkai::client::Ctx::embedded(root.join("tenkai.db")).unwrap();
+    let reconciler =
+        tenkai::reconciler::Reconciler::new(ctx, tenkai::reconciler::Config::default()).unwrap();
+    let app = router(config, Arc::new(reconciler), store).unwrap();
+    let generation = router_generation(&app, "stage").await;
+    let (status, body) = call(
+        &app,
+        "PUT",
+        "/v1/environments/stage/runner-attestation",
+        Some("stage-secret"),
+        serde_json::json!({
+            "version": 1, "operation": "configure", "environment": "stage",
+            "expected_generation": generation, "reason": "require hardware keys",
+            "change": {
+                "kind": "set_runner_attestation",
+                "max_age_ms": 600_000,
+                "require_hardware_key": true
+            },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, issued) = call(
+        &app,
+        "POST",
+        "/v1/environments/stage/runtime-enrollments",
+        Some("management-secret"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{issued}");
+    let token = issued["token"].as_str().unwrap();
+    let runner_key = rcgen::KeyPair::generate().unwrap();
+    let csr = rcgen::CertificateParams::new(Vec::<String>::new())
+        .unwrap()
+        .serialize_request(&runner_key)
+        .unwrap()
+        .pem()
+        .unwrap();
+    let enroll = "/v1/runtime/environments/stage/enroll";
+    let (status, body) = call(
+        &app,
+        "POST",
+        enroll,
+        None,
+        serde_json::json!({"token": token, "csr": csr}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PRECONDITION_REQUIRED, "{body}");
+    let attestation = tenkai::runner_attestation::sign(
+        "stage",
+        Vec::new(),
+        Default::default(),
+        &runner_key.serialize_pem(),
+        &csr,
+        tenkai::now_millis(),
+    )
+    .unwrap();
+    let (status, body) = call(
+        &app,
+        "POST",
+        enroll,
+        None,
+        serde_json::json!({"token": token, "csr": csr, "attestation": attestation}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("hardware_key_required"),
+        "{body}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

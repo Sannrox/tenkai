@@ -472,9 +472,15 @@ host evidence its runner signed with its own key (#675). Off by default.
 tenkaictl env runner-attestation set prod --max-age-ms 600000   # embedded
 tenkaictl --target remote env runner-attestation set prod --max-age-ms 600000 \
   --generation <n> --reason "bind runners to their hosts"
+tenkaictl env runner-attestation set prod --max-age-ms 600000 --require-hardware-key
 tenkaictl env facts set prod architecture arm64                  # what to compare
 # On the runner host, optionally, the checks to run and sign:
 export TENKAI_RUNTIME_PREFLIGHT_CONFIG=/etc/tenkai/runner-preflight.toml
+# Hardware-backed runner key (TPM 2.0 PKCS#11 on Linux):
+export TENKAI_RUNTIME_KEY_STORE=hardware
+export TENKAI_RUNTIME_PKCS11_MODULE=/usr/lib/x86_64-linux-gnu/libtpm2_pkcs11.so.1
+export TENKAI_RUNTIME_PKCS11_TOKEN=tenkai-runner
+export TENKAI_RUNTIME_PKCS11_PIN_FILE=/etc/tenkai/runner-pkcs11-pin
 ```
 
 - **Evidence.** The agent runs the host preflight checks of
@@ -491,8 +497,10 @@ export TENKAI_RUNTIME_PREFLIGHT_CONFIG=/etc/tenkai/runner-preflight.toml
   the runner's last bound key: no key rotation under the policy. Each
   refusal names its reason (`attestation_missing`, `evidence_stale`,
   `evidence_failed`, `signature_invalid`, `key_changed`, `no_bound_key`,
-  `fact_mismatch (architecture)`, ...); an enrollment refusal spends no
-  token.
+  `fact_mismatch (architecture)`, `hardware_key_required`, ...); an enrollment
+  refusal spends no token. With `--require-hardware-key`, a file runner key
+  is refused as `hardware_key_required` at enrollment and at renewal. The
+  certificate records whether the key is hardware-backed.
 - **Declared facts.** Each fact records who set it. Only facts set with
   `env facts set` or the facts route are declarations; facts a runtime
   reports, or set before this release, are not, so declare the facts to
@@ -525,11 +533,19 @@ export TENKAI_RUNTIME_PREFLIGHT_CONFIG=/etc/tenkai/runner-preflight.toml
   certificate expires, stops claiming work. An agent without a certificate
   directory, or a static `TENKAI_RUNTIME_TOKENS` runtime, stops claiming
   work at once.
+- **Hardware keys (#785).** `TENKAI_RUNTIME_KEY_STORE=hardware` generates the
+  runner key in a PKCS#11 token so it cannot be exported: TPM 2.0 on Linux
+  (`tpm2-pkcs11`), or a software PKCS#11 token in CI. The certificate
+  directory then holds a locator (`key.store`), never the private key.
+  `--require-hardware-key` refuses a file key with `hardware_key_required`.
+  Hosts without a hardware store keep working when that flag is off
+  (`TENKAI_RUNTIME_KEY_STORE=file`, the default). The hardware-backed bit is
+  the agent's signed report, like host facts.
 - **Limit.** A file key copied with its certificate directory has the same
   fingerprint. The policy catches fact drift and bounds a copied credential
   to one certificate lifetime (24 hours) unless the copy also passes
-  attested renewal. It does not prove the same host; that needs
-  non-exportable keys (#785).
+  attested renewal. A hardware-backed key cannot be copied that way:
+  renewal then proves the same physical host.
 
 ### Runner registry
 

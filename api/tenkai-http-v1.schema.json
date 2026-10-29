@@ -1709,7 +1709,7 @@
         },
         {
           "additionalProperties": false,
-          "description": "Require attested runner enrollment and renewal (#675) with evidence\nat most `max_age_ms` old.",
+          "description": "Require attested runner enrollment and renewal (#675) with evidence\nat most `max_age_ms` old. `require_hardware_key` (#785) refuses a\nfile runner key.",
           "properties": {
             "kind": {
               "const": "set_runner_attestation",
@@ -1719,6 +1719,9 @@
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
+            },
+            "require_hardware_key": {
+              "type": "boolean"
             }
           },
           "required": [

@@ -17,7 +17,9 @@ An environment that requires runner attestation (#675) answers an
 enrollment or renewal without `attestation` with `428` and
 `runner attestation required: attestation_missing`, spending no token; the
 agent then sends a `tenkai.runner-attestation.v1` statement signed with its
-CSR key. Other attestation refusals are `403` with a named reason, and a
+CSR key. Other attestation refusals are `403` with a named reason
+(`hardware_key_required` when the environment requires a hardware-backed
+runner key and the statement names a file key), and a
 work request (work, heartbeat, self-release, completion, inventory) admitted
 by a bearer alone is `403` `attestation_requires_client_certificate`, and a
 runtime inventory report contradicting an operator-declared fact is `409`

@@ -259,6 +259,10 @@ pub(crate) enum RunnerAttestationCommand {
         env: String,
         #[arg(long)]
         max_age_ms: u64,
+        /// Refuse a file runner key; the runner must generate its key in a
+        /// hardware store (TPM 2.0 on Linux).
+        #[arg(long)]
+        require_hardware_key: bool,
         #[command(flatten)]
         remote: RemoteChange,
     },
