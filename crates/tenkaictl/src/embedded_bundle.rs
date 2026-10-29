@@ -24,6 +24,7 @@ pub(crate) async fn run(ctx: &mut Ctx, command: BundleCommand) -> Result<()> {
             host_workflow,
             issued_at_unix_ms,
             expires_at_unix_ms,
+            base,
         } => {
             let signing = offline_bundle_build::load_exporter_key(&signing_key)?;
             let roots = TrustRoots::load(&trust_roots)?;
@@ -67,6 +68,7 @@ pub(crate) async fn run(ctx: &mut Ctx, command: BundleCommand) -> Result<()> {
                     expires_at_unix_ms: expires_at,
                     registry,
                     weight_cache: weight_cache.as_deref(),
+                    base,
                 },
             )
             .await?;
