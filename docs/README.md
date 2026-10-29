@@ -44,6 +44,7 @@ will be split over time. Contributor and agent workflow live in
 | Observe and execute rollout waves | [rollout-waves.md](rollout-waves.md) |
 | Run a stateful package migration | [package-migrations.md](package-migrations.md) |
 | Upgrade across connected, intermittent, and isolated environments | [connectivity-upgrades.md](connectivity-upgrades.md) |
+| Build a signed full-stack offline bundle | [offline-bundles.md](offline-bundles.md#build) |
 | Run a signed stateful upgrade drill | [examples/package-migration](../examples/package-migration/) |
 | Roll out a model, then its routing | [examples/model-routing-rollout](../examples/model-routing-rollout/) |
 | Walk through a model-runtime canary | [examples/model-runtime-canary](../examples/model-runtime-canary/) |

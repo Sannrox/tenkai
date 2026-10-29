@@ -78,6 +78,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
             crate::embedded_fleet::run(&mut ctx, command, &database, output).await
         }
         Command::Upgrade { command } => crate::embedded_upgrade::run(&mut ctx, command).await,
+        Command::Bundle { command } => crate::embedded_bundle::run(&mut ctx, command).await,
         Command::Migrate { command } => crate::embedded_migrate::run(&mut ctx, command).await,
         Command::Wave { command } => crate::embedded_wave::run(&mut ctx, command).await,
         Command::Env { command } => crate::embedded_env::run(&mut ctx, command, output).await,
