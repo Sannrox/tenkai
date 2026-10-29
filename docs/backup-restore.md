@@ -87,7 +87,9 @@ The drill checks the backup against its manifest, restores it into a
 scratch store, opens it on this Tenkai version (running its migrations),
 checks integrity, and counts environments, releases and plans. It prints the
 `tenkai.backup-drill.v1` evidence, records it under `drills/` (shown as
-`last_drill` by `GET /v1/backups`), and removes the scratch store. It never touches live state,
+`last_drill` by `GET /v1/backups`, with every kept drill, newest first, as
+`drills`), and removes the scratch store. The 30 newest drills are kept; a
+new drill removes older ones (#818). Only drills that pass are recorded. It never touches live state,
 so it can run on any host that can read the backup directory.
 
 ## Restore

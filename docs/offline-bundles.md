@@ -394,6 +394,18 @@ their transfer process. The server never accepts bundle bytes over HTTP.
   continues it: layer import is a no-op for matching bytes, and chunked
   weights resume from the last verified chunk. One import runs at a time
   per host; a second request while one runs gets `409`.
+- `GET /v1/imports` lists the host's jobs, newest first, with their state,
+  bundle, upgrade, environment, start and finish times and refusal. A dry
+  run and an import of the same bundle are separate jobs (`dry_run`, and an
+  id ending in `-dry`). The list survives restarts. The newest 200 jobs
+  are kept; finishing an import removes older finished ones, but never a
+  running job or a failure not yet announced. Jobs live in the staging
+  directory of the host that ran them, so the list is per host: each
+  replica lists only the imports it ran.
+- While an import runs, `GET /v1/imports/{id}` carries `progress`: for each
+  layer and weight it stores, the digest, `kind`, `bytes_done` and
+  `bytes_total`, updated as chunks land (a layer carried whole in the
+  archive reports done once stored). It stays on the job once finished.
 - `GET /v1/content/inventory` lists, for each release, the layers and model
   weights it names. For each one it shows whether the host holds those bytes
   (`stored`) and their size: a layer under any registry path of
@@ -405,8 +417,8 @@ their transfer process. The server never accepts bundle bytes over HTTP.
   referenced content that is missing, and the bytes each store uses.
 
 Import needs the management capability. An environment-scoped credential
-can import only for its own environment and cannot list the staging
-directory. Tenant-mode hubs refuse import.
+can import only for its own environment, sees only its environment's
+jobs, and cannot list the staging directory. Tenant-mode hubs refuse import.
 
 ## Isolated-network conformance
 

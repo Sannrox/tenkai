@@ -52,6 +52,9 @@ const SIGNING_DOMAIN: &[u8] = b"TENKAI-BACKUP-MANIFEST-V1\0";
 const EVIDENCE_CLOCK_SKEW_MS: i64 = 5 * 60 * 1000;
 const STATUS_FILE: &str = "status.json";
 const DRILL_DIR: &str = "drills";
+/// Restore drills kept under `drills/`: a new drill removes the oldest
+/// beyond this many (#818). Only successful drills are recorded.
+pub const DRILL_HISTORY: usize = 30;
 const LOCK_FILE: &str = ".lock";
 const PREFIX: &str = "tenkai-backup-";
 
@@ -128,7 +131,8 @@ pub struct DrillEvidence {
     pub plans: u64,
 }
 
-/// `GET /v1/backups`: `status.json` plus the newest drill.
+/// `GET /v1/backups`: `status.json` plus the newest drill and the drill
+/// history.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BackupStatus {
@@ -142,6 +146,10 @@ pub struct BackupStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub last_drill: Option<DrillEvidence>,
+    /// The kept restore drills, newest first, at most [`DRILL_HISTORY`]
+    /// (#818). Never written to `status.json`, so older versions read it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub drills: Vec<DrillEvidence>,
 }
 
 /// Backup age as health reports it.
@@ -238,7 +246,8 @@ impl Backups {
 
     pub fn status(&self) -> Result<BackupStatus> {
         let mut status = read_status(&self.policy.dir)?;
-        status.last_drill = latest_drill(&self.policy.dir)?;
+        status.drills = drills(&self.policy.dir)?;
+        status.last_drill = status.drills.first().cloned();
         Ok(status)
     }
 
@@ -573,6 +582,7 @@ pub fn drill(
     if let Some(dir) = backup.parent() {
         let name = format!("drill-{now_ms}-{}.json", uuid::Uuid::new_v4());
         write_durable(&dir.join(DRILL_DIR).join(name), &evidence)?;
+        prune_drills(dir)?;
     }
     Ok(evidence)
 }
@@ -686,33 +696,70 @@ pub fn read_status(dir: &Path) -> Result<BackupStatus> {
 }
 
 fn write_status(dir: &Path, status: &BackupStatus) -> Result<()> {
-    write_durable(&dir.join(STATUS_FILE), status)
+    // Drill evidence lives under `drills/`; `status.json` keeps its old shape.
+    let on_disk = BackupStatus {
+        last_drill: None,
+        drills: Vec::new(),
+        ..status.clone()
+    };
+    write_durable(&dir.join(STATUS_FILE), &on_disk)
 }
 
-/// The newest drill evidence under `drills/`, if any.
-fn latest_drill(dir: &Path) -> Result<Option<DrillEvidence>> {
+/// Every drill file under `drills/` with its evidence, newest first.
+fn drill_files(dir: &Path) -> Result<Vec<(PathBuf, DrillEvidence)>> {
     let drills = dir.join(DRILL_DIR);
     let entries = match std::fs::read_dir(&drills) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error).with_context(|| format!("reading {}", drills.display())),
     };
-    let mut latest: Option<DrillEvidence> = None;
+    let mut found = Vec::new();
     for entry in entries {
         let path = entry?.path();
         if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
             continue;
         }
-        let evidence: DrillEvidence = serde_json::from_slice(&std::fs::read(&path)?)
+        let raw = match std::fs::read(&path) {
+            Ok(raw) => raw,
+            // Pruned by a concurrent drill between listing and reading.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+        };
+        let evidence: DrillEvidence = serde_json::from_slice(&raw)
             .with_context(|| format!("parsing drill evidence {}", path.display()))?;
-        if latest
-            .as_ref()
-            .is_none_or(|current| evidence.restored_at_ms > current.restored_at_ms)
-        {
-            latest = Some(evidence);
+        found.push((path, evidence));
+    }
+    found.sort_by(|(left_path, left), (right_path, right)| {
+        right
+            .restored_at_ms
+            .cmp(&left.restored_at_ms)
+            .then_with(|| right_path.cmp(left_path))
+    });
+    Ok(found)
+}
+
+/// The kept drills, newest first.
+fn drills(dir: &Path) -> Result<Vec<DrillEvidence>> {
+    Ok(drill_files(dir)?
+        .into_iter()
+        .take(DRILL_HISTORY)
+        .map(|(_, evidence)| evidence)
+        .collect())
+}
+
+/// Remove drills beyond [`DRILL_HISTORY`], oldest first. Idempotent: a file
+/// another drill removed first is already gone.
+fn prune_drills(dir: &Path) -> Result<()> {
+    for (path, _) in drill_files(dir)?.into_iter().skip(DRILL_HISTORY) {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("removing {}", path.display()));
+            }
         }
     }
-    Ok(latest)
+    Ok(())
 }
 
 /// Write JSON so it is durable before it is visible: a unique temporary file,
@@ -841,6 +888,46 @@ mod tests {
         let status = backups.status().unwrap();
         assert_eq!(status.last_success.as_ref(), taken.last());
         assert_eq!(status.last_drill.unwrap().file, taken[2].file);
+        // #818: three drills, three history entries, newest first; the
+        // status file itself still carries no drill.
+        let files: Vec<_> = status
+            .drills
+            .iter()
+            .map(|drill| drill.file.as_str())
+            .collect();
+        assert_eq!(files, [&taken[2].file, &taken[1].file, &taken[0].file]);
+        let on_disk = std::fs::read_to_string(backups.policy().dir.join(STATUS_FILE)).unwrap();
+        assert!(!on_disk.contains("drill"), "{on_disk}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// #818: drill history keeps the newest [`DRILL_HISTORY`] drills, and a
+    /// prune that finds a file already gone (another drill pruned it) is fine.
+    #[test]
+    fn drill_history_keeps_the_newest_drills() {
+        let root = temp_dir("drill-history");
+        let dir = root.join(DRILL_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        for at in 1..=(DRILL_HISTORY as i64 + 2) {
+            let evidence = DrillEvidence {
+                schema: DRILL_SCHEMA.into(),
+                file: format!("backup-{at}"),
+                sha256: "abc".into(),
+                restored_at_ms: at,
+                integrity: "ok".into(),
+                environments: 0,
+                releases: 0,
+                plans: 0,
+            };
+            write_durable(&dir.join(format!("drill-{at}.json")), &evidence).unwrap();
+        }
+        prune_drills(&root).unwrap();
+        prune_drills(&root).unwrap();
+        let kept = drills(&root).unwrap();
+        assert_eq!(kept.len(), DRILL_HISTORY);
+        assert_eq!(kept[0].restored_at_ms, DRILL_HISTORY as i64 + 2);
+        assert_eq!(kept.last().unwrap().restored_at_ms, 3);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), DRILL_HISTORY);
         let _ = std::fs::remove_dir_all(root);
     }
 

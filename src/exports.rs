@@ -12,6 +12,15 @@
 //! directory, synced, and renamed into place, so a crash never leaves a
 //! partial export under its id. Events are append-only files, so concurrent
 //! downloads never rewrite each other's record.
+//!
+//! With a retention (`TENKAI_EXPORT_RETENTION_DAYS`, #818) an export expires
+//! that long after it was created: it can no longer be downloaded, its
+//! artifact is removed the next time exports are listed, and its record and
+//! events stay, so it is still listed, as expired. Removal deletes only
+//! `<id>/artifact.json`, never the audit chain or anything else, and is
+//! idempotent, so overlapping processes may both run it. Expiry is derived
+//! from the creation time and the configured retention, not stored, so the
+//! on-disk records keep the shape older versions read.
 
 use std::path::{Path, PathBuf};
 
@@ -99,6 +108,14 @@ pub struct ExportEntry {
     #[serde(flatten)]
     pub export: ExportRecord,
     pub events: Vec<ExportEvent>,
+    /// When it stops being downloadable, with a retention configured (#818).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub expires_at_ms: Option<i64>,
+    /// Past `expires_at_ms`, or its artifact already removed (a retention
+    /// that was later raised or unset does not bring it back): listed, never
+    /// downloadable.
+    pub expired: bool,
 }
 
 /// `GET /v1/exports`, newest first.
@@ -115,6 +132,8 @@ pub struct Exports {
     seed: PathBuf,
     /// Signers of audit exports made before a key rotation.
     rotated: Option<crate::release_signing::TrustRoots>,
+    /// How long an export stays downloadable; `None` keeps it for good.
+    retention_ms: Option<i64>,
 }
 
 impl Exports {
@@ -133,7 +152,18 @@ impl Exports {
             .with_context(|| format!("creating export directory {}", dir.display()))?;
         // Fail at startup, not on the first request.
         crate::approval_policy::load_signer_seed(&seed)?;
-        Ok(Self { dir, seed, rotated })
+        Ok(Self {
+            dir,
+            seed,
+            rotated,
+            retention_ms: None,
+        })
+    }
+
+    /// Expire exports `retention_ms` after creation (#818).
+    pub fn with_retention(mut self, retention_ms: i64) -> Self {
+        self.retention_ms = Some(retention_ms);
+        self
     }
 
     pub fn seed(&self) -> &Path {
@@ -240,14 +270,34 @@ impl Exports {
             let _ = std::fs::remove_dir_all(&staging);
             return Err(error.context("storing export"));
         }
-        Ok(ExportEntry {
-            export,
-            events: vec![event.clone()],
-        })
+        Ok(self.with_expiry(
+            ExportEntry {
+                export,
+                events: vec![event.clone()],
+                expires_at_ms: None,
+                expired: false,
+            },
+            crate::now_millis(),
+        ))
+    }
+
+    /// `entry` with its expiry as of `now_ms`.
+    fn with_expiry(&self, mut entry: ExportEntry, now_ms: i64) -> ExportEntry {
+        entry.expires_at_ms = self
+            .retention_ms
+            .map(|retention| entry.export.created_at_ms.saturating_add(retention));
+        entry.expired = entry.expires_at_ms.is_some_and(|at| now_ms >= at)
+            || !self.dir.join(&entry.export.id).join(ARTIFACT_FILE).exists();
+        entry
     }
 
     /// Every export, newest first. Staging directories are not exports.
+    /// Expired artifacts are removed on the way.
     pub fn list(&self) -> Result<ExportList> {
+        self.list_at(crate::now_millis())
+    }
+
+    pub fn list_at(&self, now_ms: i64) -> Result<ExportList> {
         let mut exports = Vec::new();
         for entry in std::fs::read_dir(&self.dir)? {
             let entry = entry?;
@@ -255,7 +305,11 @@ impl Exports {
                 continue;
             };
             if uuid::Uuid::try_parse(&id).is_ok() {
-                exports.push(self.read_entry(&id)?);
+                let entry = self.with_expiry(self.read_entry(&id)?, now_ms);
+                if entry.expired {
+                    self.remove_artifact(&id)?;
+                }
+                exports.push(entry);
             }
         }
         exports.sort_by(|a, b| {
@@ -269,7 +323,19 @@ impl Exports {
         if uuid::Uuid::try_parse(id).is_err() || !self.dir.join(id).join(RECORD_FILE).is_file() {
             return Ok(None);
         }
-        self.read_entry(id).map(Some)
+        Ok(Some(
+            self.with_expiry(self.read_entry(id)?, crate::now_millis()),
+        ))
+    }
+
+    /// Delete an expired export's artifact; its record and events stay.
+    fn remove_artifact(&self, id: &str) -> Result<()> {
+        match std::fs::remove_file(self.dir.join(id).join(ARTIFACT_FILE)) {
+            Ok(()) => sync_dir(&self.dir.join(id)),
+            // Already removed, by this or an overlapping process.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).with_context(|| format!("removing expired export {id}")),
+        }
     }
 
     /// Record `event` as a download, then return the artifact. The event is
@@ -281,6 +347,15 @@ impl Exports {
     ) -> Result<Option<(ExportRecord, Vec<u8>)>> {
         let Some(entry) = self.get(id)? else {
             return Ok(None);
+        };
+        if entry.expired {
+            bail!("{}", expired_message(&entry));
+        }
+        // Open before recording: an open handle keeps the bytes readable even
+        // if a concurrent listing prunes the file now. Already pruned means
+        // expired, and nothing is recorded.
+        let Some(mut artifact_file) = self.open_artifact(id)? else {
+            bail!("{}", expired_message(&entry));
         };
         // Readers see only `*.json`: write under a temporary name, then
         // rename, so no reader or crash ever meets a partial event.
@@ -295,11 +370,21 @@ impl Exports {
             let _ = std::fs::remove_file(&temporary);
         }
         published?;
-        let artifact = std::fs::read(self.dir.join(id).join(ARTIFACT_FILE))?;
+        let mut artifact = Vec::new();
+        std::io::Read::read_to_end(&mut artifact_file, &mut artifact)?;
         if format!("{:x}", Sha256::digest(&artifact)) != entry.export.sha256 {
             bail!("export {id} does not match its recorded digest");
         }
         Ok(Some((entry.export, artifact)))
+    }
+
+    /// The artifact opened for reading; `None` once it was pruned.
+    fn open_artifact(&self, id: &str) -> Result<Option<std::fs::File>> {
+        match std::fs::File::open(self.dir.join(id).join(ARTIFACT_FILE)) {
+            Ok(file) => Ok(Some(file)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error).with_context(|| format!("opening export {id}")),
+        }
     }
 
     fn read_entry(&self, id: &str) -> Result<ExportEntry> {
@@ -320,7 +405,23 @@ impl Exports {
             }
         }
         events.sort_by_key(|event| event.at_ms);
-        Ok(ExportEntry { export, events })
+        Ok(ExportEntry {
+            export,
+            events,
+            expires_at_ms: None,
+            expired: false,
+        })
+    }
+}
+
+/// Why an expired export cannot be downloaded.
+pub fn expired_message(entry: &ExportEntry) -> String {
+    match entry.expires_at_ms {
+        Some(at) => format!("export {} expired at {at}", entry.export.id),
+        None => format!(
+            "export {} expired; its artifact was removed",
+            entry.export.id
+        ),
     }
 }
 
@@ -458,6 +559,101 @@ mod tests {
             ]
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// #818: past its retention an export is listed as expired, its
+    /// artifact is gone and it cannot be downloaded; the audit chain and the
+    /// record stay. A second sweep, as by an overlapping process, is a no-op.
+    #[test]
+    fn an_export_past_its_retention_is_listed_as_expired_and_not_downloadable() {
+        let (exports, root) = exports("retention");
+        let exports = exports.with_retention(1_000);
+        // Created five seconds ago, with a one-second retention.
+        let created = event(crate::now_millis() - 5_000, ExportAction::Created);
+        let entry = exports
+            .store(
+                ExportKind::SupportBundle,
+                None,
+                "support.json",
+                b"{}",
+                &created,
+            )
+            .unwrap();
+        assert_eq!(entry.expires_at_ms, Some(created.at_ms + 1_000));
+        let chain = root.join("exports").join(AUDIT_CHAIN_DIR);
+        std::fs::create_dir_all(&chain).unwrap();
+        std::fs::write(chain.join("audit-00000001.json"), "{}").unwrap();
+
+        let fresh = exports.list_at(created.at_ms + 999).unwrap();
+        assert!(!fresh.exports[0].expired);
+        let later = created.at_ms + 1_000;
+        let listed = exports.list_at(later).unwrap();
+        assert!(listed.exports[0].expired);
+        assert_eq!(listed.exports[0].events.len(), 1);
+        exports.list_at(later).unwrap();
+        let id = &entry.export.id;
+        let dir = root.join("exports").join(id);
+        assert!(!dir.join(ARTIFACT_FILE).exists());
+        assert!(dir.join(RECORD_FILE).exists());
+        assert!(
+            chain.join("audit-00000001.json").exists(),
+            "the chain is never removed"
+        );
+        // Expired by the clock now, so the download is refused before any
+        // event is recorded.
+        let refused = exports
+            .download(id, &event(later, ExportAction::Downloaded))
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("expired"), "{refused}");
+        assert_eq!(exports.get(id).unwrap().unwrap().events.len(), 1);
+
+        // Retention raised, or unset, after the prune: still expired, and a
+        // download records nothing.
+        let unset = Exports::new(root.join("exports"), root.join("seed"), None).unwrap();
+        for reopened in [unset, exports.with_retention(i64::MAX / 2)] {
+            let listed = reopened.list_at(later).unwrap();
+            assert!(listed.exports[0].expired, "{listed:?}");
+            let refused = reopened
+                .download(id, &event(later, ExportAction::Downloaded))
+                .unwrap_err()
+                .to_string();
+            assert!(refused.contains("expired"), "{refused}");
+            assert_eq!(reopened.get(id).unwrap().unwrap().events.len(), 1);
+        }
+        let body = serde_json::to_value(&listed.exports[0]).unwrap();
+        assert_eq!(body["expired"], true);
+        let fresh_body = serde_json::to_value(&fresh.exports[0]).unwrap();
+        assert_eq!(fresh_body["expired"], false, "always serialized");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// #818: a download that opened its artifact still delivers every byte
+    /// when a concurrent listing prunes the file before it is read.
+    #[test]
+    fn an_opened_artifact_survives_a_concurrent_prune() {
+        let (exports, root) = exports("pinned");
+        let created = event(crate::now_millis(), ExportAction::Created);
+        let entry = exports
+            .store(
+                ExportKind::SupportBundle,
+                None,
+                "support.json",
+                b"{\"bundle\":1}",
+                &created,
+            )
+            .unwrap();
+        let id = &entry.export.id;
+        let mut opened = exports.open_artifact(id).unwrap().unwrap();
+        exports.remove_artifact(id).unwrap();
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut opened, &mut bytes).unwrap();
+        assert_eq!(bytes, b"{\"bundle\":1}");
+        assert!(
+            exports.open_artifact(id).unwrap().is_none(),
+            "pruned for later downloads"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

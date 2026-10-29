@@ -1557,7 +1557,8 @@ fn open_host_store(
 /// `TENKAI_EXPORT_SIGNING_KEY` (an Ed25519 seed file that signs support
 /// bundles and audit exports), which must be set together, and optionally
 /// `TENKAI_EXPORT_TRUST_ROOTS` for audit exports signed before a key
-/// rotation. Tenant-mode hubs
+/// rotation, and `TENKAI_EXPORT_RETENTION_DAYS` (unset: kept for good).
+/// Tenant-mode hubs
 /// keep tenant records in PostgreSQL and refuse the setting.
 fn export_settings(tenant_mode: bool) -> Result<Option<Arc<tenkai::exports::Exports>>> {
     match (
@@ -1574,11 +1575,18 @@ fn export_settings(tenant_mode: bool) -> Result<Option<Arc<tenkai::exports::Expo
             let rotated = std::env::var_os("TENKAI_EXPORT_TRUST_ROOTS")
                 .map(|path| tenkai::release_signing::TrustRoots::load(std::path::Path::new(&path)))
                 .transpose()?;
-            Ok(Some(Arc::new(tenkai::exports::Exports::new(
-                dir.into(),
-                seed.into(),
-                rotated,
-            )?)))
+            let exports = tenkai::exports::Exports::new(dir.into(), seed.into(), rotated)?;
+            // Unset keeps exports for good, as before (#818).
+            let exports = match std::env::var("TENKAI_EXPORT_RETENTION_DAYS").ok() {
+                None => exports,
+                Some(days) => {
+                    let days: i64 = days.parse().ok().filter(|days| *days > 0).context(
+                        "TENKAI_EXPORT_RETENTION_DAYS must be a whole number of days above 0",
+                    )?;
+                    exports.with_retention(days.saturating_mul(86_400_000))
+                }
+            };
+            Ok(Some(Arc::new(exports)))
         }
         _ => anyhow::bail!("TENKAI_EXPORT_DIR and TENKAI_EXPORT_SIGNING_KEY must be set together"),
     }
