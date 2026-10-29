@@ -512,6 +512,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_lost_held_lease_stops_a_supervised_command_as_fence_loss() {
+        let dir = test_dir("held-command");
+        let mut release = content(dir.clone(), "true", None, None);
+        release.environment = "prod".into();
+        release.mutation_lock = dir.join("mutation.lock");
+        let mut ctx = Ctx::embedded(dir.join("tenkai.db")).unwrap();
+        let held = ctx
+            .acquire_lease("tenkai/topology-availability", "ledger-ha", "wave", 60_000)
+            .await
+            .unwrap();
+        ctx.release_lease(
+            "tenkai/topology-availability",
+            "ledger-ha",
+            &held.fencing_token,
+        )
+        .await
+        .unwrap();
+        ctx.held_execution_leases = vec![crate::client::HeldExecutionLease {
+            namespace: "tenkai/topology-availability".into(),
+            key: "ledger-ha".into(),
+            fencing_token: held.fencing_token,
+            ttl_ms: 60_000,
+        }];
+        let lease = claim_environment(&mut ctx, "prod", "plan-1").await.unwrap();
+        let err = run_mutation_command(&mut ctx, &lease, &release, "true")
+            .await
+            .unwrap_err();
+        assert!(is_execution_fence_lost(&err), "{err:#}");
+        assert!(err.to_string().contains("ledger-ha"), "{err:#}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
     async fn failed_fresh_install_runs_cleanup() {
         let dir = test_dir("cleanup");
         let release = content(dir.clone(), "false", None, Some("touch cleaned"));

@@ -175,6 +175,7 @@ pub enum SoftwareObserveStatus {
 pub struct FakeSoftwareExecutor {
     applied: Mutex<Vec<String>>,
     fail_apply: bool,
+    apply_delay: std::time::Duration,
 }
 
 impl FakeSoftwareExecutor {
@@ -187,6 +188,11 @@ impl FakeSoftwareExecutor {
         self
     }
 
+    pub fn with_apply_delay(mut self, delay: std::time::Duration) -> Self {
+        self.apply_delay = delay;
+        self
+    }
+
     pub fn applied_keys(&self) -> Vec<String> {
         self.applied.lock().expect("fake software mutex").clone()
     }
@@ -195,6 +201,9 @@ impl FakeSoftwareExecutor {
 impl SoftwareExecutor for FakeSoftwareExecutor {
     fn apply(&self, request: &SoftwareApplyRequest) -> Result<()> {
         validate_request(request)?;
+        if !self.apply_delay.is_zero() {
+            std::thread::sleep(self.apply_delay);
+        }
         if self.fail_apply {
             bail!(
                 "fake software executor refused apply for {}@{} in {}",

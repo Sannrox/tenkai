@@ -451,6 +451,7 @@ pub(super) async fn cleanup_failed_activation(
             match deactivate_for(ctx, lease, content, adapters, Removal::FailedApply).await {
                 Ok(Ok(())) => (true, format!("{failure}; cleaned up failed install")),
                 Ok(Err(cleanup)) => (false, format!("{failure}; cleanup also failed: {cleanup}")),
+                Err(error) if is_execution_fence_lost(&error) => return Err(error),
                 Err(error) => (
                     false,
                     format!("{failure}; cleanup executor also failed: {error}"),

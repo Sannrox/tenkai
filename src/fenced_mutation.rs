@@ -229,19 +229,36 @@ pub async fn run(
     tokio::pin!(timeout);
     let mut refresh = tokio::time::interval(std::time::Duration::from_secs(10));
     refresh.tick().await;
-    let (status, interrupted) = loop {
+    enum Stop {
+        Interrupted(String),
+        FenceLost(anyhow::Error),
+    }
+    let (status, stop) = loop {
         tokio::select! {
             status = &mut wait => break (Some(status?), None),
-            _ = &mut timeout => break (None, Some("deployment command exceeded the 10 minute timeout".to_string())),
-            _ = interrupt.recv() => break (None, Some("deployment command interrupted".to_string())),
-            _ = terminate.recv() => break (None, Some("deployment command terminated".to_string())),
-            _ = refresh.tick() => if let Err(error) = fence.refresh().await { break (None, Some(format!("deployment command lost its environment fence: {error}"))); }
+            _ = &mut timeout => break (None, Some(Stop::Interrupted(
+                "deployment command exceeded the 10 minute timeout".into(),
+            ))),
+            _ = interrupt.recv() => break (None, Some(Stop::Interrupted(
+                "deployment command interrupted".into(),
+            ))),
+            _ = terminate.recv() => break (None, Some(Stop::Interrupted(
+                "deployment command terminated".into(),
+            ))),
+            _ = refresh.tick() => {
+                if let Err(error) = fence.refresh().await {
+                    break (None, Some(Stop::FenceLost(error)));
+                }
+            }
         }
     };
-    if let Some(reason) = interrupted {
+    if let Some(stop) = stop {
         drop(control);
         let _ = wait.await;
-        return Ok(Err(reason));
+        return match stop {
+            Stop::Interrupted(reason) => Ok(Err(reason)),
+            Stop::FenceLost(error) => Err(error),
+        };
     }
     fence.refresh().await?;
     let status = status.expect("completed command has an exit status");
