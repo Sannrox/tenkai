@@ -369,7 +369,10 @@ impl ManagementOperations {
         Self::require_capability(&context, DeliveryCapability::Management)?;
         self.require_environment_grant(credential, &context, None, "import listing")?;
         self.require_community_catalog_host()?;
-        crate::offline_import::list_staged(&settings.staging).map_err(internal)
+        let mut ctx = self.application_ctx()?;
+        crate::offline_import::list_staged_with_upgrades(&mut ctx, &settings.staging)
+            .await
+            .map_err(internal)
     }
 
     /// `GET /v1/imports` (#821): this host's import jobs, dry runs and
@@ -520,16 +523,20 @@ impl ManagementOperations {
             .map_err(internal)
     }
 
+    /// With `imports`, chunks staged for import are listed under their
+    /// layer or weight (#827).
     pub async fn content_inventory(
         &self,
         credential: &CredentialMaterial,
+        imports: Option<&crate::offline_import::ImportSettings>,
     ) -> Result<crate::content_inventory::ContentInventory, ManagementError> {
         let context = self.authenticate(credential)?;
         Self::require_capability(&context, DeliveryCapability::Read)?;
         self.require_environment_grant(credential, &context, None, "content inventory")?;
         self.require_community_catalog_host()?;
         let mut ctx = self.application_ctx()?;
-        let mut inventory = crate::content_inventory::inventory(&mut ctx)
+        let staging = imports.map(|settings| settings.staging.as_path());
+        let mut inventory = crate::content_inventory::inventory(&mut ctx, staging)
             .await
             .map_err(internal)?;
         // Product-bound credentials see only their products, as for releases.
