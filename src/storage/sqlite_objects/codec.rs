@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn encode_object(object: &Object) -> String {
+pub fn encode_object(object: &Object) -> String {
     serde_json::to_string(&StoredObject::from_proto(object)).expect("object json")
 }
 
@@ -46,12 +46,20 @@ impl StoredObject {
     }
 }
 
-pub(super) fn plan_record_to_object(record: &PlanRecord) -> AnyResult<Object> {
-    let plan: Plan = serde_json::from_str(&record.plan_json)?;
+pub fn plan_record_to_object(record: &PlanRecord) -> AnyResult<Object> {
+    let mut plan: Plan = serde_json::from_str(&record.plan_json)?;
+    plan.state = match record.status {
+        PlanStatus::Computed => PlanState::Computed,
+        PlanStatus::Running => PlanState::Running,
+        PlanStatus::Blocked => PlanState::Blocked,
+        PlanStatus::Succeeded => PlanState::Succeeded,
+        PlanStatus::Failed => PlanState::Failed,
+    };
+    plan.status_detail = record.status_detail.clone();
     plan.to_object()
 }
 
-pub(super) fn environment_record_to_object(record: &EnvironmentRecord) -> AnyResult<Object> {
+pub fn environment_record_to_object(record: &EnvironmentRecord) -> AnyResult<Object> {
     if let Ok(stored) = serde_json::from_str::<StoredObject>(&record.configuration_json)
         && (stored.kind == KIND_ENVIRONMENT || stored.id == record.id)
     {
@@ -75,7 +83,24 @@ pub(super) fn environment_record_to_object(record: &EnvironmentRecord) -> AnyRes
     })
 }
 
-pub(super) fn release_record_to_object(record: &ReleaseRecord) -> AnyResult<Object> {
+pub fn channel_record_to_object(record: &ChannelRecord) -> Object {
+    Object {
+        id: record.id.clone(),
+        kind: KIND_CHANNEL.into(),
+        name: record.name.clone(),
+        namespace: NS.into(),
+        properties: BTreeMap::from([
+            ("product".into(), record.product.clone()),
+            ("name".into(), record.name.clone()),
+            ("current_release".into(), record.release_id.clone()),
+        ])
+        .into_iter()
+        .collect(),
+        ..Object::default()
+    }
+}
+
+pub fn release_record_to_object(record: &ReleaseRecord) -> AnyResult<Object> {
     if let Ok(stored) = serde_json::from_str::<StoredObject>(&record.descriptor_json)
         && (stored.kind == KIND_RELEASE || stored.id == record.id)
     {

@@ -40,10 +40,24 @@ impl Ctx {
     }
 
     /// Enterprise hub catalog port. PostgreSQL owns authority; this context
-    /// does not open SQLite.
+    /// does not open SQLite. Writes fail closed until a catalog and tenant
+    /// are bound.
     pub fn tenant_hub() -> Self {
+        Self::tenant_hub_backend(None, None)
+    }
+
+    /// Tenant-mode hub with a catalog adapter. Bind the tenant from the
+    /// authenticated request before catalog writes.
+    pub fn tenant_hub_catalog(catalog: Arc<dyn crate::storage::CatalogGraph>) -> Self {
+        Self::tenant_hub_backend(Some(catalog), None)
+    }
+
+    fn tenant_hub_backend(
+        catalog: Option<Arc<dyn crate::storage::CatalogGraph>>,
+        tenant: Option<String>,
+    ) -> Self {
         Self {
-            backend: Backend::TenantHub,
+            backend: Backend::TenantHub { catalog, tenant },
             canary_schema_preflight: Arc::new(OnceCell::new()),
             outcome_export_enabled: false,
             outcome_inspection_enabled: true,
@@ -54,6 +68,14 @@ impl Ctx {
             trust_sources: None,
             held_execution_leases: Vec::new(),
         }
+    }
+
+    /// Bind catalog writes and reads to one tenant schema.
+    pub fn with_catalog_tenant(mut self, tenant: impl Into<String>) -> Self {
+        if let Backend::TenantHub { tenant: bound, .. } = &mut self.backend {
+            *bound = Some(tenant.into());
+        }
+        self
     }
 
     fn embedded_application_state(
@@ -114,7 +136,29 @@ impl Ctx {
     }
 
     pub(crate) fn is_tenant_hub(&self) -> bool {
-        matches!(self.backend, Backend::TenantHub)
+        matches!(self.backend, Backend::TenantHub { .. })
+    }
+
+    pub(crate) fn has_catalog(&self) -> bool {
+        matches!(
+            self.backend,
+            Backend::TenantHub {
+                catalog: Some(_),
+                ..
+            }
+        )
+    }
+
+    pub(crate) fn catalog_binding(
+        &self,
+    ) -> Option<(Arc<dyn crate::storage::CatalogGraph>, Option<String>)> {
+        match &self.backend {
+            Backend::TenantHub {
+                catalog: Some(catalog),
+                tenant,
+            } => Some((Arc::clone(catalog), tenant.clone())),
+            _ => None,
+        }
     }
 
     /// Whether this context is already bound to a reconcile-tick Plan kind-list

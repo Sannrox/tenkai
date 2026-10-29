@@ -267,7 +267,7 @@ fn plan_lifecycle_is_transactionally_constrained() {
     environment(&store);
     plan(&store);
     let now = crate::now_millis();
-    let lease = store.acquire_lease("prod", "worker", now + 10_000).unwrap();
+    let lease = OperationalStore::acquire_lease(&store, "prod", "worker", now + 10_000).unwrap();
     store
         .transition_plan(
             "plan-1",

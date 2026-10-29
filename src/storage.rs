@@ -15,6 +15,7 @@ pub const SCHEMA_VERSION: u32 = 13;
 
 mod audit;
 mod catalog;
+mod catalog_graph;
 mod change_events;
 mod error;
 mod fixture_matching;
@@ -38,12 +39,17 @@ mod sqlite_store;
 #[cfg(test)]
 mod tests;
 
+pub use catalog_graph::{CatalogGraph, MemoryCatalogGraph};
 pub use error::*;
 pub use operational_store::OperationalStore;
 pub use provider_claims::provider_event_payloads_match;
 pub use provider_event_schema::{provider_event_environment_id, provider_event_observed_at};
 pub use records::*;
 pub use rollbacks::rollback_intent_digest;
+pub use sqlite_objects::{
+    channel_record_to_object, encode_object, environment_record_to_object, plan_record_to_object,
+    release_record_to_object,
+};
 pub use sqlite_store::*;
 
 use fixture_matching::*;

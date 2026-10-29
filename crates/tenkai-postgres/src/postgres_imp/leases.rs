@@ -38,6 +38,14 @@ impl Inner {
                     detail: "fixture environments are non-executable".into(),
                 });
             }
+            super::catalog_graph::lock_catalog_apply_leases(tx, &environment)?;
+            if let Some(lease) = super::catalog_graph::catalog_apply_lease(tx, &environment)? {
+                return Err(StoreError::LeaseHeld {
+                    environment,
+                    owner: lease.owner,
+                    expires_at: lease.expires_at_ms,
+                });
+            }
             let current = lease_in(tx, &environment)?;
             let generation = match current {
                 Some(current) if current.expires_at > now && current.owner != owner => {

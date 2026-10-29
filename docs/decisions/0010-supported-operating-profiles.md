@@ -266,19 +266,20 @@ Evidence in place:
 | Replica loss | Kill-the-leader drill in CI against an ephemeral PostgreSQL: takeover within the lease bound, at most one receipt per step, a resumed stale leader's commit refused ([#749](https://github.com/Sannrox/tenkai/issues/749)) |
 | Failover procedure | [Hub failover runbook](../ha-failover-runbook.md): detection, takeover, verification, rollback |
 
-Status: **unchanged, experimental and gated.** The gate still reports two
-surfaces PostgreSQL does not own: the catalog object graph
-([#764](https://github.com/Sannrox/tenkai/issues/764)) and terminal-outcome
-export ([#765](https://github.com/Sannrox/tenkai/issues/765)). Enterprise
-backup and restore and independent operator usability drills (implementation
-sequence step 5) have not run. Multiple server replicas move from "no
-complete profile admits them" to "admitted by `enterprise-experimental` once
-its gate passes": the fenced writer removes the split-brain objection, but
-the profile is not selectable until then. When it is, the profile's
-non-guarantees drop "multiple server replicas" and "automatic failover" for
-the writer role, and keep multi-active writers, multi-AZ packaging and
-zero-downtime migration. Product `high_availability` remains unclaimed and
-fail-closed.
+Status: **unchanged, experimental and gated.** Catalog object-graph
+lifecycle lives in each tenant schema
+([ADR 0038](0038-tenant-catalog-object-graph.md) /
+[#764](https://github.com/Sannrox/tenkai/issues/764)). The gate still reports
+terminal-outcome export ([#765](https://github.com/Sannrox/tenkai/issues/765)).
+Enterprise backup and restore and independent operator usability drills
+(implementation sequence step 5) have not run. Multiple server replicas move
+from "no complete profile admits them" to "admitted by
+`enterprise-experimental` once its gate passes": the fenced writer removes
+the split-brain objection, but the profile is not selectable until then.
+When it is, the profile's non-guarantees drop "multiple server replicas" and
+"automatic failover" for the writer role, and keep multi-active writers,
+multi-AZ packaging and zero-downtime migration. Product `high_availability`
+remains unclaimed and fail-closed.
 
-Revisit when #764 and #765 land and the step 5 drills have results; that
-change, not this one, promotes the profile.
+Revisit when #765 lands and the step 5 drills have results; that change, not
+this one, promotes the profile.

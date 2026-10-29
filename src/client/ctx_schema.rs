@@ -21,7 +21,7 @@ impl Ctx {
     pub(super) fn remote(&self) -> Result<&RemoteClient> {
         match &self.backend {
             Backend::Remote { client, .. } => Ok(client.as_ref()),
-            Backend::Embedded(_) | Backend::TenantHub => {
+            Backend::Embedded(_) | Backend::TenantHub { .. } => {
                 anyhow::bail!("operation requires a configured remote provider")
             }
         }
@@ -57,7 +57,7 @@ impl Ctx {
     pub(crate) fn embedded_arc(&self) -> Option<Arc<crate::storage::SqliteStore>> {
         match &self.backend {
             Backend::Embedded(store) => Some(Arc::clone(store)),
-            Backend::Remote { .. } | Backend::TenantHub => None,
+            Backend::Remote { .. } | Backend::TenantHub { .. } => None,
         }
     }
 
@@ -65,6 +65,12 @@ impl Ctx {
         &mut self,
         schema: ObjectType,
     ) -> std::result::Result<(), super::ClientError> {
+        if let Some((catalog, Some(tenant))) = self.catalog_binding() {
+            return super::block_catalog_status(catalog, move |catalog| {
+                catalog.register_schema(Some(&tenant), schema)
+            })
+            .await;
+        }
         if self.is_tenant_hub() {
             return Err(super::ClientError::Failed(anyhow!(
                 super::TENANT_HUB_UNAVAILABLE
@@ -96,6 +102,10 @@ impl Ctx {
     }
 
     pub(crate) async fn schemas(&mut self) -> Result<Vec<ObjectType>> {
+        if let Some((catalog, Some(tenant))) = self.catalog_binding() {
+            return super::block_catalog(catalog, move |catalog| catalog.schemas(Some(&tenant)))
+                .await;
+        }
         if self.is_tenant_hub() {
             return Ok(Vec::new());
         }

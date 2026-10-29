@@ -1,6 +1,7 @@
 use super::pg;
 use super::*;
 use postgres::Transaction;
+use prost::Message;
 
 pub(crate) fn migrate_tenant_schema(tx: &mut Transaction<'_>) -> Result<()> {
     tx.batch_execute(
@@ -177,9 +178,50 @@ pub(crate) fn migrate_tenant_schema(tx: &mut Transaction<'_>) -> Result<()> {
         $fixture_migration$;
         CREATE INDEX IF NOT EXISTS development_fixture_objects_fixture
             ON development_fixture_objects(fixture_id, object_kind);
+        CREATE TABLE IF NOT EXISTS catalog_objects (
+            id TEXT PRIMARY KEY, kind TEXT NOT NULL, payload BYTEA NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS catalog_objects_kind ON catalog_objects(kind, id);
+        CREATE TABLE IF NOT EXISTS catalog_object_properties (
+            object_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            key TEXT NOT NULL,
+            value TEXT NOT NULL,
+            PRIMARY KEY (object_id, key),
+            FOREIGN KEY (object_id) REFERENCES catalog_objects(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS catalog_object_properties_lookup
+            ON catalog_object_properties(kind, key, value, object_id);
+        CREATE TABLE IF NOT EXISTS catalog_links (
+            id TEXT PRIMARY KEY, from_id TEXT NOT NULL, to_id TEXT NOT NULL,
+            relation TEXT NOT NULL, payload BYTEA NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS catalog_links_from ON catalog_links(from_id, relation, id);
+        CREATE INDEX IF NOT EXISTS catalog_links_to ON catalog_links(to_id, relation, id);
+        CREATE TABLE IF NOT EXISTS catalog_schema_types (
+            name TEXT PRIMARY KEY, payload BYTEA NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS catalog_action_types (
+            name TEXT PRIMARY KEY, payload BYTEA NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS catalog_leases (
+            namespace TEXT NOT NULL, lease_key TEXT NOT NULL, payload BYTEA NOT NULL,
+            PRIMARY KEY(namespace, lease_key)
+        );
+        CREATE TABLE IF NOT EXISTS catalog_decisions (
+            id TEXT PRIMARY KEY, timestamp BIGINT NOT NULL, actor TEXT NOT NULL,
+            action TEXT NOT NULL, payload BYTEA NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS catalog_changes (
+            id TEXT PRIMARY KEY, object_id TEXT NOT NULL, timestamp BIGINT NOT NULL,
+            payload BYTEA NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS catalog_changes_object
+            ON catalog_changes(object_id, timestamp, id);
         ",
     )
     .map_err(pg)?;
+    seed_builtin_catalog_ontology(tx)?;
     migrate_environment_retirement(tx)?;
     let legacy_events = tx
         .query(
@@ -268,5 +310,30 @@ fn migrate_environment_retirement(tx: &mut Transaction<'_>) -> Result<()> {
          ON environments(id) WHERE retired_at IS NULL",
     )
     .map_err(pg)?;
+    Ok(())
+}
+
+/// Tenant schemas have no `tenkaictl init`. Seed missing built-in object and
+/// action types so promote, subscribe, and the other catalog mutations can
+/// resolve. Existing rows stay; `register_schema` / `register_action` own upgrades.
+fn seed_builtin_catalog_ontology(tx: &mut Transaction<'_>) -> Result<()> {
+    for schema in tenkai::ontology::known_object_types() {
+        let payload = schema.encode_to_vec();
+        tx.execute(
+            "INSERT INTO catalog_schema_types(name,payload) VALUES($1,$2)
+             ON CONFLICT(name) DO NOTHING",
+            &[&schema.kind, &payload],
+        )
+        .map_err(pg)?;
+    }
+    for action in tenkai::ontology::known_actions() {
+        let payload = action.encode_to_vec();
+        tx.execute(
+            "INSERT INTO catalog_action_types(name,payload) VALUES($1,$2)
+             ON CONFLICT(name) DO NOTHING",
+            &[&action.name, &payload],
+        )
+        .map_err(pg)?;
+    }
     Ok(())
 }

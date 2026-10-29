@@ -722,32 +722,35 @@ pub(crate) async fn record_deployment_observation(
             },
         },
     )];
-    let update_result =
-        if ctx.outcome_export_enabled() || !provider_events.is_empty() || ctx.is_embedded() {
-            let mut objects = vec![deployment];
-            if environment_changed {
-                objects.push(environment.expect("an Environment transition loads its object"));
-            }
-            ctx.guarded_update_objects_with_provider_events(
-                &objects,
-                crate::apply::ENVIRONMENT_LEASE_NAMESPACE,
-                &lease.environment,
-                &lease.fencing_token,
-                &provider_events,
-                &feedback,
+    let update_result = if ctx.outcome_export_enabled()
+        || !provider_events.is_empty()
+        || ctx.is_embedded()
+        || ctx.has_catalog()
+    {
+        let mut objects = vec![deployment];
+        if environment_changed {
+            objects.push(environment.expect("an Environment transition loads its object"));
+        }
+        ctx.guarded_update_objects_with_provider_events(
+            &objects,
+            crate::apply::ENVIRONMENT_LEASE_NAMESPACE,
+            &lease.environment,
+            &lease.fencing_token,
+            &provider_events,
+            &feedback,
+        )
+        .await
+    } else {
+        if environment_changed {
+            guarded_update(
+                ctx,
+                lease,
+                environment.expect("an Environment transition loads its object"),
             )
-            .await
-        } else {
-            if environment_changed {
-                guarded_update(
-                    ctx,
-                    lease,
-                    environment.expect("an Environment transition loads its object"),
-                )
-                .await?;
-            }
-            guarded_update(ctx, lease, deployment).await
-        };
+            .await?;
+        }
+        guarded_update(ctx, lease, deployment).await
+    };
     match update_result {
         Ok(()) => Ok(()),
         Err(error) => {

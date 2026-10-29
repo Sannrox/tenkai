@@ -90,6 +90,16 @@ impl Ctx {
                 "find_by_property order key must be non-empty"
             );
         }
+        if let Some((catalog, Some(tenant))) = self.catalog_binding() {
+            let kind = query.kind.to_string();
+            let key = query.key.to_string();
+            let value = query.value.to_string();
+            let objects = super::block_catalog(catalog, move |catalog| {
+                catalog.find_by_property(Some(&tenant), &kind, &key, &value)
+            })
+            .await?;
+            return apply_remote_property_index(objects, &query);
+        }
         if self.is_tenant_hub() {
             return Ok(Vec::new());
         }
@@ -153,6 +163,13 @@ impl Ctx {
     }
 
     pub async fn list_kind(&mut self, kind: &str) -> Result<Vec<Object>> {
+        if let Some((catalog, Some(tenant))) = self.catalog_binding() {
+            let kind = kind.to_string();
+            return super::block_catalog(catalog, move |catalog| {
+                catalog.list_kind(Some(&tenant), &kind)
+            })
+            .await;
+        }
         if self.is_tenant_hub() {
             return Ok(Vec::new());
         }
@@ -190,6 +207,13 @@ impl Ctx {
     /// Remote adapters still page `ListObjects` and keep only ids; there is no
     /// cheaper name/id RPC on the vendored protocol.
     pub(crate) async fn list_kind_ids(&mut self, kind: &str) -> Result<Vec<String>> {
+        if let Some((catalog, Some(tenant))) = self.catalog_binding() {
+            let kind = kind.to_string();
+            return super::block_catalog(catalog, move |catalog| {
+                catalog.list_kind_ids(Some(&tenant), &kind)
+            })
+            .await;
+        }
         if self.is_tenant_hub() {
             return Ok(Vec::new());
         }

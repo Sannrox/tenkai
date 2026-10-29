@@ -8,8 +8,9 @@ contract.
 
 The commands open PostgreSQL as the sole hub store (`tenkai_hub` plus
 `tenkai_t_*`). Mixed `--database` / `TENKAI_DATABASE` with `TENKAI_POSTGRES_URL`
-is refused. Catalog object-graph lifecycle (#764) and terminal-outcome export
-(#765) remain unavailable. The supported profile contract remains `local` by
+is refused. Catalog object-graph lifecycle lives in each tenant schema
+(ADR 0038). Terminal-outcome export (#765) remains unavailable. The supported
+profile contract remains `local` by
 default and experimental single-server `fleet` for remote runtime operation.
 `--require-enterprise-profile` (with `--tenant-mode`) asks for the supported
 `enterprise-experimental` profile instead of this lab. It refuses to start
@@ -263,8 +264,7 @@ Mutation-level replay and stale-generation evidence:
   is not claimed by the Postgres adapter by default. The writer lease (#748)
   gives one active writer with fenced takeover; it does not make this a
   supported HA profile.
-- Catalog object-graph lifecycle and terminal-outcome export remain unavailable
-  in tenant mode.
+- Terminal-outcome export remains unavailable in tenant mode (#765).
 
 ## Related docs
 

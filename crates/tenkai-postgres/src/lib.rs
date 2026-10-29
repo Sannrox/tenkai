@@ -18,6 +18,7 @@
 //! ```
 
 mod capabilities;
+mod catalog_graph;
 mod config;
 mod fence;
 mod partition;

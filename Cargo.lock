@@ -2950,6 +2950,7 @@ version = "0.5.0"
 dependencies = [
  "anyhow",
  "postgres",
+ "prost",
  "rustls",
  "rustls-native-certs",
  "serde",

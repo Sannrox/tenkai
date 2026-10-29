@@ -178,6 +178,9 @@ impl PostgresTenantOperationalStore {
             .map_err(|error| IsolationError::Contract(error.to_string()))
     }
 
+    /// Catalog apply leases are the object-graph hold. Read them before the
+    /// typed `leases` row so retirement sees plan/apply without taking over
+    /// typed ownership.
     pub fn current_lease_for(
         &self,
         context: &AuthenticatedRequestContext,
@@ -187,6 +190,27 @@ impl PostgresTenantOperationalStore {
         #[cfg(feature = "postgres")]
         {
             use tenkai::storage::OperationalStore as _;
+            let now = tenkai::now_millis();
+            let name = environment
+                .strip_prefix("tenkai:env:")
+                .unwrap_or(environment);
+            let catalog_id = tenkai::ontology::env_id(name);
+            for key in [name, catalog_id.as_str()] {
+                if let Some(lease) = self
+                    .inner
+                    .catalog_get_lease(partition.schema(), "tenkai/environment-execution", key)
+                    .map_err(|error| IsolationError::Contract(error.to_string()))?
+                    && lease.status == "active"
+                    && lease.expires_at_ms > now
+                {
+                    return Ok(Some(tenkai::storage::LeaseRecord {
+                        environment_id: environment.to_owned(),
+                        owner: lease.owner,
+                        generation: lease.generation,
+                        expires_at: lease.expires_at_ms,
+                    }));
+                }
+            }
             partition
                 .current_lease(environment)
                 .map_err(|error| IsolationError::Contract(error.to_string()))

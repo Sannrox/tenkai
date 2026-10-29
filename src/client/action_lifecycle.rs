@@ -36,6 +36,10 @@ pub(super) enum ActionLifecycle<'a> {
         action_defs: &'a RemoteActionDefs,
     },
     Embedded(Arc<crate::storage::SqliteStore>),
+    Catalog {
+        catalog: Arc<dyn crate::storage::CatalogGraph>,
+        tenant: String,
+    },
     Unavailable,
 }
 
@@ -48,6 +52,14 @@ impl ActionLifecycle<'_> {
             Self::Unavailable => Err(super::ClientError::Failed(anyhow!(
                 super::TENANT_HUB_UNAVAILABLE
             ))),
+            Self::Catalog { catalog, tenant } => {
+                let catalog = Arc::clone(catalog);
+                let tenant = tenant.clone();
+                super::block_catalog_status(catalog, move |catalog| {
+                    catalog.register_action(Some(&tenant), action)
+                })
+                .await
+            }
             Self::Embedded(store) => {
                 let store = Arc::clone(store);
                 super::block_embedded_status(store, move |store| store.register_action(action))
@@ -103,6 +115,15 @@ impl ActionLifecycle<'_> {
     ) -> Result<ActionResult> {
         match self {
             Self::Unavailable => anyhow::bail!(super::TENANT_HUB_UNAVAILABLE),
+            Self::Catalog { catalog, tenant } => {
+                let catalog = Arc::clone(catalog);
+                let tenant = tenant.clone();
+                let action = action.to_string();
+                super::block_catalog(catalog, move |catalog| {
+                    catalog.execute_action(Some(&tenant), &action, params, dry_run)
+                })
+                .await
+            }
             Self::Embedded(store) => {
                 let store = Arc::clone(store);
                 let action = action.to_string();
@@ -189,7 +210,7 @@ impl ActionLifecycle<'_> {
     pub(super) async fn deny(&self, approval_id: &str, reason: &str) -> Result<()> {
         match self {
             Self::Unavailable => anyhow::bail!(super::TENANT_HUB_UNAVAILABLE),
-            Self::Embedded(_) => anyhow::bail!(
+            Self::Catalog { .. } | Self::Embedded(_) => anyhow::bail!(
                 "embedded mode has no deferred approvals; action {approval_id} cannot be denied"
             ),
             Self::Remote { .. } => {
@@ -209,6 +230,16 @@ impl ActionLifecycle<'_> {
     ) -> Result<Vec<Decision>> {
         match self {
             Self::Unavailable => Ok(Vec::new()),
+            Self::Catalog { catalog, tenant } => {
+                let catalog = Arc::clone(catalog);
+                let tenant = tenant.clone();
+                let actor = actor.to_string();
+                let action = action.to_string();
+                super::block_catalog(catalog, move |catalog| {
+                    catalog.decisions(Some(&tenant), &actor, &action, after)
+                })
+                .await
+            }
             Self::Embedded(store) => {
                 let store = Arc::clone(store);
                 let actor = actor.to_string();

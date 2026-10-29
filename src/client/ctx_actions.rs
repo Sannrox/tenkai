@@ -65,6 +65,13 @@ impl Ctx {
     }
 
     pub async fn object_changes(&mut self, object_id: &str) -> Result<Vec<ObjectChange>> {
+        if let Some((catalog, Some(tenant))) = self.catalog_binding() {
+            let object_id = object_id.to_string();
+            return super::block_catalog(catalog, move |catalog| {
+                catalog.changes(Some(&tenant), &object_id)
+            })
+            .await;
+        }
         if let Some(store) = self.embedded_arc() {
             let object_id = object_id.to_string();
             return block_embedded(store, move |store| store.changes(&object_id)).await;

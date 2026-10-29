@@ -290,6 +290,8 @@ fn resolve_reconcile_fence_some_for_multi_replica() {
 }
 
 #[cfg(feature = "postgres")]
+mod live_catalog;
+#[cfg(feature = "postgres")]
 mod live_change_events;
 #[cfg(feature = "postgres")]
 mod live_delivery;

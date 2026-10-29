@@ -13,6 +13,10 @@ use crate::pb::sekai::{
 pub(super) enum RelationLifecycle<'a> {
     Remote(&'a RemoteClient),
     Embedded(Arc<crate::storage::SqliteStore>),
+    Catalog {
+        catalog: Arc<dyn crate::storage::CatalogGraph>,
+        tenant: String,
+    },
     Unavailable,
 }
 
@@ -27,6 +31,16 @@ impl RelationLifecycle<'_> {
         };
         match self {
             Self::Unavailable => anyhow::bail!(super::TENANT_HUB_UNAVAILABLE),
+            Self::Catalog { catalog, tenant } => {
+                let catalog = Arc::clone(catalog);
+                let tenant = tenant.clone();
+                super::block_catalog(catalog, move |catalog| {
+                    catalog
+                        .create_link(Some(&tenant), link, false)
+                        .map_err(anyhow::Error::from)
+                })
+                .await
+            }
             Self::Embedded(store) => {
                 let store = Arc::clone(store);
                 super::block_embedded(store, move |store| {
@@ -72,6 +86,14 @@ impl RelationLifecycle<'_> {
             Self::Unavailable => Err(super::ClientError::Failed(anyhow::anyhow!(
                 super::TENANT_HUB_UNAVAILABLE
             ))),
+            Self::Catalog { catalog, tenant } => {
+                let catalog = Arc::clone(catalog);
+                let tenant = tenant.clone();
+                super::block_catalog_status(catalog, move |catalog| {
+                    catalog.create_link(Some(&tenant), link, true)
+                })
+                .await
+            }
             Self::Embedded(store) => {
                 let store = Arc::clone(store);
                 super::block_embedded_status(store, move |store| store.create_link(link, true))
@@ -110,6 +132,12 @@ impl RelationLifecycle<'_> {
         let id = format!("{from_id}--{relation}--{to_id}");
         match self {
             Self::Unavailable => anyhow::bail!(super::TENANT_HUB_UNAVAILABLE),
+            Self::Catalog { catalog, tenant } => {
+                let catalog = Arc::clone(catalog);
+                let tenant = tenant.clone();
+                super::block_catalog(catalog, move |catalog| catalog.unlink(Some(&tenant), &id))
+                    .await
+            }
             Self::Embedded(store) => {
                 let store = Arc::clone(store);
                 super::block_embedded(store, move |store| store.unlink(&id)).await
@@ -139,6 +167,17 @@ impl RelationLifecycle<'_> {
     ) -> Result<Vec<Object>> {
         match self {
             Self::Unavailable => Ok(Vec::new()),
+            Self::Catalog { catalog, tenant } => {
+                let catalog = Arc::clone(catalog);
+                let tenant = tenant.clone();
+                let object_id = object_id.to_string();
+                let relation = relation.to_string();
+                let direction = direction.to_string();
+                super::block_catalog(catalog, move |catalog| {
+                    catalog.linked(Some(&tenant), &object_id, &relation, &direction)
+                })
+                .await
+            }
             Self::Embedded(store) => {
                 let store = Arc::clone(store);
                 let object_id = object_id.to_string();
@@ -168,6 +207,16 @@ impl RelationLifecycle<'_> {
     pub(super) async fn links(&self, object_id: &str, relation: &str) -> Result<Vec<Link>> {
         match self {
             Self::Unavailable => Ok(Vec::new()),
+            Self::Catalog { catalog, tenant } => {
+                let catalog = Arc::clone(catalog);
+                let tenant = tenant.clone();
+                let object_id = object_id.to_string();
+                let relation = relation.to_string();
+                super::block_catalog(catalog, move |catalog| {
+                    catalog.links(Some(&tenant), &object_id, &relation, "out")
+                })
+                .await
+            }
             Self::Embedded(store) => {
                 let store = Arc::clone(store);
                 let object_id = object_id.to_string();

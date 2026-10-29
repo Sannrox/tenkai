@@ -316,6 +316,131 @@ async fn catalog_lists_refuse_tenant_mode() {
 }
 
 #[tokio::test]
+async fn catalog_lists_serve_bound_tenant_catalog() {
+    use super::auth_support::TenantAssertionExtension;
+    use super::support::FixedReconciler;
+    use tenkai::ontology::{KIND_CHANNEL, KIND_RELEASE};
+    use tenkai::pb::sekai::Object;
+    use tenkai::runtime_capabilities::enterprise_auth_capabilities;
+    use tenkai::storage::{CatalogGraph, MemoryCatalogGraph};
+    use tenkai::tenant_store::tenant_memory_store_capabilities;
+
+    let graph = Arc::new(MemoryCatalogGraph::new());
+    graph
+        .create(
+            Some("tenant-a"),
+            Object {
+                id: "tenkai:release:api@1.0.0".into(),
+                kind: KIND_RELEASE.into(),
+                name: "api@1.0.0".into(),
+                properties: [
+                    ("product".into(), "api".into()),
+                    ("version".into(), "1.0.0".into()),
+                    ("digest".into(), "sha256:test".into()),
+                ]
+                .into_iter()
+                .collect(),
+                ..Object::default()
+            },
+        )
+        .unwrap();
+    graph
+        .create(
+            Some("tenant-a"),
+            Object {
+                id: "tenkai:channel:api/stable".into(),
+                kind: KIND_CHANNEL.into(),
+                name: "stable".into(),
+                properties: [
+                    ("product".into(), "api".into()),
+                    ("name".into(), "stable".into()),
+                    ("current_release".into(), "tenkai:release:api@1.0.0".into()),
+                ]
+                .into_iter()
+                .collect(),
+                ..Object::default()
+            },
+        )
+        .unwrap();
+
+    let tenant_store = Arc::new(tenkai::tenant_store::InMemoryTenantOperationalStore::new());
+    let mut config = ServerConfig::community("management-secret", HashMap::new());
+    config.requirements.tenant_mode = true;
+    config.requirements.require_enterprise_authentication = true;
+    config.capabilities = tenkai::runtime_capabilities::ProvidedCapabilities::assemble(
+        "enterprise-tenant-memory",
+        [
+            tenant_memory_store_capabilities(),
+            enterprise_auth_capabilities(),
+        ],
+    );
+    config.auth_host = AuthHostConfig {
+        required_extension_id: Some("auth.enterprise".into()),
+        expected_contract_version: tenkai::auth_context::AUTH_CONTEXT_CONTRACT_VERSION,
+        expected_audience: Some("tenkai-server".into()),
+    };
+    config.enterprise_auth = Some(Arc::new(TenantAssertionExtension));
+    config.tenant_store = Some(tenant_store);
+    let store = Arc::new(tenkai::storage::SqliteStore::open_in_memory().unwrap());
+    let app = router(
+        config,
+        Arc::new(FixedReconciler::with_ctx(
+            tenkai::client::Ctx::tenant_hub_catalog(graph),
+        )),
+        store,
+    )
+    .unwrap();
+    let tenant_a =
+        r#"{"tenant":"tenant-a","principal":"user-a","capabilities":["read","management"]}"#;
+    let tenant_b =
+        r#"{"tenant":"tenant-b","principal":"user-b","capabilities":["read","management"]}"#;
+
+    let (status, body) = get_json_assertion(&app, "/v1/releases", tenant_a).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["items"].as_array().unwrap().len(), 1, "{body}");
+    assert_eq!(body["items"][0]["id"], "tenkai:release:api@1.0.0");
+    assert_eq!(body["items"][0]["product"], "api");
+
+    let (status, body) = get_json_assertion(&app, "/v1/channels", tenant_a).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["items"].as_array().unwrap().len(), 1, "{body}");
+    assert_eq!(body["items"][0]["name"], "stable");
+
+    let (status, body) = get_json_assertion(&app, "/v1/releases", tenant_b).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["items"], serde_json::json!([]), "{body}");
+}
+
+async fn get_json_assertion(
+    app: &Router,
+    path: &str,
+    assertion: &str,
+) -> (StatusCode, serde_json::Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get(path)
+                .header("x-tenkai-assertion", assertion)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = if bytes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or_else(|_| {
+            serde_json::Value::String(String::from_utf8_lossy(&bytes).into_owned())
+        })
+    };
+    (status, body)
+}
+
+#[tokio::test]
 async fn catalog_list_rejects_invalid_limit() {
     let root = std::env::temp_dir().join(format!(
         "tenkai-catalog-list-limit-{}-{}",

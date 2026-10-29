@@ -44,9 +44,9 @@ composition, not an operator support contract:
   single-server `fleet` profile.
 - `enterprise-experimental` identifies the tenant-mode hub composition:
   PostgreSQL is the sole authoritative store (`store.tenant_postgres` plus
-  authentication). SQLite is not opened. Catalog object-graph lifecycle and
-  terminal-outcome export remain unavailable. Product `high_availability` is
-  not claimed.
+  authentication). SQLite is not opened. Catalog object-graph lifecycle lives
+  in each tenant schema (ADR 0038). Terminal-outcome export remains
+  unavailable. Product `high_availability` is not claimed.
 
 Multi-replica tenant-mode hubs fence writes on one hub writer lease; the
 [hub failover runbook](ha-failover-runbook.md) covers detection, takeover,

@@ -13,6 +13,13 @@ impl FixedReconciler {
             plan: tokio::sync::OnceCell::new(),
         }
     }
+
+    pub(super) fn with_ctx(ctx: tenkai::client::Ctx) -> Self {
+        Self {
+            ctx: Some(ctx),
+            plan: tokio::sync::OnceCell::new(),
+        }
+    }
 }
 
 impl ReconcilePort for FixedReconciler {

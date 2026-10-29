@@ -34,12 +34,12 @@ pub(crate) use helpers::{
 };
 pub(crate) use plan_kind_list::{PlanKindListSnapshot, PlanKindListTick, PlanRetargetTickGuard};
 pub use schema_register::{
-    known_action, known_actions, register, require_canary_schema,
+    known_action, known_actions, known_object_types, register, require_canary_schema,
     require_connectivity_upgrade_schema, require_package_migration_schema, require_wave_schema,
 };
 pub(crate) use transport::{
-    RemoteClient, block_embedded, block_embedded_status, remote_unary, remote_unary_with_options,
-    token_transport_is_safe,
+    RemoteClient, block_catalog, block_catalog_status, block_embedded, block_embedded_status,
+    remote_unary, remote_unary_with_options, token_transport_is_safe,
 };
 
 /// A lease a plan execution must keep, refreshed with the environment apply
@@ -73,8 +73,11 @@ enum Backend {
         action_defs: action_lifecycle::RemoteActionDefs,
     },
     Embedded(Arc<crate::storage::SqliteStore>),
-    /// Enterprise hub: PostgreSQL owns authority; no SQLite catalog is opened.
-    TenantHub,
+    /// Enterprise hub catalog. Writes fail closed until a catalog and tenant are bound.
+    TenantHub {
+        catalog: Option<Arc<dyn crate::storage::CatalogGraph>>,
+        tenant: Option<String>,
+    },
 }
 
 pub(super) const TENANT_HUB_UNAVAILABLE: &str =
@@ -85,7 +88,14 @@ impl Backend {
         match self {
             Self::Remote { client, .. } => object_lifecycle::ObjectLifecycle::Remote(client),
             Self::Embedded(store) => object_lifecycle::ObjectLifecycle::Embedded(Arc::clone(store)),
-            Self::TenantHub => object_lifecycle::ObjectLifecycle::Unavailable,
+            Self::TenantHub {
+                catalog: Some(catalog),
+                tenant: Some(tenant),
+            } => object_lifecycle::ObjectLifecycle::Catalog {
+                catalog: Arc::clone(catalog),
+                tenant: tenant.clone(),
+            },
+            Self::TenantHub { .. } => object_lifecycle::ObjectLifecycle::Unavailable,
         }
     }
 
@@ -95,7 +105,14 @@ impl Backend {
             Self::Embedded(store) => {
                 relation_lifecycle::RelationLifecycle::Embedded(Arc::clone(store))
             }
-            Self::TenantHub => relation_lifecycle::RelationLifecycle::Unavailable,
+            Self::TenantHub {
+                catalog: Some(catalog),
+                tenant: Some(tenant),
+            } => relation_lifecycle::RelationLifecycle::Catalog {
+                catalog: Arc::clone(catalog),
+                tenant: tenant.clone(),
+            },
+            Self::TenantHub { .. } => relation_lifecycle::RelationLifecycle::Unavailable,
         }
     }
 
@@ -103,7 +120,14 @@ impl Backend {
         match self {
             Self::Remote { client, .. } => lease_lifecycle::LeaseLifecycle::Remote(client),
             Self::Embedded(store) => lease_lifecycle::LeaseLifecycle::Embedded(Arc::clone(store)),
-            Self::TenantHub => lease_lifecycle::LeaseLifecycle::Unavailable,
+            Self::TenantHub {
+                catalog: Some(catalog),
+                tenant: Some(tenant),
+            } => lease_lifecycle::LeaseLifecycle::Catalog {
+                catalog: Arc::clone(catalog),
+                tenant: tenant.clone(),
+            },
+            Self::TenantHub { .. } => lease_lifecycle::LeaseLifecycle::Unavailable,
         }
     }
 
@@ -117,7 +141,14 @@ impl Backend {
                 action_defs,
             },
             Self::Embedded(store) => action_lifecycle::ActionLifecycle::Embedded(Arc::clone(store)),
-            Self::TenantHub => action_lifecycle::ActionLifecycle::Unavailable,
+            Self::TenantHub {
+                catalog: Some(catalog),
+                tenant: Some(tenant),
+            } => action_lifecycle::ActionLifecycle::Catalog {
+                catalog: Arc::clone(catalog),
+                tenant: tenant.clone(),
+            },
+            Self::TenantHub { .. } => action_lifecycle::ActionLifecycle::Unavailable,
         }
     }
 }

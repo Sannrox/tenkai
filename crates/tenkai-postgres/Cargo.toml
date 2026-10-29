@@ -15,6 +15,7 @@ required-features = ["postgres"]
 default = []
 postgres = [
     "dep:postgres",
+    "dep:prost",
     "dep:tokio-postgres-rustls",
     "dep:rustls",
     "dep:rustls-native-certs",
@@ -31,6 +32,7 @@ thiserror = "2"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 postgres = { version = "0.19", optional = true }
+prost = { version = "0.14", optional = true, default-features = false, features = ["derive", "std"] }
 tokio-postgres-rustls = { version = "0.14", optional = true, features = ["ring"] }
 rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std"] }
 rustls-native-certs = { version = "0.8", optional = true }
