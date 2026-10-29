@@ -105,3 +105,21 @@ async fn tenant_hub_ctx_reads_empty_and_writes_fail_closed() {
         "{put}"
     );
 }
+
+#[tokio::test]
+async fn tenant_hub_catalog_serves_bound_tenant() {
+    use crate::storage::{CatalogGraph, MemoryCatalogGraph};
+    use std::sync::Arc;
+
+    let graph = Arc::new(MemoryCatalogGraph::new());
+    let object = Object {
+        id: "tenkai:conformance:object".into(),
+        kind: "tenkai.conformance".into(),
+        name: "original".into(),
+        ..Default::default()
+    };
+    graph.create(Some("tenant-a"), object.clone()).unwrap();
+    let mut ctx = Ctx::tenant_hub_catalog(graph).with_catalog_tenant("tenant-a");
+    assert_eq!(ctx.get(&object.id).await.unwrap(), Some(object.clone()));
+    assert_eq!(ctx.list_kind(&object.kind).await.unwrap(), vec![object]);
+}

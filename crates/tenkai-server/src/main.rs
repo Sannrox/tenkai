@@ -658,6 +658,7 @@ async fn main() -> Result<()> {
     let opened_grant_rules = opened.grant_rules;
     let store = opened.operational;
     let tenant_store = opened.tenant;
+    let catalog = opened.catalog;
     let tenant_store_for_lease = tenant_store.clone();
     let outcome_provider = match cli.outcome_provider {
         OutcomeProviderMode::Disabled => {
@@ -767,7 +768,10 @@ async fn main() -> Result<()> {
         cli.tls_require_runtime_client_cert,
     )?);
     let ctx = match cli.provider_mode {
-        ProviderMode::Embedded if cli.tenant_mode => tenkai::client::Ctx::tenant_hub(),
+        ProviderMode::Embedded if cli.tenant_mode => match catalog {
+            Some(catalog) => tenkai::client::Ctx::tenant_hub_catalog(catalog),
+            None => tenkai::client::Ctx::tenant_hub(),
+        },
         ProviderMode::Embedded => {
             let database = community_database
                 .as_ref()
@@ -1557,6 +1561,8 @@ struct OpenedHostStore {
     sqlite: Option<Arc<SqliteStore>>,
     operational: Arc<dyn OperationalStore>,
     tenant: Option<Arc<dyn TenantOperationalStore>>,
+    /// Tenant-schema catalog object graph (ADR 0038). Bound per request.
+    catalog: Option<Arc<dyn tenkai::storage::CatalogGraph>>,
     /// Stored OIDC grant rules (#836): the SQLite store, or the hub-wide
     /// PostgreSQL tables.
     grant_rules: Arc<dyn tenkai::grant_rules::GrantRuleStore>,
@@ -1594,6 +1600,7 @@ fn open_host_store(
             sqlite: None,
             operational: hub.operational,
             tenant: Some(hub.tenant),
+            catalog: Some(hub.catalog),
             grant_rules: hub.grant_rules,
         });
     }
@@ -1606,6 +1613,7 @@ fn open_host_store(
         grant_rules: sqlite.clone(),
         sqlite: Some(sqlite),
         tenant: None,
+        catalog: None,
     })
 }
 

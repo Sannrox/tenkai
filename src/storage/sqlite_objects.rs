@@ -20,7 +20,7 @@ use crate::ontology::{
 };
 use crate::pb::graph_action::{ActionResult, ActionTypeDef};
 use crate::pb::sekai::{Decision, Lease, Link, Object, ObjectChange, ObjectType};
-use crate::plan::Plan;
+use crate::plan::{Plan, PlanState};
 use crate::storage::{
     ChannelRecord, EnvironmentRecord, OperationalStore, PlanRecord, PlanStatus,
     ProviderEventRecord, ReleaseRecord, Result, SqliteStore, StoreError, enqueue_provider_event_in,
@@ -43,6 +43,10 @@ mod upserts;
 
 use actions::*;
 use codec::*;
+pub use codec::{
+    channel_record_to_object, encode_object, environment_record_to_object, plan_record_to_object,
+    release_record_to_object,
+};
 pub(super) use legacy_import::*;
 use namespaced_leases::*;
 pub(super) use schema::*;

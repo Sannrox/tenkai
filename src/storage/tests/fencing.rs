@@ -6,7 +6,7 @@ fn generations_fence_receipts_and_rollback_updates() {
     environment(&store);
     plan(&store);
     let now = crate::now_millis();
-    let first = store.acquire_lease("prod", "worker-a", now + 50).unwrap();
+    let first = OperationalStore::acquire_lease(&store, "prod", "worker-a", now + 50).unwrap();
     let rollback = RollbackRecord {
         id: "rollback-1".into(),
         environment_id: "prod".into(),
@@ -18,13 +18,11 @@ fn generations_fence_receipts_and_rollback_updates() {
     };
     store.create_rollback("worker-a", &rollback).unwrap();
     assert!(matches!(
-        store.acquire_lease("prod", "worker-b", now + 10_000),
+        OperationalStore::acquire_lease(&store, "prod", "worker-b", now + 10_000),
         Err(StoreError::LeaseHeld { .. })
     ));
     std::thread::sleep(std::time::Duration::from_millis(60));
-    let second = store
-        .acquire_lease("prod", "worker-b", now + 10_000)
-        .unwrap();
+    let second = OperationalStore::acquire_lease(&store, "prod", "worker-b", now + 10_000).unwrap();
     assert!(matches!(
         store.record_receipt(
             "worker-a",
@@ -92,7 +90,8 @@ fn pending_rollback_survives_restart_and_receipts_are_idempotent() {
         environment(&store);
         plan(&store);
         let now = crate::now_millis();
-        let lease = store.acquire_lease("prod", "worker", now + 10_000).unwrap();
+        let lease =
+            OperationalStore::acquire_lease(&store, "prod", "worker", now + 10_000).unwrap();
         assert_eq!(lease.generation, receipt.lease_generation);
         store.record_receipt("worker", &receipt).unwrap();
         store.record_receipt("worker", &receipt).unwrap();
@@ -202,9 +201,7 @@ fn execution_records_cannot_cross_environment_boundaries() {
         })
         .unwrap();
     let now = crate::now_millis();
-    let lease = store
-        .acquire_lease("other", "worker", now + 10_000)
-        .unwrap();
+    let lease = OperationalStore::acquire_lease(&store, "other", "worker", now + 10_000).unwrap();
     assert!(matches!(
         store.record_receipt(
             "worker",

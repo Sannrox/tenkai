@@ -211,9 +211,12 @@ pub fn known_action(name: &str) -> Option<ActionTypeDef> {
         .find(|action| action.name == name)
 }
 
-/// Register the tenkai schema types; existing types are left untouched.
-pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
-    let types = vec![
+/// Built-in catalog object types owned by Tenkai.
+///
+/// Tenant schemas seed these on migrate; community hosts persist them through
+/// `tenkaictl init`.
+pub fn known_object_types() -> Vec<ObjectType> {
+    vec![
         object_type(
             crate::model_release_evidence::EVALUATION_TRUST_KIND,
             "Trusted keys that may sign model evaluation evidence",
@@ -772,10 +775,13 @@ pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
                 ),
             ],
         ),
-    ];
+    ]
+}
 
+/// Register the tenkai schema types; existing types are left untouched.
+pub async fn register(ctx: &mut Ctx) -> Result<Vec<String>> {
     let mut registered = Vec::new();
-    for t in types {
+    for t in known_object_types() {
         let kind = t.kind.clone();
         match ctx.register_schema(t).await {
             Ok(()) => registered.push(kind),

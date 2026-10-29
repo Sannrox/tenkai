@@ -104,7 +104,9 @@ impl Inner {
                     )
                     .map_err(pg)?
                     .get(0);
-                if active_claim || active_lease {
+                let catalog_apply =
+                    super::catalog_graph::catalog_apply_lease_is_active(tx, &environment.id)?;
+                if active_claim || active_lease || catalog_apply {
                     return Err(StoreError::InvalidData {
                         kind: "environment",
                         detail: format!("environment {} has active delivery work", environment.id),

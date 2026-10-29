@@ -135,6 +135,7 @@ pub struct ManagementOperations {
     tenant_mode: bool,
     reconciler: Arc<dyn ReconcilePort>,
     store: Arc<dyn OperationalStore>,
+    tenant_store: Option<Arc<dyn TenantOperationalStore>>,
     tenant_environments: Option<TenantEnvironmentOperations>,
     package_migration_trust_roots: Option<ApprovalTrustRoots>,
     release_trust_roots: Option<std::path::PathBuf>,
@@ -159,7 +160,7 @@ impl ManagementOperations {
         release_trust_roots: Option<std::path::PathBuf>,
         environment_grants: std::collections::HashMap<String, String>,
     ) -> Self {
-        let tenant_environments = tenant_store.map(|tenant_store| {
+        let tenant_environments = tenant_store.clone().map(|tenant_store| {
             TenantEnvironmentOperations::new(
                 tenant_store,
                 Arc::new(ReconcileTenantEnvironmentView {
@@ -173,6 +174,7 @@ impl ManagementOperations {
             tenant_mode,
             reconciler,
             store,
+            tenant_store,
             tenant_environments,
             package_migration_trust_roots,
             release_trust_roots,
@@ -607,9 +609,8 @@ impl ManagementOperations {
     ) -> Result<ReleasePage, ManagementError> {
         let context = self.authenticate(credential)?;
         Self::require_capability(&context, DeliveryCapability::Read)?;
-        self.require_community_catalog_host()?;
         let limit = query.limit().map_err(ManagementError::BadRequest)?;
-        let mut ctx = self.application_ctx()?;
+        let mut ctx = self.catalog_ctx(&context)?;
         let mut items = crate::catalog::list_releases(&mut ctx)
             .await
             .map_err(internal)?;
@@ -629,9 +630,8 @@ impl ManagementOperations {
     ) -> Result<ChannelPage, ManagementError> {
         let context = self.authenticate(credential)?;
         Self::require_capability(&context, DeliveryCapability::Read)?;
-        self.require_community_catalog_host()?;
         let limit = query.limit().map_err(ManagementError::BadRequest)?;
-        let mut ctx = self.application_ctx()?;
+        let mut ctx = self.catalog_ctx(&context)?;
         let mut items = crate::catalog::list_channels(&mut ctx)
             .await
             .map_err(internal)?;
@@ -686,11 +686,21 @@ impl ManagementOperations {
         let context = self.authenticate(credential)?;
         Self::require_capability(&context, DeliveryCapability::Read)?;
         if self.tenant_mode {
-            return self
+            // Partition-local inspect plus the catalog apply lease. Subscriptions,
+            // latest plan, and hold stay on the typed operational inspect path;
+            // this slice enables catalog lifecycle for publish, promote, plan, and apply.
+            let mut report = self
                 .tenant_operations()?
                 .inspect(&context, environment)
                 .await
-                .map_err(map_tenant_error);
+                .map_err(map_tenant_error)?;
+            if let Ok(mut ctx) = self.catalog_ctx(&context)
+                && let Ok(lease) =
+                    crate::apply::inspect_environment_lease(&mut ctx, environment).await
+            {
+                report.lease = lease;
+            }
+            return Ok(report);
         }
         let mut report = self
             .reconciler
@@ -711,9 +721,8 @@ impl ManagementOperations {
     ) -> Result<crate::approval_policy::EffectiveApprovalPolicy, ManagementError> {
         let context = self.authenticate(credential)?;
         Self::require_capability(&context, DeliveryCapability::Read)?;
-        self.require_community_catalog_host()?;
         self.require_environment_grant(credential, &context, Some(environment), "approval policy")?;
-        let mut ctx = self.application_ctx()?;
+        let mut ctx = self.catalog_ctx(&context)?;
         let env = crate::environment::environment(&mut ctx, environment)
             .await
             .map_err(map_catalog_error)?;
@@ -728,10 +737,9 @@ impl ManagementOperations {
     ) -> Result<crate::plan_approval::PlanApprovalsView, ManagementError> {
         let context = self.authenticate(credential)?;
         Self::require_capability(&context, DeliveryCapability::Read)?;
-        self.require_community_catalog_host()?;
         crate::clock_guard::require_trusted_time("plan approvals")
             .map_err(|error| ManagementError::Unavailable(error.to_string()))?;
-        let mut ctx = self.application_ctx()?;
+        let mut ctx = self.catalog_ctx(&context)?;
         let stored = crate::plan::load(&mut ctx, plan_id)
             .await
             .map_err(map_plan_lifecycle_error)?;
@@ -811,6 +819,7 @@ impl ManagementOperations {
             "software_compatibility.record.completed",
         )?;
         self.record_change(
+            &context,
             crate::change_stream::ChangeEventKind::CompatibilityResultRecorded,
             &release_digest,
             Some(environment),
@@ -1316,6 +1325,26 @@ impl ManagementOperations {
         Ok(())
     }
 
+    /// Community hosts use the embedded catalog. Tenant-mode hubs bind the
+    /// request tenant onto a catalog adapter (ADR 0038).
+    fn catalog_ctx(&self, context: &AuthenticatedRequestContext) -> Result<Ctx, ManagementError> {
+        if self.tenant_mode {
+            let ctx = match self.application_ctx() {
+                Ok(ctx) if ctx.has_catalog() => ctx,
+                _ => {
+                    return Err(ManagementError::Unavailable(
+                        "remote catalog lifecycle is not available in tenant mode".into(),
+                    ));
+                }
+            };
+            let tenant = context
+                .tenant()
+                .ok_or_else(|| ManagementError::Forbidden(NON_DISCLOSING_DENY.into()))?;
+            return Ok(ctx.with_catalog_tenant(tenant.tenant_id()));
+        }
+        self.application_ctx()
+    }
+
     pub async fn publish_release(
         &self,
         credential: &CredentialMaterial,
@@ -1326,7 +1355,6 @@ impl ManagementOperations {
         Self::require_capability(&context, DeliveryCapability::Publish)?;
         let manifest = crate::manifest::parse_raw(&request.manifest).map_err(map_catalog_error)?;
         Self::require_product_grant(&context, &manifest.product.name)?;
-        self.require_community_catalog_host()?;
         management_lifecycle::admit_publish(
             &request,
             context.principal.kind,
@@ -1348,7 +1376,7 @@ impl ManagementOperations {
         .map_err(map_lifecycle_error)?;
         let actor = &context.audit_principal();
         self.audit(actor, "catalog.publish.requested")?;
-        let mut ctx = self.application_ctx()?;
+        let mut ctx = self.catalog_ctx(&context)?;
         let published = crate::catalog::publish_with_result(
             &mut ctx,
             &files.manifest,
@@ -1363,6 +1391,7 @@ impl ManagementOperations {
         .map_err(map_catalog_error)?;
         self.audit(actor, "catalog.publish.completed")?;
         self.record_change(
+            &context,
             crate::change_stream::ChangeEventKind::ReleasePublished,
             &published.release,
             None,
@@ -1402,7 +1431,6 @@ impl ManagementOperations {
             .map(|(product, _)| product)
             .unwrap_or(&request.spec);
         Self::require_product_grant(&context, product)?;
-        self.require_community_catalog_host()?;
         management_lifecycle::admit_promote(
             &request,
             context.principal.kind,
@@ -1411,12 +1439,13 @@ impl ManagementOperations {
         .map_err(map_lifecycle_error)?;
         let actor = &context.audit_principal();
         self.audit(actor, "catalog.promote.requested")?;
-        let mut ctx = self.application_ctx()?;
+        let mut ctx = self.catalog_ctx(&context)?;
         let message = crate::catalog::promote(&mut ctx, &context, &request.spec, channel)
             .await
             .map_err(map_catalog_error)?;
         self.audit(actor, "catalog.promote.completed")?;
         self.record_change(
+            &context,
             crate::change_stream::ChangeEventKind::ReleasePromoted,
             &request.spec,
             None,
@@ -1437,7 +1466,6 @@ impl ManagementOperations {
         let context = self.authenticate(credential)?;
         self.refuse_agent(&context, "catalog.recall")?;
         Self::require_capability(&context, DeliveryCapability::Management)?;
-        self.require_community_catalog_host()?;
         management_lifecycle::admit_recall(
             &request,
             context.principal.kind,
@@ -1446,12 +1474,13 @@ impl ManagementOperations {
         .map_err(map_lifecycle_error)?;
         let actor = &context.audit_principal();
         self.audit(actor, "catalog.recall.requested")?;
-        let mut ctx = self.application_ctx()?;
+        let mut ctx = self.catalog_ctx(&context)?;
         let message = crate::catalog::recall(&mut ctx, &context, release)
             .await
             .map_err(map_catalog_error)?;
         self.audit(actor, "catalog.recall.completed")?;
         self.record_change(
+            &context,
             crate::change_stream::ChangeEventKind::ReleaseRecalled,
             release,
             None,
@@ -1472,7 +1501,6 @@ impl ManagementOperations {
         let context = self.authenticate(credential)?;
         self.refuse_agent(&context, "catalog.subscribe")?;
         Self::require_capability(&context, DeliveryCapability::Management)?;
-        self.require_community_catalog_host()?;
         management_lifecycle::admit_subscribe(
             &request,
             environment,
@@ -1482,7 +1510,7 @@ impl ManagementOperations {
         .map_err(map_lifecycle_error)?;
         self.require_environment_visible(&context, environment)
             .await?;
-        self.require_current_generation(environment, request.expected_generation)
+        self.require_current_generation(&context, environment, request.expected_generation)
             .await?;
         let Some((product, channel)) = request.spec.split_once('=') else {
             return Err(ManagementError::BadRequest(
@@ -1491,7 +1519,7 @@ impl ManagementOperations {
         };
         let actor = &context.audit_principal();
         self.audit(actor, "catalog.subscribe.requested")?;
-        let mut ctx = self.application_ctx()?;
+        let mut ctx = self.catalog_ctx(&context)?;
         let message = crate::environment::subscribe(&mut ctx, environment, product, channel)
             .await
             .map_err(map_catalog_error)?;
@@ -1561,7 +1589,7 @@ impl ManagementOperations {
         .map_err(map_lifecycle_error)?;
         self.require_environment_visible(&context, environment)
             .await?;
-        self.require_current_generation(environment, request.expected_generation)
+        self.require_current_generation(&context, environment, request.expected_generation)
             .await?;
         // Under the policy only runner certificates admit work, and behind a
         // TLS-terminating proxy none reach this server: every runner would
@@ -1608,9 +1636,8 @@ impl ManagementOperations {
     ) -> Result<crate::delivery_hold::DeliveryHoldView, ManagementError> {
         let context = self.authenticate(credential)?;
         Self::require_capability(&context, DeliveryCapability::Read)?;
-        self.require_community_catalog_host()?;
         self.require_environment_grant(credential, &context, Some(environment), "delivery hold")?;
-        let mut ctx = self.application_ctx()?;
+        let mut ctx = self.catalog_ctx(&context)?;
         crate::delivery_hold::view(
             &mut ctx,
             &crate::delivery_hold::HoldScope::environment(environment),
@@ -1659,7 +1686,6 @@ impl ManagementOperations {
         let context = self.authenticate(credential)?;
         self.refuse_agent(&context, &format!("delivery.hold.{}", operation.as_str()))?;
         Self::require_capability(&context, DeliveryCapability::Management)?;
-        self.require_community_catalog_host()?;
         management_lifecycle::admit_delivery_hold(
             &request,
             environment,
@@ -1670,12 +1696,12 @@ impl ManagementOperations {
         .map_err(map_lifecycle_error)?;
         self.require_environment_visible(&context, environment)
             .await?;
-        self.require_current_generation(environment, request.expected_generation)
+        self.require_current_generation(&context, environment, request.expected_generation)
             .await?;
         let actor = &context.audit_principal();
         let verb = operation.as_str();
         self.audit(actor, &format!("delivery.hold.{verb}.requested"))?;
-        let mut ctx = self.application_ctx()?;
+        let mut ctx = self.catalog_ctx(&context)?;
         let scope = crate::delivery_hold::HoldScope::environment(environment);
         let hold = match operation {
             ManagementLifecycleOperation::Hold => {
@@ -1699,6 +1725,7 @@ impl ManagementOperations {
         .map_err(map_catalog_error)?;
         self.audit(actor, &format!("delivery.hold.{verb}.completed"))?;
         self.record_change(
+            &context,
             match operation {
                 ManagementLifecycleOperation::Hold => {
                     crate::change_stream::ChangeEventKind::HoldSet
@@ -1730,10 +1757,9 @@ impl ManagementOperations {
     ) -> Result<crate::delivery_hold::DeliveryHoldView, ManagementError> {
         let context = self.authenticate(credential)?;
         Self::require_capability(&context, DeliveryCapability::Read)?;
-        self.require_community_catalog_host()?;
         self.require_environment_grant(credential, &context, None, "channel hold")?;
         Self::require_channel_binding(&context, channel)?;
-        let mut ctx = self.application_ctx()?;
+        let mut ctx = self.catalog_ctx(&context)?;
         crate::delivery_hold::view(
             &mut ctx,
             &crate::delivery_hold::HoldScope::channel(product, channel),
@@ -1788,7 +1814,6 @@ impl ManagementOperations {
         self.refuse_agent(&context, &format!("delivery.hold.{}", operation.as_str()))?;
         Self::require_capability(&context, DeliveryCapability::Management)?;
         Self::require_channel_binding(&context, channel)?;
-        self.require_community_catalog_host()?;
         management_lifecycle::admit_channel_hold(
             &request,
             operation,
@@ -1799,7 +1824,7 @@ impl ManagementOperations {
         let actor = &context.audit_principal();
         let verb = operation.as_str();
         self.audit(actor, &format!("delivery.hold.{verb}.requested"))?;
-        let mut ctx = self.application_ctx()?;
+        let mut ctx = self.catalog_ctx(&context)?;
         let scope = crate::delivery_hold::HoldScope::channel(product, channel);
         let hold = match operation {
             ManagementLifecycleOperation::ChannelHold => {
@@ -1824,6 +1849,7 @@ impl ManagementOperations {
         self.audit(actor, &format!("delivery.hold.{verb}.completed"))?;
         let label = scope.key();
         self.record_change(
+            &context,
             match operation {
                 ManagementLifecycleOperation::ChannelHold => {
                     crate::change_stream::ChangeEventKind::HoldSet
@@ -1857,7 +1883,6 @@ impl ManagementOperations {
         let context = self.authenticate(credential)?;
         self.refuse_agent(&context, "target.retry")?;
         Self::require_capability(&context, DeliveryCapability::Management)?;
-        self.require_community_catalog_host()?;
         management_lifecycle::admit_retry_failed_target(
             &request,
             environment,
@@ -1868,11 +1893,11 @@ impl ManagementOperations {
         .map_err(map_lifecycle_error)?;
         self.require_environment_visible(&context, environment)
             .await?;
-        self.require_current_generation(environment, request.expected_generation)
+        self.require_current_generation(&context, environment, request.expected_generation)
             .await?;
         let actor = &context.audit_principal();
         self.audit(actor, "delivery.failed_target.retry.requested")?;
-        let mut ctx = self.application_ctx()?;
+        let mut ctx = self.catalog_ctx(&context)?;
         let env_obj = crate::environment::environment(&mut ctx, environment)
             .await
             .map_err(map_catalog_error)?;
@@ -1893,6 +1918,7 @@ impl ManagementOperations {
             .map_err(map_catalog_error)?;
         self.audit(actor, "delivery.failed_target.retry.completed")?;
         self.record_change(
+            &context,
             crate::change_stream::ChangeEventKind::TargetRetried,
             product,
             Some(environment),
@@ -1923,7 +1949,6 @@ impl ManagementOperations {
         let context = self.authenticate(credential)?;
         self.admit_agent_plan(&context, "plan")?;
         Self::require_capability(&context, DeliveryCapability::Management)?;
-        self.require_community_catalog_host()?;
         management_lifecycle::admit_plan(
             &request,
             environment,
@@ -1933,11 +1958,11 @@ impl ManagementOperations {
         .map_err(map_lifecycle_error)?;
         self.require_environment_visible(&context, environment)
             .await?;
-        self.require_current_generation(environment, request.expected_generation)
+        self.require_current_generation(&context, environment, request.expected_generation)
             .await?;
         let actor = &context.audit_principal();
         self.audit(actor, "plan.requested")?;
-        let mut ctx = self.application_ctx()?;
+        let mut ctx = self.catalog_ctx(&context)?;
         // An agent gets the reconciler's own plan: held failed targets stay
         // held, so the plan authorizes nothing the reconciler would not run.
         let stored = if context.acting_agent().is_some() {
@@ -1948,6 +1973,7 @@ impl ManagementOperations {
         .map_err(map_plan_lifecycle_error)?;
         self.audit(actor, "plan.completed")?;
         self.record_change(
+            &context,
             crate::change_stream::ChangeEventKind::PlanCreated,
             &stored.id,
             Some(environment),
@@ -1984,7 +2010,6 @@ impl ManagementOperations {
         let context = self.authenticate(credential)?;
         self.refuse_agent(&context, "plan.approve")?;
         Self::require_capability(&context, DeliveryCapability::Management)?;
-        self.require_community_catalog_host()?;
         crate::clock_guard::require_trusted_time("plan approval")
             .map_err(|error| ManagementError::Unavailable(error.to_string()))?;
         management_lifecycle::admit_approve(
@@ -1996,8 +2021,12 @@ impl ManagementOperations {
         .map_err(map_lifecycle_error)?;
         self.require_environment_visible(&context, &request.environment)
             .await?;
-        self.require_current_generation(&request.environment, request.expected_generation)
-            .await?;
+        self.require_current_generation(
+            &context,
+            &request.environment,
+            request.expected_generation,
+        )
+        .await?;
         let files = management_lifecycle::RemoteApprovalFiles::materialize(
             &request.approval,
             &request.trust_roots,
@@ -2005,7 +2034,7 @@ impl ManagementOperations {
         .map_err(map_lifecycle_error)?;
         let actor = &context.audit_principal();
         self.audit(actor, "plan.approve.requested")?;
-        let mut ctx = self.application_ctx()?;
+        let mut ctx = self.catalog_ctx(&context)?;
         let stored = crate::plan::load(&mut ctx, plan_id)
             .await
             .map_err(map_plan_lifecycle_error)?;
@@ -2059,6 +2088,7 @@ impl ManagementOperations {
         };
         self.audit(actor, "plan.approve.completed")?;
         self.record_change(
+            &context,
             crate::change_stream::ChangeEventKind::PlanApproved,
             plan_id,
             Some(&request.environment),
@@ -2080,7 +2110,6 @@ impl ManagementOperations {
         let context = self.authenticate(credential)?;
         self.refuse_agent(&context, "plan.apply")?;
         Self::require_capability(&context, DeliveryCapability::Management)?;
-        self.require_community_catalog_host()?;
         crate::clock_guard::require_trusted_time("plan apply")
             .map_err(|error| ManagementError::Unavailable(error.to_string()))?;
         management_lifecycle::admit_apply(
@@ -2092,8 +2121,12 @@ impl ManagementOperations {
         .map_err(map_lifecycle_error)?;
         self.require_environment_visible(&context, &request.environment)
             .await?;
-        self.require_current_generation(&request.environment, request.expected_generation)
-            .await?;
+        self.require_current_generation(
+            &context,
+            &request.environment,
+            request.expected_generation,
+        )
+        .await?;
         let files = management_lifecycle::RemoteApprovalFiles::materialize_set(
             &request.approval,
             &request.approvals,
@@ -2102,7 +2135,7 @@ impl ManagementOperations {
         .map_err(map_lifecycle_error)?;
         let actor = &context.audit_principal();
         self.audit(actor, "plan.apply.requested")?;
-        let mut ctx = self.application_ctx()?;
+        let mut ctx = self.catalog_ctx(&context)?;
         let stored = crate::plan::load(&mut ctx, plan_id)
             .await
             .map_err(map_plan_lifecycle_error)?;
@@ -2153,6 +2186,7 @@ impl ManagementOperations {
         if failed > 0 {
             self.audit(actor, "plan.apply.failed")?;
             self.record_change(
+                &context,
                 crate::change_stream::ChangeEventKind::TargetFailed,
                 plan_id,
                 Some(&request.environment),
@@ -2164,6 +2198,7 @@ impl ManagementOperations {
         }
         self.audit(actor, "plan.apply.completed")?;
         self.record_change(
+            &context,
             crate::change_stream::ChangeEventKind::PlanApplied,
             plan_id,
             Some(&request.environment),
@@ -2185,7 +2220,6 @@ impl ManagementOperations {
         let context = self.authenticate(credential)?;
         self.admit_agent_plan(&context, "plan.rollback")?;
         Self::require_capability(&context, DeliveryCapability::Management)?;
-        self.require_community_catalog_host()?;
         management_lifecycle::admit_rollback(
             &request,
             environment,
@@ -2195,11 +2229,11 @@ impl ManagementOperations {
         .map_err(map_lifecycle_error)?;
         self.require_environment_visible(&context, environment)
             .await?;
-        self.require_current_generation(environment, request.expected_generation)
+        self.require_current_generation(&context, environment, request.expected_generation)
             .await?;
         let actor = &context.audit_principal();
         self.audit(actor, "plan.rollback.requested")?;
-        let mut ctx = self.application_ctx()?;
+        let mut ctx = self.catalog_ctx(&context)?;
         let recovery = request.recovery_reason.as_deref();
         let step = crate::plan::rollback_step_with_recovery(
             &mut ctx,
@@ -2241,13 +2275,14 @@ impl ManagementOperations {
     /// Refuse `expected` unless it is the environment's current execution
     /// lease generation: the value `env inspect` reports and every apply
     /// advances, so remote `--generation` and inspect share one counter
-    /// (#703). Callers are community-host routes.
+    /// (#703). Tenant-mode hubs bind the request tenant onto the catalog.
     async fn require_current_generation(
         &self,
+        context: &AuthenticatedRequestContext,
         environment: &str,
         expected: u64,
     ) -> Result<(), ManagementError> {
-        let mut ctx = self.application_ctx()?;
+        let mut ctx = self.catalog_ctx(context)?;
         let lease = crate::apply::inspect_environment_lease(&mut ctx, environment)
             .await
             .map_err(|error| ManagementError::Unavailable(error.to_string()))?;
@@ -2346,19 +2381,37 @@ impl ManagementOperations {
     /// those paths stay a follow-up so this slice owns the stream contract.
     fn record_change(
         &self,
+        context: &AuthenticatedRequestContext,
         kind: crate::change_stream::ChangeEventKind,
         resource: &str,
         environment: Option<&str>,
     ) -> Result<(), ManagementError> {
-        self.store
-            .append_change_event(
-                crate::now_millis(),
-                kind.as_str(),
-                resource,
-                environment.unwrap_or(""),
-            )
-            .map(|_| ())
-            .map_err(|error| ManagementError::Unavailable(error.to_string()))
+        if self.tenant_mode {
+            let store = self
+                .tenant_store
+                .as_ref()
+                .ok_or_else(|| ManagementError::Unavailable("tenant store unavailable".into()))?;
+            store
+                .append_change_event_for(
+                    context,
+                    crate::now_millis(),
+                    kind.as_str(),
+                    resource,
+                    environment.unwrap_or(""),
+                )
+                .map(|_| ())
+                .map_err(|error| ManagementError::Unavailable(error.to_string()))
+        } else {
+            self.store
+                .append_change_event(
+                    crate::now_millis(),
+                    kind.as_str(),
+                    resource,
+                    environment.unwrap_or(""),
+                )
+                .map(|_| ())
+                .map_err(|error| ManagementError::Unavailable(error.to_string()))
+        }
     }
 }
 

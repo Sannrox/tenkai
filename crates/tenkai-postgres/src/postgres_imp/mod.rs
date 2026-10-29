@@ -129,24 +129,23 @@ pub(crate) fn ensure_environment_active(
     environment: &str,
     operation: &str,
 ) -> Result<()> {
-    let id = if environment.starts_with("tenkai:env:") {
-        environment.to_owned()
-    } else {
-        tenkai::ontology::env_id(environment)
-    };
+    let name = environment
+        .strip_prefix("tenkai:env:")
+        .unwrap_or(environment);
+    let catalog_id = tenkai::ontology::env_id(name);
     let configuration = tx
         .query_opt(
             "SELECT configuration_json FROM environments WHERE id=$1",
-            &[&id],
+            &[&name],
         )
         .map_err(pg)?
         .map(|row| row.get::<_, String>(0));
     let configuration = match configuration {
         Some(configuration) => Some(configuration),
-        None if id != environment => tx
+        None if catalog_id != name => tx
             .query_opt(
                 "SELECT configuration_json FROM environments WHERE id=$1",
-                &[&environment],
+                &[&catalog_id],
             )
             .map_err(pg)?
             .map(|row| row.get::<_, String>(0)),
@@ -166,6 +165,7 @@ pub(crate) fn ensure_environment_active(
 }
 
 mod catalog;
+mod catalog_graph;
 mod change_events;
 mod channels;
 mod connect;

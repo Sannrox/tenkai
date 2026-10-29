@@ -81,7 +81,7 @@ pub fn validate_opaque_identifier(label: &str, value: &str) -> Result<()> {
 }
 
 pub use crate::client::{
-    known_action, known_actions, register, require_canary_schema,
+    known_action, known_actions, known_object_types, register, require_canary_schema,
     require_connectivity_upgrade_schema, require_package_migration_schema, require_wave_schema,
 };
 

@@ -14,6 +14,8 @@ pub const HUB_SCHEMA: &str = "tenkai_hub";
 pub struct EnterpriseHub {
     pub tenant: Arc<dyn TenantOperationalStore>,
     pub operational: Arc<dyn OperationalStore>,
+    /// Tenant-schema catalog object graph (ADR 0038).
+    pub catalog: Arc<dyn tenkai::storage::CatalogGraph>,
     /// Stored OIDC grant rules (#836), hub-wide.
     pub grant_rules: Arc<dyn tenkai::grant_rules::GrantRuleStore>,
 }
@@ -139,7 +141,8 @@ pub fn resolve_fenced_enterprise_hub(
         let hub = store.hub_partition()?;
         Ok(EnterpriseHub {
             grant_rules: Arc::new(store.clone()),
-            tenant: Arc::new(store),
+            tenant: Arc::new(store.clone()),
+            catalog: Arc::new(store),
             operational: Arc::new(hub),
         })
     }

@@ -14,6 +14,10 @@ use crate::pb::sekai::{
 pub(super) enum LeaseLifecycle<'a> {
     Remote(&'a RemoteClient),
     Embedded(Arc<crate::storage::SqliteStore>),
+    Catalog {
+        catalog: Arc<dyn crate::storage::CatalogGraph>,
+        tenant: String,
+    },
     Unavailable,
 }
 
@@ -29,6 +33,18 @@ impl LeaseLifecycle<'_> {
             Self::Unavailable => Err(super::LeaseError::Failed(anyhow::anyhow!(
                 super::TENANT_HUB_UNAVAILABLE
             ))),
+            Self::Catalog { catalog, tenant } => {
+                let catalog = Arc::clone(catalog);
+                let tenant = tenant.clone();
+                let namespace = namespace.to_string();
+                let key = key.to_string();
+                let owner = owner.to_string();
+                super::block_catalog(catalog, move |catalog| {
+                    catalog.acquire_lease(Some(&tenant), &namespace, &key, &owner, ttl_ms)
+                })
+                .await
+                .map_err(super::LeaseError::from_anyhow)
+            }
             Self::Embedded(store) => {
                 let store = Arc::clone(store);
                 let namespace = namespace.to_string();
@@ -75,6 +91,16 @@ impl LeaseLifecycle<'_> {
     pub(super) async fn get(&self, namespace: &str, key: &str) -> Result<Option<Lease>> {
         match self {
             Self::Unavailable => Ok(None),
+            Self::Catalog { catalog, tenant } => {
+                let catalog = Arc::clone(catalog);
+                let tenant = tenant.clone();
+                let namespace = namespace.to_string();
+                let key = key.to_string();
+                super::block_catalog(catalog, move |catalog| {
+                    catalog.get_lease(Some(&tenant), &namespace, &key)
+                })
+                .await
+            }
             Self::Embedded(store) => {
                 let store = Arc::clone(store);
                 let namespace = namespace.to_string();
@@ -112,6 +138,17 @@ impl LeaseLifecycle<'_> {
     ) -> Result<Lease> {
         match self {
             Self::Unavailable => anyhow::bail!(super::TENANT_HUB_UNAVAILABLE),
+            Self::Catalog { catalog, tenant } => {
+                let catalog = Arc::clone(catalog);
+                let tenant = tenant.clone();
+                let namespace = namespace.to_string();
+                let key = key.to_string();
+                let fencing_token = fencing_token.to_string();
+                super::block_catalog(catalog, move |catalog| {
+                    catalog.refresh_lease(Some(&tenant), &namespace, &key, &fencing_token, ttl_ms)
+                })
+                .await
+            }
             Self::Embedded(store) => {
                 let store = Arc::clone(store);
                 let namespace = namespace.to_string();
@@ -152,6 +189,17 @@ impl LeaseLifecycle<'_> {
     ) -> Result<Lease> {
         match self {
             Self::Unavailable => anyhow::bail!(super::TENANT_HUB_UNAVAILABLE),
+            Self::Catalog { catalog, tenant } => {
+                let catalog = Arc::clone(catalog);
+                let tenant = tenant.clone();
+                let namespace = namespace.to_string();
+                let key = key.to_string();
+                let fencing_token = fencing_token.to_string();
+                super::block_catalog(catalog, move |catalog| {
+                    catalog.release_lease(Some(&tenant), &namespace, &key, &fencing_token)
+                })
+                .await
+            }
             Self::Embedded(store) => {
                 let store = Arc::clone(store);
                 let namespace = namespace.to_string();
@@ -194,6 +242,26 @@ impl LeaseLifecycle<'_> {
     ) -> Result<Lease> {
         match self {
             Self::Unavailable => anyhow::bail!(super::TENANT_HUB_UNAVAILABLE),
+            Self::Catalog { catalog, tenant } => {
+                let catalog = Arc::clone(catalog);
+                let tenant = tenant.clone();
+                let namespace = namespace.to_string();
+                let key = key.to_string();
+                let owner = owner.to_string();
+                let expected_fencing_token = expected_fencing_token.to_string();
+                super::block_catalog(catalog, move |catalog| {
+                    catalog.takeover_lease(
+                        Some(&tenant),
+                        &namespace,
+                        &key,
+                        &owner,
+                        &expected_fencing_token,
+                        expected_expires_at_ms,
+                        ttl_ms,
+                    )
+                })
+                .await
+            }
             Self::Embedded(store) => {
                 let store = Arc::clone(store);
                 let namespace = namespace.to_string();

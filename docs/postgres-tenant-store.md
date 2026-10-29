@@ -9,9 +9,9 @@ SQLite. Supplying both `--database` / `TENKAI_DATABASE` and
 [ADR 0010](decisions/0010-supported-operating-profiles.md) defines the supported
 profiles. The default `local` profile and experimental single-server `fleet`
 profile use SQLite. Tenant-mode hubs assemble diagnostic profile
-`enterprise-experimental` from PostgreSQL plus authentication; catalog
-object-graph lifecycle and terminal-outcome export remain unavailable until
-those surfaces are wired on PostgreSQL.
+`enterprise-experimental` from PostgreSQL plus authentication. Catalog
+object-graph lifecycle lives in each tenant schema (ADR 0038). Terminal-outcome
+export remains unavailable until the tenant outbox lands (#765).
 
 | Role | Store |
 | --- | --- |
@@ -45,7 +45,7 @@ shared application store, or supported failover. It does **not** advertise
 | --- | --- |
 | `shared_replica_state` | Shared durable state for this adapter; sufficient for single-active-writer component tests |
 | Tick fence table | `tenkai_reconcile_tick_claims` for multi-host reconcile (#135); not a HA product claim |
-| Not claimed yet | Product `high_availability`, catalog object-graph lifecycle, terminal-outcome export |
+| Not claimed yet | Product `high_availability`, terminal-outcome export |
 
 Community SQLite never advertises `shared_replica_state`.
 The two-connection mutation and lease-handoff proof is documented in

@@ -17,6 +17,10 @@ use crate::pb::sekai::{
 pub(super) enum ObjectLifecycle<'a> {
     Remote(&'a RemoteClient),
     Embedded(Arc<crate::storage::SqliteStore>),
+    Catalog {
+        catalog: Arc<dyn crate::storage::CatalogGraph>,
+        tenant: String,
+    },
     Unavailable,
 }
 
@@ -24,6 +28,12 @@ impl ObjectLifecycle<'_> {
     pub(super) async fn get(&self, id: &str) -> Result<Option<Object>> {
         match self {
             Self::Unavailable => Ok(None),
+            Self::Catalog { catalog, tenant } => {
+                let catalog = Arc::clone(catalog);
+                let tenant = tenant.clone();
+                let id = id.to_string();
+                super::block_catalog(catalog, move |catalog| catalog.get(Some(&tenant), &id)).await
+            }
             Self::Embedded(store) => {
                 let store = Arc::clone(store);
                 let id = id.to_string();
@@ -53,6 +63,14 @@ impl ObjectLifecycle<'_> {
             Self::Unavailable => Err(super::ClientError::Failed(anyhow::anyhow!(
                 super::TENANT_HUB_UNAVAILABLE
             ))),
+            Self::Catalog { catalog, tenant } => {
+                let catalog = Arc::clone(catalog);
+                let tenant = tenant.clone();
+                super::block_catalog_status(catalog, move |catalog| {
+                    catalog.create(Some(&tenant), object)
+                })
+                .await
+            }
             Self::Embedded(store) => {
                 let store = Arc::clone(store);
                 super::block_embedded_status(store, move |store| store.create(object)).await
@@ -85,6 +103,13 @@ impl ObjectLifecycle<'_> {
     pub(super) async fn delete(&self, id: &str) -> Result<()> {
         match self {
             Self::Unavailable => anyhow::bail!(super::TENANT_HUB_UNAVAILABLE),
+            Self::Catalog { catalog, tenant } => {
+                let catalog = Arc::clone(catalog);
+                let tenant = tenant.clone();
+                let id = id.to_string();
+                super::block_catalog(catalog, move |catalog| catalog.delete(Some(&tenant), &id))
+                    .await
+            }
             Self::Embedded(store) => {
                 let store = Arc::clone(store);
                 let id = id.to_string();
@@ -108,6 +133,12 @@ impl ObjectLifecycle<'_> {
     pub(super) async fn put(&self, object: Object) -> Result<Object> {
         match self {
             Self::Unavailable => anyhow::bail!(super::TENANT_HUB_UNAVAILABLE),
+            Self::Catalog { catalog, tenant } => {
+                let catalog = Arc::clone(catalog);
+                let tenant = tenant.clone();
+                super::block_catalog(catalog, move |catalog| catalog.put(Some(&tenant), object))
+                    .await
+            }
             Self::Embedded(store) => {
                 let store = Arc::clone(store);
                 super::block_embedded(store, move |store| store.put(object)).await
