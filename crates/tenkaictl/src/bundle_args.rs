@@ -40,4 +40,19 @@ pub(crate) enum BundleCommand {
         #[arg(long)]
         expires_at_unix_ms: Option<i64>,
     },
+    /// Verify a bundle and write its docs to `<out>/<version>/`.
+    Docs {
+        /// The signed offline bundle archive.
+        #[arg(long)]
+        bundle: PathBuf,
+        /// Public Ed25519 trust roots to verify it against.
+        #[arg(long)]
+        trust_roots: PathBuf,
+        /// Environment identity the bundle was signed for.
+        #[arg(long)]
+        env: String,
+        /// Directory to write the docs under; `<out>/<version>` must not exist.
+        #[arg(long)]
+        out: PathBuf,
+    },
 }

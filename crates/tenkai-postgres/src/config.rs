@@ -14,6 +14,8 @@ pub const HUB_SCHEMA: &str = "tenkai_hub";
 pub struct EnterpriseHub {
     pub tenant: Arc<dyn TenantOperationalStore>,
     pub operational: Arc<dyn OperationalStore>,
+    /// Stored OIDC grant rules (#836), hub-wide.
+    pub grant_rules: Arc<dyn tenkai::grant_rules::GrantRuleStore>,
 }
 
 /// ADR 0010: a process selects exactly one authoritative operational backend.
@@ -136,6 +138,7 @@ pub fn resolve_fenced_enterprise_hub(
         }
         let hub = store.hub_partition()?;
         Ok(EnterpriseHub {
+            grant_rules: Arc::new(store.clone()),
             tenant: Arc::new(store),
             operational: Arc::new(hub),
         })

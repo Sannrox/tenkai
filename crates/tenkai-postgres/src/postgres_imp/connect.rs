@@ -179,6 +179,20 @@ fn connect_client(config: &Config, tls: MakeRustlsConnect) -> Result<Client> {
                  );",
         )
         .map_err(pg)?;
+    // Stored OIDC grant rules (#836): hub-wide, one row per claim value, and
+    // a generation every replica polls. Additive; older binaries ignore it.
+    client
+        .batch_execute(
+            "CREATE TABLE IF NOT EXISTS tenkai_grant_rules (
+                    value TEXT PRIMARY KEY,
+                    rule_json TEXT NOT NULL
+                 );
+             CREATE TABLE IF NOT EXISTS tenkai_grant_rule_generation (
+                    id SMALLINT PRIMARY KEY CHECK (id = 1),
+                    generation BIGINT NOT NULL
+                 );",
+        )
+        .map_err(pg)?;
     client
         .query_one(
             "SELECT pg_advisory_unlock(hashtextextended('tenkai_global_schema_migration', 0))",

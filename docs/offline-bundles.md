@@ -163,6 +163,27 @@ repository: export follows a release's image manifests to them. Install and
 bind refuse a bundle that misses one, naming the image and the digest, before
 anything is stored.
 
+
+## Docs
+
+Every bundle carries the docs of the Tenkai version that built it, embedded
+at compile time from `docs/`, under `docs/<version>/` with a signed index
+(`docs/index.json`, `tenkai.offline-docs.v1`) naming each file's digest. On a
+dark site, write them out as plain files:
+
+```bash
+tenkaictl bundle docs \
+  --bundle site-c.bundle.json \
+  --trust-roots trust-roots.toml \
+  --env site-c \
+  --out ./tenkai-docs
+```
+
+The command verifies the bundle, checks each doc against the index, and
+writes `./tenkai-docs/<version>/`. That directory must not exist yet; the
+files are staged beside it and moved into place only when all are written,
+so an interrupted run leaves no partial copy to mistake for a complete one.
+
 ## Delta bundles and content retention
 
 A full bundle carries every layer and weight of a release, tens of GB for a

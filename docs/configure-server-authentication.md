@@ -204,6 +204,30 @@ credential, not for day-to-day administration. Every management mutation
 records the authenticated principal in the audit log, so the first
 administrator's actions are attributable from the first request.
 
+### Stored grant rules
+
+Grant rules can also live in the hub's store instead of the config file,
+so the first administrator can be set up, and administration changed,
+without editing the file and restarting every replica (#836). The
+`[grants]` section may then list no rules at all.
+
+- The effective rules are the file's plus the stored ones. The file stays
+  authoritative for what it names: a stored rule may not use a claim value
+  the file declares, and if the file gains a value later, the stored rule
+  for it is ignored.
+- There is one stored rule per claim value, at most 256. Each records who
+  created it, when, and why. The store keeps a generation that grows with
+  every change; every replica checks it every 5 seconds and reloads the
+  rules when it moved, and the replica that made a change applies it at
+  once. Stored rules sit in the hub-wide tables on PostgreSQL, so every
+  replica shares them.
+- `first_administrator` on `/healthz` and in the startup line counts stored
+  rules too (`stored_rules=` on the startup line).
+- Rolling deploys: releases before this one ignore stored rules. Change
+  stored rules only once every replica runs a release with this change,
+  or a request on an older replica will not see them.
+
+
 ### CLI sign-in
 
 `tenkaictl login` is an OIDC client of the same public `[client]` the console

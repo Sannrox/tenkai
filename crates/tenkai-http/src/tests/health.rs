@@ -303,3 +303,99 @@ async fn health_reports_the_first_administrator_status_only() {
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert!(body.get("first_administrator").is_none(), "{body}");
 }
+
+/// #836: a stored management rule created on one replica makes every
+/// replica's `/healthz` report a first administrator once it checks the
+/// stored rules' generation, without a restart.
+#[tokio::test]
+async fn health_reports_a_stored_first_administrator_on_every_replica() {
+    use tenkai::grant_rules::StoredGrants;
+    let dir = std::env::temp_dir().join(format!(
+        "tenkai-http-stored-grants-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let database = dir.join("tenkai.db");
+    let replica = |store: Arc<tenkai::storage::SqliteStore>| {
+        let stored = StoredGrants::load(store.clone(), Vec::<String>::new()).unwrap();
+        let mut config = ServerConfig::community("management-secret", HashMap::new());
+        config.stored_grants = Some(stored.clone());
+        let app = router(
+            config,
+            Arc::new(super::support::FixedReconciler::default()),
+            store,
+        )
+        .unwrap();
+        (stored, app)
+    };
+    let (writer, first) = replica(Arc::new(
+        tenkai::storage::SqliteStore::open(&database).unwrap(),
+    ));
+    let (reader, second) = replica(Arc::new(
+        tenkai::storage::SqliteStore::open(&database).unwrap(),
+    ));
+    let status = |app: axum::Router| async move {
+        let response = app
+            .oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        body["first_administrator"].clone()
+    };
+    assert_eq!(status(first.clone()).await, "missing");
+    writer
+        .create(
+            tenkai::oidc_verifier::OidcGrantRule {
+                value: "tenkai-admins".into(),
+                capabilities: vec!["read".into(), "management".into()],
+                environment: None,
+                channels: Vec::new(),
+                products: Vec::new(),
+                kind: None,
+            },
+            "management-token",
+            "first administrator",
+            1,
+        )
+        .unwrap();
+    assert_eq!(status(first).await, "configured");
+    assert_eq!(status(second.clone()).await, "missing", "before its check");
+    assert!(reader.refresh().unwrap());
+    assert_eq!(status(second.clone()).await, "configured");
+    // Removing the last stored management rule reports missing again.
+    assert!(writer.remove("tenkai-admins").unwrap());
+    assert!(reader.refresh().unwrap());
+    assert_eq!(status(second).await, "missing");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// #836: a replica whose stored grant rules are stale is not ready.
+#[tokio::test]
+async fn readiness_refuses_while_stored_grant_rules_are_stale() {
+    let store = Arc::new(tenkai::storage::SqliteStore::open_in_memory().unwrap());
+    let stored = tenkai::grant_rules::StoredGrants::load_with_stale_after(
+        store.clone(),
+        Vec::<String>::new(),
+        std::time::Duration::from_millis(1),
+    )
+    .unwrap();
+    let mut config = ServerConfig::community("management-secret", HashMap::new());
+    config.stored_grants = Some(stored.clone());
+    let app = router(
+        config,
+        Arc::new(super::support::FixedReconciler::default()),
+        store,
+    )
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    assert!(stored.is_stale());
+    let response = app
+        .oneshot(Request::get("/readyz").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}

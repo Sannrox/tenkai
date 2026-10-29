@@ -19,6 +19,7 @@ mod change_events;
 mod error;
 mod fixture_matching;
 mod fixtures;
+mod grant_rules;
 mod migrate;
 mod operational_store;
 mod plans;

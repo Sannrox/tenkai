@@ -302,6 +302,8 @@ mod live_fence;
 #[cfg(feature = "postgres")]
 mod live_fixture;
 #[cfg(feature = "postgres")]
+mod live_grant_rules;
+#[cfg(feature = "postgres")]
 mod live_isolation;
 #[cfg(feature = "postgres")]
 mod live_retirement;

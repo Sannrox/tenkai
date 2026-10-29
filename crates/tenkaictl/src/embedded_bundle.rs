@@ -78,7 +78,24 @@ pub(crate) async fn run(ctx: &mut Ctx, command: BundleCommand) -> Result<()> {
             );
             Ok(())
         }
+        BundleCommand::Docs {
+            bundle,
+            trust_roots,
+            env,
+            out,
+        } => extract_docs(&bundle, &trust_roots, &env, &out),
     }
+}
+
+/// Verify `bundle` and write its docs under `out`. Opens no store, so it
+/// runs on a host that only holds the archive.
+pub(crate) fn extract_docs(bundle: &Path, trust_roots: &Path, env: &str, out: &Path) -> Result<()> {
+    let envelope = tenkai::offline_bundle::BundleEnvelope::load(bundle)?;
+    let roots = TrustRoots::load(trust_roots)?;
+    let verified = envelope.verify(&roots, ontology::NS, env, tenkai::now_millis())?;
+    let written = tenkai::offline_docs::extract(&verified, out)?;
+    println!("wrote offline docs to {}", written.display());
+    Ok(())
 }
 
 fn required_host_field(flag: &str, value: Option<String>) -> Result<String> {
