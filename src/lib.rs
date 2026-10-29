@@ -183,6 +183,7 @@ pub mod fleet_workload;
 pub mod health_gate;
 pub mod host_env;
 pub mod host_preflight;
+pub mod import_progress;
 pub mod import_scanner;
 pub mod inventory;
 pub mod issuer_auth;

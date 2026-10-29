@@ -29,7 +29,7 @@ use tenkai::management_lifecycle::{
     RetireEnvironmentRequest, RetryFailedTargetRequest, RollbackRequest, SubscribeRequest,
 };
 use tenkai::observed_runtime::EnvironmentRuntimeReport;
-use tenkai::offline_import::{ImportJob, ImportRequest, StagedBundle};
+use tenkai::offline_import::{ImportJob, ImportJobList, ImportRequest, StagedBundle};
 use tenkai::oidc_verifier::OidcClientDiscovery;
 use tenkai::operational_events::WebhookDelivery;
 use tenkai::package_migration::{
@@ -172,6 +172,13 @@ pub fn http_contract() -> Value {
             // artifact in its own format: support bundle, audit export,
             // recovery bundle or offline receipt.
             response: schema::<serde_json::Value>(&mut g),
+        },
+        Route {
+            method: "GET",
+            path: "/v1/imports",
+            auth: Auth::Management,
+            request: None,
+            response: schema::<ImportJobList>(&mut g),
         },
         Route {
             method: "POST",

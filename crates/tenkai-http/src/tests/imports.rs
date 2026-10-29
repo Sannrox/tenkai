@@ -103,6 +103,18 @@ async fn import_routes_take_staged_names_and_record_refusals() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(fetched, job);
+    // #821: the job list shows the job; another environment's token sees none.
+    let (status, listed) = call("GET", "/v1/imports", Some("management-secret"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(listed["jobs"][0]["id"], job["id"]);
+    assert_eq!(listed["jobs"][0]["dry_run"], true);
+    let (status, scoped) = call("GET", "/v1/imports", Some("other-secret"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(scoped["jobs"], serde_json::json!([]));
+    assert_eq!(
+        call("GET", "/v1/imports", None, None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
     assert_eq!(
         call(
             "GET",

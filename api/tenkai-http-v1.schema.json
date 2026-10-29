@@ -1344,6 +1344,35 @@
       ],
       "type": "object"
     },
+    "EntryProgress": {
+      "description": "One content entry of an import.",
+      "properties": {
+        "bytes_done": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "bytes_total": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "digest": {
+          "type": "string"
+        },
+        "kind": {
+          "description": "`layer` or `weights`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "digest",
+        "kind",
+        "bytes_done",
+        "bytes_total"
+      ],
+      "type": "object"
+    },
     "EnvironmentConfigChange": {
       "description": "One configuration change. The variant decides the route: its resource\npath and whether it is a `PUT` or a `DELETE`.",
       "oneOf": [
@@ -2754,6 +2783,13 @@
           "$ref": "#/$defs/BindPreview",
           "description": "What the bind does (or did); present once the bundle verified."
         },
+        "progress": {
+          "description": "Per content entry (layer or weight) the bytes stored so far and the\ntotal (#821), from the job's progress file; never in the job file.",
+          "items": {
+            "$ref": "#/$defs/EntryProgress"
+          },
+          "type": "array"
+        },
         "refusal": {
           "description": "The exact refusal, for example a missing layer digest or an expired interval.",
           "type": "string"
@@ -2782,6 +2818,21 @@
         "state",
         "actor",
         "started_at_ms"
+      ],
+      "type": "object"
+    },
+    "ImportJobList": {
+      "description": "`GET /v1/imports`: this host's import jobs, newest first.",
+      "properties": {
+        "jobs": {
+          "items": {
+            "$ref": "#/$defs/ImportJob"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "jobs"
       ],
       "type": "object"
     },
@@ -5121,6 +5172,15 @@
       "path": "/v1/exports/{id}/download",
       "request": null,
       "response": true
+    },
+    {
+      "auth": "management",
+      "method": "GET",
+      "path": "/v1/imports",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/ImportJobList"
+      }
     },
     {
       "auth": "management",

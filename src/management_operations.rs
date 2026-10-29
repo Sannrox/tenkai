@@ -372,6 +372,23 @@ impl ManagementOperations {
         crate::offline_import::list_staged(&settings.staging).map_err(internal)
     }
 
+    /// `GET /v1/imports` (#821): this host's import jobs, dry runs and
+    /// imports, newest first. An environment-scoped credential sees its
+    /// environment's jobs only.
+    pub async fn import_jobs(
+        &self,
+        credential: &CredentialMaterial,
+        settings: &crate::offline_import::ImportSettings,
+    ) -> Result<crate::offline_import::ImportJobList, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        self.require_community_catalog_host()?;
+        let granted = self.granted_environment(credential, &context);
+        let mut jobs = crate::offline_import::list_jobs(&settings.staging).map_err(internal)?;
+        jobs.retain(|job| granted.is_none_or(|granted| granted == job.environment));
+        Ok(crate::offline_import::ImportJobList { jobs })
+    }
+
     /// `POST /v1/imports`: verify a staged bundle with the host trust roots
     /// and bind it, or preview the bind. A refusal is a `failed` job.
     pub async fn import_bundle(
