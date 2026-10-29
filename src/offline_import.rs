@@ -22,8 +22,17 @@
 //! ([`crate::import_progress`]). Job files live in the host's staging
 //! directory, as the bundles do, so a replica lists the imports run on its
 //! host.
+//!
+//! Each staged archive reports the SHA-256 of its bytes, and each job the
+//! digest of the bytes it read (#830), so a client can tell whether a job
+//! ran against the archive staged now. The listing hashes a file once and
+//! reuses that while its size, modification and change times and inode stay
+//! the same. A job's digest is kept beside the job, as its progress is, so
+//! the job file keeps the format earlier versions read.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -70,6 +79,11 @@ pub struct StagedBundle {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub unreadable: Option<String>,
+    /// `sha256:<hex>` of the archive file (#830); absent when it could not
+    /// be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub archive_digest: Option<String>,
 }
 
 /// Body of `POST /v1/imports`.
@@ -125,6 +139,98 @@ pub struct ImportJob {
     /// total (#821), from the job's progress file; never in the job file.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub progress: Vec<crate::import_progress::EntryProgress>,
+    /// `sha256:<hex>` of the archive bytes this job read (#830), from the
+    /// job's archive file; never in the job file. Absent before the archive
+    /// was read, and on jobs from earlier versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub archive_digest: Option<String>,
+}
+
+/// `<id>.archive.json`: the digest of the archive one attempt of a job read.
+/// The attempt is named by its start, so a record left by another attempt
+/// (an older binary's retry after a rollback does not touch this file) is
+/// never reported for the job file beside it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArchiveRecord {
+    started_at_ms: i64,
+    archive_digest: String,
+}
+
+/// What identifies one version of a staged file without reading it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    len: u64,
+    modified_ns: i128,
+    changed_ns: i128,
+    inode: u64,
+    device: u64,
+}
+
+impl FileStamp {
+    fn of(metadata: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt as _;
+        let ns = |secs: i64, nanos: i64| i128::from(secs) * 1_000_000_000 + i128::from(nanos);
+        Self {
+            len: metadata.len(),
+            modified_ns: ns(metadata.mtime(), metadata.mtime_nsec()),
+            changed_ns: ns(metadata.ctime(), metadata.ctime_nsec()),
+            inode: metadata.ino(),
+            device: metadata.dev(),
+        }
+    }
+}
+
+/// The listing's per-file reading, reused while the file's stamp holds.
+#[derive(Debug, Clone)]
+struct ArchiveReading {
+    stamp: FileStamp,
+    digest: Option<String>,
+    statement: std::result::Result<(String, String, i64), String>,
+}
+
+/// Process-local and only an optimization: a restarted process hashes each
+/// staged file once again.
+static READINGS: Mutex<Option<HashMap<PathBuf, ArchiveReading>>> = Mutex::new(None);
+
+/// `sha256:<hex>` of `bytes`.
+fn archive_digest(bytes: &[u8]) -> String {
+    format!("sha256:{:x}", Sha256::digest(bytes))
+}
+
+/// Read, hash and parse the archive at `path`, unless `stamp` shows the
+/// cached reading is still of the same file.
+fn reading(path: &Path, stamp: FileStamp) -> ArchiveReading {
+    let cached = READINGS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .and_then(|readings| readings.get(path).cloned())
+        .filter(|reading| reading.stamp == stamp);
+    if let Some(reading) = cached {
+        return reading;
+    }
+    let (digest, statement) = match BundleEnvelope::read_archive(path) {
+        Ok(raw) => (
+            Some(archive_digest(&raw)),
+            BundleEnvelope::parse(&raw)
+                .map(|envelope| {
+                    (
+                        envelope.statement.environment_id,
+                        envelope.statement.plan_id,
+                        envelope.statement.expires_at_unix_ms,
+                    )
+                })
+                .map_err(|error| format!("{error:#}")),
+        ),
+        Err(error) => (None, Err(format!("{error:#}"))),
+    };
+    ArchiveReading {
+        stamp,
+        digest,
+        statement,
+    }
 }
 
 /// `GET /v1/imports`: this host's import jobs, newest first.
@@ -137,6 +243,7 @@ pub struct ImportJobList {
 /// with the reason, so an operator sees why a transfer is unusable.
 pub fn list_staged(staging: &Path) -> Result<Vec<StagedBundle>> {
     let mut staged = Vec::new();
+    let mut readings = HashMap::new();
     for entry in
         std::fs::read_dir(staging).with_context(|| format!("reading {}", staging.display()))?
     {
@@ -149,6 +256,7 @@ pub fn list_staged(staging: &Path) -> Result<Vec<StagedBundle>> {
             continue;
         }
         let path = entry.path();
+        let read = reading(&path, FileStamp::of(&metadata));
         let mut bundle = StagedBundle {
             chunked: crate::offline_chunk_store::chunk_dir_beside(&path)
                 .is_ok_and(|dir| dir.is_dir()),
@@ -158,17 +266,24 @@ pub fn list_staged(staging: &Path) -> Result<Vec<StagedBundle>> {
             plan_id: None,
             expires_at_ms: None,
             unreadable: None,
+            archive_digest: read.digest.clone(),
         };
-        match BundleEnvelope::load(&path) {
-            Ok(envelope) => {
-                bundle.environment = Some(envelope.statement.environment_id);
-                bundle.plan_id = Some(envelope.statement.plan_id);
-                bundle.expires_at_ms = Some(envelope.statement.expires_at_unix_ms);
+        match &read.statement {
+            Ok((environment, plan_id, expires_at_ms)) => {
+                bundle.environment = Some(environment.clone());
+                bundle.plan_id = Some(plan_id.clone());
+                bundle.expires_at_ms = Some(*expires_at_ms);
             }
-            Err(error) => bundle.unreadable = Some(format!("{error:#}")),
+            Err(error) => bundle.unreadable = Some(error.clone()),
         }
+        readings.insert(path, read);
         staged.push(bundle);
     }
+    // Keep only this directory's current files; other directories' entries stay.
+    let mut cache = READINGS.lock().unwrap_or_else(PoisonError::into_inner);
+    let cache = cache.get_or_insert_with(HashMap::new);
+    cache.retain(|path, _| path.parent() != Some(staging));
+    cache.extend(readings);
     staged.sort_by(|left, right| left.file.cmp(&right.file));
     Ok(staged)
 }
@@ -221,7 +336,18 @@ pub fn job(staging: &Path, id: &str) -> Result<ImportJob> {
     let mut job: ImportJob =
         serde_json::from_slice(&raw).with_context(|| format!("reading import {id}"))?;
     job.progress = crate::import_progress::read(&progress_path(&jobs, id));
+    job.archive_digest = read_archive_record(&jobs, &job);
     Ok(job)
+}
+
+/// The digest `job`'s archive file records for this attempt; `None` when
+/// there is none, it does not parse, or it is another attempt's.
+fn read_archive_record(jobs: &Path, job: &ImportJob) -> Option<String> {
+    crate::atomic_state::read_json_optional::<ArchiveRecord>(&archive_path(jobs, &job.id))
+        .ok()
+        .flatten()
+        .filter(|record| record.started_at_ms == job.started_at_ms)
+        .map(|record| record.archive_digest)
 }
 
 /// Every import job of this host, newest first. A job file that does not
@@ -239,7 +365,9 @@ pub fn list_jobs(staging: &Path) -> Result<Vec<ImportJob>> {
         let Some(id) = name
             .to_str()
             .and_then(|name| name.strip_suffix(".json"))
-            .filter(|id| id.starts_with("imp-") && !id.ends_with(".progress"))
+            .filter(|id| {
+                id.starts_with("imp-") && !id.ends_with(".progress") && !id.ends_with(".archive")
+            })
         else {
             continue;
         };
@@ -269,6 +397,7 @@ fn prune_jobs(staging: &Path) -> Result<()> {
         }
         crate::atomic_state::remove_if_exists(&announced_marker(&jobs, &old))?;
         crate::atomic_state::remove_if_exists(&progress_path(&jobs, &old.id))?;
+        crate::atomic_state::remove_if_exists(&archive_path(&jobs, &old.id))?;
         crate::atomic_state::remove_if_exists(&jobs.join(format!("{}.json", old.id)))?;
     }
     Ok(())
@@ -276,6 +405,10 @@ fn prune_jobs(staging: &Path) -> Result<()> {
 
 fn progress_path(jobs: &Path, id: &str) -> PathBuf {
     jobs.join(format!("{id}.progress.json"))
+}
+
+fn archive_path(jobs: &Path, id: &str) -> PathBuf {
+    jobs.join(format!("{id}.archive.json"))
 }
 
 /// Run one import or dry run and return its finished job. A refusal is a
@@ -333,12 +466,30 @@ pub async fn run(
         preview: None,
         refusal: None,
         progress: Vec::new(),
+        archive_digest: None,
     };
+    // An earlier attempt's digest is not this attempt's.
+    crate::atomic_state::remove_if_exists(&archive_path(&jobs, &id))?;
     write_job(&jobs, &job)?;
     let progress = crate::import_progress::ImportProgress::new(progress_path(&jobs, &id));
     let outcome = async {
         let path = staged_path(staging, &request.bundle)?;
-        let envelope = BundleEnvelope::load(&path)?;
+        // The digest of exactly the bytes verified and imported, recorded
+        // before anything is trusted, so even a refusal names the archive.
+        let raw = BundleEnvelope::read_archive(&path)?;
+        let digest = archive_digest(&raw);
+        crate::atomic_state::write_json_verified(
+            &archive_path(&jobs, &id),
+            &ArchiveRecord {
+                started_at_ms,
+                archive_digest: digest.clone(),
+            },
+            |observed: &ArchiveRecord| {
+                anyhow::ensure!(observed.archive_digest == digest, "archive record changed");
+                Ok(())
+            },
+        )?;
+        let envelope = BundleEnvelope::parse(&raw)?;
         if request.dry_run {
             return crate::connectivity::preview_isolated_bundle(
                 ctx,
@@ -411,6 +562,7 @@ pub async fn run(
         eprintln!("pruning old import jobs failed (retried next import): {error:#}");
     }
     job.progress = crate::import_progress::read(&progress_path(&jobs, &id));
+    job.archive_digest = read_archive_record(&jobs, &job);
     Ok(job)
 }
 
@@ -431,6 +583,7 @@ pub fn unannounced_failures(staging: &Path) -> Result<Vec<ImportJob>> {
             let path = entry?.path();
             if path.extension().and_then(|ext| ext.to_str()) != Some("json")
                 || path.to_string_lossy().ends_with(".progress.json")
+                || path.to_string_lossy().ends_with(".archive.json")
             {
                 continue;
             }
@@ -480,10 +633,12 @@ fn is_announced(jobs: &Path, job: &ImportJob) -> bool {
     announced_marker(jobs, job).exists()
 }
 
-/// The job file, without progress, so it keeps the format earlier versions read.
+/// The job file, without progress or archive digest, so it keeps the
+/// format earlier versions read.
 fn write_job(jobs: &Path, job: &ImportJob) -> Result<()> {
     let stored = ImportJob {
         progress: Vec::new(),
+        archive_digest: None,
         ..job.clone()
     };
     crate::atomic_state::write_json_verified(
@@ -555,6 +710,7 @@ mod tests {
             preview: None,
             refusal: None,
             progress: Vec::new(),
+            archive_digest: None,
         };
         // The two oldest are open: a running job and an unannounced failure.
         write_job(&jobs, &job(0, ImportState::Running)).unwrap();

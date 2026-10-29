@@ -321,6 +321,11 @@ impl BundleEnvelope {
     }
 
     pub fn load(path: &Path) -> Result<Self> {
+        Self::parse(&Self::read_archive(path)?)
+    }
+
+    /// The archive's bytes, refused above the encoded archive limit.
+    pub fn read_archive(path: &Path) -> Result<Vec<u8>> {
         let size = std::fs::metadata(path)
             .with_context(|| format!("reading bundle metadata {}", path.display()))?
             .len();
@@ -328,9 +333,11 @@ impl BundleEnvelope {
         if size > encoded_limit {
             bail!("offline bundle exceeds the encoded archive byte limit");
         }
-        let raw = std::fs::read(path)
-            .with_context(|| format!("reading offline bundle {}", path.display()))?;
-        serde_json::from_slice(&raw).context("parsing offline bundle")
+        std::fs::read(path).with_context(|| format!("reading offline bundle {}", path.display()))
+    }
+
+    pub fn parse(raw: &[u8]) -> Result<Self> {
+        serde_json::from_slice(raw).context("parsing offline bundle")
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {

@@ -63,6 +63,29 @@ the same rules as an approval-policy signer: 32 bytes, readable by the
 owner only. Tenant-mode hubs refuse the setting, because tenant records
 live in PostgreSQL.
 
+## Ranged export
+
+To hand over one period, export the chain entries that cover it by
+sequence, inclusive:
+
+```bash
+tenkaictl audit export-range /var/lib/tenkai/audit --from 3 --to 7 \
+  --out audit-range-00000003-00000007.json --trust-roots audit-trust.toml
+```
+
+Over HTTP, `POST /v1/exports` with `"kind": "audit-export"`,
+`"from_sequence": 3` and `"to_sequence": 7` stores the same file, and the
+export's entry shows `audit_range` (`from`, `to`); a next-entry export shows
+its own sequence there. A ranged export is a `tenkai.audit-range.v1` file
+holding those signed exports unchanged, so it carries every record of the
+range and no other. It has no signature of its own: each export keeps its
+signature, and an older verifier can check each one. The chain must already
+hold the whole range and verify; a ranged export never writes a new chain
+entry. At most 1000 entries fit in one range. Name range files
+`audit-range-<from>-<to>.json`: only `audit-<sequence>.json` files are chain
+entries, so a range file kept beside the chain never blocks the next export. To find the sequences for a
+time window, read the period times of the chain's exports.
+
 ## Verify
 
 Add the seed's public key to a trust-roots file (`[[signers]]` with
@@ -81,6 +104,14 @@ offline transfer. It refuses:
 - a missing or out-of-order export;
 - an export that does not name its predecessor's digest;
 - an entry outside its export's cursor range.
+
+A single ranged export verifies the same way, as the chain it holds:
+`tenkaictl audit verify audit-range-00000003-00000007.json --trust-roots
+audit-trust.toml`. It is refused when an export inside the range is missing,
+reordered or changed, or a record in one was removed or altered. Its range
+bounds are not signed: compare them with the range you asked for, and pass
+`--anchor` with the digest of export `from - 1` to tie it to a chain you
+hold.
 
 To verify a later run of files on its own, pass the digest of the export
 before the first one with `--anchor`; `tenkaictl audit export` prints each
