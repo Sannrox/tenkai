@@ -102,8 +102,26 @@ the replicas. Apply checks again before it changes anything, for the release
 being deployed and the one a failure would restore, and runtime delivery checks
 before it hands out new work, so a stored plan cannot outlive a placement
 change. A topology needs at least two distinct replicas. Releases without
-a `[topology]` plan as before. Keeping a minimum of replicas available during a
-rolling upgrade and failover drills follow separately (#650).
+a `[topology]` plan as before.
+
+`min_available` (optional, at least 1 and fewer than the replicas) keeps a
+minimum of replicas serving during a rolling wave. Before the wave runs a plan
+that changes a replica that is serving (its `deployment_health.<product>`
+reads `healthy`), at least that many of the other replicas must be healthy too,
+and a replica with a plan left running (a run in progress, or one a crash
+interrupted before it recorded an outcome) does not count;
+otherwise it refuses before executing, naming the replicas that are not, and a
+later `advance` retries once they recover. The check and the run hold the
+topology's lease, so two waves cannot take two of its replicas down at once;
+the second is told to retry. Rollback runs under the same guard, applying the
+topology of each release the plan deploys or would restore on failure as well
+as the wave's, and every such release's minimum. A replica
+whose plan changes nothing is not held. The topology lease, like the wave lease,
+lasts two hours and is not renewed while a plan runs, so an execution longer
+than that is not exclusive; fencing both through execution is #834. Upgrading a replica that is not
+serving takes nothing down, so a first install and the repair of a failed
+replica proceed. This can slow upgrades by design. Failover drills follow
+separately (#650).
 
 ## Gates
 
