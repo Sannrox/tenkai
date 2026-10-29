@@ -200,10 +200,12 @@ delta that carries only what that base release lacks (#635):
   release's layers and model weights, as published, are left out, and the
   stack manifest still names them so a site holding the base passes
   preflight. Base images count with every blob they reference, so an image
-  update carries only the blobs that changed. The exporter needs no bytes of a
-  base image the new release keeps unchanged; an image the delta carries must
-  be fully readable there, including blobs it reuses, or the build stops
-  naming it (#841). A blob counts as brought only under the registry and
+  update carries only the blobs that changed. Closure discovery reads
+  manifest descriptors and does not fetch leaf blobs. Traversal stops at
+  references the base already holds under the same registry and repository,
+  so the exporter needs no bytes of a reused layer (#841). An image the
+  delta carries must be readable for the blobs it adds, or the build stops
+  naming it. A blob counts as brought only under the registry and
   repository the base put it in; one the new release needs elsewhere is
   carried. A delta's component SBOMs list what it carries; the base bundle
   describes the rest.

@@ -209,17 +209,27 @@ pub async fn build(ctx: &mut Ctx, request: &BundleBuildRequest<'_>) -> Result<Bu
             if held.contains(&blob_at(artifact)) {
                 targets.push(artifact.clone());
             } else {
-                targets.extend(
-                    crate::oci_artifact::image_closure(
-                        std::slice::from_ref(artifact),
-                        request.registry,
-                    )
-                    // A carried image must expand here; guessing which blobs
-                    // travel could publish a delta the site cannot import.
-                    .with_context(|| {
-                        format!("expanding image {} for the delta", artifact.digest)
-                    })?,
-                );
+                let expanded = crate::oci_artifact::image_closure_except(
+                    std::slice::from_ref(artifact),
+                    request.registry,
+                    |candidate| held.contains(&blob_at(candidate)),
+                )
+                // A carried image must expand here; guessing which blobs
+                // travel could publish a delta the site cannot import.
+                .with_context(|| format!("expanding image {} for the delta", artifact.digest))?;
+                for blob in &expanded {
+                    if held.contains(&blob_at(blob))
+                        || crate::oci_artifact::is_manifest_media_type(&blob.media_type)
+                    {
+                        continue;
+                    }
+                    // Leaf blobs are not fetched during discovery; a carried
+                    // one still has to be here, and the refusal names the image.
+                    if request.registry.stored(blob)? != Some(true) {
+                        bail!("missing image {}", artifact.digest);
+                    }
+                }
+                targets.extend(expanded);
             }
         }
         narrow_to_held(base, &held, &targets);
@@ -714,9 +724,9 @@ fn blob_at(artifact: &OciArtifactRef) -> BlobAt {
 
 /// What the base release `spec` brought to the site: its images with every
 /// blob they reference, where it put them, and its model weights, read from
-/// the published release (#686). When an image's closure cannot be resolved
-/// here, only its declared blobs count as present, so the delta carries more,
-/// never less.
+/// the published release (#686). Closure walks manifests only (#841). When
+/// even those cannot be resolved here, only its declared blobs count as
+/// present, so the delta carries more, never less.
 async fn delta_base(
     ctx: &mut Ctx,
     spec: &str,
