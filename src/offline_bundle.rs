@@ -590,7 +590,9 @@ fn insert_layers(
     let mut chunked: Vec<crate::offline_chunk_store::OfflineChunkArtifact> = Vec::new();
     oci_artifact::validate_all(artifacts)?;
     // An image manifest travels with the blobs it references (#627).
-    let artifacts = &oci_artifact::image_closure_except(artifacts, registry, in_base)?;
+    let artifacts = &oci_artifact::image_closure_except(artifacts, registry, |artifact| {
+        in_base(&artifact.digest)
+    })?;
     let mut layers = Vec::with_capacity(artifacts.len());
     let mut seen_paths = BTreeSet::new();
     for artifact in artifacts {
@@ -2391,5 +2393,105 @@ mod tests {
             .to_string();
         assert!(err.contains("does not name required weight"), "{err}");
         std::fs::remove_dir_all(tmp).unwrap();
+    }
+
+    fn digest_for(bytes: &[u8]) -> String {
+        format!("sha256:{:x}", Sha256::digest(bytes))
+    }
+
+    fn image_manifest(config: &str, layers: &[&str]) -> (OciArtifactRef, Vec<u8>) {
+        let media = "application/vnd.oci.image.manifest.v1+json";
+        let body = serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": media,
+            "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": config, "size": 1},
+            "layers": layers.iter().map(|layer| serde_json::json!({
+                "mediaType": "application/vnd.oci.image.layer.v1.tar",
+                "digest": layer,
+                "size": 1
+            })).collect::<Vec<_>>(),
+        })
+        .to_string()
+        .into_bytes();
+        (
+            OciArtifactRef {
+                registry: "ghcr.io".into(),
+                repository: "edge/app".into(),
+                digest: digest_for(&body),
+                media_type: media.into(),
+                sbom: None,
+            },
+            body,
+        )
+    }
+
+    fn blob_ref(digest: &str, media_type: &str) -> OciArtifactRef {
+        OciArtifactRef {
+            registry: "ghcr.io".into(),
+            repository: "edge/app".into(),
+            digest: digest.into(),
+            media_type: media_type.into(),
+            sbom: None,
+        }
+    }
+
+    #[test]
+    fn a_delta_for_an_image_update_does_not_need_reused_layers() {
+        let registry = crate::oci_artifact::MemoryArtifactRegistry::new();
+        let (config0, layer_a, config1, layer_b) = (
+            digest_for(b"config-0"),
+            digest_for(b"layer-a"),
+            digest_for(b"config-1"),
+            digest_for(b"layer-b"),
+        );
+        let (manifest0, bytes0) = image_manifest(&config0, &[&layer_a]);
+        let (manifest1, bytes1) = image_manifest(&config1, &[&layer_a, &layer_b]);
+        registry.put(&manifest0, bytes0).unwrap();
+        registry.put(&manifest1, bytes1).unwrap();
+        registry
+            .put(
+                &blob_ref(&config1, "application/vnd.oci.image.config.v1+json"),
+                b"config-1".to_vec(),
+            )
+            .unwrap();
+        registry
+            .put(
+                &blob_ref(&layer_b, "application/vnd.oci.image.layer.v1.tar"),
+                b"layer-b".to_vec(),
+            )
+            .unwrap();
+        let base = OfflineDeltaBase {
+            schema: DELTA_BASE_SCHEMA.into(),
+            base_release: "app@1.0.0".into(),
+            layers: vec![manifest0.digest.clone(), config0.clone(), layer_a.clone()],
+            weights: Vec::new(),
+        };
+        let mut payloads = BTreeMap::new();
+        insert_artifact_layers_delta(
+            &mut payloads,
+            std::slice::from_ref(&manifest1),
+            &registry,
+            None,
+            &base,
+        )
+        .unwrap();
+        assert!(
+            !payloads.contains_key(
+                &blob_ref(&layer_a, "application/vnd.oci.image.layer.v1.tar")
+                    .layer_entry_path()
+                    .unwrap()
+            )
+        );
+        assert!(payloads.contains_key(&manifest1.layer_entry_path().unwrap()));
+        assert!(
+            payloads.contains_key(
+                &blob_ref(&layer_b, "application/vnd.oci.image.layer.v1.tar")
+                    .layer_entry_path()
+                    .unwrap()
+            )
+        );
+        let listed: OfflineDeltaBase =
+            serde_json::from_slice(&payloads.get(DELTA_BASE_PATH).unwrap().1).unwrap();
+        assert!(listed.layers.contains(&layer_a), "{listed:?}");
     }
 }

@@ -589,7 +589,8 @@ pub fn referenced_blobs(media_type: &str, bytes: &[u8]) -> Result<Vec<(String, S
 }
 
 /// `artifacts` and every blob their image manifests and indexes reference,
-/// read from `registry`, each once and in first-seen order (#627).
+/// read from `registry`, each once and in first-seen order (#627). Leaf
+/// blobs are listed from descriptors and not fetched (#841).
 pub fn image_closure(
     artifacts: &[OciArtifactRef],
     registry: &dyn ArtifactRegistry,
@@ -597,12 +598,14 @@ pub fn image_closure(
     image_closure_except(artifacts, registry, |_| false)
 }
 
-/// [`image_closure`], with artifacts whose digest `held` admits kept in the
-/// closure unfetched and unexpanded: a delta's base content (#635).
+/// [`image_closure`], with artifacts `held` admits kept in the closure
+/// unfetched and unexpanded: a delta's base content at the same registry
+/// and repository (#635, #841). Manifests are fetched to read descriptors;
+/// leaf blobs are listed without a fetch.
 pub fn image_closure_except(
     artifacts: &[OciArtifactRef],
     registry: &dyn ArtifactRegistry,
-    held: impl Fn(&str) -> bool,
+    held: impl Fn(&OciArtifactRef) -> bool,
 ) -> Result<Vec<OciArtifactRef>> {
     let mut closure: Vec<OciArtifactRef> = Vec::new();
     let mut pending: std::collections::VecDeque<OciArtifactRef> =
@@ -616,7 +619,11 @@ pub fn image_closure_except(
         if seen {
             continue;
         }
-        if held(&artifact.digest) {
+        if held(&artifact) {
+            closure.push(artifact);
+            continue;
+        }
+        if !is_manifest_media_type(&artifact.media_type) {
             closure.push(artifact);
             continue;
         }
@@ -962,6 +969,67 @@ mod tests {
         );
         assert!(referenced_blobs(media, b"opaque").is_err());
         assert_eq!(manifest_content_type(b"opaque"), None);
+    }
+
+    fn image_manifest(config: &str, layer: &str) -> (OciArtifactRef, Vec<u8>) {
+        let media = "application/vnd.oci.image.manifest.v1+json";
+        let body = serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": media,
+            "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": config, "size": 1},
+            "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar", "digest": layer, "size": 1}],
+        })
+        .to_string()
+        .into_bytes();
+        (
+            OciArtifactRef {
+                registry: "ghcr.io".into(),
+                repository: "edge/app".into(),
+                digest: digest_for(&body),
+                media_type: media.into(),
+                sbom: None,
+            },
+            body,
+        )
+    }
+
+    #[test]
+    fn image_closure_lists_leaves_without_fetching_them() {
+        let registry = MemoryArtifactRegistry::new();
+        let (config, layer) = (digest_for(b"config"), digest_for(b"layer"));
+        let (manifest, bytes) = image_manifest(&config, &layer);
+        registry.put(&manifest, bytes).unwrap();
+        let closure = image_closure(std::slice::from_ref(&manifest), &registry).unwrap();
+        let digests: Vec<&str> = closure.iter().map(|blob| blob.digest.as_str()).collect();
+        assert_eq!(
+            digests,
+            vec![manifest.digest.as_str(), config.as_str(), layer.as_str()]
+        );
+        assert!(
+            registry
+                .verify(&OciArtifactRef {
+                    digest: layer.clone(),
+                    media_type: "application/vnd.oci.image.layer.v1.tar".into(),
+                    ..manifest.clone()
+                })
+                .is_err(),
+            "the layer was never stored"
+        );
+    }
+
+    #[test]
+    fn image_closure_except_stops_at_a_held_manifest() {
+        let registry = MemoryArtifactRegistry::new();
+        let (config, layer) = (digest_for(b"config"), digest_for(b"layer"));
+        let (manifest, bytes) = image_manifest(&config, &layer);
+        registry.put(&manifest, bytes).unwrap();
+        let closure = image_closure_except(std::slice::from_ref(&manifest), &registry, |blob| {
+            blob.digest == manifest.digest
+                && blob.registry == manifest.registry
+                && blob.repository == manifest.repository
+        })
+        .unwrap();
+        assert_eq!(closure, vec![manifest]);
     }
 
     #[test]
