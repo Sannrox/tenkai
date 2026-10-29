@@ -47,6 +47,7 @@ it ([ADR 0001](decisions/0001-standalone-core-and-service-evolution.md),
 | Reference llama.cpp engine plugin (fake for CI) | [Model runtime](model-runtime.md); #64 |
 | Self-verifying offline bundles | [Offline bundles](offline-bundles.md); [ADR 0003](decisions/0003-canonical-offline-delivery-archives.md) |
 | Full-stack signed bundle build with SBOM and checksum | `tenkaictl bundle build`; [Build](offline-bundles.md#build); #626 |
+| Signed advisory feed import and local image assessment | [Advisory feed](offline-bundles.md#advisory-feed); `tenkaictl exposure inspect`; #645 |
 | Signed Tenkai hosts in offline bundles | [Host binaries](offline-bundles.md#host-binaries); [Release binaries](release-binaries.md#disconnected-sites); #640 |
 | Optional governance/intelligence provider ports | [Provider contracts](provider-contracts.md) |
 | Web console served at `/ui/` from a pinned, checksum-verified release (feature `ui`, on in release binaries) | [Open the web console](run-tenkai-server.md#open-the-web-console); [ADR 0031](decisions/0031-web-console.md); #463 |

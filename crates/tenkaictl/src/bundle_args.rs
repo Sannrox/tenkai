@@ -43,6 +43,9 @@ pub(crate) enum BundleCommand {
         /// site already holds: its layers and weights are left out.
         #[arg(long)]
         base: Option<String>,
+        /// Signed `tenkai.advisory-feed.v1` JSON carried as `advisories/feed.json`.
+        #[arg(long)]
+        advisory_feed: Option<PathBuf>,
     },
     /// Verify a bundle and write its docs to `<out>/<version>/`.
     Docs {

@@ -316,6 +316,16 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
             }
         },
         Command::Exposure { command } => match command {
+            crate::args::ExposureCommand::Import { .. } => {
+                bail!(
+                    "advisory feed import over remote uses POST /v1/imports; feed-only import is --target embedded"
+                )
+            }
+            crate::args::ExposureCommand::Inspect => {
+                let status = client.inspect_advisory_feed().await?;
+                println!("{}", serde_json::to_string_pretty(&status)?);
+                Ok(())
+            }
             crate::args::ExposureCommand::Query { component, range } => {
                 let result = client.query_exposures(&component, &range).await?;
                 println!("{}", serde_json::to_string_pretty(&result)?);

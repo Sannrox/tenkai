@@ -103,6 +103,12 @@ async fn catalog_lists_require_read_and_empty_catalog_is_an_empty_page() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["matches"], serde_json::json!([]), "{body}");
+    let (status, _) = get_json(&app, "/v1/advisory-feed", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, body) = get_json(&app, "/v1/advisory-feed", Some("management-secret")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["imported"], serde_json::json!(false), "{body}");
+    assert_eq!(body["matches"], serde_json::json!([]), "{body}");
     let _ = std::fs::remove_dir_all(root);
 }
 

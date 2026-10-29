@@ -248,6 +248,91 @@ fn bundle_build_parses_release_set_and_public_trust_roots() {
 }
 
 #[test]
+fn bundle_build_parses_advisory_feed() {
+    let cli = Cli::try_parse_from([
+        "tenkaictl",
+        "bundle",
+        "build",
+        "--release",
+        "edge-app@1.0.0",
+        "--env",
+        "dark-1",
+        "--out",
+        "site.bundle.json",
+        "--signing-key",
+        "exporter.seed",
+        "--trust-roots",
+        "offline-trust.toml",
+        "--advisory-feed",
+        "advisories.json",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Bundle {
+            command: crate::bundle_args::BundleCommand::Build {
+                ref advisory_feed,
+                ..
+            }
+        } if advisory_feed.as_deref() == Some(std::path::Path::new("advisories.json"))
+    ));
+}
+
+#[test]
+fn parses_exposure_import_inspect_and_query() {
+    let import = Cli::try_parse_from([
+        "tenkaictl",
+        "exposure",
+        "import",
+        "--bundle",
+        "site.bundle.json",
+        "--trust-roots",
+        "offline-trust.toml",
+        "--env",
+        "dark-1",
+    ])
+    .unwrap();
+    assert!(matches!(
+        import.command,
+        Command::Exposure {
+            command: crate::args::ExposureCommand::Import {
+                ref bundle,
+                ref trust_roots,
+                ref env,
+            }
+        } if bundle == std::path::Path::new("site.bundle.json")
+            && trust_roots == std::path::Path::new("offline-trust.toml")
+            && env == "dark-1"
+    ));
+    let inspect = Cli::try_parse_from(["tenkaictl", "exposure", "inspect"]).unwrap();
+    assert!(matches!(
+        inspect.command,
+        Command::Exposure {
+            command: crate::args::ExposureCommand::Inspect
+        }
+    ));
+    let query = Cli::try_parse_from([
+        "tenkaictl",
+        "exposure",
+        "query",
+        "--component",
+        "openssl",
+        "--range",
+        ">=1.0.0",
+    ])
+    .unwrap();
+    assert!(matches!(
+        query.command,
+        Command::Exposure {
+            command: crate::args::ExposureCommand::Query {
+                ref component,
+                ref range,
+            }
+        } if component == "openssl" && range == ">=1.0.0"
+    ));
+}
+
+#[test]
 fn support_bundle_export_parses_beside_the_global_output_format() {
     let cli = Cli::try_parse_from([
         "tenkaictl",

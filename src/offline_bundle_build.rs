@@ -9,9 +9,10 @@
 //! those declared documents. Host binaries and model weights have no declared
 //! SBOM, so their component SBOM is the packed-file inventory alone. The
 //! bundle also carries the docs of the Tenkai version that built it (#646).
-//! The v1 archive schema is unchanged. A missing image, declared SBOM, weight or
-//! schema fails the build with the item named. Private keys never enter the
-//! archive.
+//! The v1 archive schema is unchanged. An optional signed
+//! `tenkai.advisory-feed.v1` travels as `advisories/feed.json` (#645). A
+//! missing image, declared SBOM, weight or schema fails the build with the
+//! item named. Private keys never enter the archive.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read as _;
@@ -67,6 +68,8 @@ pub struct BundleBuildRequest<'a> {
     /// Build a delta against this release (`product@version`), which the
     /// site must already hold: its layers and weights are left out (#686).
     pub base: Option<String>,
+    /// Optional `tenkai.advisory-feed.v1` JSON carried as `advisories/feed.json`.
+    pub advisory_feed: Option<&'a [u8]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -344,6 +347,28 @@ pub async fn build(ctx: &mut Ctx, request: &BundleBuildRequest<'_>) -> Result<Bu
     for sbom in sboms {
         let path = format!("sbom/{}.json", sbom_file_stem(&sbom.component));
         payloads.insert(path, (SBOM_MEDIA.into(), serde_json::to_vec(&sbom)?));
+    }
+    if let Some(bytes) = request.advisory_feed {
+        let mut feed = crate::exposure::parse_advisory_feed(bytes)?;
+        crate::exposure::refuse_generated_after_issued(
+            feed.generated_at,
+            request.issued_at_unix_ms,
+        )?;
+        if feed.generated_at <= 0 {
+            feed.generated_at = request.issued_at_unix_ms;
+        }
+        let bytes = serde_json::to_vec(&feed)?;
+        refuse_private_keys(crate::exposure::ADVISORY_FEED_PATH, &bytes)?;
+        if payloads.contains_key(crate::exposure::ADVISORY_FEED_PATH) {
+            bail!(
+                "bundle already contains {}",
+                crate::exposure::ADVISORY_FEED_PATH
+            );
+        }
+        payloads.insert(
+            crate::exposure::ADVISORY_FEED_PATH.into(),
+            (crate::exposure::ADVISORY_FEED_MEDIA.into(), bytes),
+        );
     }
     insert_checksum_manifest(&mut payloads, &chunk_dir)?;
 
@@ -1139,6 +1164,84 @@ mod tests {
             err.contains("sbom/edge-app@1.0.0.json") || err.contains("signed digest"),
             "{err}"
         );
+    }
+
+    #[tokio::test]
+    async fn advisory_feed_is_signed_and_checksummed() {
+        let fixture = Fixture::new("advisory-feed").await;
+        let archive = fixture.root.join("site.bundle.json");
+        let feed = serde_json::to_vec(&serde_json::json!({
+            "schema": crate::exposure::ADVISORY_FEED_SCHEMA,
+            "generated_at": fixture.issued_at,
+            "advisories": [{
+                "id": "TENKAI-2026-1",
+                "component": "openssl",
+                "range": ">=1.0.0,<1.2.0",
+                "severity": "high",
+                "issued_at": 1
+            }]
+        }))
+        .unwrap();
+        let mut request = fixture.request(&archive);
+        request.advisory_feed = Some(feed.as_slice());
+        let mut ctx = Ctx::embedded(fixture.root.join("tenkai.db")).unwrap();
+        let built = build(&mut ctx, &request).await.unwrap();
+        let verified = built
+            .verify(
+                &parse_trust_roots(&fixture.trust_toml).unwrap(),
+                ontology::NS,
+                "dark-1",
+                fixture.issued_at,
+            )
+            .unwrap();
+        let stored: crate::exposure::AdvisoryFeed = serde_json::from_slice(
+            verified
+                .entry(crate::exposure::ADVISORY_FEED_PATH)
+                .expect("advisory feed"),
+        )
+        .unwrap();
+        assert_eq!(stored.schema, crate::exposure::ADVISORY_FEED_SCHEMA);
+        assert_eq!(stored.advisories[0].id, "TENKAI-2026-1");
+        let checksum: ChecksumManifest =
+            serde_json::from_slice(verified.entry(CHECKSUM_MANIFEST_PATH).unwrap()).unwrap();
+        assert!(
+            checksum
+                .entries
+                .iter()
+                .any(|entry| entry.path == crate::exposure::ADVISORY_FEED_PATH)
+        );
+        let mut tampered = built;
+        let entry = tampered
+            .entries
+            .iter_mut()
+            .find(|entry| entry.path == crate::exposure::ADVISORY_FEED_PATH)
+            .unwrap();
+        entry.content_base64 =
+            base64::engine::general_purpose::STANDARD.encode(b"{\"schema\":\"tampered\"}");
+        let err = tampered
+            .verify(
+                &parse_trust_roots(&fixture.trust_toml).unwrap(),
+                ontology::NS,
+                "dark-1",
+                fixture.issued_at,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(crate::exposure::ADVISORY_FEED_PATH) || err.contains("signed digest"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_advisory_feed_fails_the_build() {
+        let fixture = Fixture::new("invalid-advisory-feed").await;
+        let archive = fixture.root.join("site.bundle.json");
+        let mut request = fixture.request(&archive);
+        request.advisory_feed = Some(br#"{"schema":"nope"}"#);
+        let mut ctx = Ctx::embedded(fixture.root.join("tenkai.db")).unwrap();
+        let err = build(&mut ctx, &request).await.unwrap_err().to_string();
+        assert!(err.contains("advisory feed"), "{err}");
     }
 
     #[tokio::test]
@@ -2024,6 +2127,7 @@ max_startup_seconds = 30
                 registry: &self.registry,
                 weight_cache: Some(&self.weight_cache),
                 base: None,
+                advisory_feed: None,
             }
         }
 
