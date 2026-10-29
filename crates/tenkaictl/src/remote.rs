@@ -315,6 +315,13 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
                 Ok(())
             }
         },
+        Command::Exposure { command } => match command {
+            crate::args::ExposureCommand::Query { component, range } => {
+                let result = client.query_exposures(&component, &range).await?;
+                println!("{}", serde_json::to_string_pretty(&result)?);
+                Ok(())
+            }
+        },
         Command::Bundle { .. } => {
             bail!("bundle build is available only with --target embedded")
         }

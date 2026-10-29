@@ -1804,6 +1804,26 @@
       ],
       "type": "object"
     },
+    "EnvironmentExposure": {
+      "description": "One environment running a matching release.",
+      "properties": {
+        "deployed_release": {
+          "type": "string"
+        },
+        "environment": {
+          "type": "string"
+        },
+        "freshness": {
+          "$ref": "#/$defs/Freshness"
+        }
+      },
+      "required": [
+        "environment",
+        "deployed_release",
+        "freshness"
+      ],
+      "type": "object"
+    },
     "EnvironmentInspectReport": {
       "description": "Detailed inspect report for one environment (no credentials).",
       "properties": {
@@ -2711,6 +2731,43 @@
       ],
       "type": "object"
     },
+    "ExposureQueryRequest": {
+      "description": "Query parameters for `GET /v1/exposures` and `tenkaictl exposure query`.",
+      "properties": {
+        "component": {
+          "default": "",
+          "type": "string"
+        },
+        "range": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "ExposureQueryResult": {
+      "description": "Result of an exposure query. Matching is local; it does not contact a network.",
+      "properties": {
+        "component": {
+          "type": "string"
+        },
+        "matches": {
+          "items": {
+            "$ref": "#/$defs/ReleaseExposure"
+          },
+          "type": "array"
+        },
+        "range": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "component",
+        "range",
+        "matches"
+      ],
+      "type": "object"
+    },
     "FirstAdministrator": {
       "description": "Whether a first administrator is configured: a `[grants]` rule that gives\nfleet management (#631). Without one, only the management token can\nadminister the server. Reported unauthenticated on `/healthz` (#815), so\nit is one coarse status and never names a rule or an identity.",
       "enum": [
@@ -2841,6 +2898,52 @@
         "environments_empty"
       ],
       "type": "object"
+    },
+    "Freshness": {
+      "description": "How current an environment's deployed release observation is.",
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "hub",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "imported_at": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "kind": {
+              "const": "as_of_last_bundle_import",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "imported_at"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "GrantRuleList": {
       "description": "`GET /v1/grant-rules`: the stored rules and their generation.",
@@ -4340,6 +4443,52 @@
       ],
       "type": "object"
     },
+    "ReleaseExposure": {
+      "description": "One catalog release that contains the queried component.",
+      "properties": {
+        "channels": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "component": {
+          "type": "string"
+        },
+        "component_version": {
+          "type": "string"
+        },
+        "environments": {
+          "items": {
+            "$ref": "#/$defs/EnvironmentExposure"
+          },
+          "type": "array"
+        },
+        "product": {
+          "type": "string"
+        },
+        "release": {
+          "type": "string"
+        },
+        "release_id": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "release",
+        "product",
+        "version",
+        "release_id",
+        "component",
+        "component_version",
+        "channels",
+        "environments"
+      ],
+      "type": "object"
+    },
     "ReleaseListEntry": {
       "description": "Identifying fields and current digest/version for one published release.",
       "properties": {
@@ -5625,6 +5774,17 @@
       },
       "response": {
         "$ref": "#/$defs/ReleasePage"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/exposures",
+      "request": {
+        "$ref": "#/$defs/ExposureQueryRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ExposureQueryResult"
       }
     },
     {

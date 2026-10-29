@@ -173,6 +173,7 @@ pub mod embedded;
 pub mod environment;
 pub mod environment_config;
 pub mod exports;
+pub mod exposure;
 pub mod federated_identity;
 pub mod feedback_observation;
 pub mod fenced_mutation;

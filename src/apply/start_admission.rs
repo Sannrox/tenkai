@@ -63,6 +63,41 @@ pub(super) async fn admit(
             .await?;
     }
     if !policy.skip_gates {
+        if let Some(detail) =
+            crate::exposure::plan_gate(ctx, &plan.environment, &plan.steps).await?
+        {
+            let step = plan
+                .steps
+                .iter()
+                .find(|step| step.action != Action::Rollback)
+                .cloned();
+            let outcomes = step.as_ref().map(|step| {
+                vec![Outcome::new(
+                    step.clone(),
+                    StepOutcomeStatus::Blocked,
+                    detail.clone(),
+                )]
+            });
+            let observation = plan_completion::plan_observation(
+                lease,
+                plan,
+                step.as_ref(),
+                crate::feedback_observation::Operation::PlanBlocked,
+                "blocked",
+                crate::feedback_observation::Reason::GateBlocked,
+            );
+            plan_completion::transition_confirmed(
+                ctx,
+                lease,
+                plan,
+                PlanState::Blocked,
+                policy.skip_gates,
+                detail,
+                &[observation],
+            )
+            .await?;
+            return Ok(Some(outcomes.unwrap_or_default()));
+        }
         for step in &plan.steps.clone() {
             if step.action == Action::Rollback {
                 continue;

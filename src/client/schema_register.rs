@@ -338,6 +338,30 @@ pub fn known_object_types() -> Vec<ObjectType> {
                 ),
                 prop("recalled_at", false, "Unix-ms timestamp when recalled"),
                 prop("recalled_by", false, "Principal that recalled the release"),
+                prop(
+                    "inventory.schema",
+                    false,
+                    "Component inventory document schema",
+                ),
+                prop(
+                    "inventory.digest",
+                    false,
+                    "sha256 of the signed inventory document",
+                ),
+                prop(
+                    "inventory.document",
+                    false,
+                    "Inventory JSON covered by the release signature",
+                ),
+            ],
+        ),
+        object_type(
+            crate::exposure::KIND_ADVISORY_FEED,
+            "Imported advisory feed matched against signed release inventories",
+            vec![
+                prop("document", true, "tenkai.advisory-feed.v1 JSON"),
+                prop("imported_at", true, "Unix-ms timestamp when imported"),
+                prop("digest", true, "sha256 of the feed document"),
             ],
         ),
         object_type(

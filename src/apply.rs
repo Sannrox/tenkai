@@ -456,6 +456,7 @@ mod tests {
                 artifacts: Vec::new(),
                 gate: GateSection::default(),
                 delivery: Default::default(),
+                inventory: None,
                 topology: None,
             },
             artifact_digest: manifest::artifact_digest(&workdir, &[]).unwrap(),

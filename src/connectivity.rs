@@ -764,6 +764,7 @@ async fn bind_isolated_bundle_locked(
     });
     record.environments[index].detail = "verified offline bundle bound".into();
     let record = persist(ctx, held, &base, &record).await?;
+    crate::exposure::record_bundle_import(ctx, environment, crate::now_millis()).await?;
     Ok(record)
 }
 
@@ -942,6 +943,7 @@ pub async fn install_isolated_stack(
     ctx.create_once(upgrade_object(&record)?)
         .await
         .map_err(|status| anyhow::anyhow!("{status}"))?;
+    crate::exposure::record_bundle_import(ctx, environment, now).await?;
     Ok(record)
 }
 
@@ -995,6 +997,7 @@ async fn reinstall_isolated_stack(
         bundle_path,
         crate::offline_chunk_store::weight_cache_from_env()?.as_ref(),
     )?;
+    crate::exposure::record_bundle_import(ctx, environment, crate::now_millis()).await?;
     Ok(record)
 }
 

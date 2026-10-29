@@ -22,6 +22,7 @@ use crate::auth_context::{
 };
 use crate::catalog::{ChannelPage, ReleasePage};
 use crate::client::Ctx;
+use crate::exposure::{ExposureQueryRequest, ExposureQueryResult};
 use crate::management_lifecycle::{
     self, ApplyRequest, ApproveRequest, ChannelHoldRequest, DeliveryHoldRequest,
     ManagementLifecycleOperation, ManagementLifecycleResult, PlanRequest, PromoteRequest,
@@ -600,6 +601,44 @@ impl ManagementOperations {
             next_cursor,
             events,
         })
+    }
+
+    pub async fn query_exposures(
+        &self,
+        credential: &CredentialMaterial,
+        query: ExposureQueryRequest,
+    ) -> Result<ExposureQueryResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        if query.component.trim().is_empty() || query.range.trim().is_empty() {
+            return Err(ManagementError::BadRequest(
+                "component and range are required".into(),
+            ));
+        }
+        let mut ctx = self.catalog_ctx(&context)?;
+        let mut result = crate::exposure::query(&mut ctx, &query.component, &query.range)
+            .await
+            .map_err(internal)?;
+        if !context.product_bindings().is_empty() {
+            result
+                .matches
+                .retain(|item| context.product_bindings().contains(&item.product));
+        }
+        if !context.channel_bindings().is_empty() {
+            for item in &mut result.matches {
+                item.channels.retain(|channel| {
+                    let name = channel.rsplit('/').next().unwrap_or(channel.as_str());
+                    context.channel_bindings().contains(name)
+                });
+            }
+        }
+        if let Some(granted) = self.granted_environment(credential, &context) {
+            for item in &mut result.matches {
+                item.environments
+                    .retain(|environment| environment.environment == granted);
+            }
+        }
+        Ok(result)
     }
 
     pub async fn list_releases(

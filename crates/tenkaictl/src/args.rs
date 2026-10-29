@@ -167,6 +167,11 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: ReleaseCommand,
     },
+    /// Query which releases, channels, and environments contain a component.
+    Exposure {
+        #[command(subcommand)]
+        command: ExposureCommand,
+    },
     /// Inspect recorded plan-approval verification evidence.
     Approval {
         #[command(subcommand)]
@@ -414,6 +419,17 @@ pub(crate) enum RunnerCaCommand {
         /// The CA's common name.
         #[arg(long, default_value = "Tenkai runner CA")]
         name: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum ExposureCommand {
+    /// List releases, channels, and environments matching a component range.
+    Query {
+        #[arg(long)]
+        component: String,
+        #[arg(long)]
+        range: String,
     },
 }
 

@@ -2,7 +2,7 @@ use anyhow::{Result, bail};
 use tenkai::command_result::{CommandName, CommandResultV1};
 use tenkai::{canary, catalog, client, maintenance, ontology, plan};
 
-use crate::args::{Command, OutputFormat};
+use crate::args::{Command, ExposureCommand, OutputFormat};
 use crate::authorization::embedded_management_actor;
 use crate::catalog_args::{ApprovalCommand, CanaryCommand, EvalEvidenceCommand, ReleaseCommand};
 use crate::output::print_machine_result;
@@ -75,6 +75,12 @@ pub(crate) async fn run(
                 } else {
                     println!("{message}");
                 }
+            }
+        },
+        Command::Exposure { command } => match command {
+            ExposureCommand::Query { component, range } => {
+                let result = tenkai::exposure::query(ctx, &component, &range).await?;
+                println!("{}", serde_json::to_string_pretty(&result)?);
             }
         },
         Command::Approval { command } => match command {

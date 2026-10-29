@@ -76,6 +76,18 @@ pub(super) async fn list_releases(
     manage_result(state.management.list_releases(&credential, query).await)
 }
 
+pub(super) async fn query_exposures(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<tenkai::exposure::ExposureQueryRequest>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    manage_result(state.management.query_exposures(&credential, query).await)
+}
+
 pub(super) async fn list_channels(
     State(state): State<Arc<AppState>>,
     Query(query): Query<tenkai::page::PageQuery>,
