@@ -2,10 +2,12 @@
 
 mod args;
 mod authorization;
+mod bundle_args;
 mod catalog_args;
 mod dev_args;
 mod embedded;
 mod embedded_apply;
+mod embedded_bundle;
 mod embedded_catalog;
 mod embedded_dev;
 mod embedded_env;

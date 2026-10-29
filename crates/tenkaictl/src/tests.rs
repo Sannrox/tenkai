@@ -202,6 +202,51 @@ fn remote_configuration_commands_map_to_their_changes() {
 }
 
 #[test]
+fn bundle_build_parses_release_set_and_public_trust_roots() {
+    let cli = Cli::try_parse_from([
+        "tenkaictl",
+        "bundle",
+        "build",
+        "--release",
+        "edge-app@1.0.0",
+        "--release",
+        "weights@1.0.0",
+        "--env",
+        "dark-1",
+        "--out",
+        "site.bundle.json",
+        "--signing-key",
+        "exporter.seed",
+        "--trust-roots",
+        "offline-trust.toml",
+        "--hosts-dir",
+        "hosts",
+        "--host-tag",
+        "v0.5.0",
+        "--host-git-sha",
+        "0123456789abcdef0123456789abcdef01234567",
+        "--host-workflow",
+        "release",
+        "--issued-at-unix-ms",
+        "1700000000000",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Bundle {
+            command: crate::bundle_args::BundleCommand::Build {
+                ref releases,
+                ref env,
+                ref out,
+                ..
+            }
+        } if releases == &["edge-app@1.0.0".to_string(), "weights@1.0.0".into()]
+            && env == "dark-1"
+            && out == std::path::Path::new("site.bundle.json")
+    ));
+}
+
+#[test]
 fn support_bundle_export_parses_beside_the_global_output_format() {
     let cli = Cli::try_parse_from([
         "tenkaictl",

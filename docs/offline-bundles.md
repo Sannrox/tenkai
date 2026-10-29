@@ -15,6 +15,68 @@ Bundle export signs the root through the same content signer as releases and
 plan approvals. A production deploy profile refuses file-based signing keys;
 see [release signing](release-signing.md#production-signer).
 
+## Build
+
+`tenkaictl bundle build` takes one or more published releases and writes one
+signed v1 archive plus its companion chunk store. The same inputs produce
+byte-identical checksum and SBOM manifests. The archive carries images by
+digest, host binaries when `--hosts-dir` is set, release configs, public trust
+roots, model weights, `checksums/manifest.json`
+(`tenkai.offline-checksum-manifest.v1`), and `sbom/<component>.json`
+(`tenkai.offline-sbom.v1`) per component. Those two manifests are ordinary
+signed entries: the bundle signature covers them. A missing image, weight, or
+schema fails the build and names the item. A release input or the trust
+roots holding a private key block fail the build naming the file; image
+layers, weights and host binaries are digest-checked blobs and are not
+inspected. The archive is written beside its destination and linked into
+place, so a failed build leaves nothing there and can be retried.
+
+Each image artifact's SBOM is the one its release declares (`sbom = { digest,
+media_type }` on the `[[artifacts]]` entry; see [release signing](release-signing.md)).
+The build fetches that document by digest from the artifact's registry,
+checks its digest, and carries it under `sbom/artifacts/`. The component's
+`sbom/<component>.json` lists the files it packed and names each declared
+document in `declared`, so both are covered by the checksum manifest and the
+signature. An image without a declared SBOM fails the build naming the
+artifact, as does a declared SBOM missing from the registry or with other
+bytes. Host binaries and model weights have no declared SBOM; their
+component SBOM is the packed-file inventory. An image manifest travels with
+every blob it references, and `stack/manifest.json` names each of them, so a
+first install's preflight finds the whole image; `sbom/images.json` lists
+those packed blobs.
+
+```bash
+tenkaictl bundle build \
+  --release edge-app@1.0.0 \
+  --release weights@1.0.0 \
+  --env site-c \
+  --out site-c.bundle.json \
+  --signing-key exporter.seed \
+  --trust-roots offline-trust.toml \
+  --hosts-dir tenkai-hosts \
+  --host-tag v0.5.0 \
+  --host-git-sha 0123456789abcdef0123456789abcdef01234567 \
+  --host-workflow release
+```
+
+`--issued-at-unix-ms` pins the statement clock so two operator rebuilds can
+match. `--out` must be a new path; an existing archive is refused. Chunk files
+land in `site-c.bundle.chunks/` beside the archive. Images
+are read from `TENKAI_OCI_STORE`; weights from `TENKAI_WEIGHT_CACHE`. The
+command is embedded-only. The v1 envelope binds `plans/content.json` and
+`approvals/content.json` as the signed release-set identity; those entries are
+not an executable Plan. First install through `upgrade install-bundle` remains
+#623.
+
+Rehearsal: `cargo test --locked two_builds_of_the_same_inputs_produce_byte_identical_manifests`
+builds the same release set twice and compares checksum and SBOM bytes.
+`cargo test --locked sbom_and_checksum_are_covered_by_the_bundle_signature`
+verifies the signed archive, then tampers an SBOM entry and confirms
+verification fails. `cargo test --locked missing_image_fails_the_build_and_names_the_digest`,
+`missing_weight_fails_the_build_and_names_the_digest`, and
+`missing_schema_fails_the_build_and_names_the_path` refuse the build while
+naming the missing item.
+
 Bundle verification requires current Ed25519 trust roots, the configured tenant
 and environment identities, and a time inside the signed validity interval.
 Removing an exporter key prevents a not-yet-executed bundle from being trusted.

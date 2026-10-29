@@ -315,6 +315,9 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
                 Ok(())
             }
         },
+        Command::Bundle { .. } => {
+            bail!("bundle build is available only with --target embedded")
+        }
         other => crate::remote_catalog::run(&client, other, output).await,
     }
 }
