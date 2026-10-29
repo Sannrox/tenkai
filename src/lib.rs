@@ -202,6 +202,7 @@ pub mod oci_artifact;
 pub mod offline_bundle;
 pub mod offline_bundle_build;
 pub mod offline_chunk_store;
+pub mod offline_docs;
 pub mod offline_fleet_drill;
 pub mod offline_host_binaries;
 pub mod offline_import;

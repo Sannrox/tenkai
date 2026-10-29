@@ -234,6 +234,20 @@ async fn run(cli: Cli) -> Result<()> {
             platform.as_deref(),
         );
     }
+    // Local only: extracting a bundle's docs needs only the archive, trust
+    // roots and destination, never a store (#646).
+    if let Command::Bundle {
+        command:
+            bundle_args::BundleCommand::Docs {
+                bundle,
+                trust_roots,
+                env,
+                out,
+            },
+    } = &cli.command
+    {
+        return embedded_bundle::extract_docs(bundle, trust_roots, env, out);
+    }
     // Local only: verifying a support bundle needs only the file.
     if let Command::SupportBundle {
         command:

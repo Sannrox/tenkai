@@ -7,8 +7,9 @@
 //! (#804): the build fetches it by digest, checks it, and carries it under
 //! `sbom/artifacts/`; the component SBOM lists the files it packed and names
 //! those declared documents. Host binaries and model weights have no declared
-//! SBOM, so their component SBOM is the packed-file inventory alone. The v1
-//! archive schema is unchanged. A missing image, declared SBOM, weight or
+//! SBOM, so their component SBOM is the packed-file inventory alone. The
+//! bundle also carries the docs of the Tenkai version that built it (#646).
+//! The v1 archive schema is unchanged. A missing image, declared SBOM, weight or
 //! schema fails the build with the item named. Private keys never enter the
 //! archive.
 
@@ -255,6 +256,20 @@ pub async fn build(ctx: &mut Ctx, request: &BundleBuildRequest<'_>) -> Result<Bu
             },
         )?;
     }
+
+    // The docs of the Tenkai that built this bundle, readable offline (#646).
+    let version = env!("CARGO_PKG_VERSION");
+    crate::offline_docs::insert(&mut payloads, version)?;
+    let doc_files: Vec<SbomFile> = crate::offline_docs::embedded()
+        .map(|(path, bytes)| {
+            sbom_file(
+                &crate::offline_docs::entry_path(version, path),
+                "text/plain",
+                bytes,
+            )
+        })
+        .collect();
+    sboms.push(component_sbom("docs", "docs", &doc_files));
 
     for sbom in sboms {
         let path = format!("sbom/{}.json", sbom_file_stem(&sbom.component));
@@ -1371,6 +1386,41 @@ inputs = ["schemas"]
             Err(error) if error.to_string().contains("is required to import") => {}
             Err(error) => panic!("preflight refused the bundle: {error}"),
         }
+    }
+
+    /// The bundle carries this build's docs under its version; extracted
+    /// from the verified bundle they are byte for byte the source docs.
+    #[tokio::test]
+    async fn the_bundle_carries_this_versions_docs() {
+        let fixture = Fixture::new("docs").await;
+        let built = fixture.build().await;
+        let verified = built
+            .verify(
+                &parse_trust_roots(&fixture.trust_toml).unwrap(),
+                ontology::NS,
+                "dark-1",
+                fixture.issued_at + 1,
+            )
+            .unwrap();
+        let index = crate::offline_docs::index(&verified).unwrap().unwrap();
+        assert_eq!(index.version, env!("CARGO_PKG_VERSION"));
+        let out = fixture.root.join("docs-out");
+        let written = crate::offline_docs::extract(&verified, &out).unwrap();
+        assert_eq!(written, out.join(env!("CARGO_PKG_VERSION")));
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs");
+        for file in &index.files {
+            assert_eq!(
+                std::fs::read(written.join(&file.path)).unwrap(),
+                std::fs::read(source.join(&file.path)).unwrap(),
+                "{}",
+                file.path
+            );
+        }
+        let checksums = String::from_utf8(payload(&built, CHECKSUM_MANIFEST_PATH)).unwrap();
+        assert!(checksums.contains(crate::offline_docs::DOCS_INDEX_PATH));
+        // A second extraction to the same place is refused, not merged.
+        let err = crate::offline_docs::extract(&verified, &out).unwrap_err();
+        assert!(err.to_string().contains("already exists"), "{err}");
     }
 
     #[tokio::test]
