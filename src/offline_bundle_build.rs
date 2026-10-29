@@ -64,6 +64,9 @@ pub struct BundleBuildRequest<'a> {
     pub expires_at_unix_ms: i64,
     pub registry: &'a dyn ArtifactRegistry,
     pub weight_cache: Option<&'a Path>,
+    /// Build a delta against this release (`product@version`), which the
+    /// site must already hold: its layers and weights are left out (#686).
+    pub base: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,6 +161,14 @@ pub async fn build(ctx: &mut Ctx, request: &BundleBuildRequest<'_>) -> Result<Bu
     std::fs::create_dir_all(&chunk_dir)
         .with_context(|| format!("creating chunk directory {}", chunk_dir.display()))?;
 
+    let (mut base, held) = match &request.base {
+        Some(spec) => {
+            let (base, held) = delta_base(ctx, spec, request.registry).await?;
+            (Some(base), held)
+        }
+        None => (None, BTreeSet::new()),
+    };
+
     let mut images = Vec::new();
     let mut weights = Vec::new();
     let mut schemas = Vec::new();
@@ -173,6 +184,10 @@ pub async fn build(ctx: &mut Ctx, request: &BundleBuildRequest<'_>) -> Result<Bu
             request.weight_cache,
             &chunk_dir,
             &mut payloads,
+            Delta {
+                base: base.as_ref(),
+                held: &held,
+            },
         )
         .await?;
         images.extend(assembled.images);
@@ -183,13 +198,52 @@ pub async fn build(ctx: &mut Ctx, request: &BundleBuildRequest<'_>) -> Result<Bu
         sboms.push(assembled.sbom);
     }
 
-    if !artifacts.is_empty() {
-        crate::offline_bundle::insert_artifact_layers_chunked(
-            &mut payloads,
-            &artifacts,
-            request.registry,
-            Some((&chunk_dir, offline_chunk_store::DEFAULT_CHUNK_BYTES)),
-        )
+    // A delta always declares its base, even with no images: its omitted
+    // weights are checked against the base through it.
+    if let Some(base) = base.as_mut() {
+        // Blobs the target needs elsewhere than where the base put them. Each
+        // image is expanded on its own, so a base blob this host lacks never
+        // hides another image's references.
+        let mut targets = Vec::new();
+        for artifact in &artifacts {
+            if held.contains(&blob_at(artifact)) {
+                targets.push(artifact.clone());
+            } else {
+                targets.extend(
+                    crate::oci_artifact::image_closure(
+                        std::slice::from_ref(artifact),
+                        request.registry,
+                    )
+                    // A carried image must expand here; guessing which blobs
+                    // travel could publish a delta the site cannot import.
+                    .with_context(|| {
+                        format!("expanding image {} for the delta", artifact.digest)
+                    })?,
+                );
+            }
+        }
+        narrow_to_held(base, &held, &targets);
+    }
+    if !artifacts.is_empty() || base.is_some() {
+        let chunks = Some((
+            chunk_dir.as_path(),
+            offline_chunk_store::DEFAULT_CHUNK_BYTES,
+        ));
+        match &base {
+            Some(base) => crate::offline_bundle::insert_artifact_layers_delta(
+                &mut payloads,
+                &artifacts,
+                request.registry,
+                chunks,
+                base,
+            ),
+            None => crate::offline_bundle::insert_artifact_layers_chunked(
+                &mut payloads,
+                &artifacts,
+                request.registry,
+                chunks,
+            ),
+        }
         .map_err(|error| named_fetch_error(error, &artifacts))?;
         // An image manifest packs the blobs it references (#627), and a
         // first install requires the stack manifest to name each one.
@@ -198,6 +252,10 @@ pub async fn build(ctx: &mut Ctx, request: &BundleBuildRequest<'_>) -> Result<Bu
         let chunked = chunked_images(&payloads)?;
         let mut image_files = Vec::new();
         for layer in &packed {
+            // The base release brought it; a delta does not carry it.
+            if layer.path == crate::offline_bundle::DELTA_BASE_PATH {
+                continue;
+            }
             // A chunked blob sits in the chunk store; its entry is the index.
             let (path, size) = if layer.path == crate::offline_bundle::IMAGE_CHUNKS_PATH {
                 let artifact = chunked.get(&layer.digest).ok_or_else(|| {
@@ -218,7 +276,9 @@ pub async fn build(ctx: &mut Ctx, request: &BundleBuildRequest<'_>) -> Result<Bu
                 media_type: layer.media_type.clone(),
             });
         }
-        sboms.push(component_sbom("images", "images", &image_files));
+        if !packed.is_empty() {
+            sboms.push(component_sbom("images", "images", &image_files));
+        }
     }
     offline_chunk_store::insert_chunk_manifest(&mut payloads, weight_chunks)?;
 
@@ -419,7 +479,9 @@ async fn assemble_release(
     weight_cache: Option<&Path>,
     chunk_dir: &Path,
     payloads: &mut BTreeMap<String, (String, Vec<u8>)>,
+    delta: Delta<'_>,
 ) -> Result<AssembledRelease> {
+    let Delta { base, held } = delta;
     let release = load_release(ctx, spec).await?;
     let raw = release
         .properties
@@ -505,6 +567,12 @@ async fn assemble_release(
     let mut declared = Vec::new();
     for artifact in &artifacts {
         artifact.validate()?;
+        // The base release brought it, and its SBOM, to the site: a delta
+        // neither fetches nor packs it (#686).
+        if held.contains(&blob_at(artifact)) {
+            images.push(artifact.digest.clone());
+            continue;
+        }
         match registry.fetch(artifact) {
             Ok(bytes) => {
                 let actual = sha256_digest(&bytes);
@@ -539,27 +607,33 @@ async fn assemble_release(
         .as_ref()
         .map(|model| model.artifact_digest.clone())
     {
-        let cache = weight_cache.ok_or_else(|| anyhow::anyhow!("missing weight {digest}"))?;
-        let blob = crate::model_runtime::WeightCache::new(cache).blob_path(&digest)?;
-        if !blob.is_file() {
-            bail!("missing weight {digest}");
+        // The base release brought it: the stack still names it, and a
+        // delta carries no chunks for it.
+        if base.is_some_and(|base| base.weights.contains(&digest)) {
+            weights.push(digest.clone());
+        } else {
+            let cache = weight_cache.ok_or_else(|| anyhow::anyhow!("missing weight {digest}"))?;
+            let blob = crate::model_runtime::WeightCache::new(cache).blob_path(&digest)?;
+            if !blob.is_file() {
+                bail!("missing weight {digest}");
+            }
+            let exported = offline_chunk_store::export_weight_chunks(
+                &blob,
+                chunk_dir,
+                offline_chunk_store::DEFAULT_CHUNK_BYTES,
+            )?;
+            if exported.digest != digest {
+                bail!("weight {digest} does not match cached bytes");
+            }
+            files.push(SbomFile {
+                path: format!("weights/{digest}"),
+                digest: exported.digest.clone(),
+                size: exported.size,
+                media_type: exported.media_type.clone(),
+            });
+            weight_chunks.push(exported);
+            weights.push(digest);
         }
-        let exported = offline_chunk_store::export_weight_chunks(
-            &blob,
-            chunk_dir,
-            offline_chunk_store::DEFAULT_CHUNK_BYTES,
-        )?;
-        if exported.digest != digest {
-            bail!("weight {digest} does not match cached bytes");
-        }
-        files.push(SbomFile {
-            path: format!("weights/{digest}"),
-            digest: exported.digest.clone(),
-            size: exported.size,
-            media_type: exported.media_type.clone(),
-        });
-        weight_chunks.push(exported);
-        weights.push(digest);
     }
 
     Ok(AssembledRelease {
@@ -616,6 +690,88 @@ fn carry_declared_sbom(
         digest: sbom.digest.clone(),
         media_type: sbom.media_type.clone(),
     })
+}
+
+/// What a delta build leaves out: the base's inventory and where the base
+/// put each blob; both empty for a full bundle.
+#[derive(Clone, Copy)]
+struct Delta<'a> {
+    base: Option<&'a crate::offline_bundle::OfflineDeltaBase>,
+    held: &'a BTreeSet<BlobAt>,
+}
+
+/// Where a blob sits on a site: registry, repository and digest. A site
+/// holds a base layer only under the repository the base imported it to.
+type BlobAt = (String, String, String);
+
+fn blob_at(artifact: &OciArtifactRef) -> BlobAt {
+    (
+        artifact.registry.clone(),
+        artifact.repository.clone(),
+        artifact.digest.clone(),
+    )
+}
+
+/// What the base release `spec` brought to the site: its images with every
+/// blob they reference, where it put them, and its model weights, read from
+/// the published release (#686). When an image's closure cannot be resolved
+/// here, only its declared blobs count as present, so the delta carries more,
+/// never less.
+async fn delta_base(
+    ctx: &mut Ctx,
+    spec: &str,
+    registry: &dyn ArtifactRegistry,
+) -> Result<(crate::offline_bundle::OfflineDeltaBase, BTreeSet<BlobAt>)> {
+    crate::offline_bundle::base_release_parts(spec)?;
+    let release = load_release(ctx, spec)
+        .await
+        .with_context(|| format!("delta base release {spec}"))?;
+    let layers: Vec<OciArtifactRef> = release
+        .properties
+        .get("oci_artifacts")
+        .map(|raw| serde_json::from_str(raw))
+        .transpose()?
+        .unwrap_or_default();
+    let weights = release
+        .properties
+        .get("manifest")
+        .map(|raw| manifest::parse_raw(raw))
+        .transpose()?
+        .and_then(|parsed| parsed.model)
+        .map(|model| model.artifact_digest)
+        .into_iter()
+        .collect();
+    let held: BTreeSet<BlobAt> = crate::oci_artifact::image_closure(&layers, registry)
+        .unwrap_or(layers)
+        .iter()
+        .map(blob_at)
+        .collect();
+    let digests: BTreeSet<String> = held.iter().map(|(_, _, digest)| digest.clone()).collect();
+    Ok((
+        crate::offline_bundle::OfflineDeltaBase {
+            schema: crate::offline_bundle::DELTA_BASE_SCHEMA.into(),
+            base_release: spec.into(),
+            layers: digests.into_iter().collect(),
+            weights,
+        },
+        held,
+    ))
+}
+
+/// Drops from `base` every digest a target blob needs under a repository the
+/// base did not put it in, so the delta carries those bytes.
+fn narrow_to_held(
+    base: &mut crate::offline_bundle::OfflineDeltaBase,
+    held: &BTreeSet<BlobAt>,
+    targets: &[OciArtifactRef],
+) {
+    let elsewhere: BTreeSet<&str> = targets
+        .iter()
+        .filter(|target| !held.contains(&blob_at(target)))
+        .map(|target| target.digest.as_str())
+        .collect();
+    base.layers
+        .retain(|digest| !elsewhere.contains(digest.as_str()));
 }
 
 async fn load_release(ctx: &mut Ctx, spec: &str) -> Result<Object> {
@@ -1423,6 +1579,222 @@ inputs = ["schemas"]
         assert!(err.to_string().contains("already exists"), "{err}");
     }
 
+    /// A delta from edge-app 1.0.0 to 1.1.0 carries only the layer 1.0.0
+    /// lacks; the base layer travels as a signed reference, and a site
+    /// without it is refused before any change, naming the digest (#686).
+    #[tokio::test]
+    async fn a_delta_carries_only_what_its_base_lacks() {
+        let fixture = Fixture::new("delta").await;
+        let sbom_of = |bytes: &[u8]| crate::oci_artifact::SbomRef {
+            digest: sha256_digest(bytes),
+            media_type: "application/spdx+json".into(),
+        };
+        let layer_b = b"layer-b";
+        let sbom_b_bytes = br#"{"spdxVersion":"SPDX-2.3","name":"edge-app-b"}"#;
+        let image_b = OciArtifactRef {
+            digest: sha256_digest(layer_b),
+            sbom: Some(sbom_of(sbom_b_bytes)),
+            ..fixture.image.clone()
+        };
+        fixture.registry.put(&image_b, layer_b.to_vec()).unwrap();
+        fixture
+            .registry
+            .put(
+                &OciArtifactRef {
+                    digest: sha256_digest(sbom_b_bytes),
+                    media_type: "application/spdx+json".into(),
+                    sbom: None,
+                    ..image_b.clone()
+                },
+                sbom_b_bytes.to_vec(),
+            )
+            .unwrap();
+        let app = fixture.root.join("edge-next");
+        std::fs::create_dir_all(app.join("schemas")).unwrap();
+        std::fs::write(app.join("schemas/edge.json"), b"{\"type\":\"object\"}").unwrap();
+        let artifact = |image: &OciArtifactRef| {
+            let sbom = image.sbom.as_ref().unwrap();
+            format!(
+                "\n[[artifacts]]\nregistry = \"{}\"\nrepository = \"{}\"\ndigest = \"{}\"\nmedia_type = \"{}\"\nsbom = {{ digest = \"{}\", media_type = \"{}\" }}\n",
+                image.registry,
+                image.repository,
+                image.digest,
+                image.media_type,
+                sbom.digest,
+                sbom.media_type
+            )
+        };
+        std::fs::write(
+            app.join("tenkai.toml"),
+            format!(
+                "[product]\nname = \"edge-app\"\nversion = \"1.1.0\"\n\n[deploy]\ninstall = \"true\"\ninputs = [\"schemas/edge.json\"]\n{}{}",
+                artifact(&fixture.image),
+                artifact(&image_b)
+            ),
+        )
+        .unwrap();
+        let mut ctx = Ctx::embedded(fixture.root.join("tenkai.db")).unwrap();
+        let publish_registry = Arc::new(MemoryArtifactRegistry::new());
+        publish_registry
+            .put(&fixture.image, b"layer-a".to_vec())
+            .unwrap();
+        publish_registry.put(&image_b, layer_b.to_vec()).unwrap();
+        catalog::publish(
+            &mut ctx,
+            &app.join("tenkai.toml"),
+            &PublishOptions {
+                allow_unsigned_development: true,
+                artifact_registry: Some(publish_registry),
+                state_dir: Some(fixture.root.join("state")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        // The exporter need not hold what the base brought: this registry
+        // has only the new layer and its SBOM.
+        let exporter = MemoryArtifactRegistry::new();
+        exporter.put(&image_b, layer_b.to_vec()).unwrap();
+        exporter
+            .put(
+                &OciArtifactRef {
+                    digest: sha256_digest(sbom_b_bytes),
+                    media_type: "application/spdx+json".into(),
+                    sbom: None,
+                    ..image_b.clone()
+                },
+                sbom_b_bytes.to_vec(),
+            )
+            .unwrap();
+        let archive = fixture.root.join("delta.bundle.json");
+        let mut request = fixture.request(&archive);
+        request.releases = vec!["edge-app@1.1.0".into(), "weights@1.0.0".into()];
+        request.base = Some("edge-app@1.0.0".into());
+        request.registry = &exporter;
+        let delta = build(&mut ctx, &request).await.unwrap();
+        let carried = |image: &OciArtifactRef| {
+            delta
+                .entries
+                .iter()
+                .any(|entry| entry.path == image.layer_entry_path().unwrap())
+        };
+        assert!(!carried(&fixture.image), "the base layer is not carried");
+        assert!(carried(&image_b));
+        let base: crate::offline_bundle::OfflineDeltaBase =
+            serde_json::from_slice(&payload(&delta, crate::offline_bundle::DELTA_BASE_PATH))
+                .unwrap();
+        assert_eq!(base.base_release, "edge-app@1.0.0");
+        assert_eq!(base.layers, std::slice::from_ref(&fixture.image.digest));
+
+        let verified = delta
+            .verify(
+                &parse_trust_roots(&fixture.trust_toml).unwrap(),
+                ontology::NS,
+                "dark-1",
+                fixture.issued_at + 1,
+            )
+            .unwrap();
+        let empty = MemoryArtifactRegistry::new();
+        let refused = crate::offline_bundle::preflight_delta_base(
+            &verified,
+            Some(&empty),
+            &BTreeMap::from([(
+                "registry.example".to_string(),
+                "registry.example".to_string(),
+            )]),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(refused.contains(&fixture.image.digest), "{refused}");
+    }
+
+    /// A base that brought the model weights: the delta carries no chunks
+    /// for them, and the stack manifest still names them.
+    #[tokio::test]
+    async fn a_delta_leaves_out_the_base_weights() {
+        let fixture = Fixture::new("delta-weights").await;
+        let mut ctx = Ctx::embedded(fixture.root.join("tenkai.db")).unwrap();
+        let full = fixture.build().await;
+        let weights = |bundle: &BundleEnvelope| {
+            let stack: OfflineStackManifest = serde_json::from_slice(&payload(
+                bundle,
+                crate::offline_bundle::STACK_MANIFEST_PATH,
+            ))
+            .unwrap();
+            stack.weights
+        };
+        let archive = fixture.root.join("delta-weights.bundle.json");
+        let mut request = fixture.request(&archive);
+        request.base = Some("weights@1.0.0".into());
+        let delta = build(&mut ctx, &request).await.unwrap();
+        assert_eq!(weights(&delta), weights(&full));
+        // The weights' chunk index lists them in the full bundle; the delta
+        // carries no chunks for them, so it has none for them either.
+        let chunks = |bundle: &BundleEnvelope| {
+            bundle
+                .entries
+                .iter()
+                .find(|entry| entry.path == offline_chunk_store::CHUNK_MANIFEST_PATH)
+                .map(|_| {
+                    String::from_utf8(payload(bundle, offline_chunk_store::CHUNK_MANIFEST_PATH))
+                        .unwrap()
+                })
+                .unwrap_or_default()
+        };
+        let digest = &weights(&full)[0];
+        assert!(chunks(&full).contains(digest.as_str()));
+        assert!(!chunks(&delta).contains(digest.as_str()));
+
+        // A weights-only delta still declares its base, so import checks
+        // the omitted weights against it.
+        let weights_archive = fixture.root.join("weights-only.bundle.json");
+        let mut request = fixture.request(&weights_archive);
+        request.releases = vec!["weights@1.0.0".into()];
+        request.base = Some("weights@1.0.0".into());
+        let weights_only = build(&mut ctx, &request).await.unwrap();
+        let base: crate::offline_bundle::OfflineDeltaBase = serde_json::from_slice(&payload(
+            &weights_only,
+            crate::offline_bundle::DELTA_BASE_PATH,
+        ))
+        .unwrap();
+        assert_eq!(base.weights, std::slice::from_ref(digest));
+    }
+
+    /// A blob the target needs under another repository than the base put
+    /// it in is carried: the site holds it only where the base imported it.
+    #[test]
+    fn a_base_blob_needed_elsewhere_is_carried() {
+        let at = |repository: &str, digest: &str| OciArtifactRef {
+            registry: "registry.example".into(),
+            repository: repository.into(),
+            digest: digest.into(),
+            media_type: "application/vnd.oci.image.layer.v1.tar".into(),
+            sbom: None,
+        };
+        let shared = format!("sha256:{}", "a".repeat(64));
+        let kept = format!("sha256:{}", "b".repeat(64));
+        let held: BTreeSet<BlobAt> = [
+            blob_at(&at("edge/app", &shared)),
+            blob_at(&at("edge/app", &kept)),
+        ]
+        .into_iter()
+        .collect();
+        let mut base = crate::offline_bundle::OfflineDeltaBase {
+            schema: crate::offline_bundle::DELTA_BASE_SCHEMA.into(),
+            base_release: "edge-app@1.0.0".into(),
+            layers: vec![shared.clone(), kept.clone()],
+            weights: Vec::new(),
+        };
+        narrow_to_held(
+            &mut base,
+            &held,
+            &[at("edge/moved", &shared), at("edge/app", &kept)],
+        );
+        assert_eq!(base.layers, [kept]);
+    }
+
     #[tokio::test]
     async fn existing_archive_destination_is_refused() {
         let fixture = Fixture::new("existing-out").await;
@@ -1641,6 +2013,7 @@ max_startup_seconds = 30
                 expires_at_unix_ms: default_expires_at(self.issued_at),
                 registry: &self.registry,
                 weight_cache: Some(&self.weight_cache),
+                base: None,
             }
         }
 

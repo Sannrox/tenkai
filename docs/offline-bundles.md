@@ -196,6 +196,17 @@ delta that carries only what that base release lacks (#635):
   instructions point at a signed `delta/base.json`
   (`tenkai.offline-delta-base.v1`), which names the base release and lists
   the digests. Base weights are left out of the chunk store.
+  `tenkaictl bundle build --base <product>@<version>` builds one: the base
+  release's layers and model weights, as published, are left out, and the
+  stack manifest still names them so a site holding the base passes
+  preflight. Base images count with every blob they reference, so an image
+  update carries only the blobs that changed. The exporter needs no bytes of a
+  base image the new release keeps unchanged; an image the delta carries must
+  be fully readable there, including blobs it reuses, or the build stops
+  naming it (#841). A blob counts as brought only under the registry and
+  repository the base put it in; one the new release needs elsewhere is
+  carried. A delta's component SBOMs list what it carries; the base bundle
+  describes the rest.
 - **Before any change:** bind, dry-run import and server-side import refuse
   a delta unless the base release is in the site's catalog and every listed
   layer (under the environment's mirror) and weight is held here with

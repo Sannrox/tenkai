@@ -39,6 +39,10 @@ pub(crate) enum BundleCommand {
         /// Expires-at unix milliseconds. Defaults to issued-at plus seven days.
         #[arg(long)]
         expires_at_unix_ms: Option<i64>,
+        /// Build a delta against this release (`product@version`), which the
+        /// site already holds: its layers and weights are left out.
+        #[arg(long)]
+        base: Option<String>,
     },
     /// Verify a bundle and write its docs to `<out>/<version>/`.
     Docs {
