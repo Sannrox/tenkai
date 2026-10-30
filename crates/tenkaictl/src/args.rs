@@ -209,6 +209,11 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: WaveCommand,
     },
+    /// Recall matching releases and admit a fix-forward wave, or import a notice.
+    Remediate {
+        #[command(subcommand)]
+        command: RemediateCommand,
+    },
     /// Failover-drill a replica of a declared topology (explicit request only).
     Topology {
         #[command(subcommand)]
@@ -419,6 +424,41 @@ pub(crate) enum RunnerCaCommand {
         /// The CA's common name.
         #[arg(long, default_value = "Tenkai runner CA")]
         name: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum RemediateCommand {
+    /// Recall releases matching an advisory and admit a stop-on-failure wave.
+    Propose {
+        /// Advisory id from the imported feed (`tenkaictl exposure query`).
+        #[arg(long)]
+        exposure: String,
+        /// Patched release to wave, e.g. `api@1.1.0`.
+        #[arg(long)]
+        fix: String,
+        #[arg(long)]
+        channel: String,
+        /// Comma-separated environment names in wave order.
+        #[arg(long)]
+        cohort: String,
+        /// Durable wave name. Defaults to `recall-<advisory-id>`.
+        #[arg(long)]
+        wave_name: Option<String>,
+        /// 32-byte Ed25519 seed (mode 0600) that signs the recall notice.
+        #[arg(long)]
+        signing_key: PathBuf,
+        /// Where to write the signed recall notice.
+        #[arg(long)]
+        notice_out: PathBuf,
+    },
+    /// Import a signed recall notice and refuse planning of the named releases.
+    ImportNotice {
+        #[arg(long)]
+        notice: PathBuf,
+        /// Release-format trust roots naming the recall-notice authorities.
+        #[arg(long)]
+        trust_roots: PathBuf,
     },
 }
 

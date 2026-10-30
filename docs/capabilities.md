@@ -29,6 +29,7 @@ it ([ADR 0001](decisions/0001-standalone-core-and-service-evolution.md),
 | Model-runtime evidence outbox export | [Model-release evidence](model-release-evidence.md#export); #604 |
 | Model-runtime evaluation promotion gate | [Model-release evidence](model-release-evidence.md#channel-promotion); #605 |
 | Multi-environment rollout waves | [Rollout waves](rollout-waves.md); [ADR 0017](decisions/0017-executable-release-waves.md) |
+| Advisory-driven recall notice and fix-forward proposal | [Recall notices](recall-notices.md); `tenkaictl remediate propose` / `import-notice`; #693 |
 | Canary × model_runtime promote E2E | [Model runtime](model-runtime.md#canary-promotion-evidence-model_runtime); #108 |
 | Multi-environment list/inspect | `tenkaictl env list` / `env inspect`; #56 |
 | Authenticated remote status/inspect | `--target remote`; #58 |

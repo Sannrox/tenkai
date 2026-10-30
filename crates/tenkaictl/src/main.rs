@@ -18,6 +18,7 @@ mod embedded_migrate;
 mod embedded_preflight;
 mod embedded_product;
 mod embedded_reconcile;
+mod embedded_remediate;
 mod embedded_rollback;
 mod embedded_topology;
 mod embedded_upgrade;

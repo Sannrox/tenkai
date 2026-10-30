@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-use crate::args::{Cli, Command, KeysCommand, Target};
+use crate::args::{Cli, Command, KeysCommand, RemediateCommand, Target};
 use crate::env_args::{EnvCommand, MaintenanceCommand, OverlayCommand};
 use crate::topology_args::TopologyCommand;
 use crate::wave_args::WaveCommand;
@@ -614,6 +614,59 @@ fn parses_shared_apply_and_wave_approval_flags() {
     assert!(approval.approval_dir.is_none());
     assert!(approval.allow_unapproved_development);
     assert_eq!(approval.development_reason.as_deref(), Some("local drill"));
+
+    let propose = Cli::try_parse_from([
+        "tenkaictl",
+        "remediate",
+        "propose",
+        "--exposure",
+        "TENKAI-2026-1",
+        "--fix",
+        "api@1.1.0",
+        "--channel",
+        "stable",
+        "--cohort",
+        "canary,prod",
+        "--signing-key",
+        "notice.seed",
+        "--notice-out",
+        "notice.json",
+    ])
+    .unwrap();
+    let Command::Remediate {
+        command:
+            RemediateCommand::Propose {
+                ref exposure,
+                ref fix,
+                ref cohort,
+                ref wave_name,
+                ..
+            },
+    } = propose.command
+    else {
+        panic!("expected remediate propose");
+    };
+    assert_eq!(exposure, "TENKAI-2026-1");
+    assert_eq!(fix, "api@1.1.0");
+    assert_eq!(cohort, "canary,prod");
+    assert!(wave_name.is_none());
+
+    let import = Cli::try_parse_from([
+        "tenkaictl",
+        "remediate",
+        "import-notice",
+        "--notice",
+        "notice.json",
+        "--trust-roots",
+        "notice-roots.toml",
+    ])
+    .unwrap();
+    assert!(matches!(
+        import.command,
+        Command::Remediate {
+            command: RemediateCommand::ImportNotice { .. }
+        }
+    ));
 
     let drill = Cli::try_parse_from([
         "tenkaictl",
