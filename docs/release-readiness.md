@@ -1,7 +1,9 @@
 # Release readiness checklist
 
 Use this checklist before tagging a Tenkai release. It does **not** invent a
-version number; the maintainer chooses the target version. Pair with the
+version number; the maintainer chooses the target version. Family policy is
+[ADR 0040](decisions/0040-family-versioning-and-release-policy.md). The
+maintainer procedure is [RELEASING.md](../RELEASING.md). Pair with the
 project-local `prepare-release` skill for notes and evidence assembly.
 
 Latest milestone notes: [docs/releases/0.6.0.md](releases/0.6.0.md).
