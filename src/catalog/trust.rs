@@ -335,6 +335,8 @@ pub(super) fn verification_view(
                     key_id: property(properties, "signer_key_id")?.into(),
                     identity: property(properties, "signer_identity")?.into(),
                     public_key: property(properties, "signer_public_key")?.into(),
+                    not_before: None,
+                    not_after: None,
                 }],
             };
             let evidence = release_signing::verify_release(

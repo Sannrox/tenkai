@@ -456,6 +456,8 @@ tenkai.audit_export outcome=ok sequence=3 entries=12";
                 key_id: crate::signature_verification::key_id(&public),
                 identity: "support".into(),
                 public_key: STANDARD.encode(public),
+                not_before: None,
+                not_after: None,
             }],
         };
         let mut ctx = Ctx::embedded(dir.join("tenkai.db")).unwrap();

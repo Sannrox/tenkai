@@ -2660,6 +2660,8 @@ install = "true"
             identity: "exporter".into(),
             public_key: base64::engine::general_purpose::STANDARD
                 .encode(exporter.verifying_key().to_bytes()),
+            not_before: None,
+            not_after: None,
         }];
         if let Some(runtime) = runtime {
             signers.push(TrustedSigner {
@@ -2667,6 +2669,8 @@ install = "true"
                 identity: "airgap-runtime".into(),
                 public_key: base64::engine::general_purpose::STANDARD
                     .encode(runtime.verifying_key().to_bytes()),
+                not_before: None,
+                not_after: None,
             });
         }
         crate::release_signing::TrustRoots {

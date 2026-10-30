@@ -36,6 +36,9 @@ pub fn load_trust_roots(path: &Path) -> Result<ApprovalTrustRoots> {
             "package migration approval trust roots must use version {TRUST_ROOT_VERSION} and contain at least one signer"
         );
     }
+    for signer in &roots.signers {
+        signer.validity().validate()?;
+    }
     Ok(roots)
 }
 

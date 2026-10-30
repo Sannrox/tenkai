@@ -60,6 +60,20 @@ pub struct TrustedSigner {
     pub providers: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<String>,
+    /// Unix milliseconds. Absent: validity is not recorded (#812).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub not_before: Option<i64>,
+    /// Unix milliseconds. Absent: validity is not recorded (#812).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub not_after: Option<i64>,
+}
+
+impl TrustedSigner {
+    pub(crate) fn validity(&self) -> crate::signature_verification::SignerValidityWindow {
+        crate::signature_verification::SignerValidityWindow::new(self.not_before, self.not_after)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -292,6 +306,7 @@ impl TrustRoots {
                 &signer.public_key,
                 &signer.key_id,
             )?;
+            signer.validity().validate()?;
             if keys.insert(&signer.key_id, ()).is_some() || !identities.insert(&signer.identity) {
                 bail!("plan approval trust roots contain duplicate keys or identities");
             }
@@ -545,6 +560,7 @@ pub fn verify_envelope(
         bail!("plan approval expired at {}", envelope.statement.expires_at);
     }
     let signer = roots.signer(&envelope.key_id)?;
+    signer.validity().check(&signer.identity, now)?;
     if !signer.environments.is_empty() && !signer.environments.contains(&plan.environment) {
         bail!("plan approval signer is outside its environment scope");
     }
@@ -1023,6 +1039,8 @@ mod tests {
                     environments: environments.iter().map(|value| value.to_string()).collect(),
                     providers: providers.iter().map(|value| value.to_string()).collect(),
                     groups: groups.iter().map(|value| value.to_string()).collect(),
+                    not_before: None,
+                    not_after: None,
                 }
             };
         let roots = TrustRoots {

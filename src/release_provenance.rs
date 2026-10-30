@@ -480,6 +480,8 @@ mod tests {
                 identity: envelope.issuer.clone(),
                 public_key: base64::engine::general_purpose::STANDARD
                     .encode(signing_key.verifying_key().to_bytes()),
+                not_before: None,
+                not_after: None,
             }],
         };
         assert!(envelope.verify_issuer(&roots).is_ok());
@@ -507,6 +509,8 @@ mod tests {
                 identity: envelope.issuer.clone(),
                 public_key: base64::engine::general_purpose::STANDARD
                     .encode(signing_key.verifying_key().to_bytes()),
+                not_before: None,
+                not_after: None,
             }],
         };
 

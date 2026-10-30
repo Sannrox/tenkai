@@ -91,6 +91,8 @@ fn remote_api_version_and_unknown_fields_fail_closed() {
                 key_id: "k".into(),
                 identity: "approver".into(),
                 public_key: "cA==".into(),
+                not_before: None,
+                not_after: None,
             }],
         },
         &BTreeMap::from([(
@@ -140,6 +142,8 @@ async fn remote_approval_files_materialize_on_the_blocking_pool() {
                 key_id: "k".into(),
                 identity: "approver".into(),
                 public_key: "cA==".into(),
+                not_before: None,
+                not_after: None,
             }],
         },
         BTreeMap::new(),

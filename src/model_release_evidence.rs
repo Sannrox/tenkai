@@ -302,6 +302,20 @@ pub struct EvaluationTrustRoots {
 pub struct EvaluationTrustedSigner {
     pub key_id: String,
     pub public_key: String,
+    /// Unix milliseconds. Absent: validity is not recorded (#812).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub not_before: Option<i64>,
+    /// Unix milliseconds. Absent: validity is not recorded (#812).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub not_after: Option<i64>,
+}
+
+impl EvaluationTrustedSigner {
+    pub(crate) fn validity(&self) -> crate::signature_verification::SignerValidityWindow {
+        crate::signature_verification::SignerValidityWindow::new(self.not_before, self.not_after)
+    }
 }
 
 impl EvaluationTrustRoots {
@@ -341,6 +355,7 @@ impl EvaluationTrustRoots {
                 &signer.public_key,
                 &signer.key_id,
             )?;
+            signer.validity().validate()?;
         }
         Ok(())
     }
@@ -393,6 +408,9 @@ fn verify_evaluation_signature(
         .iter()
         .find(|signer| signer.key_id == evidence.signer.key_id)
         .context("model evaluation signer is not currently trusted")?;
+    signer
+        .validity()
+        .check(&evidence.signer.key_id, crate::now_millis())?;
     let key = crate::signature_verification::trusted_key(
         "model evaluation public key",
         &signer.public_key,
@@ -462,6 +480,8 @@ async fn ensure_fixture_evaluation_trust(ctx: &mut Ctx) -> Result<SigningKey> {
         signers: vec![EvaluationTrustedSigner {
             key_id: key_id(&public),
             public_key: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, public),
+            not_before: None,
+            not_after: None,
         }],
     };
     let actor = crate::auth_context::test_management_context("eval-trust-fixture");
@@ -1500,6 +1520,8 @@ uninstall = "true"
                     &base64::engine::general_purpose::STANDARD,
                     public,
                 ),
+                not_before: None,
+                not_after: None,
             }],
         };
         let trust_path = root.join("eval-trust.toml");
@@ -1570,6 +1592,8 @@ uninstall = "true"
                     &base64::engine::general_purpose::STANDARD,
                     public,
                 ),
+                not_before: None,
+                not_after: None,
             }],
         };
         let publisher = crate::auth_context::AuthenticatedRequestContextBuilder::new(

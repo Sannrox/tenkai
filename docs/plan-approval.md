@@ -56,14 +56,17 @@ key_id = "sha256:<sha256-of-the-32-byte-public-key>"
 identity = "deployment-approver@example.com"
 public_key = "<base64-encoded-32-byte-Ed25519-public-key>"
 groups = ["release"]   # optional; used by multi-party quorum
+# optional Unix milliseconds (#812)
+# not_before = 1700000000000
+# not_after = 1800000000000
 ```
 
 Apply verifies the signature, exact plan and environment scope, purpose, issue
-time, expiry, policy fields, and current trust membership before claiming the
-execution lease. Removing a key therefore revokes every not-yet-executed
-approval made by that key; adding a replacement key does not alter existing
-envelopes. Unknown fields, duplicate roots, malformed values, and missing or
-mismatched inputs fail closed.
+time, expiry, signer validity window when recorded, policy fields, and current
+trust membership before claiming the execution lease. Removing a key therefore
+revokes every not-yet-executed approval made by that key; adding a replacement
+key does not alter existing envelopes. Unknown fields, duplicate roots,
+malformed values, and missing or mismatched inputs fail closed.
 
 ## Multi-party approval
 

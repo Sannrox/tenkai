@@ -43,6 +43,12 @@ For stateful products whose upgrades need data migration, see
 [package migrations](package-migrations.md). To restore Tenkai's own state, see
 [backup and restore](backup-restore.md).
 
+Trust-root files may carry optional signer `not_before` / `not_after` windows
+on format v1 ([ADR 0039](decisions/0039-signer-validity-windows.md)). Upgrade
+every host before writing those fields. Restore files without the fields
+before running an older binary; an older release refuses a file that still
+has them.
+
 ## Capture a rollback replay
 
 The deterministic replay capture runs a healthy deployment followed by a

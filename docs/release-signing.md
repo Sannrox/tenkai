@@ -36,11 +36,18 @@ version = 1
 key_id = "sha256:<sha256-of-the-32-byte-public-key>"
 identity = "release@example.com"
 public_key = "<base64-encoded-32-byte-Ed25519-public-key>"
+# optional Unix milliseconds (#812); omit both to leave validity unrecorded
+# not_before = 1700000000000
+# not_after = 1800000000000
 ```
 
 Signer identity comes only from this local trust-root file, never from the
 untrusted signature envelope. Duplicate keys or identities and key ids that do
-not match their public keys are rejected.
+not match their public keys are rejected. Optional `not_before` and `not_after`
+are Unix milliseconds. A signature verified before `not_before` or after
+`not_after` is refused with that field named. Files that omit the fields stay
+valid and report `signer_validity: "not_recorded"`. Older releases that do not
+know the fields refuse a file that has them ([ADR 0039](decisions/0039-signer-validity-windows.md)).
 
 ## Publication policy
 

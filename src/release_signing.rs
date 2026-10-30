@@ -57,6 +57,34 @@ pub struct TrustedSigner {
     pub key_id: String,
     pub identity: String,
     pub public_key: String,
+    /// Unix milliseconds. Absent: validity is not recorded (#812).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub not_before: Option<i64>,
+    /// Unix milliseconds. Absent: validity is not recorded (#812).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub not_after: Option<i64>,
+}
+
+impl TrustedSigner {
+    pub fn new(
+        key_id: impl Into<String>,
+        identity: impl Into<String>,
+        public_key: impl Into<String>,
+    ) -> Self {
+        Self {
+            key_id: key_id.into(),
+            identity: identity.into(),
+            public_key: public_key.into(),
+            not_before: None,
+            not_after: None,
+        }
+    }
+
+    pub(crate) fn validity(&self) -> crate::signature_verification::SignerValidityWindow {
+        crate::signature_verification::SignerValidityWindow::new(self.not_before, self.not_after)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -257,11 +285,16 @@ impl TrustRoots {
                 &signer.public_key,
                 &signer.key_id,
             )?;
+            signer.validity().validate()?;
         }
         Ok(())
     }
 
     pub fn resolve(&self, key_id: &str) -> Result<ResolvedSigner> {
+        self.resolve_at(key_id, crate::now_millis())
+    }
+
+    pub fn resolve_at(&self, key_id: &str, at_ms: i64) -> Result<ResolvedSigner> {
         let signers: HashMap<_, _> = self
             .signers
             .iter()
@@ -270,6 +303,7 @@ impl TrustRoots {
         let signer = signers
             .get(key_id)
             .with_context(|| format!("signer {key_id} is not trusted"))?;
+        signer.validity().check(&signer.identity, at_ms)?;
         Ok(ResolvedSigner {
             identity: signer.identity.clone(),
             key_id: signer.key_id.clone(),
@@ -391,6 +425,8 @@ mod tests {
                 key_id: key_id(&public_key),
                 identity: "release@example.com".into(),
                 public_key: STANDARD.encode(public_key),
+                not_before: None,
+                not_after: None,
             }],
         };
         roots.validate().unwrap();
@@ -441,6 +477,8 @@ mod tests {
                 key_id: key_id(&public_key),
                 identity: "release@example.com".into(),
                 public_key: STANDARD.encode(public_key),
+                not_before: None,
+                not_after: None,
             }],
         };
         let mut envelope = SignatureEnvelope {
@@ -476,6 +514,8 @@ mod tests {
                 key_id: key_id(&identity_point),
                 identity: "release@example.com".into(),
                 public_key: STANDARD.encode(identity_point),
+                not_before: None,
+                not_after: None,
             }],
         };
         assert!(roots.validate().is_err());
@@ -491,6 +531,8 @@ mod tests {
                 key_id: key_id(&public_key),
                 identity: "release@example.com".into(),
                 public_key: STANDARD.encode(public_key),
+                not_before: None,
+                not_after: None,
             }],
         };
         let mut envelope = SignatureEnvelope {
@@ -527,6 +569,8 @@ mod tests {
                 key_id: key_id(&trusted_public_key),
                 identity: "trusted@example.com".into(),
                 public_key: STANDARD.encode(trusted_public_key),
+                not_before: None,
+                not_after: None,
             }],
         };
         let mut envelope = SignatureEnvelope {
@@ -545,5 +589,88 @@ mod tests {
                 .to_bytes(),
         );
         assert!(verify_release(&envelope, &roots, &"2".repeat(64), &"3".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn current_format_roots_without_windows_still_verify() {
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[15_u8; 32]);
+        let public_key = signing_key.verifying_key().to_bytes();
+        let raw = format!(
+            "version = {TRUST_ROOT_VERSION}\n\n[[signers]]\nkey_id = \"{}\"\nidentity = \"release@example.com\"\npublic_key = \"{}\"\n",
+            key_id(&public_key),
+            STANDARD.encode(public_key)
+        );
+        let roots: TrustRoots = toml::from_str(&raw).unwrap();
+        roots.validate().unwrap();
+        assert!(roots.signers[0].not_before.is_none());
+        assert!(roots.signers[0].not_after.is_none());
+        let mut envelope = SignatureEnvelope {
+            schema: ENVELOPE_SCHEMA.into(),
+            key_id: key_id(&public_key),
+            statement: ReleaseStatement {
+                manifest_digest: "2".repeat(64),
+                artifact_digest: "3".repeat(64),
+                provenance: provenance(),
+            },
+            signature: String::new(),
+        };
+        envelope.signature = STANDARD.encode(
+            signing_key
+                .sign(&envelope.signed_bytes().unwrap())
+                .to_bytes(),
+        );
+        envelope.authenticate(&roots).unwrap();
+    }
+
+    #[test]
+    fn verification_refuses_a_signer_outside_its_validity_window() {
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[16_u8; 32]);
+        let public_key = signing_key.verifying_key().to_bytes();
+        let mut signer = TrustedSigner::new(
+            key_id(&public_key),
+            "release@example.com",
+            STANDARD.encode(public_key),
+        );
+        signer.not_before = Some(10);
+        signer.not_after = Some(20);
+        let roots = TrustRoots {
+            version: TRUST_ROOT_VERSION,
+            signers: vec![signer.clone()],
+        };
+        roots.resolve_at(&key_id(&public_key), 15).unwrap();
+        let early = roots
+            .resolve_at(&key_id(&public_key), 9)
+            .unwrap_err()
+            .to_string();
+        assert!(early.contains("not_before"), "{early}");
+        let late = roots
+            .resolve_at(&key_id(&public_key), 21)
+            .unwrap_err()
+            .to_string();
+        assert!(late.contains("not_after"), "{late}");
+
+        signer.not_before = None;
+        signer.not_after = Some(1);
+        let expired = TrustRoots {
+            version: TRUST_ROOT_VERSION,
+            signers: vec![signer],
+        };
+        let mut envelope = SignatureEnvelope {
+            schema: ENVELOPE_SCHEMA.into(),
+            key_id: key_id(&public_key),
+            statement: ReleaseStatement {
+                manifest_digest: "2".repeat(64),
+                artifact_digest: "3".repeat(64),
+                provenance: provenance(),
+            },
+            signature: String::new(),
+        };
+        envelope.signature = STANDARD.encode(
+            signing_key
+                .sign(&envelope.signed_bytes().unwrap())
+                .to_bytes(),
+        );
+        let closed = envelope.authenticate(&expired).unwrap_err().to_string();
+        assert!(closed.contains("not_after"), "{closed}");
     }
 }

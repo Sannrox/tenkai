@@ -230,6 +230,20 @@ pub struct ApprovalTrustedSigner {
     pub key_id: String,
     pub identity: String,
     pub public_key: String,
+    /// Unix milliseconds. Absent: validity is not recorded (#812).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub not_before: Option<i64>,
+    /// Unix milliseconds. Absent: validity is not recorded (#812).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub not_after: Option<i64>,
+}
+
+impl ApprovalTrustedSigner {
+    pub(crate) fn validity(&self) -> crate::signature_verification::SignerValidityWindow {
+        crate::signature_verification::SignerValidityWindow::new(self.not_before, self.not_after)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

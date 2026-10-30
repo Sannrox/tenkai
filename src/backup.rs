@@ -1077,6 +1077,8 @@ mod tests {
                 key_id: crate::signature_verification::key_id(&public),
                 identity: "backup".into(),
                 public_key: STANDARD.encode(public),
+                not_before: None,
+                not_after: None,
             }],
         };
         (path, roots)

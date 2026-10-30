@@ -562,6 +562,8 @@ pub fn exporter_roots(seed_path: &Path, extra_roots: Option<&TrustRoots>) -> Res
         key_id: crate::signature_verification::key_id(&public),
         identity: "this audit exporter".into(),
         public_key: STANDARD.encode(public),
+        not_before: None,
+        not_after: None,
     });
     Ok(roots)
 }
@@ -693,6 +695,8 @@ mod tests {
                 key_id: crate::signature_verification::key_id(&public),
                 identity: "audit".into(),
                 public_key: STANDARD.encode(public),
+                not_before: None,
+                not_after: None,
             }],
         };
         (path, roots)

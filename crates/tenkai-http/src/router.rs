@@ -129,7 +129,12 @@ pub fn router(
                 signers: roots
                     .signers
                     .iter()
-                    .map(|signer| (signer.key_id.clone(), signer.identity.clone()))
+                    .map(|signer| tenkai::trust_posture::LoadedSigner {
+                        key_id: signer.key_id.clone(),
+                        identity: signer.identity.clone(),
+                        not_before: signer.not_before,
+                        not_after: signer.not_after,
+                    })
                     .collect(),
             });
     }

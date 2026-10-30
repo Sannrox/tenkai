@@ -724,11 +724,11 @@ mod tests {
 
     fn signer(seed: &[u8; 32], identity: &str) -> TrustedSigner {
         let public = SigningKey::from_bytes(seed).verifying_key().to_bytes();
-        TrustedSigner {
-            key_id: crate::signature_verification::key_id(&public),
-            identity: identity.into(),
-            public_key: STANDARD.encode(public),
-        }
+        TrustedSigner::new(
+            crate::signature_verification::key_id(&public),
+            identity,
+            STANDARD.encode(public),
+        )
     }
 
     fn roots(signers: Vec<TrustedSigner>) -> TrustRoots {

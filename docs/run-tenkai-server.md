@@ -331,14 +331,17 @@ tenkai-runtime
 this host trusts and how long its certificates last (#676):
 
 - **Signing.** Each configured trust-root file (`release`,
-  `package_migration_approval`, `bundle_import`, `key_revocation`) with its
+  `plan_approval`, `package_migration_approval`, `bundle_import`,
+  `key_revocation`) with its
   signers' key ids and identities, each marked `revoked` when the installed
   key revocation list revokes it, and that list's sequence and signer.
   The list also carries `issued_at`, when its authority signed it, and
   `installed_at`, when the installed file was last written by an install
-  or bundle import (#811). Trust-root files record no signer validity, so
-  each root says `signer_validity: "not_recorded"`: a signer is trusted
-  until it is removed or revoked.
+  or bundle import (#811). A root whose signers omit `not_before` and
+  `not_after` says `signer_validity: "not_recorded"`: those signers are
+  trusted until removed or revoked. A root that records a window says
+  `recorded` and lists each signer's `not_before` / `not_after` (Unix
+  milliseconds, #812).
 - **TLS.** Every certificate in the listener chain (`TENKAI_TLS_CERT`), the
   TLS client CA, the runner CA and the outbound CA bundle
   (`TENKAI_CA_BUNDLE`), with subject, `not_after`, days left and a status:
@@ -365,13 +368,14 @@ The worst certificate status also appears on `/readyz` as `trust`, from a
 snapshot refreshed every minute, without failing readiness. Only public
 certificates and trust roots are read, never key files, and files are
 named without their directories.
-**Runway (#811).** `GET /v1/trust/runway` (same audience) lists each
+**Runway (#811, #812).** `GET /v1/trust/runway` (same audience) lists each
 environment's latest plan that has yet to apply (`computed` or `blocked`),
 the next maintenance window it waits for (`window_opens_at_ms`, absent when
-it may apply now), and `blocked_by`: the first TLS certificate that lapses
-at or before that window. It is computed on each request with the same
-check plan creation uses ([maintenance windows](manage-environments.md#maintenance-windows)).
-Signers are not checked, as trust roots record no signer validity.
+it may apply now), and `blocked_by`: the first TLS certificate or trust-root
+signer that lapses at or before that window. It is computed on each request
+with the same check plan creation uses
+([maintenance windows](manage-environments.md#maintenance-windows)).
+A signer without a recorded `not_after` is not checked.
 **Announcements (#775).** When the worst certificate status turns
 `warning`, `critical` or `expired`, host webhooks that list `trust.expiring`
 are notified once per turn, as for `backup.stale` and `clock.drift`.

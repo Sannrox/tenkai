@@ -66,13 +66,23 @@ pub struct TrustSources {
     pub loaded_signing: Vec<LoadedSigning>,
 }
 
-/// Signers a verifier holds in memory: `(key id, identity)` pairs.
+/// Signers a verifier holds in memory.
 #[derive(Debug, Clone, Default)]
 pub struct LoadedSigning {
     pub purpose: String,
     /// Shown in place of a file name.
     pub name: String,
-    pub signers: Vec<(String, String)>,
+    pub signers: Vec<LoadedSigner>,
+}
+
+/// One signer a verifier loaded at start, including a validity window
+/// when the trust-root file recorded one (#812).
+#[derive(Debug, Clone, Default)]
+pub struct LoadedSigner {
+    pub key_id: String,
+    pub identity: String,
+    pub not_before: Option<i64>,
+    pub not_after: Option<i64>,
 }
 
 impl TrustSources {
@@ -186,8 +196,8 @@ pub struct SigningRoot {
     /// verifier loaded at start (package-migration approvals), which adopts
     /// a changed file only after a restart (#811).
     pub source: TrustSource,
-    /// Trust-root files carry no signer validity period, so a signer is
-    /// trusted until removed or revoked (#811).
+    /// `not_recorded` when no signer on this root carries a window;
+    /// `recorded` when at least one does (#812).
     #[serde(default)]
     pub signer_validity: SignerValidity,
     pub signers: Vec<TrustedSignerView>,
@@ -203,9 +213,11 @@ pub struct SigningRoot {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum SignerValidity {
-    /// Trust-root format v1 has no `not_before` or `not_after` per signer.
+    /// No signer on this root carries `not_before` or `not_after`.
     #[default]
     NotRecorded,
+    /// At least one signer carries a validity window (#812).
+    Recorded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -214,6 +226,14 @@ pub struct TrustedSignerView {
     pub identity: String,
     /// Revoked by the key revocations this process enforces.
     pub revoked: bool,
+    /// Unix milliseconds. Absent when this signer has no window (#812).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub not_before: Option<i64>,
+    /// Unix milliseconds. Absent when this signer has no window (#812).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub not_after: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -268,6 +288,53 @@ pub struct CertificateEntry {
     pub error: Option<String>,
 }
 
+/// Reporting-only: identity and optional windows, extra signer fields ignored
+/// so plan-approval roots (environments, groups) list beside release roots.
+fn load_signing_signers(path: &Path) -> anyhow::Result<Vec<TrustedSignerView>> {
+    #[derive(serde::Deserialize)]
+    struct Roots {
+        #[serde(default)]
+        signers: Vec<Signer>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Signer {
+        key_id: String,
+        #[serde(default)]
+        identity: String,
+        #[serde(default)]
+        not_before: Option<i64>,
+        #[serde(default)]
+        not_after: Option<i64>,
+    }
+    let raw = std::fs::read_to_string(path)?;
+    let roots: Roots = toml::from_str(&raw)?;
+    if roots.signers.is_empty() {
+        anyhow::bail!("trust roots contain no signers");
+    }
+    Ok(roots
+        .signers
+        .into_iter()
+        .map(|signer| TrustedSignerView {
+            revoked: crate::key_revocation::is_revoked(&signer.key_id),
+            key_id: signer.key_id,
+            identity: signer.identity,
+            not_before: signer.not_before,
+            not_after: signer.not_after,
+        })
+        .collect())
+}
+
+fn signer_validity_of(signers: &[TrustedSignerView]) -> SignerValidity {
+    if signers
+        .iter()
+        .any(|signer| signer.not_before.is_some() || signer.not_after.is_some())
+    {
+        SignerValidity::Recorded
+    } else {
+        SignerValidity::NotRecorded
+    }
+}
+
 fn file_name(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -307,26 +374,42 @@ impl CredentialRunway {
     }
 }
 
-/// The first certificate in `sources` that lapses at or before
-/// `window_opens_at_ms`, if any. A certificate without a readable expiry is
-/// left to the posture's own `critical` grade.
+/// The first certificate or trust-root signer in `sources` that lapses at
+/// or before `window_opens_at_ms`, if any. A certificate without a readable
+/// expiry is left to the posture's own `critical` grade. A signer without a
+/// recorded `not_after` is not checked.
 pub fn runway(
     sources: &TrustSources,
     now_ms: i64,
     window_opens_at_ms: i64,
 ) -> Option<CredentialRunway> {
     let shown = posture(sources, now_ms.div_euclid(1_000));
-    shown
-        .tls
-        .into_iter()
-        .filter_map(|entry| Some((entry.not_after?.saturating_mul(1_000), entry)))
-        .filter(|(expires_at_ms, _)| *expires_at_ms <= window_opens_at_ms)
-        .min_by_key(|(expires_at_ms, _)| *expires_at_ms)
-        .map(|(expires_at_ms, entry)| CredentialRunway {
-            credential: match entry.subject {
+    let certificates = shown.tls.into_iter().filter_map(|entry| {
+        Some((
+            entry.not_after?.saturating_mul(1_000),
+            match entry.subject {
                 Some(subject) => format!("{} ({subject})", entry.purpose),
                 None => entry.purpose,
             },
+        ))
+    });
+    let signers = shown.signing.into_iter().flat_map(|root| {
+        root.signers.into_iter().filter_map(move |signer| {
+            if signer.revoked {
+                return None;
+            }
+            Some((
+                signer.not_after?,
+                format!("{} signer {}", root.purpose, signer.identity),
+            ))
+        })
+    });
+    certificates
+        .chain(signers)
+        .filter(|(expires_at_ms, _)| *expires_at_ms <= window_opens_at_ms)
+        .min_by_key(|(expires_at_ms, _)| *expires_at_ms)
+        .map(|(expires_at_ms, credential)| CredentialRunway {
+            credential,
             expires_at_ms,
             window_opens_at_ms,
         })
@@ -347,8 +430,8 @@ pub(crate) fn environment_runway(
     runway(sources, crate::now_millis(), opens_at_ms)
 }
 
-/// A plan waiting to apply and the first certificate that would lapse
-/// before it can (#811).
+/// A plan waiting to apply and the first certificate or trust-root signer
+/// that would lapse before it can (#811, #812).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PlanRunway {
     pub plan_id: String,
@@ -360,9 +443,8 @@ pub struct PlanRunway {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub window_opens_at_ms: Option<i64>,
-    /// The first TLS certificate to lapse at or before that window. Absent
-    /// when none does. Signers are not checked: trust roots record no
-    /// signer validity.
+    /// The first TLS certificate or trust-root signer to lapse at or before
+    /// that window. Absent when none does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub blocked_by: Option<CredentialRunway>,
@@ -405,49 +487,42 @@ pub fn posture(sources: &TrustSources, now_secs: i64) -> TrustPosture {
     let signing = sources
         .signing
         .iter()
-        .map(
-            |(purpose, path)| match crate::release_signing::TrustRoots::load(path) {
-                Ok(roots) => SigningRoot {
-                    purpose: purpose.clone(),
-                    file: file_name(path),
-                    source: TrustSource::File,
-                    signer_validity: SignerValidity::NotRecorded,
-                    signers: roots
-                        .signers
-                        .into_iter()
-                        .map(|signer| TrustedSignerView {
-                            revoked: crate::key_revocation::is_revoked(&signer.key_id),
-                            key_id: signer.key_id,
-                            identity: signer.identity,
-                        })
-                        .collect(),
-                    error: None,
-                },
-                Err(error) => SigningRoot {
-                    purpose: purpose.clone(),
-                    file: file_name(path),
-                    source: TrustSource::File,
-                    signer_validity: SignerValidity::NotRecorded,
-                    signers: Vec::new(),
-                    error: Some(redacted(&error, path)),
-                },
+        .map(|(purpose, path)| match load_signing_signers(path) {
+            Ok(signers) => SigningRoot {
+                purpose: purpose.clone(),
+                file: file_name(path),
+                source: TrustSource::File,
+                signer_validity: signer_validity_of(&signers),
+                signers,
+                error: None,
             },
-        )
+            Err(error) => SigningRoot {
+                purpose: purpose.clone(),
+                file: file_name(path),
+                source: TrustSource::File,
+                signer_validity: SignerValidity::NotRecorded,
+                signers: Vec::new(),
+                error: Some(redacted(&error, path)),
+            },
+        })
         .chain(sources.loaded_signing.iter().map(|loaded| {
+            let signers: Vec<TrustedSignerView> = loaded
+                .signers
+                .iter()
+                .map(|signer| TrustedSignerView {
+                    revoked: crate::key_revocation::is_revoked(&signer.key_id),
+                    key_id: signer.key_id.clone(),
+                    identity: signer.identity.clone(),
+                    not_before: signer.not_before,
+                    not_after: signer.not_after,
+                })
+                .collect();
             SigningRoot {
                 purpose: loaded.purpose.clone(),
                 file: loaded.name.clone(),
                 source: TrustSource::Loaded,
-                signer_validity: SignerValidity::NotRecorded,
-                signers: loaded
-                    .signers
-                    .iter()
-                    .map(|(key_id, identity)| TrustedSignerView {
-                        revoked: crate::key_revocation::is_revoked(key_id),
-                        key_id: key_id.clone(),
-                        identity: identity.clone(),
-                    })
-                    .collect(),
+                signer_validity: signer_validity_of(&signers),
+                signers,
                 error: None,
             }
         }))
@@ -778,14 +853,14 @@ mod tests {
             .to_bytes();
         let authorities = crate::release_signing::TrustRoots {
             version: crate::release_signing::TRUST_ROOT_VERSION,
-            signers: vec![crate::release_signing::TrustedSigner {
-                key_id: crate::release_signing::key_id(&public),
-                identity: "revocation-authority".into(),
-                public_key: {
+            signers: vec![crate::release_signing::TrustedSigner::new(
+                crate::release_signing::key_id(&public),
+                "revocation-authority",
+                {
                     use base64::Engine as _;
                     base64::engine::general_purpose::STANDARD.encode(public)
                 },
-            }],
+            )],
         };
         let roots_path = dir.join("authorities.toml");
         std::fs::write(&roots_path, toml::to_string(&authorities).unwrap()).unwrap();
@@ -810,7 +885,12 @@ mod tests {
                 loaded_signing: vec![LoadedSigning {
                     purpose: "package_migration_approval".into(),
                     name: "package migration trust roots in use".into(),
-                    signers: vec![("ed25519:loaded".into(), "approver".into())],
+                    signers: vec![LoadedSigner {
+                        key_id: "ed25519:loaded".into(),
+                        identity: "approver".into(),
+                        not_before: None,
+                        not_after: None,
+                    }],
                 }],
                 ..TrustSources::default()
             },
@@ -933,6 +1013,52 @@ IQDZq+YO1/tDxcu5xN5Lo9z7V6C39Ey9tLwLOK4Lqlybog==
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// #812: a recorded signer window is reported, and a plan whose window
+    /// opens after that signer's `not_after` is blocked by it; one that
+    /// opens before is not.
+    #[test]
+    fn runway_names_a_signer_that_lapses_before_the_window() {
+        let dir =
+            std::env::temp_dir().join(format!("tenkai-signer-runway-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let public = ed25519_dalek::SigningKey::from_bytes(&[21; 32])
+            .verifying_key()
+            .to_bytes();
+        let now_ms = crate::now_millis();
+        let not_after = now_ms + 5_000;
+        let mut signer = crate::release_signing::TrustedSigner::new(
+            crate::release_signing::key_id(&public),
+            "release-bot",
+            {
+                use base64::Engine as _;
+                base64::engine::general_purpose::STANDARD.encode(public)
+            },
+        );
+        signer.not_after = Some(not_after);
+        let trust = crate::release_signing::TrustRoots {
+            version: crate::release_signing::TRUST_ROOT_VERSION,
+            signers: vec![signer],
+        };
+        let roots = dir.join("release-trust.toml");
+        std::fs::write(&roots, toml::to_string(&trust).unwrap()).unwrap();
+        let sources = TrustSources {
+            signing: vec![("release".into(), roots)],
+            ..TrustSources::default()
+        };
+        let shown = posture(&sources, now_ms.div_euclid(1_000));
+        assert_eq!(shown.signing[0].signer_validity, SignerValidity::Recorded);
+        assert_eq!(shown.signing[0].signers[0].not_after, Some(not_after));
+        let body = serde_json::to_value(&shown.signing[0]).unwrap();
+        assert_eq!(body["signer_validity"], "recorded");
+        assert_eq!(body["signers"][0]["not_after"], not_after);
+
+        let flagged = runway(&sources, now_ms, now_ms + 10_000).unwrap();
+        assert_eq!(flagged.credential, "release signer release-bot");
+        assert_eq!(flagged.expires_at_ms, not_after);
+        assert_eq!(runway(&sources, now_ms, now_ms + 1_000), None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// Certificates are graded against the thresholds, the worst wins, and
     /// signing roots list their signers; no key material is read or shown.
     #[test]
@@ -948,14 +1074,14 @@ IQDZq+YO1/tDxcu5xN5Lo9z7V6C39Ey9tLwLOK4Lqlybog==
             .to_bytes();
         let trust = crate::release_signing::TrustRoots {
             version: crate::release_signing::TRUST_ROOT_VERSION,
-            signers: vec![crate::release_signing::TrustedSigner {
-                key_id: crate::release_signing::key_id(&public),
-                identity: "release-bot".into(),
-                public_key: {
+            signers: vec![crate::release_signing::TrustedSigner::new(
+                crate::release_signing::key_id(&public),
+                "release-bot",
+                {
                     use base64::Engine as _;
                     base64::engine::general_purpose::STANDARD.encode(public)
                 },
-            }],
+            )],
         };
         std::fs::write(&roots, toml::to_string(&trust).unwrap()).unwrap();
         let sources = TrustSources {

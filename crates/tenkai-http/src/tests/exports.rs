@@ -18,6 +18,8 @@ fn trust_roots(key_id: &str) -> tenkai::release_signing::TrustRoots {
             key_id: key_id.into(),
             identity: "export signer".into(),
             public_key: base64::engine::general_purpose::STANDARD.encode(public),
+            not_before: None,
+            not_after: None,
         }],
     }
 }

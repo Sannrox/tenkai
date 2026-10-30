@@ -612,6 +612,8 @@ mod tests {
                 key_id: crate::signature_verification::key_id(&key.verifying_key().to_bytes()),
                 identity: "exporter".into(),
                 public_key: STANDARD.encode(key.verifying_key().to_bytes()),
+                not_before: None,
+                not_after: None,
             }],
         }
     }

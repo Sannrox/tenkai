@@ -820,6 +820,8 @@ mod tests {
                 key_id: signer.key_id().to_string(),
                 identity: identity.into(),
                 public_key: STANDARD.encode(signer.public_key()),
+                not_before: None,
+                not_after: None,
             }],
         }
     }

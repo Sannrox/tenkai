@@ -106,8 +106,8 @@ pub(super) async fn content_inventory(
     )
 }
 
-/// `GET /v1/trust/runway` (#811): per waiting plan, the first certificate
-/// to lapse before it can apply.
+/// `GET /v1/trust/runway` (#811, #812): per waiting plan, the first
+/// certificate or trust-root signer to lapse before it can apply.
 pub(super) async fn trust_runway(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
