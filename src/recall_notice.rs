@@ -6,8 +6,8 @@
 //! verifies, refuses a revoked key, then stamps [`crate::catalog::recall`].
 //! Named releases that are not in the catalog still get a recall claim so a
 //! later publish of that identity is not deployable. `propose` validates the
-//! signing key, notice, and wave cohort before promoting or recalling, then
-//! admits a stop-on-failure wave on a named patched release without applying it.
+//! signing key, notice, and wave cohort, reserves the wave name, then promotes
+//! and recalls. The admitted wave does not apply until plan approval.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -32,6 +32,8 @@ use crate::wave::{self, ExecutableWaveSpec, WaveRecord};
 pub const NOTICE_SCHEMA: &str = "tenkai.recall-notice.v1";
 /// Stored imported-notice object kind.
 pub const KIND_RECALL_NOTICE: &str = "tenkai.recall_notice";
+/// First-writer claim that binds a wave name to one proposal identity.
+pub const KIND_RECALL_PROPOSAL: &str = "tenkai.recall_proposal";
 /// Optional outbox kind for imported notices. Off unless [`export_notice`] runs.
 pub const RECALL_NOTICE_PROVIDER_KIND: &str = "recall_notice";
 const SIGNING_DOMAIN: &[u8] = b"TENKAI-RECALL-NOTICE-V1\0";
@@ -296,9 +298,9 @@ async fn environments_running(
     Ok(running)
 }
 
-async fn preflight_wave_cohort(ctx: &mut Ctx, spec: &ExecutableWaveSpec) -> Result<bool> {
+async fn preflight_wave_cohort(ctx: &mut Ctx, spec: &ExecutableWaveSpec) -> Result<()> {
     let fix_id = release_id(&spec.product, &spec.version);
-    let existing = if ctx
+    if ctx
         .get(&crate::ontology::wave_id(&spec.name))
         .await?
         .is_some()
@@ -319,29 +321,7 @@ async fn preflight_wave_cohort(ctx: &mut Ctx, spec: &ExecutableWaveSpec) -> Resu
                 spec.name
             );
         }
-        let channel = ctx
-            .get(&crate::ontology::channel_id(&spec.product, &spec.channel))
-            .await?
-            .ok_or_else(|| {
-                anyhow::anyhow!("channel {}/{} does not exist", spec.product, spec.channel)
-            })?;
-        let current = channel
-            .properties
-            .get("current_release")
-            .map(String::as_str)
-            .unwrap_or("");
-        if current != fix_id {
-            bail!(
-                "wave {} already exists; channel {}/{} currently names {current}, refusing to restore {fix_id}",
-                spec.name,
-                spec.product,
-                spec.channel
-            );
-        }
-        true
-    } else {
-        false
-    };
+    }
     let fix_release = ctx.get(&fix_id).await?.ok_or_else(|| {
         anyhow::anyhow!(
             "patched release {}@{} is not published",
@@ -381,7 +361,85 @@ async fn preflight_wave_cohort(ctx: &mut Ctx, spec: &ExecutableWaveSpec) -> Resu
             );
         }
     }
-    Ok(existing)
+    Ok(())
+}
+
+async fn require_replaceable_or_matching_head(
+    ctx: &mut Ctx,
+    spec: &ExecutableWaveSpec,
+    replaceable_heads: &[String],
+) -> Result<()> {
+    let fix_id = release_id(&spec.product, &spec.version);
+    let current = match ctx
+        .get(&crate::ontology::channel_id(&spec.product, &spec.channel))
+        .await?
+    {
+        Some(channel) => channel
+            .properties
+            .get("current_release")
+            .cloned()
+            .unwrap_or_default(),
+        None => String::new(),
+    };
+    if current.is_empty() || current == fix_id || replaceable_heads.iter().any(|id| id == &current)
+    {
+        return Ok(());
+    }
+    bail!(
+        "channel {}/{} currently names {current}; refusing to replace it with {fix_id}",
+        spec.product,
+        spec.channel
+    )
+}
+
+fn proposal_id(wave_name: &str) -> String {
+    format!("tenkai:recall-proposal:{wave_name}")
+}
+
+fn proposal_identity(spec: &ExecutableWaveSpec) -> Result<String> {
+    Ok(serde_json::to_string(&serde_json::json!({
+        "product": spec.product,
+        "version": spec.version,
+        "channel": spec.channel,
+        "environments": spec.environments,
+        "fail_policy": spec.fail_policy,
+    }))?)
+}
+
+/// Bind `spec.name` to this proposal before channel or recall writes.
+async fn reserve_proposal(ctx: &mut Ctx, spec: &ExecutableWaveSpec) -> Result<()> {
+    let id = proposal_id(&spec.name);
+    let identity = proposal_identity(spec)?;
+    let now = crate::now_millis();
+    let proposed = Object {
+        id: id.clone(),
+        kind: KIND_RECALL_PROPOSAL.into(),
+        name: format!("recall-proposal {}", spec.name),
+        namespace: NS.into(),
+        external_id: String::new(),
+        properties: HashMap::from([("identity".into(), identity.clone())]),
+        created: now,
+        updated: now,
+    };
+    match ctx.create_once(proposed).await {
+        Ok(_) => Ok(()),
+        Err(status) if crate::client::is_unique_conflict(&status) => {
+            let stored = ctx
+                .get(&id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("recall proposal {id} appeared then vanished"))?;
+            if stored.kind != KIND_RECALL_PROPOSAL
+                || stored.properties.get("identity").map(String::as_str) != Some(identity.as_str())
+            {
+                bail!(
+                    "wave {} already exists with a conflicting identity (cohort, release, channel, or policy changed)",
+                    spec.name
+                );
+            }
+            Ok(())
+        }
+        Err(status) => Err(status.into()),
+    }
 }
 
 /// Verify `notice` and stamp catalog recalls. Signature, revoked-key, and
@@ -537,7 +595,7 @@ pub async fn propose(
         request.environments,
         true,
     )?;
-    let existing_wave = preflight_wave_cohort(ctx, &spec).await?;
+    preflight_wave_cohort(ctx, &spec).await?;
     let reason = format!(
         "advisory {} {} matches {} {}",
         advisory.id,
@@ -563,24 +621,25 @@ pub async fn propose(
         |_| Ok(()),
     )
     .with_context(|| format!("writing {}", request.notice_out.display()))?;
-    if !existing_wave {
-        let replaceable_heads: Vec<String> = recalled_entries
-            .iter()
-            .filter_map(|entry| {
-                parse_release_spec(&entry.release)
-                    .ok()
-                    .map(|(product, version)| release_id(product, version))
-            })
-            .collect();
-        crate::catalog::promote_over_replaceable_heads(
-            ctx,
-            actor,
-            &request.fix,
-            &spec.channel,
-            &replaceable_heads,
-        )
-        .await?;
-    }
+    let replaceable_heads: Vec<String> = recalled_entries
+        .iter()
+        .filter_map(|entry| {
+            parse_release_spec(&entry.release)
+                .ok()
+                .map(|(product, version)| release_id(product, version))
+        })
+        .collect();
+    require_replaceable_or_matching_head(ctx, &spec, &replaceable_heads).await?;
+    // First-writer claim on the wave name, before channel or recall writes.
+    reserve_proposal(ctx, &spec).await?;
+    crate::catalog::promote_over_replaceable_heads(
+        ctx,
+        actor,
+        &request.fix,
+        &spec.channel,
+        &replaceable_heads,
+    )
+    .await?;
     let mut recalled = Vec::new();
     for entry in &recalled_entries {
         let message = crate::catalog::recall(ctx, actor, &entry.release).await?;
@@ -1464,7 +1523,9 @@ document = "suite.json"
             .unwrap_err()
             .to_string();
         assert!(
-            denied.contains("refusing to restore") || denied.contains("already exists"),
+            denied.contains("refusing to restore")
+                || denied.contains("refusing to replace")
+                || denied.contains("already exists"),
             "{denied}"
         );
         let channel = ctx
@@ -1551,6 +1612,94 @@ document = "suite.json"
                 .get("current_release")
                 .map(String::as_str),
             Some(release_id("api", "1.2.0").as_str())
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn conflicting_wave_identity_does_not_promote_the_other_channel() {
+        let root = temp_root("propose-conflict-wave");
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        signed_publish(
+            &mut ctx,
+            &root,
+            "1.0.0",
+            &native_inventory("openssl", "1.1.1"),
+        )
+        .await;
+        signed_publish(
+            &mut ctx,
+            &root,
+            "1.1.0",
+            &native_inventory("openssl", "3.0.0"),
+        )
+        .await;
+        let actor = crate::auth_context::test_management_context("notice-conflict-wave");
+        crate::catalog::promote(&mut ctx, &actor, "api@1.0.0", "stable")
+            .await
+            .unwrap();
+        crate::catalog::promote(&mut ctx, &actor, "api@1.0.0", "beta")
+            .await
+            .unwrap();
+        crate::environment::env_add(&mut ctx, "stable-env", "fixture")
+            .await
+            .unwrap();
+        crate::environment::env_add(&mut ctx, "beta-env", "fixture")
+            .await
+            .unwrap();
+        plan::subscribe(&mut ctx, "stable-env", "api", "stable")
+            .await
+            .unwrap();
+        plan::subscribe(&mut ctx, "beta-env", "api", "beta")
+            .await
+            .unwrap();
+        crate::exposure::import_advisory_feed(&mut ctx, sample_feed(), crate::now_millis())
+            .await
+            .unwrap();
+        let keys = root.join("notice-keys");
+        std::fs::create_dir_all(&keys).unwrap();
+        let signing_key = seed_file(&keys, &NOTICE);
+        propose(
+            &mut ctx,
+            &actor,
+            ProposeRequest {
+                exposure: "TENKAI-2026-1".into(),
+                fix: "api@1.1.0".into(),
+                channel: "stable".into(),
+                environments: vec!["stable-env".into()],
+                wave_name: "recall-TENKAI-2026-1".into(),
+                signing_key: signing_key.clone(),
+                notice_out: root.join("notice-stable.json"),
+            },
+        )
+        .await
+        .unwrap();
+        let denied = propose(
+            &mut ctx,
+            &actor,
+            ProposeRequest {
+                exposure: "TENKAI-2026-1".into(),
+                fix: "api@1.1.0".into(),
+                channel: "beta".into(),
+                environments: vec!["beta-env".into()],
+                wave_name: "recall-TENKAI-2026-1".into(),
+                signing_key,
+                notice_out: root.join("notice-beta.json"),
+            },
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(denied.contains("conflicting identity"), "{denied}");
+        let beta = ctx
+            .get(&crate::ontology::channel_id("api", "beta"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            beta.properties.get("current_release").map(String::as_str),
+            Some(release_id("api", "1.0.0").as_str())
         );
         let _ = std::fs::remove_dir_all(root);
     }

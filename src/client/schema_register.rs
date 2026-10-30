@@ -376,6 +376,15 @@ pub fn known_object_types() -> Vec<ObjectType> {
             ],
         ),
         object_type(
+            crate::recall_notice::KIND_RECALL_PROPOSAL,
+            "A first-writer claim binding a wave name to one remediation identity",
+            vec![prop(
+                "identity",
+                true,
+                "Canonical JSON of the proposed wave identity",
+            )],
+        ),
+        object_type(
             KIND_RELEASE_RECALL,
             "An immutable first-writer claim that a release was recalled",
             vec![
