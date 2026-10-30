@@ -313,12 +313,16 @@ fn isolated_trust_roots(exporter: &SigningKey, runtime: &SigningKey) -> TrustRoo
                 identity: "exporter".into(),
                 public_key: base64::engine::general_purpose::STANDARD
                     .encode(exporter.verifying_key().to_bytes()),
+                not_before: None,
+                not_after: None,
             },
             TrustedSigner {
                 key_id: crate::signature_verification::key_id(&runtime.verifying_key().to_bytes()),
                 identity: "airgap-runtime".into(),
                 public_key: base64::engine::general_purpose::STANDARD
                     .encode(runtime.verifying_key().to_bytes()),
+                not_before: None,
+                not_after: None,
             },
         ],
     }

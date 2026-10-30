@@ -192,6 +192,16 @@
         "key_id": {
           "type": "string"
         },
+        "not_after": {
+          "description": "Unix milliseconds. Absent: validity is not recorded (#812).",
+          "format": "int64",
+          "type": "integer"
+        },
+        "not_before": {
+          "description": "Unix milliseconds. Absent: validity is not recorded (#812).",
+          "format": "int64",
+          "type": "integer"
+        },
         "public_key": {
           "type": "string"
         }
@@ -2870,6 +2880,16 @@
         "key_id": {
           "type": "string"
         },
+        "not_after": {
+          "description": "Unix milliseconds. Absent: validity is not recorded (#812).",
+          "format": "int64",
+          "type": "integer"
+        },
+        "not_before": {
+          "description": "Unix milliseconds. Absent: validity is not recorded (#812).",
+          "format": "int64",
+          "type": "integer"
+        },
         "public_key": {
           "type": "string"
         }
@@ -4431,6 +4451,16 @@
         "key_id": {
           "type": "string"
         },
+        "not_after": {
+          "description": "Unix milliseconds. Absent: validity is not recorded (#812).",
+          "format": "int64",
+          "type": "integer"
+        },
+        "not_before": {
+          "description": "Unix milliseconds. Absent: validity is not recorded (#812).",
+          "format": "int64",
+          "type": "integer"
+        },
         "providers": {
           "items": {
             "type": "string"
@@ -4553,11 +4583,11 @@
       "type": "object"
     },
     "PlanRunway": {
-      "description": "A plan waiting to apply and the first certificate that would lapse\nbefore it can (#811).",
+      "description": "A plan waiting to apply and the first certificate or trust-root signer\nthat would lapse before it can (#811, #812).",
       "properties": {
         "blocked_by": {
           "$ref": "#/$defs/CredentialRunway",
-          "description": "The first TLS certificate to lapse at or before that window. Absent\nwhen none does. Signers are not checked: trust roots record no\nsigner validity."
+          "description": "The first TLS certificate or trust-root signer to lapse at or before\nthat window. Absent when none does."
         },
         "environment": {
           "type": "string"
@@ -4992,6 +5022,16 @@
         },
         "key_id": {
           "type": "string"
+        },
+        "not_after": {
+          "description": "Unix milliseconds. Absent: validity is not recorded (#812).",
+          "format": "int64",
+          "type": "integer"
+        },
+        "not_before": {
+          "description": "Unix milliseconds. Absent: validity is not recorded (#812).",
+          "format": "int64",
+          "type": "integer"
         },
         "public_key": {
           "type": "string"
@@ -5494,7 +5534,12 @@
       "oneOf": [
         {
           "const": "not_recorded",
-          "description": "Trust-root format v1 has no `not_before` or `not_after` per signer.",
+          "description": "No signer on this root carries `not_before` or `not_after`.",
+          "type": "string"
+        },
+        {
+          "const": "recorded",
+          "description": "At least one signer carries a validity window (#812).",
           "type": "string"
         }
       ]
@@ -5514,7 +5559,7 @@
         "signer_validity": {
           "$ref": "#/$defs/SignerValidity",
           "default": "not_recorded",
-          "description": "Trust-root files carry no signer validity period, so a signer is\ntrusted until removed or revoked (#811)."
+          "description": "`not_recorded` when no signer on this root carries a window;\n`recorded` when at least one does (#812)."
         },
         "signers": {
           "items": {
@@ -5842,6 +5887,16 @@
         },
         "key_id": {
           "type": "string"
+        },
+        "not_after": {
+          "description": "Unix milliseconds. Absent when this signer has no window (#812).",
+          "format": "int64",
+          "type": "integer"
+        },
+        "not_before": {
+          "description": "Unix milliseconds. Absent when this signer has no window (#812).",
+          "format": "int64",
+          "type": "integer"
         },
         "revoked": {
           "description": "Revoked by the key revocations this process enforces.",

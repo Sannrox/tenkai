@@ -1208,6 +1208,8 @@ mod tests {
                 identity: provenance.issuer.clone(),
                 public_key: base64::engine::general_purpose::STANDARD
                     .encode(signing_key.verifying_key().to_bytes()),
+                not_before: None,
+                not_after: None,
             }],
         };
         std::fs::write(&roots_path, toml::to_string(&roots).unwrap()).unwrap();
@@ -1778,6 +1780,8 @@ media_type = "{}"
                 key_id: crate::release_signing::key_id(&exporter.verifying_key().to_bytes()),
                 identity: "exporter".into(),
                 public_key: STANDARD.encode(exporter.verifying_key().to_bytes()),
+                not_before: None,
+                not_after: None,
             }],
         };
         let verified = envelope
@@ -1923,6 +1927,8 @@ media_type = "{}"
                 key_id: crate::release_signing::key_id(&exporter.verifying_key().to_bytes()),
                 identity: "exporter".into(),
                 public_key: STANDARD.encode(exporter.verifying_key().to_bytes()),
+                not_before: None,
+                not_after: None,
             }],
         };
         let bundle = |mut payloads: std::collections::BTreeMap<String, (String, Vec<u8>)>| {

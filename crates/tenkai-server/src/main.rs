@@ -1770,6 +1770,10 @@ fn trust_sources(
     let signing = [
         ("release", path("TENKAI_RELEASE_TRUST_ROOTS")),
         (
+            "plan_approval",
+            path(tenkai::plan_approval::TRUST_ROOTS_ENV),
+        ),
+        (
             "package_migration_approval",
             path("TENKAI_PACKAGE_MIGRATION_APPROVAL_TRUST_ROOTS"),
         ),

@@ -46,6 +46,8 @@ async fn trust_posture_grades_certificates_for_fleet_readers() {
                     use base64::Engine as _;
                     base64::engine::general_purpose::STANDARD.encode(public)
                 },
+                not_before: None,
+                not_after: None,
             }],
         })
         .unwrap(),

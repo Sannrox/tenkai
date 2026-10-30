@@ -38,3 +38,4 @@
 - [0036 — Signed offline key revocation](0036-offline-key-revocation.md)
 - [0037 — Multi-party plan approval](0037-multi-party-plan-approval.md)
 - [0038 — Tenant catalog object graph on PostgreSQL](0038-tenant-catalog-object-graph.md)
+- [0039 — Signer validity windows on trust-root format v1](0039-signer-validity-windows.md)

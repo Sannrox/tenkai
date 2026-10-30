@@ -2125,6 +2125,8 @@ document = "sbom.json"
                     &base64::engine::general_purpose::STANDARD,
                     key.verifying_key().to_bytes(),
                 ),
+                not_before: None,
+                not_after: None,
             }],
         }
     }

@@ -181,10 +181,11 @@ inside a window, it may finish after that window closes.
 
 A plan computed while the window is closed is checked against the
 certificates the server serves and trusts (listener, client CA, runner CA,
-outbound CA). If one lapses before the window opens, the plan records it as
-`credential_runway` and the plan message names the certificate, its expiry
-and the window's opening, so it can be renewed first. The check is advisory
-and runs only on a server with those certificates configured.
+outbound CA) and against trust-root signers that record `not_after`. If one
+lapses before the window opens, the plan records it as `credential_runway`
+and the plan message names the credential, its expiry and the window's
+opening, so it can be renewed first. The check is advisory and runs only on
+a server with those sources configured.
 `GET /v1/trust/runway` repeats it for every plan still waiting, as of now
 ([trust posture](run-tenkai-server.md#trust-posture)).
 

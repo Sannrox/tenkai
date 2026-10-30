@@ -153,6 +153,8 @@ pub fn verify_approval_envelope(
                 envelope.key_id
             )
         })?;
+    signer.validity().validate()?;
+    signer.validity().check(&signer.identity, now)?;
     let public_key = signature_verification::trusted_key(
         "package migration approval public key",
         &signer.public_key,

@@ -1582,6 +1582,8 @@ mod tests {
                 key_id: signing_key_id(key),
                 identity: identity.into(),
                 public_key: STANDARD.encode(key.verifying_key().to_bytes()),
+                not_before: None,
+                not_after: None,
             }],
         }
     }
@@ -1809,6 +1811,8 @@ mod tests {
                 key_id: mismatched_key_id.clone(),
                 identity: "exporter".into(),
                 public_key: STANDARD.encode(exporter.verifying_key().to_bytes()),
+                not_before: None,
+                not_after: None,
             }],
         };
         let mut archive = bundle(&exporter);
@@ -1853,6 +1857,8 @@ mod tests {
                 key_id: mismatched_key_id.clone(),
                 identity: "runtime".into(),
                 public_key: STANDARD.encode(runtime.verifying_key().to_bytes()),
+                not_before: None,
+                not_after: None,
             }],
         };
         let scope = ReceiptTrustScope {

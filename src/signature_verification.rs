@@ -77,6 +77,62 @@ pub(crate) fn verifying_key(label: &str, value: &str) -> Result<VerifyingKey> {
     Ok(key)
 }
 
+/// Optional validity window on a trust-root signer, Unix milliseconds.
+///
+/// Absent fields mean the window is not recorded: the signer is trusted
+/// until removed or revoked. Load still accepts an expired window so the
+/// rest of the file keeps working; verification refuses it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SignerValidityWindow {
+    pub not_before: Option<i64>,
+    pub not_after: Option<i64>,
+}
+
+impl SignerValidityWindow {
+    pub(crate) fn new(not_before: Option<i64>, not_after: Option<i64>) -> Self {
+        Self {
+            not_before,
+            not_after,
+        }
+    }
+
+    pub(crate) fn validate(&self) -> Result<()> {
+        for (name, value) in [
+            ("not_before", self.not_before),
+            ("not_after", self.not_after),
+        ] {
+            if let Some(value) = value
+                && value <= 0
+            {
+                bail!("signer {name} must be a positive Unix millisecond timestamp");
+            }
+        }
+        if let (Some(not_before), Some(not_after)) = (self.not_before, self.not_after)
+            && not_before >= not_after
+        {
+            bail!("signer not_before must be before not_after");
+        }
+        Ok(())
+    }
+
+    /// Refuse a signature when `at_ms` is outside this window. The reason
+    /// names `not_before` or `not_after`. A window that is not recorded
+    /// never refuses.
+    pub(crate) fn check(&self, identity: &str, at_ms: i64) -> Result<()> {
+        if let Some(not_before) = self.not_before
+            && at_ms < not_before
+        {
+            bail!("trusted signer {identity} is not yet valid (not_before)");
+        }
+        if let Some(not_after) = self.not_after
+            && at_ms > not_after
+        {
+            bail!("trusted signer {identity} is no longer valid (not_after)");
+        }
+        Ok(())
+    }
+}
+
 /// Key to verify a signature with now: well formed and not revoked
 /// ([`crate::key_revocation`]).
 pub(crate) fn trusted_key(
@@ -156,6 +212,29 @@ mod tests {
         let signature = STANDARD.encode(signature_bytes);
         verify_strict(&key, "test signature", &signature, message).unwrap();
         assert!(verify_strict(&key, "test signature", &signature, b"changed").is_err());
+    }
+
+    #[test]
+    fn signer_validity_window_refuses_outside_named_bounds() {
+        let open = SignerValidityWindow::default();
+        open.validate().unwrap();
+        open.check("release@example.com", 50).unwrap();
+        assert!(open.not_before.is_none() && open.not_after.is_none());
+
+        let window = SignerValidityWindow::new(Some(10), Some(20));
+        window.validate().unwrap();
+        window.check("release@example.com", 10).unwrap();
+        window.check("release@example.com", 20).unwrap();
+        let early = window.check("release@example.com", 9).unwrap_err();
+        assert!(early.to_string().contains("not_before"), "{early:#}");
+        let late = window.check("release@example.com", 21).unwrap_err();
+        assert!(late.to_string().contains("not_after"), "{late:#}");
+        assert!(
+            SignerValidityWindow::new(Some(20), Some(10))
+                .validate()
+                .is_err()
+        );
+        assert!(SignerValidityWindow::new(Some(0), None).validate().is_err());
     }
 
     #[test]
