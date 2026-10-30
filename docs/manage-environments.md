@@ -24,11 +24,32 @@ digests, work directories, payloads, and bearer tokens are not returned.
 
 `env add --connectivity <class>` also sets the connectivity class.
 
+### Criticality
+
+Environments and products may carry optional criticality (`low`, `medium`,
+`high`, `critical`) with an owner and a reason. The declared value is set
+through an audited mutation. A signed `tenkai.derived-criticality.v1`
+envelope can add a derived value from an external evidence source. The
+effective value is the higher of the two; a stale or missing derived value
+is shown and never lowers it.
+
+```bash
+tenkaictl env criticality set prod --level critical --owner alice --reason pci
+tenkaictl product criticality set api --level high --owner alice --reason payments
+tenkaictl criticality import --envelope derived.json --trust-roots criticality-trust.toml
+```
+
+`env inspect` and `fleet status` show it when set. Exposure queries sort and
+filter by the effective value (`tenkaictl exposure query --min-criticality high`).
+An environment-scoped token can declare only its own environment; product
+criticality and derived import need fleet management. Unset criticality
+behaves as before.
+
 ### Remote configuration
 
 With `tenkaictl --target remote`, `env add` needs `--reason`. `facts`,
-`constraints`, `maintenance`, `webhooks` and `approval-policy` `set`,
-`clear` and `remove` need `--generation`, the `lease.generation` that remote
+`constraints`, `maintenance`, `webhooks`, `approval-policy` and `criticality`
+`set`, `clear` and `remove` need `--generation`, the `lease.generation` that remote
 `env inspect` reports (`0` only before the environment's first apply or
 change), and `--reason`. They call the
 management routes in [management lifecycle](management-lifecycle.md#operations)
@@ -37,8 +58,8 @@ audited with the authenticated actor and the reason. An
 environment-scoped token can configure only its own environment and cannot
 register environments. The `list` and `show` commands stay embedded; remote
 `env inspect` shows the same configuration, including `webhooks` (URL,
-`secret_env` and events; never a secret value) and `approval_policy`, the
-policy file path, so a client can read what it edits (#820).
+`secret_env` and events; never a secret value), `approval_policy`, the
+policy file path, and `criticality` when set, so a client can read what it edits (#820).
 
 ```bash
 tenkaictl --target remote env add edge --connectivity isolated --reason "new site"

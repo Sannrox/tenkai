@@ -19,6 +19,9 @@ use tenkai::backup::{BackupManifest, BackupStatus};
 use tenkai::catalog::{ChannelPage, ReleasePage};
 use tenkai::change_stream::ChangeEventPage;
 use tenkai::content_inventory::ContentInventory;
+use tenkai::criticality::{
+    DerivedEnvelope, DerivedImportResult, EffectiveCriticality, SetCriticalityRequest,
+};
 use tenkai::delivery_hold::DeliveryHoldView;
 use tenkai::environment::{EnvironmentInspectReport, EnvironmentListEntry, StatusRow};
 use tenkai::environment_config::{EnvironmentConfigRequest, RegisterEnvironmentRequest};
@@ -292,6 +295,13 @@ pub fn http_contract() -> Value {
             response: schema::<AdvisoryFeedStatus>(&mut g),
         },
         Route {
+            method: "POST",
+            path: "/v1/criticality/derived",
+            auth: Auth::Management,
+            request: Some(schema::<DerivedEnvelope>(&mut g)),
+            response: schema::<DerivedImportResult>(&mut g),
+        },
+        Route {
             method: "GET",
             path: "/v1/channels",
             auth: Auth::Read,
@@ -353,6 +363,41 @@ pub fn http_contract() -> Value {
             auth: Auth::Management,
             request: Some(config.clone()),
             response: lifecycle.clone(),
+        },
+        Route {
+            method: "PUT",
+            path: "/v1/environments/{environment}/criticality",
+            auth: Auth::Management,
+            request: Some(config.clone()),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "DELETE",
+            path: "/v1/environments/{environment}/criticality",
+            auth: Auth::Management,
+            request: Some(config.clone()),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "GET",
+            path: "/v1/products/{product}/criticality",
+            auth: Auth::Read,
+            request: None,
+            response: schema::<EffectiveCriticality>(&mut g),
+        },
+        Route {
+            method: "PUT",
+            path: "/v1/products/{product}/criticality",
+            auth: Auth::Management,
+            request: Some(schema::<SetCriticalityRequest>(&mut g)),
+            response: schema::<EffectiveCriticality>(&mut g),
+        },
+        Route {
+            method: "DELETE",
+            path: "/v1/products/{product}/criticality",
+            auth: Auth::Management,
+            request: None,
+            response: schema::<EffectiveCriticality>(&mut g),
         },
         Route {
             method: "PUT",

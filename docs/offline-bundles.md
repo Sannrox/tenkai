@@ -25,7 +25,9 @@ roots, model weights, `checksums/manifest.json`
 (`tenkai.offline-checksum-manifest.v1`), and `sbom/<component>.json`
 (`tenkai.offline-sbom.v1`) per component. Those two manifests are ordinary
 signed entries: the bundle signature covers them. `--advisory-feed FILE` adds
-a `tenkai.advisory-feed.v1` document at `advisories/feed.json`. A missing
+a `tenkai.advisory-feed.v1` document at `advisories/feed.json`.
+`--derived-criticality FILE` adds a `tenkai.derived-criticality.v1` envelope
+at `criticality/derived.json`. A missing
 image, weight, or schema fails the build and names the item. A release input
 or the trust roots holding a private key block fail the build naming the
 file; image layers, weights and host binaries are digest-checked blobs and
@@ -58,7 +60,8 @@ tenkaictl bundle build \
   --host-tag v0.5.0 \
   --host-git-sha 0123456789abcdef0123456789abcdef01234567 \
   --host-workflow release \
-  --advisory-feed advisories.json
+  --advisory-feed advisories.json \
+  --derived-criticality derived.json
 ```
 
 `--issued-at-unix-ms` pins the statement clock so two operator rebuilds can
@@ -91,6 +94,12 @@ to the bundle issued-at, then import time). An environment property
 `exposure.max_feed_age_ms` gates stale feeds; a tampered feed fails bundle
 verify. A bundle whose authenticated revocation list revokes its exporter
 is refused.
+
+A signed `tenkai.derived-criticality.v1` travels as `criticality/derived.json`.
+Bind, first install, and reinstall verify it against
+`TENKAI_CRITICALITY_TRUST_ROOTS` when the entry is present, then apply
+assignments. A bad signature writes nothing. `tenkaictl criticality import`
+applies an envelope without a bundle.
 
 Bundle verification requires current Ed25519 trust roots, the configured tenant
 and environment identities, and a time inside the signed validity interval.

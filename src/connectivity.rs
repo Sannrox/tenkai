@@ -712,7 +712,7 @@ async fn bind_isolated_bundle_locked(
         crate::now_millis(),
     )?;
     crate::offline_host_binaries::preflight(&verified)?;
-    crate::exposure::preflight_verified_bundle(&verified)?;
+    crate::exposure::preflight_verified_bundle(&verified, environment)?;
     let (mut record, index, bundle_digest) =
         admit_isolated_bind(ctx, name, environment, &verified).await?;
     let base = record.clone();
@@ -764,7 +764,7 @@ async fn bind_isolated_bundle_locked(
             .and_then(|evidence| evidence.receipt.clone()),
     });
     record.environments[index].detail = "verified offline bundle bound".into();
-    crate::exposure::import_from_verified_bundle(ctx, &verified).await?;
+    crate::exposure::import_from_verified_bundle(ctx, &verified, environment).await?;
     let record = persist(ctx, held, &base, &record).await?;
     crate::exposure::record_bundle_import(ctx, environment, crate::now_millis()).await?;
     Ok(record)
@@ -809,7 +809,7 @@ pub async fn install_isolated_stack(
         crate::now_millis(),
     )?;
     crate::offline_host_binaries::preflight(&verified)?;
-    crate::exposure::preflight_verified_bundle(&verified)?;
+    crate::exposure::preflight_verified_bundle(&verified, environment)?;
     if crate::offline_bundle::delta_base(&verified)?.is_some() {
         bail!("a first install needs a full bundle; this one is a delta against a base release");
     }
@@ -943,7 +943,7 @@ pub async fn install_isolated_stack(
         created_at: now,
         updated_at: now,
     };
-    crate::exposure::import_from_verified_bundle(ctx, &verified).await?;
+    crate::exposure::import_from_verified_bundle(ctx, &verified, environment).await?;
     ctx.create_once(upgrade_object(&record)?)
         .await
         .map_err(|status| anyhow::anyhow!("{status}"))?;
@@ -1001,7 +1001,7 @@ async fn reinstall_isolated_stack(
         bundle_path,
         crate::offline_chunk_store::weight_cache_from_env()?.as_ref(),
     )?;
-    crate::exposure::import_from_verified_bundle(ctx, verified).await?;
+    crate::exposure::import_from_verified_bundle(ctx, verified, environment).await?;
     crate::exposure::record_bundle_import(ctx, environment, crate::now_millis()).await?;
     Ok(record)
 }

@@ -221,6 +221,7 @@ impl FixtureEnvironmentProjection {
             retirement: None,
             preview: None,
             delivery_hold: None,
+            criticality: None,
         }
     }
 
@@ -254,6 +255,7 @@ impl FixtureEnvironmentProjection {
                 .as_ref()
                 .map(|plan| plan.status.as_str().into()),
             posture: posture.into(),
+            criticality: None,
         }
     }
 }

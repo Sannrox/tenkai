@@ -1120,6 +1120,45 @@ pub struct EnvironmentInspectReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub delivery_hold: Option<crate::delivery_hold::DeliveryHold>,
+    /// Declared and derived criticality when either is set (#694).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub criticality: Option<EnvironmentCriticality>,
+}
+
+/// Inspect copy of declared/derived criticality. Lives here so this module
+/// does not import the criticality leaf (that cycle breaks `Send` on inspect).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct EnvironmentCriticality {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub effective: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub declared: Option<EnvironmentDeclaredCriticality>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub derived: Option<EnvironmentDerivedCriticality>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct EnvironmentDeclaredCriticality {
+    pub level: String,
+    pub owner: String,
+    pub reason: String,
+    pub set_at: i64,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct EnvironmentDerivedCriticality {
+    pub level: String,
+    pub source: String,
+    pub reason: String,
+    pub generated_at: i64,
+    pub imported_at: i64,
+    pub age_ms: i64,
+    pub stale: bool,
 }
 
 /// Read-only view of the environment's own maintenance schedule, evaluated
@@ -1421,6 +1460,7 @@ pub async fn fleet_status(ctx: &mut Ctx) -> Result<FleetStatusReport> {
             &crate::delivery_hold::HoldScope::environment(&env_obj.name),
         )
         .await?;
+        let criticality = criticality_from_properties(&env_obj.properties, crate::now_millis());
         reports.push(EnvironmentInspectReport {
             name: env_obj.name,
             id: env_obj.id,
@@ -1446,6 +1486,7 @@ pub async fn fleet_status(ctx: &mut Ctx) -> Result<FleetStatusReport> {
             preview: None,
             retirement,
             delivery_hold,
+            criticality,
         });
     }
     Ok(fleet_status_from_inspects(reports))
@@ -1511,6 +1552,7 @@ async fn inspect_environment_base(
     let now = chrono::DateTime::from_timestamp_millis(crate::now_millis())
         .context("current time is outside the supported maintenance-window range")?;
     let maintenance = maintenance_inspect(crate::maintenance::list(ctx, env).await, now);
+    let criticality = criticality_from_properties(&env_obj.properties, crate::now_millis());
     Ok(EnvironmentInspectReport {
         name: env_obj.name,
         id: env_obj.id,
@@ -1537,6 +1579,86 @@ async fn inspect_environment_base(
         preview,
         retirement,
         delivery_hold,
+        criticality,
+    })
+}
+
+fn criticality_from_properties(
+    properties: &HashMap<String, String>,
+    now: i64,
+) -> Option<EnvironmentCriticality> {
+    let declared =
+        properties
+            .get("criticality.declared")
+            .map(|level| EnvironmentDeclaredCriticality {
+                level: level.clone(),
+                owner: properties
+                    .get("criticality.declared.owner")
+                    .cloned()
+                    .unwrap_or_default(),
+                reason: properties
+                    .get("criticality.declared.reason")
+                    .cloned()
+                    .unwrap_or_default(),
+                set_at: properties
+                    .get("criticality.declared.set_at")
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(0),
+                source: "declared".into(),
+            });
+    let derived = properties.get("criticality.derived").map(|level| {
+        let generated_at = properties
+            .get("criticality.derived.generated_at")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        let imported_at = properties
+            .get("criticality.derived.imported_at")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        let max_age_ms = properties
+            .get("criticality.derived.max_age_ms")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        let age_ms = now.saturating_sub(generated_at);
+        EnvironmentDerivedCriticality {
+            level: level.clone(),
+            source: properties
+                .get("criticality.derived.source")
+                .cloned()
+                .unwrap_or_default(),
+            reason: properties
+                .get("criticality.derived.reason")
+                .cloned()
+                .unwrap_or_default(),
+            generated_at,
+            imported_at,
+            age_ms,
+            stale: max_age_ms > 0 && age_ms > max_age_ms,
+        }
+    });
+    if declared.is_none() && derived.is_none() {
+        return None;
+    }
+    let effective = [
+        declared.as_ref().map(|value| value.level.as_str()),
+        derived
+            .as_ref()
+            .and_then(|value| (!value.stale).then_some(value.level.as_str())),
+    ]
+    .into_iter()
+    .flatten()
+    .max_by_key(|level| match *level {
+        "low" => 0u8,
+        "medium" => 1,
+        "high" => 2,
+        "critical" => 3,
+        _ => 0,
+    })
+    .map(str::to_owned);
+    Some(EnvironmentCriticality {
+        effective,
+        declared,
+        derived,
     })
 }
 
@@ -2298,6 +2420,10 @@ async fn latest_plan_for_environment(
     let policy = crate::approval_policy::load_live_policy(properties);
     let signals = crate::approval_policy::delivery_signals_for_plan(ctx, &plan).await?;
     let live_policy = policy.as_ref().ok().and_then(|value| value.as_ref());
+    let products: Vec<String> = plan.steps.iter().map(|step| step.product.clone()).collect();
+    let plan_criticality = crate::criticality_store::effective_for_targets(ctx, env, &products)
+        .await?
+        .map(|level| level.as_str().to_owned());
     let approval = if crate::approval_policy::plan_awaiting_execution(&plan)
         && crate::approval_policy::development_bypass_current(&plan, &execution)
     {
@@ -2308,6 +2434,7 @@ async fn latest_plan_for_environment(
             inspected.evidence.as_ref(),
             now,
             execution,
+            plan_criticality.as_deref(),
         )
     } else if crate::approval_policy::plan_awaiting_execution(&plan) && policy.is_err() {
         // Before the pending-human check: an unreadable policy also blocks
@@ -2346,6 +2473,7 @@ async fn latest_plan_for_environment(
             inspected.evidence.as_ref(),
             now,
             execution,
+            plan_criticality.as_deref(),
         )
     };
     let mut summary = environment_plan_summary(plan)?;
@@ -3132,6 +3260,138 @@ mod tests {
             .unwrap();
         assert_eq!(preserved.source, "human");
         assert_eq!(preserved.policy_provider.as_deref(), Some("alice"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn inspect_plan_approval_uses_plan_product_criticality() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-inspect-product-criticality-{}-{}-{}",
+            std::process::id(),
+            crate::now_millis(),
+            uuid::Uuid::new_v4()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        env_add(&mut ctx, "lab", "Lab").await.unwrap();
+        ctx.put(Object {
+            id: product_id("api"),
+            kind: KIND_PRODUCT.into(),
+            name: "api".into(),
+            namespace: NS.into(),
+            external_id: String::new(),
+            properties: HashMap::new(),
+            created: 1,
+            updated: 1,
+        })
+        .await
+        .unwrap();
+
+        let mut install = crate::plan::Plan {
+            format_version: crate::plan::PLAN_FORMAT_VERSION,
+            id: String::new(),
+            content_id: String::new(),
+            environment: "lab".into(),
+            created_at: 100,
+            inputs: vec![crate::plan::DesiredStateInput {
+                product: "api".into(),
+                channel: "stable".into(),
+                channel_id: "tenkai:channel:api/stable".into(),
+                desired_version: "1.0.0".into(),
+                release_id: "tenkai:release:api@1.0.0".into(),
+                release_digest: "abc".into(),
+                artifact_digest: "abc".into(),
+                deployed_version: None,
+            }],
+            steps: vec![crate::plan::Step {
+                id: String::new(),
+                order: 0,
+                product: "api".into(),
+                action: crate::plan::Action::Install,
+                from: None,
+                to: "1.0.0".into(),
+                release_id: "tenkai:release:api@1.0.0".into(),
+                release_digest: "abc".into(),
+                artifact_digest: "abc".into(),
+                workdir: ".".into(),
+                restore: None,
+            }],
+            state: crate::plan::PlanState::Computed,
+            gates_skipped: None,
+            status_detail: String::new(),
+            maintenance_blocked: false,
+            prior_warnings: Vec::new(),
+            recalled_recovery_reason: None,
+            credential_runway: None,
+        };
+        install.bind_content_identity().unwrap();
+        crate::plan::store(&mut ctx, &install).await.unwrap();
+
+        let key = root.join("auto-approver.ed25519");
+        #[cfg(unix)]
+        {
+            use std::io::Write as _;
+            use std::os::unix::fs::OpenOptionsExt as _;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&key)
+                .unwrap();
+            file.write_all(&[7_u8; 32]).unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(&key, [7_u8; 32]).unwrap();
+        }
+        let policy = root.join("policy.toml");
+        std::fs::write(
+            &policy,
+            format!(
+                "version = 1\nmode = \"auto\"\nttl_ms = 60000\nauto_signer_key = \"{}\"\n\n[[quorum]]\npurpose = \"execute_plan\"\nn = 2\nmin_criticality = \"critical\"\n",
+                key.display()
+            ),
+        )
+        .unwrap();
+        set_plan_approval_policy(&mut ctx, "lab", &policy)
+            .await
+            .unwrap();
+
+        let approved = inspect_environment(&mut ctx, "lab")
+            .await
+            .unwrap()
+            .latest_plan
+            .unwrap()
+            .approval
+            .unwrap();
+        assert_eq!(approved.source, "policy");
+        assert_eq!(approved.reason, None);
+
+        crate::criticality_store::set_product(
+            &mut ctx,
+            "api",
+            &crate::criticality::SetCriticalityRequest {
+                level: crate::criticality::CriticalityLevel::Critical,
+                owner: "alice".into(),
+                reason: "marked data".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let required = inspect_environment(&mut ctx, "lab")
+            .await
+            .unwrap()
+            .latest_plan
+            .unwrap()
+            .approval
+            .unwrap();
+        assert_eq!(required.source, "required");
+        assert!(
+            required.reason.as_deref().unwrap().contains("multi-party"),
+            "{required:?}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

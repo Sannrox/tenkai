@@ -243,13 +243,23 @@ async fn execute(
         };
         let env_obj = crate::environment::environment(ctx, request.environment).await?;
         let signals = crate::approval_policy::delivery_signals_for_plan(ctx, &stored).await?;
+        let now = crate::now_millis();
+        let products: Vec<String> = stored
+            .steps
+            .iter()
+            .map(|step| step.product.clone())
+            .collect();
+        let criticality =
+            crate::criticality_store::effective_for_targets(ctx, request.environment, &products)
+                .await?;
         match crate::approval_policy::resolve_auto_envelope(
             &env_obj.properties,
             &stored,
             request.policy.skip_gates,
             signals,
             directory,
-            crate::now_millis(),
+            now,
+            criticality,
         )? {
             crate::approval_policy::AutoEnvelope::NeedsHuman => {
                 return Ok(EnvironmentStatus::AwaitingApproval { plan_id, steps });
@@ -549,6 +559,7 @@ mod tests {
                             crate::approval_policy::DeliverySignals::default(),
                             envelope.parent().unwrap(),
                             crate::now_millis(),
+                            None,
                         )
                         .unwrap(),
                         crate::approval_policy::AutoEnvelope::Signed(_)

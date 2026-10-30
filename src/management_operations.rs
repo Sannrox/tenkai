@@ -616,7 +616,7 @@ impl ManagementOperations {
             ));
         }
         let mut ctx = self.catalog_ctx(&context)?;
-        let mut result = crate::exposure::query(&mut ctx, &query.component, &query.range)
+        let mut result = crate::exposure::query_with(&mut ctx, &query)
             .await
             .map_err(internal)?;
         if !context.product_bindings().is_empty() {
@@ -636,7 +636,24 @@ impl ManagementOperations {
             for item in &mut result.matches {
                 item.environments
                     .retain(|environment| environment.environment == granted);
+                let env_max = item
+                    .environments
+                    .iter()
+                    .filter_map(|environment| environment.criticality)
+                    .max();
+                item.criticality = crate::criticality::higher(item.product_criticality, env_max);
             }
+            if let Some(min) = query.min_criticality {
+                result
+                    .matches
+                    .retain(|item| item.criticality.is_some_and(|got| got >= min));
+            }
+            result.matches.sort_by(|left, right| {
+                right
+                    .criticality
+                    .cmp(&left.criticality)
+                    .then(left.release_id.cmp(&right.release_id))
+            });
         }
         Ok(result)
     }
@@ -1684,6 +1701,128 @@ impl ManagementOperations {
             message,
             Some(environment.to_string()),
         ))
+    }
+
+    fn require_fleet_management(
+        &self,
+        credential: &CredentialMaterial,
+        context: &crate::auth_context::AuthenticatedRequestContext,
+        operation: &str,
+    ) -> Result<(), ManagementError> {
+        if self.granted_environment(credential, context).is_some() {
+            return Err(ManagementError::Forbidden(format!(
+                "environment-scoped credentials cannot call {operation}"
+            )));
+        }
+        Ok(())
+    }
+
+    pub async fn inspect_product_criticality(
+        &self,
+        credential: &CredentialMaterial,
+        product: &str,
+    ) -> Result<crate::criticality::EffectiveCriticality, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        Self::require_product_grant(&context, product)?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        crate::criticality_store::inspect_product(&mut ctx, product)
+            .await
+            .map_err(internal)
+    }
+
+    pub async fn set_product_criticality(
+        &self,
+        credential: &CredentialMaterial,
+        product: &str,
+        request: crate::criticality::SetCriticalityRequest,
+    ) -> Result<crate::criticality::EffectiveCriticality, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "catalog.criticality.set")?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        self.require_fleet_management(credential, &context, "product criticality")?;
+        Self::require_product_grant(&context, product)?;
+        request
+            .validate()
+            .map_err(|error| ManagementError::BadRequest(error.to_string()))?;
+        let actor = &context.audit_principal();
+        self.audit(actor, "catalog.criticality.set.requested")?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        crate::criticality_store::set_product(&mut ctx, product, &request)
+            .await
+            .map_err(map_config_error)?;
+        let view = crate::criticality_store::inspect_product(&mut ctx, product)
+            .await
+            .map_err(internal)?;
+        self.audit(actor, "catalog.criticality.set.completed")?;
+        Ok(view)
+    }
+
+    pub async fn clear_product_criticality(
+        &self,
+        credential: &CredentialMaterial,
+        product: &str,
+    ) -> Result<crate::criticality::EffectiveCriticality, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "catalog.criticality.clear")?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        self.require_fleet_management(credential, &context, "product criticality")?;
+        Self::require_product_grant(&context, product)?;
+        let actor = &context.audit_principal();
+        self.audit(actor, "catalog.criticality.clear.requested")?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        crate::criticality_store::clear_product(&mut ctx, product)
+            .await
+            .map_err(map_config_error)?;
+        let view = crate::criticality_store::inspect_product(&mut ctx, product)
+            .await
+            .map_err(internal)?;
+        self.audit(actor, "catalog.criticality.clear.completed")?;
+        Ok(view)
+    }
+
+    pub async fn import_derived_criticality(
+        &self,
+        credential: &CredentialMaterial,
+        envelope: crate::criticality::DerivedEnvelope,
+    ) -> Result<crate::criticality::DerivedImportResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "catalog.criticality.derived")?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        self.require_fleet_management(credential, &context, "derived criticality import")?;
+        for assignment in &envelope.statement.assignments {
+            if assignment.kind == crate::criticality::CriticalityTargetKind::Product {
+                Self::require_product_grant(&context, &assignment.name)?;
+            }
+        }
+        let roots = crate::criticality_store::configured_trust_roots()
+            .map_err(|error| ManagementError::BadRequest(error.to_string()))?
+            .ok_or_else(|| {
+                ManagementError::BadRequest(format!(
+                    "{} is not set",
+                    crate::criticality::CRITICALITY_TRUST_ROOTS_ENV
+                ))
+            })?;
+        let actor = &context.audit_principal();
+        self.audit(actor, "catalog.criticality.derived.requested")?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        let applied = crate::criticality_store::import_envelope(
+            &mut ctx,
+            &envelope,
+            &roots,
+            crate::now_millis(),
+        )
+        .await
+        .map_err(|error| {
+            let message = format!("{error:#}");
+            if message.contains("signature") || message.contains("schema") {
+                ManagementError::BadRequest(message)
+            } else {
+                map_config_error(error)
+            }
+        })?;
+        self.audit(actor, "catalog.criticality.derived.completed")?;
+        Ok(crate::criticality::DerivedImportResult { applied })
     }
 
     pub async fn environment_hold(
@@ -2769,6 +2908,7 @@ mod tests {
                     retirement: None,
                     preview: None,
                     delivery_hold: None,
+                    criticality: None,
                 })
             })
         }
@@ -3205,6 +3345,40 @@ mod tests {
                 .await
                 .unwrap_err(),
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn derived_import_refuses_products_outside_the_publication_grant() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-criticality-grant-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let ops = catalog_ops(&root, grant_auth([DeliveryCapability::Management], [])).await;
+        let envelope = crate::criticality::DerivedEnvelope {
+            schema: crate::criticality::DERIVED_SCHEMA.into(),
+            key_id: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .into(),
+            signature: "c2ln".into(),
+            statement: crate::criticality::DerivedStatement {
+                generated_at: 1,
+                max_age_ms: 1,
+                assignments: vec![crate::criticality::DerivedAssignment {
+                    kind: crate::criticality::CriticalityTargetKind::Product,
+                    name: "other".into(),
+                    level: crate::criticality::CriticalityLevel::High,
+                    source: "governance-catalog".into(),
+                    reason: "marked data".into(),
+                }],
+            },
+        };
+        assert!(matches!(
+            ops.import_derived_criticality(&grant_credential(), envelope)
+                .await,
+            Err(ManagementError::Forbidden(ref msg)) if msg.contains("product")
+        ));
         let _ = std::fs::remove_dir_all(&root);
     }
 

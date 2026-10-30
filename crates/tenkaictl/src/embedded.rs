@@ -56,6 +56,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         | Command::Publish { .. }
         | Command::Release { .. }
         | Command::Exposure { .. }
+        | Command::Criticality { .. }
         | Command::Approval { .. }
         | Command::Promote { .. }
         | Command::EvalEvidence { .. }

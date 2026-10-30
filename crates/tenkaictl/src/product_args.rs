@@ -7,6 +7,30 @@ pub(crate) enum ProductCommand {
         #[command(subcommand)]
         command: ProductMaintenanceCommand,
     },
+    /// Declare or clear product criticality (#694). Fleet management only.
+    Criticality {
+        #[command(subcommand)]
+        command: ProductCriticalityCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum ProductCriticalityCommand {
+    Show {
+        product: String,
+    },
+    Set {
+        product: String,
+        #[arg(long)]
+        level: String,
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        reason: String,
+    },
+    Clear {
+        product: String,
+    },
 }
 
 #[derive(Subcommand)]

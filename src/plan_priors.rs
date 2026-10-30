@@ -410,6 +410,7 @@ mod tests {
             retirement: None,
             preview: None,
             delivery_hold: None,
+            criticality: None,
         };
         annotate_plan_with_priors(
             &mut plan,
@@ -559,6 +560,7 @@ mod tests {
             retirement: None,
             preview: None,
             delivery_hold: None,
+            criticality: None,
         };
         let config = PriorConfig {
             enabled: true,

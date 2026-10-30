@@ -1,10 +1,46 @@
 use anyhow::Result;
 use tenkai::{client, maintenance};
 
-use crate::product_args::{ProductCommand, ProductMaintenanceCommand};
+use crate::product_args::{ProductCommand, ProductCriticalityCommand, ProductMaintenanceCommand};
 
 pub(crate) async fn run(ctx: &mut client::Ctx, command: ProductCommand) -> Result<()> {
     match command {
+        ProductCommand::Criticality { command } => match command {
+            ProductCriticalityCommand::Show { product } => {
+                let view = tenkai::criticality_store::inspect_product(ctx, &product).await?;
+                if view.is_empty() {
+                    println!("product {product} has no criticality");
+                } else {
+                    println!("{}", serde_json::to_string_pretty(&view)?);
+                }
+            }
+            ProductCriticalityCommand::Set {
+                product,
+                level,
+                owner,
+                reason,
+            } => {
+                println!(
+                    "{}",
+                    tenkai::criticality_store::set_product(
+                        ctx,
+                        &product,
+                        &tenkai::criticality::SetCriticalityRequest {
+                            level: tenkai::criticality::CriticalityLevel::parse(&level)?,
+                            owner,
+                            reason,
+                        },
+                    )
+                    .await?
+                );
+            }
+            ProductCriticalityCommand::Clear { product } => {
+                println!(
+                    "{}",
+                    tenkai::criticality_store::clear_product(ctx, &product).await?
+                );
+            }
+        },
         ProductCommand::Maintenance { command } => match command {
             ProductMaintenanceCommand::Set {
                 product,

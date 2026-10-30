@@ -48,6 +48,7 @@ will be split over time. Contributor and agent workflow live in
 | Upgrade across connected, intermittent, and isolated environments | [connectivity-upgrades.md](connectivity-upgrades.md) |
 | Build a signed full-stack offline bundle | [offline-bundles.md](offline-bundles.md#build) |
 | Import and inspect a signed advisory feed | [offline-bundles.md](offline-bundles.md#advisory-feed) |
+| Declare or import environment and product criticality | [manage-environments.md](manage-environments.md#criticality) |
 | Run a signed stateful upgrade drill | [examples/package-migration](../examples/package-migration/) |
 | Roll out a model, then its routing | [examples/model-routing-rollout](../examples/model-routing-rollout/) |
 | Walk through a model-runtime canary | [examples/model-runtime-canary](../examples/model-runtime-canary/) |

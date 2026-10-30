@@ -189,16 +189,32 @@ pub(super) async fn admit(
     backfill_legacy_verification(ctx, &rid, &verification_properties).await?;
 
     let pid = product_id(&name);
-    ctx.put(object(
-        pid.clone(),
-        KIND_PRODUCT,
-        name.clone(),
-        HashMap::from([(
-            "description".into(),
-            loaded.manifest.product.description.clone(),
-        )]),
-    ))
-    .await?;
+    let lease = crate::criticality_store::claim_product_mutation(ctx, &name).await?;
+    let result = async {
+        let existing_product = ctx.get(&pid).await?;
+        let create = existing_product.is_none();
+        crate::criticality_store::persist_product_object(
+            ctx,
+            object(
+                pid.clone(),
+                KIND_PRODUCT,
+                name.clone(),
+                crate::criticality::preserve_product_properties(
+                    existing_product.as_ref().map(|product| &product.properties),
+                    HashMap::from([(
+                        "description".into(),
+                        loaded.manifest.product.description.clone(),
+                    )]),
+                ),
+            ),
+            &lease,
+            create,
+        )
+        .await?;
+        Ok(())
+    }
+    .await;
+    crate::criticality_store::finish_product_mutation(ctx, &lease, result).await?;
     ctx.link(&rid, &pid, REL_RELEASE_OF).await?;
 
     if existing_release {

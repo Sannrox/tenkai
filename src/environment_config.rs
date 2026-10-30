@@ -2,8 +2,8 @@
 //!
 //! `POST /v1/environments` registers an environment. Generation-fenced
 //! `PUT`/`DELETE` routes under `/v1/environments/{environment}/` change its
-//! facts, constraints, maintenance windows, webhooks, approval policy and
-//! runner attestation policy (#675). Every
+//! facts, constraints, maintenance windows, webhooks, approval policy,
+//! runner attestation policy (#675), and declared criticality (#694). Every
 //! change runs the same embedded function, and so the same validation, as the
 //! CLI. Every change also appends an immutable audit event that records the
 //! actor and the reason.
@@ -107,6 +107,14 @@ pub enum EnvironmentConfigChange {
         require_hardware_key: bool,
     },
     ClearRunnerAttestation,
+    /// Declared environment criticality (#694). Derived values are imported
+    /// separately and are not cleared here.
+    SetCriticality {
+        level: crate::criticality::CriticalityLevel,
+        owner: String,
+        reason: String,
+    },
+    ClearCriticality,
 }
 
 /// The configuration resource a route serves.
@@ -118,6 +126,7 @@ pub enum ConfigResource {
     Webhooks,
     ApprovalPolicy,
     RunnerAttestation,
+    Criticality,
 }
 
 impl ConfigResource {
@@ -129,6 +138,7 @@ impl ConfigResource {
             Self::Webhooks => "webhooks",
             Self::ApprovalPolicy => "approval-policy",
             Self::RunnerAttestation => "runner-attestation",
+            Self::Criticality => "criticality",
         }
     }
 }
@@ -150,6 +160,7 @@ impl EnvironmentConfigChange {
             Self::SetRunnerAttestation { .. } | Self::ClearRunnerAttestation => {
                 ConfigResource::RunnerAttestation
             }
+            Self::SetCriticality { .. } | Self::ClearCriticality => ConfigResource::Criticality,
         }
     }
 
@@ -163,6 +174,7 @@ impl EnvironmentConfigChange {
                 | Self::ClearWebhooks { .. }
                 | Self::ClearApprovalPolicy
                 | Self::ClearRunnerAttestation
+                | Self::ClearCriticality
         )
     }
 
@@ -200,6 +212,8 @@ impl EnvironmentConfigChange {
             Self::ClearApprovalPolicy => "clear_approval_policy",
             Self::SetRunnerAttestation { .. } => "set_runner_attestation",
             Self::ClearRunnerAttestation => "clear_runner_attestation",
+            Self::SetCriticality { .. } => "set_criticality",
+            Self::ClearCriticality => "clear_criticality",
         }
     }
 }
@@ -284,7 +298,8 @@ pub fn validate(change: &EnvironmentConfigChange) -> Result<()> {
         .validate(),
         Change::ClearWebhooks { .. }
         | Change::ClearApprovalPolicy
-        | Change::ClearRunnerAttestation => Ok(()),
+        | Change::ClearRunnerAttestation
+        | Change::ClearCriticality => Ok(()),
         Change::SetRunnerAttestation {
             max_age_ms,
             require_hardware_key,
@@ -296,6 +311,16 @@ pub fn validate(change: &EnvironmentConfigChange) -> Result<()> {
         Change::SetApprovalPolicy { path } => {
             crate::approval_policy::validate_policy_file_path(std::path::Path::new(path))
         }
+        Change::SetCriticality {
+            level,
+            owner,
+            reason,
+        } => crate::criticality::SetCriticalityRequest {
+            level: *level,
+            owner: owner.clone(),
+            reason: reason.clone(),
+        }
+        .validate(),
     }
 }
 
@@ -398,7 +423,7 @@ pub async fn apply(
         fence(lease.generation.saturating_sub(1))?;
         let action = change.action();
         append_audit(ctx, environment, action, "requested", actor, reason).await?;
-        let result = mutate(ctx, environment, change).await;
+        let result = mutate(ctx, environment, change, &lease).await;
         let outcome = if result.is_ok() {
             "completed"
         } else {
@@ -423,6 +448,7 @@ async fn mutate(
     ctx: &mut Ctx,
     environment: &str,
     change: &EnvironmentConfigChange,
+    lease: &crate::apply::EnvironmentLease,
 ) -> Result<String> {
     use EnvironmentConfigChange as Change;
     Ok(match change {
@@ -524,6 +550,26 @@ async fn mutate(
         }
         Change::ClearRunnerAttestation => {
             crate::runner_attestation::clear_policy(ctx, environment).await?
+        }
+        Change::SetCriticality {
+            level,
+            owner,
+            reason,
+        } => {
+            crate::criticality_store::set_environment_locked(
+                ctx,
+                environment,
+                &crate::criticality::SetCriticalityRequest {
+                    level: *level,
+                    owner: owner.clone(),
+                    reason: reason.clone(),
+                },
+                lease,
+            )
+            .await?
+        }
+        Change::ClearCriticality => {
+            crate::criticality_store::clear_environment_locked(ctx, environment, lease).await?
         }
     })
 }
@@ -652,5 +698,20 @@ mod tests {
         assert!(change(serde_json::json!({"kind": "delete_everything"})).is_err());
         assert!(require_reason("  ").is_err());
         assert!(require_reason(&"x".repeat(MAX_REASON_BYTES + 1)).is_err());
+
+        let set_criticality = change(serde_json::json!({
+            "kind": "set_criticality",
+            "level": "critical",
+            "owner": "alice",
+            "reason": "pci"
+        }))
+        .unwrap();
+        assert_eq!(
+            set_criticality.path("prod"),
+            "/v1/environments/prod/criticality"
+        );
+        require_route(&set_criticality, ConfigResource::Criticality, false, None).unwrap();
+        let clear_criticality = change(serde_json::json!({"kind": "clear_criticality"})).unwrap();
+        require_route(&clear_criticality, ConfigResource::Criticality, true, None).unwrap();
     }
 }

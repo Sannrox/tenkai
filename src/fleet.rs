@@ -37,6 +37,10 @@ pub struct FleetEnvironmentRow {
     pub latest_plan_state: Option<String>,
     /// Aggregate posture: `empty` | `unhealthy` | `behind` | `current`.
     pub posture: String,
+    /// Effective environment criticality when set (#694).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub criticality: Option<String>,
 }
 
 /// Fleet-wide delivery posture (no credentials).
@@ -135,6 +139,10 @@ pub fn fleet_row_from_inspect(report: &EnvironmentInspectReport) -> FleetEnviron
         lease_held: report.lease.held,
         latest_plan_state: report.latest_plan.as_ref().map(|plan| plan.state.clone()),
         posture,
+        criticality: report
+            .criticality
+            .as_ref()
+            .and_then(|value| value.effective.clone()),
     }
 }
 
@@ -473,6 +481,7 @@ mod tests {
             retirement: None,
             preview: None,
             delivery_hold: None,
+            criticality: None,
         };
         let behind = EnvironmentInspectReport {
             name: "beta".into(),
@@ -512,6 +521,7 @@ mod tests {
             retirement: None,
             preview: None,
             delivery_hold: None,
+            criticality: None,
         };
         let unhealthy = EnvironmentInspectReport {
             name: "gamma".into(),
@@ -551,6 +561,7 @@ mod tests {
             retirement: None,
             preview: None,
             delivery_hold: None,
+            criticality: None,
         };
         let empty = EnvironmentInspectReport {
             name: "delta".into(),
@@ -579,6 +590,7 @@ mod tests {
             retirement: None,
             preview: None,
             delivery_hold: None,
+            criticality: None,
         };
         let report = fleet_status_from_inspects(vec![behind, empty, unhealthy, current]);
         assert_eq!(report.environment_count, 4);
@@ -644,6 +656,7 @@ mod tests {
             retirement: None,
             preview: None,
             delivery_hold: None,
+            criticality: None,
         };
         let report = fleet_status_from_inspects(vec![stale]);
         assert_eq!(report.environments[0].posture, "behind");

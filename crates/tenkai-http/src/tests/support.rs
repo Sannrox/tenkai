@@ -134,6 +134,7 @@ impl ReconcilePort for FixedReconciler {
                 retirement: None,
                 preview: None,
                 delivery_hold: None,
+                criticality: None,
             })
         })
     }
@@ -159,6 +160,7 @@ impl ReconcilePort for FixedReconciler {
                     lease_held: false,
                     latest_plan_state: None,
                     posture: "empty".into(),
+                    criticality: None,
                 }],
                 environment_count: 1,
                 environments_current: 0,

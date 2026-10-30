@@ -182,6 +182,11 @@ async fn remote_configuration_matches_embedded_and_refuses_like_the_cli() {
             events: vec![tenkai::deploy_webhook::WebhookEvent::ApplyFailed],
             operational: Vec::new(),
         },
+        Change::SetCriticality {
+            level: tenkai::criticality::CriticalityLevel::High,
+            owner: "alice".into(),
+            reason: "pci".into(),
+        },
     ];
 
     client
@@ -244,6 +249,22 @@ async fn remote_configuration_matches_embedded_and_refuses_like_the_cli() {
             report.facts,
             report.constraints,
             windows,
+            report.criticality.map(|view| {
+                (
+                    view.effective,
+                    view.declared.map(|declared| {
+                        (
+                            declared.level,
+                            declared.owner,
+                            declared.reason,
+                            declared.source,
+                        )
+                    }),
+                    view.derived.map(|derived| {
+                        (derived.level, derived.source, derived.reason, derived.stale)
+                    }),
+                )
+            }),
         )
     };
     let remote = configured(client.inspect_environment("edge").await.unwrap());

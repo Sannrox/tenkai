@@ -4,13 +4,13 @@ use anyhow::{Result, bail};
 use tenkai::environment_config::EnvironmentConfigChange as Change;
 
 use crate::env_args::{
-    ApprovalPolicyCommand, ConstraintsCommand, EnvCommand, FactsCommand, MaintenanceCommand,
-    RemoteChange, RunnerAttestationCommand, WebhooksCommand,
+    ApprovalPolicyCommand, ConstraintsCommand, CriticalityCommand, EnvCommand, FactsCommand,
+    MaintenanceCommand, RemoteChange, RunnerAttestationCommand, WebhooksCommand,
 };
 
 /// The environment, change and fence of a configuration command, or `None`
 /// when `command` is not one (lists and shows go elsewhere).
-pub(crate) fn change(command: &EnvCommand) -> Option<Result<(&str, Change, &RemoteChange)>> {
+pub(crate) fn change(command: &EnvCommand) -> Option<Result<(&str, Change, RemoteChange)>> {
     Some(match command {
         EnvCommand::Facts { command } => match command {
             FactsCommand::Set { env, spec, remote } => spec
@@ -21,11 +21,13 @@ pub(crate) fn change(command: &EnvCommand) -> Option<Result<(&str, Change, &Remo
                         key: key.into(),
                         value: value.into(),
                     };
-                    (env.as_str(), change, remote)
+                    (env.as_str(), change, remote.clone())
                 }),
-            FactsCommand::Clear { env, key, remote } => {
-                Ok((env.as_str(), Change::ClearFact { key: key.clone() }, remote))
-            }
+            FactsCommand::Clear { env, key, remote } => Ok((
+                env.as_str(),
+                Change::ClearFact { key: key.clone() },
+                remote.clone(),
+            )),
             _ => return None,
         },
         EnvCommand::Constraints { command } => match command {
@@ -42,7 +44,7 @@ pub(crate) fn change(command: &EnvCommand) -> Option<Result<(&str, Change, &Remo
                     name: name.clone(),
                     value: value.clone(),
                 },
-                remote,
+                remote.clone(),
             )),
             ConstraintsCommand::Clear {
                 env,
@@ -55,7 +57,7 @@ pub(crate) fn change(command: &EnvCommand) -> Option<Result<(&str, Change, &Remo
                     constraint: kind.clone(),
                     name: name.clone(),
                 },
-                remote,
+                remote.clone(),
             )),
             ConstraintsCommand::List { .. } => return None,
         },
@@ -76,7 +78,7 @@ pub(crate) fn change(command: &EnvCommand) -> Option<Result<(&str, Change, &Remo
                     start: start.clone(),
                     duration_minutes: *duration_minutes,
                 };
-                (env.as_str(), change, remote)
+                (env.as_str(), change, remote.clone())
             }),
             MaintenanceCommand::Remove {
                 env,
@@ -87,7 +89,7 @@ pub(crate) fn change(command: &EnvCommand) -> Option<Result<(&str, Change, &Remo
                 Change::RemoveMaintenanceWindow {
                     name: identity.clone(),
                 },
-                remote,
+                remote.clone(),
             )),
             _ => return None,
         },
@@ -106,13 +108,13 @@ pub(crate) fn change(command: &EnvCommand) -> Option<Result<(&str, Change, &Remo
                         events,
                         operational,
                     };
-                    (env.as_str(), change, remote)
+                    (env.as_str(), change, remote.clone())
                 },
             ),
             WebhooksCommand::Clear { env, url, remote } => Ok((
                 env.as_str(),
                 Change::ClearWebhooks { url: url.clone() },
-                remote,
+                remote.clone(),
             )),
             WebhooksCommand::List { .. } => return None,
         },
@@ -121,10 +123,10 @@ pub(crate) fn change(command: &EnvCommand) -> Option<Result<(&str, Change, &Remo
                 let change = Change::SetApprovalPolicy {
                     path: path.display().to_string(),
                 };
-                Ok((env.as_str(), change, remote))
+                Ok((env.as_str(), change, remote.clone()))
             }
             ApprovalPolicyCommand::Clear { env, remote } => {
-                Ok((env.as_str(), Change::ClearApprovalPolicy, remote))
+                Ok((env.as_str(), Change::ClearApprovalPolicy, remote.clone()))
             }
             ApprovalPolicyCommand::Show { .. } => return None,
         },
@@ -140,12 +142,38 @@ pub(crate) fn change(command: &EnvCommand) -> Option<Result<(&str, Change, &Remo
                     max_age_ms: *max_age_ms,
                     require_hardware_key: *require_hardware_key,
                 },
-                remote,
+                remote.clone(),
             )),
             RunnerAttestationCommand::Clear { env, remote } => {
-                Ok((env.as_str(), Change::ClearRunnerAttestation, remote))
+                Ok((env.as_str(), Change::ClearRunnerAttestation, remote.clone()))
             }
             RunnerAttestationCommand::Show { .. } => return None,
+        },
+        EnvCommand::Criticality { command } => match command {
+            CriticalityCommand::Set {
+                env,
+                level,
+                owner,
+                reason,
+                generation,
+            } => tenkai::criticality::CriticalityLevel::parse(level).map(|level| {
+                (
+                    env.as_str(),
+                    Change::SetCriticality {
+                        level,
+                        owner: owner.clone(),
+                        reason: reason.clone(),
+                    },
+                    RemoteChange {
+                        generation: *generation,
+                        reason: Some(reason.clone()),
+                    },
+                )
+            }),
+            CriticalityCommand::Clear { env, remote } => {
+                Ok((env.as_str(), Change::ClearCriticality, remote.clone()))
+            }
+            CriticalityCommand::Show { .. } => return None,
         },
         _ => return None,
     })
@@ -157,7 +185,7 @@ pub(crate) async fn run(client: &tenkai_http::RemoteClient, command: &EnvCommand
         bail!("this command is not an environment configuration change");
     };
     let (env, change, remote) = planned?;
-    let (generation, reason) = require(remote)?;
+    let (generation, reason) = require(&remote)?;
     let result = client
         .configure_environment(env, change, reason, generation)
         .await?;

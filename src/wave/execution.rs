@@ -375,6 +375,9 @@ async fn revalidate_environment(
     environment: &str,
 ) -> Result<()> {
     crate::environment::environment(ctx, environment).await?;
+    if matches!(record.fail_policy, WaveFailPolicy::Continue) {
+        refuse_continue_after_failure(ctx, environment, &record.product).await?;
+    }
     if crate::catalog::release_is_recalled(ctx, &record.release_id).await? {
         bail!(
             "release {} is recalled and cannot advance wave {}",
@@ -748,9 +751,44 @@ async fn finish_wave_lease<T>(ctx: &mut Ctx, lease: &WaveLease, result: Result<T
     }
 }
 
+async fn refuse_continue_after_failure(
+    ctx: &mut Ctx,
+    environment: &str,
+    product: &str,
+) -> Result<()> {
+    let env = crate::environment::environment(ctx, environment).await?;
+    let Some(policy) = crate::approval_policy::load_live_policy(&env.properties)? else {
+        return Ok(());
+    };
+    let products = [product.to_string()];
+    let effective =
+        crate::criticality_store::effective_for_targets(ctx, environment, &products).await?;
+    let max = policy
+        .continue_after_failure_max_criticality
+        .as_deref()
+        .map(crate::criticality::CriticalityLevel::parse)
+        .transpose()?;
+    if crate::criticality::continue_after_failure_refused(effective, max) {
+        bail!(
+            "environment {environment} effective criticality {} forbids continue-after-failure waves above {}",
+            effective
+                .map(crate::criticality::CriticalityLevel::as_str)
+                .unwrap_or("unset"),
+            max.map(crate::criticality::CriticalityLevel::as_str)
+                .unwrap_or("unset"),
+        );
+    }
+    Ok(())
+}
+
 async fn admit_locked(ctx: &mut Ctx, spec: &ExecutableWaveSpec) -> Result<WaveRecord> {
     spec.validate()?;
     require_wave_schema(ctx).await?;
+    if matches!(spec.fail_policy, WaveFailPolicy::Continue) {
+        for environment in &spec.environments {
+            refuse_continue_after_failure(ctx, environment, &spec.product).await?;
+        }
+    }
     let pin = resolve_release_pin(ctx, spec).await?;
     let digest = identity_digest(
         spec,

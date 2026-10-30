@@ -333,6 +333,7 @@ fn partition_local_fleet_row(name: &str) -> crate::plan::FleetEnvironmentRow {
         lease_held: false,
         latest_plan_state: None,
         posture: "empty".into(),
+        criticality: None,
     }
 }
 
@@ -364,6 +365,7 @@ fn partition_local_inspect(name: &str) -> EnvironmentInspectReport {
         preview: None,
         retirement: None,
         delivery_hold: None,
+        criticality: None,
     }
 }
 
@@ -727,6 +729,7 @@ mod tests {
             retirement: None,
             preview: None,
             delivery_hold: None,
+            criticality: None,
         }
     }
 

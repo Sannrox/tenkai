@@ -397,8 +397,11 @@ pub async fn verify_for_execution_named(
     let environment = crate::environment::environment(ctx, &plan.environment).await?;
     let policy = crate::approval_policy::load_live_policy(&environment.properties)?;
     let purpose = crate::approval_policy::quorum_purpose(plan, skip_gates);
+    let products: Vec<String> = plan.steps.iter().map(|step| step.product.clone()).collect();
+    let criticality =
+        crate::criticality_store::effective_for_targets(ctx, &plan.environment, &products).await?;
     let rule = match &policy {
-        Some(policy) => crate::approval_policy::quorum_rule(policy, purpose),
+        Some(policy) => crate::approval_policy::quorum_rule(policy, purpose, criticality),
         None => crate::approval_policy::default_quorum(purpose),
     };
     if rule.exclude_requester && requester.is_none() {
@@ -451,7 +454,22 @@ pub async fn verify_for_execution_named(
         }
         let signals = crate::approval_policy::delivery_signals_for_plan(ctx, plan).await?;
         if !matches!(
-            crate::approval_policy::evaluate(&policy, plan, skip_gates, signals),
+            crate::approval_policy::evaluate(
+                &policy,
+                plan,
+                skip_gates,
+                signals,
+                crate::criticality_store::effective_for_targets(
+                    ctx,
+                    &plan.environment,
+                    &plan
+                        .steps
+                        .iter()
+                        .map(|step| step.product.clone())
+                        .collect::<Vec<_>>(),
+                )
+                .await?,
+            ),
             crate::approval_policy::Decision::Auto { .. }
         ) {
             bail!("live environment policy requires human approval");
@@ -894,8 +912,11 @@ pub async fn approvals_view(
     let environment = crate::environment::environment(ctx, &plan.environment).await?;
     let policy = crate::approval_policy::load_live_policy(&environment.properties)?;
     let purpose = crate::approval_policy::quorum_purpose(plan, skip_gates);
+    let products: Vec<String> = plan.steps.iter().map(|step| step.product.clone()).collect();
+    let criticality =
+        crate::criticality_store::effective_for_targets(ctx, &plan.environment, &products).await?;
     let rule = match &policy {
-        Some(policy) => crate::approval_policy::quorum_rule(policy, purpose),
+        Some(policy) => crate::approval_policy::quorum_rule(policy, purpose, criticality),
         None => crate::approval_policy::default_quorum(purpose),
     };
     let expected_digest = format!("sha256:{}", plan.executable_digest()?);
@@ -1162,6 +1183,7 @@ mod tests {
             n,
             groups: groups.iter().map(|group| (*group).to_string()).collect(),
             exclude_requester,
+            min_criticality: None,
         }
     }
 

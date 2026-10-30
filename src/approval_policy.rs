@@ -62,6 +62,11 @@ pub struct ApprovalPolicy {
     /// envelope still authorizes, matching the v1 single-envelope policy.
     #[serde(default)]
     pub quorum: Vec<QuorumRule>,
+    /// Refuse continue-after-failure waves when an environment's effective
+    /// criticality is above this level (#694). `low`, `medium`, `high`, or
+    /// `critical`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continue_after_failure_max_criticality: Option<String>,
     /// SHA-256 of the TOML file bytes when loaded from disk.
     #[serde(skip)]
     source_digest: Option<String>,
@@ -100,6 +105,11 @@ pub struct QuorumRule {
     /// When true, the apply requester's principal cannot count toward N.
     #[serde(default)]
     pub exclude_requester: bool,
+    /// When set, this rule applies only at this criticality or higher (#694).
+    /// `low`, `medium`, `high`, or `critical`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub min_criticality: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,12 +212,14 @@ impl ApprovalPolicy {
         {
             bail!("plan approval policy require_preflight.max_age_ms must be positive");
         }
-        let mut purposes = std::collections::BTreeSet::new();
+        let mut seen = std::collections::BTreeSet::new();
         for rule in &self.quorum {
             if rule.n == 0 {
                 bail!("plan approval policy quorum n must be at least 1");
             }
-            if !purposes.insert(rule.purpose.as_str()) {
+            parse_policy_criticality("quorum min_criticality", rule.min_criticality.as_deref())?;
+            let key = (rule.purpose.as_str(), rule.min_criticality.as_deref());
+            if !seen.insert(key) {
                 bail!(
                     "plan approval policy quorum purpose {} is duplicated",
                     rule.purpose.as_str()
@@ -217,6 +229,10 @@ impl ApprovalPolicy {
                 crate::ontology::validate_identifier("quorum group", group)?;
             }
         }
+        parse_policy_criticality(
+            "continue_after_failure_max_criticality",
+            self.continue_after_failure_max_criticality.as_deref(),
+        )?;
         Ok(())
     }
 
@@ -263,13 +279,14 @@ pub fn evaluate(
     plan: &Plan,
     skip_gates: bool,
     signals: DeliverySignals,
+    criticality: Option<crate::criticality::CriticalityLevel>,
 ) -> Decision {
     if policy.mode != PolicyMode::Auto {
         return Decision::RequireHuman {
             reason: "policy mode is manual".into(),
         };
     }
-    if quorum_rule(policy, quorum_purpose(plan, skip_gates)).n > 1 {
+    if quorum_rule(policy, quorum_purpose(plan, skip_gates), criticality).n > 1 {
         return Decision::RequireHuman {
             reason: "multi-party approval requires human-signed envelopes".into(),
         };
@@ -337,18 +354,39 @@ pub fn quorum_purpose(plan: &Plan, skip_gates: bool) -> QuorumPurpose {
 }
 
 /// The matching quorum, or the v1 default of one trusted envelope.
-pub fn quorum_rule(policy: &ApprovalPolicy, purpose: QuorumPurpose) -> QuorumRule {
-    policy
+///
+/// When several rules share a purpose, the most specific `min_criticality`
+/// that the environment still meets wins.
+pub fn quorum_rule(
+    policy: &ApprovalPolicy,
+    purpose: QuorumPurpose,
+    criticality: Option<crate::criticality::CriticalityLevel>,
+) -> QuorumRule {
+    let mut matched: Vec<&QuorumRule> = policy
         .quorum
         .iter()
-        .find(|rule| rule.purpose == purpose)
-        .cloned()
-        .unwrap_or(QuorumRule {
-            purpose,
-            n: 1,
-            groups: Vec::new(),
-            exclude_requester: false,
+        .filter(|rule| {
+            rule.purpose == purpose
+                && rule.min_criticality.as_deref().is_none_or(|min| {
+                    crate::criticality::CriticalityLevel::parse(min)
+                        .ok()
+                        .is_some_and(|min| criticality.is_some_and(|got| got >= min))
+                })
         })
+        .collect();
+    matched.sort_by_key(|rule| {
+        (
+            rule.min_criticality
+                .as_deref()
+                .and_then(|min| crate::criticality::CriticalityLevel::parse(min).ok()),
+            rule.n,
+        )
+    });
+    matched
+        .last()
+        .copied()
+        .cloned()
+        .unwrap_or(default_quorum(purpose))
 }
 
 /// Default N=1 rule when no live policy is configured.
@@ -358,6 +396,16 @@ pub fn default_quorum(purpose: QuorumPurpose) -> QuorumRule {
         n: 1,
         groups: Vec::new(),
         exclude_requester: false,
+        min_criticality: None,
+    }
+}
+
+fn parse_policy_criticality(label: &str, value: Option<&str>) -> Result<()> {
+    match value {
+        None => Ok(()),
+        Some(value) => crate::criticality::CriticalityLevel::parse(value)
+            .map(|_| ())
+            .map_err(|error| anyhow::anyhow!("{label} {error}")),
     }
 }
 
@@ -393,6 +441,7 @@ pub fn resolve_auto_envelope(
     signals: DeliverySignals,
     directory: &Path,
     now: i64,
+    criticality: Option<crate::criticality::CriticalityLevel>,
 ) -> Result<AutoEnvelope> {
     let envelope = directory.join(format!("{}.json", plan.id));
     let policy = load_live_policy(properties)?;
@@ -400,7 +449,7 @@ pub fn resolve_auto_envelope(
         None => Decision::RequireHuman {
             reason: "no plan approval policy".into(),
         },
-        Some(policy) => evaluate(policy, plan, skip_gates, signals),
+        Some(policy) => evaluate(policy, plan, skip_gates, signals, criticality),
     };
     if envelope.is_file() {
         if is_auto_envelope(&envelope)? {
@@ -649,8 +698,14 @@ pub(crate) async fn reused_auto_envelope_is_unexecutable(
     let Some(policy) = policy else {
         return false;
     };
+    let products: Vec<String> = plan.steps.iter().map(|step| step.product.clone()).collect();
+    let criticality =
+        crate::criticality_store::effective_for_targets(ctx, &plan.environment, &products)
+            .await
+            .ok()
+            .flatten();
     if !matches!(
-        evaluate(policy, plan, execution.skip_gates, signals),
+        evaluate(policy, plan, execution.skip_gates, signals, criticality,),
         Decision::Auto { .. }
     ) || !auto_signer_present(policy)
         || !auto_envelope_current(&path, policy, now)
@@ -753,6 +808,7 @@ pub fn explain_plan_approval(
     recorded: Option<&VerificationEvidence>,
     now: i64,
     execution: ExecutionPolicy,
+    criticality: Option<&str>,
 ) -> PlanApprovalView {
     let recorded_provider = recorded.map(|evidence| evidence.policy_provider.as_str());
     let expired = recorded.is_some_and(|evidence| now > evidence.expires_at);
@@ -811,7 +867,9 @@ pub fn explain_plan_approval(
             policy_provider: recorded_provider.map(str::to_string),
         };
     };
-    match evaluate(policy, plan, execution.skip_gates, signals) {
+    let criticality =
+        criticality.and_then(|value| crate::criticality::CriticalityLevel::parse(value).ok());
+    match evaluate(policy, plan, execution.skip_gates, signals, criticality) {
         Decision::RequireHuman { reason } => PlanApprovalView {
             source: "required".into(),
             reason: Some(reason),
@@ -1181,6 +1239,7 @@ exclude_requester = true
                 })
                 .unwrap_or_default(),
             quorum: Vec::new(),
+            continue_after_failure_max_criticality: None,
             source_digest: None,
         }
     }
@@ -1391,6 +1450,7 @@ exclude_requester = true
             DeliverySignals::default(),
             &approvals,
             now,
+            None,
         )
         .unwrap() else {
             panic!("expected initial automatic approval")
@@ -1425,6 +1485,7 @@ exclude_requester = true
                 DeliverySignals::default(),
                 &approvals,
                 now + 1,
+                None,
             )
             .unwrap(),
             AutoEnvelope::Signed(_)
@@ -1798,21 +1859,21 @@ n = 2
         let policy = auto_policy(Path::new("/tmp/key"), None);
         let install = sample_plan(Action::Install, "api");
         assert!(matches!(
-            evaluate(&policy, &install, false, DeliverySignals::default()),
+            evaluate(&policy, &install, false, DeliverySignals::default(), None),
             Decision::Auto { .. }
         ));
         assert!(matches!(
-            evaluate(&policy, &install, true, DeliverySignals::default()),
+            evaluate(&policy, &install, true, DeliverySignals::default(), None),
             Decision::RequireHuman { reason } if reason.contains("skip_gates")
         ));
         let rollback = sample_plan(Action::Rollback, "api");
         assert!(matches!(
-            evaluate(&policy, &rollback, false, DeliverySignals::default()),
+            evaluate(&policy, &rollback, false, DeliverySignals::default(), None),
             Decision::RequireHuman { reason } if reason.contains("rollback")
         ));
         let downgrade = sample_plan(Action::Downgrade, "api");
         assert!(matches!(
-            evaluate(&policy, &downgrade, false, DeliverySignals::default()),
+            evaluate(&policy, &downgrade, false, DeliverySignals::default(), None),
             Decision::RequireHuman { reason } if reason.contains("downgrade")
         ));
         let payments = auto_policy(Path::new("/tmp/key"), Some("payments"));
@@ -1821,14 +1882,15 @@ n = 2
                 &payments,
                 &sample_plan(Action::Install, "payments"),
                 false,
-                DeliverySignals::default()
+                DeliverySignals::default(),
+                None,
             ),
             Decision::RequireHuman { reason } if reason.contains("payments")
         ));
         let mut manual = policy.clone();
         manual.mode = PolicyMode::Manual;
         assert!(matches!(
-            evaluate(&manual, &install, false, DeliverySignals::default()),
+            evaluate(&manual, &install, false, DeliverySignals::default(), None),
             Decision::RequireHuman { reason } if reason.contains("manual")
         ));
     }
@@ -1853,6 +1915,7 @@ n = 2
             )),
             10,
             ExecutionPolicy::default(),
+            None,
         );
         assert_eq!(approved.source, "policy");
         assert_eq!(approved.reason, None);
@@ -1865,6 +1928,7 @@ n = 2
             None,
             10,
             ExecutionPolicy::default(),
+            None,
         );
         assert_eq!(unavailable.source, "required");
         assert_eq!(
@@ -1880,6 +1944,7 @@ n = 2
             None,
             10,
             ExecutionPolicy::default(),
+            None,
         );
         assert_eq!(human.source, "required");
         assert!(
@@ -1900,6 +1965,7 @@ n = 2
             )),
             10,
             ExecutionPolicy::default(),
+            None,
         );
         assert_eq!(stale.source, "policy");
         assert_eq!(
@@ -1920,6 +1986,7 @@ n = 2
             )),
             10,
             ExecutionPolicy::default(),
+            None,
         );
         assert_eq!(rotated.source, "policy");
         assert_eq!(
@@ -1934,6 +2001,7 @@ n = 2
             Some(&recorded("alice", None, 5, None, "kid")),
             10,
             ExecutionPolicy::default(),
+            None,
         );
         assert_eq!(expired.source, "required");
         assert_eq!(
@@ -1956,6 +2024,7 @@ n = 2
             )),
             10,
             ExecutionPolicy::default(),
+            None,
         );
         assert_eq!(completed.source, "policy");
         assert_eq!(completed.reason, None);
@@ -1966,6 +2035,7 @@ n = 2
             Some(&recorded("alice", None, 20, None, "kid")),
             10,
             ExecutionPolicy::default(),
+            None,
         );
         assert_eq!(preserved.source, "human");
         let mut running = install.clone();
@@ -1977,6 +2047,7 @@ n = 2
             Some(&recorded("alice", None, 5, None, "kid")),
             10,
             ExecutionPolicy::default(),
+            None,
         );
         assert_eq!(in_flight.source, "human");
         let development = explain_plan_approval(
@@ -1992,6 +2063,7 @@ n = 2
             )),
             10,
             ExecutionPolicy::default(),
+            None,
         );
         assert_eq!(development.source, "development");
         assert_eq!(
@@ -2008,6 +2080,7 @@ n = 2
                 skip_gates: true,
                 ..ExecutionPolicy::default()
             },
+            None,
         );
         assert_eq!(skip_gates.source, "required");
         assert!(
@@ -2025,6 +2098,7 @@ n = 2
                 skip_gates: true,
                 ..ExecutionPolicy::default()
             },
+            None,
         );
         assert_eq!(mismatched_gates.source, "required");
         assert_eq!(
@@ -2042,6 +2116,7 @@ n = 2
                 skip_gates: true,
                 ..ExecutionPolicy::default()
             },
+            None,
         );
         assert_eq!(matching_gates.source, "human");
         let unsigned_host = explain_plan_approval(
@@ -2054,6 +2129,7 @@ n = 2
                 auto_signing: false,
                 ..ExecutionPolicy::default()
             },
+            None,
         );
         assert_eq!(unsigned_host.source, "required");
         assert_eq!(
@@ -2070,6 +2146,7 @@ n = 2
                 trust_roots: Some(write_trust_roots(&dir, &[8_u8; 32])),
                 ..ExecutionPolicy::default()
             },
+            None,
         );
         assert_eq!(untrusted.source, "required");
         assert_eq!(
@@ -2086,6 +2163,7 @@ n = 2
                 trust_roots: Some(write_trust_roots(&dir, &[7_u8; 32])),
                 ..ExecutionPolicy::default()
             },
+            None,
         );
         assert_eq!(trusted.source, "policy");
         let _ = fs::remove_dir_all(&dir);
@@ -2108,6 +2186,7 @@ n = 2
             Some(&evidence),
             10,
             ExecutionPolicy::default(),
+            None,
         );
         assert_eq!(stale.source, "required");
         assert_eq!(
@@ -2128,6 +2207,7 @@ n = 2
             Some(&evidence),
             10,
             host.clone(),
+            None,
         );
         assert_eq!(current.source, "development");
         assert_eq!(current.reason.as_deref(), Some("exercise local executor"));
@@ -2139,6 +2219,7 @@ n = 2
             None,
             10,
             host.clone(),
+            None,
         );
         assert_eq!(before_record.source, "development");
         assert_eq!(
@@ -2153,6 +2234,7 @@ n = 2
             Some(&evidence),
             10,
             host,
+            None,
         );
         assert_eq!(other_env.source, "required");
         assert_eq!(
@@ -2492,7 +2574,7 @@ n = 2
         let policy = auto_policy(Path::new("/tmp/key"), None);
         let install = sample_plan(Action::Install, "api");
         assert!(matches!(
-            evaluate(&policy, &install, false, DeliverySignals::default()),
+            evaluate(&policy, &install, false, DeliverySignals::default(), None),
             Decision::Auto { .. }
         ));
         assert!(matches!(
@@ -2503,7 +2585,8 @@ n = 2
                 DeliverySignals {
                     has_migration: true,
                     ..DeliverySignals::default()
-                }
+                },
+                None,
             ),
             Decision::RequireHuman { reason } if reason.contains("has_migration")
         ));
@@ -2515,7 +2598,8 @@ n = 2
                 DeliverySignals {
                     changes_identity_config: true,
                     ..DeliverySignals::default()
-                }
+                },
+                None,
             ),
             Decision::RequireHuman { reason } if reason.contains("changes_identity_config")
         ));
@@ -2527,7 +2611,8 @@ n = 2
                 DeliverySignals {
                     reverses_migration: true,
                     ..DeliverySignals::default()
-                }
+                },
+                None,
             ),
             Decision::RequireHuman { .. }
         ));
@@ -2555,6 +2640,7 @@ n = 2
                 DeliverySignals::default(),
                 &approvals,
                 now,
+                None,
             )
             .unwrap(),
             AutoEnvelope::NeedsHuman
@@ -2571,6 +2657,7 @@ n = 2
                 DeliverySignals::default(),
                 &approvals,
                 now + 1,
+                None,
             )
             .unwrap(),
             AutoEnvelope::NeedsHuman
@@ -2600,7 +2687,8 @@ n = 2
                 false,
                 DeliverySignals::default(),
                 &approvals,
-                now
+                now,
+                None,
             )
             .unwrap(),
             AutoEnvelope::Signed(_)
@@ -2615,7 +2703,8 @@ n = 2
                     ..DeliverySignals::default()
                 },
                 &approvals,
-                now
+                now,
+                None,
             )
             .unwrap(),
             AutoEnvelope::NeedsHuman
@@ -2646,6 +2735,7 @@ n = 2
             DeliverySignals::default(),
             &approvals,
             now,
+            None,
         )
         .unwrap() else {
             panic!("expected auto envelope");
@@ -2698,7 +2788,8 @@ n = 2
                 false,
                 DeliverySignals::default(),
                 &approvals,
-                now
+                now,
+                None,
             )
             .unwrap(),
             AutoEnvelope::NeedsHuman
@@ -2716,7 +2807,8 @@ n = 2
                 false,
                 DeliverySignals::default(),
                 &approvals,
-                now
+                now,
+                None,
             )
             .unwrap(),
             AutoEnvelope::NeedsHuman
@@ -2730,6 +2822,7 @@ n = 2
             DeliverySignals::default(),
             &approvals,
             now + 120_000,
+            None,
         )
         .unwrap() else {
             panic!("expected re-sign after expiry");
@@ -2761,7 +2854,8 @@ n = 2
                 false,
                 DeliverySignals::default(),
                 &approvals,
-                1
+                1,
+                None,
             )
             .unwrap(),
             AutoEnvelope::NeedsHuman
@@ -2803,6 +2897,7 @@ n = 2
             DeliverySignals::default(),
             &dir.join("approvals"),
             now,
+            None,
         )
         .unwrap() else {
             panic!("expected automatic approval")
@@ -2906,5 +3001,38 @@ n = 2
             .unwrap_err();
         assert!(error.contains("signature"), "{error}");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn critical_quorum_requires_two_approvers() {
+        let policy = ApprovalPolicy {
+            quorum: vec![QuorumRule {
+                purpose: QuorumPurpose::ExecutePlan,
+                n: 2,
+                groups: Vec::new(),
+                exclude_requester: false,
+                min_criticality: Some("critical".into()),
+            }],
+            ..auto_policy(Path::new("/tmp/key"), None)
+        };
+        assert_eq!(
+            quorum_rule(
+                &policy,
+                QuorumPurpose::ExecutePlan,
+                Some(crate::criticality::CriticalityLevel::Critical)
+            )
+            .n,
+            2
+        );
+        assert_eq!(
+            quorum_rule(
+                &policy,
+                QuorumPurpose::ExecutePlan,
+                Some(crate::criticality::CriticalityLevel::High)
+            )
+            .n,
+            1
+        );
+        assert_eq!(quorum_rule(&policy, QuorumPurpose::ExecutePlan, None).n, 1);
     }
 }

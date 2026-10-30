@@ -54,6 +54,11 @@ tenkaictl wave execute local-rollout \
   --allow-unapproved-development --development-reason "laptop dogfood"
 ```
 
+An environment approval policy may set
+`continue_after_failure_max_criticality`. Continue-after-failure admission
+refuses the wave when that environment's effective criticality is above the
+limit.
+
 `tenkaictl remediate propose` admits a stop-on-failure wave after recalling
 the releases that match an advisory. The wave still waits for plan approval;
 see [recall notices](recall-notices.md).
