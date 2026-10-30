@@ -9,6 +9,8 @@
 //! The crate is organized around a small set of application seams:
 //!
 //! - [`catalog`] owns immutable release publication, promotion, and lookup.
+//!   [`recall_notice`] composes catalog recall with a signed portable notice
+//!   and an admitted fix-forward wave.
 //!   Its private publication module concentrates content identity, provenance,
 //!   optional change-set closure pins, immutable replay, persistence, and
 //!   graph-link ordering behind one admission interface.
@@ -223,6 +225,7 @@ pub mod preview;
 mod product_kind;
 pub mod provider_event;
 pub mod providers;
+pub mod recall_notice;
 pub mod reconcile_fence;
 pub mod reconciler;
 pub mod recovery_bundle;

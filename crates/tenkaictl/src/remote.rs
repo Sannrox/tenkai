@@ -338,6 +338,11 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         Command::Topology { .. } => {
             bail!("topology drills run against the embedded store; use --target embedded")
         }
+        Command::Remediate { .. } => {
+            bail!(
+                "remediate propose and notice import run against the embedded store; use --target embedded"
+            )
+        }
         other => crate::remote_catalog::run(&client, other, output).await,
     }
 }

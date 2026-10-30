@@ -365,6 +365,26 @@ pub fn known_object_types() -> Vec<ObjectType> {
             ],
         ),
         object_type(
+            crate::recall_notice::KIND_RECALL_NOTICE,
+            "An imported signed recall notice",
+            vec![
+                prop("document", true, "tenkai.recall-notice.v1 JSON"),
+                prop("digest", true, "sha256 of the notice document"),
+                prop("imported_at", true, "Unix-ms timestamp when imported"),
+                prop("advisory_id", true, "Advisory referenced by the notice"),
+                prop("key_id", true, "Signer key id"),
+            ],
+        ),
+        object_type(
+            crate::recall_notice::KIND_RECALL_PROPOSAL,
+            "A first-writer claim binding a wave name to one remediation identity",
+            vec![prop(
+                "identity",
+                true,
+                "Canonical JSON of the proposed wave identity",
+            )],
+        ),
+        object_type(
             KIND_RELEASE_RECALL,
             "An immutable first-writer claim that a release was recalled",
             vec![

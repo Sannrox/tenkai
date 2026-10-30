@@ -54,6 +54,10 @@ tenkaictl wave execute local-rollout \
   --allow-unapproved-development --development-reason "laptop dogfood"
 ```
 
+`tenkaictl remediate propose` admits a stop-on-failure wave after recalling
+the releases that match an advisory. The wave still waits for plan approval;
+see [recall notices](recall-notices.md).
+
 Admission pins the exact release (id, manifest digest, artifact digest) and the
 channel head that currently names it. Advancement revalidates signatures or
 unsigned-local policy, channel head, recall, subscription, and plan approval

@@ -814,6 +814,28 @@ pub async fn promote(
     spec: &str,
     channel: &str,
 ) -> Result<String> {
+    promote_inner(ctx, actor, spec, channel, None).await
+}
+
+/// Promote `spec` onto `channel` while holding the promotion lock, only when
+/// the current head is empty, already `spec`, or one of `replaceable_heads`.
+pub(crate) async fn promote_over_replaceable_heads(
+    ctx: &mut Ctx,
+    actor: &AuthenticatedRequestContext,
+    spec: &str,
+    channel: &str,
+    replaceable_heads: &[String],
+) -> Result<String> {
+    promote_inner(ctx, actor, spec, channel, Some(replaceable_heads)).await
+}
+
+async fn promote_inner(
+    ctx: &mut Ctx,
+    actor: &AuthenticatedRequestContext,
+    spec: &str,
+    channel: &str,
+    replaceable_heads: Option<&[String]>,
+) -> Result<String> {
     actor
         .require_delivery_capability(DeliveryCapability::Publish)
         .map_err(|error| anyhow::anyhow!("{error}"))?;
@@ -842,6 +864,7 @@ pub async fn promote(
     let promotion_version = version.clone();
     let promotion_channel = channel.clone();
     let promoted_release = rid.clone();
+    let replaceable_heads = replaceable_heads.map(|heads| heads.to_vec());
     crate::canary::guarded_promotion(ctx, actor, &name, &version, &channel, &owner, move |ctx| {
         Box::pin(async move {
             let Some(release) = ctx.get(&promoted_release).await? else {
@@ -852,6 +875,26 @@ pub async fn promote(
                 .await?;
             crate::model_runtime::require_classical_registry_attestation(&release)?;
             let cid = channel_id(&promotion_name, &promotion_channel);
+            if let Some(replaceable) = replaceable_heads.as_deref() {
+                let current = match ctx.get(&cid).await? {
+                    Some(channel) => channel
+                        .properties
+                        .get("current_release")
+                        .cloned()
+                        .unwrap_or_default(),
+                    None => String::new(),
+                };
+                if current == promoted_release {
+                    return Ok(format!(
+                        "promoted {promotion_name}@{promotion_version} to channel {promotion_channel}"
+                    ));
+                }
+                if !current.is_empty() && !replaceable.contains(&current) {
+                    anyhow::bail!(
+                        "channel {promotion_name}/{promotion_channel} currently names {current}; refusing to replace it with {promoted_release}"
+                    );
+                }
+            }
             let mut channel_properties = HashMap::from([
                 ("product".into(), promotion_name.clone()),
                 ("channel".into(), promotion_channel.clone()),
@@ -896,32 +939,27 @@ pub async fn promote(
     .await
 }
 
-/// Mark a published release recalled. Lookup and planning fail closed afterwards.
-pub async fn recall(
+/// Persist the durable recall claim for `release_id`.
+///
+/// When the release object exists, stamp `recalled_at` on it. When it does not,
+/// the claim alone makes later lookup and admission fail closed.
+pub(crate) async fn persist_recall_claim(
     ctx: &mut Ctx,
     actor: &AuthenticatedRequestContext,
-    spec: &str,
-) -> Result<String> {
+    release_id: &str,
+) -> Result<()> {
     actor
         .require_delivery_capability(DeliveryCapability::Management)
         .map_err(|error| anyhow::anyhow!("{error}"))?;
-    let mut release = release_for_spec(ctx, spec).await?;
-    if release
-        .properties
-        .get("recalled_at")
-        .is_some_and(|value| !value.is_empty())
-    {
-        return Ok(format!("release {spec} is already recalled"));
-    }
-    let claim_id = release_recall_id(&release.id);
+    let claim_id = release_recall_id(release_id);
     let recalled_at = crate::now_millis().to_string();
     let recalled_by = actor.principal_id().to_string();
     let proposed = object(
         claim_id.clone(),
         KIND_RELEASE_RECALL,
-        format!("recall {}", release.id),
+        format!("recall {release_id}"),
         HashMap::from([
-            ("release_id".into(), release.id.clone()),
+            ("release_id".into(), release_id.to_string()),
             ("recalled_at".into(), recalled_at.clone()),
             ("recalled_by".into(), recalled_by.clone()),
             (
@@ -939,9 +977,23 @@ pub async fn recall(
         }
         Err(status) => return Err(status.into()),
     };
-    if claim.kind != KIND_RELEASE_RECALL || claim.properties.get("release_id") != Some(&release.id)
+    if claim.kind != KIND_RELEASE_RECALL
+        || claim.properties.get("release_id").map(String::as_str) != Some(release_id)
     {
-        bail!("release {} has conflicting recall evidence", release.id);
+        bail!("release {release_id} has conflicting recall evidence");
+    }
+    let Some(mut release) = ctx.get(release_id).await? else {
+        return Ok(());
+    };
+    if release.kind != KIND_RELEASE {
+        bail!("{release_id} is not a release");
+    }
+    if release
+        .properties
+        .get("recalled_at")
+        .is_some_and(|value| !value.is_empty())
+    {
+        return Ok(());
     }
     let recalled_at = claim
         .properties
@@ -958,6 +1010,27 @@ pub async fn recall(
     release.properties.insert("recalled_at".into(), recalled_at);
     release.properties.insert("recalled_by".into(), recalled_by);
     ctx.put(release).await?;
+    Ok(())
+}
+
+/// Mark a published release recalled. Lookup and planning fail closed afterwards.
+pub async fn recall(
+    ctx: &mut Ctx,
+    actor: &AuthenticatedRequestContext,
+    spec: &str,
+) -> Result<String> {
+    actor
+        .require_delivery_capability(DeliveryCapability::Management)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let release = release_for_spec(ctx, spec).await?;
+    if release
+        .properties
+        .get("recalled_at")
+        .is_some_and(|value| !value.is_empty())
+    {
+        return Ok(format!("release {spec} is already recalled"));
+    }
+    persist_recall_claim(ctx, actor, &release.id).await?;
     Ok(format!("recalled {spec}"))
 }
 

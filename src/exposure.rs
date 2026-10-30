@@ -471,6 +471,20 @@ pub async fn inspect(ctx: &mut Ctx) -> Result<AdvisoryFeedStatus> {
     })
 }
 
+/// Load one advisory from the imported feed.
+pub async fn advisory(ctx: &mut Ctx, id: &str) -> Result<Advisory> {
+    if id.trim().is_empty() {
+        bail!("advisory id is required");
+    }
+    let Some((feed, _)) = load_advisory_feed(ctx).await? else {
+        bail!("no advisory feed has been imported");
+    };
+    feed.advisories
+        .into_iter()
+        .find(|advisory| advisory.id == id)
+        .ok_or_else(|| anyhow::anyhow!("advisory {id} is not in the imported feed"))
+}
+
 /// Match the imported advisory feed against stored inventories. No network.
 pub async fn match_advisories(ctx: &mut Ctx) -> Result<Vec<MatchedExposure>> {
     let Some((feed, _)) = load_advisory_feed(ctx).await? else {
@@ -765,6 +779,13 @@ fn stored_inventory(release: &Object) -> Result<Option<ComponentInventory>> {
         );
     }
     Ok(Some(parsed))
+}
+
+/// Require a validated stored inventory. Absence is not "unaffected".
+pub(crate) fn require_stored_inventory(release: &Object) -> Result<ComponentInventory> {
+    validate_stored_inventory(release, None)?;
+    stored_inventory(release)?
+        .ok_or_else(|| anyhow::anyhow!("release {} has no component inventory", release.id))
 }
 
 fn environment_freshness(environment: &Object) -> Freshness {
