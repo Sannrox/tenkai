@@ -61,7 +61,7 @@ will be split over time. Contributor and agent workflow live in
 
 | Task | Page |
 | --- | --- |
-| Tag a release | [release-readiness.md](release-readiness.md) |
+| Tag a release | [RELEASING.md](../RELEASING.md), [release-readiness.md](release-readiness.md) |
 | Fail over a multi-replica Postgres hub | [ha-failover-runbook.md](ha-failover-runbook.md) |
 | Promote a one- or two-node SQLite spoke standby | [spoke-standby.md](spoke-standby.md) |
 | Compose two local Postgres hubs | [multi-replica-hub-runbook.md](multi-replica-hub-runbook.md) |
@@ -135,6 +135,8 @@ will be split over time. Contributor and agent workflow live in
 
 ### Releases
 
+- [Family versioning and tagging](decisions/0040-family-versioning-and-release-policy.md)
+- [RELEASING.md](../RELEASING.md)
 - [Release 0.6.0 notes](releases/0.6.0.md)
 - [Release 0.5.0 notes](releases/0.5.0.md)
 - [Release 0.4.2 notes](releases/0.4.2.md)

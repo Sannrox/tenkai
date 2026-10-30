@@ -113,3 +113,4 @@ make update
 
 Contributor setup and pull-request flow live in
 [CONTRIBUTING.md](CONTRIBUTING.md); agent workflow is [AGENTS.md](AGENTS.md).
+Tagging follows [RELEASING.md](RELEASING.md).

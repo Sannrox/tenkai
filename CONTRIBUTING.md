@@ -27,7 +27,8 @@ Pull Request. Agent and parallel-lane policy lives in [AGENTS.md](AGENTS.md).
 
 Pull requests should include a concise behavior summary, tests run, the
 linked Issue, and any protocol, persistence, migration, configuration,
-operational, or security implications.
+operational, or security implications. Do not edit `CHANGELOG.md`; the
+release step drafts it ([RELEASING.md](RELEASING.md)).
 
 ## Review gates
 
