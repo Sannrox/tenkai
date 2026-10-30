@@ -24,12 +24,13 @@ digest, host binaries when `--hosts-dir` is set, release configs, public trust
 roots, model weights, `checksums/manifest.json`
 (`tenkai.offline-checksum-manifest.v1`), and `sbom/<component>.json`
 (`tenkai.offline-sbom.v1`) per component. Those two manifests are ordinary
-signed entries: the bundle signature covers them. A missing image, weight, or
-schema fails the build and names the item. A release input or the trust
-roots holding a private key block fail the build naming the file; image
-layers, weights and host binaries are digest-checked blobs and are not
-inspected. The archive is written beside its destination and linked into
-place, so a failed build leaves nothing there and can be retried.
+signed entries: the bundle signature covers them. `--advisory-feed FILE` adds
+a `tenkai.advisory-feed.v1` document at `advisories/feed.json`. A missing
+image, weight, or schema fails the build and names the item. A release input
+or the trust roots holding a private key block fail the build naming the
+file; image layers, weights and host binaries are digest-checked blobs and
+are not inspected. The archive is written beside its destination and linked
+into place, so a failed build leaves nothing there and can be retried.
 
 Each image artifact's SBOM is the one its release declares (`sbom = { digest,
 media_type }` on the `[[artifacts]]` entry; see [release signing](release-signing.md)).
@@ -56,7 +57,8 @@ tenkaictl bundle build \
   --hosts-dir tenkai-hosts \
   --host-tag v0.5.0 \
   --host-git-sha 0123456789abcdef0123456789abcdef01234567 \
-  --host-workflow release
+  --host-workflow release \
+  --advisory-feed advisories.json
 ```
 
 `--issued-at-unix-ms` pins the statement clock so two operator rebuilds can
@@ -76,6 +78,19 @@ verification fails. `cargo test --locked missing_image_fails_the_build_and_names
 `missing_weight_fails_the_build_and_names_the_digest`, and
 `missing_schema_fails_the_build_and_names_the_path` refuse the build while
 naming the missing item.
+
+### Advisory feed
+
+A signed `tenkai.advisory-feed.v1` travels as `advisories/feed.json` in the
+same v1 archive. Bind, first install, and reinstall apply bundled key
+revocations, verify the envelope, then import that entry when present.
+`tenkaictl exposure import --bundle --trust-roots --env` follows the same
+order and imports the feed only; inspect with `tenkaictl exposure inspect`
+or `GET /v1/advisory-feed`. Age is the feed's `generated_at` (falling back
+to the bundle issued-at, then import time). An environment property
+`exposure.max_feed_age_ms` gates stale feeds; a tampered feed fails bundle
+verify. A bundle whose authenticated revocation list revokes its exporter
+is refused.
 
 Bundle verification requires current Ed25519 trust roots, the configured tenant
 and environment identities, and a time inside the signed validity interval.

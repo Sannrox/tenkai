@@ -25,6 +25,7 @@ pub(crate) async fn run(ctx: &mut Ctx, command: BundleCommand) -> Result<()> {
             issued_at_unix_ms,
             expires_at_unix_ms,
             base,
+            advisory_feed,
         } => {
             let signing = offline_bundle_build::load_exporter_key(&signing_key)?;
             let roots = TrustRoots::load(&trust_roots)?;
@@ -53,6 +54,13 @@ pub(crate) async fn run(ctx: &mut Ctx, command: BundleCommand) -> Result<()> {
             };
             let weight_cache =
                 std::env::var_os("TENKAI_WEIGHT_CACHE").map(std::path::PathBuf::from);
+            let advisory_feed = match advisory_feed {
+                Some(path) => Some(
+                    std::fs::read(&path)
+                        .with_context(|| format!("reading advisory feed {}", path.display()))?,
+                ),
+                None => None,
+            };
             let envelope = offline_bundle_build::build(
                 ctx,
                 &BundleBuildRequest {
@@ -69,6 +77,7 @@ pub(crate) async fn run(ctx: &mut Ctx, command: BundleCommand) -> Result<()> {
                     registry,
                     weight_cache: weight_cache.as_deref(),
                     base,
+                    advisory_feed: advisory_feed.as_deref(),
                 },
             )
             .await?;

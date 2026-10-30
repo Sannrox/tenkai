@@ -1,5 +1,45 @@
 {
   "$defs": {
+    "AdvisoryFeedStatus": {
+      "description": "Imported feed age and the releases it currently flags.",
+      "properties": {
+        "advisory_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "age_ms": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "generated_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "imported": {
+          "type": "boolean"
+        },
+        "imported_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "matches": {
+          "items": {
+            "$ref": "#/$defs/MatchedExposure"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "imported",
+        "imported_at",
+        "generated_at",
+        "age_ms",
+        "advisory_count",
+        "matches"
+      ],
+      "type": "object"
+    },
     "ApplyRequest": {
       "additionalProperties": false,
       "properties": {
@@ -3246,6 +3286,38 @@
       ],
       "type": "object"
     },
+    "MatchedExposure": {
+      "description": "A release component that matches an advisory.",
+      "properties": {
+        "advisory_id": {
+          "type": "string"
+        },
+        "component": {
+          "type": "string"
+        },
+        "component_version": {
+          "type": "string"
+        },
+        "release": {
+          "type": "string"
+        },
+        "release_id": {
+          "type": "string"
+        },
+        "severity": {
+          "$ref": "#/$defs/Severity"
+        }
+      },
+      "required": [
+        "advisory_id",
+        "severity",
+        "component",
+        "component_version",
+        "release",
+        "release_id"
+      ],
+      "type": "object"
+    },
     "MigrationApprovalEnvelope": {
       "additionalProperties": false,
       "properties": {
@@ -5021,6 +5093,17 @@
       ],
       "type": "object"
     },
+    "Severity": {
+      "description": "Ordered advisory severities. Higher values are more severe.",
+      "enum": [
+        "info",
+        "low",
+        "medium",
+        "high",
+        "critical"
+      ],
+      "type": "string"
+    },
     "SignatureEnvelope": {
       "additionalProperties": false,
       "properties": {
@@ -5785,6 +5868,15 @@
       },
       "response": {
         "$ref": "#/$defs/ExposureQueryResult"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/advisory-feed",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/AdvisoryFeedStatus"
       }
     },
     {

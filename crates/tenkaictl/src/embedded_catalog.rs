@@ -78,6 +78,33 @@ pub(crate) async fn run(
             }
         },
         Command::Exposure { command } => match command {
+            ExposureCommand::Import {
+                bundle,
+                trust_roots,
+                env,
+            } => {
+                let envelope = tenkai::offline_bundle::BundleEnvelope::load(&bundle)?;
+                let roots = tenkai::release_signing::TrustRoots::load(&trust_roots)?;
+                let verified = tenkai::exposure::verify_envelope_for_import(
+                    &envelope,
+                    &roots,
+                    &env,
+                    tenkai::now_millis(),
+                )?;
+                let Some(status) =
+                    tenkai::exposure::import_from_verified_bundle(ctx, &verified).await?
+                else {
+                    bail!(
+                        "bundle does not contain {}",
+                        tenkai::exposure::ADVISORY_FEED_PATH
+                    );
+                };
+                println!("{}", serde_json::to_string_pretty(&status)?);
+            }
+            ExposureCommand::Inspect => {
+                let status = tenkai::exposure::inspect(ctx).await?;
+                println!("{}", serde_json::to_string_pretty(&status)?);
+            }
             ExposureCommand::Query { component, range } => {
                 let result = tenkai::exposure::query(ctx, &component, &range).await?;
                 println!("{}", serde_json::to_string_pretty(&result)?);

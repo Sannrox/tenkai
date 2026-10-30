@@ -177,6 +177,13 @@ impl RemoteClient {
             .await
     }
 
+    pub async fn inspect_advisory_feed(
+        &self,
+    ) -> anyhow::Result<tenkai::exposure::AdvisoryFeedStatus> {
+        self.request_json(reqwest::Method::GET, "/v1/advisory-feed")
+            .await
+    }
+
     pub(super) async fn request_json<T: serde::de::DeserializeOwned>(
         &self,
         method: reqwest::Method,

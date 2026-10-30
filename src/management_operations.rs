@@ -22,7 +22,7 @@ use crate::auth_context::{
 };
 use crate::catalog::{ChannelPage, ReleasePage};
 use crate::client::Ctx;
-use crate::exposure::{ExposureQueryRequest, ExposureQueryResult};
+use crate::exposure::{AdvisoryFeedStatus, ExposureQueryRequest, ExposureQueryResult};
 use crate::management_lifecycle::{
     self, ApplyRequest, ApproveRequest, ChannelHoldRequest, DeliveryHoldRequest,
     ManagementLifecycleOperation, ManagementLifecycleResult, PlanRequest, PromoteRequest,
@@ -639,6 +639,24 @@ impl ManagementOperations {
             }
         }
         Ok(result)
+    }
+
+    pub async fn inspect_advisory_feed(
+        &self,
+        credential: &CredentialMaterial,
+    ) -> Result<AdvisoryFeedStatus, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        let mut status = crate::exposure::inspect(&mut ctx).await.map_err(internal)?;
+        if !context.product_bindings().is_empty() {
+            status.matches.retain(|item| {
+                item.release
+                    .split_once('@')
+                    .is_some_and(|(product, _)| context.product_bindings().contains(product))
+            });
+        }
+        Ok(status)
     }
 
     pub async fn list_releases(

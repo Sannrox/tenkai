@@ -88,6 +88,17 @@ pub(super) async fn query_exposures(
     manage_result(state.management.query_exposures(&credential, query).await)
 }
 
+pub(super) async fn inspect_advisory_feed(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    manage_result(state.management.inspect_advisory_feed(&credential).await)
+}
+
 pub(super) async fn list_channels(
     State(state): State<Arc<AppState>>,
     Query(query): Query<tenkai::page::PageQuery>,

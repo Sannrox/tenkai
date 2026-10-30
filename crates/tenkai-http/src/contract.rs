@@ -22,7 +22,7 @@ use tenkai::content_inventory::ContentInventory;
 use tenkai::delivery_hold::DeliveryHoldView;
 use tenkai::environment::{EnvironmentInspectReport, EnvironmentListEntry, StatusRow};
 use tenkai::environment_config::{EnvironmentConfigRequest, RegisterEnvironmentRequest};
-use tenkai::exposure::{ExposureQueryRequest, ExposureQueryResult};
+use tenkai::exposure::{AdvisoryFeedStatus, ExposureQueryRequest, ExposureQueryResult};
 use tenkai::fleet::FleetStatusReport;
 use tenkai::management_lifecycle::{
     ApplyRequest, ApproveRequest, ChannelHoldRequest, DeliveryHoldRequest,
@@ -283,6 +283,13 @@ pub fn http_contract() -> Value {
             auth: Auth::Read,
             request: Some(schema::<ExposureQueryRequest>(&mut g)),
             response: schema::<ExposureQueryResult>(&mut g),
+        },
+        Route {
+            method: "GET",
+            path: "/v1/advisory-feed",
+            auth: Auth::Read,
+            request: None,
+            response: schema::<AdvisoryFeedStatus>(&mut g),
         },
         Route {
             method: "GET",

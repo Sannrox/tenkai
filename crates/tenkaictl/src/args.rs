@@ -167,7 +167,7 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: ReleaseCommand,
     },
-    /// Query which releases, channels, and environments contain a component.
+    /// Import a signed advisory feed, inspect it, or query component exposure.
     Exposure {
         #[command(subcommand)]
         command: ExposureCommand,
@@ -424,6 +424,17 @@ pub(crate) enum RunnerCaCommand {
 
 #[derive(Subcommand)]
 pub(crate) enum ExposureCommand {
+    /// Verify a signed bundle and import `advisories/feed.json` into the catalog.
+    Import {
+        #[arg(long)]
+        bundle: PathBuf,
+        #[arg(long)]
+        trust_roots: PathBuf,
+        #[arg(long)]
+        env: String,
+    },
+    /// Show imported feed age and the releases it currently flags.
+    Inspect,
     /// List releases, channels, and environments matching a component range.
     Query {
         #[arg(long)]
