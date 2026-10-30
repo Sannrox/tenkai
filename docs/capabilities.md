@@ -111,7 +111,7 @@ Postgres hub + multi-replica fencing) are landed on main. Remaining work is
 
 | Track | Intent |
 | --- | --- |
-| Release packaging | [GitHub Release binaries](release-binaries.md); [v0.5.0 notes](releases/0.5.0.md) |
+| Release packaging | [GitHub Release binaries](release-binaries.md); [v0.6.0 notes](releases/0.6.0.md) |
 | Server self-upgrade with store check and rollback | [Upgrade a server host](release-binaries.md#upgrade-a-server-host); #678 |
 | Hub HA product claim | Criteria + automated drills before advertising `high_availability` (fence already shipped #135) |
 | Intelligence loop depth | Fail-closed prior policy; live remote OutcomeProvider history |
