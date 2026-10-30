@@ -3,7 +3,7 @@ use tenkai::{client, inventory, maintenance, plan};
 
 use crate::env_args::{
     ApprovalPolicyCommand, ArtifactMirrorCommand, ClusterConfigCommand, ConstraintsCommand,
-    DockerSecretsCommand, FactsCommand, MaintenanceCommand, OverlayCommand,
+    CriticalityCommand, DockerSecretsCommand, FactsCommand, MaintenanceCommand, OverlayCommand,
     RunnerAttestationCommand, WebhooksCommand,
 };
 
@@ -349,6 +349,47 @@ pub(crate) async fn runner_attestation(
         ),
         RunnerAttestationCommand::Clear { env, .. } => {
             println!("{}", attestation::clear_policy(ctx, &env).await?)
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn criticality(ctx: &mut client::Ctx, command: CriticalityCommand) -> Result<()> {
+    match command {
+        CriticalityCommand::Show { env } => {
+            let view = tenkai::criticality_store::inspect_environment(ctx, &env).await?;
+            if view.is_empty() {
+                println!("{env} has no criticality");
+            } else {
+                println!("{}", serde_json::to_string_pretty(&view)?);
+            }
+        }
+        CriticalityCommand::Set {
+            env,
+            level,
+            owner,
+            reason,
+            ..
+        } => {
+            println!(
+                "{}",
+                tenkai::criticality_store::set_environment(
+                    ctx,
+                    &env,
+                    &tenkai::criticality::SetCriticalityRequest {
+                        level: tenkai::criticality::CriticalityLevel::parse(&level)?,
+                        owner,
+                        reason,
+                    },
+                )
+                .await?
+            );
+        }
+        CriticalityCommand::Clear { env, .. } => {
+            println!(
+                "{}",
+                tenkai::criticality_store::clear_environment(ctx, &env).await?
+            );
         }
     }
     Ok(())

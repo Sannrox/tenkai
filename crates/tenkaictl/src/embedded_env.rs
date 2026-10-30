@@ -180,6 +180,9 @@ pub(crate) async fn run(
         EnvCommand::RunnerAttestation { command } => {
             crate::embedded_env_config::runner_attestation(ctx, command).await?;
         }
+        EnvCommand::Criticality { command } => {
+            crate::embedded_env_config::criticality(ctx, command).await?;
+        }
         EnvCommand::Hold {
             env,
             generation: _,

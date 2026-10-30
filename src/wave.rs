@@ -332,6 +332,7 @@ mod tests {
             retirement: None,
             preview: None,
             delivery_hold: None,
+            criticality: None,
         }
     }
 

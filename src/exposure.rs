@@ -59,6 +59,10 @@ pub struct ExposureQueryRequest {
     pub component: String,
     #[serde(default)]
     pub range: String,
+    /// When set, keep only matches whose effective criticality is at least this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub min_criticality: Option<crate::criticality::CriticalityLevel>,
 }
 
 /// One component listed in a release inventory.
@@ -91,6 +95,9 @@ pub struct EnvironmentExposure {
     pub environment: String,
     pub deployed_release: String,
     pub freshness: Freshness,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub criticality: Option<crate::criticality::CriticalityLevel>,
 }
 
 /// One catalog release that contains the queried component.
@@ -104,6 +111,12 @@ pub struct ReleaseExposure {
     pub component_version: String,
     pub channels: Vec<String>,
     pub environments: Vec<EnvironmentExposure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub product_criticality: Option<crate::criticality::CriticalityLevel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub criticality: Option<crate::criticality::CriticalityLevel>,
 }
 
 /// Result of an exposure query. Matching is local; it does not contact a network.
@@ -251,6 +264,24 @@ pub fn validate_stored_inventory(release: &Object, workdir: Option<&Path>) -> Re
 
 /// Query releases, channels, and environments that contain `component` in `range`.
 pub async fn query(ctx: &mut Ctx, component: &str, range: &str) -> Result<ExposureQueryResult> {
+    query_with(
+        ctx,
+        &ExposureQueryRequest {
+            component: component.into(),
+            range: range.into(),
+            min_criticality: None,
+        },
+    )
+    .await
+}
+
+/// Query exposures, optionally filtered by effective criticality (#694).
+pub async fn query_with(
+    ctx: &mut Ctx,
+    request: &ExposureQueryRequest,
+) -> Result<ExposureQueryResult> {
+    let component = request.component.as_str();
+    let range = request.range.as_str();
     if component.trim().is_empty() || range.trim().is_empty() {
         bail!("exposure query requires --component and --range");
     }
@@ -308,6 +339,11 @@ pub async fn query(ctx: &mut Ctx, component: &str, range: &str) -> Result<Exposu
             })
             .collect();
         matched_channels.sort();
+        let now = crate::now_millis();
+        let product_criticality = match ctx.get(&crate::ontology::product_id(&product)).await? {
+            Some(object) => crate::criticality::effective_level(&object.properties, now)?,
+            None => None,
+        };
         let mut matched_environments = Vec::new();
         for environment in &environments {
             let deployed = environment
@@ -317,13 +353,41 @@ pub async fn query(ctx: &mut Ctx, component: &str, range: &str) -> Result<Exposu
             if deployed != Some(release.id.as_str()) {
                 continue;
             }
+            let env_criticality =
+                crate::criticality::effective_level(&environment.properties, now)?;
+            if let Some(min) = request.min_criticality
+                && env_criticality.is_none_or(|got| got < min)
+                && product_criticality.is_none_or(|got| got < min)
+            {
+                continue;
+            }
             matched_environments.push(EnvironmentExposure {
                 environment: environment.name.clone(),
                 deployed_release: spec.clone(),
                 freshness: environment_freshness(environment),
+                criticality: env_criticality,
             });
         }
-        matched_environments.sort_by(|left, right| left.environment.cmp(&right.environment));
+        matched_environments.sort_by(|left, right| {
+            right
+                .criticality
+                .cmp(&left.criticality)
+                .then(left.environment.cmp(&right.environment))
+        });
+        let env_max = matched_environments
+            .iter()
+            .filter_map(|environment| environment.criticality)
+            .max();
+        let criticality = match (product_criticality, env_max) {
+            (None, right) => right,
+            (left, None) => left,
+            (Some(left), Some(right)) => Some(left.max(right)),
+        };
+        if let Some(min) = request.min_criticality
+            && criticality.is_none_or(|got| got < min)
+        {
+            continue;
+        }
         matches.push(ReleaseExposure {
             release: spec,
             product,
@@ -333,9 +397,16 @@ pub async fn query(ctx: &mut Ctx, component: &str, range: &str) -> Result<Exposu
             component_version: hit.version.clone(),
             channels: matched_channels,
             environments: matched_environments,
+            product_criticality,
+            criticality,
         });
     }
-    matches.sort_by(|left, right| left.release_id.cmp(&right.release_id));
+    matches.sort_by(|left, right| {
+        right
+            .criticality
+            .cmp(&left.criticality)
+            .then(left.release_id.cmp(&right.release_id))
+    });
     Ok(ExposureQueryResult {
         component: component.into(),
         range: range.into(),
@@ -412,8 +483,19 @@ pub fn verify_envelope_for_import(
     envelope.verify(roots, NS, env, now)
 }
 
-/// Parse `advisories/feed.json` when present, before any catalog mutation.
-pub fn preflight_verified_bundle(verified: &crate::offline_bundle::VerifiedBundle) -> Result<()> {
+/// Parse `advisories/feed.json` and `criticality/derived.json` when present,
+/// before any catalog mutation.
+pub fn preflight_verified_bundle(
+    verified: &crate::offline_bundle::VerifiedBundle,
+    bound_environment: &str,
+) -> Result<()> {
+    if let Some(bytes) = verified.entry(crate::criticality::DERIVED_PATH) {
+        crate::criticality_store::preflight_derived_payload(
+            bytes,
+            verified.statement().issued_at_unix_ms,
+            bound_environment,
+        )?;
+    }
     let Some(bytes) = verified.entry(ADVISORY_FEED_PATH) else {
         return Ok(());
     };
@@ -429,11 +511,22 @@ pub fn refuse_generated_after_issued(generated_at: i64, issued_at: i64) -> Resul
     Ok(())
 }
 
-/// Import `advisories/feed.json` from a verified bundle. Missing is a no-op.
+/// Import `advisories/feed.json` and `criticality/derived.json` from a verified
+/// bundle. A missing advisory feed is a no-op for that document.
 pub async fn import_from_verified_bundle(
     ctx: &mut Ctx,
     verified: &crate::offline_bundle::VerifiedBundle,
+    bound_environment: &str,
 ) -> Result<Option<AdvisoryFeedStatus>> {
+    if let Some(bytes) = verified.entry(crate::criticality::DERIVED_PATH) {
+        crate::criticality_store::import_derived_payload(
+            ctx,
+            bytes,
+            verified.statement().issued_at_unix_ms,
+            bound_environment,
+        )
+        .await?;
+    }
     let Some(bytes) = verified.entry(ADVISORY_FEED_PATH) else {
         return Ok(None);
     };
@@ -1307,6 +1400,88 @@ document = "sbom.json"
     }
 
     #[tokio::test]
+    async fn query_orders_and_filters_by_effective_criticality() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-exposure-criticality-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        signed_publish(
+            &mut ctx,
+            &root,
+            "1.0.0",
+            &cyclonedx_inventory("openssl", "1.1.1"),
+        )
+        .await;
+        crate::environment::env_add(&mut ctx, "lab", "lab")
+            .await
+            .unwrap();
+        crate::environment::env_add(&mut ctx, "prod", "prod")
+            .await
+            .unwrap();
+        crate::criticality_store::set_environment(
+            &mut ctx,
+            "lab",
+            &crate::criticality::SetCriticalityRequest {
+                level: crate::criticality::CriticalityLevel::Low,
+                owner: "alice".into(),
+                reason: "lab".into(),
+            },
+        )
+        .await
+        .unwrap();
+        crate::criticality_store::set_environment(
+            &mut ctx,
+            "prod",
+            &crate::criticality::SetCriticalityRequest {
+                level: crate::criticality::CriticalityLevel::Critical,
+                owner: "alice".into(),
+                reason: "pci".into(),
+            },
+        )
+        .await
+        .unwrap();
+        for name in ["lab", "prod"] {
+            let mut env = crate::environment::environment(&mut ctx, name)
+                .await
+                .unwrap();
+            env.properties.insert("deployed.api".into(), "1.0.0".into());
+            env.properties
+                .insert("deployed_release.api".into(), release_id("api", "1.0.0"));
+            ctx.put(env).await.unwrap();
+        }
+        let result = query(&mut ctx, "openssl", ">=1.0.0").await.unwrap();
+        assert_eq!(
+            result.matches[0].criticality,
+            Some(crate::criticality::CriticalityLevel::Critical)
+        );
+        assert_eq!(result.matches[0].environments[0].environment, "prod");
+        assert_eq!(result.matches[0].environments[1].environment, "lab");
+        let filtered = query_with(
+            &mut ctx,
+            &ExposureQueryRequest {
+                component: "openssl".into(),
+                range: ">=1.0.0".into(),
+                min_criticality: Some(crate::criticality::CriticalityLevel::High),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(filtered.matches[0].environments.len(), 1);
+        assert_eq!(filtered.matches[0].environments[0].environment, "prod");
+        let rid = release_id("api", "1.0.0");
+        if let Some(stored) = ctx.get(&rid).await.unwrap()
+            && let Some(snapshot) = stored.properties.get("workdir")
+        {
+            let _ = std::fs::remove_dir_all(snapshot);
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn mismatched_inventory_is_refused() {
         let root = std::env::temp_dir().join(format!(
             "tenkai-exposure-mismatch-{}-{}",
@@ -1532,7 +1707,7 @@ document = "sbom.json"
         let key = ed25519_dalek::SigningKey::from_bytes(&[11; 32]);
         let feed = feed_document(vec![matched_advisory()], generated_at);
         let verified = signed_feed_bundle(&key, &feed);
-        let status = import_from_verified_bundle(&mut ctx, &verified)
+        let status = import_from_verified_bundle(&mut ctx, &verified, "spoke")
             .await
             .unwrap()
             .expect("feed imported");
@@ -1604,7 +1779,7 @@ document = "sbom.json"
         let key = ed25519_dalek::SigningKey::from_bytes(&[13; 32]);
         let feed = feed_document(vec![matched_advisory()], 0);
         let verified = signed_feed_bundle(&key, &feed);
-        let status = import_from_verified_bundle(&mut ctx, &verified)
+        let status = import_from_verified_bundle(&mut ctx, &verified, "spoke")
             .await
             .unwrap()
             .expect("feed imported");
@@ -1626,6 +1801,7 @@ document = "sbom.json"
         let empty = import_from_verified_bundle(
             &mut ctx,
             &signed_feed_bundle(&key, &feed_document(Vec::new(), 1_000)),
+            "spoke",
         )
         .await
         .unwrap()
@@ -1635,6 +1811,7 @@ document = "sbom.json"
         let newer = import_from_verified_bundle(
             &mut ctx,
             &signed_feed_bundle(&key, &feed_document(vec![matched_advisory()], 2_000)),
+            "spoke",
         )
         .await
         .unwrap()
@@ -1644,6 +1821,7 @@ document = "sbom.json"
         let older = import_from_verified_bundle(
             &mut ctx,
             &signed_feed_bundle(&key, &feed_document(Vec::new(), 1_500)),
+            "spoke",
         )
         .await
         .unwrap()
@@ -1672,14 +1850,14 @@ document = "sbom.json"
         let future_bundle = signed_feed_envelope(&key, &future, 1_000)
             .verify(&exporter_roots(&key), crate::ontology::NS, "spoke", 1_001)
             .unwrap();
-        let preflight_err = preflight_verified_bundle(&future_bundle)
+        let preflight_err = preflight_verified_bundle(&future_bundle, "spoke")
             .unwrap_err()
             .to_string();
         assert!(
             preflight_err.contains("after bundle issued_at"),
             "{preflight_err}"
         );
-        let future_err = import_from_verified_bundle(&mut ctx, &future_bundle)
+        let future_err = import_from_verified_bundle(&mut ctx, &future_bundle, "spoke")
             .await
             .unwrap_err()
             .to_string();

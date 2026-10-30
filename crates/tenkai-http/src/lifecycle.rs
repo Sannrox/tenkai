@@ -407,6 +407,66 @@ pub(super) async fn release_channel_hold(
     )
 }
 
+pub(super) async fn set_product_criticality(
+    State(state): State<Arc<AppState>>,
+    Path(product): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let request = match parse_management_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .set_product_criticality(&credential, &product, request)
+            .await,
+    )
+}
+
+pub(super) async fn clear_product_criticality(
+    State(state): State<Arc<AppState>>,
+    Path(product): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .clear_product_criticality(&credential, &product)
+            .await,
+    )
+}
+
+pub(super) async fn import_derived_criticality(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let envelope = match parse_management_json(&body) {
+        Ok(envelope) => envelope,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .import_derived_criticality(&credential, envelope)
+            .await,
+    )
+}
+
 pub(super) async fn software_compatibility_report(
     State(state): State<Arc<AppState>>,
     Path((environment, release)): Path<(String, String)>,

@@ -195,6 +195,33 @@ fn remote_configuration_commands_map_to_their_changes() {
         (Some(7), Some("night changes"))
     );
 
+    let criticality = Cli::try_parse_from([
+        "tenkaictl",
+        "env",
+        "criticality",
+        "set",
+        "prod",
+        "--level",
+        "critical",
+        "--owner",
+        "alice",
+        "--reason",
+        "pci",
+        "--generation",
+        "7",
+    ])
+    .unwrap();
+    let Command::Env { command } = criticality.command else {
+        panic!("expected env command");
+    };
+    let (env, change, remote) = crate::remote_env_config::change(&command).unwrap().unwrap();
+    assert_eq!(env, "prod");
+    assert_eq!(change.path(env), "/v1/environments/prod/criticality");
+    assert_eq!(
+        (remote.generation, remote.reason.as_deref()),
+        (Some(7), Some("pci"))
+    );
+
     let list = Cli::try_parse_from(["tenkaictl", "env", "facts", "list", "prod"]).unwrap();
     let Command::Env { command } = list.command else {
         panic!("expected env command");
@@ -235,15 +262,10 @@ fn bundle_build_parses_release_set_and_public_trust_roots() {
     assert!(matches!(
         cli.command,
         Command::Bundle {
-            command: crate::bundle_args::BundleCommand::Build {
-                ref releases,
-                ref env,
-                ref out,
-                ..
-            }
-        } if releases == &["edge-app@1.0.0".to_string(), "weights@1.0.0".into()]
-            && env == "dark-1"
-            && out == std::path::Path::new("site.bundle.json")
+            command: crate::bundle_args::BundleCommand::Build(ref args)
+        } if args.releases == ["edge-app@1.0.0".to_string(), "weights@1.0.0".into()]
+            && args.env == "dark-1"
+            && args.out == std::path::Path::new("site.bundle.json")
     ));
 }
 
@@ -270,11 +292,36 @@ fn bundle_build_parses_advisory_feed() {
     assert!(matches!(
         cli.command,
         Command::Bundle {
-            command: crate::bundle_args::BundleCommand::Build {
-                ref advisory_feed,
-                ..
-            }
-        } if advisory_feed.as_deref() == Some(std::path::Path::new("advisories.json"))
+            command: crate::bundle_args::BundleCommand::Build(ref args)
+        } if args.advisory_feed.as_deref() == Some(std::path::Path::new("advisories.json"))
+    ));
+}
+
+#[test]
+fn bundle_build_parses_derived_criticality() {
+    let cli = Cli::try_parse_from([
+        "tenkaictl",
+        "bundle",
+        "build",
+        "--release",
+        "edge-app@1.0.0",
+        "--env",
+        "dark-1",
+        "--out",
+        "site.bundle.json",
+        "--signing-key",
+        "exporter.seed",
+        "--trust-roots",
+        "offline-trust.toml",
+        "--derived-criticality",
+        "criticality.json",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Bundle {
+            command: crate::bundle_args::BundleCommand::Build(ref args)
+        } if args.derived_criticality.as_deref() == Some(std::path::Path::new("criticality.json"))
     ));
 }
 
@@ -327,6 +374,7 @@ fn parses_exposure_import_inspect_and_query() {
             command: crate::args::ExposureCommand::Query {
                 ref component,
                 ref range,
+                min_criticality: None,
             }
         } if component == "openssl" && range == ">=1.0.0"
     ));

@@ -326,12 +326,83 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&status)?);
                 Ok(())
             }
-            crate::args::ExposureCommand::Query { component, range } => {
-                let result = client.query_exposures(&component, &range).await?;
+            crate::args::ExposureCommand::Query {
+                component,
+                range,
+                min_criticality,
+            } => {
+                let min_criticality = min_criticality
+                    .as_deref()
+                    .map(tenkai::criticality::CriticalityLevel::parse)
+                    .transpose()?;
+                let result = client
+                    .query_exposures(&component, &range, min_criticality)
+                    .await?;
                 println!("{}", serde_json::to_string_pretty(&result)?);
                 Ok(())
             }
         },
+        Command::Criticality { command } => match command {
+            crate::args::DerivedCriticalityCommand::Import { envelope, .. } => {
+                let envelope = tenkai::criticality::DerivedEnvelope::load(&envelope)?;
+                let result = client.import_derived_criticality(&envelope).await?;
+                println!(
+                    "imported {} derived criticality assignment(s)",
+                    result.applied
+                );
+                Ok(())
+            }
+        },
+        Command::Product {
+            command: crate::product_args::ProductCommand::Criticality { command },
+        } => match command {
+            crate::product_args::ProductCriticalityCommand::Show { product } => {
+                let view = client.inspect_product_criticality(&product).await?;
+                if view.is_empty() {
+                    println!("product {product} has no criticality");
+                } else {
+                    println!("{}", serde_json::to_string_pretty(&view)?);
+                }
+                Ok(())
+            }
+            crate::product_args::ProductCriticalityCommand::Set {
+                product,
+                level,
+                owner,
+                reason,
+            } => {
+                let view = client
+                    .set_product_criticality(
+                        &product,
+                        &tenkai::criticality::SetCriticalityRequest {
+                            level: tenkai::criticality::CriticalityLevel::parse(&level)?,
+                            owner,
+                            reason,
+                        },
+                    )
+                    .await?;
+                println!("{}", serde_json::to_string_pretty(&view)?);
+                Ok(())
+            }
+            crate::product_args::ProductCriticalityCommand::Clear { product } => {
+                let view = client.clear_product_criticality(&product).await?;
+                println!("{}", serde_json::to_string_pretty(&view)?);
+                Ok(())
+            }
+        },
+        Command::Env {
+            command:
+                EnvCommand::Criticality {
+                    command: crate::env_args::CriticalityCommand::Show { env },
+                },
+        } => {
+            let report = client.inspect_environment(&env).await?;
+            match report.criticality {
+                Some(view) => println!("{}", serde_json::to_string_pretty(&view)?),
+                None => println!("{env} has no criticality"),
+            }
+            Ok(())
+        }
         Command::Bundle { .. } => {
             bail!("bundle build is available only with --target embedded")
         }

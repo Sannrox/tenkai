@@ -92,7 +92,7 @@ pub(crate) async fn run(
                     tenkai::now_millis(),
                 )?;
                 let Some(status) =
-                    tenkai::exposure::import_from_verified_bundle(ctx, &verified).await?
+                    tenkai::exposure::import_from_verified_bundle(ctx, &verified, &env).await?
                 else {
                     bail!(
                         "bundle does not contain {}",
@@ -105,9 +105,42 @@ pub(crate) async fn run(
                 let status = tenkai::exposure::inspect(ctx).await?;
                 println!("{}", serde_json::to_string_pretty(&status)?);
             }
-            ExposureCommand::Query { component, range } => {
-                let result = tenkai::exposure::query(ctx, &component, &range).await?;
+            ExposureCommand::Query {
+                component,
+                range,
+                min_criticality,
+            } => {
+                let min_criticality = min_criticality
+                    .as_deref()
+                    .map(tenkai::criticality::CriticalityLevel::parse)
+                    .transpose()?;
+                let result = tenkai::exposure::query_with(
+                    ctx,
+                    &tenkai::exposure::ExposureQueryRequest {
+                        component,
+                        range,
+                        min_criticality,
+                    },
+                )
+                .await?;
                 println!("{}", serde_json::to_string_pretty(&result)?);
+            }
+        },
+        Command::Criticality { command } => match command {
+            crate::args::DerivedCriticalityCommand::Import {
+                envelope,
+                trust_roots,
+            } => {
+                let envelope = tenkai::criticality::DerivedEnvelope::load(&envelope)?;
+                let roots = tenkai::release_signing::TrustRoots::load(&trust_roots)?;
+                let applied = tenkai::criticality_store::import_envelope(
+                    ctx,
+                    &envelope,
+                    &roots,
+                    tenkai::now_millis(),
+                )
+                .await?;
+                println!("imported {applied} derived criticality assignment(s)");
             }
         },
         Command::Approval { command } => match command {

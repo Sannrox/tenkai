@@ -168,13 +168,64 @@ impl RemoteClient {
         &self,
         component: &str,
         range: &str,
+        min_criticality: Option<tenkai::criticality::CriticalityLevel>,
     ) -> anyhow::Result<tenkai::exposure::ExposureQueryResult> {
-        let query = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("component", component)
-            .append_pair("range", range)
-            .finish();
+        let mut query = url::form_urlencoded::Serializer::new(String::new());
+        query.append_pair("component", component);
+        query.append_pair("range", range);
+        if let Some(min) = min_criticality {
+            query.append_pair("min_criticality", min.as_str());
+        }
+        let query = query.finish();
         self.request_json(reqwest::Method::GET, &format!("/v1/exposures?{query}"))
             .await
+    }
+
+    pub async fn inspect_product_criticality(
+        &self,
+        product: &str,
+    ) -> anyhow::Result<tenkai::criticality::EffectiveCriticality> {
+        self.request_json(
+            reqwest::Method::GET,
+            &format!("/v1/products/{product}/criticality"),
+        )
+        .await
+    }
+
+    pub async fn set_product_criticality(
+        &self,
+        product: &str,
+        request: &tenkai::criticality::SetCriticalityRequest,
+    ) -> anyhow::Result<tenkai::criticality::EffectiveCriticality> {
+        self.request_json_body(
+            reqwest::Method::PUT,
+            &format!("/v1/products/{product}/criticality"),
+            Some(request),
+        )
+        .await
+    }
+
+    pub async fn clear_product_criticality(
+        &self,
+        product: &str,
+    ) -> anyhow::Result<tenkai::criticality::EffectiveCriticality> {
+        self.request_json(
+            reqwest::Method::DELETE,
+            &format!("/v1/products/{product}/criticality"),
+        )
+        .await
+    }
+
+    pub async fn import_derived_criticality(
+        &self,
+        envelope: &tenkai::criticality::DerivedEnvelope,
+    ) -> anyhow::Result<tenkai::criticality::DerivedImportResult> {
+        self.request_json_body(
+            reqwest::Method::POST,
+            "/v1/criticality/derived",
+            Some(envelope),
+        )
+        .await
     }
 
     pub async fn inspect_advisory_feed(

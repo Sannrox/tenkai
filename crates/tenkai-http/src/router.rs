@@ -12,7 +12,7 @@ use tenkai::tenant_store::TenantOperationalStore;
 use super::auth::{import_development_fixture, reset_development_fixture};
 use super::config::ServerConfig;
 use super::environment_config::{
-    configure_approval_policy, configure_constraints, configure_facts,
+    configure_approval_policy, configure_constraints, configure_criticality, configure_facts,
     configure_maintenance_window, configure_runner_attestation, configure_webhooks,
     register_environment,
 };
@@ -24,16 +24,18 @@ use super::imports::{
 };
 use super::inspect::{
     backup_status, change_events, environment_approval_policy, environment_status, fleet_status,
-    health, inspect_advisory_feed, inspect_environment, list_channels, list_environments,
-    list_migrations, list_releases, observed_runtime, oidc_client, openmetrics, plan_approvals,
-    query_exposures, ready, reconcile, take_backup,
+    health, inspect_advisory_feed, inspect_environment, inspect_product_criticality, list_channels,
+    list_environments, list_migrations, list_releases, observed_runtime, oidc_client, openmetrics,
+    plan_approvals, query_exposures, ready, reconcile, take_backup,
 };
 use super::lifecycle::{
-    apply_plan, approve_plan, channel_hold, environment_hold, install_model_evaluation_trust,
-    plan_environment, promote_release, publish_release, recall_release,
-    record_model_evaluation_evidence, record_software_compatibility_evidence, release_channel_hold,
-    release_environment_hold, retire_environment, retry_failed_target, rollback_environment,
-    set_channel_hold, set_environment_hold, software_compatibility_report, subscribe_environment,
+    apply_plan, approve_plan, channel_hold, clear_product_criticality, environment_hold,
+    import_derived_criticality, install_model_evaluation_trust, plan_environment, promote_release,
+    publish_release, recall_release, record_model_evaluation_evidence,
+    record_software_compatibility_evidence, release_channel_hold, release_environment_hold,
+    retire_environment, retry_failed_target, rollback_environment, set_channel_hold,
+    set_environment_hold, set_product_criticality, software_compatibility_report,
+    subscribe_environment,
 };
 use super::package_migration::{
     apply_package_migration, package_migration_status, preview_package_migration,
@@ -182,6 +184,7 @@ pub fn router(
         .route("/v1/releases", get(list_releases).post(publish_release))
         .route("/v1/exposures", get(query_exposures))
         .route("/v1/advisory-feed", get(inspect_advisory_feed))
+        .route("/v1/criticality/derived", post(import_derived_criticality))
         .route("/v1/channels", get(list_channels))
         .route("/v1/migrations", get(list_migrations))
         .route(
@@ -210,6 +213,16 @@ pub fn router(
         .route(
             "/v1/environments/{environment}/runner-attestation",
             put(configure_runner_attestation).delete(configure_runner_attestation),
+        )
+        .route(
+            "/v1/environments/{environment}/criticality",
+            put(configure_criticality).delete(configure_criticality),
+        )
+        .route(
+            "/v1/products/{product}/criticality",
+            get(inspect_product_criticality)
+                .put(set_product_criticality)
+                .delete(clear_product_criticality),
         )
         .route(
             "/v1/environments/{environment}/constraints",

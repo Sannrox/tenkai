@@ -12,21 +12,23 @@ use crate::bundle_args::BundleCommand;
 
 pub(crate) async fn run(ctx: &mut Ctx, command: BundleCommand) -> Result<()> {
     match command {
-        BundleCommand::Build {
-            releases,
-            env,
-            out,
-            signing_key,
-            trust_roots,
-            hosts_dir,
-            host_tag,
-            host_git_sha,
-            host_workflow,
-            issued_at_unix_ms,
-            expires_at_unix_ms,
-            base,
-            advisory_feed,
-        } => {
+        BundleCommand::Build(args) => {
+            let crate::bundle_args::BundleBuild {
+                releases,
+                env,
+                out,
+                signing_key,
+                trust_roots,
+                hosts_dir,
+                host_tag,
+                host_git_sha,
+                host_workflow,
+                issued_at_unix_ms,
+                expires_at_unix_ms,
+                base,
+                advisory_feed,
+                derived_criticality,
+            } = *args;
             let signing = offline_bundle_build::load_exporter_key(&signing_key)?;
             let roots = TrustRoots::load(&trust_roots)?;
             let exporter_identity = offline_bundle_build::exporter_identity(&roots, &signing)?;
@@ -61,6 +63,13 @@ pub(crate) async fn run(ctx: &mut Ctx, command: BundleCommand) -> Result<()> {
                 ),
                 None => None,
             };
+            let derived_criticality =
+                match derived_criticality {
+                    Some(path) => Some(std::fs::read(&path).with_context(|| {
+                        format!("reading derived criticality {}", path.display())
+                    })?),
+                    None => None,
+                };
             let envelope = offline_bundle_build::build(
                 ctx,
                 &BundleBuildRequest {
@@ -78,6 +87,7 @@ pub(crate) async fn run(ctx: &mut Ctx, command: BundleCommand) -> Result<()> {
                     weight_cache: weight_cache.as_deref(),
                     base,
                     advisory_feed: advisory_feed.as_deref(),
+                    derived_criticality: derived_criticality.as_deref(),
                 },
             )
             .await?;

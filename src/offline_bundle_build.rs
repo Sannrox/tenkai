@@ -70,6 +70,8 @@ pub struct BundleBuildRequest<'a> {
     pub base: Option<String>,
     /// Optional `tenkai.advisory-feed.v1` JSON carried as `advisories/feed.json`.
     pub advisory_feed: Option<&'a [u8]>,
+    /// Optional `tenkai.derived-criticality.v1` JSON carried as `criticality/derived.json`.
+    pub derived_criticality: Option<&'a [u8]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -368,6 +370,24 @@ pub async fn build(ctx: &mut Ctx, request: &BundleBuildRequest<'_>) -> Result<Bu
         payloads.insert(
             crate::exposure::ADVISORY_FEED_PATH.into(),
             (crate::exposure::ADVISORY_FEED_MEDIA.into(), bytes),
+        );
+    }
+    if let Some(bytes) = request.derived_criticality {
+        let envelope = crate::criticality::parse_envelope(bytes)?;
+        crate::criticality::refuse_generated_after_issued(
+            envelope.statement.generated_at,
+            request.issued_at_unix_ms,
+        )?;
+        refuse_private_keys(crate::criticality::DERIVED_PATH, bytes)?;
+        if payloads.contains_key(crate::criticality::DERIVED_PATH) {
+            bail!(
+                "bundle already contains {}",
+                crate::criticality::DERIVED_PATH
+            );
+        }
+        payloads.insert(
+            crate::criticality::DERIVED_PATH.into(),
+            (crate::criticality::DERIVED_MEDIA.into(), bytes.to_vec()),
         );
     }
     insert_checksum_manifest(&mut payloads, &chunk_dir)?;
@@ -2128,6 +2148,7 @@ max_startup_seconds = 30
                 weight_cache: Some(&self.weight_cache),
                 base: None,
                 advisory_feed: None,
+                derived_criticality: None,
             }
         }
 

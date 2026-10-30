@@ -164,6 +164,8 @@ pub mod clock_guard;
 pub mod command_result;
 pub mod connectivity;
 pub mod content_inventory;
+pub mod criticality;
+pub mod criticality_store;
 pub mod customer_key_release;
 pub mod delivery_bridge;
 pub mod delivery_hold;

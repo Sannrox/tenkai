@@ -88,6 +88,23 @@ pub(super) async fn query_exposures(
     manage_result(state.management.query_exposures(&credential, query).await)
 }
 
+pub(super) async fn inspect_product_criticality(
+    State(state): State<Arc<AppState>>,
+    Path(product): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .inspect_product_criticality(&credential, &product)
+            .await,
+    )
+}
+
 pub(super) async fn inspect_advisory_feed(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

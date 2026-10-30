@@ -88,7 +88,20 @@ purpose = "execute_plan"
 n = 2
 groups = ["release", "sre"]
 exclude_requester = true
+
+[[quorum]]
+purpose = "execute_plan"
+n = 2
+min_criticality = "critical"
+groups = ["release", "sre"]
 ```
+
+`min_criticality` selects the most specific matching rule for the
+environment's (and, at apply, the plan products') effective criticality.
+A rule with `n = 2` and `min_criticality = "critical"` blocks a
+single-approver plan at that level. Optional
+`continue_after_failure_max_criticality` on the same policy refuses
+continue-after-failure waves above that level.
 
 `exclude_requester` means the principal that calls apply cannot be one of the
 N. Automatic approval cannot satisfy `n > 1`. Apply accepts one envelope

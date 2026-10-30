@@ -4,7 +4,7 @@ use clap::Subcommand;
 
 /// Fence and reason for a configuration change. Both are required with
 /// `--target remote`; the embedded target does not use them.
-#[derive(clap::Args, Debug, Default)]
+#[derive(clap::Args, Debug, Default, Clone)]
 pub(crate) struct RemoteChange {
     /// Current fencing generation; required with --target remote.
     #[arg(long)]
@@ -128,6 +128,11 @@ pub(crate) enum EnvCommand {
     RunnerAttestation {
         #[command(subcommand)]
         command: RunnerAttestationCommand,
+    },
+    /// Declare or clear environment criticality (#694).
+    Criticality {
+        #[command(subcommand)]
+        command: CriticalityCommand,
     },
     /// Manage signed post-deploy webhook endpoints. Never secret bytes.
     Webhooks {
@@ -267,6 +272,32 @@ pub(crate) enum RunnerAttestationCommand {
         remote: RemoteChange,
     },
     /// Stop requiring runner attestation.
+    Clear {
+        env: String,
+        #[command(flatten)]
+        remote: RemoteChange,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum CriticalityCommand {
+    /// Show declared, derived, and effective criticality.
+    Show { env: String },
+    /// Declare environment criticality. Derived values stay.
+    Set {
+        env: String,
+        #[arg(long)]
+        level: String,
+        #[arg(long)]
+        owner: String,
+        /// Why this criticality is declared; also the remote audit reason.
+        #[arg(long)]
+        reason: String,
+        /// Current fencing generation; required with --target remote.
+        #[arg(long)]
+        generation: Option<u64>,
+    },
+    /// Clear declared environment criticality. Derived values stay.
     Clear {
         env: String,
         #[command(flatten)]

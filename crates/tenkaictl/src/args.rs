@@ -172,6 +172,11 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: ExposureCommand,
     },
+    /// Import a signed derived-criticality envelope (#694).
+    Criticality {
+        #[command(subcommand)]
+        command: DerivedCriticalityCommand,
+    },
     /// Inspect recorded plan-approval verification evidence.
     Approval {
         #[command(subcommand)]
@@ -481,6 +486,20 @@ pub(crate) enum ExposureCommand {
         component: String,
         #[arg(long)]
         range: String,
+        /// Keep matches whose effective criticality is at least this.
+        #[arg(long)]
+        min_criticality: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum DerivedCriticalityCommand {
+    /// Verify and apply a signed `tenkai.derived-criticality.v1` envelope.
+    Import {
+        #[arg(long)]
+        envelope: PathBuf,
+        #[arg(long)]
+        trust_roots: PathBuf,
     },
 }
 
