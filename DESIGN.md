@@ -164,6 +164,7 @@ depends on these integrations. Which ones Tenkai wires today is in
 | Governed execution of destructive steps | `PlanExecution` / `ExecutePlan(Stream)` — tenkai plan steps map onto governed actions (PR #57) |
 | Cost-aware rollout (esp. model rollouts) | `CheckBudget` / `RecordUsage` |
 | Learning from deployment outcomes | Sekai `SubmitEvidence` terminal-outcome envelopes and evolve/pattern APIs — mine failure patterns across the fleet |
+| Recurring operation-bound feedback | Opt-in `SubmitEvidence` + `SubmitActionInstance` of captured `tenkai.feedback_observation.v1` records through the evidence-and-finding package |
 | AI-assisted ops (plan explanation, incident triage, release notes) | `LlmService.Chat` through the governed gateway |
 
 ### Trust model

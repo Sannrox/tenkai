@@ -70,6 +70,7 @@ impl Ctx {
             backend: Backend::TenantHub { catalog, tenant },
             canary_schema_preflight: Arc::new(OnceCell::new()),
             outcome_export_enabled,
+            feedback_export_enabled: false,
             outcome_inspection_enabled: true,
             release_trust_roots: None,
             require_host_release_trust: false,
@@ -103,6 +104,7 @@ impl Ctx {
             backend: Backend::Embedded(Arc::new(store)),
             canary_schema_preflight: Arc::new(OnceCell::new()),
             outcome_export_enabled,
+            feedback_export_enabled: false,
             outcome_inspection_enabled: true,
             release_trust_roots: None,
             require_host_release_trust: false,
@@ -225,9 +227,19 @@ impl Ctx {
         self.outcome_export_enabled
     }
 
+    pub fn with_feedback_export(mut self, enabled: bool) -> Self {
+        self.feedback_export_enabled = enabled;
+        self
+    }
+
+    pub(crate) fn feedback_export_enabled(&self) -> bool {
+        self.feedback_export_enabled
+    }
+
     pub(crate) fn without_outcome_export(&self) -> Self {
         let mut context = self.clone();
         context.outcome_export_enabled = false;
+        context.feedback_export_enabled = false;
         context.outcome_inspection_enabled = false;
         context
     }

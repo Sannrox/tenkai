@@ -126,8 +126,9 @@ learning evidence.
 
 Every committed deployment outcome also leaves one
 `tenkai.feedback_observation.v1` record (#802). It is captured always,
-whether or not outcome export is on, and is never sent anywhere; it is not a
-provider event, and `tenkai.terminal_outcome.v1` is unchanged. It is written
+whether or not any export is on. Delivery to Sekai is a separate opt-in
+adapter (#783). The record is not a provider event until that adapter is
+enabled, and `tenkai.terminal_outcome.v1` is unchanged. It is written
 in the same transaction as the outcome, into a dedicated
 `feedback_observations` table that refuses updates. An identical replay is a
 no-op; a conflicting one keeps the stored record. A capture that cannot be
@@ -159,6 +160,51 @@ recalled rollback, bounded).
 
 A record holds no detail text: no command output, credentials, signing
 material, environment facts or content. Identifiers are bounded.
+
+### Feedback observation export (#783)
+
+Reference adapter: `ChiseiFeedbackProvider` in `src/feedback_export.rs`.
+
+When `--feedback-provider chisei` is set, each captured observation is also
+enqueued on the durable provider-event outbox as destination kind `feedback`.
+The outbox payload wraps the captured observation; the evidence body submitted
+to Sekai is only that observation. Delivery uses existing authenticated
+submission:
+
+1. `SekaiService.SubmitEvidence` with evidence type `feedback.observation`,
+   schema `feedback.observation@1.0.0`, target kind `feedback_observation`,
+   and provenance for the observation identity, package
+   `pkg:feedback.evidence-finding/v1`, and evidence binding.
+2. `SekaiService.SubmitActionInstance` for `feedback.observation.record`,
+   passing the admitted submission id. Action parameters (`object_id`,
+   `problem_signature`, `occurrence_ids`, `classification`, `disposition`)
+   are derived from the captured fields. No new core RPC.
+
+Retryable delivery survives restart, duplicate enqueue, and lost
+acknowledgements: the outbox event id is the evidence and Action
+idempotency key. Adapters may see an event more than once; Sekai
+deduplicates. Disabled or unavailable export never interrupts deployment,
+rollback, or standalone operation.
+
+Before enabling export, a Sekai administrator must register, for the
+configured principal and namespace, a producer capability for
+`source_type=feedback`, the `feedback.observation` schema, target kind
+`feedback_observation`, and the `feedback.observation.record` Action. Tenkai
+fails startup unless `TENKAI_FEEDBACK_PROVIDER_REGISTRATION` exactly attests
+to that registration.
+
+```sh
+export TENKAI_FEEDBACK_PROVIDER_URL=https://sekai.example.internal
+export TENKAI_FEEDBACK_NAMESPACE=delivery-learning
+export TENKAI_FEEDBACK_PROVIDER_PRINCIPAL=tenkai.feedback
+export TENKAI_FEEDBACK_PROVIDER_TOKEN='inject-from-secret-store'
+export TENKAI_FEEDBACK_PROVIDER_REGISTRATION='producer=tenkai.feedback;source_type=feedback;source_instance=delivery-learning:feedback;namespace=delivery-learning;evidence_type=feedback.observation;schema=feedback.observation@1.0.0;target_kind=feedback_observation;classification=internal;intent=upsert;action=feedback.observation.record'
+tenkai-server --feedback-provider chisei
+```
+
+The token is environment-only. Remote plaintext endpoints are rejected even
+when no token is configured. Feedback export requires embedded Tenkai
+application state so capture and outbox enqueue share one local transaction.
 
 ## Standalone operation and external adapters
 
