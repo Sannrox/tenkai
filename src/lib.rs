@@ -9,6 +9,9 @@
 //! The crate is organized around a small set of application seams:
 //!
 //! - [`catalog`] owns immutable release publication, promotion, and lookup.
+//!   Authorized callers export release pins as a digest-pinned bundle section
+//!   (identity, channel, content digest) and import them onto another catalog;
+//!   pins the caller cannot take are named as withheld.
 //!   [`recall_notice`] composes catalog recall with a signed portable notice
 //!   and an admitted fix-forward wave.
 //!   Its private publication module concentrates content identity, provenance,

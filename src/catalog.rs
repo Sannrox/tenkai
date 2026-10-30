@@ -1,4 +1,5 @@
-//! Catalog operations: publish immutable releases, promote them into channels.
+//! Catalog operations: publish immutable releases, promote them into channels,
+//! and export authorized release pins as a digest-pinned bundle section.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -16,9 +17,14 @@ use crate::pb::sekai::Object;
 use crate::release_provenance::{self, ProvenanceEnvelope, ProvenanceProjection};
 use crate::release_signing::{self, VerificationEvidence};
 
+mod pin_export;
 mod publication;
 mod trust;
 
+pub use pin_export::{
+    PIN_BUNDLE_SCHEMA, PinImportReport, PinTransferFailure, ReleasePin, ReleasePinBundleSection,
+    WithheldReleasePin, export_release_pins, import_release_pins,
+};
 pub use trust::{inspect_release, require_deployable_trust, reverify_release};
 pub(crate) use trust::{load_deployable_snapshot, load_recoverable_snapshot, release_is_recalled};
 
