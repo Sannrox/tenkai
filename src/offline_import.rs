@@ -533,6 +533,28 @@ fn archive_path(jobs: &Path, id: &str) -> PathBuf {
     jobs.join(format!("{id}.archive.json"))
 }
 
+/// Exclusive lock on `<jobs>/.lock`. One import at a time on this host: a
+/// bind rewrites the whole upgrade record, and imports share the OCI store
+/// and the weight cache.
+fn lock_jobs(jobs: &Path) -> Result<std::fs::File> {
+    let path = jobs.join(".lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("creating {}", path.display()))?;
+    match lock.try_lock() {
+        Ok(()) => Ok(lock),
+        Err(std::fs::TryLockError::WouldBlock) => {
+            bail!("another import is already running")
+        }
+        Err(std::fs::TryLockError::Error(error)) => {
+            Err(error).context("locking the import job directory")
+        }
+    }
+}
+
 /// Run one import or dry run and return its finished job. A refusal is a
 /// `failed` job, not an error; errors are left for the job store itself.
 pub async fn run(
@@ -545,12 +567,7 @@ pub async fn run(
     let id = job_id(request);
     let jobs = staging.join(JOB_DIR);
     std::fs::create_dir_all(&jobs).with_context(|| format!("creating {}", jobs.display()))?;
-    // One import at a time on this host: a bind rewrites the whole upgrade
-    // record, and imports share the OCI store and the weight cache.
-    let lock = std::fs::File::create(jobs.join(".lock"))?;
-    if lock.try_lock().is_err() {
-        bail!("another import is already running");
-    }
+    let lock = lock_jobs(&jobs)?;
     // A retry replaces the job file; a failure not yet announced moves aside
     // first, so its `import.failed` event is not lost.
     let previous = self::job(staging, &id).ok();
@@ -685,6 +702,10 @@ pub async fn run(
     }
     job.progress = crate::import_progress::read(&progress_path(&jobs, &id));
     job.archive_digest = read_archive_record(&jobs, &job);
+    // Release before this future reports Ready: async drop of `lock` otherwise
+    // happens after the caller starts the next import, and Linux flock then
+    // refuses the same process.
+    drop(lock);
     Ok(job)
 }
 
@@ -727,10 +748,11 @@ pub fn unannounced_failures(staging: &Path) -> Result<Vec<ImportJob>> {
 /// `false`.
 pub fn mark_announced(staging: &Path, job: &ImportJob) -> Result<bool> {
     let jobs = staging.join(JOB_DIR);
-    let lock = std::fs::File::create(jobs.join(".lock"))?;
-    if lock.try_lock().is_err() {
-        return Ok(false);
-    }
+    let _lock = match lock_jobs(&jobs) {
+        Ok(lock) => lock,
+        Err(error) if error.to_string().contains("already running") => return Ok(false),
+        Err(error) => return Err(error),
+    };
     if job.id.contains('@') {
         let path = jobs.join(PENDING_DIR).join(format!("{}.json", job.id));
         std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
@@ -847,6 +869,25 @@ mod tests {
         assert!(kept.iter().any(|job| job.id == "imp-0000"));
         assert!(kept.iter().any(|job| job.id == "imp-0001"));
         assert!(!kept.iter().any(|job| job.id == "imp-0002"));
+        let _ = std::fs::remove_dir_all(staging);
+    }
+
+    #[test]
+    fn a_finished_import_releases_the_lock() {
+        let staging = std::env::temp_dir().join(format!(
+            "tenkai-import-lock-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let jobs = staging.join(JOB_DIR);
+        std::fs::create_dir_all(&jobs).unwrap();
+        let held = lock_jobs(&jobs).unwrap();
+        let contended = lock_jobs(&jobs);
+        drop(held);
+        if let Err(error) = contended {
+            assert!(error.to_string().contains("already running"), "{error:#}");
+        }
+        lock_jobs(&jobs).unwrap();
         let _ = std::fs::remove_dir_all(staging);
     }
 }

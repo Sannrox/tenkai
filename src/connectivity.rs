@@ -2558,7 +2558,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "tenkai-upgrade-{name}-{}-{}",
             std::process::id(),
-            crate::now_millis()
+            uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&root).unwrap();
         root
