@@ -30,6 +30,13 @@ pub struct MutationCommand<'a> {
     pub command: &'a str,
 }
 
+/// POSIX shell that runs `deploy.install`, health, and uninstall.
+///
+/// Absolute `/bin/sh` so a `sh` from PATH (wrappers, store links, a workdir
+/// named `sh`) cannot fail the deploy after the child environment is scrubbed
+/// (#794). Install tools still use the allowlisted `PATH`.
+pub(crate) const DEPLOY_SHELL: &str = "/bin/sh";
+
 /// Parent-process variables that may be inherited by deploy children.
 ///
 /// Control-plane credentials (`TENKAI_MANAGEMENT_TOKEN`, `TENKAI_RUNTIME_TOKEN`,
@@ -265,16 +272,18 @@ pub async fn run(
     if status.success() {
         return Ok(Ok(()));
     }
-    // The deployment command's own output is discarded, so anything here is
-    // the guard's reason for failing itself.
+    // Guard failures write a reason here; a failed deploy command copies a
+    // bounded, credential-free stderr snippet the same way (#794).
     let mut reason = String::new();
     if let Some(stderr) = guard_stderr {
         let _ = stderr.take(4096).read_to_string(&mut reason).await;
     }
-    let reason = reason.trim();
+    let reason = crate::software_executor::sanitize_diagnostic_text(reason.trim());
     Ok(Err(
-        if status.code() == Some(i32::from(GUARD_FAILED_EXIT)) && !reason.is_empty() {
-            format!("deployment command guard failed: {reason}")
+        if let Some(detail) = reason.strip_prefix(GUARD_FAILED_PREFIX) {
+            format!("deployment command guard failed: {detail}")
+        } else if !reason.is_empty() {
+            format!("deployment command exited with {status}: {reason}")
         } else {
             format!("deployment command exited with {status}")
         },
@@ -332,8 +341,12 @@ pub fn with_mutation_lock_authorized<T>(
 }
 
 /// Exit code of a guard that failed itself, as distinct from the deployment
-/// command's own status. The guard writes the reason to stderr (#794).
+/// command's own status. The guard writes [`GUARD_FAILED_PREFIX`] plus the
+/// reason to stderr (#794). A command that exits 125 is not this case.
 pub const GUARD_FAILED_EXIT: u8 = 125;
+
+/// Stderr stamp so a command that exits 125 cannot look like a guard failure.
+const GUARD_FAILED_PREFIX: &str = "tenkai-executor-guard: ";
 
 /// A guard process's whole job: run [`supervise`] and return the exit code,
 /// the deployment command's own status or [`GUARD_FAILED_EXIT`].
@@ -347,7 +360,10 @@ pub async fn guard(mutation: MutationCommand<'_>, generation: u64) -> u8 {
         },
         Err(error) => {
             // One line: the controller reports it as the step's failure.
-            eprintln!("{}", format!("{error:#}").replace('\n', " "));
+            eprintln!(
+                "{GUARD_FAILED_PREFIX}{}",
+                format!("{error:#}").replace('\n', " ")
+            );
             GUARD_FAILED_EXIT
         }
     }
@@ -360,6 +376,8 @@ pub async fn supervise(
     mutation: MutationCommand<'_>,
     generation: u64,
 ) -> Result<std::process::ExitStatus> {
+    use tokio::io::AsyncReadExt as _;
+
     let lock = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -376,14 +394,15 @@ pub async fn supervise(
     if go != *b"G" {
         bail!("executor guard did not receive start authorization");
     }
-    let mut child = tokio::process::Command::new("sh");
+    let mut child = tokio::process::Command::new(DEPLOY_SHELL);
     child
         .arg("-c")
         .arg(mutation.command)
         .current_dir(mutation.workdir)
         .kill_on_drop(true)
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     configure_deploy_child_env(
         &mut child,
         mutation.environment,
@@ -393,16 +412,67 @@ pub async fn supervise(
     child.as_std_mut().process_group(0);
     let mut child = child.spawn().context("spawning deployment command")?;
     let process_group = child.id().context("deployment command has no process id")? as i32;
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let drain = tokio::spawn({
+        let captured = captured.clone();
+        let mut pipe = child.stderr.take();
+        async move {
+            let Some(ref mut pipe) = pipe else {
+                return;
+            };
+            let mut buf = [0_u8; 256];
+            loop {
+                match pipe.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let mut held = captured.lock().unwrap_or_else(|error| error.into_inner());
+                        if held.len() < 4_096 {
+                            let take = n.min(4_096 - held.len());
+                            held.extend_from_slice(&buf[..take]);
+                        }
+                    }
+                }
+            }
+        }
+    });
     let (closed_tx, mut controller_closed) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
         let mut sink = Vec::new();
         let result = std::io::stdin().read_to_end(&mut sink);
         let _ = closed_tx.send(result);
     });
-    tokio::select! {
-        status = child.wait() => { let status = status?; unsafe { libc::kill(-process_group, libc::SIGKILL) }; wait_for_process_group_exit(process_group).await?; Ok(status) }
-        _ = &mut controller_closed => { unsafe { libc::kill(-process_group, libc::SIGKILL) }; let _ = child.wait().await; wait_for_process_group_exit(process_group).await?; bail!("deployment controller exited") }
+    let status = tokio::select! {
+        biased;
+        status = child.wait() => status?,
+        _ = &mut controller_closed => {
+            drain.abort();
+            unsafe {
+                libc::kill(-process_group, libc::SIGKILL);
+            }
+            let _ = child.wait().await;
+            wait_for_process_group_exit(process_group).await?;
+            bail!("deployment controller exited");
+        }
+    };
+    // Copy remaining bytes, but do not wait for a descendant that left the
+    // process group and still holds the write end.
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(50), drain).await;
+    unsafe {
+        libc::kill(-process_group, libc::SIGKILL);
     }
+    wait_for_process_group_exit(process_group).await?;
+    let stderr_buf = captured
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    if !status.success() {
+        let detail = String::from_utf8_lossy(&stderr_buf);
+        let detail = crate::software_executor::sanitize_diagnostic_text(detail.trim());
+        if !detail.is_empty() {
+            eprintln!("{detail}");
+        }
+    }
+    Ok(status)
 }
 
 async fn wait_for_process_group_exit(process_group: i32) -> Result<()> {
@@ -602,6 +672,34 @@ mod tests {
             command(&dir, "exit 3").await,
             Err("deployment command exited with exit status: 3".into())
         );
+        let named = command(&dir, "echo \"$0\" >&2; exit 1").await.unwrap_err();
+        assert!(
+            named.starts_with("deployment command exited with exit status: 1: "),
+            "{named}"
+        );
+        assert!(
+            named.contains(DEPLOY_SHELL),
+            "deploy shell should be {DEPLOY_SHELL}, got {named}"
+        );
+        let leaked = command(
+            &dir,
+            "echo postgres://app:s3cret@db.internal/tenkai >&2; exit 1",
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            leaked.starts_with("deployment command exited with exit status: 1: "),
+            "{leaked}"
+        );
+        assert!(!leaked.contains("s3cret"), "{leaked}");
+        let docker_client = command(&dir, "echo client-daemon-error >&2; exit 125")
+            .await
+            .unwrap_err();
+        assert!(
+            docker_client.contains("deployment command exited with exit status: 125"),
+            "{docker_client}"
+        );
+        assert!(!docker_client.contains("guard failed"), "{docker_client}");
         let missing = command(&dir.join("absent"), "true").await.unwrap_err();
         assert!(
             missing.starts_with("deployment command guard failed: spawning deployment command"),
