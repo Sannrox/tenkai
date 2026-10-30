@@ -81,3 +81,6 @@ the profile drain timeout. Apply the previously pinned worker_pool and
 model_runtime releases through the normal plan path.
 
 See [`examples/dark-site`](../examples/dark-site).
+
+A one- or two-node SQLite spoke uses the [spoke-standby profile](spoke-standby.md)
+for writer loss. This page is the local model and site-agent packaging.

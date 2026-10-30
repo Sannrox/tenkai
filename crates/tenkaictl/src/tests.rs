@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-use crate::args::{Cli, Command, DarkSiteCommand, KeysCommand, RemediateCommand, Target};
+use crate::args::{
+    Cli, Command, DarkSiteCommand, KeysCommand, RemediateCommand, SpokeStandbyCommand, Target,
+};
 use crate::env_args::{EnvCommand, MaintenanceCommand, OverlayCommand};
 use crate::topology_args::TopologyCommand;
 use crate::wave_args::WaveCommand;
@@ -181,6 +183,64 @@ fn parses_dark_site_ready_and_rollback() {
                 active_claims: 1,
                 ..
             }
+        }
+    ));
+}
+
+#[test]
+fn parses_spoke_standby_validate_promote_and_drill() {
+    let validate = Cli::try_parse_from([
+        "tenkaictl",
+        "spoke-standby",
+        "validate",
+        "--profile",
+        "profile.toml",
+    ])
+    .unwrap();
+    assert!(matches!(
+        validate.command,
+        Command::SpokeStandby {
+            command: SpokeStandbyCommand::Validate { .. }
+        }
+    ));
+    let promote = Cli::try_parse_from([
+        "tenkaictl",
+        "spoke-standby",
+        "promote",
+        "--profile",
+        "profile.toml",
+        "--holder",
+        "spoke-b",
+        "--lease-dir",
+        "leases",
+        "--state",
+        "state",
+        "--signing-key",
+        "seed",
+    ])
+    .unwrap();
+    assert!(matches!(
+        promote.command,
+        Command::SpokeStandby {
+            command: SpokeStandbyCommand::Promote { .. }
+        }
+    ));
+    let drill = Cli::try_parse_from([
+        "tenkaictl",
+        "spoke-standby",
+        "drill",
+        "--profile",
+        "profile.toml",
+        "--signing-key",
+        "seed",
+        "--out",
+        "drill.json",
+    ])
+    .unwrap();
+    assert!(matches!(
+        drill.command,
+        Command::SpokeStandby {
+            command: SpokeStandbyCommand::Drill { .. }
         }
     ));
 }

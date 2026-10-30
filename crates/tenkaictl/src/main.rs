@@ -40,6 +40,7 @@ mod remote_env_config;
 mod remote_hold;
 mod revocations;
 mod self_upgrade;
+mod spoke_standby;
 #[cfg(test)]
 mod tests;
 mod token_cache;
@@ -185,6 +186,9 @@ async fn run(cli: Cli) -> Result<()> {
     }
     if let Command::DarkSite { command } = &cli.command {
         return dark_site::run(command);
+    }
+    if let Command::SpokeStandby { command } = &cli.command {
+        return spoke_standby::run(command);
     }
     if let Command::Registry {
         command:

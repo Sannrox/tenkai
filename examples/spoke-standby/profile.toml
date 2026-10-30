@@ -1,0 +1,6 @@
+version = 1
+members = 2
+backup_interval_ms = 300000
+promotion = "manual"
+exclusive_lock = false
+witness = false

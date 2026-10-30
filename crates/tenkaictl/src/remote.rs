@@ -409,6 +409,9 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         Command::DarkSite { .. } => {
             bail!("dark-site profiles run locally; use --target embedded")
         }
+        Command::SpokeStandby { .. } => {
+            bail!("spoke-standby profiles run locally; use --target embedded")
+        }
         Command::Topology { .. } => {
             bail!("topology drills run against the embedded store; use --target embedded")
         }

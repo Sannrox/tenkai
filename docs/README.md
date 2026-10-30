@@ -41,6 +41,7 @@ will be split over time. Contributor and agent workflow live in
 | Export and verify signed audit records | [audit-export.md](audit-export.md) |
 | Run the on-site key ceremony | [key-ceremony.md](key-ceremony.md) |
 | Run a dark-site local model with site-agent workers | [dark-site.md](dark-site.md) |
+| Run a one- or two-node SQLite spoke with a warm standby | [spoke-standby.md](spoke-standby.md) |
 | Diagnose a server and watch fleet drift | [server-diagnostics.md](server-diagnostics.md) |
 | Observe and execute rollout waves | [rollout-waves.md](rollout-waves.md) |
 | Import a signed recall notice and propose a fix-forward wave | [recall-notices.md](recall-notices.md) |
@@ -62,6 +63,7 @@ will be split over time. Contributor and agent workflow live in
 | --- | --- |
 | Tag a release | [release-readiness.md](release-readiness.md) |
 | Fail over a multi-replica Postgres hub | [ha-failover-runbook.md](ha-failover-runbook.md) |
+| Promote a one- or two-node SQLite spoke standby | [spoke-standby.md](spoke-standby.md) |
 | Compose two local Postgres hubs | [multi-replica-hub-runbook.md](multi-replica-hub-runbook.md) |
 | Run the 1,000-environment scale drill | [fleet-workload.md](fleet-workload.md) |
 | Check rollout-time budgets | [software-executor.md](software-executor.md#rollout-time-budget) |
@@ -85,6 +87,7 @@ will be split over time. Contributor and agent workflow live in
 | Policy, eval-suite, and agent products | [staged-products.md](staged-products.md) |
 | Worker pools | [worker-pool.md](worker-pool.md) |
 | Dark-site local model profile | [dark-site.md](dark-site.md) |
+| Small-footprint dark-site spoke profile | [spoke-standby.md](spoke-standby.md) |
 | Workshop modules | [workshop-modules.md](workshop-modules.md) |
 | Preview environments | [preview-environments.md](preview-environments.md) |
 | Change-set pins | [change-set-pin.md](change-set-pin.md) |
