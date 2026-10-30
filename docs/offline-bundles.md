@@ -149,6 +149,10 @@ Isolated-bundle bind (`tenkaictl upgrade bind-bundle`) imports those chunks
 into `TENKAI_WEIGHT_CACHE` from `<bundle-stem>.chunks/` beside the archive.
 A chunked bundle without the archive path or that cache directory fails closed.
 
+A [dark-site profile](dark-site.md) binds its model-weight and site-agent image
+digests to this stack index after import, then refuses cloud model routes while
+the profile is active.
+
 First install of a dark site uses the same archive schema. A signed
 `stack/manifest.json` (`tenkai.offline-stack.v1`) lists the required product
 images, model weights, schemas, and hub payload. `tenkaictl upgrade

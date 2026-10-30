@@ -23,6 +23,9 @@ drain_timeout_ms = 5000
 `intake` must be `plane`. `filesystem` and unknown adapters fail closed before
 planning or execution.
 
+A [dark-site profile](dark-site.md) pins this pool's worker image digest beside
+a `model_runtime` digest and uses the same drain path on digest-pinned rollback.
+
 ## Operator workflow
 
 ```bash

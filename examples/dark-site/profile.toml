@@ -1,0 +1,22 @@
+version = 1
+
+[model_runtime]
+product = "qwen-coder"
+version = "0.1.0"
+digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+[site_agent]
+product = "site-agent-workers"
+version = "1.0.0"
+profile = "site-agent"
+image_digest = "sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+replicas = 2
+drain_timeout_ms = 5000
+
+[routing]
+audience = "local"
+model = "qwen-coder"
+allowed_providers = ["local"]
+
+[verifier]
+jwks = "jwks.json"

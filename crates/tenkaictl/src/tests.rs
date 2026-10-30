@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-use crate::args::{Cli, Command, KeysCommand, RemediateCommand, Target};
+use crate::args::{Cli, Command, DarkSiteCommand, KeysCommand, RemediateCommand, Target};
 use crate::env_args::{EnvCommand, MaintenanceCommand, OverlayCommand};
 use crate::topology_args::TopologyCommand;
 use crate::wave_args::WaveCommand;
@@ -116,6 +116,72 @@ fn parses_keys_ceremony() {
                 ..
             }
         } if custodian.as_slice() == ["alice", "bob"] && tenant.as_slice() == ["acme"]
+    ));
+}
+
+#[test]
+fn parses_dark_site_activate() {
+    let cli = Cli::try_parse_from([
+        "tenkaictl",
+        "dark-site",
+        "activate",
+        "--profile",
+        "profile.toml",
+        "--stack",
+        "stack.json",
+        "--state",
+        "runtime",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::DarkSite {
+            command: DarkSiteCommand::Activate { .. }
+        }
+    ));
+}
+
+#[test]
+fn parses_dark_site_ready_and_rollback() {
+    let ready = Cli::try_parse_from([
+        "tenkaictl",
+        "dark-site",
+        "ready",
+        "--state",
+        "runtime",
+        "--model-health",
+        "healthy",
+        "--ready-replicas",
+        "2",
+    ])
+    .unwrap();
+    assert!(matches!(
+        ready.command,
+        Command::DarkSite {
+            command: DarkSiteCommand::Ready {
+                ready_replicas: 2,
+                ..
+            }
+        }
+    ));
+    let rollback = Cli::try_parse_from([
+        "tenkaictl",
+        "dark-site",
+        "rollback",
+        "--state",
+        "runtime",
+        "--active-claims",
+        "1",
+    ])
+    .unwrap();
+    assert!(matches!(
+        rollback.command,
+        Command::DarkSite {
+            command: DarkSiteCommand::Rollback {
+                active_claims: 1,
+                ..
+            }
+        }
     ));
 }
 

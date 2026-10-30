@@ -49,6 +49,14 @@ pub(super) async fn activate(
             &content.workdir.join(&routing.config),
             &routing.allowed_providers,
         )?;
+        if let Some(runtime_dir) = content
+            .routing_state
+            .parent()
+            .and_then(|path| path.parent())
+            && let Err(error) = crate::dark_site::admit_applied_routing(runtime_dir, &config)
+        {
+            return Ok(Err(error.to_string()));
+        }
         let executor =
             crate::routing::LocalRoutingConfigExecutor::new(content.routing_state.clone());
         return Ok(executor
