@@ -151,6 +151,11 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: KeysCommand,
     },
+    /// Local-only dark-site profile: model_runtime plus site-agent workers.
+    DarkSite {
+        #[command(subcommand)]
+        command: DarkSiteCommand,
+    },
     /// Enroll, list, inspect and revoke runtime agents (server only).
     #[command(visible_alias = "runner")]
     Runtime {
@@ -524,6 +529,45 @@ pub(crate) enum RegistryCommand {
         /// PEM private key of that certificate.
         #[arg(long)]
         tls_key: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum DarkSiteCommand {
+    /// Load and validate a version 1 dark-site profile.
+    Validate {
+        #[arg(long)]
+        profile: PathBuf,
+    },
+    /// Bind an offline stack index and write the active profile beside runtime state.
+    Activate {
+        #[arg(long)]
+        profile: PathBuf,
+        /// `tenkai.offline-stack.v1` JSON (from `stack/manifest.json`).
+        #[arg(long)]
+        stack: PathBuf,
+        /// Environment runtime directory that will hold `dark-site.json`.
+        #[arg(long)]
+        state: PathBuf,
+    },
+    /// Report combined model and site-agent readiness for the active profile.
+    Ready {
+        #[arg(long)]
+        state: PathBuf,
+        /// `healthy` or `unhealthy` from the running model_runtime.
+        #[arg(long)]
+        model_health: String,
+        /// Workers currently `ready` or `active` at the pinned version.
+        #[arg(long, default_value_t = 0)]
+        ready_replicas: u32,
+    },
+    /// Decide digest-pinned rollback using existing worker drain.
+    Rollback {
+        #[arg(long)]
+        state: PathBuf,
+        /// Active claims still held by current workers.
+        #[arg(long, default_value_t = 0)]
+        active_claims: u32,
     },
 }
 

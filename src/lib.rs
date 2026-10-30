@@ -104,6 +104,9 @@
 //!   Kubernetes, or fake adapters and pass them through apply execution
 //!   options; the private diagnostics module hides credential-free stderr
 //!   capture and sanitization shared by Helm and kubectl.
+//! - [`dark_site`] pins a local `model_runtime` digest beside a site-agent
+//!   worker image, binds those pins to an offline stack, refuses cloud model
+//!   routes while active, and rolls back through existing worker drain.
 //! - `product_kind` owns the closed Product-kind policy for manifest target
 //!   classification, staged identity, cleanup semantics, and coordinated
 //!   model/routing rollout rank without introducing a trait seam.
@@ -167,6 +170,7 @@ pub mod content_inventory;
 pub mod criticality;
 pub mod criticality_store;
 pub mod customer_key_release;
+pub mod dark_site;
 pub mod delivery_bridge;
 pub mod delivery_hold;
 pub mod delivery_manifest;

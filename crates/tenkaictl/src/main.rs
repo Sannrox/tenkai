@@ -4,6 +4,7 @@ mod args;
 mod authorization;
 mod bundle_args;
 mod catalog_args;
+mod dark_site;
 mod dev_args;
 mod embedded;
 mod embedded_apply;
@@ -181,6 +182,9 @@ async fn run(cli: Cli) -> Result<()> {
     }
     if let Command::Keys { command } = &cli.command {
         return keys::run(command);
+    }
+    if let Command::DarkSite { command } = &cli.command {
+        return dark_site::run(command);
     }
     if let Command::Registry {
         command:

@@ -1,0 +1,11 @@
+{
+  "schema": "tenkai.offline-stack.v1",
+  "images": [
+    "sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+  ],
+  "weights": [
+    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  ],
+  "schemas": [],
+  "hub": []
+}

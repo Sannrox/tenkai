@@ -40,6 +40,7 @@ will be split over time. Contributor and agent workflow live in
 | Export a redacted support bundle | [support-bundle.md](support-bundle.md) |
 | Export and verify signed audit records | [audit-export.md](audit-export.md) |
 | Run the on-site key ceremony | [key-ceremony.md](key-ceremony.md) |
+| Run a dark-site local model with site-agent workers | [dark-site.md](dark-site.md) |
 | Diagnose a server and watch fleet drift | [server-diagnostics.md](server-diagnostics.md) |
 | Observe and execute rollout waves | [rollout-waves.md](rollout-waves.md) |
 | Import a signed recall notice and propose a fix-forward wave | [recall-notices.md](recall-notices.md) |
@@ -83,6 +84,7 @@ will be split over time. Contributor and agent workflow live in
 | vLLM Kubernetes executor | [vllm-kubernetes.md](vllm-kubernetes.md) |
 | Policy, eval-suite, and agent products | [staged-products.md](staged-products.md) |
 | Worker pools | [worker-pool.md](worker-pool.md) |
+| Dark-site local model profile | [dark-site.md](dark-site.md) |
 | Workshop modules | [workshop-modules.md](workshop-modules.md) |
 | Preview environments | [preview-environments.md](preview-environments.md) |
 | Change-set pins | [change-set-pin.md](change-set-pin.md) |

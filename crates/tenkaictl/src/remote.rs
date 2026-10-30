@@ -406,6 +406,9 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         Command::Bundle { .. } => {
             bail!("bundle build is available only with --target embedded")
         }
+        Command::DarkSite { .. } => {
+            bail!("dark-site profiles run locally; use --target embedded")
+        }
         Command::Topology { .. } => {
             bail!("topology drills run against the embedded store; use --target embedded")
         }
