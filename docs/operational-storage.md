@@ -13,8 +13,9 @@ Pre-0029 graph files migrate into typed schema 13 rows and drop `embedded_*`
 tables so leftover objects cannot authorize apply. `TENKAI_POSTGRES_URL` is
 invalid on embedded and spoke hosts.
 
-The store also owns the provider-event retry queue used for audit and outcome
-projection. The shipped SQLite host path uses this queue for terminal outcomes;
+The store also owns the provider-event retry queue used for audit, outcome,
+and opt-in feedback-observation projection. The shipped SQLite host path uses
+this queue for terminal outcomes and, when enabled, feedback observations;
 audit and planning-event mutations remain unwired. Provider adapters can
 acknowledge delivery, but cannot change or reconstruct operational truth. See
 [provider contracts](provider-contracts.md) for delivery semantics.

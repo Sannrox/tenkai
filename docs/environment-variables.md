@@ -8,7 +8,7 @@ command line.
 ## Secret files
 
 Every secret setting below (management and runtime tokens, the token maps,
-`TENKAI_POSTGRES_URL`, `TENKAI_OUTCOME_PROVIDER_TOKEN`, `SEKAI_AUTH_TOKEN`,
+`TENKAI_POSTGRES_URL`, `TENKAI_OUTCOME_PROVIDER_TOKEN`, `TENKAI_FEEDBACK_PROVIDER_TOKEN`, `SEKAI_AUTH_TOKEN`,
 `TENKAI_OIDC_CLIENT_SECRET`, `TENKAI_JWT_ASSERTION`, and the webhook secrets
 named by `secret_env`) is read, in order, from:
 
@@ -126,6 +126,12 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | `TENKAI_OUTCOME_PROVIDER_PRINCIPAL` | `tenkai.outcome` | Authenticated telemetry-writer principal for outcome admission |
 | `TENKAI_OUTCOME_PROVIDER_TOKEN` | unset | Optional outcome-adapter bearer secret; environment-only and never persisted |
 | `TENKAI_OUTCOME_PROVIDER_REGISTRATION` | unset | Required exact attestation of the administrator-registered Sekai producer and `tenkai.terminal_outcome.v1@1.0.0` schema when outcome export is enabled |
+| `TENKAI_FEEDBACK_PROVIDER` | `disabled` | Set to `chisei` to enable durable feedback-observation export |
+| `TENKAI_FEEDBACK_PROVIDER_URL` | unset | Explicit Sekai endpoint used only with `tenkai-server --feedback-provider chisei` |
+| `TENKAI_FEEDBACK_NAMESPACE` | unset | Namespace authorized for feedback-observation admission |
+| `TENKAI_FEEDBACK_PROVIDER_PRINCIPAL` | `tenkai.feedback` | Authenticated telemetry-writer principal for feedback admission |
+| `TENKAI_FEEDBACK_PROVIDER_TOKEN` | unset | Optional feedback-adapter bearer secret; environment-only and never persisted |
+| `TENKAI_FEEDBACK_PROVIDER_REGISTRATION` | unset | Required exact attestation of the administrator-registered Sekai producer, `feedback.observation@1.0.0` schema, and `feedback.observation.record` Action when feedback export is enabled |
 
 ## `tenkai-runtime`
 

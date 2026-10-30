@@ -13,6 +13,9 @@ use tenkai::auth_context::{
     AUTH_CONTEXT_CONTRACT_VERSION, AuthHostConfig, EnterpriseAuthExtension,
 };
 use tenkai::deploy_webhook::{ProcessWebhookSecrets, deliver_webhook_batch};
+use tenkai::feedback_export::{
+    ChiseiFeedbackProvider, FEEDBACK_PROVIDER_REGISTRATION_ENV, deliver_feedback_batch,
+};
 use tenkai::issuer_auth::{ISSUER_AUTH_EXTENSION_ID, IssuerAuthExtension};
 use tenkai::oidc_verifier::{
     JwksCache, OIDC_AUTH_EXTENSION_ID, OidcAuthExtension, OidcClientDiscovery, OidcConfig,
@@ -132,6 +135,17 @@ struct Cli {
     /// Namespace admitted by the configured Chisei telemetry-writer policy.
     #[arg(long, env = "TENKAI_OUTCOME_NAMESPACE")]
     outcome_namespace: Option<String>,
+    /// Optional feedback-observation adapter. Disabled keeps standalone operation network-free.
+    #[arg(
+        long,
+        env = "TENKAI_FEEDBACK_PROVIDER",
+        value_enum,
+        default_value_t = OutcomeProviderMode::Disabled
+    )]
+    feedback_provider: OutcomeProviderMode,
+    /// Namespace admitted by the configured Chisei feedback-observation Action.
+    #[arg(long, env = "TENKAI_FEEDBACK_NAMESPACE")]
+    feedback_namespace: Option<String>,
     /// Development only: serve a local console build at /ui/ instead of the
     /// bundle embedded by feature `ui`.
     #[arg(long)]
@@ -702,6 +716,49 @@ async fn main() -> Result<()> {
             )
         }
     };
+    let feedback_provider = match cli.feedback_provider {
+        OutcomeProviderMode::Disabled => {
+            anyhow::ensure!(
+                cli.feedback_namespace.is_none()
+                    && std::env::var_os("TENKAI_FEEDBACK_PROVIDER_URL").is_none()
+                    && tenkai::secret_source::read("TENKAI_FEEDBACK_PROVIDER_TOKEN")?.is_none()
+                    && std::env::var_os(FEEDBACK_PROVIDER_REGISTRATION_ENV).is_none(),
+                "feedback provider configuration requires --feedback-provider chisei"
+            );
+            None
+        }
+        OutcomeProviderMode::Chisei => {
+            anyhow::ensure!(
+                matches!(cli.provider_mode, ProviderMode::Embedded),
+                "feedback export requires embedded Tenkai application state so capture and outbox enqueue share one transaction"
+            );
+            let endpoint = std::env::var("TENKAI_FEEDBACK_PROVIDER_URL")
+                .context("TENKAI_FEEDBACK_PROVIDER_URL is required for Chisei feedback export")?;
+            let namespace = cli
+                .feedback_namespace
+                .as_deref()
+                .context("TENKAI_FEEDBACK_NAMESPACE is required for Chisei feedback export")?;
+            let principal = std::env::var("TENKAI_FEEDBACK_PROVIDER_PRINCIPAL")
+                .unwrap_or_else(|_| "tenkai.feedback".into());
+            let token = tenkai::secret_source::read("TENKAI_FEEDBACK_PROVIDER_TOKEN")?;
+            let registration =
+                std::env::var(FEEDBACK_PROVIDER_REGISTRATION_ENV).with_context(|| {
+                    format!(
+                        "{FEEDBACK_PROVIDER_REGISTRATION_ENV} is required after the Sekai producer capability, observation schema, and observation Action are registered"
+                    )
+                })?;
+            Some(
+                ChiseiFeedbackProvider::new_for_export(
+                    endpoint,
+                    namespace,
+                    principal,
+                    token,
+                    registration,
+                )
+                .context("validating Chisei feedback adapter configuration")?,
+            )
+        }
+    };
     let jwt_trust_path = std::env::var_os(JWT_VERIFIER_CONFIG_ENV).map(PathBuf::from);
     let oidc_config_path = std::env::var_os(OIDC_CONFIG_ENV).map(PathBuf::from);
     let enterprise_auth = compose_enterprise_auth(
@@ -786,7 +843,8 @@ async fn main() -> Result<()> {
         .with_release_trust_roots(
             std::env::var_os("TENKAI_RELEASE_TRUST_ROOTS").map(std::path::PathBuf::from),
         )
-        .with_trust_sources(trust_sources.clone());
+        .with_trust_sources(trust_sources.clone())
+        .with_feedback_export(feedback_provider.is_some());
     let runtime_environments = runtime_assignments
         .values()
         .cloned()
@@ -825,6 +883,7 @@ async fn main() -> Result<()> {
     let trust_status: Arc<std::sync::RwLock<Option<tenkai::trust_posture::TrustSnapshot>>> =
         Default::default();
     let tenant_store_for_outcomes = tenant_store.clone();
+    let tenant_store_for_feedback = tenant_store.clone();
     let import_staging = imports.as_ref().map(|settings| settings.staging.clone());
     let clock_every = clock_settings()?;
     let audit_export = audit_export_settings(cli.tenant_mode)?;
@@ -968,6 +1027,74 @@ async fn main() -> Result<()> {
                                 Err(error) => {
                                     eprintln!(
                                         "tenkai.outcome_export outcome=degraded detail={}",
+                                        error
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        })
+    });
+    let feedback_task = feedback_provider.map(|provider| {
+        let feedback_store = store.clone();
+        let tenant_store = tenant_store_for_feedback;
+        let mut feedback_shutdown_rx = shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            let mut timer = tokio::time::interval(Duration::from_secs(5));
+            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    changed = feedback_shutdown_rx.changed() => {
+                        if changed.is_err() || *feedback_shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                    _ = timer.tick() => {
+                        let partitions = match &tenant_store {
+                            Some(tenant) => {
+                                let tenant = Arc::clone(tenant);
+                                match tokio::task::spawn_blocking(move || {
+                                    tenant.provider_event_partitions()
+                                })
+                                .await
+                                {
+                                    Ok(Ok(partitions)) => partitions,
+                                    Ok(Err(error)) => {
+                                        eprintln!(
+                                            "tenkai.feedback_export outcome=degraded detail={error}"
+                                        );
+                                        continue;
+                                    }
+                                    Err(error) => {
+                                        eprintln!(
+                                            "tenkai.feedback_export outcome=degraded detail={error}"
+                                        );
+                                        continue;
+                                    }
+                                }
+                            }
+                            None => vec![Arc::clone(&feedback_store)],
+                        };
+                        for partition in partitions {
+                            match deliver_feedback_batch(
+                                partition.as_ref(),
+                                &provider,
+                                Duration::from_secs(5),
+                                tenkai::now_millis(),
+                                10,
+                            ).await {
+                                Ok((delivered, deferred)) if delivered > 0 || deferred > 0 => {
+                                    eprintln!(
+                                        "tenkai.feedback_export delivered={} deferred={}",
+                                        delivered, deferred
+                                    );
+                                }
+                                Ok(_) => {}
+                                Err(error) => {
+                                    eprintln!(
+                                        "tenkai.feedback_export outcome=degraded detail={}",
                                         error
                                     );
                                 }
@@ -1453,6 +1580,11 @@ async fn main() -> Result<()> {
         outcome_task
             .await
             .context("joining outcome delivery task during shutdown")?;
+    }
+    if let Some(feedback_task) = feedback_task {
+        feedback_task
+            .await
+            .context("joining feedback delivery task during shutdown")?;
     }
     webhook_task
         .await

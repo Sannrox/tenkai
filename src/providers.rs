@@ -30,7 +30,9 @@ pub const OUTCOME_PROVIDER_REGISTRATION_ENV: &str = "TENKAI_OUTCOME_PROVIDER_REG
 const MAX_PROVIDER_EVENT_ID_BYTES: usize = 512;
 const MAX_PROVIDER_EVENT_PAYLOAD_BYTES: usize = 16 * 1024;
 
-fn evidence_submission_succeeded(result: &crate::pb::sekai::EvidenceSubmissionResult) -> bool {
+pub(crate) fn evidence_submission_succeeded(
+    result: &crate::pb::sekai::EvidenceSubmissionResult,
+) -> bool {
     let Some(submission) = result.submission.as_ref() else {
         return false;
     };
@@ -514,7 +516,7 @@ fn bind_tenant_to_provider_event(
     tenant: &str,
 ) -> Result<ProviderEventRecord, ProviderError> {
     if record.provider_kind != OUTCOME_PROVIDER_KIND {
-        return Ok(record.clone());
+        return crate::feedback_export::bind_tenant_to_feedback_event(record, tenant);
     }
     let Ok(mut event) = serde_json::from_str::<ProviderEvent>(&record.payload_json) else {
         return Ok(record.clone());
@@ -780,7 +782,7 @@ impl std::fmt::Debug for ChiseiOutcomeProvider {
     }
 }
 
-fn outcome_transport_is_safe(endpoint: &str) -> bool {
+pub(crate) fn provider_transport_is_safe(endpoint: &str) -> bool {
     let Ok(parsed) = url::Url::parse(endpoint) else {
         return false;
     };
@@ -840,7 +842,7 @@ impl ChiseiOutcomeProvider {
                 "outcome bearer token must not be empty when configured".into(),
             ));
         }
-        if !outcome_transport_is_safe(&endpoint) {
+        if !provider_transport_is_safe(&endpoint) {
             return Err(ProviderError::InvalidEvidence(
                 "outcome provider endpoints require HTTPS or loopback HTTP".into(),
             ));

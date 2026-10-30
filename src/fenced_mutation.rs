@@ -33,7 +33,7 @@ pub struct MutationCommand<'a> {
 /// Parent-process variables that may be inherited by deploy children.
 ///
 /// Control-plane credentials (`TENKAI_MANAGEMENT_TOKEN`, `TENKAI_RUNTIME_TOKEN`,
-/// outcome-provider tokens, `SEKAI_AUTH_TOKEN`, and similar) are intentionally
+/// outcome-provider and feedback-provider tokens, `SEKAI_AUTH_TOKEN`, and similar) are intentionally
 /// absent. Deploy shells receive only this allowlist plus the explicit Tenkai
 /// fencing/identity variables set by [`deploy_child_environment`].
 const DEPLOY_CHILD_INHERITED_ENV: &[&str] = &[
@@ -433,6 +433,10 @@ mod tests {
         "TENKAI_OUTCOME_PROVIDER_URL",
         "TENKAI_OUTCOME_PROVIDER_PRINCIPAL",
         "TENKAI_OUTCOME_PROVIDER_REGISTRATION",
+        "TENKAI_FEEDBACK_PROVIDER_TOKEN",
+        "TENKAI_FEEDBACK_PROVIDER_URL",
+        "TENKAI_FEEDBACK_PROVIDER_PRINCIPAL",
+        "TENKAI_FEEDBACK_PROVIDER_REGISTRATION",
         "TENKAI_JWT_VERIFIER_CONFIG",
         "TENKAI_POSTGRES_URL",
         "TENKAI_DEVELOPMENT_FIXTURE_PRINCIPALS",
@@ -445,6 +449,7 @@ mod tests {
             ("TENKAI_RUNTIME_TOKEN", "runtime-secret"),
             ("TENKAI_RUNTIME_TOKENS", r#"{"t":"prod"}"#),
             ("TENKAI_OUTCOME_PROVIDER_TOKEN", "outcome-secret"),
+            ("TENKAI_FEEDBACK_PROVIDER_TOKEN", "feedback-secret"),
             ("SEKAI_AUTH_TOKEN", "sekai-secret"),
             ("TENKAI_POSTGRES_URL", "postgres://secret"),
             ("PATH", "/usr/bin:/bin"),
@@ -519,7 +524,8 @@ mod tests {
             .env("TENKAI_MANAGEMENT_TOKEN", "mgmt-should-not-leak")
             .env("TENKAI_RUNTIME_TOKEN", "runtime-should-not-leak")
             .env("SEKAI_AUTH_TOKEN", "sekai-should-not-leak")
-            .env("TENKAI_OUTCOME_PROVIDER_TOKEN", "outcome-should-not-leak");
+            .env("TENKAI_OUTCOME_PROVIDER_TOKEN", "outcome-should-not-leak")
+            .env("TENKAI_FEEDBACK_PROVIDER_TOKEN", "feedback-should-not-leak");
         configure_deploy_child_env(&mut child, "lab", "app", Some(3));
         let status = child.status().await.unwrap();
         assert!(status.success());
@@ -530,10 +536,12 @@ mod tests {
             "TENKAI_RUNTIME_TOKEN=",
             "SEKAI_AUTH_TOKEN=",
             "TENKAI_OUTCOME_PROVIDER_TOKEN=",
+            "TENKAI_FEEDBACK_PROVIDER_TOKEN=",
             "mgmt-should-not-leak",
             "runtime-should-not-leak",
             "sekai-should-not-leak",
             "outcome-should-not-leak",
+            "feedback-should-not-leak",
         ] {
             assert!(
                 !dumped.contains(forbidden),

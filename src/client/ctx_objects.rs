@@ -10,6 +10,24 @@ use super::{
 use crate::pb::sekai::{CreateObjectResponse, Object, UpdateObjectResponse};
 
 impl Ctx {
+    fn with_feedback_export_events(
+        &self,
+        events: &[crate::storage::ProviderEventRecord],
+        observations: &[crate::feedback_observation::FeedbackObservation],
+    ) -> Vec<crate::storage::ProviderEventRecord> {
+        if !self.feedback_export_enabled()
+            || observations.is_empty()
+            || (self.embedded_arc().is_none() && !self.has_catalog())
+        {
+            return events.to_vec();
+        }
+        let mut events = events.to_vec();
+        events.extend(crate::feedback_export::records_for_observations(
+            observations,
+        ));
+        events
+    }
+
     /// Get an object by id; `None` on not-found.
     pub async fn get(&mut self, id: &str) -> Result<Option<Object>> {
         self.backend.object_lifecycle().get(id).await
@@ -41,12 +59,11 @@ impl Ctx {
         events: &[crate::storage::ProviderEventRecord],
         observations: &[crate::feedback_observation::FeedbackObservation],
     ) -> Result<Object> {
+        let events = self.with_feedback_export_events(events, observations);
         if let Some((catalog, Some(tenant))) = self.catalog_binding() {
-            let _ = observations;
             if events.is_empty() {
                 return self.put(object).await;
             }
-            let events = events.to_vec();
             return super::block_catalog(catalog, move |catalog| {
                 catalog.put_with_provider_events(Some(&tenant), object, &events)
             })
@@ -63,7 +80,6 @@ impl Ctx {
         if events.is_empty() && observations.is_empty() {
             return self.put(object).await;
         }
-        let events = events.to_vec();
         let observations = observations.to_vec();
         block_embedded(store, move |store| {
             store.put_with_provider_events(object, &events, &observations)
@@ -77,10 +93,9 @@ impl Ctx {
         events: &[crate::storage::ProviderEventRecord],
         observations: &[crate::feedback_observation::FeedbackObservation],
     ) -> Result<()> {
+        let events = self.with_feedback_export_events(events, observations);
         if let Some((catalog, Some(tenant))) = self.catalog_binding() {
-            let _ = observations;
             let objects = objects.to_vec();
-            let events = events.to_vec();
             return super::block_catalog(catalog, move |catalog| {
                 catalog.put_objects_with_provider_events(Some(&tenant), &objects, &events)
             })
@@ -92,7 +107,6 @@ impl Ctx {
             );
         };
         let objects = objects.to_vec();
-        let events = events.to_vec();
         let observations = observations.to_vec();
         block_embedded(store, move |store| {
             store.put_objects_with_provider_events(&objects, &events, &observations)
@@ -221,16 +235,16 @@ impl Ctx {
         events: &[crate::storage::ProviderEventRecord],
         observations: &[crate::feedback_observation::FeedbackObservation],
     ) -> Result<()> {
+        let events = self.with_feedback_export_events(events, observations);
         if let Some((catalog, Some(tenant))) = self.catalog_binding() {
             // CatalogGraph is the object graph. Feedback rows stay on the
-            // operational store; catalog writes drop observations the same way
-            // remote application state does (#802).
-            let _ = observations;
+            // operational store; catalog writes drop local observation rows
+            // the same way remote application state does (#802). Export
+            // events still enqueue on the tenant outbox when enabled (#783).
             let objects = objects.to_vec();
             let lease_namespace = lease_namespace.to_string();
             let lease_key = lease_key.to_string();
             let fencing_token = fencing_token.to_string();
-            let events = events.to_vec();
             return super::block_catalog(catalog, move |catalog| {
                 catalog.guarded_put_objects_with_provider_events(
                     Some(&tenant),
@@ -252,7 +266,6 @@ impl Ctx {
         let lease_namespace = lease_namespace.to_string();
         let lease_key = lease_key.to_string();
         let fencing_token = fencing_token.to_string();
-        let events = events.to_vec();
         let observations = observations.to_vec();
         block_embedded(store, move |store| {
             store.guarded_put_objects_with_provider_events(

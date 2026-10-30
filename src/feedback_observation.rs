@@ -3,9 +3,9 @@
 //! One versioned, bounded record per committed deployment outcome: which
 //! operation and stage, a typed reason, how long the step took, the
 //! controller version, and the lease generation it ran under. It is written
-//! in the same transaction as the outcome, never changes afterwards, and is
-//! never sent anywhere by this layer. `tenkai.terminal_outcome.v1` is
-//! unchanged.
+//! in the same transaction as the outcome and never changes afterwards.
+//! Delivery to Sekai is a separate opt-in adapter (#783).
+//! `tenkai.terminal_outcome.v1` is unchanged.
 //!
 //! An observation carries no detail text: no command output, credentials,
 //! signing material, environment facts or content. The reason is classified
