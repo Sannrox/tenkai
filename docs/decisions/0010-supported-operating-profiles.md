@@ -301,3 +301,23 @@ Status: **experimental, selectable.** Authoritative surfaces pass the startup
 gate. Backup, restore, and independent operator usability drills
 (implementation sequence step 5) have not run, so the profile is not stable.
 Product `high_availability` remains unclaimed and fail-closed.
+
+## Amendment: small-footprint dark-site spoke (2026-10-30, #695)
+
+Spokes stay on SQLite, one writer (ADR 0029). The hub HA stack above does not
+apply. A one- or two-node site uses the [spoke-standby profile](../spoke-standby.md):
+
+- Deployed workloads keep the last good release while the writer is down.
+  New plans, applies and rollbacks pause.
+- A warm standby restores shipped backups on a stated interval. That interval
+  is the acknowledged-loss bound.
+- Promotion is a signed operator action. Automatic promotion requires a
+  witness or a storage-level exclusive lock. Two nodes and a timeout alone
+  are refused (`fencing_lease::require_auto_promote`).
+- Promotion fences the old generation. Site runtimes refuse it.
+- A two-node drill with egress blocked produces signed evidence of the
+  interruption window, the loss bound, remaining single points of failure,
+  no duplicate apply, and refusal of the returning writer.
+
+Product `high_availability` stays unclaimed. PostgreSQL on spokes and
+multi-writer SQLite stay rejected.

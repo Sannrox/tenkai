@@ -754,6 +754,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
+name = "fencing-lease"
+version = "0.1.0"
+source = "git+https://github.com/Sannrox/agent-kit?rev=7adf5da3254b6a78f93c49837ab9f7cd6103b2d0#7adf5da3254b6a78f93c49837ab9f7cd6103b2d0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2866,6 +2877,7 @@ dependencies = [
  "chrono-tz",
  "cryptoki",
  "ed25519-dalek",
+ "fencing-lease",
  "libc",
  "prost",
  "rcgen",

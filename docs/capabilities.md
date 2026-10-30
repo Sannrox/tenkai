@@ -63,6 +63,7 @@ it ([ADR 0001](decisions/0001-standalone-core-and-service-evolution.md),
 | Preview environments from a branch pin | [Preview environments](preview-environments.md); #379 |
 | Two-environment immutable closure drill | [Change-set pins](change-set-pin.md#two-environment-drill); `examples/two-environment-closure`; #360 |
 | Topology failover drill with signed evidence | [Failover drill](manifest.md#failover-drill); #691 |
+| Small-footprint dark-site spoke (fenced writer, standby backups, signed promotion) | [Spoke standby](spoke-standby.md); #695 |
 | Fixed-replica Shikigami worker-pool lifecycle | [Worker pools](worker-pool.md); [ADR 0011](decisions/0011-shikigami-worker-pool-lifecycle.md); [ADR 0028](decisions/0028-live-worker-lifecycle-port.md); #284 / #336 |
 | Connectivity-class upgrades | [Connectivity upgrades](connectivity-upgrades.md); [ADR 0020](decisions/0020-connectivity-class-upgrade.md); #287 |
 | Governed package migrations | [Package migrations](package-migrations.md); [ADR 0024](decisions/0024-package-migration.md); #289, #334 |

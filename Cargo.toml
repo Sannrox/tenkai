@@ -52,6 +52,7 @@ sekai-client = { git = "https://github.com/Sannrox/sekai-chisei", rev = "67157d1
 tar = { version = "0.4", default-features = false }
 cryptoki = "0.10"
 sekai-keys = { git = "https://github.com/Sannrox/sekai-chisei", rev = "40ab00a4954d435c67c6c12b560522ba5eaebb53", version = "1.0.0" }
+fencing-lease = { git = "https://github.com/Sannrox/agent-kit", rev = "7adf5da3254b6a78f93c49837ab9f7cd6103b2d0" }
 
 [features]
 default = []

@@ -156,6 +156,11 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: DarkSiteCommand,
     },
+    /// One- or two-node SQLite spoke: fenced writer, standby backups, signed promotion.
+    SpokeStandby {
+        #[command(subcommand)]
+        command: SpokeStandbyCommand,
+    },
     /// Enroll, list, inspect and revoke runtime agents (server only).
     #[command(visible_alias = "runner")]
     Runtime {
@@ -568,6 +573,43 @@ pub(crate) enum DarkSiteCommand {
         /// Active claims still held by current workers.
         #[arg(long, default_value_t = 0)]
         active_claims: u32,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum SpokeStandbyCommand {
+    /// Load and validate a version 1 small-footprint spoke profile.
+    Validate {
+        #[arg(long)]
+        profile: PathBuf,
+    },
+    /// Signed operator promotion of a restored standby.
+    Promote {
+        #[arg(long)]
+        profile: PathBuf,
+        /// Holder id of this process (`spoke-b` on the standby).
+        #[arg(long)]
+        holder: String,
+        /// Directory of `fencing-lease` lock files. Shared only when the profile sets `exclusive_lock`.
+        #[arg(long)]
+        lease_dir: PathBuf,
+        /// Restored spoke state directory (`spoke-standby.json`).
+        #[arg(long)]
+        state: PathBuf,
+        /// 32-byte Ed25519 seed (mode 0600) for the promotion statement.
+        #[arg(long)]
+        signing_key: PathBuf,
+    },
+    /// Two-node drill: kill the writer, promote the standby, refuse the old generation.
+    Drill {
+        #[arg(long)]
+        profile: PathBuf,
+        /// 32-byte Ed25519 seed (mode 0600) for the drill evidence.
+        #[arg(long)]
+        signing_key: PathBuf,
+        /// Where to write the signed evidence JSON.
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
 }
 

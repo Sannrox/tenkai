@@ -110,6 +110,10 @@ After restore:
 2. Rehydrate artifact payloads from registries if hosts lost content caches.
 3. Confirm `env list` / `env inspect` for expected environments.
 
+A dark-site standby restores the same backups on the interval in the
+[spoke-standby profile](spoke-standby.md). That restore does not promote the
+standby; promotion is a separate signed operator action.
+
 ## Failure modes
 
 - Missing backup path → fail closed with actionable error.

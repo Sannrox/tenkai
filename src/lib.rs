@@ -107,6 +107,9 @@
 //! - [`dark_site`] pins a local `model_runtime` digest beside a site-agent
 //!   worker image, binds those pins to an offline stack, refuses cloud model
 //!   routes while active, and rolls back through existing worker drain.
+//! - [`spoke_standby`] is the one- or two-node SQLite spoke profile: a fenced
+//!   writer, backups feeding a warm standby, signed manual promotion, and a
+//!   drill that fences the old generation. Product HA is not claimed.
 //! - `product_kind` owns the closed Product-kind policy for manifest target
 //!   classification, staged identity, cleanup semantics, and coordinated
 //!   model/routing rollout rank without introducing a trait seam.
@@ -257,6 +260,7 @@ pub mod signer;
 pub mod smtp_digest;
 pub mod software_compatibility;
 pub mod software_executor;
+pub mod spoke_standby;
 pub mod staged_artifact;
 pub mod storage;
 pub mod support_bundle;

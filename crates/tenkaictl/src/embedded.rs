@@ -118,6 +118,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         | Command::Revocations { .. }
         | Command::Keys { .. }
         | Command::DarkSite { .. }
+        | Command::SpokeStandby { .. }
         | Command::Registry { .. }
         | Command::SelfUpgrade { .. }
         | Command::RunnerCa { .. }
