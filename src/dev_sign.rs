@@ -243,13 +243,6 @@ pub fn sign_release(
     signature_out: &Path,
     trust_roots_out: &Path,
 ) -> Result<WrittenPaths> {
-    init_dev_keys(keys_dir)?;
-    reject_output_path_collisions(keys_dir, signature_out, trust_roots_out)?;
-    let seed = load_private_seed(&keys_dir.join(RELEASE_KEY_FILE))?;
-    let signing_key = signing_key_from_seed(&seed);
-    let public = signing_key.verifying_key().to_bytes();
-    let kid = key_id(&public);
-
     let loaded = manifest::load(manifest_path)?;
     let raw = fs::read_to_string(manifest_path)
         .with_context(|| format!("reading manifest {}", manifest_path.display()))?;
@@ -259,6 +252,31 @@ pub fn sign_release(
         &loaded.manifest.immutable_inputs(),
         &loaded.manifest.artifacts,
     )?;
+    sign_digests(
+        keys_dir,
+        &m_digest,
+        &a_digest,
+        signature_out,
+        trust_roots_out,
+    )
+}
+
+/// Sign a release statement over `m_digest` and `a_digest` with the dev key
+/// in `keys_dir`. `sign_release` uses it for product manifests; tests use it
+/// for other signed release documents such as family release manifests.
+pub(crate) fn sign_digests(
+    keys_dir: &Path,
+    m_digest: &str,
+    a_digest: &str,
+    signature_out: &Path,
+    trust_roots_out: &Path,
+) -> Result<WrittenPaths> {
+    init_dev_keys(keys_dir)?;
+    reject_output_path_collisions(keys_dir, signature_out, trust_roots_out)?;
+    let seed = load_private_seed(&keys_dir.join(RELEASE_KEY_FILE))?;
+    let signing_key = signing_key_from_seed(&seed);
+    let public = signing_key.verifying_key().to_bytes();
+    let kid = key_id(&public);
 
     let roots = trust_roots_toml(&kid, "dogfood-release@localhost", &STANDARD.encode(public));
     write_text_owner_only(trust_roots_out, &roots)?;
@@ -267,8 +285,8 @@ pub fn sign_release(
         schema: ENVELOPE_SCHEMA.into(),
         key_id: kid,
         statement: ReleaseStatement {
-            manifest_digest: m_digest.clone(),
-            artifact_digest: a_digest.clone(),
+            manifest_digest: m_digest.into(),
+            artifact_digest: a_digest.into(),
             provenance: Provenance {
                 source_uri: "https://github.com/Sannrox/tenkai".into(),
                 revision: "dogfood".into(),
@@ -287,7 +305,7 @@ pub fn sign_release(
 
     // Fail closed: envelope must verify against the trust roots we just wrote.
     let roots = ReleaseTrustRoots::load(trust_roots_out)?;
-    verify_release(&envelope, &roots, &m_digest, &a_digest)?;
+    verify_release(&envelope, &roots, m_digest, a_digest)?;
 
     Ok(WrittenPaths {
         trust_roots: trust_roots_out.to_path_buf(),

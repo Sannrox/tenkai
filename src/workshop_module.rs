@@ -692,6 +692,7 @@ document = "module.json"
             change_set_evidence: Some(ChangeSetEvidenceInput::Document(Box::new(evidence_for(
                 &section,
             )))),
+            family_release: None,
             artifact_registry: None,
             state_dir: None,
         }
@@ -988,6 +989,7 @@ document = "module.json"
                 provenance: Vec::new(),
                 provenance_trust_roots: None,
                 change_set_evidence: None,
+                family_release: None,
                 artifact_registry: None,
                 state_dir: None,
             },
@@ -1013,6 +1015,7 @@ document = "module.json"
                 provenance: Vec::new(),
                 provenance_trust_roots: None,
                 change_set_evidence: Some(ChangeSetEvidenceInput::Document(Box::new(unauthorized))),
+                family_release: None,
                 artifact_registry: None,
                 state_dir: None,
             },

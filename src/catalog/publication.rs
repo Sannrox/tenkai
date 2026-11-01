@@ -67,6 +67,7 @@ pub(super) async fn admit(
         crate::now_millis(),
     )?;
     let verification = verify_publication(options, &digest, &artifact_digest)?;
+    let family_release = admit_family_release(options, &name, &version)?;
     let inventory_signed = matches!(verification, PublicationTrust::Verified(_));
     let verification_properties = verification.properties()?;
     let versioned_workdir = manifest::snapshot_workdir_in(
@@ -95,6 +96,7 @@ pub(super) async fn admit(
             crate::exposure::validate_stored_inventory(&existing, Some(&versioned_workdir))?;
             validate_stored_provenance(&existing, &provenance_properties)?;
             change_set_pin::validate_stored(&existing, admitted_pin.as_ref())?;
+            crate::family_release::validate_stored(&existing, family_release.as_ref())?;
             existing
                 .properties
                 .insert("artifact_digest".into(), artifact_digest.clone());
@@ -135,6 +137,9 @@ pub(super) async fn admit(
         persist_delivery_properties(&mut properties, &loaded.manifest.delivery);
         properties.extend(provenance_properties.clone());
         properties.extend(pin_properties.clone());
+        if let Some(admitted) = &family_release {
+            properties.extend(admitted.properties());
+        }
         let release = object(
             rid.clone(),
             KIND_RELEASE,
@@ -164,6 +169,7 @@ pub(super) async fn admit(
                 crate::exposure::validate_stored_inventory(&existing, Some(&versioned_workdir))?;
                 validate_stored_provenance(&existing, &provenance_properties)?;
                 change_set_pin::validate_stored(&existing, admitted_pin.as_ref())?;
+                crate::family_release::validate_stored(&existing, family_release.as_ref())?;
                 let mut pinned = existing;
                 pinned
                     .properties
@@ -265,6 +271,32 @@ fn persist_oci_artifacts(
     }
     properties.insert("oci_artifacts".into(), serde_json::to_string(artifacts)?);
     Ok(())
+}
+
+/// Verify the optional family release manifest with the publication trust
+/// roots. It needs a signature and trust roots even when the local unsigned
+/// development bypass is set: gate flags must not come from unsigned input.
+fn admit_family_release(
+    options: &PublishOptions,
+    product: &str,
+    version: &str,
+) -> Result<Option<crate::family_release::Admitted>> {
+    let Some(input) = &options.family_release else {
+        return Ok(None);
+    };
+    let Some(trust_roots) = &options.trust_roots else {
+        bail!("--family-release requires --trust-roots");
+    };
+    crate::family_release::admit(
+        &crate::family_release::Evidence {
+            manifest: &input.manifest,
+            signature: &input.signature,
+            trust_roots,
+        },
+        product,
+        version,
+    )
+    .map(Some)
 }
 
 #[cfg(test)]

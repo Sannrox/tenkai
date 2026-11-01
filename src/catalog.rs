@@ -266,6 +266,13 @@ impl PublicationTrust {
     }
 }
 
+/// A family release manifest and its detached release signature.
+#[derive(Clone, Debug)]
+pub struct FamilyReleaseInput {
+    pub manifest: PathBuf,
+    pub signature: PathBuf,
+}
+
 #[derive(Clone, Default)]
 pub struct PublishOptions {
     pub signature: Option<PathBuf>,
@@ -274,6 +281,9 @@ pub struct PublishOptions {
     pub provenance: Vec<PathBuf>,
     pub provenance_trust_roots: Option<PathBuf>,
     pub change_set_evidence: Option<ChangeSetEvidenceInput>,
+    /// Signed family release manifest from the component's `v*` workflow.
+    /// Verified against `trust_roots`; its gate flags hold channels on promote.
+    pub family_release: Option<FamilyReleaseInput>,
     /// Host-selected registry used to verify digest-bound artifacts at publish.
     pub artifact_registry: Option<std::sync::Arc<dyn crate::oci_artifact::ArtifactRegistry>>,
     /// Durable snapshot directory for this publication. When unset,
@@ -293,6 +303,7 @@ impl std::fmt::Debug for PublishOptions {
             )
             .field("provenance", &self.provenance)
             .field("provenance_trust_roots", &self.provenance_trust_roots)
+            .field("family_release", &self.family_release)
             .field("change_set_evidence", &self.change_set_evidence)
             .field("artifact_registry", &self.artifact_registry.is_some())
             .field("state_dir", &self.state_dir)
@@ -871,6 +882,7 @@ async fn promote_inner(
     let promotion_channel = channel.clone();
     let promoted_release = rid.clone();
     let replaceable_heads = replaceable_heads.map(|heads| heads.to_vec());
+    let hold_actor = actor.principal_id().to_string();
     crate::canary::guarded_promotion(ctx, actor, &name, &version, &channel, &owner, move |ctx| {
         Box::pin(async move {
             let Some(release) = ctx.get(&promoted_release).await? else {
@@ -934,6 +946,20 @@ async fn promote_inner(
                     ]),
                 ))
                 .await?;
+            }
+            // A release with gate flags holds the channel before its head
+            // moves, so nothing serves it until a human clears the hold.
+            let gate_flags = crate::family_release::stored_gate_flags(&release)?;
+            if !gate_flags.is_empty() {
+                let scope =
+                    crate::delivery_hold::HoldScope::channel(&promotion_name, &promotion_channel);
+                if crate::delivery_hold::get(ctx, &scope).await?.is_none() {
+                    let reason = crate::family_release::hold_reason(
+                        &format!("{promotion_name}@{promotion_version}"),
+                        &gate_flags,
+                    );
+                    crate::delivery_hold::set(ctx, &scope, &reason, &hold_actor).await?;
+                }
             }
             ctx.link(&cid, &promoted_release, REL_PROMOTES).await?;
             ctx.put(channel_head).await?;

@@ -128,6 +128,13 @@ pub(crate) enum Command {
         /// Bounded change-set publication evidence for a `[change_set_pin]` manifest.
         #[arg(long)]
         change_set_evidence: Option<PathBuf>,
+        /// Signed family release manifest (tenkai.family-release-manifest.v1) from
+        /// the component's v* workflow. Its gate flags hold channels on promote.
+        #[arg(long, requires_all = ["family_release_signature", "trust_roots"])]
+        family_release: Option<PathBuf>,
+        /// Release signature over the family release manifest.
+        #[arg(long, requires = "family_release")]
+        family_release_signature: Option<PathBuf>,
     },
     /// Check this host for an environment and record signed preflight evidence.
     Preflight {
