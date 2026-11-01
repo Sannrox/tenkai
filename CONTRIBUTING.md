@@ -31,10 +31,11 @@ operational, or security implications. Do not edit `CHANGELOG.md`; the
 release step drafts it ([RELEASING.md](RELEASING.md)).
 
 When callers must act, mark the title `type!:` or add a `## Breaking` or
-`## Upgrade` section, and add the `risk:breaking` label. The CI
-`Proto breaking` job runs `buf breaking` (rules in `proto/buf.yaml`) against
-the last final `v*` tag; a reported break passes only with that marker and
-label.
+`## Upgrade` section, and add the `risk:breaking` label. A reported break
+passes only with that marker and label in two CI jobs: `Semver` runs
+`cargo-semver-checks` on the library crates against the pull request base,
+and `Proto breaking` runs `buf breaking` (rules in `proto/buf.yaml`) against
+the last final `v*` tag.
 
 ## Review gates
 
