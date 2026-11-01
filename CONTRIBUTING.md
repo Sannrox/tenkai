@@ -30,15 +30,12 @@ linked Issue, and any protocol, persistence, migration, configuration,
 operational, or security implications. Do not edit `CHANGELOG.md`; the
 release step drafts it ([RELEASING.md](RELEASING.md)).
 
-When callers must act, mark the title `type!:` or add a `## Breaking` or
-`## Upgrade` section, and add the `risk:breaking` label. A reported break
-passes only with that marker and label in two CI jobs: `Semver` runs
-`cargo-semver-checks` on the library crates against the pull request base,
-and `Proto breaking` runs `buf breaking` (rules in `proto/buf.yaml`) against
-the last final `v*` tag.
-
 ## Review gates
 
 Before review, run `make validate` and the focused tests for the change.
 `make validate` runs every `scripts/validate-*.sh`. Clippy matches
 `cargo clippy --all-targets --all-features --locked -- -D warnings`.
+The CI `Proto breaking` job runs `buf breaking` (rules in `proto/buf.yaml`)
+against the last final `v*` tag. A reported break passes only when the pull
+request title is `type!:` or its body has a `## Breaking` or `## Upgrade`
+section, and the pull request carries the `risk:breaking` label.
