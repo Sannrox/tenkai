@@ -32,6 +32,8 @@ pub(crate) async fn run(
             provenance,
             provenance_trust_roots,
             change_set_evidence,
+            family_release,
+            family_release_signature,
         } => {
             let options = catalog::PublishOptions {
                 signature,
@@ -41,6 +43,12 @@ pub(crate) async fn run(
                 provenance_trust_roots,
                 change_set_evidence: change_set_evidence
                     .map(tenkai::change_set_pin::ChangeSetEvidenceInput::File),
+                family_release: family_release.zip(family_release_signature).map(
+                    |(manifest, signature)| catalog::FamilyReleaseInput {
+                        manifest,
+                        signature,
+                    },
+                ),
                 artifact_registry: tenkai::oci_artifact::selected_registry().ok().flatten(),
                 state_dir: None,
             };

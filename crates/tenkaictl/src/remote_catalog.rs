@@ -21,11 +21,14 @@ pub(crate) async fn run(
             provenance,
             provenance_trust_roots,
             change_set_evidence,
+            family_release,
+            family_release_signature: _,
         } => {
             if allow_unsigned_development
                 || !provenance.is_empty()
                 || provenance_trust_roots.is_some()
                 || change_set_evidence.is_some()
+                || family_release.is_some()
             {
                 bail!(
                     "the local-development publish bypass and extra publication evidence are available only with --target embedded"
