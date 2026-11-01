@@ -22,6 +22,7 @@ mod embedded_reconcile;
 mod embedded_remediate;
 mod embedded_rollback;
 mod embedded_topology;
+mod embedded_train;
 mod embedded_upgrade;
 mod embedded_wave;
 mod env_args;
@@ -45,6 +46,7 @@ mod spoke_standby;
 mod tests;
 mod token_cache;
 mod topology_args;
+mod train_args;
 mod upgrade_args;
 mod wave_args;
 

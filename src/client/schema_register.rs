@@ -276,6 +276,27 @@ pub fn known_object_types() -> Vec<ObjectType> {
             ],
         ),
         object_type(
+            crate::release_train::TRAIN_KIND,
+            "A signed family release train: component releases tested together",
+            vec![
+                prop("document", true, "tenkai.release-train.v1 JSON"),
+                prop("digest", true, "SHA-256 of the train document"),
+                prop("channel", true, "candidate|stable"),
+                prop("admitted_by", true, "Principal that admitted the train"),
+                prop("promoted_by", false, "Principal that promoted it to stable"),
+                prop(
+                    "gate_flags",
+                    false,
+                    "Comma-separated gate flags its member releases carry",
+                ),
+                prop(
+                    "gates_approved_by",
+                    false,
+                    "Principal that approved the gate flags at promotion",
+                ),
+            ],
+        ),
+        object_type(
             crate::delivery_hold::HOLD_AUDIT_KIND,
             "An immutable delivery hold set or clear event",
             vec![

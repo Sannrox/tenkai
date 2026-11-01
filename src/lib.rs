@@ -245,6 +245,7 @@ pub mod reconciler;
 pub mod recovery_bundle;
 pub mod release_provenance;
 pub mod release_signing;
+pub mod release_train;
 pub mod rollout_time;
 pub mod routing;
 pub mod runner_attestation;
