@@ -40,3 +40,7 @@ base; a reported major break passes only with that marker and label.
 Before review, run `make validate` and the focused tests for the change.
 `make validate` runs every `scripts/validate-*.sh`. Clippy matches
 `cargo clippy --all-targets --all-features --locked -- -D warnings`.
+The CI `Proto breaking` job runs `buf breaking` (rules in `proto/buf.yaml`)
+against the last final `v*` tag. A reported break passes only when the pull
+request title is `type!:` or its body has a `## Breaking` or `## Upgrade`
+section, and the pull request carries the `risk:breaking` label.

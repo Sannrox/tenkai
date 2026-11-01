@@ -1,0 +1,11 @@
+# buf configuration for tenkai's proto surface. CI runs `buf breaking`
+# against the last final v* tag (see the Proto breaking job). FILE is the
+# strictest category: renames and moves break the generated Rust code, not
+# only the wire. vendor/ copies sekai-chisei's protos, which that repository
+# checks against its own tags.
+version: v2
+breaking:
+  use:
+    - FILE
+  ignore:
+    - vendor
