@@ -111,10 +111,10 @@ pub fn admit(evidence: &Evidence<'_>, product: &str, version: &str) -> Result<Ad
     let manifest: Manifest =
         serde_json::from_str(&raw).context("parsing the family release manifest")?;
     validate(&manifest, product, version)?;
-    let digest = crate::manifest::digest(&raw);
+    let (digest, contents) = signed_digests(&raw)?;
     let envelope = SignatureEnvelope::load(evidence.signature)?;
     let roots = TrustRoots::load(evidence.trust_roots)?;
-    verify_release(&envelope, &roots, &digest, &contents_digest(&manifest))
+    verify_release(&envelope, &roots, &digest, &contents)
         .context("verifying the family release manifest signature")?;
     Ok(Admitted {
         digest,
@@ -125,11 +125,18 @@ pub fn admit(evidence: &Evidence<'_>, product: &str, version: &str) -> Result<Ad
 /// Gate flags stored on a release; empty for a release published without a
 /// family manifest.
 pub fn stored_gate_flags(release: &Object) -> Result<BTreeSet<GateFlag>> {
-    release
-        .properties
-        .get(GATE_FLAGS_PROPERTY)
-        .map(String::as_str)
-        .unwrap_or_default()
+    parse_flags(
+        release
+            .properties
+            .get(GATE_FLAGS_PROPERTY)
+            .map(String::as_str)
+            .unwrap_or_default(),
+    )
+}
+
+/// Parse a comma-separated gate flag list as written by [`join_flags`].
+pub(crate) fn parse_flags(value: &str) -> Result<BTreeSet<GateFlag>> {
+    value
         .split(',')
         .filter(|flag| !flag.is_empty())
         .map(GateFlag::parse)
@@ -158,7 +165,7 @@ pub fn hold_reason(release: &str, flags: &BTreeSet<GateFlag>) -> String {
     )
 }
 
-fn join_flags(flags: &BTreeSet<GateFlag>) -> String {
+pub(crate) fn join_flags(flags: &BTreeSet<GateFlag>) -> String {
     flags
         .iter()
         .map(|flag| flag.as_str())
@@ -251,6 +258,14 @@ fn validate_image(image: &Named) -> Result<()> {
     )
 }
 
+/// The `(manifest digest, artifact digest)` pair a release signature over the
+/// family manifest `raw` must carry. Signers and tests use it to sign.
+pub(crate) fn signed_digests(raw: &str) -> Result<(String, String)> {
+    let manifest: Manifest =
+        serde_json::from_str(raw).context("parsing the family release manifest")?;
+    Ok((crate::manifest::digest(raw), contents_digest(&manifest)))
+}
+
 /// SHA-256 over the sorted `kind name digest` lines of every binary and
 /// image, so the signature binds the exact admitted contents.
 fn contents_digest(manifest: &Manifest) -> String {
@@ -321,13 +336,13 @@ mod tests {
     fn signed(dir: &Path, raw: &str) -> (PathBuf, PathBuf, PathBuf) {
         let manifest_path = dir.join("family-release.json");
         std::fs::write(&manifest_path, raw).unwrap();
-        let parsed: Manifest = serde_json::from_str(raw).unwrap();
+        let (manifest_digest, contents) = signed_digests(raw).unwrap();
         let signature = dir.join("family-release.sig.json");
         let roots = dir.join("trust-roots.toml");
         crate::dev_sign::sign_digests(
             &dir.join("keys"),
-            &crate::manifest::digest(raw),
-            &contents_digest(&parsed),
+            &manifest_digest,
+            &contents,
             &signature,
             &roots,
         )

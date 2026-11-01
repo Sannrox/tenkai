@@ -98,6 +98,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
             crate::embedded_rollback::run(&mut ctx, command, output).await
         }
         Command::Product { command } => crate::embedded_product::run(&mut ctx, command).await,
+        Command::Train { command } => crate::embedded_train::run(&mut ctx, command).await,
         Command::Preflight {
             env,
             config,

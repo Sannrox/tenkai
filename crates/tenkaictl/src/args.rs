@@ -216,6 +216,11 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: ChannelCommand,
     },
+    /// Family release trains: signed sets of component releases tested together.
+    Train {
+        #[command(subcommand)]
+        command: crate::train_args::TrainCommand,
+    },
     /// Manage environments.
     Env {
         #[command(subcommand)]

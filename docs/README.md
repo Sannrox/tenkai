@@ -119,6 +119,7 @@ will be split over time. Contributor and agent workflow live in
 | Release signing | [release-signing.md](release-signing.md) |
 | Release provenance | [release-provenance.md](release-provenance.md) |
 | Family release manifests | [family-release-manifests.md](family-release-manifests.md) |
+| Release trains | [release-trains.md](release-trains.md) |
 | Plan approval | [plan-approval.md](plan-approval.md) |
 | Host preflight | [host-preflight.md](host-preflight.md) |
 | Key rollover and offline revocation | [key-rollover.md](key-rollover.md) |
