@@ -180,3 +180,40 @@ fn schema_eleven_backfills_environment_retirement_column() {
     drop(store);
     let _ = std::fs::remove_file(path);
 }
+
+/// A state database the previous release (v0.5.0, schema 12) wrote opens and
+/// migrates to the current schema with its rows intact.
+#[test]
+fn previous_release_state_database_migrates_with_its_data() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch(include_str!("fixtures/state-schema-12.sql"))
+        .unwrap();
+    let version = |connection: &Connection| {
+        connection
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+            .unwrap()
+    };
+    assert_eq!(version(&connection), 12);
+    migrate(&mut connection).unwrap();
+    assert_eq!(version(&connection), SCHEMA_VERSION);
+    let channel: (String, String) = connection
+        .query_row(
+            "SELECT release_id, name FROM channels WHERE id = 'chan-kako-stable'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(channel, ("rel-kako-0.1.0".into(), "stable".into()));
+    let audit: String = connection
+        .query_row(
+            "SELECT operation FROM audit_events WHERE id = 'audit-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(audit, "promote");
+    // Migrating again is a no-op.
+    migrate(&mut connection).unwrap();
+    assert_eq!(version(&connection), SCHEMA_VERSION);
+}
