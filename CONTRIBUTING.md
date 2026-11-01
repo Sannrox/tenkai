@@ -30,6 +30,11 @@ linked Issue, and any protocol, persistence, migration, configuration,
 operational, or security implications. Do not edit `CHANGELOG.md`; the
 release step drafts it ([RELEASING.md](RELEASING.md)).
 
+When callers must act, mark the title `type!:` or add a `## Breaking` or
+`## Upgrade` section, and add the `risk:breaking` label. The CI `Semver` job
+runs `cargo-semver-checks` on the library crates against the pull request
+base; a reported major break passes only with that marker and label.
+
 ## Review gates
 
 Before review, run `make validate` and the focused tests for the change.
