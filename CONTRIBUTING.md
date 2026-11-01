@@ -30,6 +30,12 @@ linked Issue, and any protocol, persistence, migration, configuration,
 operational, or security implications. Do not edit `CHANGELOG.md`; the
 release step drafts it ([RELEASING.md](RELEASING.md)).
 
+When callers must act, mark the title `type!:` or add a `## Breaking` or
+`## Upgrade` section, and add the `risk:breaking` label. The CI
+`Proto breaking` job runs `buf breaking` (rules in `proto/buf.yaml`) against
+the last final `v*` tag; a reported break passes only with that marker and
+label.
+
 ## Review gates
 
 Before review, run `make validate` and the focused tests for the change.
