@@ -27,7 +27,7 @@ and signed release identity.
 2. Draft notes with `scripts/changelog-draft.sh`. Pull requests never edit
    `CHANGELOG.md`; the release step writes the section from merged work.
    The section heading is `## vX.Y.Z (date)` or `## [X.Y.Z]`; its body is the
-   GitHub Release body. List gate markers on one line,
+   GitHub Release body. List gate markers on one required line,
    `Gate flags: breaking, migration, realm` (any subset, or `none`), from the
    `risk:breaking` and `risk:migration` pull requests and any realm change in
    the range. The release manifest copies them.

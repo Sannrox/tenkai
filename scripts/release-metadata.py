@@ -11,10 +11,14 @@ Usage:
       Validate PATH against the CycloneDX 1.5 JSON schema and SPDX license
       expressions. Needs cyclonedx-python-lib[json-validation]; the release
       workflow runs it in a job without attestation permissions.
+  scripts/release-metadata.py gate-flags VERSION
+      Print the gate flags of the VERSION section; fail when its
+      `Gate flags:` line is missing.
   scripts/release-metadata.py manifest --version V --git-sha SHA --tag TAG
-      --dist DIR --out PATH [--attestation URL]...
+      --dist DIR --out PATH [--attestation URL]... [--allow-missing-gate-flags]
       Write the tenkai.family-release-manifest.v1 (docs/family-release-manifests.md)
       for the release assets in DIR, with gate flags from the CHANGELOG section.
+      Only the dry run of an already released version allows a missing line.
   scripts/release-metadata.py self-test
 
 Everything except check-sbom uses only the standard library.
@@ -58,11 +62,16 @@ def changelog_section(text: str, version: str) -> str:
     raise SystemExit(f"CHANGELOG.md has no section for {version}")
 
 
-def gate_flags(section: str) -> list[str]:
-    """Flags from the section's optional `Gate flags: a, b` line (`none` allowed)."""
+def gate_flags(section: str, *, required: bool = True) -> list[str]:
+    """Flags from the section's `Gate flags: a, b` (or `none`) line.
+
+    A missing line fails: an empty list would release without a channel hold.
+    """
     lines = _GATE_LINE.findall(section)
     if len(lines) > 1:
         raise SystemExit("CHANGELOG section has more than one 'Gate flags:' line")
+    if not lines and required:
+        raise SystemExit("CHANGELOG section has no 'Gate flags:' line (list flags or 'none')")
     if not lines or lines[0].strip().lower() == "none":
         return []
     flags = {flag.strip().lower() for flag in lines[0].split(",") if flag.strip()}
@@ -219,7 +228,8 @@ def self_test() -> None:
     assert "feat: one" in section and "fix: two" not in section, section
     assert changelog_section(changelog, "0.6.1") == "- fix: two"
     assert gate_flags(section) == ["breaking", "migration"]
-    assert gate_flags("- fix: two") == []
+    expect_exit("no 'Gate flags:' line", lambda: gate_flags("- fix: two"))
+    assert gate_flags("- fix: two", required=False) == []
     assert gate_flags("Gate flags: none") == []
     expect_exit("unknown gate flags", lambda: gate_flags("Gate flags: risky"))
     expect_exit("no section for 9.9.9", lambda: changelog_section(changelog, "9.9.9"))
@@ -269,6 +279,8 @@ def main(argv: list[str]) -> None:
     commands = parser.add_subparsers(dest="command", required=True)
     notes = commands.add_parser("notes")
     notes.add_argument("version")
+    gates = commands.add_parser("gate-flags")
+    gates.add_argument("version")
     sbom = commands.add_parser("sbom")
     sbom.add_argument("out", type=Path)
     check = commands.add_parser("check-sbom")
@@ -280,6 +292,7 @@ def main(argv: list[str]) -> None:
     manifest.add_argument("--dist", required=True, type=Path)
     manifest.add_argument("--out", required=True, type=Path)
     manifest.add_argument("--attestation", action="append", default=[])
+    manifest.add_argument("--allow-missing-gate-flags", action="store_true")
     commands.add_parser("self-test")
     args = parser.parse_args(argv)
 
@@ -287,6 +300,9 @@ def main(argv: list[str]) -> None:
         self_test()
     elif args.command == "notes":
         print(changelog_section((ROOT / "CHANGELOG.md").read_text(), args.version))
+    elif args.command == "gate-flags":
+        section = changelog_section((ROOT / "CHANGELOG.md").read_text(), args.version)
+        print(", ".join(gate_flags(section)) or "none")
     elif args.command == "sbom":
         raw = subprocess.check_output(
             ["cargo", "metadata", "--locked", "--format-version", "1"], cwd=ROOT, text=True
@@ -304,7 +320,7 @@ def main(argv: list[str]) -> None:
             tag=args.tag,
             dist=args.dist,
             attestations=[url for url in args.attestation if url],
-            flags=gate_flags(section),
+            flags=gate_flags(section, required=not args.allow_missing_gate_flags),
         )
         args.out.write_text(json.dumps(document, indent=2) + "\n")
 

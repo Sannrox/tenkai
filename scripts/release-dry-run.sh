@@ -44,7 +44,15 @@ python3 -m venv "${tmp}/venv"
 "${tmp}/venv/bin/pip" install --quiet --disable-pip-version-check -r scripts/release-sbom-requirements.txt
 "${tmp}/venv/bin/python" scripts/release-metadata.py check-sbom "${dist}/tenkai.cdx.json"
 
-python3 scripts/release-metadata.py manifest \
+# A version whose tag already exists was released before the CHANGELOG
+# carried gate flags; a version still to be tagged must list them.
+gate_args=()
+if git ls-remote --exit-code --tags origin "refs/tags/v${version}" >/dev/null 2>&1; then
+  gate_args=(--allow-missing-gate-flags)
+else
+  printf 'gate flags for v%s: %s\n' "$version" "$(python3 scripts/release-metadata.py gate-flags "$version")"
+fi
+python3 scripts/release-metadata.py manifest ${gate_args[@]+"${gate_args[@]}"} \
   --version "$version" \
   --git-sha "$(git rev-parse HEAD)" \
   --tag "v${version}" \

@@ -63,7 +63,14 @@ verify_signed_tag() {
   [[ -f "$KEY_FILE" ]] || fail "missing release tag key: ${KEY_FILE}"
   [[ -f "$FINGERPRINTS_FILE" ]] || fail "missing release tag fingerprints: ${FINGERPRINTS_FILE}"
   gpg --batch --quiet --import "$KEY_FILE" >/dev/null 2>&1 || fail "could not import ${KEY_FILE}"
-  raw="$(git verify-tag --raw "refs/tags/${tag}" 2>&1)" || true
+  # git verify-tag succeeds only on GOODSIG; also refuse a good signature
+  # from a revoked or expired key, which GnuPG still reports as VALIDSIG.
+  verified=true
+  raw="$(git verify-tag --raw "refs/tags/${tag}" 2>&1)" || verified=false
+  if grep -Eq '^\[GNUPG:\] (REVKEYSIG|EXPKEYSIG|EXPSIG) ' <<<"$raw"; then
+    fail "tag ${tag} is signed by a revoked or expired key"
+  fi
+  $verified || fail "tag ${tag} is unsigned or its signature is not valid"
   line="$(grep -m1 '^\[GNUPG:\] VALIDSIG ' <<<"$raw")" || fail "tag ${tag} is unsigned or its signature is not valid"
   fingerprint="$(normalize_fingerprint "$(awk '{ print $3 }' <<<"$line")")"
   primary="$(normalize_fingerprint "$(awk '{ print $12 }' <<<"$line")")"
@@ -171,6 +178,13 @@ signed_self_test() {
   (cd "$work" && expect_signed_failure "does not match workspace version 1.2.3" v1.2.4 "$first")
   printf 'AEDA618886BF0331105B9CFCE4DC1F4A579505FB\n' >"${tmp}/fingerprints"
   (cd "$work" && expect_signed_failure "not listed" v1.2.3 "$first")
+  printf '%s\n' "$fpr" >"${tmp}/fingerprints"
+  # The revocation certificate gpg wrote at key generation, armored with a
+  # leading ':' so it is not imported by accident.
+  sed 's/^:-----/-----/' "${GNUPGHOME}/openpgp-revocs.d/${fpr}.rev" | gpg --batch --quiet --import >/dev/null 2>&1 \
+    || fail "could not revoke the self-test key"
+  gpg --batch --armor --export "$fpr" >"${tmp}/key.asc"
+  (cd "$work" && expect_signed_failure "revoked or expired" v1.2.3 "$first")
   gpgconf --kill gpg-agent >/dev/null 2>&1 || true
 }
 

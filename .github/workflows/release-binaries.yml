@@ -24,8 +24,10 @@ jobs:
         run: git fetch --no-tags --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
       - name: Refuse lightweight, unsigned, or off-version tags
         run: bash scripts/verify-release-tag.sh verify-signed "${GITHUB_REF_NAME}" "${GITHUB_SHA}"
-      - name: Require the CHANGELOG section
-        run: python3 scripts/release-metadata.py notes "${GITHUB_REF_NAME#v}" >/dev/null
+      - name: Require the CHANGELOG section and its gate flags
+        run: |
+          python3 scripts/release-metadata.py notes "${GITHUB_REF_NAME#v}" >/dev/null
+          python3 scripts/release-metadata.py gate-flags "${GITHUB_REF_NAME#v}"
 
   sbom:
     name: CycloneDX SBOM

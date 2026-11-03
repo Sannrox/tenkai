@@ -121,7 +121,8 @@ The first job fetches the tag object and runs
 signed by a key listed in `security/release-tag-fingerprints`
 (public key in `security/release-tag-key.asc`), resolve to the triggering
 commit, and equal the workspace version. Lightweight and unsigned tags stop
-the workflow before anything is built. The tag's CHANGELOG section must exist.
+the workflow before anything is built. The tag's CHANGELOG section must exist
+and carry its `Gate flags:` line.
 
 The workflow then builds the five community hosts with `--workspace --features tenkai-server/ui`,
 rebuilds `tenkai-server` with `-p tenkai-server --features postgres,ui` and names it
