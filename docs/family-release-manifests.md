@@ -33,6 +33,17 @@ and gate flags on the release. Re-publishing the same release with a different
 family manifest, or adding one to a release published without it, is refused:
 releases are immutable.
 
+## Tenkai's own manifest
+
+Tenkai's release workflow attaches `tenkai-release.json` to each GitHub
+Release ([release binaries](release-binaries.md#packaging-path)). It lists
+every host and the HTTP API contract by digest, the provenance and SBOM
+attestation URLs, `images: []`, and the gate flags from the `Gate flags:`
+line of the version's `CHANGELOG.md` section. The workflow attests the
+manifest; it holds no long-lived signing key. The release signature that
+`--family-release-signature` takes is made by the release owner with a
+publication key.
+
 ## Gate flags hold channels
 
 `tenkaictl promote <product>@<version> <channel>` sets a delivery hold on the

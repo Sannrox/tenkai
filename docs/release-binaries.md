@@ -26,8 +26,9 @@ Source `cargo build` remains valid.
 Platforms: `linux-x86_64`, `darwin-aarch64`. Community asset names are
 `<binary>-<platform>`. The hub host is `tenkai-server-postgres-<platform>`
 so it does not replace `tenkai-server-<platform>`. The release also attaches
-`SHA256SUMS` and `tenkai-http-v1.schema.json`, the HTTP API contract clients
-generate types from (see `api/` in the repository).
+`SHA256SUMS`, `tenkai-http-v1.schema.json` (the HTTP API contract clients
+generate types from, see `api/` in the repository), the `tenkai.cdx.json`
+SBOM, and the `tenkai-release.json` family release manifest.
 The fixture and Postgres conformance harness stay source-built.
 
 ## Verify and install
@@ -115,16 +116,48 @@ Spoke and embedded CLI continue to refuse `TENKAI_POSTGRES_URL`.
 ## Packaging path
 
 Tag `v[0-9]+.[0-9]+.[0-9]+` starts `.github/workflows/release-binaries.yml`.
-That workflow builds the five community hosts with `--workspace --features tenkai-server/ui`, then
+The first job fetches the tag object and runs
+`scripts/verify-release-tag.sh verify-signed`: the tag must be annotated,
+signed by a key listed in `security/release-tag-fingerprints`
+(public key in `security/release-tag-key.asc`), resolve to the triggering
+commit, and equal the workspace version. Lightweight and unsigned tags stop
+the workflow before anything is built. The tag's CHANGELOG section must exist.
+
+The workflow then builds the five community hosts with `--workspace --features tenkai-server/ui`,
 rebuilds `tenkai-server` with `-p tenkai-server --features postgres,ui` and names it
 `tenkai-server-postgres-<platform>` with
 `scripts/package-release-binaries.sh package-hub`. It adds the HTTP API
-contract, writes `SHA256SUMS`, and attests every packaged file before the
-upload job runs. The upload job checks that the live
-tag resolves to the triggering commit. If the Release does not exist yet, the
-workflow creates it; if it already exists, the workflow attaches or replaces
-only the asset files and does not rewrite notes. A tag mismatch fails closed
-before assets are uploaded.
+contract and writes `SHA256SUMS`. A separate job writes `tenkai.cdx.json`, a
+CycloneDX 1.5 SBOM of the locked Cargo graph and the pinned web console, and
+validates it against the CycloneDX schema and SPDX license expressions
+(`scripts/release-metadata.py`). The attest job then creates:
+
+- a provenance attestation for every host, the contract, `SHA256SUMS`, and the SBOM;
+- an SBOM attestation for every file listed in `SHA256SUMS`;
+- `tenkai-release.json`, the [family release manifest](family-release-manifests.md),
+  and a provenance attestation for it.
+
+The upload job checks that the live tag resolves to the triggering commit,
+creates a draft GitHub Release whose body is the tag's `CHANGELOG.md`
+section, attaches the assets, and publishes it. A rerun resumes a draft. An
+already published Release is refused, not edited. A tag mismatch fails
+closed before assets are uploaded. Pull requests run
+`scripts/release-dry-run.sh` instead, which writes the same notes, SBOM, and
+manifest for stub hosts and never attests or publishes.
+
+Verify the SBOM and manifest like a host:
+
+```bash
+for asset in tenkai.cdx.json tenkai-release.json; do
+  curl -fsSL -O "${base}/${asset}"
+  gh attestation verify "$asset" \
+    --repo Sannrox/tenkai \
+    --signer-workflow Sannrox/tenkai/.github/workflows/release-binaries.yml \
+    --source-ref "refs/tags/${tag}"
+done
+gh attestation verify "tenkaictl-${platform}" --repo Sannrox/tenkai \
+  --predicate-type https://cyclonedx.org/bom
+```
 
 Tags `v0.2.0`, `v0.3.0`, and `v0.3.1` predate this workflow and have no
 attached hosts. Install those from source. First attached hosts: `v0.3.2`.

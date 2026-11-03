@@ -80,6 +80,18 @@ jobs:
           components: rustfmt
       - run: cargo fmt --check
 
+  # The v* workflow's notes, SBOM, and manifest steps against stub binaries.
+  # No attestations, tags, or releases.
+  release-dry-run:
+    name: Release dry run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.96.1
+      - run: bash scripts/release-dry-run.sh
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
