@@ -7,6 +7,7 @@
 #   scripts/package-release-binaries.sh package-hub --out DIR [--bin-dir DIR]
 #       [--platform ID] [--strip]
 #   scripts/package-release-binaries.sh checksums --out DIR [--require-complete]
+#   scripts/package-release-binaries.sh names
 #   scripts/package-release-binaries.sh self-test
 #
 # Community hosts: tenkaictl, tenkai-server, tenkai-executor-guard,
@@ -26,7 +27,7 @@ CHECKSUMS_NAME=SHA256SUMS
 CONTRACT_ASSETS=(tenkai-http-v1.schema.json)
 
 usage() {
-  sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-2}"
 }
 
@@ -401,6 +402,7 @@ main() {
     package) cmd_package "$@" ;;
     package-hub) cmd_package_hub "$@" ;;
     checksums) cmd_checksums "$@" ;;
+    names) complete_names ;;
     self-test) cmd_self_test "$@" ;;
     -h | --help | "") usage 0 ;;
     *) usage 1 ;;

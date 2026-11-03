@@ -1,0 +1,3 @@
+# Validator for the release SBOM (scripts/release-metadata.py check-sbom).
+# Installed into a throwaway venv by the dry run and the release sbom job.
+cyclonedx-python-lib[json-validation]==11.12.0
