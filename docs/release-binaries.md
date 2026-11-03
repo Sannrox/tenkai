@@ -128,10 +128,11 @@ The workflow then builds the five community hosts with `--workspace --features t
 rebuilds `tenkai-server` with `-p tenkai-server --features postgres,ui` and names it
 `tenkai-server-postgres-<platform>` with
 `scripts/package-release-binaries.sh package-hub`. It adds the HTTP API
-contract and writes `SHA256SUMS`. A separate job writes `tenkai.cdx.json`, a
-CycloneDX 1.5 SBOM of the locked Cargo graph and the pinned web console, and
-validates it against the CycloneDX schema and SPDX license expressions
-(`scripts/release-metadata.py`). The attest job then creates:
+contract and writes `SHA256SUMS`. `scripts/release-metadata.py` writes
+`tenkai.cdx.json`, a CycloneDX 1.5 SBOM of the locked Cargo graph and the
+pinned web console. A separate job validates it against the CycloneDX schema
+and SPDX license expressions; the attest job regenerates it and requires the
+validated digest. The attest job then creates:
 
 - a provenance attestation for every host, the contract, `SHA256SUMS`, and the SBOM;
 - an SBOM attestation for every file listed in `SHA256SUMS`;
