@@ -178,7 +178,7 @@ fn two_plans_racing_for_one_generation_run_once() {
                 let paths = &host.paths;
                 scope.spawn(move || {
                     barrier.wait();
-                    match store::admit(paths, &intake.verified, tenkai::now_millis())? {
+                    match store::admit(paths, &intake.verified)? {
                         Admission::Run(running) => {
                             std::thread::sleep(std::time::Duration::from_millis(50));
                             running.finish(HostApplyOutcome::Succeeded, Some(0), "", 0)?;
@@ -377,4 +377,37 @@ fn a_release_that_does_not_compare_keeps_the_high_water_release() {
     // 2.0.0 is still older than 3.0.0, which was applied.
     let (install_two, _) = host.spool(install(&two, Some("nightly"), 2));
     assert!(refusal(host.admit(&install_two)).contains("high-water release 3.0.0"));
+}
+
+#[test]
+fn approvals_that_expire_while_waiting_for_the_lock_do_not_start_the_step() {
+    let host = Host::new(Vec::new());
+    let a = host.release("1.0.0");
+    let now = tenkai::now_millis();
+    let plan = host.fixture.plan(
+        "edge",
+        now,
+        &[tenkai::host_apply::fixture::StepSpec {
+            release: a.release.clone(),
+            action: HostAction::Install,
+            step_action: Action::Install,
+            from: None,
+            expected_generation: 0,
+        }],
+    );
+    let short = tenkai::host_apply::fixture::approve_with(
+        &host.fixture.approvers[0].key,
+        &plan,
+        "external-review",
+        now - 1_000,
+        now + 500,
+    );
+    let request = host.fixture.request(&plan, 0, &a.release, vec![short]);
+    let instance = host.spool_request(&request, &a.dir);
+    let intake = host.intake(&instance).unwrap();
+    // The lock wait outlasts the approval.
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    let refused = refusal(store::admit(&host.paths, &intake.verified));
+    assert!(refused.contains("stopped being valid"), "{refused}");
+    assert_eq!(host.record().generation, 0);
 }

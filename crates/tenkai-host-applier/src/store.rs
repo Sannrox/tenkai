@@ -79,11 +79,13 @@ impl Running {
 
 /// The critical section: under the per-product lock, settle the step that
 /// last advanced the record, return the recorded result of an instance that
-/// already started, then check the generation, source release, and
-/// downgrade approvals, and durably write the advanced record and the
-/// `started` record before anything runs.
-pub fn admit(paths: &ApplierPaths, step: &VerifiedHostStep, now_ms: i64) -> Result<Admission> {
+/// already started, then check that the approvals are still valid after the
+/// wait for the lock, the generation, source release, and downgrade
+/// approvals, and durably write the advanced record and the `started` record
+/// before anything runs.
+pub fn admit(paths: &ApplierPaths, step: &VerifiedHostStep) -> Result<Admission> {
     let lock = lock_product(paths, &step.environment, &step.product)?;
+    let now_ms = tenkai::now_millis();
     let mut record = read_record(paths, &step.environment, &step.product)?;
     settle_last(paths, &mut record, now_ms)?;
     if let Some(result) = recorded_result(paths, &step.instance)? {
@@ -96,6 +98,7 @@ pub fn admit(paths: &ApplierPaths, step: &VerifiedHostStep, now_ms: i64) -> Resu
         write_result(paths, &result)?;
         return Ok(Admission::Recorded(result));
     }
+    step.approvals.require_unexpired(now_ms)?;
     let (started, advanced) = record.admit(step, now_ms)?;
     if let Some(advanced) = &advanced {
         write_record(paths, advanced)?;

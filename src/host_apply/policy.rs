@@ -135,6 +135,7 @@ impl HostApprovalPolicy {
         let roots = self.trust_roots();
         let mut candidates = Vec::new();
         let mut rejected = Vec::new();
+        let mut valid_until = i64::MAX;
         for envelope in envelopes {
             let statement = &envelope.statement;
             if statement.policy_provider == crate::approval_policy::POLICY_PROVIDER {
@@ -155,15 +156,24 @@ impl HostApprovalPolicy {
             }
             // The gate-skip flag is server state; an approval binds it either way.
             match verify_envelope(plan, envelope, &roots, now_ms, statement.skip_gates) {
-                Ok(evidence) => candidates.push(CountedApproval {
-                    key_id: evidence.key_id,
-                    identity: evidence.signer_identity,
-                    groups: roots
-                        .signer(&envelope.key_id)
-                        .map(|signer| signer.groups.clone())
-                        .unwrap_or_default(),
-                    auto: false,
-                }),
+                Ok(evidence) => {
+                    let signer = roots.signer(&envelope.key_id).ok();
+                    // The approval stops counting at its expiry or when its
+                    // signer's window closes, whichever comes first.
+                    valid_until = valid_until.min(statement.expires_at).min(
+                        signer
+                            .and_then(|signer| signer.not_after)
+                            .unwrap_or(i64::MAX),
+                    );
+                    candidates.push(CountedApproval {
+                        key_id: evidence.key_id,
+                        identity: evidence.signer_identity,
+                        groups: signer
+                            .map(|signer| signer.groups.clone())
+                            .unwrap_or_default(),
+                        auto: false,
+                    })
+                }
                 Err(error) => rejected.push(format!("{}: {error:#}", envelope.key_id)),
             }
         }
@@ -186,7 +196,11 @@ impl HostApprovalPolicy {
                 refusals.insert(purpose, missing.join("; "));
             }
         }
-        HostApprovals { refusals, rejected }
+        HostApprovals {
+            refusals,
+            rejected,
+            valid_until,
+        }
     }
 }
 
@@ -195,9 +209,23 @@ impl HostApprovalPolicy {
 pub struct HostApprovals {
     refusals: BTreeMap<QuorumPurpose, String>,
     rejected: Vec<String>,
+    valid_until: i64,
 }
 
 impl HostApprovals {
+    /// Refuse at `now_ms` once any counted approval expired or its signer's
+    /// window closed: the tally holds only until then. The applier checks
+    /// this again after waiting for the product lock.
+    pub fn require_unexpired(&self, now_ms: i64) -> Result<()> {
+        if now_ms >= self.valid_until {
+            bail!(
+                "an approval counted for this step stopped being valid at {} before the step could start",
+                self.valid_until
+            );
+        }
+        Ok(())
+    }
+
     /// Refuse unless every rule for `purpose` is met.
     pub fn require(&self, purpose: QuorumPurpose) -> Result<()> {
         let Some(refusal) = self.refusals.get(&purpose) else {

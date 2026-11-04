@@ -152,7 +152,7 @@ impl Host {
     /// Intake and admit `instance`.
     pub fn admit(&self, instance: &str) -> anyhow::Result<Admission> {
         let intake = self.intake(instance)?;
-        store::admit(&self.paths, &intake.verified, tenkai::now_millis())
+        store::admit(&self.paths, &intake.verified)
     }
 
     /// Admit `instance` and, when admitted, finish it with `outcome` without
