@@ -50,7 +50,8 @@ impl Ctx {
         self.backend.object_lifecycle().put(object).await
     }
 
-    /// Write `object` with `events` and feedback `observations` atomically.
+    /// Write `object` with `events` and feedback `observations` atomically,
+    /// on the embedded store or the tenant's catalog partition (#868).
     /// Remote application state has no observation store: there the
     /// observations are dropped and the write goes ahead (#802).
     pub(crate) async fn put_with_provider_events(
@@ -61,11 +62,12 @@ impl Ctx {
     ) -> Result<Object> {
         let events = self.with_feedback_export_events(events, observations);
         if let Some((catalog, Some(tenant))) = self.catalog_binding() {
-            if events.is_empty() {
+            if events.is_empty() && observations.is_empty() {
                 return self.put(object).await;
             }
+            let observations = observations.to_vec();
             return super::block_catalog(catalog, move |catalog| {
-                catalog.put_with_provider_events(Some(&tenant), object, &events)
+                catalog.put_with_provider_events(Some(&tenant), object, &events, &observations)
             })
             .await;
         }
@@ -96,8 +98,14 @@ impl Ctx {
         let events = self.with_feedback_export_events(events, observations);
         if let Some((catalog, Some(tenant))) = self.catalog_binding() {
             let objects = objects.to_vec();
+            let observations = observations.to_vec();
             return super::block_catalog(catalog, move |catalog| {
-                catalog.put_objects_with_provider_events(Some(&tenant), &objects, &events)
+                catalog.put_objects_with_provider_events(
+                    Some(&tenant),
+                    &objects,
+                    &events,
+                    &observations,
+                )
             })
             .await;
         }
@@ -237,11 +245,10 @@ impl Ctx {
     ) -> Result<()> {
         let events = self.with_feedback_export_events(events, observations);
         if let Some((catalog, Some(tenant))) = self.catalog_binding() {
-            // CatalogGraph is the object graph. Feedback rows stay on the
-            // operational store; catalog writes drop local observation rows
-            // the same way remote application state does (#802). Export
-            // events still enqueue on the tenant outbox when enabled (#783).
+            // Observations land in the tenant partition with the objects
+            // (#868); export events enqueue on its outbox when enabled (#783).
             let objects = objects.to_vec();
+            let observations = observations.to_vec();
             let lease_namespace = lease_namespace.to_string();
             let lease_key = lease_key.to_string();
             let fencing_token = fencing_token.to_string();
@@ -253,6 +260,7 @@ impl Ctx {
                     &lease_key,
                     &fencing_token,
                     &events,
+                    &observations,
                 )
             })
             .await;

@@ -1,5 +1,6 @@
 use postgres::Transaction;
 use prost::Message;
+use tenkai::feedback_observation::FeedbackObservation;
 use tenkai::ontology::{KIND_CHANNEL, KIND_ENVIRONMENT, KIND_PLAN, KIND_RELEASE, NS, env_id};
 use tenkai::pb::graph_action::{ActionResult, ActionTypeDef};
 use tenkai::pb::sekai::{Decision, Lease, Link, Object, ObjectChange, ObjectType};
@@ -501,6 +502,7 @@ impl Inner {
         schema: &str,
         objects: &[Object],
         events: &[ProviderEventRecord],
+        observations: &[FeedbackObservation],
     ) -> Result<()> {
         if objects.is_empty() {
             return Err(StoreError::InvalidData {
@@ -510,11 +512,13 @@ impl Inner {
         }
         let objects = objects.to_vec();
         let events = events.to_vec();
+        let observations = observations.to_vec();
         self.with_writer_schema(schema, move |tx| {
-            catalog_put_objects_with_provider_events_in(tx, &objects, &events, None)
+            catalog_put_objects_with_provider_events_in(tx, &objects, &events, &observations, None)
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn catalog_guarded_put_objects_with_provider_events(
         &self,
         schema: &str,
@@ -523,6 +527,7 @@ impl Inner {
         key: &str,
         fencing_token: &str,
         events: &[ProviderEventRecord],
+        observations: &[FeedbackObservation],
     ) -> Result<()> {
         if objects.is_empty() {
             return Err(StoreError::InvalidData {
@@ -534,11 +539,13 @@ impl Inner {
         let key = key.to_owned();
         let fencing_token = fencing_token.to_owned();
         let events = events.to_vec();
+        let observations = observations.to_vec();
         self.with_writer_schema(schema, move |tx| {
             catalog_put_objects_with_provider_events_in(
                 tx,
                 &objects,
                 &events,
+                &observations,
                 Some((namespace.as_str(), key.as_str(), fencing_token.as_str())),
             )
         })
@@ -755,6 +762,37 @@ impl Inner {
         })
     }
 
+    /// Feedback observations of `environment` in the tenant schema, oldest
+    /// first. A record this version cannot read is skipped and logged.
+    pub fn catalog_feedback_observations(
+        &self,
+        schema: &str,
+        environment: &str,
+    ) -> Result<Vec<FeedbackObservation>> {
+        let environment = environment.to_owned();
+        self.with_schema(schema, move |tx| {
+            let rows = tx
+                .query(
+                    "SELECT id, body_json FROM feedback_observations
+                     WHERE environment_id=$1 ORDER BY observed_at, id",
+                    &[&environment],
+                )
+                .map_err(pg)?;
+            Ok(rows
+                .into_iter()
+                .filter_map(|row| {
+                    let id: String = row.get(0);
+                    let body: String = row.get(1);
+                    serde_json::from_str(&body)
+                        .inspect_err(|error| {
+                            eprintln!("skipping unreadable feedback observation {id}: {error}")
+                        })
+                        .ok()
+                })
+                .collect())
+        })
+    }
+
     pub fn catalog_changes(&self, schema: &str, object_id: &str) -> Result<Vec<ObjectChange>> {
         let object_id = object_id.to_owned();
         self.with_schema(schema, move |tx| {
@@ -883,6 +921,7 @@ fn catalog_put_objects_with_provider_events_in(
     tx: &mut Transaction<'_>,
     objects: &[Object],
     events: &[ProviderEventRecord],
+    observations: &[FeedbackObservation],
     lease: Option<(&str, &str, &str)>,
 ) -> Result<()> {
     let unique = objects
@@ -922,7 +961,62 @@ fn catalog_put_objects_with_provider_events_in(
     for event in events {
         enqueue_provider_event_in(tx, event)?;
     }
+    for observation in observations {
+        insert_feedback_observation_in(tx, observation);
+    }
     Ok(())
+}
+
+/// Store `observation` unless one with its id exists, under a savepoint so a
+/// refused insert rolls back alone and the write it rides with still commits
+/// (#802, #868). An identical replay changes nothing; a conflicting one keeps
+/// the stored record. Either refusal is logged.
+fn insert_feedback_observation_in(tx: &mut Transaction<'_>, observation: &FeedbackObservation) {
+    let stored = (|| -> Result<()> {
+        let body = serde_json::to_string(observation).map_err(|error| StoreError::InvalidData {
+            kind: "feedback observation",
+            detail: error.to_string(),
+        })?;
+        let mut savepoint = tx.savepoint("feedback_observation").map_err(pg)?;
+        let inserted = savepoint
+            .execute(
+                // The immutability rule rules out ON CONFLICT. A concurrent
+                // insert of the same id fails the savepoint alone.
+                "INSERT INTO feedback_observations
+                     (id, schema, environment_id, observed_at, body_json)
+                 SELECT $1, $2, $3, $4, $5
+                 WHERE NOT EXISTS (SELECT 1 FROM feedback_observations WHERE id=$1)",
+                &[
+                    &observation.id,
+                    &observation.schema,
+                    &observation.environment,
+                    &observation.observed_at_ms,
+                    &body,
+                ],
+            )
+            .map_err(pg)?;
+        if inserted == 0 {
+            let row = savepoint
+                .query_one(
+                    "SELECT body_json FROM feedback_observations WHERE id=$1",
+                    &[&observation.id],
+                )
+                .map_err(pg)?;
+            if row.get::<_, String>(0) != body {
+                eprintln!(
+                    "feedback observation {} conflicts with the stored one; kept the stored observation",
+                    observation.id
+                );
+            }
+        }
+        savepoint.commit().map_err(pg)
+    })();
+    if let Err(error) = stored {
+        eprintln!(
+            "feedback observation {} was not stored: {error}",
+            observation.id
+        );
+    }
 }
 
 fn catalog_put_in(tx: &mut Transaction<'_>, object: &Object) -> Result<()> {
