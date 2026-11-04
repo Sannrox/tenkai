@@ -13,6 +13,15 @@ fn live_postgres_tenant_isolation() {
 
     let config = PostgresTenantConfig::from_env().expect("TENKAI_POSTGRES_URL");
     let store = config.open().expect("connect");
+    // Unique per run: the check expects tenant A to list only `env_a`, so a
+    // rerun or a neighbouring agent on the same database must not share it.
+    let suffix = format!(
+        "{}{}",
+        std::process::id(),
+        &uuid::Uuid::new_v4().simple().to_string()[..8]
+    );
+    let tenant_a = format!("iso-a-{suffix}");
+    let tenant_b = format!("iso-b-{suffix}");
     let authority = TenantDerivationAuthority::new("test");
     let ctx_a = AuthenticatedRequestContextBuilder::new(
         "r-a",
@@ -22,7 +31,7 @@ fn live_postgres_tenant_isolation() {
         },
         "test",
     )
-    .with_tenant("tenant-a", &authority)
+    .with_tenant(&tenant_a, &authority)
     .unwrap()
     .build()
     .unwrap();
@@ -34,12 +43,17 @@ fn live_postgres_tenant_isolation() {
         },
         "test",
     )
-    .with_tenant("tenant-b", &authority)
+    .with_tenant(&tenant_b, &authority)
     .unwrap()
     .build()
     .unwrap();
     store
-        .run_partition_isolation_check(&ctx_a, &ctx_b, "env-a", "env-b")
+        .run_partition_isolation_check(
+            &ctx_a,
+            &ctx_b,
+            &format!("env-a-{suffix}"),
+            &format!("env-b-{suffix}"),
+        )
         .unwrap();
     let part = store.partition_for(&ctx_a).unwrap();
     part.check_health().unwrap();

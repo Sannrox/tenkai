@@ -12,7 +12,11 @@ fn live_postgres_retirement_column_backfills_and_filters() {
 
     let config = PostgresTenantConfig::from_env().expect("TENKAI_POSTGRES_URL");
     let store = config.open().expect("connect");
-    let tenant = format!("retire-{}", tenkai::now_millis());
+    let tenant = format!(
+        "retire-{}-{}",
+        std::process::id(),
+        &uuid::Uuid::new_v4().simple().to_string()[..8]
+    );
     let schema = tenant_schema_name(&tenant).unwrap();
     let ctx = AuthenticatedRequestContextBuilder::new(
         "r-retire",
