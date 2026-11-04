@@ -53,7 +53,7 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U tenkai"
+          --health-cmd "pg_isready -U tenkai -d tenkai_test"
           --health-interval 2s
           --health-timeout 5s
           --health-retries 30
