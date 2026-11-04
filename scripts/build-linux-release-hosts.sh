@@ -66,7 +66,8 @@ docker run --rm --platform linux/amd64 \
     fi
     export PATH="${CARGO_HOME}/bin:${PATH}"
     cd /src
-    ldd --version | head -n 1
+    # sed reads all input; head would close the pipe and fail pipefail with SIGPIPE.
+    ldd --version | sed -n 1p
     # Same commands as the macOS hosts in release-binaries.yml.
     cargo build --release --locked --workspace --features tenkai-server/ui \
       --bin tenkaictl \
