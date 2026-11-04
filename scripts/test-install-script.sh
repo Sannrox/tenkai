@@ -8,15 +8,19 @@
 #
 # The self-test covers each role, the baked and --version paths, a checksum
 # mismatch and a missing SHA256SUMS entry (nothing installed, existing files
-# kept), and a refused self-upgrade home. The container run installs on
-# Ubuntu 22.04, Debian 12, RHEL 8 and 9 compatible images, runs every
-# installed host, and expects a clean refusal on musl Alpine. CI passes the
+# kept), a refused self-upgrade home, and --with-host-applier refused for a
+# non-root user or a non-Linux system. The container run installs on
+# Ubuntu 22.04, Debian 12, RHEL 8 and 9 compatible images, also with
+# --with-host-applier as root (owners, modes, files), runs every installed
+# host, refuses the applier into a directory others can write, through a
+# symbolic link, or for a non-root user, and expects a clean refusal on musl Alpine. CI passes the
 # hosts built by scripts/build-linux-release-hosts.sh.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PACKAGE="${ROOT}/scripts/package-release-binaries.sh"
 HOSTS=(tenkaictl tenkai-server tenkai-executor-guard tenkai-runtime tenkai-runtime-guard)
+APPLIER=tenkai-host-applier-linux-x86_64
 VERSION=1.2.3
 
 fail() {
@@ -76,6 +80,7 @@ write_fixture() {
       printf '#!/bin/sh\necho "%s %s"\n' "$host" "$VERSION" >"${release}/${host}-${platform}"
     done
   done
+  printf '#!/bin/sh\necho applier\n' >"${release}/${APPLIER}"
   bash "$PACKAGE" install-script --out "$release" --version "$VERSION"
   bash "$PACKAGE" checksums --out "$release"
 }
@@ -150,6 +155,17 @@ self_test() {
   expect_files "${tmp}/dir" tenkai-executor-guard
   expect_files "${tmp}/dir/tenkai-executor-guard"
 
+  # The applier installs as root on linux-x86_64 only; anything else is
+  # refused before a download.
+  local applier_refusal="--with-host-applier must run as root"
+  if [[ "$(uname -s)" != Linux ]]; then
+    applier_refusal="published for linux-x86_64 only"
+  fi
+  if [[ "$(id -u)" != 0 || "$(uname -s)" != Linux ]]; then
+    expect_refused "$applier_refusal" "$script" --base-url "file://${tmp}/missing" --prefix "${tmp}/applier" --with-host-applier
+    [[ ! -e "${tmp}/applier" ]] || fail "a refused applier install created its prefix"
+  fi
+
   printf 'install script self-test passed\n'
 }
 
@@ -158,7 +174,7 @@ container_test() {
   command -v docker >/dev/null 2>&1 || fail "docker is required with --linux-hosts"
   local release="${tmp}/containers/v${VERSION}" host image
   mkdir -p "$release"
-  for host in "${HOSTS[@]}"; do
+  for host in "${HOSTS[@]}" tenkai-host-applier; do
     cp "${linux_hosts}/${host}-linux-x86_64" "$release/" || fail "missing ${host}-linux-x86_64 in ${linux_hosts}"
   done
   bash "$PACKAGE" install-script --out "$release" --version "$VERSION"
@@ -172,12 +188,49 @@ container_test() {
       if ! command -v curl >/dev/null 2>&1; then
         apt-get update -qq >/dev/null && apt-get install -y -qq curl >/dev/null
       fi
-      sh /release/v'"$VERSION"'/install.sh --base-url file:///release --role server
-      sh /release/v'"$VERSION"'/install.sh --base-url file:///release --role runtime >/dev/null
+      release=/release/v'"$VERSION"'
+      sh "${release}/install.sh" --base-url file:///release --role server --with-host-applier
+      sh "${release}/install.sh" --base-url file:///release --role runtime >/dev/null
       tenkaictl --version
       for host in tenkaictl tenkai-server tenkai-executor-guard tenkai-runtime tenkai-runtime-guard; do
         "/usr/local/bin/${host}" --help >/dev/null
-      done'
+      done
+      applier=/usr/local/libexec/tenkai/tenkai-host-applier
+      "$applier" --help >/dev/null
+      test "$(stat -c "%u:%g %a" "$applier" /usr/local/libexec/tenkai)" = "0:0 755
+0:0 755"
+      test "$(stat -c "%u:%g %a" /etc/systemd/system/tenkai-host-apply@.service /etc/polkit-1/rules.d/50-tenkai-host-apply.rules)" = "0:0 644
+0:0 644"
+      # Minimal images lack cmp.
+      same() { test "$(sha256sum <"$1")" = "$(sha256sum <"$2")"; }
+      same "${release}/tenkai-host-apply.service" /etc/systemd/system/tenkai-host-apply@.service
+      same "${release}/tenkai-host-apply.rules" /etc/polkit-1/rules.d/50-tenkai-host-apply.rules
+      # Refused for a non-root user, and into a directory others can write.
+      if command -v setpriv >/dev/null 2>&1 && setpriv --reuid=65534 --regid=65534 --clear-groups sh "${release}/install.sh" \
+        --base-url file:///release --prefix /tmp/nobody --with-host-applier 2>/tmp/err; then
+        echo "non-root applier install was not refused" >&2
+        exit 1
+      fi
+      if command -v setpriv >/dev/null 2>&1; then
+        grep -Fq "must run as root" /tmp/err
+        echo "non-root applier install refused"
+      fi
+      chmod 0777 /usr/local/libexec/tenkai
+      if sh "${release}/install.sh" --base-url file:///release --with-host-applier 2>/tmp/err; then
+        echo "applier install into a world-writable directory was not refused" >&2
+        exit 1
+      fi
+      grep -Fq "/usr/local/libexec/tenkai is writable by group or others" /tmp/err
+      # Nor through a symbolic link.
+      chmod 0755 /usr/local/libexec/tenkai
+      mv /usr/local/libexec/tenkai /usr/local/libexec/tenkai.real
+      ln -s tenkai.real /usr/local/libexec/tenkai
+      if sh "${release}/install.sh" --base-url file:///release --with-host-applier 2>/tmp/err; then
+        echo "applier install through a symbolic link was not refused" >&2
+        exit 1
+      fi
+      grep -Fq "/usr/local/libexec/tenkai is a symbolic link" /tmp/err
+      echo "host applier ok"'
   done
 
   printf '== alpine:3 (musl, refused)\n'

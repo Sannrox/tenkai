@@ -9,7 +9,7 @@
 # Needs docker; on a non-x86-64 machine docker must emulate linux/amd64.
 # Build state (toolchain, registry, target) lives in
 # ${CARGO_TARGET_DIR:-target}/linux-release-hosts, apart from native builds.
-# Writes the six packaged linux-x86_64 hosts to DIR and checks them with
+# Writes the seven packaged linux-x86_64 hosts to DIR and checks them with
 # scripts/package-release-binaries.sh check-glibc.
 set -euo pipefail
 
@@ -68,13 +68,15 @@ docker run --rm --platform linux/amd64 \
     cd /src
     # sed reads all input; head would close the pipe and fail pipefail with SIGPIPE.
     ldd --version | sed -n 1p
-    # Same commands as the macOS hosts in release-binaries.yml.
+    # The macOS hosts in release-binaries.yml, plus the Linux-only
+    # tenkai-host-applier.
     cargo build --release --locked --workspace --features tenkai-server/ui \
       --bin tenkaictl \
       --bin tenkai-server \
       --bin tenkai-executor-guard \
       --bin tenkai-runtime \
-      --bin tenkai-runtime-guard
+      --bin tenkai-runtime-guard \
+      --bin tenkai-host-applier
     bash scripts/package-release-binaries.sh package \
       --out /out --bin-dir /state/target/release --platform linux-x86_64 --strip
     cargo build --release --locked -p tenkai-server --features postgres,ui

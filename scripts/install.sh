@@ -8,6 +8,8 @@
 # installed; a mismatch or a missing entry installs nothing. Each binary is
 # renamed into place, so a reader sees the old file or the new one. A
 # tenkaictl self-upgrade home is refused: self-upgrade owns those hosts.
+# --with-host-applier also installs the root side of privileged host
+# releases at fixed root-owned paths, and starts nothing.
 set -eu
 
 # Written by scripts/package-release-binaries.sh install-script when the
@@ -15,6 +17,10 @@ set -eu
 RELEASE_VERSION=""
 REPO=Sannrox/tenkai
 GLIBC_FLOOR=2.28
+# Where --with-host-applier installs. The unit's ExecStart names the binary.
+APPLIER_DIR=/usr/local/libexec/tenkai
+UNIT_DIR=/etc/systemd/system
+RULES_DIR=/etc/polkit-1/rules.d
 
 die() {
   printf 'tenkai install: %s\n' "$1" >&2
@@ -35,6 +41,11 @@ Options:
   --role cli|server|runtime  cli: tenkaictl (default)
                              server: tenkaictl, tenkai-server, tenkai-executor-guard
                              runtime: tenkai-runtime, tenkai-runtime-guard
+  --with-host-applier        also install the privileged host release applier
+                             (linux-x86_64, as root): ${APPLIER_DIR}/tenkai-host-applier,
+                             ${UNIT_DIR}/tenkai-host-apply@.service and
+                             ${RULES_DIR}/50-tenkai-host-apply.rules.
+                             Starts nothing.
   --version X.Y.Z            release to install (default: ${RELEASE_VERSION:-none, required})
   --prefix DIR               install directory (default: /usr/local/bin as
                              root, ~/.local/bin otherwise)
@@ -50,6 +61,7 @@ role=cli
 version="$RELEASE_VERSION"
 prefix=""
 base_url="https://github.com/${REPO}/releases/download"
+with_applier=false
 while [ $# -gt 0 ]; do
   case "$1" in
     --role | --version | --prefix | --base-url)
@@ -61,6 +73,10 @@ while [ $# -gt 0 ]; do
         --base-url) base_url="$2" ;;
       esac
       shift 2
+      ;;
+    --with-host-applier)
+      with_applier=true
+      shift
       ;;
     -h | --help) usage 0 ;;
     *) die "unknown argument: $1 (see --help)" ;;
@@ -115,6 +131,53 @@ case "${os}:${arch}" in
   *) die "no Tenkai hosts are published for ${os} ${arch}; supported: linux-x86_64, darwin-aarch64. Build from source instead." ;;
 esac
 
+# Refuse unless absolute directory $1 and every directory above it are owned
+# by root, writable by nobody else, and not symbolic links, so no other user
+# can swap what root installs or runs.
+require_root_only() {
+  checked="$1"
+  while :; do
+    if [ -L "$checked" ]; then
+      die "${checked} is a symbolic link; refusing to install the host applier (install it by hand: docs/host-releases.md#install)"
+    fi
+    # shellcheck disable=SC2046 # split ls -ldn into mode, links, uid, ...
+    set -- $(ls -ldn "$checked")
+    case "$1" in
+      d*) ;;
+      *) die "${checked} is not a directory; refusing to install the host applier" ;;
+    esac
+    [ "$3" = 0 ] || die "${checked} is owned by uid $3, not root; refusing to install the host applier"
+    case "$1" in
+      ?????w* | ????????w*) die "${checked} is writable by group or others; refusing to install the host applier" ;;
+    esac
+    [ "$checked" = / ] && break
+    checked="$(dirname "$checked")"
+  done
+}
+
+# The nearest existing directory at or above $1.
+existing_parent() {
+  found="$1"
+  while [ ! -e "$found" ] && [ ! -L "$found" ]; do
+    found="$(dirname "$found")"
+  done
+  printf '%s\n' "$found"
+}
+
+if $with_applier; then
+  [ "$platform" = linux-x86_64 ] || die "the host applier is published for linux-x86_64 only (it runs under systemd)"
+  [ "$(id -u)" = 0 ] || die "--with-host-applier must run as root"
+  for dir in "$APPLIER_DIR" "$UNIT_DIR" "$RULES_DIR"; do
+    require_root_only "$(existing_parent "$dir")"
+  done
+  for target in "${APPLIER_DIR}/tenkai-host-applier" "${UNIT_DIR}/tenkai-host-apply@.service" \
+    "${RULES_DIR}/50-tenkai-host-apply.rules"; do
+    if [ -L "$target" ] || { [ -e "$target" ] && [ ! -f "$target" ]; }; then
+      die "${target} exists and is not a regular file; refusing to install"
+    fi
+  done
+fi
+
 if [ -z "$prefix" ]; then
   if [ "$(id -u)" = 0 ]; then
     prefix=/usr/local/bin
@@ -160,27 +223,50 @@ else
   die "sha256sum or shasum is required"
 fi
 
+# Download asset $2 into directory $1 and check it against $1/SHA256SUMS.
+fetch_verified() {
+  fetch "${url}/$2" "$1/$2" || die "cannot download ${url}/$2"
+  expected="$(awk -v name="$2" '$2 == name || $2 == "*" name {print $1}' "$1/SHA256SUMS")"
+  [ -n "$expected" ] || die "SHA256SUMS has no entry for $2; refusing to install"
+  [ "$(printf '%s\n' "$expected" | wc -l | tr -d ' ')" = 1 ] || die "SHA256SUMS lists $2 more than once; refusing to install"
+  actual="$(digest "$1/$2")"
+  [ "$actual" = "$expected" ] || die "checksum mismatch for $2: expected ${expected}, got ${actual}; refusing to install"
+}
+
 mkdir -p "$prefix" 2>/dev/null || die "cannot create ${prefix}; run as root or pass --prefix"
 # Staged inside the prefix, so the final rename stays on one file system.
 stage="$(mktemp -d "${prefix}/.tenkai-install.XXXXXX" 2>/dev/null)" \
   || die "cannot write to ${prefix}; run as root or pass --prefix"
-trap 'rm -rf "$stage"' EXIT
+applier_stage=""
+pending=""
+trap 'rm -rf "$stage" $applier_stage $pending' EXIT
 trap 'exit 1' HUP INT TERM
+
+# The applier's files are staged and checked in a root-only directory, apart
+# from a prefix another user may control.
+if $with_applier; then
+  umask 022
+  for dir in "$APPLIER_DIR" "$UNIT_DIR" "$RULES_DIR"; do
+    mkdir -p "$dir"
+    require_root_only "$dir"
+  done
+  applier_stage="$(mktemp -d "${APPLIER_DIR}/.tenkai-install.XXXXXX")"
+fi
 
 url="${base_url%/}/${tag}"
 say "Installing Tenkai ${tag} (${role}, ${platform}) into ${prefix}"
-fetch "${url}/SHA256SUMS" "${stage}/SHA256SUMS" || die "cannot download ${url}/SHA256SUMS"
 
 # Verify every file before installing any of them.
+fetch "${url}/SHA256SUMS" "${stage}/SHA256SUMS" || die "cannot download ${url}/SHA256SUMS"
 for binary in $binaries; do
-  asset="${binary}-${platform}"
-  fetch "${url}/${asset}" "${stage}/${asset}" || die "cannot download ${url}/${asset}"
-  expected="$(awk -v name="$asset" '$2 == name || $2 == "*" name {print $1}' "${stage}/SHA256SUMS")"
-  [ -n "$expected" ] || die "SHA256SUMS has no entry for ${asset}; refusing to install"
-  [ "$(printf '%s\n' "$expected" | wc -l | tr -d ' ')" = 1 ] || die "SHA256SUMS lists ${asset} more than once; refusing to install"
-  actual="$(digest "${stage}/${asset}")"
-  [ "$actual" = "$expected" ] || die "checksum mismatch for ${asset}: expected ${expected}, got ${actual}; refusing to install"
+  fetch_verified "$stage" "${binary}-${platform}"
 done
+if $with_applier; then
+  fetch "${url}/SHA256SUMS" "${applier_stage}/SHA256SUMS" || die "cannot download ${url}/SHA256SUMS"
+  for asset in "tenkai-host-applier-${platform}" tenkai-host-apply.service tenkai-host-apply.rules; do
+    fetch_verified "$applier_stage" "$asset"
+  done
+fi
 
 for binary in $binaries; do
   asset="${binary}-${platform}"
@@ -192,10 +278,34 @@ for binary in $binaries; do
   say "  ${prefix}/${binary}"
 done
 
+# Copy $1 from the applier stage to $2, owned by root with mode $3, renamed
+# into place within its directory.
+install_root_file() {
+  pending="${2}.tenkai-install.$$"
+  cp "${applier_stage}/$1" "$pending"
+  chown 0:0 "$pending"
+  chmod "$3" "$pending"
+  mv -f "$pending" "$2"
+  pending=""
+  say "  $2"
+}
+
+applier_files=""
+if $with_applier; then
+  install_root_file "tenkai-host-applier-${platform}" "${APPLIER_DIR}/tenkai-host-applier" 0755
+  install_root_file tenkai-host-apply.service "${UNIT_DIR}/tenkai-host-apply@.service" 0644
+  install_root_file tenkai-host-apply.rules "${RULES_DIR}/50-tenkai-host-apply.rules" 0644
+  applier_files="${APPLIER_DIR}/tenkai-host-applier ${UNIT_DIR}/tenkai-host-apply@.service ${RULES_DIR}/50-tenkai-host-apply.rules"
+fi
+
 say ""
 say "Checksums matched SHA256SUMS. To verify build provenance with the GitHub CLI:"
-for binary in $binaries; do
-  say "  gh attestation verify ${prefix}/${binary} --repo ${REPO} --signer-workflow ${REPO}/.github/workflows/release-binaries.yml --source-ref refs/tags/${tag}"
+for file in $binaries $applier_files; do
+  case "$file" in
+    /*) ;;
+    *) file="${prefix}/${file}" ;;
+  esac
+  say "  gh attestation verify ${file} --repo ${REPO} --signer-workflow ${REPO}/.github/workflows/release-binaries.yml --source-ref refs/tags/${tag}"
 done
 # A relative prefix (the quickstart's --prefix .) is used by path, not PATH.
 case "$prefix" in
@@ -204,3 +314,13 @@ case "$prefix" in
     *) say "" && say "${prefix} is not on PATH; add it to run the binaries by name." ;;
   esac ;;
 esac
+if $with_applier; then
+  say ""
+  say "The host applier is installed and nothing was started. Next, as root"
+  say "(https://github.com/${REPO}/blob/${tag}/docs/host-releases.md#install):"
+  say "  1. create the tenkai user and its spool directory;"
+  say "  2. write /etc/tenkai/host-applier.toml, release-trust-roots.toml and"
+  say "     host-approval-policy.toml, owned by root and writable by root only;"
+  say "  3. systemctl daemon-reload;"
+  say "  4. check that tenkai may start and stop only tenkai-host-apply@<instance>.service."
+fi

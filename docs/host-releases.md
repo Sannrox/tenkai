@@ -142,6 +142,26 @@ policy to cap it on the root side.
 Every file below is owned by root and not writable by group or others; the
 applier refuses configuration or trust it reads from anything else.
 
+On `linux-x86_64`, the [install script](release-binaries.md#install-with-one-command)
+does steps 1 and 5 from a GitHub Release, every file checked against its
+`SHA256SUMS` first:
+
+```bash
+curl -fsSL https://github.com/Sannrox/tenkai/releases/download/vX.Y.Z/install.sh \
+  | sudo sh -s -- --role server --with-host-applier
+```
+
+It installs the binary at `/usr/local/libexec/tenkai/tenkai-host-applier`
+(mode 0755), the unit at `/etc/systemd/system/tenkai-host-apply@.service`,
+and the rule at `/etc/polkit-1/rules.d/50-tenkai-host-apply.rules` (0644),
+all owned by root, staged and checked in a root-only directory. It runs only
+as root and refuses when one of those directories, or any directory above
+them, is a symbolic link or writable by anyone but root. It
+neither reloads systemd nor starts anything; continue with steps 2 to 4 and 6,
+then `systemctl daemon-reload`.
+
+By hand, or from a source build:
+
 1. Install the binary where only root can write:
 
    ```bash
