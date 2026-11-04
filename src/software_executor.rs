@@ -474,15 +474,23 @@ impl SoftwareExecutors {
             Ok(value) if default.is_some() => SoftwareExecutorKind::from_name(&value),
             _ => Some(SoftwareExecutorKind::Shell),
         };
-        let declared = SoftwareExecutorKind::ALL
-            .into_iter()
-            .filter_map(|kind| Some((kind, Arc::from(software_executor_for(kind)?))))
-            .collect();
         Self {
             default_kind,
             default,
-            declared,
+            declared: Vec::new(),
         }
+        .with_installed_adapters()
+    }
+
+    /// Add every adapter the host installed for declared kinds, keeping this
+    /// default. Management API apply keeps its shell default this way.
+    pub fn with_installed_adapters(self) -> Self {
+        SoftwareExecutorKind::ALL
+            .into_iter()
+            .filter_map(|kind| Some((kind, Arc::from(software_executor_for(kind)?))))
+            .fold(self, |executors, (kind, adapter)| {
+                executors.with_adapter(kind, adapter)
+            })
     }
 
     /// An unnamed default adapter (a test fake) and no declared adapters.

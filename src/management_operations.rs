@@ -2358,7 +2358,9 @@ impl ManagementOperations {
                     trust_roots: &files.trust_roots,
                     requester: Some(context.principal_id()),
                 },
-                software_executors: crate::software_executor::SoftwareExecutors::default(),
+                // Undeclared releases keep the shell path here, as before.
+                software_executors: crate::software_executor::SoftwareExecutors::default()
+                    .with_installed_adapters(),
                 model_runtime_executor:
                     crate::model_runtime::selected_model_runtime_executor_factory(),
                 worker_lifecycle: None,
