@@ -93,20 +93,28 @@ fn take_copy(connection: &Connection, database: &Path, found: u32) -> anyhow::Re
             .into_iter()
             .filter(|copy| copy.found == found)
             .max_by_key(|copy| copy.taken_ms);
-        if let Some(newest) = newest
-            && same_bytes(&newest.path, &temporary)?
-        {
-            std::fs::remove_file(&temporary)?;
-            return Ok(newest.path);
-        }
-        // A copy taken earlier in the same millisecond keeps its name. Two
-        // starts racing for one name each leave a valid copy under it.
-        let copy = (now_ms..)
-            .map(|taken_ms| dir.join(format!("{name}.pre-v{found}.{taken_ms}.db")))
-            .find(|copy| !copy.exists())
-            .context("no free name for the copy")?;
-        std::fs::rename(&temporary, &copy)
-            .with_context(|| format!("renaming {} to {}", temporary.display(), copy.display()))?;
+        let copy = match newest {
+            // The start that published it may have crashed before syncing
+            // it, so it is made durable again before it is relied on.
+            Some(newest) if same_bytes(&newest.path, &temporary)? => {
+                std::fs::remove_file(&temporary)?;
+                std::fs::File::open(&newest.path)?.sync_all()?;
+                newest.path
+            }
+            _ => {
+                // A copy taken earlier in the same millisecond keeps its name.
+                // Two starts racing for one name each leave a valid copy under it.
+                let copy = (now_ms..)
+                    .map(|taken_ms| dir.join(format!("{name}.pre-v{found}.{taken_ms}.db")))
+                    .find(|copy| !copy.exists())
+                    .context("no free name for the copy")?;
+                std::fs::rename(&temporary, &copy).with_context(|| {
+                    format!("renaming {} to {}", temporary.display(), copy.display())
+                })?;
+                copy
+            }
+        };
+        // The copy's name is durable before the migration may begin.
         crate::runtime_self_upgrade::sync_dir(dir)?;
         Ok(copy)
     });
