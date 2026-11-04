@@ -1,6 +1,6 @@
 [package]
 name = "tenkai-runtime"
-version = "0.6.0"
+version = "0.7.0-rc.1"
 edition = "2024"
 rust-version = "1.96.1"
 license = "Apache-2.0"
@@ -23,7 +23,7 @@ name = "tenkai-worker-lifecycle-fixture"
 path = "src/bin/tenkai-worker-lifecycle-fixture.rs"
 
 [dependencies]
-tenkai = { path = "../..", version = "0.6.0" }
+tenkai = { path = "../..", version = "0.7.0-rc.1" }
 anyhow = "1"
 clap = { version = "4", default-features = false, features = ["derive", "env", "error-context", "help", "std", "usage"] }
 tokio = { version = "1", default-features = false, features = ["io-std", "io-util", "macros", "process", "rt-multi-thread", "signal"] }
@@ -31,7 +31,7 @@ tokio = { version = "1", default-features = false, features = ["io-std", "io-uti
 [dev-dependencies]
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 serde_json = "1"
-tenkai-http = { path = "../tenkai-http", version = "0.6.0" }
+tenkai-http = { path = "../tenkai-http", version = "0.7.0-rc.1" }
 tokio = { version = "1", default-features = false, features = ["macros", "net", "rt-multi-thread"] }
 uuid = { version = "1", features = ["v4"] }
 
