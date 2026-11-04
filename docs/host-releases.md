@@ -73,7 +73,10 @@ SIGTERM). Nothing the command starts outlives the step: the applier is the
 child subreaper, so a process that detaches or double-forks reparents to it,
 and it kills and reaps everything left before it records the result and
 releases the product's lock. A process stuck in the kernel holds the lock
-until it dies. Install long-running services as their own systemd units.
+until it dies. If the applier itself dies mid-command, the step resolves as
+`interrupted` only once the unit's control group, recorded when the step
+started, holds nothing else; until then the product admits no step. Install
+long-running services as their own systemd units.
 
 ## Approvals
 

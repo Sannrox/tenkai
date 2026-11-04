@@ -74,8 +74,9 @@ pub struct AppliedStateRecord {
     /// release that does not compare never replaces it); `empty` keeps it.
     /// A target that is not newer needs downgrade or rollback approvals.
     pub high_water: Option<HostRelease>,
-    /// The install or uninstall that last advanced the generation, written
-    /// in the same atomic replace that advanced it.
+    /// The step that last started for this product, written in the same
+    /// atomic replace that started it. Steps of one product run one at a
+    /// time, so this is the only one that may still be running after a crash.
     pub last_started: Option<HostApplyStarted>,
     /// Its result, once it completed, so a crash before the instance's own
     /// result file is written loses nothing.
@@ -100,6 +101,11 @@ pub struct HostApplyStarted {
     /// install or uninstall, unchanged for health.
     pub generation: u64,
     pub started_at: i64,
+    /// The applier's control group (cgroup v2 path) when it started the
+    /// command. Before a start without a result is settled as interrupted,
+    /// this group must hold no process but the settling applier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cgroup: Option<String>,
 }
 
 /// How a started instance ended.
@@ -200,13 +206,16 @@ impl AppliedStateRecord {
     /// Requires the expected generation, the source release, and, for an
     /// install whose target is not newer than the high-water release, the
     /// downgrade (or, for a rollback step, rollback) approvals. Returns the
-    /// started record and, for an install or uninstall, the record to write
-    /// before the command runs: generation advanced, state `dirty`.
+    /// started record and the record to write before the command runs: for
+    /// an install or uninstall the generation advanced and the state `dirty`,
+    /// for health both unchanged; `last_started` names the step either way.
+    /// `cgroup` is the applier's control group, if it knows one.
     pub fn admit(
         &self,
         step: &VerifiedHostStep,
+        cgroup: Option<String>,
         now_ms: i64,
-    ) -> Result<(HostApplyStarted, Option<Self>)> {
+    ) -> Result<(HostApplyStarted, Self)> {
         if self.environment != step.environment || self.product != step.product {
             bail!("applied-state record belongs to another environment or product");
         }
@@ -269,22 +278,28 @@ impl AppliedStateRecord {
             release: step.release.clone(),
             generation,
             started_at: now_ms,
+            cgroup,
         };
-        let advanced = (step.action != HostAction::Health).then(|| Self {
-            generation,
-            state: AppliedState::Dirty {
+        let state = match step.action {
+            HostAction::Health => self.state.clone(),
+            HostAction::Install | HostAction::Uninstall => AppliedState::Dirty {
                 from: source.cloned(),
                 to: (step.action == HostAction::Install).then(|| step.release.clone()),
             },
+        };
+        let next = Self {
+            generation,
+            state,
             last_started: Some(started.clone()),
             last_result: None,
             ..self.clone()
-        });
-        Ok((started, advanced))
+        };
+        Ok((started, next))
     }
 
-    /// The record after `started`'s install or uninstall ended with `result`:
-    /// `applied` or `empty` on success, still `dirty` otherwise.
+    /// The record after `started` ended with `result`: an install or
+    /// uninstall moves to `applied` or `empty` on success and stays `dirty`
+    /// otherwise; health changes nothing but the recorded result.
     pub fn complete(&self, started: &HostApplyStarted, result: &HostApplyResult) -> Self {
         let mut next = self.clone();
         if result.outcome.succeeded() {

@@ -97,4 +97,23 @@ if sudo kill -0 "$child" 2>/dev/null; then
   fail "the command's child outlived the stop"
 fi
 
+echo "== a crashed applier: the step resolves as interrupted once nothing of it runs"
+as_tenkai systemctl start --no-block "tenkai-host-apply@$CRASH.service"
+for _ in $(seq 1 100); do
+  sudo test -s "$evidence/crash-child" && break
+  sleep 0.2
+done
+crash_child=$(sudo cat "$evidence/crash-child")
+sudo systemctl kill --kill-whom=main --signal=SIGKILL "tenkai-host-apply@$CRASH.service"
+for _ in $(seq 1 100); do
+  systemctl is-active --quiet "tenkai-host-apply@$CRASH.service" || break
+  sleep 0.2
+done
+if sudo kill -0 "$crash_child" 2>/dev/null; then
+  fail "the crashed step's child outlived its unit"
+fi
+sudo test ! -e "/var/lib/tenkai-host/instances/$CRASH/result.json" || fail "a crash wrote a result"
+as_tenkai systemctl start "tenkai-host-apply@$CRASH.service" 2>/dev/null || true
+[ "$(result_field "$CRASH" outcome)" = interrupted ] || fail "the crashed step did not resolve as interrupted"
+
 echo "host applier drill passed"

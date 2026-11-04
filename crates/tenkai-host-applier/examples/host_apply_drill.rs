@@ -5,7 +5,7 @@
 //! Usage: `host_apply_drill <out-dir> <spool-dir> <evidence-dir>`. Writes
 //! `<out-dir>/etc/` (config and trust for `/etc/tenkai`), `<out-dir>/spool/`
 //! (one directory per instance), and `<out-dir>/instances.env` naming the
-//! `INSTALL` and `SLOW` instances. The signed commands write to
+//! `INSTALL`, `SLOW`, and `CRASH` instances. The signed commands write to
 //! `<evidence-dir>`.
 
 use std::os::unix::fs::PermissionsExt as _;
@@ -65,11 +65,24 @@ fn main() {
         ],
         &[("bin/payload", b"slow\n")],
     );
+    let crash = fixture.release(
+        &out.join("stage-crash"),
+        "drill",
+        "2.0.0",
+        [
+            &format!("sleep 300 & echo $! > {evidence}/crash-child; wait"),
+            "true",
+            "true",
+        ],
+        &[("bin/payload", b"slow\n")],
+    );
     let now = tenkai::now_millis();
     let mut lines = String::new();
+    // SLOW is stopped, which leaves dirty(1.0.0, 2.0.0) at generation 2.
     for (name, release, from, generation, created_at) in [
         ("INSTALL", &install, None, 0, now),
         ("SLOW", &slow, Some("1.0.0".to_string()), 1, now + 1),
+        ("CRASH", &crash, Some("2.0.0".to_string()), 2, now + 2),
     ] {
         let plan = fixture.plan(
             "drill",
@@ -90,11 +103,7 @@ fn main() {
             &dir.join("request.json"),
             &serde_json::to_string(&request).unwrap(),
         );
-        let stage = if name == "INSTALL" {
-            "stage-install"
-        } else {
-            "stage-slow"
-        };
+        let stage = format!("stage-{}", name.to_lowercase());
         std::fs::rename(out.join(stage), dir.join("artifacts")).unwrap();
         lines.push_str(&format!("{name}={instance}\n"));
     }

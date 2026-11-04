@@ -12,6 +12,7 @@
 mod apply;
 pub mod config;
 pub mod copy;
+pub mod fence;
 pub mod run;
 pub mod store;
 
