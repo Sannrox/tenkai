@@ -1,85 +1,116 @@
-# tenkai
+# Tenkai
 
-Tenkai (展開, "deployment") is a delivery control plane for software you ship
-into many environments you do not fully control: customer VPCs, on-prem sites,
-edge hosts, and air-gapped networks. You **publish** immutable releases,
-**promote** them into channels, and **subscribe** environments to channels.
-Tenkai computes the plan that converges each environment, executes it behind
-health probes, and rolls back automatically on failure. Model routing configs
-and other intelligence artifacts ship through the same path as services.
+**Ship one product to many environments you don't control.**
 
-It is for teams that deliver one product to a fleet of heterogeneous or
-disconnected environments and need per-environment channels, gates,
-maintenance windows, signed releases, approvals, and an audit trail.
+[![CI](https://img.shields.io/github/actions/workflow/status/Sannrox/tenkai/ci.yml?branch=main&label=ci)](https://github.com/Sannrox/tenkai/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Sannrox/tenkai)](https://github.com/Sannrox/tenkai/releases)
+[![License](https://img.shields.io/github/license/Sannrox/tenkai)](LICENSE)
 
-**Why not Flux, Argo CD, or a deploy script?** GitOps tools sync a git repo
-into a connected cluster you own; a deploy script pushes whatever it is told
-to. Tenkai keeps a catalog of immutable releases and lets each environment's
-own constraints decide what it runs and when, including environments that are
-only reachable by [offline bundle](docs/offline-bundles.md). The full
-rationale is in [DESIGN.md](DESIGN.md).
+[Quickstart](#try-it-in-five-minutes) · [Docs](docs/README.md) · [Design](DESIGN.md) · [Roadmap](docs/capabilities.md)
+
+Tenkai (展開, "deployment") delivers software into customer VPCs, on-prem
+sites, edge hosts, and air-gapped networks. You publish immutable releases and
+promote them into channels. Each environment subscribes to a channel and
+decides for itself what it runs and when. Tenkai plans the change, applies it
+behind health probes, and rolls back automatically when a probe fails.
+
+- **Per-environment channels.** Each site follows `stable`, `beta`, or its own pin.
+- **Constraints and maintenance windows.** Each environment carries its own facts and rules.
+- **Signed releases and signed approvals.** Everything outside local development fails closed.
+- **Automatic rollback.** A failed health probe restores the previous release.
+- **Offline bundles.** Deliver to sites that never reach your network.
+- **One binary to start.** Embedded mode needs no server, database, or network.
+
+![Deploying a release, then watching Tenkai roll back one whose health probe fails](docs/assets/quickstart-demo.gif)
 
 ## Try it in five minutes
 
-Embedded mode is one `tenkaictl` binary with a local SQLite store: no server,
-database, or network service. The example product only writes a file.
+Install `tenkaictl` into the current directory (Linux x86-64 or Apple Silicon).
+The script verifies the download against the release's `SHA256SUMS`:
 
 ```bash
 git clone https://github.com/Sannrox/tenkai && cd tenkai
-
-# install tenkaictl here, checked against the release's SHA256SUMS
 curl -fsSL https://github.com/Sannrox/tenkai/releases/latest/download/install.sh | sh -s -- --prefix .
+```
 
-# initialize .tenkai-state/tenkai.db and the built-in local environment
+Releases before v0.7.0 ship no `install.sh`. Until v0.7.0 is out, build from
+source with `cargo build --bin tenkaictl && cp target/debug/tenkaictl .`
+
+Deploy the example product, which writes its version to a file:
+
+```bash
 ./tenkaictl init
+export TENKAI_MANAGEMENT_TOKEN=tenkai-local-management   # any value works in embedded mode
 
-# publish an immutable release and promote it to a channel
-export TENKAI_MANAGEMENT_TOKEN='replace-from-secret-store'
 ./tenkaictl publish examples/hello-local/tenkai.toml --allow-unsigned-development
 ./tenkaictl promote hello-local@0.1.0 stable
-
-# subscribe this machine and converge
 ./tenkaictl env subscribe local hello-local=stable
-./tenkaictl plan --env local
-./tenkaictl apply <plan-id-from-previous-command> \
-  --allow-unapproved-development \
-  --development-reason "local quickstart"
+
+PLAN=$(./tenkaictl plan --env local | awk '/^plan id:/ {print $3}')
+./tenkaictl apply "$PLAN" --allow-unapproved-development --development-reason quickstart
 ./tenkaictl status
 ```
 
-Releases before v0.7.0 attach no `install.sh`. While one of them is the
-latest Release, download `tenkaictl` by hand as in
-[GitHub Release binaries](docs/release-binaries.md#verify-and-install-by-hand).
+```text
+product                  channel    deployed     head         state
+hello-local              stable     0.1.0        0.1.0        current
+```
 
-`--allow-unsigned-development` and `--allow-unapproved-development` are
-development bypasses for the built-in `local` environment only. Every other
-environment fails closed without [signed releases](docs/release-signing.md)
-and [signed plan approvals](docs/plan-approval.md).
+Now ship a release whose health probe fails, and watch Tenkai undo it:
 
-The install script supports `linux-x86_64` (glibc 2.28 or newer) and
-`darwin-aarch64`. It installs a server host with `--role server` and a
-runtime host with `--role runtime`, and prints the command that verifies
-build provenance; see [GitHub Release binaries](docs/release-binaries.md),
-which also keeps the manual download and verify path. To build from source
-instead, run `cargo build --bin tenkaictl` and use `./target/debug/tenkaictl`.
-Hub Postgres hosts are the GitHub asset `tenkai-server-postgres-<platform>`,
-built with `-p tenkai-server --features postgres,ui`. Source build uses the
-same feature set.
+```bash
+./tenkaictl publish examples/hello-local/broken.toml --allow-unsigned-development
+./tenkaictl promote hello-local@0.2.0 stable
+
+PLAN=$(./tenkaictl plan --env local | awk '/^plan id:/ {print $3}')
+./tenkaictl apply "$PLAN" --allow-unapproved-development --development-reason quickstart
+```
+
+`apply` reports the rollback and exits non-zero; `status` still shows 0.1.0
+deployed:
+
+```text
+  upgrade   hello-local              0.1.0 -> 0.2.0
+  ROLLBACK  hello-local              ... restored hello-local to 0.1.0 ...
+```
+
+The `--allow-*-development` flags work only for the built-in `local`
+environment. Every other environment requires
+[signed releases](docs/release-signing.md) and
+[signed plan approvals](docs/plan-approval.md). Source builds, server and
+runtime hosts, and manual verification are in
+[GitHub Release binaries](docs/release-binaries.md).
 
 ## How it works
 
+```mermaid
+flowchart LR
+  P[publish release] --> C[promote to channel]
+  C --> S[environment subscribes]
+  S --> PL[plan]
+  PL --> A[apply under lease]
+  A --> H{health probe}
+  H -- pass --> D[deployed]
+  H -- fail --> R[roll back]
+```
+
 A **product** has immutable **releases**. Promoting a release moves a
 **channel** to it. Each **environment** subscribes to one channel per product
-and carries its own facts, constraints, maintenance windows, and trust policy.
-Tenkai computes a **plan** that moves the environment to its channel heads,
-applies it under a generation-fenced lease, probes health, and rolls back on
-failure. Plans, deployments, leases, and audit records live in Tenkai's own
-operational store, so Tenkai stays operable and recoverable without any
-optional provider ([ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md)).
+and carries its own constraints, maintenance windows, and trust policy.
+Plans, deployments, leases, and audit records live in Tenkai's own store, so
+Tenkai stays operable and recoverable on its own
+([ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md)).
 
-The same contract runs three ways: embedded in `tenkaictl` (as in the
-quickstart), as the networked `tenkai-server`, and with pull-only
-`tenkai-runtime` processes inside environments the server cannot reach.
+The same contract runs three ways: embedded in `tenkaictl` (as above), as the
+networked `tenkai-server`, and as pull-only `tenkai-runtime` processes inside
+environments the server cannot reach.
+
+**Why not a GitOps sync tool or a deploy script?** GitOps tools sync a git
+repo into a connected cluster you own. A deploy script pushes whatever it is
+told to. Tenkai keeps a catalog of immutable releases and lets each
+environment's own constraints decide what it runs and when, including
+environments reachable only by [offline bundle](docs/offline-bundles.md).
+Details in [DESIGN.md](DESIGN.md).
 
 ## Next steps
 
@@ -101,19 +132,16 @@ Everything else is in the [documentation index](docs/README.md).
 
 ## Status
 
-**v0 control-plane kernel**: the architecture program is complete and product
-depth is still growing. See [capabilities and roadmap](docs/capabilities.md)
-for what has shipped and what is next; work is tracked in GitHub Issues.
+Pre-1.0. The core delivery loop (publish, plan, apply, roll back, recover) is
+in place; interfaces may still change between minor releases. See
+[capabilities and roadmap](docs/capabilities.md). Work is tracked in
+[GitHub Issues](https://github.com/Sannrox/tenkai/issues).
 
 ## Contributing
 
-```bash
-make test
-make validate
-make test-integration
-make update
-```
+`make test` runs the test suite and `make validate` runs the full lint and
+contract checks. Setup and pull-request flow are in
+[CONTRIBUTING.md](CONTRIBUTING.md), agent workflow in [AGENTS.md](AGENTS.md),
+and tagging in [RELEASING.md](RELEASING.md).
 
-Contributor setup and pull-request flow live in
-[CONTRIBUTING.md](CONTRIBUTING.md); agent workflow is [AGENTS.md](AGENTS.md).
-Tagging follows [RELEASING.md](RELEASING.md).
+Apache-2.0 licensed.
