@@ -368,9 +368,6 @@ async fn execute_host(
         started_at_ms,
     } = step_context;
     let executor = adapters.software.host()?;
-    if host.action == crate::plan::HostAction::Uninstall {
-        bail!("this server does not run host uninstall steps yet");
-    }
     // The product may have been deployed with another executor since the
     // plan was made; admission leaves host steps to the applier.
     crate::plan::require_host_product(ctx, adapters.software, environment, &step.product).await?;
@@ -397,15 +394,27 @@ async fn execute_host(
                 StepOutcomeStatus::Succeeded,
                 result.detail.clone(),
             ),
-            Some(crate::environment::DeploymentTransition::Deployed {
-                version: step.to.clone(),
+            Some(match host.action {
+                crate::plan::HostAction::Install => {
+                    crate::environment::DeploymentTransition::Deployed {
+                        version: step.to.clone(),
+                        previous: step.from.clone(),
+                    }
+                }
                 // A health step proves the applied release healthy again,
                 // also after a failed health step made it unknown; it
                 // leaves the rollback history alone.
-                previous: match host.action {
-                    crate::plan::HostAction::Install => step.from.clone(),
-                    crate::plan::HostAction::Health | crate::plan::HostAction::Uninstall => None,
-                },
+                crate::plan::HostAction::Health => {
+                    crate::environment::DeploymentTransition::Deployed {
+                        version: step.to.clone(),
+                        previous: None,
+                    }
+                }
+                crate::plan::HostAction::Uninstall => {
+                    crate::environment::DeploymentTransition::Removed {
+                        version: step.to.clone(),
+                    }
+                }
             }),
         ),
         host_step::HostStepEnd::Recorded(result) => host_step_failed(

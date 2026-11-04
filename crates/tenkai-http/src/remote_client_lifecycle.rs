@@ -196,6 +196,28 @@ impl RemoteClient {
         .await
     }
 
+    pub async fn unsubscribe_environment(
+        &self,
+        environment: &str,
+        product: &str,
+        expected_generation: u64,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::DELETE,
+            &format!("/v1/environments/{environment}/subscriptions/{product}"),
+            Some(&tenkai::management_lifecycle::UnsubscribeRequest {
+                version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Unsubscribe
+                    .as_str()
+                    .into(),
+                environment: environment.to_string(),
+                expected_generation,
+                product: product.to_string(),
+            }),
+        )
+        .await
+    }
+
     pub async fn plan_environment(
         &self,
         environment: &str,

@@ -25,6 +25,10 @@ pub(crate) enum DeploymentTransition {
     },
     /// Same-version refresh: health and overlays change, rollback history does not.
     Refreshed,
+    /// The product's release was uninstalled; it is the rollback target.
+    Removed {
+        version: String,
+    },
     Unknown,
 }
 
@@ -603,7 +607,9 @@ pub(crate) async fn record_deployment_observation(
             && environment.properties.get(&failed_target_key) == Some(&observation.step.release_id)
             && matches!(
                 observation.transition,
-                DeploymentTransition::Deployed { .. } | DeploymentTransition::Refreshed
+                DeploymentTransition::Deployed { .. }
+                    | DeploymentTransition::Refreshed
+                    | DeploymentTransition::Removed { .. }
             )
         {
             environment.properties.remove(&failed_target_key);
@@ -835,6 +841,20 @@ fn transition_deployment(
             stamp_applied_overlays(environment, product);
             clear_unknown_origin(environment, product);
         }
+        DeploymentTransition::Removed { version } => {
+            for key in [
+                "deployed",
+                "deployed_release",
+                "deployment_health",
+                "deployment_error",
+            ] {
+                environment.properties.remove(&format!("{key}.{product}"));
+            }
+            environment
+                .properties
+                .insert(format!("deployed_prev.{product}"), version.clone());
+            clear_unknown_origin(environment, product);
+        }
         DeploymentTransition::Unknown => {
             environment
                 .properties
@@ -891,6 +911,65 @@ pub async fn subscribe(ctx: &mut Ctx, env: &str, product: &str, channel: &str) -
     };
     ctx.execute_action(action, params).await?;
     Ok(format!("{env} subscribed to {product}/{channel}"))
+}
+
+/// Remove `product` from `env`'s desired state. When a release of it is
+/// deployed, it must be a `host` release: the next approved plan uninstalls
+/// it through the root-side applier (ADR 0041 section 2). Removing a
+/// deployed release of another executor is not supported, so it is refused
+/// here rather than left running unmanaged.
+pub async fn unsubscribe(ctx: &mut Ctx, env: &str, product: &str) -> Result<String> {
+    validate_identifier("environment", env)?;
+    validate_identifier("product", product)?;
+    let eid = env_id(env);
+    let existing = active_environment(ctx, env).await?;
+    let property = |key: &str| {
+        existing
+            .properties
+            .get(&format!("{key}.{product}"))
+            .cloned()
+    };
+    // What may be on the host: the deployed release, and a release whose
+    // failed step left the deployment unknown.
+    let candidates: Vec<String> = [
+        property("deployed").map(|version| release_id(product, &version)),
+        property("failed_target"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if candidates.is_empty() && property("deployment_health").as_deref() == Some("unknown") {
+        bail!(
+            "deployment state of {product} in {env} is unknown; record it with `tenkaictl env reconcile` before unsubscribing"
+        );
+    }
+    for release in &candidates {
+        let executor = crate::plan::stored_release_executor(ctx, release).await?;
+        if executor != Some(crate::software_executor::SoftwareExecutorKind::Host) {
+            bail!(
+                "{product} is deployed in {env} from {release}, which is not a host release; only host releases are removed by a plan"
+            );
+        }
+    }
+    let mut removed = 0;
+    for link in ctx.links(&eid, REL_SUBSCRIBES).await? {
+        let channel = ctx
+            .get(&link.to_id)
+            .await?
+            .with_context(|| format!("subscription link {} has no channel", link.id))?;
+        if channel.properties.get("product").map(String::as_str) == Some(product) {
+            ctx.unlink(&eid, &link.to_id, REL_SUBSCRIBES).await?;
+            removed += 1;
+        }
+    }
+    if removed == 0 {
+        return Ok(format!("{env} is not subscribed to {product}"));
+    }
+    Ok(if candidates.is_empty() {
+        format!("{env} unsubscribed from {product}")
+    } else {
+        format!("{env} unsubscribed from {product}; the next approved plan uninstalls it")
+    })
 }
 
 pub(crate) async fn environment(ctx: &mut Ctx, env: &str) -> Result<Object> {

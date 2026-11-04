@@ -89,6 +89,28 @@ pub(super) async fn subscribe_environment(
     )
 }
 
+pub(super) async fn unsubscribe_environment(
+    State(state): State<Arc<AppState>>,
+    Path((environment, product)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let request = match parse_management_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .unsubscribe_environment(&credential, &environment, &product, request)
+            .await,
+    )
+}
+
 pub(super) async fn retire_environment(
     State(state): State<Arc<AppState>>,
     Path(environment): Path<String>,

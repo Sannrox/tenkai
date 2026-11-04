@@ -1605,6 +1605,45 @@ impl ManagementOperations {
         ))
     }
 
+    /// `DELETE /v1/environments/{environment}/subscriptions/{product}`:
+    /// remove a product from the environment's desired state, as
+    /// `env unsubscribe` does.
+    pub async fn unsubscribe_environment(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+        product: &str,
+        request: management_lifecycle::UnsubscribeRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "catalog.unsubscribe")?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        management_lifecycle::admit_unsubscribe(
+            &request,
+            environment,
+            product,
+            context.principal.kind,
+            self.granted_environment(credential, &context),
+        )
+        .map_err(map_lifecycle_error)?;
+        self.require_environment_visible(&context, environment)
+            .await?;
+        self.require_current_generation(&context, environment, request.expected_generation)
+            .await?;
+        let actor = &context.audit_principal();
+        self.audit(actor, "catalog.unsubscribe.requested")?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        let message = crate::environment::unsubscribe(&mut ctx, environment, product)
+            .await
+            .map_err(map_catalog_error)?;
+        self.audit(actor, "catalog.unsubscribe.completed")?;
+        Ok(ManagementLifecycleResult::new(
+            ManagementLifecycleOperation::Unsubscribe,
+            message,
+            Some(environment.to_string()),
+        ))
+    }
+
     /// `POST /v1/environments`: register an environment as `env add` does.
     pub async fn register_environment(
         &self,

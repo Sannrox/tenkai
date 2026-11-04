@@ -65,6 +65,16 @@ pub(crate) enum EnvCommand {
         #[arg(long)]
         generation: Option<u64>,
     },
+    /// Remove a product from an environment's desired state. A deployed host
+    /// release is uninstalled by the next approved plan; other deployed
+    /// releases are refused.
+    Unsubscribe {
+        env: String,
+        product: String,
+        /// Current fencing generation; required with --target remote.
+        #[arg(long)]
+        generation: Option<u64>,
+    },
     /// Remove an abandoned apply lease after verifying no apply is running.
     Unlock { env: String },
     /// Record manually reconciled deployment state; omit --deployed after cleanup.

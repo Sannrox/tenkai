@@ -502,7 +502,7 @@ pub(crate) async fn step_requires_slo_evaluation(
     step: &Step,
 ) -> Result<bool> {
     match step.action {
-        Action::Rollback => Ok(false),
+        Action::Rollback | Action::Remove => Ok(false),
         Action::Restart => restart_retries_failed_health_gate(ctx, environment, step).await,
         _ => Ok(true),
     }

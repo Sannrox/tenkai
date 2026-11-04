@@ -277,6 +277,43 @@ impl HostExecutor {
         Ok(record)
     }
 
+    /// Every applied-state record the applier keeps for `environment`.
+    /// Planning reads them to remove host products the environment no
+    /// longer subscribes to.
+    pub fn applied_states(&self, environment: &str) -> Result<Vec<AppliedStateRecord>> {
+        let dir = self.state_dir.join("records");
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error).with_context(|| format!("reading {}", dir.display())),
+        };
+        let mut records = Vec::new();
+        for entry in entries {
+            let path = entry?.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(bytes) = read_record(&path)? else {
+                continue;
+            };
+            let record: AppliedStateRecord = serde_json::from_slice(&bytes)
+                .with_context(|| format!("parsing host applied-state record {}", path.display()))?;
+            if record.schema != APPLIED_STATE_SCHEMA
+                || path != record_path(&self.state_dir, &record.environment, &record.product)
+            {
+                bail!(
+                    "host applied-state record {} is not where its environment and product put it",
+                    path.display()
+                );
+            }
+            if record.environment == environment {
+                records.push(record);
+            }
+        }
+        records.sort_by(|a, b| a.product.cmp(&b.product));
+        Ok(records)
+    }
+
     /// Spool `request` with the release workdir: `request.json`, and the
     /// manifest's `inputs` copied from `release_root` under `artifacts/`.
     /// Checks the copy against `artifact_digest` and replaces whatever an

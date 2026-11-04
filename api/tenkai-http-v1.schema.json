@@ -5892,6 +5892,39 @@
       ],
       "type": "object"
     },
+    "UnsubscribeRequest": {
+      "additionalProperties": false,
+      "description": "`DELETE /v1/environments/{environment}/subscriptions/{product}`: remove\na product from the environment's desired state; the next approved plan\nuninstalls a host release.",
+      "properties": {
+        "environment": {
+          "type": "string"
+        },
+        "expected_generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "product": {
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "environment",
+        "expected_generation",
+        "product"
+      ],
+      "type": "object"
+    },
     "WebhookDelivery": {
       "description": "One webhook delivery as `GET .../webhooks/deliveries` reports it.",
       "properties": {
@@ -6538,6 +6571,17 @@
       "path": "/v1/environments/{environment}/subscriptions",
       "request": {
         "$ref": "#/$defs/SubscribeRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "DELETE",
+      "path": "/v1/environments/{environment}/subscriptions/{product}",
+      "request": {
+        "$ref": "#/$defs/UnsubscribeRequest"
       },
       "response": {
         "$ref": "#/$defs/ManagementLifecycleResult"

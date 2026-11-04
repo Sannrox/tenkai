@@ -184,6 +184,18 @@ the record is refused by the applier. Host releases do not evaluate SLO
 gates (`[[gate.slo]]`); a plan that would need one is refused before anything
 runs.
 
+To remove a host release, take its product out of the environment's desired
+state; the next plan uninstalls it with a host `uninstall` step at the
+record's generation, approved like any other change:
+
+```bash
+tenkaictl --target remote env unsubscribe <environment> <product> --generation <generation>
+```
+
+Only host releases are removed this way: unsubscribing a product deployed
+with another executor is refused. A successful uninstall records the product
+as no longer deployed, with the removed release as its rollback target.
+
 Host steps are always attended. The server never approves a plan with a host
 step itself, whatever the environment's approval policy says, and the
 applier counts only approvals from the root-owned host approval policy.

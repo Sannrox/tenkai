@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Linux proof for the server side of privileged host releases (ADR 0041 §2):
 # tenkai-server runs as the unprivileged `tenkai` user, plans a signed host
-# release against the applier's record, and installs it and runs its health
-# step through tenkai-host-apply@.service with approvals the server cannot
-# sign itself. Run it after scripts/host-applier-systemd-drill.sh, which
+# release against the applier's record, installs it and runs its health step,
+# then uninstalls it, all through tenkai-host-apply@.service with approvals
+# the server cannot sign itself. Run it after scripts/host-applier-systemd-drill.sh, which
 # installs the applier, the unit, and the polkit rule. Needs root (via sudo)
 # and systemd as PID 1. Never run it on a host you care about.
 #
@@ -158,5 +158,28 @@ echo "== the environment is converged"
 remote plan --env drill --generation "$(generation)" >"$work/again.txt"
 grep -q 'drill is up to date' "$work/again.txt" ||
   fail "a converged environment planned steps: $(cat "$work/again.txt")"
+
+echo "== unsubscribing uninstalls the host release through an approved plan"
+remote env unsubscribe drill host-drill --generation "$(generation)" >/dev/null
+remote plan --env drill --generation "$(generation)" >"$work/remove.txt"
+plan=$(sed -n 's/^plan id: //p' "$work/remove.txt")
+digest=$(sed -n 's/^plan digest: //p' "$work/remove.txt")
+[ -n "$plan" ] && [ -n "$digest" ] || fail "no removal plan: $(cat "$work/remove.txt")"
+tenkaictl dev sign-approval --plan-digest "$digest" --env drill --keys "$keys" \
+  --approval "$work/remove-approval.json" --trust-roots "$work/approvers.toml" >/dev/null
+remote apply "$plan" --approval "$work/remove-approval.json" --approval-trust-roots "$work/approvers.toml" \
+  --generation "$(generation)" >"$work/apply.txt" || fail "removal failed: $(cat "$work/apply.txt")"
+sudo test ! -e "$evidence" || fail "the uninstall did not run"
+record=$(sudo python3 -c '
+import glob, json
+for path in glob.glob("/var/lib/tenkai-host/records/*.json"):
+    r = json.load(open(path))
+    if r["environment"] == "drill" and r["product"] == "host-drill":
+        print(r["state"], r["generation"])
+')
+[ "$record" = "empty 2" ] || fail "unexpected applied-state record after the uninstall: $record"
+remote plan --env drill --generation "$(generation)" >"$work/again.txt"
+grep -q 'drill is up to date' "$work/again.txt" ||
+  fail "a removed product planned steps: $(cat "$work/again.txt")"
 
 echo "host executor drill passed"

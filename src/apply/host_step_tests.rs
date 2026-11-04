@@ -867,3 +867,131 @@ async fn a_unit_left_running_by_an_earlier_holder_is_stopped_before_the_next_app
     .unwrap();
     assert_eq!(result.outcome, HostApplyOutcome::Stopped);
 }
+
+#[tokio::test]
+async fn an_unsubscribed_host_release_is_uninstalled_by_an_approved_plan() {
+    let mut host = Host::new("uninstall").await;
+    host.release("1.0.0", false).await;
+    let plan = host.plan().await;
+    host.apply(&plan).await.unwrap();
+
+    crate::environment::unsubscribe(&mut host.ctx, "edge", "cluster")
+        .await
+        .unwrap();
+    let remove = host.plan().await;
+
+    let bindings: Vec<_> = remove
+        .steps
+        .iter()
+        .map(|step| (step.action, step.from.clone(), step.to.clone(), step.host))
+        .collect();
+    assert_eq!(
+        bindings,
+        [(
+            Action::Remove,
+            Some("1.0.0".into()),
+            "1.0.0".into(),
+            Some(HostStep {
+                action: HostAction::Uninstall,
+                expected_generation: 1
+            })
+        )]
+    );
+    // A failed uninstall stays failed; the next plan tries it again.
+    host.applier
+        .fail
+        .lock()
+        .unwrap()
+        .insert(HostAction::Uninstall);
+    let outcomes = host.apply(&remove).await.unwrap();
+    assert_eq!(
+        statuses(&outcomes),
+        [StepOutcomeStatus::Failed],
+        "{outcomes:?}"
+    );
+    host.applier.fail.lock().unwrap().clear();
+    let retry = host.plan().await;
+    assert_eq!(
+        retry.steps[0].host,
+        Some(HostStep {
+            action: HostAction::Uninstall,
+            expected_generation: 2
+        })
+    );
+
+    let outcomes = host.apply(&retry).await.unwrap();
+
+    assert_eq!(
+        statuses(&outcomes),
+        [StepOutcomeStatus::Succeeded],
+        "{outcomes:?}"
+    );
+    assert_eq!(host.record().state, AppliedState::Empty);
+    assert_eq!(host.deployed().await, None);
+    let environment = crate::environment::environment(&mut host.ctx, "edge")
+        .await
+        .unwrap();
+    assert_eq!(
+        environment
+            .properties
+            .get("deployed_prev.cluster")
+            .map(String::as_str),
+        Some("1.0.0")
+    );
+    assert!(host.plan().await.steps.is_empty(), "removed");
+    assert_eq!(
+        *host.applier.runs.lock().unwrap(),
+        [
+            "install cluster@1.0.0",
+            "uninstall cluster@1.0.0",
+            "uninstall cluster@1.0.0"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn only_a_host_release_is_removed_by_unsubscribing() {
+    let mut host = Host::new("unsubscribe").await;
+    let dir = host.root.join("api-1.0.0");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("tenkai.toml"),
+        "[product]\nname = \"api\"\nversion = \"1.0.0\"\n\n[deploy]\ninstall = \"true\"\n",
+    )
+    .unwrap();
+    crate::catalog::publish(
+        &mut host.ctx,
+        &dir.join("tenkai.toml"),
+        &crate::catalog::PublishOptions {
+            allow_unsigned_development: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let actor = crate::auth_context::test_management_context("host-step");
+    crate::catalog::promote(&mut host.ctx, &actor, "api@1.0.0", "stable")
+        .await
+        .unwrap();
+    crate::plan::subscribe(&mut host.ctx, "edge", "api", "stable")
+        .await
+        .unwrap();
+    crate::environment::reconcile_deployment(&mut host.ctx, "edge", "api", Some("1.0.0"))
+        .await
+        .unwrap();
+
+    let error = crate::environment::unsubscribe(&mut host.ctx, "edge", "api")
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("not a host release"), "{error}");
+    // A product with nothing deployed simply leaves the desired state.
+    crate::environment::reconcile_deployment(&mut host.ctx, "edge", "api", None)
+        .await
+        .unwrap();
+    let message = crate::environment::unsubscribe(&mut host.ctx, "edge", "api")
+        .await
+        .unwrap();
+    assert_eq!(message, "edge unsubscribed from api");
+}

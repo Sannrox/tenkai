@@ -161,6 +161,12 @@ async fn bind_host_steps(
             continue;
         };
         if manifest.deploy.executor != Some(crate::software_executor::SoftwareExecutorKind::Host) {
+            if step.action == Action::Remove {
+                bail!(
+                    "{} is not a host release; only host releases are removed by a plan",
+                    step.release_id
+                );
+            }
             bound.push(step);
             continue;
         }
@@ -185,6 +191,18 @@ async fn bind_host_steps(
                 "host release {} is never restarted; plan a new install instead",
                 step.release_id
             ),
+            // Uninstall acts on the release the record holds, which the
+            // planner pinned; its `from` is the release itself.
+            None if step.action == Action::Remove => {
+                step.from = Some(step.to.clone());
+                step.restore = None;
+                step.host = Some(HostStep {
+                    action: HostAction::Uninstall,
+                    expected_generation: record.generation,
+                });
+                bound.push(step);
+                continue;
+            }
             None => {}
         }
         let from = host_source(&record, step.from.as_deref());
@@ -599,6 +617,42 @@ async fn compute_snapshot_with_policy(
             None => pending.push((product, Action::Install, None, desired, target, None, kind)),
         }
     }
+    // A host product the environment no longer subscribes to is removed
+    // like any other change: by an approved host uninstall step, from what
+    // the applier's record holds (ADR 0041 section 2).
+    if let Ok(host) = executors.host() {
+        for record in host.applied_states(env)? {
+            if products.contains(&record.product) {
+                continue;
+            }
+            let deployed = env_obj
+                .properties
+                .get(&format!("deployed.{}", record.product))
+                .cloned();
+            let Some(version) = host_source(&record, deployed.as_deref()) else {
+                if let Some(deployed) = deployed {
+                    bail!(
+                        "the host applier records {} removed from {env} at generation {}, but this server records {deployed}; once no apply runs, record it with `tenkaictl env reconcile {env} {}`",
+                        record.product,
+                        record.generation,
+                        record.product
+                    );
+                }
+                continue;
+            };
+            let target = pin_release(ctx, &release_id(&record.product, &version), env).await?;
+            host_products.insert(record.product.clone());
+            pending.push((
+                record.product.clone(),
+                Action::Remove,
+                Some(version.clone()),
+                version,
+                target,
+                None,
+                crate::manifest::ProductKind::Software,
+            ));
+        }
+    }
     inputs.sort_by(|a, b| a.product.cmp(&b.product));
     if held_model {
         pending.retain(|entry| entry.6 != crate::manifest::ProductKind::RoutingConfig);
@@ -670,7 +724,7 @@ pub(super) fn model_routing_rollout_rank(kind: crate::manifest::ProductKind, act
     use crate::product_kind::RolloutDirection;
     let direction = match action {
         Action::Install | Action::Upgrade | Action::Restart => RolloutDirection::Forward,
-        Action::Downgrade | Action::Rollback => RolloutDirection::Reverse,
+        Action::Downgrade | Action::Rollback | Action::Remove => RolloutDirection::Reverse,
     };
     kind.policy().rollout_rank(direction)
 }
