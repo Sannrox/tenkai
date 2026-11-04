@@ -297,7 +297,8 @@ fn same_entry(checked: &Stat, opened: &Stat, name: &str) -> Result<()> {
 /// Permission bits to keep on the copy; the artifact digest covers them.
 /// Set-id and sticky bits are refused rather than copied as root.
 fn permission_bits(stat: &Stat, name: &str) -> Result<u32> {
-    let mode = stat.st_mode as u32;
+    // `st_mode` is narrower than `u32` on some platforms.
+    let mode: u32 = stat.st_mode as _;
     if mode & 0o7000 != 0 {
         bail!("{name} carries set-id or sticky bits");
     }
