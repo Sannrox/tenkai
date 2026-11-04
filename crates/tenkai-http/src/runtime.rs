@@ -6,7 +6,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 
 use tenkai::management_operations::ManagementError;
-use tenkai::runner_attestation::AttestationRefusal;
+use tenkai::runner_attestation::{AttestationChallenge, AttestationRefusal};
 use tenkai::runtime_delivery::{RuntimeDeliveryError, RuntimeHeartbeat, RuntimeInventoryReport};
 
 use super::router::{AppState, ErrorBody};
@@ -211,12 +211,19 @@ fn runtime_delivery_error(error: RuntimeDeliveryError) -> Response {
         RuntimeDeliveryError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
         RuntimeDeliveryError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         // 428 advertises the runner attestation policy (#675): the agent
-        // then sends evidence. Every other refusal is final for the request.
-        RuntimeDeliveryError::Attestation(ref refusal) => match refusal {
-            AttestationRefusal::Missing => StatusCode::PRECONDITION_REQUIRED,
-            AttestationRefusal::InventoryContradictsDeclaredFact { .. } => StatusCode::CONFLICT,
-            _ => StatusCode::FORBIDDEN,
-        },
+        // then sends evidence in one of the schemas named with it (#849).
+        // Every other refusal is final for the request.
+        RuntimeDeliveryError::Attestation(ref refusal) => {
+            let status = match refusal {
+                AttestationRefusal::Missing => StatusCode::PRECONDITION_REQUIRED,
+                AttestationRefusal::InventoryContradictsDeclaredFact { .. } => StatusCode::CONFLICT,
+                _ => StatusCode::FORBIDDEN,
+            };
+            if refusal.names_schemas() {
+                return (status, Json(AttestationChallenge::new(refusal))).into_response();
+            }
+            status
+        }
     };
     error_response(status, error.to_string())
 }

@@ -2153,16 +2153,19 @@ mod tests {
             "evidence_stale"
         );
         let failed = crate::runner_attestation::sign(
-            "prod",
-            vec![crate::host_preflight::CheckResult {
-                check: "disk /var".into(),
-                passed: false,
-                reason: "full".into(),
-            }],
-            BTreeMap::new(),
+            crate::runner_attestation::AttestationSchema::V2,
+            crate::runner_attestation::HostEvidence {
+                environment: "prod".into(),
+                checks: vec![crate::host_preflight::CheckResult {
+                    check: "disk /var".into(),
+                    passed: false,
+                    reason: "full".into(),
+                }],
+                facts: BTreeMap::new(),
+                checked_at: now,
+            },
             &key.0,
             &key.1,
-            now,
         )
         .unwrap();
         assert_eq!(

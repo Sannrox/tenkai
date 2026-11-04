@@ -105,7 +105,10 @@ pub async fn enrolled_credential(
         let (Some(dir), Some(csr)) = (certificate_dir, &request.csr) else {
             bail!("the server requires runner attestation, which needs --certificate-dir");
         };
-        request.attestation = Some(host_attestation(dir, environment, csr, preflight)?);
+        let schema = crate::runner_attestation::AttestationSchema::for_challenge(
+            &response.text().await.unwrap_or_default(),
+        )?;
+        request.attestation = Some(host_attestation(dir, environment, csr, preflight, schema)?);
         response = client.post(&url).json(&request).send().await?;
     }
     let status = response.status();
@@ -140,27 +143,40 @@ fn runner_csr(dir: &std::path::Path) -> Result<String> {
     crate::runner_key::RunnerKey::open_or_generate(dir)?.csr()
 }
 
-/// Host evidence for `environment`, signed with the runner key in `dir`
-/// for the key of `csr` (#675): the checks of the preflight config at
-/// `preflight` (none without one) and the probed inventory facts.
+/// Host evidence for `environment`, signed as `schema` with the runner key
+/// in `dir` for the key of `csr` (#675).
 fn host_attestation(
     dir: &std::path::Path,
     environment: &str,
     csr: &str,
     preflight: Option<&std::path::Path>,
+    schema: crate::runner_attestation::AttestationSchema,
 ) -> Result<crate::runner_attestation::RunnerAttestation> {
-    let now = crate::now_millis();
+    let key = crate::runner_key::RunnerKey::open(dir)?
+        .with_context(|| format!("reading the runner key in {}", dir.display()))?;
+    key.sign_attestation(schema, host_evidence(environment, preflight)?, csr)
+}
+
+/// This host's evidence for `environment` now: the checks of the preflight
+/// config at `preflight` (none without one) and the probed inventory facts.
+fn host_evidence(
+    environment: &str,
+    preflight: Option<&std::path::Path>,
+) -> Result<crate::runner_attestation::HostEvidence> {
+    let checked_at = crate::now_millis();
     let checks = match preflight {
         Some(path) => crate::host_preflight::run_checks(
             &crate::host_preflight::PreflightConfig::load(path)?,
-            now,
+            checked_at,
         ),
         None => Vec::new(),
     };
-    let facts = inventory::facts_map(&inventory::probe_local_inventory()?);
-    let key = crate::runner_key::RunnerKey::open(dir)?
-        .with_context(|| format!("reading the runner key in {}", dir.display()))?;
-    key.sign_attestation(environment, checks, facts, csr, now)
+    Ok(crate::runner_attestation::HostEvidence {
+        environment: environment.into(),
+        checks,
+        facts: inventory::facts_map(&inventory::probe_local_inventory()?),
+        checked_at,
+    })
 }
 
 /// The agent's runner certificate from `dir` as a client identity with the
@@ -407,18 +423,6 @@ impl RuntimeClient {
             .as_ref()
             .context("the runner key is missing from the certificate directory")?;
         let csr = key.csr()?;
-        let attest = |csr: &str| {
-            let now = crate::now_millis();
-            let checks = match self.preflight.as_deref() {
-                Some(path) => crate::host_preflight::run_checks(
-                    &crate::host_preflight::PreflightConfig::load(path)?,
-                    now,
-                ),
-                None => Vec::new(),
-            };
-            let facts = inventory::facts_map(&inventory::probe_local_inventory()?);
-            key.sign_attestation(&self.environment, checks, facts, csr, now)
-        };
         let send = |attestation| {
             client
                 .post(format!(
@@ -434,12 +438,17 @@ impl RuntimeClient {
                 })
                 .send()
         };
-        // Evidence only when this server asks for it on this request (#675):
-        // a server of an earlier release, during a rolling deploy or after a
-        // rollback, refuses the unknown field.
+        // Evidence only when this server asks for it on this request (#675),
+        // in a schema it names (#849): a server of an earlier release, during
+        // a rolling deploy or after a rollback, refuses the unknown field and
+        // names no schemas, so it gets v1.
         let mut response = send(None).await?;
         if response.status() == reqwest::StatusCode::PRECONDITION_REQUIRED {
-            response = send(Some(attest(&csr)?)).await?;
+            let schema = crate::runner_attestation::AttestationSchema::for_challenge(
+                &response.text().await.unwrap_or_default(),
+            )?;
+            let evidence = host_evidence(&self.environment, self.preflight.as_deref())?;
+            response = send(Some(key.sign_attestation(schema, evidence, &csr)?)).await?;
         }
         let renewed: crate::runtime_delivery::RuntimeCertificate =
             decode_response(response, "renewing the runner certificate").await?;
@@ -1199,37 +1208,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// Renewal sends evidence only after a 428 on that request (#675): an
-    /// agent that attested to one server still renews against a server of
-    /// an earlier release, which refuses the unknown `attestation` field.
+    /// Renewal sends evidence only after a 428 on that request (#675), in
+    /// the schema the 428 names, or v1 when it names none (#849): an agent
+    /// that attested to one server still renews against a server of an
+    /// earlier release, with or without attestation.
     #[tokio::test]
     async fn an_agent_that_attested_renews_against_a_server_without_attestation() {
         use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::atomic::{AtomicBool, Ordering};
         let (cert, ca_key) = crate::runner_ca::RunnerCa::generate("runner CA").unwrap();
         let ca = Arc::new(crate::runner_ca::RunnerCa::from_pem(&cert, &ca_key).unwrap());
         // True: the server requires attestation; false: an earlier release.
         let requires = Arc::new(AtomicBool::new(true));
-        let attested = Arc::new(AtomicUsize::new(0));
+        // The 428 body: this release's challenge, or an earlier one's.
+        let challenge = Arc::new(std::sync::Mutex::new(
+            serde_json::to_string(&crate::runner_attestation::AttestationChallenge::new(
+                &crate::runner_attestation::AttestationRefusal::Missing,
+            ))
+            .unwrap(),
+        ));
+        let attested = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let app = {
-            let (ca, requires, attested) = (ca.clone(), requires.clone(), attested.clone());
+            let (ca, requires, challenge, attested) = (
+                ca.clone(),
+                requires.clone(),
+                challenge.clone(),
+                attested.clone(),
+            );
             axum::Router::new().route(
                 "/v1/runtime/environments/prod/certificate",
                 axum::routing::post(move |body: axum::body::Bytes| {
-                    let (ca, requires, attested) = (ca.clone(), requires.clone(), attested.clone());
+                    let (ca, requires, challenge, attested) =
+                        (ca.clone(), requires.clone(), challenge.clone(), attested.clone());
                     async move {
                         use axum::http::StatusCode;
                         let raw: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                        let has = raw.get("attestation").is_some();
-                        match (requires.load(Ordering::SeqCst), has) {
-                            (true, false) => return (StatusCode::PRECONDITION_REQUIRED, String::new()),
-                            (false, true) => {
+                        let schema = raw
+                            .get("attestation")
+                            .map(|attestation| attestation["schema"].as_str().unwrap().to_owned());
+                        match (requires.load(Ordering::SeqCst), schema) {
+                            (true, None) => {
+                                let body = challenge.lock().unwrap().clone();
+                                return (StatusCode::PRECONDITION_REQUIRED, body);
+                            }
+                            (false, Some(_)) => {
                                 return (StatusCode::BAD_REQUEST, "unknown field `attestation`".into());
                             }
-                            (true, true) => {
-                                attested.fetch_add(1, Ordering::SeqCst);
-                            }
-                            (false, false) => {}
+                            (true, Some(schema)) => attested.lock().unwrap().push(schema),
+                            (false, None) => {}
                         }
                         let csr = raw["csr"].as_str().unwrap();
                         let certificate = ca
@@ -1263,12 +1289,23 @@ mod tests {
         .with_certificate_dir(dir.clone())
         .unwrap();
         client.renew_certificate_if_due().await.unwrap();
-        assert_eq!(attested.load(Ordering::SeqCst), 1, "attested after the 428");
-        // Rolled back to a server without attestation: renew again.
+        // Rolled back to a server that requires attestation but names no
+        // schemas, then to one without attestation: renew each time.
+        *challenge.lock().unwrap() =
+            r#"{"error":"runner attestation required: attestation_missing"}"#.into();
+        *client.certified.write().unwrap() = None;
+        client.renew_certificate_if_due().await.unwrap();
         requires.store(false, Ordering::SeqCst);
         *client.certified.write().unwrap() = None;
         client.renew_certificate_if_due().await.unwrap();
-        assert_eq!(attested.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *attested.lock().unwrap(),
+            [
+                crate::runner_attestation::ATTESTATION_SCHEMA,
+                crate::runner_attestation::LEGACY_ATTESTATION_SCHEMA
+            ],
+            "attested after each 428, in the schema it named"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }

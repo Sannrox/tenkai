@@ -489,9 +489,10 @@ export TENKAI_RUNTIME_PKCS11_PIN_FILE=/etc/tenkai/runner-pkcs11-pin
 
 - **Evidence.** The agent runs the host preflight checks of
   `TENKAI_RUNTIME_PREFLIGHT_CONFIG` (none without it) on its own host, adds
-  its probed host facts, and signs a `tenkai.runner-attestation.v1`
+  its probed host facts, and signs a `tenkai.runner-attestation.v2`
   statement with its runner key (ECDSA P-256, `ecdsa-p256-sha256`): the key
-  of its CSR. The runner key never becomes a plan approval or `preflight`
+  of its CSR, over the exact bytes it sends
+  ([wire format](runtime-protocol-v1.md#runner-attestation-statement)). The runner key never becomes a plan approval or `preflight`
   trust root; operator-signed `preflight_evidence` is unchanged.
 - **Checks.** The server verifies the signature against the CSR key and
   refuses evidence that is missing, older than `max_age_ms`, failed, signed
@@ -529,10 +530,14 @@ export TENKAI_RUNTIME_PKCS11_PIN_FILE=/etc/tenkai/runner-pkcs11-pin
   raises one `runner.attestation_refused` operational event per runner,
   reason and binding ([operational events](deploy-webhooks.md#operational-events)).
 - **Compatibility.** The server advertises the policy only by answering
-  `428` to a request without evidence, and the agent sends evidence only
-  then. With the policy off nothing changes, and agents of earlier releases
-  keep working. Enable the policy only once the environment's agents run
-  this release and have a certificate directory: an older agent cannot
+  `428` to a request without evidence, naming the statement schemas it
+  verifies, and the agent sends evidence only then, in a schema the server
+  named. Servers of this release verify v2 and the deprecated v1 of earlier
+  agents; agents of this release send v1 to a server that names no schemas.
+  So servers and agents upgrade in either order under the policy. With the
+  policy off nothing changes, and agents of earlier releases keep working.
+  Enable the policy only once the environment's agents run 0.6.0 or later
+  and have a certificate directory: an older agent cannot
   attest, so it fails renewal (registry: `attestation_missing`) and, once its
   certificate expires, stops claiming work. An agent without a certificate
   directory, or a static `TENKAI_RUNTIME_TOKENS` runtime, stops claiming

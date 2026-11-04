@@ -14,10 +14,20 @@ There is no served gRPC `RuntimeService`.
 | `POST /v1/runtime/environments/{environment}/certificate` | Runner certificate (or, once it expired, the enrolled bearer) and `x-tenkai-runtime-instance`. JSON `RuntimeCertificateRequest` (`csr`; optional `attestation`) | JSON `RuntimeCertificate` (`certificate`, `ca`) ([runner certificates](run-tenkai-server.md#runner-certificates)) |
 
 An environment that requires runner attestation (#675) answers an
-enrollment or renewal without `attestation` with `428` and
-`runner attestation required: attestation_missing`, spending no token; the
-agent then sends a `tenkai.runner-attestation.v1` statement signed with its
-CSR key. Other attestation refusals are `403` with a named reason
+enrollment or renewal without `attestation` with `428`, spending no token,
+and a body that names the statement schemas it verifies, preferred first:
+
+```json
+{"error": "runner attestation required: attestation_missing",
+ "accepted_schemas": ["tenkai.runner-attestation.v2", "tenkai.runner-attestation.v1"]}
+```
+
+The agent then repeats the request with an
+[attestation](#runner-attestation-statement) in the first listed schema it
+signs. A server of a release before 0.7.0 sends no `accepted_schemas`; an
+agent then sends v1. An attestation in a schema the server does not verify,
+in any JSON shape, is `403` `attestation_schema_unsupported` with the same
+body. Other attestation refusals are `403` with a named reason
 (`hardware_key_required` when the environment requires a hardware-backed
 runner key and the statement names a file key), and a
 work request (work, heartbeat, self-release, completion, inventory) admitted
@@ -26,6 +36,51 @@ runtime inventory report contradicting an operator-declared fact is `409`
 ([attested runners](run-tenkai-server.md#attested-runners)). An agent sends
 `attestation` only after a `428`, so agents and servers without it are
 unchanged.
+
+### Runner attestation statement
+
+`tenkai.runner-attestation.v2` is signed over the exact bytes the agent
+sends. The `attestation` field of an enrollment or renewal is:
+
+| Field | Value |
+| --- | --- |
+| `schema` | `tenkai.runner-attestation.v2` |
+| `algorithm` | `ecdsa-p256-sha256`, the only one |
+| `statement` | base64 (standard alphabet, padded) of the statement: a UTF-8 JSON object |
+| `signature` | base64 (standard alphabet, padded) of an ASN.1 DER ECDSA P-256 SHA-256 signature, by the key of the request's CSR, over the ASCII domain `TENKAI-RUNNER-ATTESTATION-V2`, one `0x00` byte, then the decoded statement bytes |
+
+The server verifies the signature over the bytes it received before it
+parses them, so neither side's JSON formatting or field order is part of
+the contract. The statement object has these fields:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `environment` | string | The environment of the request path |
+| `checked_at` | integer | Unix milliseconds the evidence was taken; at most `max_age_ms` old and 60 s ahead of the server |
+| `passed` | boolean | True only when every check passed |
+| `checks` | array of `{check: string, passed: boolean, reason: string}` | Host preflight checks the agent ran; may be empty |
+| `facts` | object of string to string | Probed host facts (the environment fact keys); a key may appear once |
+| `key_fingerprint` | string | `sha256:<hex>` of the CSR key's DER SubjectPublicKeyInfo |
+| `hardware_backed` | boolean | True when the key was generated in a hardware store |
+
+A verifier ignores statement fields and check fields it does not know,
+which the signature still covers. An added field must therefore be one an
+older verifier can safely ignore; a field that changes what the statement
+means needs a new schema. Fields of the `attestation` object other than
+those above are ignored and unsigned. A repeated key in the statement or in
+`facts` is malformed.
+
+The evidence digest is `sha256:<hex>` of the decoded statement bytes as
+sent. The issued runner certificate carries it in the private, non-critical
+extension `2.25.15797326480183637975`: a DER `SEQUENCE` of two 32-byte
+`OCTET STRING`s, the evidence digest and the key fingerprint, followed by
+`BOOLEAN TRUE` when the key is hardware-backed.
+
+`tenkai.runner-attestation.v1` is deprecated. Its `statement` is a JSON
+object signed over the server's own re-encoding of it, it allows no added
+field, and its evidence digest hashes the server's re-encoding of the whole
+attestation. Servers of this release still verify it from agents of earlier
+releases; a later release removes it.
 
 The other endpoints take either a configured runtime token or an enrolled
 credential as the bearer
@@ -118,7 +173,9 @@ logs.
 - Authorize the path `environment` against the transport principal.
 - Persist delivery and receipt idempotency keys atomically.
 - Compare plan ID and generation on HTTP heartbeat and completion.
-- Treat unknown HTTP JSON fields as unsupported, never as success.
+- Treat unknown HTTP JSON fields as unsupported, never as success. A
+  signed runner attestation statement is the exception: its unknown fields
+  are ignored and stay covered by its signature.
 - Keep the proto `Negotiate` / `Pull` / `CompleteStep` / `Heartbeat` /
   `ReportObservation` surface distinct from the HTTP JSON types above.
 - On the proto contract, negotiate versions and capabilities before accepting
