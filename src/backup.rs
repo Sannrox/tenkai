@@ -552,7 +552,7 @@ pub fn drill(
     let scratch = private.join("restored.db");
     SqliteStore::restore(backup, &scratch)?;
     // Opening runs this version's migrations: the backup must still open.
-    drop(SqliteStore::open(&scratch).context("opening the restored store")?);
+    drop(SqliteStore::open_scratch(&scratch).context("opening the restored store")?);
     let connection = rusqlite::Connection::open(&scratch)?;
     let integrity: String = connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
     let count = |table: &str| -> Result<u64> {

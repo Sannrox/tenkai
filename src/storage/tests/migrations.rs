@@ -132,11 +132,13 @@ fn provider_event_inspection_uses_immutable_observation_time() {
 
 #[test]
 fn schema_eleven_backfills_environment_retirement_column() {
-    let path = std::env::temp_dir().join(format!(
-        "tenkai-457-retirement-{}-{}.db",
+    let dir = std::env::temp_dir().join(format!(
+        "tenkai-457-retirement-{}-{}",
         std::process::id(),
-        crate::now_millis()
+        uuid::Uuid::new_v4().simple()
     ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("tenkai.db");
     {
         let mut connection = Connection::open(&path).unwrap();
         migrate(&mut connection).unwrap();
@@ -178,15 +180,24 @@ fn schema_eleven_backfills_environment_retirement_column() {
         "tenant listing filters on the row's own retirement"
     );
     drop(store);
-    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// A state database the previous release (v0.5.0, schema 12) wrote opens and
-/// migrates to the current schema with its rows intact.
+/// migrates to the current schema with its rows intact, and leaves a
+/// pre-migration copy at schema 12 with the same rows that the previous
+/// binary can open (#906).
 #[test]
 fn previous_release_state_database_migrates_with_its_data() {
-    let mut connection = Connection::open_in_memory().unwrap();
-    connection
+    let dir = std::env::temp_dir().join(format!(
+        "tenkai-890-previous-release-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let database = dir.join("tenkai.db");
+    Connection::open(&database)
+        .unwrap()
         .execute_batch(include_str!("fixtures/state-schema-12.sql"))
         .unwrap();
     let version = |connection: &Connection| {
@@ -194,26 +205,54 @@ fn previous_release_state_database_migrates_with_its_data() {
             .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
             .unwrap()
     };
-    assert_eq!(version(&connection), 12);
-    migrate(&mut connection).unwrap();
-    assert_eq!(version(&connection), SCHEMA_VERSION);
-    let channel: (String, String) = connection
-        .query_row(
-            "SELECT release_id, name FROM channels WHERE id = 'chan-kako-stable'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
-    assert_eq!(channel, ("rel-kako-0.1.0".into(), "stable".into()));
-    let audit: String = connection
-        .query_row(
-            "SELECT operation FROM audit_events WHERE id = 'audit-1'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(audit, "promote");
-    // Migrating again is a no-op.
-    migrate(&mut connection).unwrap();
-    assert_eq!(version(&connection), SCHEMA_VERSION);
+    let rows = |connection: &Connection| {
+        let channel: (String, String) = connection
+            .query_row(
+                "SELECT release_id, name FROM channels WHERE id = 'chan-kako-stable'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(channel, ("rel-kako-0.1.0".into(), "stable".into()));
+        let audit: String = connection
+            .query_row(
+                "SELECT operation FROM audit_events WHERE id = 'audit-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(audit, "promote");
+    };
+    let copies = || {
+        std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.to_str().unwrap().contains("tenkai.db.pre-v12."))
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        SqliteStore::open(&database)
+            .unwrap()
+            .schema_version()
+            .unwrap(),
+        SCHEMA_VERSION
+    );
+    let store = Connection::open(&database).unwrap();
+    assert_eq!(version(&store), SCHEMA_VERSION);
+    rows(&store);
+    let [copy] = copies().try_into().unwrap();
+    let previous =
+        Connection::open_with_flags(&copy, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    assert_eq!(version(&previous), 12);
+    rows(&previous);
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&copy).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "the copy holds the whole store");
+    }
+    // Opening again is a no-op and copies nothing more.
+    drop(SqliteStore::open(&database).unwrap());
+    assert_eq!(copies(), vec![copy]);
+    let _ = std::fs::remove_dir_all(dir);
 }
