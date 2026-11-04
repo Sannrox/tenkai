@@ -145,7 +145,8 @@ next start converges from durable state.
 ### Run host releases
 
 A release that declares `executor = "host"` installs software on the host
-itself as root, for example a single-node cluster, while the server stays
+itself as root, for example a single-node cluster
+([bare host to cluster](bare-host.md)), while the server stays
 the unprivileged `tenkai` user
 ([ADR 0041](decisions/0041-per-release-executor-and-privileged-host-releases.md)).
 Hosts that run no host releases skip this section.

@@ -1,0 +1,32 @@
+# Single-node k3s server, installed by Tenkai's cluster host release.
+# It runs as its own unit, outside the host applier's sandbox.
+[Unit]
+Description=Single-node Kubernetes (k3s), installed by Tenkai
+Documentation=https://github.com/Sannrox/tenkai/blob/main/docs/bare-host.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=notify
+ExecStartPre=-/sbin/modprobe br_netfilter
+ExecStartPre=-/sbin/modprobe overlay
+# No ingress controller, service load balancer, metrics server, or local
+# storage provisioner: releases bring what they need.
+ExecStart=/usr/local/bin/k3s server \
+  --write-kubeconfig-mode 0600 \
+  --disable traefik \
+  --disable servicelb \
+  --disable metrics-server \
+  --disable local-storage
+KillMode=process
+Delegate=yes
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitCORE=infinity
+TasksMax=infinity
+TimeoutStartSec=0
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

@@ -121,6 +121,7 @@ Details in [DESIGN.md](DESIGN.md).
 | Add environments, constraints, and maintenance windows | [Manage environments](docs/manage-environments.md) |
 | Upgrade, roll back, or recover a product | [Upgrade and rollback](docs/upgrade-and-rollback.md) |
 | Run the server or a remote environment runtime | [Run tenkai-server](docs/run-tenkai-server.md) |
+| Install only Tenkai on a host and let it install a cluster | [Bare host to cluster](docs/bare-host.md) |
 | Ship from GitHub tags | [Deploy from GitHub](docs/deploy-from-github.md) |
 | Sign releases and approve plans | [Release signing](docs/release-signing.md), [plan approval](docs/plan-approval.md) |
 | Deliver to disconnected sites | [Offline bundles](docs/offline-bundles.md) |

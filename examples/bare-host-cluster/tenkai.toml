@@ -1,0 +1,32 @@
+# Reference host release: a single-node k3s cluster on the host Tenkai runs
+# on, with a scoped identity for Tenkai in it (ADR 0041). The root-side host
+# applier runs these commands as root; tenkai-server stays the tenkai user.
+#
+# The k3s version and the SHA-256 of its binary are pinned in cluster.env,
+# which is a signed input like every other file here. Change the version by
+# editing cluster.env and publishing a new release version.
+#
+# Guide: docs/bare-host.md
+
+[product]
+name = "cluster"
+version = "1.0.0"
+description = "Single-node k3s cluster with a scoped Tenkai identity"
+kind = "software"
+
+[deploy]
+executor = "host"
+workdir = "."
+install = "sh install.sh"
+uninstall = "sh uninstall.sh"
+health = "sh health.sh"
+inputs = [
+  "cluster.env",
+  "install.sh",
+  "cluster-lib.sh",
+  "uninstall.sh",
+  "cleanup.sh",
+  "health.sh",
+  "k3s.service",
+  "tenkai-identity.yaml",
+]
