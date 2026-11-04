@@ -187,13 +187,34 @@ to Sekai is only that observation. Delivery uses existing authenticated
 submission:
 
 1. `SekaiService.SubmitEvidence` with evidence type `feedback.observation`,
-   schema `feedback.observation@1.0.0`, target kind `feedback_observation`,
-   and provenance for the observation identity, package
-   `pkg:feedback.evidence-finding/v1`, and evidence binding.
+   schema `feedback.observation@1.0.0`, a target (below), and provenance for
+   the observation identity, package `pkg:feedback.evidence-finding/v1`, and
+   evidence binding.
 2. `SekaiService.SubmitActionInstance` for `feedback.observation.record`,
    passing the admitted submission id. Action parameters (`object_id`,
    `problem_signature`, `occurrence_ids`, `classification`, `disposition`)
    are derived from the captured fields. No new core RPC.
+
+Target:
+
+- on a community host, the observation ID → `target_external_id` with target
+  kind `feedback_observation`;
+- on a tenant-mode hub, `<tenant>:<observation ID>` → `target_external_id`
+  with target kind `tenant_feedback_observation`. `%` and `:` in the tenant
+  are percent-encoded (`%25`, `%3A`), the same grammar as
+  `tenkai.tenant_deployment`, so the first `:` ends the tenant and the
+  observation ID follows verbatim.
+
+Versioning: the outbox wrapper carries `schema: tenkai.feedback_export.v2`
+(#945), and the delivery worker derives the target kind and target id from it,
+the same rule as terminal outcomes. Rows queued before 0.7.0 carry no wrapper
+schema and are resent with exactly the target they had: kind
+`feedback_observation`, and on a tenant-mode hub the unescaped
+`<tenant>:<observation ID>`. The wrapper is closed, so an older release
+refuses a `.v2` row as a visible, retryable failure instead of resending it
+with a different target under the same idempotency key. The wrapper schema
+is part of the event id. The evidence body (the observation) and its schema
+`feedback.observation@1.0.0` do not change.
 
 Retryable delivery survives restart, duplicate enqueue, and lost
 acknowledgements: the outbox event id is the evidence and Action
@@ -208,7 +229,8 @@ rollback, or standalone operation.
 Before enabling export, a Sekai administrator must register, for the
 configured principal and namespace, a producer capability for
 `source_type=feedback`, the `feedback.observation` schema, target kind
-`feedback_observation`, and the `feedback.observation.record` Action. Tenkai
+`feedback_observation` (community host) or `tenant_feedback_observation`
+(tenant-mode hub), and the `feedback.observation.record` Action. Tenkai
 fails startup unless `TENKAI_FEEDBACK_PROVIDER_REGISTRATION` exactly attests
 to that registration.
 
@@ -221,9 +243,34 @@ export TENKAI_FEEDBACK_PROVIDER_REGISTRATION='producer=tenkai.feedback;source_ty
 tenkai-server --feedback-provider chisei
 ```
 
+On a tenant-mode hub the attestation names
+`target_kind=tenant_feedback_observation`.
+
 The token is environment-only. Remote plaintext endpoints are rejected even
 when no token is configured. Feedback export requires embedded Tenkai
 application state so capture and outbox enqueue share one local transaction.
+
+#### Upgrading tenant-mode feedback export (0.7.0)
+
+Only tenant-mode hubs with `--feedback-provider chisei` change. Community
+hosts keep their registration and targets.
+
+1. In Sekai, add target kind `tenant_feedback_observation` to the feedback
+   producer capability and keep `feedback_observation`.
+2. Upgrade Tenkai with `TENKAI_FEEDBACK_PROVIDER_REGISTRATION` changed from
+   `target_kind=feedback_observation` to
+   `target_kind=tenant_feedback_observation`. A tenant-mode hub with the old
+   attestation refuses to start.
+3. Observations queued before the upgrade deliver with their old target.
+   Older replicas still running during a rolling upgrade, or after a
+   rollback, leave newer rows retrying until a 0.7.0 replica delivers them.
+   Once no older replica runs and no observation queued before the upgrade
+   is undelivered, remove `feedback_observation` from the capability.
+
+Evidence keyed on a tenant-mode target sees a new key for later observations
+(`tenant_feedback_observation`, encoded tenant). Every host enqueues `.v2`
+rows, and the wrapper schema is part of the event id, so an observation
+enqueued again across the upgrade can be exported once under each id.
 
 ## Standalone operation and external adapters
 

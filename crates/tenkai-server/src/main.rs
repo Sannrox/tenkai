@@ -754,6 +754,7 @@ async fn main() -> Result<()> {
                     namespace,
                     principal,
                     token,
+                    cli.tenant_mode,
                     registration,
                 )
                 .context("validating Chisei feedback adapter configuration")?,
