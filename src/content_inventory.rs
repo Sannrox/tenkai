@@ -485,7 +485,9 @@ impl ContentLock {
     fn exclusive(oci_root: Option<&Path>, cache_root: Option<&Path>) -> Result<Self> {
         let files = Self::open(oci_root, cache_root)?;
         for file in &files {
-            if file.try_lock().is_err() {
+            if !crate::file_lock::try_lock_within(file, crate::file_lock::SETTLE)
+                .context("locking the content stores")?
+            {
                 bail!(
                     "an import or apply is using the content stores; collect content after it finishes"
                 );

@@ -193,6 +193,7 @@ pub mod federated_identity;
 pub mod feedback_export;
 pub mod feedback_observation;
 pub mod fenced_mutation;
+pub mod file_lock;
 pub mod fleet;
 pub mod fleet_budget;
 pub mod fleet_fairness;
