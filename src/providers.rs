@@ -23,8 +23,24 @@ pub use crate::provider_event::{
 };
 
 pub const PROVIDER_CONTRACT_VERSION: u32 = 1;
-pub const TERMINAL_OUTCOME_SCHEMA: &str = "tenkai.terminal_outcome.v1";
-const TERMINAL_OUTCOME_SCHEMA_VERSION: &str = "1.0.0";
+/// Terminal-outcome schema id Tenkai enqueues. `.v2` (#867) added the
+/// optional `tenant_id` and the tenant-scoped target. Delivery derives the
+/// envelope from the payload's schema id, so every change takes a new id:
+/// older releases refuse rows with an unknown id instead of resending them
+/// with a different envelope under the same idempotency key. The checked-in
+/// JSON Schema is `api/tenkai-terminal-outcome-v2.schema.json`.
+pub const TERMINAL_OUTCOME_SCHEMA: &str = "tenkai.terminal_outcome.v2";
+pub const TERMINAL_OUTCOME_SCHEMA_VERSION: &str = "2.0.0";
+/// Schema id of outcomes queued before 0.7.0. They still deliver, with the
+/// `1.0.0` envelope and target an earlier attempt may already have sent.
+const LEGACY_TERMINAL_OUTCOME_SCHEMA: &str = "tenkai.terminal_outcome.v1";
+const LEGACY_TERMINAL_OUTCOME_SCHEMA_VERSION: &str = "1.0.0";
+/// Evidence target kind of a community-host outcome: the target id is the
+/// deployment id.
+pub const DEPLOYMENT_TARGET_KIND: &str = "tenkai.deployment";
+/// Evidence target kind of a tenant-mode outcome: the target id is
+/// [`tenant_deployment_target_id`].
+pub const TENANT_DEPLOYMENT_TARGET_KIND: &str = "tenkai.tenant_deployment";
 pub const OUTCOME_PROVIDER_KIND: &str = "outcome";
 pub const OUTCOME_PROVIDER_REGISTRATION_ENV: &str = "TENKAI_OUTCOME_PROVIDER_REGISTRATION";
 const MAX_PROVIDER_EVENT_ID_BYTES: usize = 512;
@@ -165,7 +181,7 @@ impl ProviderEvent {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TerminalOutcomeState {
     DeploymentSucceeded,
@@ -191,27 +207,77 @@ impl TerminalOutcomeState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Content of `tenkai.terminal_outcome.v2` (and of queued `.v1` rows, which
+/// never carry `tenant_id`). Its JSON Schema
+/// ([`terminal_outcome_payload_schema`]) is what operators register.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TerminalOutcomePayload {
+    #[schemars(extend("const" = TERMINAL_OUTCOME_SCHEMA))]
     pub schema: String,
+    #[schemars(length(min = 1, max = 512))]
     pub deployment_id: String,
+    #[schemars(length(min = 1, max = 512))]
     pub plan_id: String,
+    #[schemars(length(min = 1, max = 512))]
     pub release_id: String,
+    #[schemars(length(min = 1, max = 512))]
     pub product: String,
+    #[schemars(length(min = 1, max = 512))]
     pub environment_id: String,
+    #[schemars(length(min = 1, max = 512))]
     pub configuration_id: String,
     pub terminal_state: TerminalOutcomeState,
+    /// Tenkai observation time, milliseconds since the Unix epoch.
+    #[schemars(range(min = 1))]
     pub observed_at: i64,
-    /// Tenant that owns the outcome. Empty on community hosts; required in
+    /// Tenant that owns the outcome. Omitted on community hosts; present in
     /// tenant-mode export so two tenants cannot share a producer identity.
     #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[schemars(length(min = 1, max = 512), transform = drop_default)]
     pub tenant_id: String,
+}
+
+fn is_terminal_outcome_schema(schema: &str) -> bool {
+    schema == TERMINAL_OUTCOME_SCHEMA || schema == LEGACY_TERMINAL_OUTCOME_SCHEMA
+}
+
+/// `tenant_id` is omitted rather than empty on the wire, so the schema does
+/// not advertise the serde default `""`.
+fn drop_default(schema: &mut schemars::Schema) {
+    schema.remove("default");
+}
+
+/// The published JSON Schema of [`TerminalOutcomePayload`] at
+/// [`TERMINAL_OUTCOME_SCHEMA_VERSION`], checked in as
+/// `api/tenkai-terminal-outcome-v2.schema.json`.
+pub fn terminal_outcome_payload_schema() -> serde_json::Value {
+    let mut schema = schemars::generate::SchemaSettings::draft2020_12()
+        .into_generator()
+        .into_root_schema_for::<TerminalOutcomePayload>();
+    schema.insert("title".into(), TERMINAL_OUTCOME_SCHEMA.into());
+    schema.insert(
+        "description".into(),
+        "Content of one Tenkai terminal deployment outcome, exported as evidence type operations.terminal_outcome.".into(),
+    );
+    schema.insert(
+        "x-tenkai-schema-version".into(),
+        TERMINAL_OUTCOME_SCHEMA_VERSION.into(),
+    );
+    schema.to_value()
+}
+
+/// Target id of a tenant-mode outcome: `<tenant>:<deployment_id>` with `%`
+/// and `:` in the tenant percent-encoded, so the first `:` always ends the
+/// tenant and the deployment id is kept verbatim.
+pub fn tenant_deployment_target_id(tenant_id: &str, deployment_id: &str) -> String {
+    let tenant = tenant_id.replace('%', "%25").replace(':', "%3A");
+    format!("{tenant}:{deployment_id}")
 }
 
 impl TerminalOutcomePayload {
     fn validate_for_event(&self, event: &ProviderEvent) -> Result<(), ProviderError> {
-        if self.schema != TERMINAL_OUTCOME_SCHEMA || self.observed_at <= 0 {
+        if !is_terminal_outcome_schema(&self.schema) || self.observed_at <= 0 {
             return Err(ProviderError::InvalidEvidence(
                 "terminal outcome schema or observation time is invalid".into(),
             ));
@@ -290,10 +356,10 @@ pub fn project_terminal_outcome(
         ));
     }
     let payload_value: serde_json::Value = serde_json::from_str(&event.payload_json)?;
-    if payload_value
+    if !payload_value
         .get("schema")
         .and_then(serde_json::Value::as_str)
-        != Some(TERMINAL_OUTCOME_SCHEMA)
+        .is_some_and(is_terminal_outcome_schema)
     {
         return Ok(None);
     }
@@ -764,6 +830,10 @@ pub struct ChiseiOutcomeProvider {
     principal: String,
     bearer_token: Option<String>,
     registration_attested: bool,
+    /// Whether this adapter exports tenant-scoped outcomes. It must match
+    /// every payload's `tenant_id` presence, so the target kind always
+    /// matches the attested registration.
+    tenant_mode: bool,
     client: SekaiServiceClient<Channel>,
 }
 
@@ -778,6 +848,7 @@ impl std::fmt::Debug for ChiseiOutcomeProvider {
                 &self.bearer_token.as_ref().map(|_| "[redacted]"),
             )
             .field("registration_attested", &self.registration_attested)
+            .field("tenant_mode", &self.tenant_mode)
             .finish_non_exhaustive()
     }
 }
@@ -806,11 +877,33 @@ pub(crate) fn provider_transport_is_safe(endpoint: &str) -> bool {
 /// Return the exact, non-secret registration contract expected by the
 /// terminal-outcome adapter. Sekai administrators register the corresponding
 /// producer capability and schema out of band; Tenkai compares this value at
-/// startup before enabling delivery.
-pub fn outcome_provider_registration_attestation(principal: &str, namespace: &str) -> String {
+/// startup before enabling delivery. A tenant-mode hub exports tenant-scoped
+/// targets, so its registration names [`TENANT_DEPLOYMENT_TARGET_KIND`].
+pub fn outcome_provider_registration_attestation(
+    principal: &str,
+    namespace: &str,
+    tenant_mode: bool,
+) -> String {
+    let target_kind = outcome_target_kind(tenant_mode);
     format!(
-        "producer={principal};source_type={OUTCOME_PROVIDER_KIND};source_instance={namespace}:{OUTCOME_PROVIDER_KIND};namespace={namespace};evidence_type=operations.terminal_outcome;schema={TERMINAL_OUTCOME_SCHEMA}@{TERMINAL_OUTCOME_SCHEMA_VERSION};target_kind=tenkai.deployment;classification=internal;intent=upsert"
+        "producer={principal};source_type={OUTCOME_PROVIDER_KIND};source_instance={namespace}:{OUTCOME_PROVIDER_KIND};namespace={namespace};evidence_type=operations.terminal_outcome;schema={TERMINAL_OUTCOME_SCHEMA}@{TERMINAL_OUTCOME_SCHEMA_VERSION};target_kind={target_kind};classification=internal;intent=upsert"
     )
+}
+
+/// Envelope fields that depend on the queued schema and the hub mode.
+struct DeliveryTarget {
+    schema_id: &'static str,
+    schema_version: &'static str,
+    external_id: String,
+    kind: &'static str,
+}
+
+fn outcome_target_kind(tenant_mode: bool) -> &'static str {
+    if tenant_mode {
+        TENANT_DEPLOYMENT_TARGET_KIND
+    } else {
+        DEPLOYMENT_TARGET_KIND
+    }
 }
 
 impl ChiseiOutcomeProvider {
@@ -824,6 +917,7 @@ impl ChiseiOutcomeProvider {
         namespace: impl Into<String>,
         principal: impl Into<String>,
         bearer_token: Option<String>,
+        tenant_mode: bool,
     ) -> Result<Self, ProviderError> {
         let endpoint = endpoint.into();
         let namespace = namespace.into();
@@ -867,6 +961,7 @@ impl ChiseiOutcomeProvider {
             principal,
             bearer_token,
             registration_attested: false,
+            tenant_mode,
             client: SekaiServiceClient::new(channel),
         })
     }
@@ -882,11 +977,15 @@ impl ChiseiOutcomeProvider {
         namespace: impl Into<String>,
         principal: impl Into<String>,
         bearer_token: Option<String>,
+        tenant_mode: bool,
         registration_attestation: impl AsRef<str>,
     ) -> Result<Self, ProviderError> {
-        let provider = Self::new(endpoint, namespace, principal, bearer_token)?;
-        let expected =
-            outcome_provider_registration_attestation(&provider.principal, &provider.namespace);
+        let provider = Self::new(endpoint, namespace, principal, bearer_token, tenant_mode)?;
+        let expected = outcome_provider_registration_attestation(
+            &provider.principal,
+            &provider.namespace,
+            tenant_mode,
+        );
         if registration_attestation.as_ref() != expected {
             return Err(ProviderError::InvalidEvidence(format!(
                 "{OUTCOME_PROVIDER_REGISTRATION_ENV} must exactly confirm the configured Sekai producer and schema registration"
@@ -898,10 +997,49 @@ impl ChiseiOutcomeProvider {
         })
     }
 
+    /// Schema id, version, target id, and target kind for one queued outcome.
+    /// A `.v1` row queued before 0.7.0 resends exactly the `1.0.0` envelope an
+    /// earlier attempt may already have admitted.
+    fn delivery_target(
+        &self,
+        payload: &TerminalOutcomePayload,
+    ) -> Result<DeliveryTarget, ProviderError> {
+        let tenant = payload.tenant_id.as_str();
+        let deployment = payload.deployment_id.as_str();
+        if payload.schema == LEGACY_TERMINAL_OUTCOME_SCHEMA {
+            return Ok(DeliveryTarget {
+                schema_id: LEGACY_TERMINAL_OUTCOME_SCHEMA,
+                schema_version: LEGACY_TERMINAL_OUTCOME_SCHEMA_VERSION,
+                external_id: if tenant.is_empty() {
+                    deployment.into()
+                } else {
+                    format!("{tenant}:{deployment}")
+                },
+                kind: DEPLOYMENT_TARGET_KIND,
+            });
+        }
+        if tenant.is_empty() == self.tenant_mode {
+            return Err(ProviderError::InvalidEvidence(
+                "terminal outcome tenant scope does not match the registered target kind".into(),
+            ));
+        }
+        Ok(DeliveryTarget {
+            schema_id: TERMINAL_OUTCOME_SCHEMA,
+            schema_version: TERMINAL_OUTCOME_SCHEMA_VERSION,
+            external_id: if self.tenant_mode {
+                tenant_deployment_target_id(tenant, deployment)
+            } else {
+                deployment.into()
+            },
+            kind: outcome_target_kind(self.tenant_mode),
+        })
+    }
+
     fn evidence(&self, event: &ProviderEvent) -> Result<EvidenceEnvelope, ProviderError> {
         event.validate()?;
         let payload: TerminalOutcomePayload = serde_json::from_str(&event.payload_json)?;
         payload.validate_for_event(event)?;
+        let target = self.delivery_target(&payload)?;
         let content_value: serde_json::Value = serde_json::from_str(&event.payload_json)?;
         let content_json = serde_json::to_vec(&content_value)?;
         let content_digest = format!("{:x}", Sha256::digest(&content_json));
@@ -917,16 +1055,12 @@ impl ChiseiOutcomeProvider {
                 )
             })?,
             namespace: self.namespace.clone(),
-            target_external_id: if payload.tenant_id.is_empty() {
-                payload.deployment_id.clone()
-            } else {
-                format!("{}:{}", payload.tenant_id, payload.deployment_id)
-            },
-            target_kind: "tenkai.deployment".into(),
+            target_external_id: target.external_id,
+            target_kind: target.kind.into(),
             evidence_type: "operations.terminal_outcome".into(),
             signal: "other".into(),
-            schema_id: TERMINAL_OUTCOME_SCHEMA.into(),
-            schema_version: TERMINAL_OUTCOME_SCHEMA_VERSION.into(),
+            schema_id: target.schema_id.into(),
+            schema_version: target.schema_version.into(),
             schema_compatibility: "exact".into(),
             observed_at_ms: payload.observed_at,
             collected_at_ms: event.collected_at_ms.ok_or_else(|| {
@@ -1243,22 +1377,33 @@ mod tests {
             generic_record.id
         );
 
-        let provider = ChiseiOutcomeProvider::new(
+        let tenant_provider = ChiseiOutcomeProvider::new(
             "http://127.0.0.1:50051",
             "tenkai-prod",
             "tenkai.outcome",
             None,
+            true,
+        )
+        .unwrap();
+        let community_provider = ChiseiOutcomeProvider::new(
+            "http://127.0.0.1:50051",
+            "tenkai-prod",
+            "tenkai.outcome",
+            None,
+            false,
         )
         .unwrap();
         let mut collected_a: ProviderEvent =
             serde_json::from_str(&bound_a[0].payload_json).unwrap();
         collected_a.collected_at_ms = Some(1_000);
         collected_a.source_sequence = Some(1);
-        let evidence_a = provider.evidence(&collected_a).unwrap();
+        let evidence_a = tenant_provider.evidence(&collected_a).unwrap();
         assert_eq!(
             evidence_a.target_external_id,
             "tenant-a:tenkai:deployment:prod:api:1"
         );
+        assert_eq!(evidence_a.target_kind, TENANT_DEPLOYMENT_TARGET_KIND);
+        assert_eq!(evidence_a.schema_version, TERMINAL_OUTCOME_SCHEMA_VERSION);
         assert_eq!(
             evidence_a.provenance.get("tenant_id").map(String::as_str),
             Some("tenant-a")
@@ -1269,12 +1414,156 @@ mod tests {
         let mut collected_community = event.clone();
         collected_community.collected_at_ms = Some(1_000);
         collected_community.source_sequence = Some(1);
-        let evidence_community = provider.evidence(&collected_community).unwrap();
+        let evidence_community = community_provider.evidence(&collected_community).unwrap();
         assert_eq!(
             evidence_community.target_external_id,
             "tenkai:deployment:prod:api:1"
         );
+        assert_eq!(evidence_community.target_kind, DEPLOYMENT_TARGET_KIND);
+        assert_eq!(
+            evidence_community.schema_version,
+            TERMINAL_OUTCOME_SCHEMA_VERSION
+        );
         assert!(!evidence_community.provenance.contains_key("tenant_id"));
+
+        // An adapter only emits the target kind its registration attests.
+        assert!(community_provider.evidence(&collected_a).is_err());
+        assert!(tenant_provider.evidence(&collected_community).is_err());
+    }
+
+    /// `.v1` outcomes queued before 0.7.0 resend the `1.0.0` envelope and
+    /// target an earlier attempt may already have admitted, and still project.
+    #[tokio::test]
+    async fn outcomes_queued_before_the_v2_bump_keep_their_envelope() {
+        let event = terminal_event();
+        let record = provider_event_record(OUTCOME_PROVIDER_KIND, &event, 1_000).unwrap();
+        let bound = bind_tenant_to_provider_events(Some("tenant:a"), std::slice::from_ref(&record))
+            .unwrap();
+        let mut current: ProviderEvent = serde_json::from_str(&bound[0].payload_json).unwrap();
+        current.collected_at_ms = Some(1_000);
+        current.source_sequence = Some(1);
+        let legacy = ProviderEvent {
+            payload_json: current.payload_json.replace(
+                &format!("\"{TERMINAL_OUTCOME_SCHEMA}\""),
+                &format!("\"{LEGACY_TERMINAL_OUTCOME_SCHEMA}\""),
+            ),
+            ..current.clone()
+        };
+        assert_ne!(legacy.payload_json, current.payload_json);
+        let tenant_provider = ChiseiOutcomeProvider::new(
+            "http://127.0.0.1:50051",
+            "tenkai-prod",
+            "tenkai.outcome",
+            None,
+            true,
+        )
+        .unwrap();
+
+        let resent = tenant_provider.evidence(&legacy).unwrap();
+        assert_eq!(resent.schema_id, "tenkai.terminal_outcome.v1");
+        assert_eq!(resent.schema_version, "1.0.0");
+        assert_eq!(resent.target_kind, DEPLOYMENT_TARGET_KIND);
+        assert_eq!(
+            resent.target_external_id,
+            "tenant:a:tenkai:deployment:prod:api:1"
+        );
+        let fresh = tenant_provider.evidence(&current).unwrap();
+        assert_eq!(fresh.schema_id, TERMINAL_OUTCOME_SCHEMA);
+        assert_eq!(fresh.schema_version, TERMINAL_OUTCOME_SCHEMA_VERSION);
+        assert_eq!(fresh.target_kind, TENANT_DEPLOYMENT_TARGET_KIND);
+        assert_eq!(
+            fresh.target_external_id,
+            "tenant%3Aa:tenkai:deployment:prod:api:1"
+        );
+
+        let legacy_community = ProviderEvent {
+            payload_json: event.payload_json.replace(
+                &format!("\"{TERMINAL_OUTCOME_SCHEMA}\""),
+                &format!("\"{LEGACY_TERMINAL_OUTCOME_SCHEMA}\""),
+            ),
+            ..event.clone()
+        };
+        let legacy_id = terminal_outcome_event_id(
+            &legacy_community.binding,
+            &serde_json::from_str(&legacy_community.payload_json).unwrap(),
+        )
+        .unwrap();
+        let legacy_community = ProviderEvent {
+            id: legacy_id,
+            ..legacy_community
+        };
+        let legacy_record =
+            provider_event_record(OUTCOME_PROVIDER_KIND, &legacy_community, 1_000).unwrap();
+        let projected = project_terminal_outcome(&legacy_record, 2_000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(projected.schema, "tenkai.terminal_outcome.v1");
+
+        let unknown = ProviderEvent {
+            payload_json: current
+                .payload_json
+                .replace(TERMINAL_OUTCOME_SCHEMA, "tenkai.terminal_outcome.v9"),
+            ..current
+        };
+        assert!(tenant_provider.evidence(&unknown).is_err());
+    }
+
+    /// A tenant containing `:` or `%` cannot shift the tenant/deployment split.
+    #[test]
+    fn tenant_deployment_target_id_splits_at_the_first_colon() {
+        assert_ne!(
+            tenant_deployment_target_id("a:b", "c"),
+            tenant_deployment_target_id("a", "b:c")
+        );
+        assert_ne!(
+            tenant_deployment_target_id("a%3Ab", "c"),
+            tenant_deployment_target_id("a:b", "c")
+        );
+        assert_eq!(tenant_deployment_target_id("a:b%", "x:y"), "a%3Ab%25:x:y");
+    }
+
+    /// Payloads Tenkai builds, community and tenant-bound, satisfy the shape
+    /// the published schema declares.
+    #[test]
+    fn terminal_outcome_schema_describes_emitted_payloads() {
+        let schema = terminal_outcome_payload_schema();
+        assert_eq!(schema["title"], TERMINAL_OUTCOME_SCHEMA);
+        assert_eq!(
+            schema["x-tenkai-schema-version"],
+            TERMINAL_OUTCOME_SCHEMA_VERSION
+        );
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(
+            schema["properties"]["schema"]["const"],
+            TERMINAL_OUTCOME_SCHEMA
+        );
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect();
+        assert!(!required.contains(&"tenant_id"));
+        assert!(schema["properties"]["tenant_id"].get("default").is_none());
+
+        let event = terminal_event();
+        let record = provider_event_record(OUTCOME_PROVIDER_KIND, &event, 1_000).unwrap();
+        let bound = bind_tenant_to_provider_events(Some("tenant-a"), std::slice::from_ref(&record))
+            .unwrap();
+        let bound: ProviderEvent = serde_json::from_str(&bound[0].payload_json).unwrap();
+        for payload_json in [&event.payload_json, &bound.payload_json] {
+            let payload: serde_json::Map<String, serde_json::Value> =
+                serde_json::from_str(payload_json).unwrap();
+            for field in &required {
+                assert!(payload.contains_key(*field), "{field} missing");
+            }
+            for field in payload.keys() {
+                assert!(
+                    schema["properties"].get(field).is_some(),
+                    "{field} undeclared"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1488,6 +1777,7 @@ mod tests {
             "tenkai-prod",
             "tenkai.outcome",
             Some("secret-token".into()),
+            false,
         )
         .unwrap();
         let mut collected_event = event.clone();
@@ -1514,22 +1804,42 @@ mod tests {
         assert!(!evidence.provenance.contains_key("tenant_id"));
 
         let registration =
-            outcome_provider_registration_attestation("tenkai.outcome", "tenkai-prod");
+            outcome_provider_registration_attestation("tenkai.outcome", "tenkai-prod", false);
+        assert!(registration.contains("schema=tenkai.terminal_outcome.v2@2.0.0;"));
+        assert!(registration.contains("target_kind=tenkai.deployment;"));
         let export_provider = ChiseiOutcomeProvider::new_for_export(
             "http://127.0.0.1:50051",
             "tenkai-prod",
             "tenkai.outcome",
             Some("secret-token".into()),
-            registration,
+            false,
+            &registration,
         )
         .unwrap();
         assert!(export_provider.registration_attested);
+        // A tenant-mode hub must attest the tenant-scoped target kind.
         assert!(
             ChiseiOutcomeProvider::new_for_export(
                 "http://127.0.0.1:50051",
                 "tenkai-prod",
                 "tenkai.outcome",
                 None,
+                true,
+                &registration,
+            )
+            .is_err()
+        );
+        assert!(
+            outcome_provider_registration_attestation("tenkai.outcome", "tenkai-prod", true)
+                .contains("target_kind=tenkai.tenant_deployment;")
+        );
+        assert!(
+            ChiseiOutcomeProvider::new_for_export(
+                "http://127.0.0.1:50051",
+                "tenkai-prod",
+                "tenkai.outcome",
+                None,
+                false,
                 "producer=tenkai.outcome;schema=wrong",
             )
             .is_err()
@@ -1541,6 +1851,7 @@ mod tests {
                 "tenkai-prod",
                 "tenkai.outcome",
                 Some("secret-token".into()),
+                false,
             )
             .is_err()
         );
@@ -1550,6 +1861,7 @@ mod tests {
                 "tenkai-prod",
                 "tenkai.outcome",
                 None,
+                false,
             )
             .is_err()
         );

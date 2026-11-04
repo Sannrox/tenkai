@@ -125,7 +125,7 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | `TENKAI_OUTCOME_NAMESPACE` | unset | Namespace authorized for terminal-outcome admission |
 | `TENKAI_OUTCOME_PROVIDER_PRINCIPAL` | `tenkai.outcome` | Authenticated telemetry-writer principal for outcome admission |
 | `TENKAI_OUTCOME_PROVIDER_TOKEN` | unset | Optional outcome-adapter bearer secret; environment-only and never persisted |
-| `TENKAI_OUTCOME_PROVIDER_REGISTRATION` | unset | Required exact attestation of the administrator-registered Sekai producer and `tenkai.terminal_outcome.v1@1.0.0` schema when outcome export is enabled |
+| `TENKAI_OUTCOME_PROVIDER_REGISTRATION` | unset | Required exact attestation of the administrator-registered Sekai producer and `tenkai.terminal_outcome.v2@2.0.0` schema (and target kind) when outcome export is enabled |
 | `TENKAI_FEEDBACK_PROVIDER` | `disabled` | Set to `chisei` to enable durable feedback-observation export |
 | `TENKAI_FEEDBACK_PROVIDER_URL` | unset | Explicit Sekai endpoint used only with `tenkai-server --feedback-provider chisei` |
 | `TENKAI_FEEDBACK_NAMESPACE` | unset | Namespace authorized for feedback-observation admission |
