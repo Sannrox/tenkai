@@ -21,7 +21,7 @@ use super::*;
 const REFRESH_EVERY: Duration = Duration::from_secs(10);
 /// How long a stopped unit may take to record the stop and exit. The unit's
 /// own `TimeoutStopSec` bounds it on the systemd side.
-const STOP_GRACE: Duration = Duration::from_secs(120);
+pub(super) const STOP_GRACE: Duration = Duration::from_secs(120);
 
 /// How a host step ended, short of a fence or control-plane failure.
 #[derive(Debug, Clone, PartialEq, Eq)]

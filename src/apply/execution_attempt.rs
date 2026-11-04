@@ -189,6 +189,21 @@ async fn execute_with_options_inner(
     let owner = stored_plan.id.clone();
     let lease = claim_execution_environment(ctx, &environment, &owner).await?;
     apply_span.set_fencing_generation(lease.generation);
+    // A host unit an earlier holder of this lease left running is stopped
+    // before anything of this plan runs (ADR 0041 section 2).
+    if let Ok(host) = options.software_executors.host()
+        && let Err(error) = host
+            .fence_environment(&environment, super::host_step::STOP_GRACE)
+            .await
+    {
+        let unlock = release_environment(ctx, &lease).await;
+        return match unlock {
+            Ok(()) => Err(error),
+            Err(unlock) => Err(error.context(format!(
+                "releasing environment apply lease also failed: {unlock}"
+            ))),
+        };
+    }
     if let Err(error) = start_admission::authorize_maintenance(
         ctx,
         &lease,

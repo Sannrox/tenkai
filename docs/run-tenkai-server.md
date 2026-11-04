@@ -190,14 +190,20 @@ server hands the plan's approval envelopes to the applier.
 Each step runs `tenkai-host-apply@<instance>.service`, where the instance is
 derived from the plan digest, the step, and its action. The server keeps the
 environment lease fresh while the unit runs and stops the unit when it loses
-the lease or receives SIGTERM, like a shell deploy command. It accepts only a
-result that names the instance it started. A step the applier refused ran
+the lease or receives SIGTERM, like a shell deploy command. The unit outlives
+a server that dies, so whoever next claims the environment lease to apply a
+plan first stops any host unit still running for that environment, and
+refuses to go on while one runs. It accepts only a result that names the
+instance it started. A step the applier refused ran
 nothing and leaves the deployment as it was. A failed host step stays failed:
 nothing is cleaned up or restored, and the server marks the deployment
 unknown. The next approved plan moves on from the applier's record: it
 installs the channel's release again, or, after you promote the previous
 release, returns to it with the rollback or downgrade approvals the host
-policy requires. Reconcile neither observes nor restarts host releases.
+policy requires. Reconcile neither observes nor restarts host releases. If the
+server died after the applier finished a step but before recording it, the
+next plan names the release the applier applied and asks you to record it
+with `tenkaictl env reconcile <environment> <product> --deployed <version>`.
 
 To authenticate with enterprise JWT assertions or with an identity provider
 (OIDC) instead of shared bearer tokens, see

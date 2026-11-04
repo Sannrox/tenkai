@@ -21,8 +21,9 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result, bail};
 
 use crate::host_apply::state::{
-    APPLIED_STATE_SCHEMA, AppliedStateRecord, HostApplyRefused, HostApplyResult, REFUSED_FILE,
-    REFUSED_SCHEMA, RESULT_FILE, RESULT_SCHEMA, instance_dir, record_path,
+    APPLIED_STATE_SCHEMA, AppliedStateRecord, HostApplyRefused, HostApplyResult, HostApplyStarted,
+    REFUSED_FILE, REFUSED_SCHEMA, RESULT_FILE, RESULT_SCHEMA, STARTED_FILE, instance_dir,
+    record_path,
 };
 use crate::host_apply::{ARTIFACTS_DIR, HostApplyRequest, REQUEST_FILE, validate_instance_name};
 
@@ -39,7 +40,7 @@ const MAX_RECORD_BYTES: u64 = 1024 * 1024;
 const SYSTEMCTL_PATH: &str = "/usr/sbin:/usr/bin:/sbin:/bin";
 
 /// A boxed future that borrows its receiver.
-pub type UnitFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+pub type UnitFuture<'a, T = ()> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 
 /// Starts and stops instances of `tenkai-host-apply@.service`: the only two
 /// systemd verbs the polkit rule grants the server's user.
@@ -51,6 +52,9 @@ pub trait HostUnits: Send + Sync {
     /// Ask systemd to stop `instance` without waiting. The pending
     /// [`Self::start`] resolves once the applier recorded the stop and exited.
     fn stop(&self, instance: &str) -> Result<()>;
+    /// The instances whose unit is starting, running, or stopping. Reading
+    /// unit state needs no authorization.
+    fn running(&self) -> UnitFuture<'_, Vec<String>>;
 }
 
 /// [`HostUnits`] through `systemctl`, as the server's user.
@@ -89,6 +93,41 @@ impl HostUnits for Systemctl {
                 );
             }
             Ok(())
+        })
+    }
+
+    fn running(&self) -> UnitFuture<'_, Vec<String>> {
+        Box::pin(async move {
+            let output = tokio::process::Command::new("systemctl")
+                .args([
+                    "list-units",
+                    "--plain",
+                    "--no-legend",
+                    "--no-pager",
+                    "--state=activating,active,deactivating,reloading",
+                    "tenkai-host-apply@*.service",
+                ])
+                .env_clear()
+                .env("PATH", SYSTEMCTL_PATH)
+                .stdin(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .output()
+                .await
+                .context("running systemctl list-units")?;
+            if !output.status.success() {
+                bail!("systemctl list-units ended with {}", output.status);
+            }
+            Ok(String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| {
+                    line.split_whitespace()
+                        .next()?
+                        .strip_prefix("tenkai-host-apply@")?
+                        .strip_suffix(".service")
+                        .filter(|instance| validate_instance_name(instance).is_ok())
+                        .map(str::to_string)
+                })
+                .collect())
         })
     }
 
@@ -301,6 +340,59 @@ impl HostExecutor {
         Ok(instance)
     }
 
+    /// Stop every running host unit that acts on `environment`, and wait
+    /// until it is gone. Only the environment lease's holder may have one
+    /// running, so a unit still running when the lease is claimed belongs to
+    /// a holder that died or lost the lease; stopping it fences that holder
+    /// out even though the unit outlived the process that started it. A unit
+    /// is attributed by the applier's started record, else by its spooled
+    /// request. Fails closed when a unit does not stop within `patience`.
+    pub async fn fence_environment(
+        &self,
+        environment: &str,
+        patience: std::time::Duration,
+    ) -> Result<Vec<String>> {
+        let mut stale = Vec::new();
+        for instance in self.units.running().await? {
+            if self.instance_environment(&instance).as_deref() == Some(environment) {
+                self.units.stop(&instance)?;
+                stale.push(instance);
+            }
+        }
+        let deadline = tokio::time::Instant::now() + patience;
+        while !stale.is_empty() {
+            let running = self.units.running().await?;
+            if !stale.iter().any(|instance| running.contains(instance)) {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                bail!(
+                    "host units of {environment} from an earlier lease holder are still running: {}",
+                    stale
+                        .iter()
+                        .map(|instance| unit_name(instance))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        Ok(stale)
+    }
+
+    /// The environment a running instance acts on, if it can be told.
+    fn instance_environment(&self, instance: &str) -> Option<String> {
+        let started = instance_dir(&self.state_dir, instance).join(STARTED_FILE);
+        if let Ok(Some(bytes)) = read_record(&started)
+            && let Ok(started) = serde_json::from_slice::<HostApplyStarted>(&bytes)
+        {
+            return Some(started.environment);
+        }
+        let request = self.spool_dir.join(instance).join(REQUEST_FILE);
+        let bytes = read_bounded(&request, crate::host_apply::MAX_REQUEST_BYTES).ok()??;
+        Some(HostApplyRequest::parse(&bytes).ok()?.plan.environment)
+    }
+
     /// Remove an instance's spool once the step ended; the applier keeps its
     /// own copy and records.
     pub fn discard_spool(&self, instance: &str) {
@@ -358,8 +450,14 @@ impl HostExecutor {
     }
 }
 
-/// Read one record, bounded; `None` when it does not exist.
+/// Read one record of at most `MAX_RECORD_BYTES`; `None` when it does not
+/// exist.
 fn read_record(path: &Path) -> Result<Option<Vec<u8>>> {
+    read_bounded(path, MAX_RECORD_BYTES)
+}
+
+/// Read a file of at most `max` bytes; `None` when it does not exist.
+fn read_bounded(path: &Path, max: u64) -> Result<Option<Vec<u8>>> {
     use std::io::Read as _;
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
@@ -369,11 +467,11 @@ fn read_record(path: &Path) -> Result<Option<Vec<u8>>> {
         }
     };
     let mut bytes = Vec::new();
-    file.take(MAX_RECORD_BYTES + 1)
+    file.take(max + 1)
         .read_to_end(&mut bytes)
         .with_context(|| format!("reading {}", path.display()))?;
-    if bytes.len() as u64 > MAX_RECORD_BYTES {
-        bail!("{} is larger than {MAX_RECORD_BYTES} bytes", path.display());
+    if bytes.len() as u64 > max {
+        bail!("{} is larger than {max} bytes", path.display());
     }
     Ok(Some(bytes))
 }

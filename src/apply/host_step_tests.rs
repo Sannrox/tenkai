@@ -38,6 +38,8 @@ struct Applier {
     /// Every start, and every command that ran, as `action product@version`.
     starts: Mutex<Vec<String>>,
     runs: Mutex<Vec<String>>,
+    /// Instances whose unit is running.
+    running: Mutex<BTreeSet<String>>,
 }
 
 impl Applier {
@@ -141,13 +143,20 @@ impl HostUnits for Units {
                 .lock()
                 .unwrap()
                 .push(format!("{} {}@{}", request.action, step.product, step.to));
-            self.0.run(instance).await
+            self.0.running.lock().unwrap().insert(instance.to_string());
+            let ran = self.0.run(instance).await;
+            self.0.running.lock().unwrap().remove(instance);
+            ran
         })
     }
 
     fn stop(&self, _instance: &str) -> Result<()> {
         self.0.stopped.notify_one();
         Ok(())
+    }
+
+    fn running(&self) -> UnitFuture<'_, Vec<String>> {
+        Box::pin(async { Ok(self.0.running.lock().unwrap().iter().cloned().collect()) })
     }
 }
 
@@ -181,6 +190,7 @@ impl Host {
             stopped: tokio::sync::Notify::new(),
             starts: Mutex::default(),
             runs: Mutex::default(),
+            running: Mutex::default(),
         });
         let executor = HostExecutor::new(
             spool,
@@ -537,6 +547,32 @@ async fn a_host_release_never_replaces_one_deployed_with_another_executor() {
 }
 
 #[tokio::test]
+async fn an_applied_release_the_server_never_recorded_asks_to_be_reconciled() {
+    let mut host = Host::new("bookkeeping").await;
+    host.release("1.0.0", false).await;
+    let plan = host.plan().await;
+    host.apply(&plan).await.unwrap();
+    // As if the server crashed after the applier finished.
+    crate::environment::reconcile_deployment(&mut host.ctx, "edge", "cluster", None)
+        .await
+        .unwrap();
+
+    let error = crate::plan::create_with(&mut host.ctx, "edge", &host.executors)
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(
+        error.contains("tenkaictl env reconcile edge cluster --deployed 1.0.0"),
+        "{error}"
+    );
+    crate::environment::reconcile_deployment(&mut host.ctx, "edge", "cluster", Some("1.0.0"))
+        .await
+        .unwrap();
+    assert!(host.plan().await.steps.is_empty(), "converged");
+}
+
+#[tokio::test]
 async fn an_slo_gate_on_a_host_release_is_refused_before_anything_runs() {
     let mut host = Host::new("slo").await;
     host.release_with(
@@ -682,5 +718,93 @@ async fn losing_the_lease_stops_the_unit_and_a_retry_never_runs_it_again() {
     assert_eq!(
         *host.applier.runs.lock().unwrap(),
         ["install cluster@1.0.0"]
+    );
+}
+
+#[tokio::test]
+async fn a_unit_left_running_by_an_earlier_holder_is_stopped_before_the_next_apply() {
+    let mut host = Host::new("fence").await;
+    host.release("1.0.0", false).await;
+    let plan = host.plan().await;
+    // An earlier holder spooled and started the install, then died: its
+    // unit keeps running without anyone refreshing the lease.
+    *host.applier.hang.lock().unwrap() = Some(Box::new(|| Box::pin(async {})));
+    let executor = host.executors.host().unwrap().clone();
+    let release = super::release_content::admit(
+        &mut host.ctx,
+        &crate::plan::ReleasePin {
+            release_id: plan.steps[0].release_id.clone(),
+            digest: plan.steps[0].release_digest.clone(),
+            artifact_digest: plan.steps[0].artifact_digest.clone(),
+            workdir: plan.steps[0].workdir.clone(),
+        },
+        "edge",
+        "cluster",
+        false,
+    )
+    .await
+    .unwrap();
+    let approvals = {
+        let path = host.root.join("approval.json");
+        crate::dev_sign::sign_plan_approval_for_digest(
+            &host.root.join("keys"),
+            &format!("sha256:{}", plan.executable_digest().unwrap()),
+            "edge",
+            &path,
+            &host.root.join("approvers.toml"),
+            3600,
+        )
+        .unwrap();
+        crate::plan_approval::load_envelopes(&path).unwrap()
+    };
+    let signature = crate::catalog::signature_envelope(&mut host.ctx, &plan.steps[0].release_id)
+        .await
+        .unwrap();
+    let request = super::step_lifecycle::host_request(
+        &plan,
+        &plan.steps[0],
+        plan.steps[0].host.unwrap(),
+        &release,
+        signature,
+        &approvals,
+    )
+    .unwrap();
+    executor
+        .spool(
+            &request,
+            &release.content_root,
+            &release.manifest.immutable_inputs(),
+            &release.artifact_digest,
+        )
+        .unwrap();
+    let instance = request.instance().unwrap();
+    let orphan = {
+        let executor = executor.clone();
+        let instance = instance.clone();
+        tokio::spawn(async move { executor.units().start(&instance).await })
+    };
+    while !host.applier.running.lock().unwrap().contains(&instance) {
+        tokio::task::yield_now().await;
+    }
+
+    let stopped = executor
+        .fence_environment("edge", std::time::Duration::from_secs(5))
+        .await
+        .unwrap();
+
+    assert_eq!(stopped, [instance.clone()]);
+    orphan.await.unwrap().unwrap();
+    let result: crate::host_apply::state::HostApplyResult = serde_json::from_slice(
+        &std::fs::read(instance_dir(&host.applier.state, &instance).join(RESULT_FILE)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(result.outcome, HostApplyOutcome::Stopped);
+    // Units of other environments are left alone.
+    assert!(
+        executor
+            .fence_environment("other", std::time::Duration::from_secs(1))
+            .await
+            .unwrap()
+            .is_empty()
     );
 }

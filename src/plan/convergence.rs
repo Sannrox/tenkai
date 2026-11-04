@@ -460,7 +460,26 @@ async fn compute_snapshot_with_policy(
         });
         if let Some((record, health)) = &host_record {
             match host_progress(record, &desired, *health) {
-                HostProgress::Converged => {}
+                HostProgress::Converged => {
+                    // The applier finished, but the server never recorded
+                    // it (a crash or failed bookkeeping after the step).
+                    // Nothing observes host releases, so say how to settle it.
+                    let unknown = env_obj
+                        .properties
+                        .get(&format!("deployment_health.{product}"))
+                        .is_some_and(|health| health == "unknown");
+                    if unknown || deployed.as_deref() != Some(desired.as_str()) {
+                        bail!(
+                            "the host applier records {product} {desired} applied in {env} at generation {}, but this server records {}; once no apply runs, record it with `tenkaictl env reconcile {env} {product} --deployed {desired}`",
+                            record.generation,
+                            if unknown {
+                                "it as unknown".to_string()
+                            } else {
+                                deployed.as_deref().unwrap_or("nothing").to_string()
+                            }
+                        );
+                    }
+                }
                 HostProgress::NeedsHealth => {
                     host_health_only.insert(product.clone());
                     pending.push((

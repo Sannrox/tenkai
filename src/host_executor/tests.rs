@@ -19,6 +19,10 @@ impl HostUnits for Inert {
     fn stop(&self, _instance: &str) -> Result<()> {
         Ok(())
     }
+
+    fn running(&self) -> UnitFuture<'_, Vec<String>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
 }
 
 struct Dirs {
