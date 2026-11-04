@@ -19,7 +19,8 @@ For each host step the server writes a request into its spool directory and
 runs `systemctl start --no-block tenkai-host-apply@<instance>.service`. The
 applier then:
 
-1. returns the recorded result if this instance ever started, and stops;
+1. returns how this instance ended if it ever started, from its own records
+   alone, and stops;
 2. copies `request.json` into a fresh root-owned directory under
    `/run/tenkai-host/work/<instance>`, opening every path component relative
    to its parent with `O_NOFOLLOW` and refusing symbolic links, hard links,
@@ -39,7 +40,8 @@ applier then:
 6. runs the signed command for the action (`deploy.install`,
    `deploy.uninstall`, or `deploy.health`) with `/bin/sh -c` in the copied
    workdir, with its own process group and a fixed environment;
-7. records the result, updates the product's record, and removes the copy.
+7. stops anything the command left running, records the result, updates
+   the product's record, and removes the copy.
 
 A refusal before step 5 changes nothing and does not count as a start: the
 server may start the same instance again once the reason is fixed, for
@@ -67,9 +69,11 @@ which is removed after the step.
 
 The applier kills the command's process group when its own timeout fires
 (`timeout_seconds`) and when the unit is stopped (`systemctl stop` sends it
-SIGTERM). What a command that exited on its own left running is killed with
-the rest of the unit's control group. Install long-running services as their
-own systemd units.
+SIGTERM). Nothing the command starts outlives the step: the applier is the
+child subreaper, so a process that detaches or double-forks reparents to it,
+and it kills and reaps everything left before it records the result and
+releases the product's lock. A process stuck in the kernel holds the lock
+until it dies. Install long-running services as their own systemd units.
 
 ## Approvals
 

@@ -57,9 +57,10 @@ pub fn command_environment(step: &VerifiedHostStep) -> Vec<(&'static str, String
     ]
 }
 
-/// How long the applier keeps killing what the command left behind before it
-/// gives up and reports the step as failed.
-const DESCENDANT_DEADLINE: Duration = Duration::from_secs(30);
+/// How long stopping what the command left behind may take before the
+/// applier says, once, that it is still waiting.
+#[cfg(target_os = "linux")]
+const DESCENDANT_PATIENCE: Duration = Duration::from_secs(30);
 
 /// Make the applier the child subreaper of everything it starts (Linux), so
 /// descendants that leave the command's process group reparent to it. Call
@@ -133,14 +134,8 @@ pub async fn run_command(
             }
         }
     };
-    match stop_descendants(DESCENDANT_DEADLINE) {
-        Ok(()) => Ok(end),
-        Err(error) => Ok(CommandEnd {
-            outcome: HostApplyOutcome::Failed,
-            exit_status: end.exit_status,
-            detail: format!("{}; {error:#}", end.detail),
-        }),
-    }
+    stop_descendants();
+    Ok(end)
 }
 
 /// Kill the command's process group, then reap its leader. The leader is
@@ -156,42 +151,49 @@ async fn kill_group_and_reap(
 }
 
 /// Kill and reap the applier's children until it has none. With
-/// [`adopt_descendants`] that is every process the command started.
+/// [`adopt_descendants`] that is every process the command started. It never
+/// gives up: the step is recorded, and the product lock released, only once
+/// nothing the command started is left. A process stuck in the kernel keeps
+/// the lock until it dies.
 #[cfg(target_os = "linux")]
-fn stop_descendants(deadline: Duration) -> Result<()> {
+fn stop_descendants() {
     use rustix::process::{Signal, WaitOptions, kill_process, wait};
     let started = std::time::Instant::now();
+    let mut warned = false;
     loop {
         // Any child: `waitpid(None, ..)` would wait only for the applier's
         // own process group.
         match wait(WaitOptions::NOHANG) {
-            Err(rustix::io::Errno::CHILD) => return Ok(()),
+            Err(rustix::io::Errno::CHILD) => return,
             Ok(Some(_)) => continue,
-            Ok(None) => {
-                for pid in children()? {
+            Ok(None) | Err(_) => {
+                for pid in children() {
                     let _ = kill_process(pid, Signal::KILL);
                 }
-                if started.elapsed() > deadline {
-                    anyhow::bail!("processes the command started are still running");
+                if !warned && started.elapsed() > DESCENDANT_PATIENCE {
+                    eprintln!(
+                        "tenkai-host-applier: processes the command started are still running; holding the product lock until they are gone"
+                    );
+                    warned = true;
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
-            Err(error) => return Err(error).context("reaping what the command started"),
         }
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-fn stop_descendants(_deadline: Duration) -> Result<()> {
-    Ok(())
-}
+fn stop_descendants() {}
 
 /// The applier's live children, from `/proc/<pid>/stat`.
 #[cfg(target_os = "linux")]
-fn children() -> Result<Vec<rustix::process::Pid>> {
+fn children() -> Vec<rustix::process::Pid> {
     let me = rustix::process::getpid().as_raw_nonzero().get();
     let mut children = Vec::new();
-    for entry in std::fs::read_dir("/proc").context("listing /proc")? {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return children;
+    };
+    for entry in entries {
         let Ok(entry) = entry else { continue };
         let Some(pid) = entry
             .file_name()
@@ -215,5 +217,5 @@ fn children() -> Result<Vec<rustix::process::Pid>> {
             children.push(pid);
         }
     }
-    Ok(children)
+    children
 }
