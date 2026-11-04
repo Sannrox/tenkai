@@ -123,9 +123,10 @@ impl HostApprovalPolicy {
         }
     }
 
-    /// Verify `envelopes` for `plan` at `now_ms` and tally them against
-    /// every purpose. An envelope that fails verification, is automatic, or
-    /// outlives `max_approval_ttl_ms` does not count.
+    /// Verify `envelopes` for `plan` at `now_ms`. An envelope that fails
+    /// verification, is automatic, or outlives `max_approval_ttl_ms` does not
+    /// count; each one that does counts until it expires or its signer's
+    /// window closes.
     pub fn evaluate(
         &self,
         plan: &Plan,
@@ -155,54 +156,135 @@ impl HostApprovalPolicy {
             }
             // The gate-skip flag is server state; an approval binds it either way.
             match verify_envelope(plan, envelope, &roots, now_ms, statement.skip_gates) {
-                Ok(evidence) => candidates.push(CountedApproval {
-                    key_id: evidence.key_id,
-                    identity: evidence.signer_identity,
-                    groups: roots
-                        .signer(&envelope.key_id)
-                        .map(|signer| signer.groups.clone())
-                        .unwrap_or_default(),
-                    auto: false,
-                }),
+                Ok(evidence) => {
+                    let signer = roots.signer(&envelope.key_id).ok();
+                    candidates.push(Candidate {
+                        approval: CountedApproval {
+                            key_id: evidence.key_id,
+                            identity: evidence.signer_identity,
+                            groups: signer
+                                .map(|signer| signer.groups.clone())
+                                .unwrap_or_default(),
+                            auto: false,
+                        },
+                        valid_until: statement.expires_at.min(
+                            signer
+                                .and_then(|signer| signer.not_after)
+                                .map_or(i64::MAX, |not_after| not_after.saturating_add(1)),
+                        ),
+                    })
+                }
                 Err(error) => rejected.push(format!("{}: {error:#}", envelope.key_id)),
             }
         }
-        let mut refusals = BTreeMap::new();
-        for purpose in [
+        let rules = [
             QuorumPurpose::ExecutePlan,
             QuorumPurpose::SkipGates,
             QuorumPurpose::Rollback,
             QuorumPurpose::Downgrade,
-        ] {
-            let missing: Vec<String> = self
-                .rules(purpose)
-                .iter()
-                .filter_map(|rule| {
-                    let tally = count_quorum(rule, &candidates, None);
-                    (tally.missing > 0).then(|| quorum_refusal(rule, &tally))
-                })
-                .collect();
-            if !missing.is_empty() {
-                refusals.insert(purpose, missing.join("; "));
-            }
+        ]
+        .into_iter()
+        .map(|purpose| (purpose, self.rules(purpose)))
+        .collect();
+        HostApprovals {
+            rules,
+            candidates,
+            rejected,
         }
-        HostApprovals { refusals, rejected }
     }
 }
 
-/// Which purposes' quorums a set of approvals satisfies for one plan.
+/// The purposes a plan needs before any of its host steps runs, from the
+/// plan alone: `execute_plan`, `skip_gates` (as if gates were skipped), and
+/// `rollback` or `downgrade` when any step is one.
+pub fn plan_purposes(plan: &Plan) -> Vec<QuorumPurpose> {
+    let mut purposes = vec![QuorumPurpose::ExecutePlan, QuorumPurpose::SkipGates];
+    if plan
+        .steps
+        .iter()
+        .any(|step| step.action == Action::Rollback)
+    {
+        purposes.push(QuorumPurpose::Rollback);
+    }
+    if plan
+        .steps
+        .iter()
+        .any(|step| step.action == Action::Downgrade)
+    {
+        purposes.push(QuorumPurpose::Downgrade);
+    }
+    purposes
+}
+
+/// One verified approval and when it stops counting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Candidate {
+    approval: CountedApproval,
+    /// Exclusive: the approval counts while `now < valid_until`.
+    valid_until: i64,
+}
+
+/// Verified approvals for one plan, and the host policy's rules to count
+/// them against.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostApprovals {
-    refusals: BTreeMap<QuorumPurpose, String>,
+    rules: BTreeMap<QuorumPurpose, Vec<QuorumRule>>,
+    candidates: Vec<Candidate>,
     rejected: Vec<String>,
 }
 
 impl HostApprovals {
+    /// The approvals still valid at `now_ms`. The applier recounts with this
+    /// after waiting for the product lock, so an approval that expired in
+    /// the meantime no longer counts while the others still do.
+    pub fn at(&self, now_ms: i64) -> Self {
+        let (valid, expired): (Vec<Candidate>, Vec<Candidate>) = self
+            .candidates
+            .iter()
+            .cloned()
+            .partition(|candidate| now_ms < candidate.valid_until);
+        let mut rejected = self.rejected.clone();
+        rejected.extend(expired.into_iter().map(|candidate| {
+            format!(
+                "{}: stopped being valid before the step could start",
+                candidate.approval.key_id
+            )
+        }));
+        Self {
+            rules: self.rules.clone(),
+            candidates: valid,
+            rejected,
+        }
+    }
+
+    /// Refuse unless every purpose in `purposes` is met.
+    pub fn require_all(&self, purposes: &[QuorumPurpose]) -> Result<()> {
+        purposes
+            .iter()
+            .try_for_each(|purpose| self.require(*purpose))
+    }
+
     /// Refuse unless every rule for `purpose` is met.
     pub fn require(&self, purpose: QuorumPurpose) -> Result<()> {
-        let Some(refusal) = self.refusals.get(&purpose) else {
+        let approvals: Vec<CountedApproval> = self
+            .candidates
+            .iter()
+            .map(|candidate| candidate.approval.clone())
+            .collect();
+        let missing: Vec<String> = self
+            .rules
+            .get(&purpose)
+            .into_iter()
+            .flatten()
+            .filter_map(|rule| {
+                let tally = count_quorum(rule, &approvals, None);
+                (tally.missing > 0).then(|| quorum_refusal(rule, &tally))
+            })
+            .collect();
+        if missing.is_empty() {
             return Ok(());
-        };
+        }
+        let refusal = missing.join("; ");
         if self.rejected.is_empty() {
             bail!("host approval policy: {refusal}");
         }
@@ -210,28 +292,5 @@ impl HostApprovals {
             "host approval policy: {refusal}; not counted: {}",
             self.rejected.join("; ")
         )
-    }
-
-    /// The purposes a plan needs before any of its host steps runs, from the
-    /// plan alone: `execute_plan`, `skip_gates` (as if gates were skipped),
-    /// and `rollback` or `downgrade` when any step is one.
-    pub fn require_for_plan(&self, plan: &Plan) -> Result<()> {
-        self.require(QuorumPurpose::ExecutePlan)?;
-        self.require(QuorumPurpose::SkipGates)?;
-        if plan
-            .steps
-            .iter()
-            .any(|step| step.action == Action::Rollback)
-        {
-            self.require(QuorumPurpose::Rollback)?;
-        }
-        if plan
-            .steps
-            .iter()
-            .any(|step| step.action == Action::Downgrade)
-        {
-            self.require(QuorumPurpose::Downgrade)?;
-        }
-        Ok(())
     }
 }

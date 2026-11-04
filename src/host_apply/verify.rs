@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::policy::{HostApprovalPolicy, HostApprovals};
 use super::request::HostApplyRequest;
+use crate::approval_policy::QuorumPurpose;
 use crate::plan::{Action, HostAction, PLAN_FORMAT_VERSION};
 use crate::software_executor::SoftwareExecutorKind;
 
@@ -54,6 +55,8 @@ pub struct VerifiedHostStep {
     pub command: String,
     pub signer_identity: String,
     pub approvals: HostApprovals,
+    /// The purposes every host step of this plan needs, from the plan alone.
+    pub purposes: Vec<QuorumPurpose>,
 }
 
 /// Verify a request copied into root-owned storage, and the copied release
@@ -176,7 +179,8 @@ pub fn verify_request(
         bail!("the release signature and the plan step name different artifact digests");
     }
     let approvals = trust.policy.evaluate(plan, &request.approvals, now_ms);
-    approvals.require_for_plan(plan)?;
+    let purposes = super::policy::plan_purposes(plan);
+    approvals.require_all(&purposes)?;
 
     Ok(VerifiedHostStep {
         instance: instance.into(),
@@ -198,6 +202,7 @@ pub fn verify_request(
         command,
         signer_identity: signer.identity,
         approvals,
+        purposes,
     })
 }
 
