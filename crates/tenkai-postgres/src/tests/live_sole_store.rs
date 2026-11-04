@@ -52,7 +52,14 @@ fn live_postgres_sole_store_survives_reconnect() {
         },
         "test",
     )
-    .with_tenant("sole-store", &authority)
+    .with_tenant(
+        format!(
+            "sole-store-{}-{}",
+            std::process::id(),
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        ),
+        &authority,
+    )
     .unwrap()
     .build()
     .unwrap();
