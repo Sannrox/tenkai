@@ -88,6 +88,20 @@ async fn stored_release_manifest(
     crate::manifest::parse_raw(raw).with_context(|| format!("parsing stored manifest of {release}"))
 }
 
+/// The stored manifest of `release`, or `None` when the release is missing or
+/// its manifest does not parse; apply admission refuses such a release.
+async fn readable_manifest(
+    ctx: &mut Ctx,
+    release: &str,
+) -> Result<Option<crate::manifest::Manifest>> {
+    Ok(ctx.get(release).await?.and_then(|object| {
+        object
+            .properties
+            .get("manifest")
+            .and_then(|raw| crate::manifest::parse_raw(raw).ok())
+    }))
+}
+
 /// The executor the stored manifest of `release` declares.
 pub(crate) async fn stored_release_executor(
     ctx: &mut Ctx,
@@ -142,14 +156,7 @@ async fn bind_host_steps(
     for mut step in steps {
         // A release that is missing or unreadable is left to apply
         // admission, which refuses it.
-        let manifest = match ctx.get(&step.release_id).await? {
-            Some(release) => release
-                .properties
-                .get("manifest")
-                .and_then(|raw| crate::manifest::parse_raw(raw).ok()),
-            None => None,
-        };
-        let Some(manifest) = manifest else {
+        let Some(manifest) = readable_manifest(ctx, &step.release_id).await? else {
             bound.push(step);
             continue;
         };
@@ -241,14 +248,19 @@ fn observe_executor(
     }
 }
 
-async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateInput>, Vec<Step>)> {
-    compute_snapshot_with_policy(ctx, env, ConvergencePolicy::catalog_only()).await
+async fn compute_snapshot(
+    ctx: &mut Ctx,
+    env: &str,
+    executors: &crate::software_executor::SoftwareExecutors,
+) -> Result<(Vec<DesiredStateInput>, Vec<Step>)> {
+    compute_snapshot_with_policy(ctx, env, ConvergencePolicy::catalog_only(), executors).await
 }
 
 async fn compute_snapshot_with_policy(
     ctx: &mut Ctx,
     env: &str,
     policy: ConvergencePolicy,
+    executors: &crate::software_executor::SoftwareExecutors,
 ) -> Result<(Vec<DesiredStateInput>, Vec<Step>)> {
     let env_obj = crate::environment::active_environment(ctx, env).await?;
     crate::preview::admit_plan(&env_obj, crate::now_millis())?;
@@ -268,7 +280,6 @@ async fn compute_snapshot_with_policy(
         }
     }
 
-    let executors = crate::software_executor::SoftwareExecutors::from_process();
     let mut inputs = Vec::new();
     let mut pending = Vec::new();
     let mut held_model = false;
@@ -310,10 +321,23 @@ async fn compute_snapshot_with_policy(
         let target = pin_release(ctx, &release, env).await?;
         crate::software_compatibility::require_release(ctx, env, &release).await?;
         crate::topology::require_placement(ctx, env, &release).await?;
-        if env_obj
-            .properties
-            .get(&format!("deployment_health.{product}"))
-            .is_some_and(|health| health == "unknown")
+        // The root-side applier's record, not the server's view, says what a
+        // host release has applied (ADR 0041 section 2).
+        let host_record = if readable_manifest(ctx, &release)
+            .await?
+            .is_some_and(|manifest| {
+                manifest.deploy.executor
+                    == Some(crate::software_executor::SoftwareExecutorKind::Host)
+            }) {
+            Some(executors.host()?.applied_state(env, &product)?)
+        } else {
+            None
+        };
+        if host_record.is_none()
+            && env_obj
+                .properties
+                .get(&format!("deployment_health.{product}"))
+                .is_some_and(|health| health == "unknown")
         {
             let detail = env_obj
                 .properties
@@ -347,6 +371,28 @@ async fn compute_snapshot_with_policy(
             artifact_digest: target.artifact_digest.clone(),
             deployed_version: deployed.clone(),
         });
+        if let Some(record) = &host_record {
+            // Converged only when the record holds exactly the desired
+            // release; anything else, a dirty record included, takes an
+            // install that binding starts from what the record holds.
+            let applied = matches!(
+                &record.state,
+                crate::host_apply::state::AppliedState::Applied { release }
+                    if release.version == desired
+            );
+            if !applied {
+                pending.push((
+                    product,
+                    Action::Install,
+                    deployed,
+                    desired,
+                    target,
+                    None,
+                    kind,
+                ));
+            }
+            continue;
+        }
         match deployed {
             Some(v) if v == desired => {
                 let mut restart = !policy.observe_live
@@ -363,7 +409,7 @@ async fn compute_snapshot_with_policy(
                         == Some(crate::software_executor::SoftwareExecutorKind::Host)
                 });
                 if let Some(manifest) = live.as_ref()
-                    && let Some(executor) = observe_executor(&executors, manifest)?
+                    && let Some(executor) = observe_executor(executors, manifest)?
                 {
                     let request = crate::software_executor::request_from_parts(
                         product.clone(),
@@ -559,7 +605,8 @@ pub(super) fn validate_model_routing_rollout_order(
 
 /// Compute the steps that converge the environment on its subscribed channels.
 pub(super) async fn compute(ctx: &mut Ctx, env: &str) -> Result<Vec<Step>> {
-    Ok(compute_snapshot(ctx, env).await?.1)
+    let executors = crate::software_executor::SoftwareExecutors::from_process();
+    Ok(compute_snapshot(ctx, env, &executors).await?.1)
 }
 
 /// Compute and persist an immutable executable plan before any step is run.
@@ -569,7 +616,7 @@ pub(super) async fn create(
     env: &str,
     executors: &crate::software_executor::SoftwareExecutors,
 ) -> Result<Plan> {
-    let (inputs, steps) = compute_snapshot(ctx, env).await?;
+    let (inputs, steps) = compute_snapshot(ctx, env, executors).await?;
     create_with_content(ctx, executors, env, inputs, steps, None).await
 }
 
@@ -583,14 +630,14 @@ pub(super) async fn create_for_held_target(
     product: &str,
     release: &str,
 ) -> Result<Plan> {
-    let (inputs, steps) = compute_snapshot(ctx, env).await?;
+    let executors = crate::software_executor::SoftwareExecutors::from_process();
+    let (inputs, steps) = compute_snapshot(ctx, env, &executors).await?;
     if !steps
         .iter()
         .any(|step| step.product == product && step.release_id == release)
     {
         bail!("explicit retry did not include held failed target {product} ({release})");
     }
-    let executors = crate::software_executor::SoftwareExecutors::from_process();
     create_with_content(ctx, &executors, env, inputs, steps, None).await
 }
 
@@ -600,21 +647,21 @@ pub(super) async fn create_for_held_target(
 /// and is not served to a runtime agent. Operator `create` still persists
 /// empty Computed plans so durable callers can reload the returned id.
 pub(super) async fn create_for_reconcile(ctx: &mut Ctx, env: &str) -> Result<Plan> {
+    let executors = crate::software_executor::SoftwareExecutors::from_process();
     let (inputs, mut steps) =
-        compute_snapshot_with_policy(ctx, env, ConvergencePolicy::reconcile()).await?;
+        compute_snapshot_with_policy(ctx, env, ConvergencePolicy::reconcile(), &executors).await?;
     if steps.is_empty() {
         return assemble_plan(env, inputs, &mut steps, None);
     }
-    let executors = crate::software_executor::SoftwareExecutors::from_process();
     create_with_content(ctx, &executors, env, inputs, steps, None).await
 }
 
 /// Persist a reconcile-policy plan, even with zero steps. Held failed targets
 /// stay held, unlike operator `create`, which retries them.
 pub(super) async fn create_holding_failed_targets(ctx: &mut Ctx, env: &str) -> Result<Plan> {
-    let (inputs, steps) =
-        compute_snapshot_with_policy(ctx, env, ConvergencePolicy::reconcile()).await?;
     let executors = crate::software_executor::SoftwareExecutors::from_process();
+    let (inputs, steps) =
+        compute_snapshot_with_policy(ctx, env, ConvergencePolicy::reconcile(), &executors).await?;
     create_with_content(ctx, &executors, env, inputs, steps, None).await
 }
 

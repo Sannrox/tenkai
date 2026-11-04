@@ -168,11 +168,15 @@ Hosts that run no host releases skip this section.
    logs `tenkai-server warning: host executor unavailable` and every host
    step fails closed, naming the setting.
 
-A plan binds each host step to the applier's record for its product: the
-step starts from the release the record holds, at the record's generation,
-and when the release declares `deploy.health` a `health` step follows. Both
-are part of the plan, so its digest and approvals cover them; a plan made
-before another host step changed the record is refused by the applier.
+The applier's record for a product, not the server's view, decides what a
+host release has applied: a plan installs the channel's release unless the
+record holds exactly that release. Each host step starts from the release the
+record holds, at the record's generation, and when the release declares
+`deploy.health` a `health` step follows. Both are part of the plan, so its
+digest and approvals cover them; a plan made before another host step changed
+the record is refused by the applier. Host releases do not evaluate SLO
+gates (`[[gate.slo]]`); a plan that would need one is refused before anything
+runs.
 
 Host steps are always attended. The server never approves a plan with a host
 step itself, whatever the environment's approval policy says, and the
@@ -184,10 +188,13 @@ Each step runs `tenkai-host-apply@<instance>.service`, where the instance is
 derived from the plan digest, the step, and its action. The server keeps the
 environment lease fresh while the unit runs and stops the unit when it loses
 the lease or receives SIGTERM, like a shell deploy command. It accepts only a
-result that names the instance it started. A failed host step stays failed:
-nothing is cleaned up or restored, and returning to the previous release is a
-rollback plan with its own approvals. Reconcile neither observes nor restarts
-host releases.
+result that names the instance it started. A step the applier refused ran
+nothing and leaves the deployment as it was. A failed host step stays failed:
+nothing is cleaned up or restored, and the server marks the deployment
+unknown. The next approved plan moves on from the applier's record: it
+installs the channel's release again, or, after you promote the previous
+release, returns to it with the rollback or downgrade approvals the host
+policy requires. Reconcile neither observes nor restarts host releases.
 
 To authenticate with enterprise JWT assertions or with an identity provider
 (OIDC) instead of shared bearer tokens, see

@@ -233,6 +233,28 @@ async fn admit_plan_artifact_pulls(
     Ok(())
 }
 
+/// Host steps sample no SLO metrics and record no gate evidence; a host
+/// release proves health with its approved health step (ADR 0041 section 2).
+/// Refuse an SLO gate such a step would otherwise skip, before anything runs.
+async fn refuse_host_slo_gate(ctx: &mut Ctx, environment: &str, step: &Step) -> Result<()> {
+    if !crate::health_gate::step_requires_slo_evaluation(ctx, environment, step).await? {
+        return Ok(());
+    }
+    let gate =
+        crate::health_gate::load_release_gate_section(ctx, &step.release_id, &step.release_digest)
+            .await?;
+    if !crate::health_gate::resolve_spec(ctx, environment, &step.product, &gate)
+        .await?
+        .is_empty()
+    {
+        bail!(
+            "host step {} has SLO health gates, which host releases do not evaluate; drop the gate or apply with gates skipped",
+            step.id
+        );
+    }
+    Ok(())
+}
+
 async fn execute_locked(
     ctx: &mut Ctx,
     mut stored_plan: Plan,
@@ -263,6 +285,16 @@ async fn execute_locked(
     {
         plan_completion::fail(ctx, lease, &mut stored_plan, skip_gates, error.to_string()).await?;
         return Err(error);
+    }
+
+    if !skip_gates {
+        for step in steps.iter().filter(|step| step.host.is_some()) {
+            if let Err(error) = refuse_host_slo_gate(ctx, &env, step).await {
+                plan_completion::fail(ctx, lease, &mut stored_plan, skip_gates, error.to_string())
+                    .await?;
+                return Err(error);
+            }
+        }
     }
 
     if options.delivery_adapter.is_some() && !skip_gates {

@@ -150,7 +150,7 @@ jobs:
       - name: Install polkit
         run: sudo apt-get update && sudo apt-get install -y polkitd
       - name: Build the applier, the drill fixture, the server, and the CLI
-        run: cargo build --locked -p tenkai-host-applier --bin tenkai-host-applier --example host_apply_drill -p tenkai-server -p tenkaictl
+        run: cargo build --locked -p tenkai-host-applier -p tenkai-server -p tenkaictl --bin tenkai-host-applier --bin tenkai-server --bin tenkaictl --example host_apply_drill
       - name: Run the drill
         run: bash scripts/host-applier-systemd-drill.sh target/debug/tenkai-host-applier target/debug/examples/host_apply_drill
       - name: Run the server-side drill

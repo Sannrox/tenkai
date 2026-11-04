@@ -198,6 +198,11 @@ impl Host {
 
     /// Sign, publish, and promote `cluster@version`, subscribed by `edge`.
     async fn release(&mut self, version: &str, health: bool) {
+        self.release_with(version, health, "").await;
+    }
+
+    /// [`Self::release`] with `extra` manifest sections appended.
+    async fn release_with(&mut self, version: &str, health: bool, extra: &str) {
         let dir = self.root.join(format!("cluster-{version}"));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("install.sh"), "echo install\n").unwrap();
@@ -206,7 +211,7 @@ impl Host {
         std::fs::write(
             &manifest,
             format!(
-                "[product]\nname = \"cluster\"\nversion = \"{version}\"\n\n[deploy]\nexecutor = \"host\"\ninstall = \"sh install.sh\"\nuninstall = \"true\"\n{health}inputs = [\"install.sh\"]\n"
+                "[product]\nname = \"cluster\"\nversion = \"{version}\"\n\n[deploy]\nexecutor = \"host\"\ninstall = \"sh install.sh\"\nuninstall = \"true\"\n{health}inputs = [\"install.sh\"]\n{extra}"
             ),
         )
         .unwrap();
@@ -368,6 +373,7 @@ async fn install_and_health_run_through_the_applier_at_the_planned_generations()
     assert_eq!(host.record().generation, 1);
     // The spool holds nothing once the steps ended.
     assert_eq!(std::fs::read_dir(&host.applier.spool).unwrap().count(), 0);
+    assert!(host.plan().await.steps.is_empty(), "converged");
 
     // The next plan starts from what the applier recorded.
     host.release("1.1.0", false).await;
@@ -415,8 +421,47 @@ async fn a_failed_host_install_stays_failed_and_nothing_is_restored() {
         ["install cluster@1.0.0", "install cluster@2.0.0"]
     );
     assert!(matches!(host.record().state, AppliedState::Dirty { .. }));
-    // Which release is live is unknown until the operator settles it.
+    // The server no longer knows which release is live ...
     assert_eq!(host.deployed().await, None);
+
+    // ... but the applier's record does, so an approved plan can move on
+    // from the dirty record at its current generation.
+    host.applier.fail.lock().unwrap().clear();
+    let retry = host.plan().await;
+    assert_eq!(retry.steps.len(), 1);
+    assert_eq!(retry.steps[0].from.as_deref(), Some("1.0.0"));
+    assert_eq!(
+        retry.steps[0].host,
+        Some(HostStep {
+            action: HostAction::Install,
+            expected_generation: 2
+        })
+    );
+    let outcomes = host.apply(&retry).await.unwrap();
+    assert_eq!(
+        statuses(&outcomes),
+        [StepOutcomeStatus::Succeeded],
+        "{outcomes:?}"
+    );
+    assert_eq!(host.deployed().await.as_deref(), Some("2.0.0"));
+    assert!(host.plan().await.steps.is_empty(), "converged");
+}
+
+#[tokio::test]
+async fn an_slo_gate_on_a_host_release_is_refused_before_anything_runs() {
+    let mut host = Host::new("slo").await;
+    host.release_with(
+        "1.0.0",
+        false,
+        "\n[gate]\nbake_window_seconds = 0\non_fail = \"halt\"\n\n[[gate.slo]]\nname = \"error_rate\"\nquery = \"error_rate\"\nthreshold = 0.01\n",
+    )
+    .await;
+    let plan = host.plan().await;
+
+    let error = host.apply(&plan).await.unwrap_err();
+
+    assert!(error.to_string().contains("SLO health gates"), "{error:#}");
+    assert!(host.applier.starts.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
