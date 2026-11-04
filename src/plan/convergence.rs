@@ -206,7 +206,11 @@ async fn bind_host_steps(
                 .checked_add(1)
                 .context("host applied-state generation overflow")?;
             bound.push(step.clone());
-            step.action = Action::Restart;
+            // The health step of a rollback is part of that rollback, so it
+            // keeps the rollback's admission, recalled recovery included.
+            if step.action != Action::Rollback {
+                step.action = Action::Restart;
+            }
             step.from = Some(step.to.clone());
             step.host = Some(HostStep {
                 action: HostAction::Health,
