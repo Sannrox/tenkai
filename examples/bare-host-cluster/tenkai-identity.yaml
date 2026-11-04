@@ -1,0 +1,60 @@
+# Tenkai's identity in the cluster. install.sh replaces ENVIRONMENT with the
+# Tenkai environment name, which is also the namespace in-cluster releases
+# land in. The service account lives in tenkai-system, so releases Tenkai
+# applies into the environment's namespace cannot change its credentials.
+#
+# Both namespaces enforce the restricted Pod Security standard, so no pod
+# Tenkai applies can be privileged, mount a host path, or join a host
+# namespace. The `admin` role cannot change namespace labels.
+#
+# Scope: the built-in `admin` role, bound in the environment's namespace only.
+# That covers every namespaced kind the in-process executor applies, including
+# Roles and RoleBindings inside the namespace, and reading the namespace
+# itself. Nothing cluster-wide: no cluster-admin, no other namespace, no
+# nodes, no CRDs.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tenkai-system
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ENVIRONMENT
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tenkai
+  namespace: tenkai-system
+---
+# A long-lived token for the kubeconfig Tenkai reads. Rotate it by deleting
+# the secret and running the release's install again.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: tenkai-token
+  namespace: tenkai-system
+  annotations:
+    kubernetes.io/service-account.name: tenkai
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: tenkai
+  namespace: ENVIRONMENT
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: admin
+subjects:
+  - kind: ServiceAccount
+    name: tenkai
+    namespace: tenkai-system

@@ -1,0 +1,23 @@
+# Reference in-cluster release for a bare host (ADR 0041): a Deployment and a
+# Service that meet the restricted Pod Security standard, applied by the
+# in-process Kubernetes executor into the namespace named after the
+# environment, as the identity the cluster host release
+# (examples/bare-host-cluster) creates. Until that release has written the
+# environment's kubeconfig, every attempt fails closed and leaves the
+# deployment as it was; reconcile's backoff converges it once the cluster
+# exists. Health comes from the Deployment's Available condition. Its name
+# sorts before `cluster` on purpose: host-release steps run first in a plan
+# whatever the product names.
+#
+# Guide: docs/bare-host.md
+
+[product]
+name = "app"
+version = "1.0.0"
+description = "Minimal Deployment and Service for a bare-host cluster"
+kind = "software"
+
+[deploy]
+executor = "kubernetes-inprocess"
+workdir = "."
+inputs = ["manifests"]

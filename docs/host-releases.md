@@ -13,6 +13,10 @@ This page covers the root side: what it checks, how to install it, and what
 it records. [Run host releases](run-tenkai-server.md#run-host-releases)
 covers the server side: planning, approvals, and configuration.
 
+For the whole flow on a bare host, from installing Tenkai to a cluster it
+installs and releases delivered into it, see
+[bare host to cluster](bare-host.md).
+
 ## What one step does
 
 For each host step the server writes a request into its spool directory and

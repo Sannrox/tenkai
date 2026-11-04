@@ -1,0 +1,83 @@
+name: Bare-host drill
+
+# Linux proof for ADR 0041 end to end (#912): Tenkai installed by its install
+# script on a fresh runner installs a single-node cluster as a privileged host
+# release, delivers an in-cluster release into it, then upgrades, rolls back,
+# and uninstalls the cluster through approved plans. Heavy and not a required
+# check; it runs on pull requests that touch this path and on demand, where a
+# release tag runs it against that GitHub Release instead of this commit.
+on:
+  pull_request:
+    paths:
+      - .github/workflows/bare-host-drill.yml
+      - scripts/bare-host-drill.sh
+      - scripts/install.sh
+      - scripts/package-release-binaries.sh
+      - examples/bare-host-cluster/**
+      - examples/bare-host-app/**
+      - examples/host-applier-systemd/**
+      - crates/tenkai-host-applier/**
+      - crates/tenkai-executor/src/in_process_kubernetes.rs
+      - src/host_apply/**
+      - src/host_apply.rs
+      - src/host_executor/**
+      - src/host_executor.rs
+      - src/apply/**
+      - src/plan/**
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release tag to install (vX.Y.Z or vX.Y.Z-rc.N); empty builds this commit
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  bare-host-drill:
+    name: Bare-host drill
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install polkit
+        run: sudo apt-get update && sudo apt-get install -y polkitd
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        if: inputs.release_tag == ''
+        with:
+          toolchain: 1.96.1
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        if: inputs.release_tag == ''
+      - name: Package this commit's Linux hosts as release assets
+        if: inputs.release_tag == ''
+        run: |
+          set -euo pipefail
+          cargo build --locked \
+            --bin tenkaictl --bin tenkai-server --bin tenkai-executor-guard \
+            --bin tenkai-runtime --bin tenkai-runtime-guard --bin tenkai-host-applier
+          version="$(awk '/^\[/ { p = ($0 == "[package]") } p && /^version = "/ { gsub(/^version = "|"$/, ""); print; exit }' Cargo.toml)"
+          bash scripts/package-release-binaries.sh package --out dist --bin-dir target/debug --platform linux-x86_64
+          bash scripts/package-release-binaries.sh install-script --out dist --version "$version"
+          bash scripts/package-release-binaries.sh checksums --out dist
+      - name: Run the drill against this commit
+        if: inputs.release_tag == ''
+        run: bash scripts/bare-host-drill.sh --dist dist
+      - name: Run the drill against a release
+        if: inputs.release_tag != ''
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: bash scripts/bare-host-drill.sh --release-tag "$RELEASE_TAG"
+      - name: Server, applier, and cluster journals
+        if: always()
+        run: |
+          sudo journalctl -u tenkai-server --no-pager -o cat | tail -n 200 || true
+          sudo journalctl -t tenkai-host-apply --no-pager | tail -n 200 || true
+          sudo journalctl -u k3s --no-pager | tail -n 100 || true
