@@ -51,7 +51,7 @@ pub(crate) fn copy_before_migrate(
         return Ok(None);
     }
     let copy = take_copy(connection, database, found).map_err(|error| {
-        StoreError::PreMigrationCopy(format!(
+        StoreError::Database(format!(
             "the schema-{found} store {} was not copied before migrating it to schema \
              {SCHEMA_VERSION}, so it was left as it is: {error:#}",
             database.display()

@@ -70,7 +70,7 @@ fn a_copy_that_cannot_be_written_refuses_the_start_and_leaves_the_store() {
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
     if let Some(opened) = opened {
         assert!(
-            matches!(opened, Err(StoreError::PreMigrationCopy(_))),
+            matches!(&opened, Err(StoreError::Database(detail)) if detail.contains("was not copied")),
             "{:?}",
             opened.err()
         );
