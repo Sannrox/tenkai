@@ -66,8 +66,9 @@ executor of the release it acts on: activating the target uses the target's,
 and removing or restoring the previous release uses the previous release's.
 That covers apply, rollback, recovery, restart, and observation, including
 `cluster_observe_executor`, which reads the variable directly today. The one
-exception is `host` releases: they get no automatic restore (section 2), and a
-failed host step leaves the step failed until an approved rollback plan runs.
+exception is `host` releases: they get no automatic restore, restart, or
+periodic observation (section 2), and a failed host step leaves the step failed
+until an approved rollback plan runs.
 
 A product keeps one executor across its releases in an environment. A plan
 whose target release resolves to a different executor than the currently
@@ -124,10 +125,20 @@ key from the verified request and refuses an instance whose name does not match.
    It checks expiry and that purposes such as rollback and downgrade carry the
    approvals the policy requires. An `uninstall` needs an approved plan that
    removes the product, like any other change;
-5. refuses an instance it has already completed and returns that recorded
-   result instead of running again. Completion records live in persistent
-   root-owned state, `/var/lib/tenkai-host`, so a reboot does not reopen a
-   completed step.
+5. checks the step's starting state against its own record: the release the
+   step replaces must equal the last host release it applied successfully for
+   that environment and product, or nothing for a first install. An older
+   approved plan that never ran can therefore not run after a newer one, and
+   going back to an earlier release always needs a rollback plan;
+6. refuses an instance it has already started, and returns the recorded result
+   instead of running again.
+
+All of this state lives in persistent root-owned storage, `/var/lib/tenkai-host`:
+the last applied release per environment and product, and per instance a
+`started` record written before the command runs and a result record written
+after. An instance that has a `started` record but no result, after a crash or
+a reboot, resolves as interrupted and failed. It is never run again; continuing
+takes a new approved plan.
 
 Only then does it run the copied release's command. It builds the command's
 environment itself from a fixed allowlist plus values from the signed manifest;
@@ -142,14 +153,18 @@ when it fires. The server cancels on lease loss with the allowed `stop`, which
 the unit maps to the same kill. The result record (instance, release digest,
 action, outcome, exit status, timestamps) is written to `/var/lib/tenkai-host`,
 root-owned and readable but not writable by the `tenkai` user; the server accepts it only when it matches the instance it
-started. A missing or mismatched result is a failed step. A completed instance
-is never re-run, so a restart, a reboot, or a replayed request cannot run the
-command twice.
+started. A missing or mismatched result is a failed step. An instance is never
+re-run once started, so a restart, a reboot, or a replayed request cannot run
+the command twice.
 
-**No automatic restore.** A host step authorizes one release and one action. The
-applier therefore never runs an unapproved restore of the release a failed step
-replaced. A failed host step stays failed, and returning to the previous release
-is a rollback plan with its own approvals.
+**No automatic restore, restart, or periodic observation.** A host step
+authorizes one release and one action, once. The applier therefore never runs an
+unapproved restore of the release a failed step replaced, and reconcile does not
+emit restart plans or periodic observation for host releases. A failed host step
+stays failed, and returning to the previous release is a rollback plan with its
+own approvals. A host release's `health` runs only as an approved step. Its
+lasting health shows through what depends on it: in-cluster releases fail closed
+while the cluster is down.
 
 **Approvals for host steps are never the server's own.** Today the server can
 auto-approve with a key it owns. Such keys are excluded from the host approval
@@ -161,8 +176,9 @@ upgrading the cluster, are rare and high-impact, so they stay attended.
 run a release that a trusted signer signed for `host` execution, is not revoked
 or outside its validity window, and appears in a plan whose quorum of approvals
 satisfies the root-owned host policy for that exact action, and each such step
-at most once. It cannot run arbitrary commands, alter what runs, approve its own
-host steps, or uninstall a product without an approved plan.
+at most once, in the order its record of applied releases allows. It cannot run
+arbitrary commands, alter what runs, approve its own host steps, run an old plan
+out of order, or uninstall a product without an approved plan.
 
 **Known limit: recall.** Catalog recall is server state the root side cannot
 see. A recalled host release can still run while a plan that approves it is
