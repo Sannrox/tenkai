@@ -183,7 +183,11 @@ submission:
 Retryable delivery survives restart, duplicate enqueue, and lost
 acknowledgements: the outbox event id is the evidence and Action
 idempotency key. Adapters may see an event more than once; Sekai
-deduplicates. Disabled or unavailable export never interrupts deployment,
+deduplicates. An event is marked delivered only when the Action instance is
+`admitted`, whether fresh or replayed. Sekai stores a denial under the
+idempotency key and replays it, so a `denied` or `parked` instance stays
+undelivered in the outbox with its reason as `last_error` and keeps
+retrying with backoff. Disabled or unavailable export never interrupts deployment,
 rollback, or standalone operation.
 
 Before enabling export, a Sekai administrator must register, for the

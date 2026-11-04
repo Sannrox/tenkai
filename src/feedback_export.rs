@@ -625,26 +625,35 @@ impl FeedbackProvider for ChiseiFeedbackProvider {
                 )));
             }
         };
-        if response.replay {
-            return Ok(());
-        }
-        let instance = response.instance.ok_or_else(|| {
-            ProviderError::Unavailable("Sekai SubmitActionInstance returned no instance".into())
-        })?;
-        if instance.status == "admitted" || instance.policy_decision == "allow" {
-            return Ok(());
-        }
-        Err(ProviderError::Unavailable(
-            if instance.deny_reason.is_empty() {
-                format!(
-                    "Sekai feedback observation Action status {}",
-                    instance.status
-                )
-            } else {
-                instance.deny_reason
-            },
-        ))
+        observation_admission(response)
     }
+}
+
+/// Map a `SubmitActionInstance` reply to the outbox transition (#880).
+///
+/// Only an `admitted` instance counts as delivered, whether fresh or a
+/// replay. A denial is durable under the idempotency key, so a replay can
+/// carry it too; a denied or parked instance stays undelivered with its
+/// reason as the outbox's visible `last_error`, and keeps retrying.
+pub fn observation_admission(
+    response: crate::pb::sekai::SubmitActionInstanceResponse,
+) -> Result<(), ProviderError> {
+    let instance = response.instance.ok_or_else(|| {
+        ProviderError::Unavailable("Sekai SubmitActionInstance returned no instance".into())
+    })?;
+    if instance.status == "admitted" {
+        return Ok(());
+    }
+    let replay = if response.replay { " (replayed)" } else { "" };
+    let reason = if instance.deny_reason.is_empty() {
+        String::new()
+    } else {
+        format!(": {}", instance.deny_reason)
+    };
+    Err(ProviderError::Unavailable(format!(
+        "Sekai feedback observation Action status {}{replay}{reason}",
+        instance.status
+    )))
 }
 
 impl FeedbackProvider for crate::providers::LocalEventSink {
@@ -657,6 +666,7 @@ impl FeedbackProvider for crate::providers::LocalEventSink {
 mod tests {
     use super::*;
     use crate::feedback_observation::{Capture, Operation, RetryContext};
+    use crate::pb::sekai::SubmitActionInstanceResponse;
     use crate::plan::Action;
     use crate::providers::{LocalEventSink, enqueue_optional_event};
     use crate::storage::{OperationalStore, SqliteStore};
@@ -929,6 +939,112 @@ mod tests {
             1
         );
         drop(ctx);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn action_reply(
+        status: &str,
+        policy_decision: &str,
+        replay: bool,
+    ) -> SubmitActionInstanceResponse {
+        SubmitActionInstanceResponse {
+            instance: Some(crate::pb::sekai::ActionInstance {
+                status: status.into(),
+                policy_decision: policy_decision.into(),
+                deny_reason: if status == "denied" {
+                    "budget exhausted".into()
+                } else {
+                    String::new()
+                },
+                ..Default::default()
+            }),
+            replay,
+        }
+    }
+
+    #[test]
+    fn only_an_admitted_instance_counts_as_delivered() {
+        assert!(observation_admission(action_reply("admitted", "allow", false)).is_ok());
+        assert!(observation_admission(action_reply("admitted", "allow", true)).is_ok());
+        // A budget deny keeps `policy_decision = allow`; a replay carries the
+        // stored denial. Neither is an admission.
+        for reply in [
+            action_reply("denied", "allow", false),
+            action_reply("denied", "deny", true),
+            action_reply("parked", "require_approval", true),
+        ] {
+            assert!(observation_admission(reply).is_err());
+        }
+        assert!(
+            observation_admission(SubmitActionInstanceResponse {
+                instance: None,
+                replay: true,
+            })
+            .is_err()
+        );
+    }
+
+    /// Plays back `SubmitActionInstance` replies, one per delivery.
+    struct ScriptedPlane(
+        std::sync::Mutex<std::collections::VecDeque<SubmitActionInstanceResponse>>,
+    );
+
+    impl FeedbackProvider for ScriptedPlane {
+        async fn deliver(&self, _event: &ProviderEvent) -> Result<(), ProviderError> {
+            let reply = self.0.lock().unwrap().pop_front().expect("scripted reply");
+            observation_admission(reply)
+        }
+    }
+
+    #[tokio::test]
+    async fn denied_observation_replay_stays_undelivered_and_retryable() {
+        let dir = std::env::temp_dir().join(format!(
+            "tenkai-feedback-denied-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = SqliteStore::open(dir.join("tenkai.db")).unwrap();
+        let record = record(&observation("failed", Reason::ProductFailed)).unwrap();
+        let event: ProviderEvent = serde_json::from_str(&record.payload_json).unwrap();
+        enqueue_optional_event(&store, FEEDBACK_PROVIDER_KIND, &event, 100).unwrap();
+        let plane = ScriptedPlane(std::sync::Mutex::new(
+            [
+                action_reply("denied", "allow", false),
+                action_reply("denied", "allow", true),
+                action_reply("admitted", "allow", true),
+            ]
+            .into(),
+        ));
+        let pending = || {
+            OperationalStore::list_provider_events(&store, FEEDBACK_PROVIDER_KIND, "prod", 8)
+                .unwrap()
+                .remove(0)
+        };
+        // The first denial and its replay both defer; the outbox shows why.
+        for now in [200, 60_000] {
+            assert_eq!(
+                deliver_feedback_batch(&store, &plane, Duration::from_secs(1), now, 10)
+                    .await
+                    .unwrap(),
+                (0, 1)
+            );
+            let pending = pending();
+            assert_eq!(pending.delivered_at, None);
+            assert!(
+                pending.last_error.contains("budget exhausted"),
+                "{}",
+                pending.last_error
+            );
+        }
+        assert_eq!(
+            deliver_feedback_batch(&store, &plane, Duration::from_secs(1), 120_000, 10)
+                .await
+                .unwrap(),
+            (1, 0)
+        );
+        assert_eq!(pending().delivered_at, Some(120_000));
+        drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }
 
