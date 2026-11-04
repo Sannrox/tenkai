@@ -1633,7 +1633,8 @@ impl ManagementOperations {
         let actor = &context.audit_principal();
         self.audit(actor, "catalog.unsubscribe.requested")?;
         let mut ctx = self.catalog_ctx(&context)?;
-        let message = crate::environment::unsubscribe(&mut ctx, environment, product)
+        let executors = crate::software_executor::SoftwareExecutors::from_process();
+        let message = crate::environment::unsubscribe(&mut ctx, environment, product, &executors)
             .await
             .map_err(map_catalog_error)?;
         self.audit(actor, "catalog.unsubscribe.completed")?;

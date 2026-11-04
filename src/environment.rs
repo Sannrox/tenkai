@@ -917,8 +917,14 @@ pub async fn subscribe(ctx: &mut Ctx, env: &str, product: &str, channel: &str) -
 /// deployed, it must be a `host` release: the next approved plan uninstalls
 /// it through the root-side applier (ADR 0041 section 2). Removing a
 /// deployed release of another executor is not supported, so it is refused
-/// here rather than left running unmanaged.
-pub async fn unsubscribe(ctx: &mut Ctx, env: &str, product: &str) -> Result<String> {
+/// here rather than left running unmanaged, and so is a host release when
+/// `executors` has no host executor to plan its removal with.
+pub async fn unsubscribe(
+    ctx: &mut Ctx,
+    env: &str,
+    product: &str,
+    executors: &crate::software_executor::SoftwareExecutors,
+) -> Result<String> {
     validate_identifier("environment", env)?;
     validate_identifier("product", product)?;
     let eid = env_id(env);
@@ -950,6 +956,10 @@ pub async fn unsubscribe(ctx: &mut Ctx, env: &str, product: &str) -> Result<Stri
                 "{product} is deployed in {env} from {release}, which is not a host release; only host releases are removed by a plan"
             );
         }
+    }
+    if !candidates.is_empty() {
+        // Only the host executor can plan the uninstall this promises.
+        executors.host()?;
     }
     let mut removed = 0;
     for link in ctx.links(&eid, REL_SUBSCRIBES).await? {

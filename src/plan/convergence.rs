@@ -620,7 +620,29 @@ async fn compute_snapshot_with_policy(
     // A host product the environment no longer subscribes to is removed
     // like any other change: by an approved host uninstall step, from what
     // the applier's record holds (ADR 0041 section 2).
-    if let Ok(host) = executors.host() {
+    let host = executors.host();
+    if let Err(error) = &host {
+        // Without the applier's records nothing here can remove a host
+        // release that is deployed but no longer subscribed.
+        for (key, version) in &env_obj.properties {
+            let Some(product) = key.strip_prefix("deployed.") else {
+                continue;
+            };
+            if products.contains(product) {
+                continue;
+            }
+            if readable_manifest(ctx, &release_id(product, version))
+                .await?
+                .is_some_and(|manifest| {
+                    manifest.deploy.executor
+                        == Some(crate::software_executor::SoftwareExecutorKind::Host)
+                })
+            {
+                bail!("{product} is a host release to remove from {env}: {error:#}");
+            }
+        }
+    }
+    if let Ok(host) = host {
         for record in host.applied_states(env)? {
             if products.contains(&record.product) {
                 continue;
@@ -644,7 +666,6 @@ async fn compute_snapshot_with_policy(
             // nothing, and its signature and integrity are still checked.
             let target =
                 pin_release_for_recovery(ctx, &release_id(&record.product, &version), env).await?;
-            host_products.insert(record.product.clone());
             pending.push((
                 record.product.clone(),
                 Action::Remove,
@@ -675,8 +696,12 @@ async fn compute_snapshot_with_policy(
     pending.sort_by(|a, b| {
         let agent = |product: &str| product == crate::runtime_self_upgrade::SELF_PRODUCT;
         let not_host = |product: &String| !host_products.contains(product);
+        // Removals run after everything else: what runs in a cluster a host
+        // release provides has to go before the cluster does.
+        let remove = |action: Action| action == Action::Remove;
         agent(&a.0)
             .cmp(&agent(&b.0))
+            .then_with(|| remove(a.1).cmp(&remove(b.1)))
             .then_with(|| not_host(&a.0).cmp(&not_host(&b.0)))
             .then_with(|| {
                 model_routing_rollout_rank(a.6, a.1).cmp(&model_routing_rollout_rank(b.6, b.1))
