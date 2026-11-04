@@ -51,7 +51,7 @@ it ([ADR 0001](decisions/0001-standalone-core-and-service-evolution.md),
 | Signed advisory feed import and local image assessment | [Advisory feed](offline-bundles.md#advisory-feed); `tenkaictl exposure inspect`; #645 |
 | Declared and imported derived criticality | [Manage environments](manage-environments.md#criticality); [Plan approval](plan-approval.md#multi-party-approval); #694 |
 | Signed Tenkai hosts in offline bundles | [Host binaries](offline-bundles.md#host-binaries); [Release binaries](release-binaries.md#disconnected-sites); #640 |
-| Checksummed host binaries on GitHub Releases | [Release binaries](release-binaries.md); [release notes](releases/0.6.0.md); #446 |
+| Checksummed host binaries on GitHub Releases | [Release binaries](release-binaries.md); [release notes](releases/0.7.0.md); #446 |
 | One-command install script for CLI, server, and runtime hosts, checked against `SHA256SUMS` | [Install with one command](release-binaries.md#install-with-one-command); #905 |
 | Verified server self-upgrade with store check and rollback | [Upgrade a server host](release-binaries.md#upgrade-a-server-host); #678 |
 | Optional governance/intelligence provider ports | [Provider contracts](provider-contracts.md) |

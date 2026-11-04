@@ -140,6 +140,7 @@ will be split over time. Contributor and agent workflow live in
 
 - [Family versioning and tagging](decisions/0040-family-versioning-and-release-policy.md)
 - [RELEASING.md](../RELEASING.md)
+- [Release 0.7.0 notes](releases/0.7.0.md)
 - [Release 0.6.0 notes](releases/0.6.0.md)
 - [Release 0.5.0 notes](releases/0.5.0.md)
 - [Release 0.4.2 notes](releases/0.4.2.md)

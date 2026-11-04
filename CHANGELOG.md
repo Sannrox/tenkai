@@ -6,6 +6,55 @@ pull request body, which becomes the squash commit; at release,
 
 ## [Unreleased]
 
+## v0.7.0 (2026-11-04)
+
+Gate flags: breaking, migration
+
+### What's Changed
+- feat(host): tenkai-host-applier binary, systemd unit, and polkit rule (#948)
+- feat(host): durable applied-state record and generation critical section (#941)
+- feat(host): host apply request format and root-side verification (#937)
+- fix(providers)!: scope tenant-mode feedback targets under tenkai.feedback_export.v2 (#959)
+- test(postgres): give every live test unique tenant and environment names (#957)
+- fix(catalog): settle a just-released file lock before refusing as held (#955)
+- fix(providers): capture feedback observations in tenant-mode catalog partitions (#954)
+- fix(auth): report a committed grant-rule change as done, and fail closed when unsure (#952)
+- fix(providers)!: move terminal outcomes to tenkai.terminal_outcome.v2 with tenant-scoped targets (#944)
+- fix(catalog)!: sign recall notices and topology drills over the bytes sent (#951)
+- test(worker-pool): poll the live fixture instead of sleeping a fixed 80 ms (#950)
+- fix(providers): mark a feedback observation delivered only when admitted (#946)
+- fix(auth): read stored grant rules one row at a time (#936)
+- feat(apply)!: resolve the software executor per release (#938)
+- fix(catalog): index a prefix of PostgreSQL property values so large plans store (#942)
+- fix(criticality)!: sign derived criticality over the bytes the producer sent (#933)
+- fix(postgres): live lease tests do not wait on the runner's disk at commit (#939)
+- feat(storage): take a verified pre-migration copy of the SQLite store (#927)
+- fix(executor)!: sign runner attestations over the bytes sent and name accepted schemas (#929)
+- feat(ops): install Tenkai hosts with one verified command (#928)
+- fix(release): stop the Linux host build failing on SIGPIPE from ldd (#930)
+- fix(trust): check signer windows at an artifact's signed time (#925)
+- feat(manifest): signed deploy.executor field (#922)
+- fix(auth): stored grant rules only add to what the grant file grants (#924)
+- ci(release): accept signed vX.Y.Z-rc.N tags and publish them as pre-releases (#923)
+- fix(release): build Linux hosts at a glibc 2.28 floor and refuse newer (#921)
+- docs(capabilities): list server self-upgrade and release binaries as shipped (#918)
+- docs(release): complete the 0.6.0 upgrade notes (#919)
+- docs(adr): per-release software executor and privileged host releases (#908)
+- ci(release): signed-tag verification, SBOM, family release manifest, notes from CHANGELOG (#897)
+
+### Upgrade
+- Outcome export (#944): new outcomes are `tenkai.terminal_outcome.v2@2.0.0`, and tenant-mode hubs use target kind `tenkai.tenant_deployment` with a percent-encoded tenant. Register `.v2` from `api/tenkai-terminal-outcome-v2.schema.json` in the evidence store and keep `.v1`, then upgrade with `TENKAI_OUTCOME_PROVIDER_REGISTRATION` naming `schema=tenkai.terminal_outcome.v2@2.0.0` (and `target_kind=tenkai.tenant_deployment` on a tenant-mode hub). A host that still attests `.v1` refuses to start. Rows queued earlier deliver unchanged. Remove `.v1` once no older replica runs and nothing queued before the upgrade is undelivered.
+- Tenant-mode feedback export (#959): new observations use the `tenkai.feedback_export.v2` wrapper and target kind `tenant_feedback_observation`. Add that target kind to the feedback producer capability, keep `feedback_observation`, and change `TENKAI_FEEDBACK_PROVIDER_REGISTRATION` to `target_kind=tenant_feedback_observation`. Community hosts keep their registration. Older replicas leave `.v2` rows retrying, visibly, until a 0.7.0 replica delivers them.
+- Tenant-mode PostgreSQL hubs now capture feedback observations (#954). Observation history starts at the upgrade.
+- Signed statements now sign the bytes sent: runner attestations (#929), derived criticality (#933), recall notices and topology drills (#951) have `.v2` schemas. 0.7.0 still verifies `.v1`. Releases before 0.7.0 refuse `.v2`. Upgrade every server and `tenkaictl` that imports these first, then switch producers and signers. Runner agents and servers upgrade in either order. `tenkaictl bundle build --derived-criticality` refuses `.v1`.
+- Signer validity windows (#925): stored artifacts are checked at their signed time, so setting `not_after` on a rotated key no longer breaks what it already signed. Live admissions still check at now.
+- `[deploy] executor` (#922, #938): a release may name its executor. Declare it only after every server and runtime reading the catalog runs 0.7.0; older ones refuse the manifest. A declared executor the process lacks fails the step, never falls back. `executor = "host"` always fails with "the host executor is not available in this process" in 0.7.0: the server side (#911) and the shipped `tenkai-host-applier` asset (#949) are not in this release. On a server that sets `TENKAI_SOFTWARE_EXECUTOR`, apply through the management API now uses that executor, like the reconciler.
+- Stored grant rules (#924, #936, #952) only add to what the grant file grants, are read one row at a time, and an unreadable row is withheld and reported (`stored_grant_rules_withheld` on `/healthz`, `applied` and `unreadable` on `GET /v1/grant-rules`). A grant-rule write whose outcome is unknown makes that replica not ready until a later read succeeds.
+- SQLite (#927): a start that migrates a store from an older schema first writes a verified copy beside it, `<db>.pre-v<found>.<ms>.<id>.db`, and refuses to start if it cannot. Keep enough free space for one copy. `SCHEMA_VERSION` is unchanged at 13.
+- PostgreSQL hubs (#942): the first use of each tenant schema rebuilds `catalog_object_properties_lookup` on a 256-character value prefix. No action needed; rolling deploys and rollback stay correct.
+- Linux hosts (#921) need glibc 2.28 or newer on x86-64. Each Release attaches `install.sh` (#928).
+- Rust library API: `ExecutionOptions.software_executors`, `DeploySection.executor`, `plan::Step.host`, and the grant-rule store types changed (#922, #936, #937, #938).
+
 ## v0.6.0 (2026-10-30)
 
 ### What's Changed
