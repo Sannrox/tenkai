@@ -667,10 +667,15 @@ pub fn export_exposures(
 /// Returns a named reason (`exposure_feed_stale` / `exposure_unmitigated`)
 /// when the environment has configured the corresponding policy property.
 pub async fn plan_gate(ctx: &mut Ctx, environment: &str, steps: &[Step]) -> Result<Option<String>> {
-    if steps
-        .iter()
-        .all(|step| step.action == crate::plan::Action::Rollback)
-    {
+    // Rollbacks and removals deploy nothing new; a removal is often the
+    // remediation for the very advisory that would otherwise block it.
+    let deploys = |step: &&Step| {
+        !matches!(
+            step.action,
+            crate::plan::Action::Rollback | crate::plan::Action::Remove
+        )
+    };
+    if !steps.iter().any(|step| deploys(&step)) {
         return Ok(None);
     }
     let env = crate::environment::environment(ctx, environment).await?;
@@ -694,10 +699,7 @@ pub async fn plan_gate(ctx: &mut Ctx, environment: &str, steps: &[Step]) -> Resu
         ));
     }
     let matched = match_advisories(ctx).await?;
-    for step in steps {
-        if step.action == crate::plan::Action::Rollback {
-            continue;
-        }
+    for step in steps.iter().filter(deploys) {
         if let Some(hit) = matched
             .iter()
             .filter(|entry| entry.release_id == step.release_id && entry.severity >= threshold)

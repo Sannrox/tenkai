@@ -919,22 +919,41 @@ pub async fn subscribe(ctx: &mut Ctx, env: &str, product: &str, channel: &str) -
 /// deployed release of another executor is not supported, so it is refused
 /// here rather than left running unmanaged, and so is a host release when
 /// `executors` has no host executor to plan its removal with.
+///
+/// It runs under the environment apply lease, so no apply starts, or
+/// installs the product, between reading what is deployed and removing the
+/// subscription. `fence` runs inside the lease with the generation that
+/// claiming it superseded and refuses a stale one before any change, as
+/// environment configuration changes do.
 pub async fn unsubscribe(
     ctx: &mut Ctx,
     env: &str,
     product: &str,
     executors: &crate::software_executor::SoftwareExecutors,
+    fence: impl FnOnce(u64) -> Result<()>,
 ) -> Result<String> {
     validate_identifier("environment", env)?;
-    // Held so no apply starts, or installs the product, between reading what
-    // is deployed and removing the subscription.
     let lease =
         crate::apply::claim_environment(ctx, env, &format!("unsubscribe:{product}")).await?;
-    let unsubscribed = unsubscribe_held(ctx, env, product, executors).await;
+    let unsubscribed = match fence(lease.generation.saturating_sub(1)) {
+        Ok(()) => unsubscribe_held(ctx, env, product, executors).await,
+        Err(error) => Err(error),
+    };
     let released = crate::apply::release_environment(ctx, &lease).await;
-    let message = unsubscribed?;
-    released?;
-    Ok(message)
+    match (unsubscribed, released) {
+        (Ok(message), Ok(())) => Ok(message),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error.context("releasing the environment apply lease")),
+    }
+}
+
+/// Whether `env` subscribes to a channel of `product`.
+pub(crate) async fn subscribes(ctx: &mut Ctx, env: &str, product: &str) -> Result<bool> {
+    Ok(ctx
+        .linked(&env_id(env), REL_SUBSCRIBES, "out")
+        .await?
+        .iter()
+        .any(|channel| channel.properties.get("product").map(String::as_str) == Some(product)))
 }
 
 /// [`unsubscribe`] under the environment's apply lease.

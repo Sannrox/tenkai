@@ -880,15 +880,22 @@ async fn an_unsubscribed_host_release_is_uninstalled_by_an_approved_plan() {
         "edge",
         "cluster",
         &SoftwareExecutors::default(),
+        |_| Ok(()),
     )
     .await
     .unwrap_err()
     .to_string();
     assert!(error.contains("host executor is not available"), "{error}");
 
-    crate::environment::unsubscribe(&mut host.ctx, "edge", "cluster", &host.executors)
-        .await
-        .unwrap();
+    crate::environment::unsubscribe(
+        &mut host.ctx,
+        "edge",
+        "cluster",
+        &host.executors,
+        |_| Ok(()),
+    )
+    .await
+    .unwrap();
     let remove = host.plan().await;
 
     let bindings: Vec<_> = remove
@@ -991,19 +998,21 @@ async fn only_a_host_release_is_removed_by_unsubscribing() {
         .await
         .unwrap();
 
-    let error = crate::environment::unsubscribe(&mut host.ctx, "edge", "api", &host.executors)
-        .await
-        .unwrap_err()
-        .to_string();
+    let error =
+        crate::environment::unsubscribe(&mut host.ctx, "edge", "api", &host.executors, |_| Ok(()))
+            .await
+            .unwrap_err()
+            .to_string();
 
     assert!(error.contains("not a host release"), "{error}");
     // A product with nothing deployed simply leaves the desired state.
     crate::environment::reconcile_deployment(&mut host.ctx, "edge", "api", None)
         .await
         .unwrap();
-    let message = crate::environment::unsubscribe(&mut host.ctx, "edge", "api", &host.executors)
-        .await
-        .unwrap();
+    let message =
+        crate::environment::unsubscribe(&mut host.ctx, "edge", "api", &host.executors, |_| Ok(()))
+            .await
+            .unwrap();
     assert_eq!(message, "edge unsubscribed from api");
 }
 
@@ -1013,9 +1022,15 @@ async fn a_removal_is_stale_once_the_product_is_subscribed_again() {
     host.release("1.0.0", false).await;
     let plan = host.plan().await;
     host.apply(&plan).await.unwrap();
-    crate::environment::unsubscribe(&mut host.ctx, "edge", "cluster", &host.executors)
-        .await
-        .unwrap();
+    crate::environment::unsubscribe(
+        &mut host.ctx,
+        "edge",
+        "cluster",
+        &host.executors,
+        |_| Ok(()),
+    )
+    .await
+    .unwrap();
     let remove = host.plan().await;
     crate::plan::subscribe(&mut host.ctx, "edge", "cluster", "stable")
         .await
@@ -1040,9 +1055,15 @@ async fn a_recalled_host_release_can_still_be_removed() {
     crate::catalog::recall(&mut host.ctx, &actor, "cluster@1.0.0")
         .await
         .unwrap();
-    crate::environment::unsubscribe(&mut host.ctx, "edge", "cluster", &host.executors)
-        .await
-        .unwrap();
+    crate::environment::unsubscribe(
+        &mut host.ctx,
+        "edge",
+        "cluster",
+        &host.executors,
+        |_| Ok(()),
+    )
+    .await
+    .unwrap();
 
     let remove = host.plan().await;
     let outcomes = host.apply(&remove).await.unwrap();
@@ -1060,9 +1081,15 @@ async fn a_plan_is_stale_once_its_product_is_unsubscribed() {
     let mut host = Host::new("unsubscribed").await;
     host.release("1.0.0", false).await;
     let install = host.plan().await;
-    crate::environment::unsubscribe(&mut host.ctx, "edge", "cluster", &host.executors)
-        .await
-        .unwrap();
+    crate::environment::unsubscribe(
+        &mut host.ctx,
+        "edge",
+        "cluster",
+        &host.executors,
+        |_| Ok(()),
+    )
+    .await
+    .unwrap();
 
     let error = host.apply(&install).await.unwrap_err().to_string();
 
@@ -1078,7 +1105,10 @@ async fn unsubscribing_waits_for_no_apply_to_run() {
         .await
         .unwrap();
 
-    let error = crate::environment::unsubscribe(&mut host.ctx, "edge", "cluster", &host.executors)
+    let error =
+        crate::environment::unsubscribe(&mut host.ctx, "edge", "cluster", &host.executors, |_| {
+            Ok(())
+        })
         .await
         .unwrap_err()
         .to_string();
@@ -1087,7 +1117,26 @@ async fn unsubscribing_waits_for_no_apply_to_run() {
     super::release_environment(&mut host.ctx, &lease)
         .await
         .unwrap();
-    crate::environment::unsubscribe(&mut host.ctx, "edge", "cluster", &host.executors)
+    // A stale generation is refused inside the lease and changes nothing.
+    assert!(
+        crate::environment::unsubscribe(&mut host.ctx, "edge", "cluster", &host.executors, |_| {
+            anyhow::bail!("stale fencing generation")
+        })
         .await
-        .unwrap();
+        .is_err()
+    );
+    assert!(
+        crate::environment::subscribes(&mut host.ctx, "edge", "cluster")
+            .await
+            .unwrap()
+    );
+    crate::environment::unsubscribe(
+        &mut host.ctx,
+        "edge",
+        "cluster",
+        &host.executors,
+        |_| Ok(()),
+    )
+    .await
+    .unwrap();
 }

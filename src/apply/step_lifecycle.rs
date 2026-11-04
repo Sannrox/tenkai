@@ -374,6 +374,10 @@ async fn execute_host(
     // The product may have been deployed with another executor since the
     // plan was made; admission leaves host steps to the applier.
     crate::plan::require_host_product(ctx, adapters.software, environment, &step.product).await?;
+    // Subscribing does not wait for an apply, so a removal approved and
+    // admitted earlier must not uninstall a product that is desired again.
+    let resubscribed = host.action == crate::plan::HostAction::Uninstall
+        && crate::environment::subscribes(ctx, environment, &step.product).await?;
     let request = match crate::catalog::signature_envelope(ctx, &step.release_id).await {
         Ok(signature) => host_request(
             plan,
@@ -387,6 +391,10 @@ async fn execute_host(
         Err(error) => Err(format!("{error:#}")),
     };
     let ended = match request {
+        _ if resubscribed => host_step::HostStepEnd::NotRun(format!(
+            "{environment} subscribes to {} again",
+            step.product
+        )),
         Ok(request) => host_step::run(ctx, lease, executor, &request, content).await?,
         Err(detail) => host_step::HostStepEnd::NotRun(detail),
     };
