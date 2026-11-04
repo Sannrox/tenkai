@@ -586,7 +586,10 @@ pub fn verify_chain(
         if export.schema != AUDIT_EXPORT_SCHEMA {
             bail!("unsupported audit export schema {}", export.schema);
         }
-        let signer = roots.resolve(&export.key_id)?;
+        // An export is stamped at its period end; its signer must have been
+        // valid then (ADR 0042). The end may run ahead of this clock: period
+        // ends stay monotonic across replicas whose clocks differ.
+        let signer = roots.resolve_at(&export.key_id, statement.period_end_ms)?;
         crate::signature_verification::verify_strict(
             &signer.verifying_key,
             "audit export signature",

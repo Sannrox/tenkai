@@ -408,9 +408,13 @@ fn verify_evaluation_signature(
         .iter()
         .find(|signer| signer.key_id == evidence.signer.key_id)
         .context("model evaluation signer is not currently trusted")?;
-    signer
-        .validity()
-        .check(&evidence.signer.key_id, crate::now_millis())?;
+    // Checked at the evidence's signed observation time (ADR 0042); its
+    // own expiry bounds freshness at admission.
+    signer.validity().check_signed_at(
+        &evidence.signer.key_id,
+        evidence.observed_at,
+        crate::now_millis(),
+    )?;
     let key = crate::signature_verification::trusted_key(
         "model evaluation public key",
         &signer.public_key,

@@ -1,6 +1,6 @@
 //! Detached Ed25519 signatures for release manifests and deployment artifacts.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Context as _, Result, bail};
@@ -174,12 +174,25 @@ impl SignatureEnvelope {
         Ok(format!("{:x}", Sha256::digest(self.signed_bytes()?)))
     }
 
+    /// The time the release was signed: its provenance `built_at_unix_ms`.
+    /// The signer's validity window is checked at this time (ADR 0042).
+    pub fn signed_at_ms(&self) -> i64 {
+        self.statement.provenance.built_at_unix_ms
+    }
+
     /// Resolve the envelope's signer through trusted local configuration and
     /// strictly authenticate the statement before returning its identity.
+    /// The signer must have been valid at [`Self::signed_at_ms`], which must
+    /// not be after now (within a small clock skew).
     pub fn authenticate(&self, roots: &TrustRoots) -> Result<ResolvedSigner> {
+        self.authenticate_at(roots, crate::now_millis())
+    }
+
+    /// [`Self::authenticate`] against an explicit verifier clock `now_ms`.
+    pub fn authenticate_at(&self, roots: &TrustRoots, now_ms: i64) -> Result<ResolvedSigner> {
         self.validate()?;
         roots.validate()?;
-        let signer = roots.resolve(&self.key_id)?;
+        let signer = roots.resolve_signed_at(&self.key_id, self.signed_at_ms(), now_ms)?;
         crate::signature_verification::verify_strict(
             &signer.verifying_key,
             "release signature",
@@ -290,20 +303,46 @@ impl TrustRoots {
         Ok(())
     }
 
+    /// Resolve a signer for a live admission: the validity window is checked
+    /// at the verifier's clock. Revocation applies at now.
     pub fn resolve(&self, key_id: &str) -> Result<ResolvedSigner> {
         self.resolve_at(key_id, crate::now_millis())
     }
 
+    /// Resolve a signer with its validity window checked at `at_ms`. A signed
+    /// artifact uses [`Self::resolve_signed_at`], which also refuses a signed
+    /// time in the future.
     pub fn resolve_at(&self, key_id: &str, at_ms: i64) -> Result<ResolvedSigner> {
-        let signers: HashMap<_, _> = self
-            .signers
-            .iter()
-            .map(|signer| (signer.key_id.as_str(), signer))
-            .collect();
-        let signer = signers
-            .get(key_id)
-            .with_context(|| format!("signer {key_id} is not trusted"))?;
+        let signer = self.signer(key_id)?;
         signer.validity().check(&signer.identity, at_ms)?;
+        Self::resolved(signer)
+    }
+
+    /// Resolve the signer of a signed artifact (ADR 0042). `signed_at_ms` is
+    /// the time the artifact's signed statement carries; it must not be after
+    /// `now_ms` beyond a five-minute clock skew. The validity window is
+    /// checked at `signed_at_ms`; revocation still applies at now.
+    pub fn resolve_signed_at(
+        &self,
+        key_id: &str,
+        signed_at_ms: i64,
+        now_ms: i64,
+    ) -> Result<ResolvedSigner> {
+        let signer = self.signer(key_id)?;
+        signer
+            .validity()
+            .check_signed_at(&signer.identity, signed_at_ms, now_ms)?;
+        Self::resolved(signer)
+    }
+
+    fn signer(&self, key_id: &str) -> Result<&TrustedSigner> {
+        self.signers
+            .iter()
+            .find(|signer| signer.key_id == key_id)
+            .with_context(|| format!("signer {key_id} is not trusted"))
+    }
+
+    fn resolved(signer: &TrustedSigner) -> Result<ResolvedSigner> {
         Ok(ResolvedSigner {
             identity: signer.identity.clone(),
             key_id: signer.key_id.clone(),
@@ -623,38 +662,9 @@ mod tests {
     }
 
     #[test]
-    fn verification_refuses_a_signer_outside_its_validity_window() {
+    fn release_signer_window_is_checked_at_the_built_time() {
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&[16_u8; 32]);
         let public_key = signing_key.verifying_key().to_bytes();
-        let mut signer = TrustedSigner::new(
-            key_id(&public_key),
-            "release@example.com",
-            STANDARD.encode(public_key),
-        );
-        signer.not_before = Some(10);
-        signer.not_after = Some(20);
-        let roots = TrustRoots {
-            version: TRUST_ROOT_VERSION,
-            signers: vec![signer.clone()],
-        };
-        roots.resolve_at(&key_id(&public_key), 15).unwrap();
-        let early = roots
-            .resolve_at(&key_id(&public_key), 9)
-            .unwrap_err()
-            .to_string();
-        assert!(early.contains("not_before"), "{early}");
-        let late = roots
-            .resolve_at(&key_id(&public_key), 21)
-            .unwrap_err()
-            .to_string();
-        assert!(late.contains("not_after"), "{late}");
-
-        signer.not_before = None;
-        signer.not_after = Some(1);
-        let expired = TrustRoots {
-            version: TRUST_ROOT_VERSION,
-            signers: vec![signer],
-        };
         let mut envelope = SignatureEnvelope {
             schema: ENVELOPE_SCHEMA.into(),
             key_id: key_id(&public_key),
@@ -670,7 +680,36 @@ mod tests {
                 .sign(&envelope.signed_bytes().unwrap())
                 .to_bytes(),
         );
-        let closed = envelope.authenticate(&expired).unwrap_err().to_string();
+        let built = envelope.signed_at_ms();
+        let roots_closing_at = |not_after: i64| {
+            let mut signer = TrustedSigner::new(
+                key_id(&public_key),
+                "release@example.com",
+                STANDARD.encode(public_key),
+            );
+            signer.not_after = Some(not_after);
+            TrustRoots {
+                version: TRUST_ROOT_VERSION,
+                signers: vec![signer],
+            }
+        };
+
+        // Rotated after the build: the release still verifies long after.
+        envelope
+            .authenticate_at(&roots_closing_at(built + 1), built + 1_000_000)
+            .unwrap();
+        let closed = envelope
+            .authenticate_at(&roots_closing_at(built - 1), built)
+            .unwrap_err()
+            .to_string();
         assert!(closed.contains("not_after"), "{closed}");
+        let future = envelope
+            .authenticate_at(
+                &roots_closing_at(built + 1),
+                built - crate::signature_verification::SIGNED_AT_CLOCK_SKEW_MS - 1,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(future.contains("future"), "{future}");
     }
 }

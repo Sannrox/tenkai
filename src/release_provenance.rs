@@ -262,12 +262,18 @@ impl ProvenanceEnvelope {
 
     pub fn verify_issuer(&self, roots: &TrustRoots) -> Result<()> {
         roots.validate()?;
-        let signer = roots.resolve(&self.issuer_key_id).map_err(|_| {
-            anyhow::anyhow!(
-                "release provenance issuer key {} is not trusted",
-                self.issuer_key_id
+        let signer = roots
+            .resolve_signed_at(
+                &self.issuer_key_id,
+                self.observed_at_unix_ms,
+                crate::now_millis(),
             )
-        })?;
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "release provenance issuer key {} is not trusted: {error}",
+                    self.issuer_key_id
+                )
+            })?;
         if signer.identity != self.issuer {
             bail!("release provenance issuer does not match its trusted key identity");
         }

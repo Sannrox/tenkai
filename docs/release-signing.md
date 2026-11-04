@@ -44,10 +44,45 @@ public_key = "<base64-encoded-32-byte-Ed25519-public-key>"
 Signer identity comes only from this local trust-root file, never from the
 untrusted signature envelope. Duplicate keys or identities and key ids that do
 not match their public keys are rejected. Optional `not_before` and `not_after`
-are Unix milliseconds. A signature verified before `not_before` or after
-`not_after` is refused with that field named. Files that omit the fields stay
-valid and report `signer_validity: "not_recorded"`. Older releases that do not
-know the fields refuse a file that has them ([ADR 0039](decisions/0039-signer-validity-windows.md)).
+are Unix milliseconds, checked as [signer validity windows](#signer-validity-windows)
+describes. Files that omit the fields stay valid and report
+`signer_validity: "not_recorded"`. Older releases that do not know the fields
+refuse a file that has them ([ADR 0039](decisions/0039-signer-validity-windows.md)).
+
+## Signer validity windows
+
+A signer's window is checked at one instant, chosen by the class of what it
+signed ([ADR 0042](decisions/0042-signer-window-at-signed-time.md)). Outside
+the window the signature is refused with `not_before` or `not_after` named.
+
+- **Signed artifacts** are checked at the time their signed statement
+  carries. That time must not be later than the verifier's clock plus five
+  minutes of clock skew, and the artifact's own expiry, where it has one,
+  bounds freshness. Rotating a key with `not_after` stops it from signing new
+  artifacts; what it signed inside its window keeps verifying.
+- **Live admissions** are checked at the verifier's clock.
+- **Revocation** applies at the verifier's clock for every class: a revoked
+  key is refused whatever the signed time.
+
+| Class | Window checked at |
+| --- | --- |
+| Release signature envelope (import, deploy) | provenance `built_at_unix_ms` |
+| Offline bundle | `issued_at_unix_ms`; the bundle is also refused outside `issued_at_unix_ms` to `expires_at_unix_ms` |
+| Offline receipt | `completed_at_unix_ms` |
+| Key revocation list (install, process start) | `issued_at` |
+| Recall notice | `issued_at` |
+| Backup manifest (restore drill) | `taken_at_ms` |
+| Audit export | `period_end_ms`, which may run ahead of the verifier's clock because period ends stay monotonic across replicas |
+| Support bundle | `created_at_ms` |
+| Plan approval, package-migration approval | now, at apply |
+| Bundle exporter key at build | now |
+| Release provenance envelope | `observed_at_unix_ms` |
+| Model evaluation evidence (publish, promotion) | `observed_at` |
+| Derived criticality | now, at import; its generated time is optional |
+
+The signed time is asserted by the signer, so `not_after` bounds an honest
+signer, not a leaked key. Revoke a key that may have leaked
+([ADR 0036](decisions/0036-offline-key-revocation.md)).
 
 ## Publication policy
 

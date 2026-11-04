@@ -195,11 +195,16 @@ impl RecallNotice {
 
     /// Check the shape and the signature against the notice authorities.
     ///
-    /// [`TrustRoots::resolve`] refuses a revoked key, so a notice signed by a
-    /// revoked authority never reaches catalog mutation.
+    /// [`TrustRoots::resolve_signed_at`] refuses a revoked key, so a notice
+    /// signed by a revoked authority never reaches catalog mutation. The
+    /// authority must have been valid at `issued_at` (ADR 0042).
     pub fn verify(&self, authorities: &TrustRoots) -> Result<()> {
         self.validate_shape()?;
-        let signer = authorities.resolve(&self.key_id)?;
+        let signer = authorities.resolve_signed_at(
+            &self.key_id,
+            self.statement.issued_at,
+            crate::now_millis(),
+        )?;
         crate::signature_verification::verify_strict(
             &signer.verifying_key,
             "recall notice signature",
