@@ -40,7 +40,7 @@ json_field() {
 }
 
 generation() {
-  remote env inspect drill | json_field 'r["lease"]["generation"] or 0'
+  remote env inspect host-env | json_field 'r["lease"]["generation"] or 0'
 }
 
 echo "== operator keys stay outside the server's reach"
@@ -61,7 +61,7 @@ EOF
 tenkaictl dev sign-release "$work/release/tenkai.toml" --keys "$keys" \
   --signature "$work/signature.json" --trust-roots "$work/release-trust.toml" >/dev/null
 # The trusted approver's public key, from an approval of nothing in particular.
-tenkaictl dev sign-approval --plan-digest "sha256:$(printf '0%.0s' $(seq 1 64))" --env drill \
+tenkaictl dev sign-approval --plan-digest "sha256:$(printf '0%.0s' $(seq 1 64))" --env host-env \
   --keys "$keys" --approval "$work/probe.json" --trust-roots "$work/approvers.toml" >/dev/null
 sudo install -o root -g root -m 0644 "$work/release-trust.toml" /etc/tenkai/release-trust-roots.toml
 # Only this approver may authorize host steps.
@@ -95,12 +95,12 @@ pid=$(systemctl show -p MainPID --value "$unit")
 export TENKAI_SERVER_URL="http://$address" TENKAI_MANAGEMENT_TOKEN="$token"
 
 echo "== a host release is planned against the applier's record"
-remote env add drill --reason "host executor drill" >/dev/null
+remote env add host-env --reason "host executor drill" >/dev/null
 remote publish "$work/release/tenkai.toml" --signature "$work/signature.json" \
   --trust-roots "$work/release-trust.toml" >/dev/null
 remote promote host-drill@1.0.0 stable >/dev/null
-remote env subscribe drill host-drill=stable --generation "$(generation)" >/dev/null
-remote plan --env drill --generation "$(generation)" >"$work/plan.txt"
+remote env subscribe host-env host-drill=stable --generation "$(generation)" >/dev/null
+remote plan --env host-env --generation "$(generation)" >"$work/plan.txt"
 plan=$(sed -n 's/^plan id: //p' "$work/plan.txt")
 digest=$(sed -n 's/^plan digest: //p' "$work/plan.txt")
 [ -n "$plan" ] && [ -n "$digest" ] || fail "no plan: $(cat "$work/plan.txt")"
@@ -108,7 +108,7 @@ digest=$(sed -n 's/^plan digest: //p' "$work/plan.txt")
 echo "== an approval the root side does not trust runs nothing"
 # The server accepts this approver; the root-owned host policy does not.
 tenkaictl dev init-keys --dir "$work/other-keys" >/dev/null
-tenkaictl dev sign-approval --plan-digest "$digest" --env drill --keys "$work/other-keys" \
+tenkaictl dev sign-approval --plan-digest "$digest" --env host-env --keys "$work/other-keys" \
   --approval "$work/untrusted.json" --trust-roots "$work/untrusted-approvers.toml" >/dev/null
 before=$(date +%s)
 if remote apply "$plan" --approval "$work/untrusted.json" \
@@ -119,13 +119,13 @@ sudo test ! -e "$evidence/installed" || fail "an unapproved host step ran"
 sudo journalctl -t tenkai-host-apply --since "@$before" --no-pager -o cat |
   grep -q 'refused: host approval policy' ||
   fail "the applier did not refuse the untrusted approval"
-remote plan --env drill --generation "$(generation)" >"$work/plan.txt"
+remote plan --env host-env --generation "$(generation)" >"$work/plan.txt"
 plan=$(sed -n 's/^plan id: //p' "$work/plan.txt")
 digest=$(sed -n 's/^plan digest: //p' "$work/plan.txt")
 [ -n "$plan" ] && [ -n "$digest" ] || fail "no plan after the refusal: $(cat "$work/plan.txt")"
 
 echo "== an approved plan installs as root, then runs its health step"
-tenkaictl dev sign-approval --plan-digest "$digest" --env drill --keys "$keys" \
+tenkaictl dev sign-approval --plan-digest "$digest" --env host-env --keys "$keys" \
   --approval "$work/approval.json" --trust-roots "$work/approvers.toml" >/dev/null
 remote apply "$plan" --approval "$work/approval.json" --approval-trust-roots "$work/approvers.toml" \
   --generation "$(generation)" >"$work/apply.txt" || fail "apply failed: $(cat "$work/apply.txt")"
@@ -140,7 +140,7 @@ for path in glob.glob("/var/lib/tenkai-host/instances/*/result.json"):
 ' | sort)
 [ "$outcomes" = "$(printf 'health succeeded 1\ninstall succeeded 1')" ] ||
   fail "unexpected host results: $outcomes"
-remote env inspect drill | json_field 'r["latest_plan"]["state"]' >"$work/state"
+remote env inspect host-env | json_field 'r["latest_plan"]["state"]' >"$work/state"
 [ "$(cat "$work/state")" = succeeded ] || fail "the plan is $(cat "$work/state")"
 # The server removes what it spooled once a step ended; the applier drill's
 # own fixtures stay.
@@ -155,17 +155,17 @@ for path in glob.glob("/var/lib/tenkai-host/instances/*/result.json"):
 [ -z "$left" ] || fail "the server left its spool behind: $left"
 
 echo "== the environment is converged"
-remote plan --env drill --generation "$(generation)" >"$work/again.txt"
-grep -q 'drill is up to date' "$work/again.txt" ||
+remote plan --env host-env --generation "$(generation)" >"$work/again.txt"
+grep -q 'host-env is up to date' "$work/again.txt" ||
   fail "a converged environment planned steps: $(cat "$work/again.txt")"
 
 echo "== unsubscribing uninstalls the host release through an approved plan"
-remote env unsubscribe drill host-drill --generation "$(generation)" >/dev/null
-remote plan --env drill --generation "$(generation)" >"$work/remove.txt"
+remote env unsubscribe host-env host-drill --generation "$(generation)" >/dev/null
+remote plan --env host-env --generation "$(generation)" >"$work/remove.txt"
 plan=$(sed -n 's/^plan id: //p' "$work/remove.txt")
 digest=$(sed -n 's/^plan digest: //p' "$work/remove.txt")
 [ -n "$plan" ] && [ -n "$digest" ] || fail "no removal plan: $(cat "$work/remove.txt")"
-tenkaictl dev sign-approval --plan-digest "$digest" --env drill --keys "$keys" \
+tenkaictl dev sign-approval --plan-digest "$digest" --env host-env --keys "$keys" \
   --approval "$work/remove-approval.json" --trust-roots "$work/approvers.toml" >/dev/null
 remote apply "$plan" --approval "$work/remove-approval.json" --approval-trust-roots "$work/approvers.toml" \
   --generation "$(generation)" >"$work/apply.txt" || fail "removal failed: $(cat "$work/apply.txt")"
@@ -174,12 +174,12 @@ record=$(sudo python3 -c '
 import glob, json
 for path in glob.glob("/var/lib/tenkai-host/records/*.json"):
     r = json.load(open(path))
-    if r["environment"] == "drill" and r["product"] == "host-drill":
+    if r["environment"] == "host-env" and r["product"] == "host-drill":
         print(r["state"], r["generation"])
 ')
 [ "$record" = "empty 2" ] || fail "unexpected applied-state record after the uninstall: $record"
-remote plan --env drill --generation "$(generation)" >"$work/again.txt"
-grep -q 'drill is up to date' "$work/again.txt" ||
+remote plan --env host-env --generation "$(generation)" >"$work/again.txt"
+grep -q 'host-env is up to date' "$work/again.txt" ||
   fail "a removed product planned steps: $(cat "$work/again.txt")"
 
 echo "host executor drill passed"

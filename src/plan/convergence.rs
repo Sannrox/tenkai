@@ -642,8 +642,17 @@ async fn compute_snapshot_with_policy(
     }
     match executors.host() {
         Ok(host) => {
+            // Only products this server delivered to the environment: a
+            // record of a product it never managed here is not its to remove.
             for record in host.applied_states(env)? {
-                if !products.contains(&record.product) {
+                let managed = ["deployed", "deployed_prev", "deployment_health"]
+                    .iter()
+                    .any(|key| {
+                        env_obj
+                            .properties
+                            .contains_key(&format!("{key}.{}", record.product))
+                    });
+                if managed && !products.contains(&record.product) {
                     removable.insert(record.product);
                 }
             }

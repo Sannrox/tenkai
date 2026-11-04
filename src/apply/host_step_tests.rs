@@ -1168,3 +1168,19 @@ async fn a_deployed_host_release_without_a_record_is_not_reported_removed() {
         "{error}"
     );
 }
+
+#[tokio::test]
+async fn a_record_of_a_product_this_server_never_delivered_is_left_alone() {
+    let mut host = Host::new("foreign-record").await;
+    let mut record = AppliedStateRecord::empty("edge", "other");
+    record.generation = 1;
+    record.state = AppliedState::Applied {
+        release: crate::host_apply::HostRelease {
+            version: "9.9.9".into(),
+            manifest_digest: "d".into(),
+        },
+    };
+    Applier::write(&record_path(&host.applier.state, "edge", "other"), &record).unwrap();
+
+    assert!(host.plan().await.steps.is_empty());
+}
