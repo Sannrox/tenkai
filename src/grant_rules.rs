@@ -189,9 +189,10 @@ struct Snapshot {
     applied: Arc<AppliedGrantRules>,
     /// When the last check the store answered was asked.
     checked_at: Instant,
-    /// When a write this replica tried failed, until a read started after
-    /// it succeeds: the write may have committed, so the snapshot may hold
-    /// a rule it removed.
+    /// When a write this replica tried answered with an error, until a
+    /// read started after that succeeds: the write may have committed, so
+    /// the snapshot may hold a rule it removed. A read started earlier may
+    /// have run before the commit.
     unsure_since: Option<Instant>,
 }
 
@@ -378,15 +379,17 @@ impl StoredGrants {
         };
     }
 
-    /// A write started at `started` failed and may have committed: suspend
-    /// stored rules until a read started after it succeeds, and try one now.
-    fn write_failed(&self, started: Instant) {
+    /// A write answered with an error and may have committed: suspend
+    /// stored rules until a read started after that answer succeeds, and
+    /// try one now.
+    fn write_failed(&self) {
+        let failed = Instant::now();
         {
             let mut snapshot = self
                 .snapshot
                 .write()
                 .unwrap_or_else(PoisonError::into_inner);
-            snapshot.unsure_since = snapshot.unsure_since.max(Some(started));
+            snapshot.unsure_since = snapshot.unsure_since.max(Some(failed));
         }
         if let Err(error) = self.reload() {
             eprintln!(
@@ -482,7 +485,7 @@ impl StoredGrants {
                 })
             }
             Err(error) => {
-                self.write_failed(started);
+                self.write_failed();
                 Err(error.into())
             }
         }
