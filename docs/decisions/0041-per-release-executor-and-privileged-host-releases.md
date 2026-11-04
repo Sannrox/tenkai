@@ -123,22 +123,42 @@ key from the verified request and refuses an instance whose name does not match.
    for that plan digest against a root-owned host approval policy in
    `/etc/tenkai`: the trusted approvers, the quorum, and the purposes it allows.
    It checks expiry and that purposes such as rollback and downgrade carry the
-   approvals the policy requires. An `uninstall` needs an approved plan that
+   approvals the policy requires. Gates, and the flag that skips them, are
+   evaluated by the server and cannot be verified here, so the host policy is
+   always applied at its strictest quorum, as if gates were skipped. An `uninstall` needs an approved plan that
    removes the product, like any other change;
-5. checks the step's starting state against its own record: the release the
-   step replaces must equal the last host release it applied successfully for
-   that environment and product, or nothing for a first install. An older
-   approved plan that never ran can therefore not run after a newer one, and
-   going back to an earlier release always needs a rollback plan;
+5. checks the step's expected generation against its own record (below), and
+   requires an exact match;
 6. refuses an instance it has already started, and returns the recorded result
    instead of running again.
 
+**Applied-state record.** For each environment and product the applier keeps a
+generation number and a state: `empty`, `applied(release)`, or
+`dirty(from, to)`. Each host step in a plan names the generation it expects;
+that number is part of the plan, so it is covered by the plan digest and the
+approvals. The server reads the record to build the plan; only the applier
+writes it.
+
+- Starting an `install` or `uninstall` advances the generation and sets
+  `dirty(from, to)` before the command runs. Success sets `applied(to)`, or
+  `empty` after an `uninstall`. Failure or a crash leaves `dirty` at the new
+  generation.
+- `health` requires the current generation and changes nothing.
+- Any approved step for the current generation may move on from `dirty`. A step
+  whose target is not newer than the last applied release needs the rollback or
+  downgrade approvals the host policy requires.
+
+Because every applied or interrupted step advances the generation, an approved
+plan that never ran can never run after any other host step for that product,
+including after a rollback (A, B, A). A product can be uninstalled and installed
+again, which is also how a product moves to another executor.
+
 All of this state lives in persistent root-owned storage, `/var/lib/tenkai-host`:
-the last applied release per environment and product, and per instance a
-`started` record written before the command runs and a result record written
-after. An instance that has a `started` record but no result, after a crash or
-a reboot, resolves as interrupted and failed. It is never run again; continuing
-takes a new approved plan.
+the applied-state record, and per instance a `started` record written before the
+command runs and a result record written after. An instance with a `started`
+record but no result, after a crash or a reboot, resolves as interrupted and
+failed and is never run again. Its product's record stays `dirty`, and
+continuing takes a new approved plan for the current generation.
 
 Only then does it run the copied release's command. It builds the command's
 environment itself from a fixed allowlist plus values from the signed manifest;
@@ -176,7 +196,7 @@ upgrading the cluster, are rare and high-impact, so they stay attended.
 run a release that a trusted signer signed for `host` execution, is not revoked
 or outside its validity window, and appears in a plan whose quorum of approvals
 satisfies the root-owned host policy for that exact action, and each such step
-at most once, in the order its record of applied releases allows. It cannot run
+at most once, and only at the generation its record names. It cannot run
 arbitrary commands, alter what runs, approve its own host steps, run an old plan
 out of order, or uninstall a product without an approved plan.
 
