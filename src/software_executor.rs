@@ -474,8 +474,16 @@ pub struct SoftwareExecutors {
     /// Adapters for declared kinds. `shell` and `host` never have one.
     declared: Vec<(SoftwareExecutorKind, Arc<dyn SoftwareExecutor>)>,
     /// Runs `host` releases through the root-side applier, as host plan
-    /// steps only.
-    host: Option<Arc<crate::host_executor::HostExecutor>>,
+    /// steps only; otherwise why it is unavailable.
+    host: std::result::Result<Arc<crate::host_executor::HostExecutor>, String>,
+}
+
+/// Why a process without `TENKAI_HOST_SPOOL_DIR` has no host executor.
+fn host_not_configured() -> String {
+    format!(
+        "set {} to the applier's spool directory",
+        crate::host_executor::SPOOL_DIR_ENV
+    )
 }
 
 /// Shell default and no declared adapters.
@@ -485,7 +493,7 @@ impl Default for SoftwareExecutors {
             default_kind: Some(SoftwareExecutorKind::Shell),
             default: None,
             declared: Vec::new(),
-            host: None,
+            host: Err(host_not_configured()),
         }
     }
 }
@@ -494,8 +502,9 @@ impl SoftwareExecutors {
     /// This process's executors: the `TENKAI_SOFTWARE_EXECUTOR` default,
     /// every adapter the host installed (`tenkai_executor::install()`), and
     /// the host executor `TENKAI_HOST_SPOOL_DIR` configures. A host executor
-    /// configuration that does not parse leaves it unavailable; the server
-    /// reports why at startup.
+    /// whose configuration does not parse or that is not ready
+    /// ([`crate::host_executor::HostExecutor::check_ready`]) is unavailable,
+    /// so host steps fail closed naming why, as `/readyz` omits it.
     pub fn from_process() -> Self {
         let default = selected_software_executor().map(Arc::from);
         let default_kind = match std::env::var("TENKAI_SOFTWARE_EXECUTOR") {
@@ -512,10 +521,14 @@ impl SoftwareExecutors {
             default_kind,
             default,
             declared,
-            host: crate::host_executor::HostExecutor::from_env()
-                .ok()
-                .flatten()
-                .map(Arc::new),
+            host: match crate::host_executor::HostExecutor::from_env() {
+                Ok(Some(host)) => host
+                    .check_ready()
+                    .map(|()| Arc::new(host))
+                    .map_err(|error| format!("{error:#}")),
+                Ok(None) => Err(host_not_configured()),
+                Err(error) => Err(format!("{error:#}")),
+            },
         }
     }
 
@@ -525,7 +538,7 @@ impl SoftwareExecutors {
             default_kind: None,
             default: Some(default),
             declared: Vec::new(),
-            host: None,
+            host: Err(host_not_configured()),
         }
     }
 
@@ -549,16 +562,15 @@ impl SoftwareExecutors {
 
     /// Run `host` releases with `host`, replacing any earlier one.
     pub fn with_host(mut self, host: Arc<crate::host_executor::HostExecutor>) -> Self {
-        self.host = Some(host);
+        self.host = Ok(host);
         self
     }
 
     /// The host executor, or an error naming what is missing.
     pub fn host(&self) -> Result<&Arc<crate::host_executor::HostExecutor>> {
-        self.host.as_ref().with_context(|| {
-            format!(
-                "release declares deploy.executor = \"host\", and the host executor is not available in this process; set {} to the applier's spool directory",
-                crate::host_executor::SPOOL_DIR_ENV
+        self.host.as_ref().map_err(|reason| {
+            anyhow::anyhow!(
+                "release declares deploy.executor = \"host\", and the host executor is not available in this process: {reason}"
             )
         })
     }
@@ -643,7 +655,7 @@ impl std::fmt::Debug for SoftwareExecutors {
                     .map(|(kind, _)| *kind)
                     .collect::<Vec<_>>(),
             )
-            .field("host", &self.host)
+            .field("host", &self.host.as_ref().ok())
             .finish()
     }
 }
