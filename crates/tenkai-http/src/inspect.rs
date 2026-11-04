@@ -240,6 +240,11 @@ fn service_status(status: &'static str, config: &ServerConfig) -> ServiceStatus 
                     .either(stored.first_administrator())
             },
         )),
+        stored_grant_rules_withheld: config
+            .stored_grants
+            .as_ref()
+            .map(|stored| stored.withheld())
+            .filter(|withheld| *withheld > 0),
         backup: config
             .backups
             .as_ref()

@@ -3348,17 +3348,29 @@
             "$ref": "#/$defs/GrantRuleView"
           },
           "type": "array"
+        },
+        "unreadable": {
+          "description": "Stored rows this release cannot read (#850), for example written by\na newer release. No replica of this release applies them; remove one\nby its `value`.",
+          "items": {
+            "$ref": "#/$defs/UnreadableGrantRule"
+          },
+          "type": "array"
         }
       },
       "required": [
         "generation",
-        "rules"
+        "rules",
+        "unreadable"
       ],
       "type": "object"
     },
     "GrantRuleView": {
       "description": "A stored rule: the rule as the configuration file would hold it, and who\ncreated it, when and why.",
       "properties": {
+        "applied": {
+          "description": "Whether replicas of this release apply the rule: false when the\nconfiguration file declares its claim value or the rule fails this\nrelease's checks (#850).",
+          "type": "boolean"
+        },
         "created_at_ms": {
           "format": "int64",
           "type": "integer"
@@ -3370,6 +3382,10 @@
         "declared_by_config": {
           "description": "The configuration file declares this claim value, so the stored\nrule is ignored.",
           "type": "boolean"
+        },
+        "not_applied_reason": {
+          "description": "Why the rule is not applied.",
+          "type": "string"
         },
         "reason": {
           "type": "string"
@@ -3383,7 +3399,8 @@
         "created_by",
         "created_at_ms",
         "reason",
-        "declared_by_config"
+        "declared_by_config",
+        "applied"
       ],
       "type": "object"
     },
@@ -5455,6 +5472,12 @@
         "status": {
           "type": "string"
         },
+        "stored_grant_rules_withheld": {
+          "description": "How many stored grant rules this replica withholds (#850): rows it\ncannot read or rules that fail its checks, for example written by a\nnewer release. Never names a rule; `GET /v1/grant-rules` lists them.\nAbsent when none; it never fails readiness.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
         "trust": {
           "$ref": "#/$defs/TrustStatus",
           "description": "The worst status of the host's certificates (#676), when any are\nconfigured. It never fails readiness; `GET /v1/trust` has details."
@@ -5907,6 +5930,24 @@
         "key_id",
         "identity",
         "revoked"
+      ],
+      "type": "object"
+    },
+    "UnreadableGrantRule": {
+      "description": "A stored row this release cannot read; it is never applied.",
+      "properties": {
+        "reason": {
+          "description": "Why it cannot be read.",
+          "type": "string"
+        },
+        "value": {
+          "description": "The claim value the row is stored under.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "value",
+        "reason"
       ],
       "type": "object"
     },

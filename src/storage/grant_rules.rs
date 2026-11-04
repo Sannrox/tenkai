@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::grant_rules::{
-    GrantRuleStore, GrantRuleWrite, MAX_STORED_RULES, StoredGrantRule, decode, encode,
+    GrantRuleStore, GrantRuleWrite, MAX_STORED_RULES, StoredGrantRule, StoredGrantRules, encode,
 };
 
 pub(super) fn ensure_grant_rule_tables(connection: &Connection) -> Result<()> {
@@ -45,19 +45,19 @@ impl GrantRuleStore for SqliteStore {
         generation(&*self.connection()?)
     }
 
-    fn grant_rules(&self) -> Result<(i64, Vec<StoredGrantRule>)> {
+    fn grant_rules(&self) -> Result<StoredGrantRules> {
         let mut connection = self.connection()?;
         let tx = connection.transaction()?;
         let current = generation(&tx)?;
-        let raw = {
-            let mut statement = tx.prepare("SELECT rule_json FROM grant_rules ORDER BY value")?;
+        let rows = {
+            let mut statement =
+                tx.prepare("SELECT value, rule_json FROM grant_rules ORDER BY value")?;
             statement
-                .query_map([], |row| row.get::<_, String>(0))?
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
         tx.commit()?;
-        let rules = raw.iter().map(|raw| decode(raw)).collect::<Result<_>>()?;
-        Ok((current, rules))
+        Ok(StoredGrantRules::decode(current, rows))
     }
 
     fn insert_grant_rule(
@@ -116,7 +116,19 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let store = std::sync::Arc::new(SqliteStore::open(dir.join("tenkai.db")).unwrap());
         let other = std::sync::Arc::new(SqliteStore::open(dir.join("tenkai.db")).unwrap());
-        crate::grant_rules::assert_grant_rule_store_contract(store, other, "sqlite");
+        let raw = SqliteStore::open(dir.join("tenkai.db")).unwrap();
+        let put_row = |value: &str, row: &str| {
+            let mut connection = raw.connection().unwrap();
+            let tx = connection.transaction().unwrap();
+            tx.execute(
+                "INSERT INTO grant_rules(value, rule_json) VALUES(?1, ?2)",
+                params![value, row],
+            )
+            .unwrap();
+            bump(&tx).unwrap();
+            tx.commit().unwrap();
+        };
+        crate::grant_rules::assert_grant_rule_store_contract(store, other, "sqlite", &put_row);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

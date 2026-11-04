@@ -861,7 +861,14 @@ impl OidcAuthExtension {
             .map(|stored| stored.rules())
             .unwrap_or_default();
         let effective = if matched.is_empty() {
-            for rule in stored.iter().filter(matches) {
+            // A withheld stored rule (#850) might have confined what the
+            // others give this token, so it gets none of them.
+            if values.iter().any(|value| stored.withheld.contains(*value)) {
+                return Err(AuthError::Forbidden(
+                    "a stored grant rule for this token is not applied on this replica; retry once every replica runs a release that reads it".into(),
+                ));
+            }
+            for rule in stored.rules.iter().filter(matches) {
                 matched.add(rule)?;
             }
             matched.resolve()?
@@ -870,7 +877,7 @@ impl OidcAuthExtension {
             // a stored rule applies only if it confines nothing the file's
             // grant leaves open; otherwise it is skipped, never refused.
             let mut effective = matched.resolve()?;
-            for rule in stored.iter().filter(matches) {
+            for rule in stored.rules.iter().filter(matches) {
                 let mut widened = matched.clone();
                 match widened.add(rule).and_then(|()| widened.resolve()) {
                     Ok(next) if next.covers(&effective) => {

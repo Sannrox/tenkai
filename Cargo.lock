@@ -2939,6 +2939,7 @@ dependencies = [
  "ed25519-dalek",
  "rcgen",
  "reqwest",
+ "rusqlite",
  "rustls",
  "schemars",
  "serde",

@@ -21,8 +21,16 @@
 //! Each rule records who created it, when and why. Older replicas ignore the
 //! stored rules, so they take effect everywhere only once every replica runs a
 //! release with this change.
+//!
+//! Rows are read one at a time (#850): a row this release cannot read (a
+//! newer `format`, a rule field it does not know) or a rule that fails
+//! [`OidcGrantRule::validate`] (a capability it does not know) is withheld,
+//! logged and listed as not applied; the other rows still apply. Withholding
+//! only removes grants: a token the file grants nothing that matches a
+//! withheld claim value is refused, since the missing rule might have
+//! confined what the others give it.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, PoisonError, RwLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -40,10 +48,18 @@ pub const STALE_AFTER: Duration = Duration::from_secs(30);
 pub const MAX_STORED_RULES: usize = 256;
 const MAX_REASON: usize = 1024;
 
+/// The stored row format this release reads and writes. A row without
+/// `format` is format 1, the shape every release since #836 writes; a row of
+/// another format is withheld.
+pub const STORED_FORMAT: u32 = 1;
+
 /// A stored rule: the rule as the configuration file would hold it, and who
 /// created it, when and why.
+// A stored row decodes leniently around the rule (#850): unknown fields next
+// to it are ignored, so they may only ever carry metadata. Anything that
+// changes what a rule grants goes in `rule`, which stays strict (an unknown
+// field there withholds the row), or needs a new `STORED_FORMAT`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct StoredGrantRule {
     pub rule: OidcGrantRule,
     /// The principal, or the management token's use, that created it.
@@ -52,13 +68,59 @@ pub struct StoredGrantRule {
     pub reason: String,
 }
 
+/// A stored row this release cannot read; it is never applied.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+pub struct UnreadableGrantRule {
+    /// The claim value the row is stored under.
+    pub value: String,
+    /// Why it cannot be read.
+    pub reason: String,
+}
+
+/// Every stored row, read together with the generation it is current at.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StoredGrantRules {
+    pub generation: i64,
+    pub rules: Vec<StoredGrantRule>,
+    pub unreadable: Vec<UnreadableGrantRule>,
+}
+
+impl StoredGrantRules {
+    /// Decode `(value, row)` pairs as the store keeps them, one at a time:
+    /// a row this release cannot read is set aside and fails nothing else.
+    pub fn decode(generation: i64, rows: impl IntoIterator<Item = (String, String)>) -> Self {
+        let mut decoded = Self {
+            generation,
+            ..Self::default()
+        };
+        for (value, raw) in rows {
+            match decode(&value, &raw) {
+                Ok(rule) => decoded.rules.push(rule),
+                Err(reason) => decoded
+                    .unreadable
+                    .push(UnreadableGrantRule { value, reason }),
+            }
+        }
+        decoded
+    }
+}
+
+/// The stored rules a replica applies, and the claim values of the rows it
+/// withholds: unreadable, or failing validation.
+#[derive(Debug, Default)]
+pub struct AppliedGrantRules {
+    pub rules: Vec<OidcGrantRule>,
+    pub withheld: BTreeSet<String>,
+}
+
 /// Stored grant rules, shared by every replica of a hub.
 pub trait GrantRuleStore: Send + Sync {
     /// The generation: 0 before the first change, then one more per change.
     fn grant_rule_generation(&self) -> Result<i64>;
-    /// Every stored rule with the generation they are current at, read
-    /// together.
-    fn grant_rules(&self) -> Result<(i64, Vec<StoredGrantRule>)>;
+    /// Every stored row with the generation they are current at, read
+    /// together. A row that does not decode is returned as unreadable, not
+    /// as an error.
+    fn grant_rules(&self) -> Result<StoredGrantRules>;
     /// Store `rule` unless a rule for its claim value exists, the store
     /// already holds [`MAX_STORED_RULES`], or the generation is not
     /// `expected` (when given).
@@ -111,7 +173,7 @@ pub enum GrantRuleError {
 
 struct Snapshot {
     generation: i64,
-    rules: Arc<Vec<OidcGrantRule>>,
+    applied: Arc<AppliedGrantRules>,
     /// When the last check the store answered was asked.
     checked_at: Instant,
 }
@@ -147,7 +209,7 @@ impl StoredGrants {
             config_values: config_values.into_iter().collect(),
             snapshot: RwLock::new(Snapshot {
                 generation: -1,
-                rules: Arc::default(),
+                applied: Arc::default(),
                 checked_at: Instant::now(),
             }),
             stale_after,
@@ -157,14 +219,33 @@ impl StoredGrants {
     }
 
     /// The stored rules in effect: those the configuration file does not
-    /// override, and none while the store has not answered a check for
-    /// longer than the stale bound.
-    pub fn rules(&self) -> Arc<Vec<OidcGrantRule>> {
+    /// override and this release can read and validate, and none while the
+    /// store has not answered a check for longer than the stale bound.
+    pub fn rules(&self) -> Arc<AppliedGrantRules> {
         let snapshot = self.snapshot.read().unwrap_or_else(PoisonError::into_inner);
         if snapshot.checked_at.elapsed() > self.stale_after {
             return Arc::default();
         }
-        snapshot.rules.clone()
+        snapshot.applied.clone()
+    }
+
+    /// How many stored rows this replica withholds, at the last reload.
+    pub fn withheld(&self) -> usize {
+        self.snapshot
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .applied
+            .withheld
+            .len()
+    }
+
+    /// Why this replica does not apply a readable stored rule, if it does
+    /// not.
+    pub fn not_applied_reason(&self, rule: &OidcGrantRule) -> Option<String> {
+        if self.config_values.contains(&rule.value) {
+            return Some("the configuration file declares this claim value".into());
+        }
+        rule.validate().err().map(|error| error.to_string())
     }
 
     /// Whether stored rules are suspended because the store has not
@@ -189,6 +270,7 @@ impl StoredGrants {
     pub fn first_administrator(&self) -> FirstAdministrator {
         if self
             .rules()
+            .rules
             .iter()
             .any(OidcGrantRule::grants_fleet_management)
         {
@@ -225,20 +307,40 @@ impl StoredGrants {
     /// Replace the snapshot with a read started at `started`, unless a read
     /// started later, or of a newer generation, already replaced it.
     fn reload_from(&self, started: Instant) -> Result<()> {
-        let (generation, stored) = self.store.grant_rules()?;
-        let rules = stored
-            .into_iter()
-            .map(|stored| stored.rule)
-            .filter(|rule| !self.config_values.contains(&rule.value) && rule.validate().is_ok())
-            .collect();
+        let stored = self.store.grant_rules()?;
+        let mut applied = AppliedGrantRules::default();
+        let mut not_applied = BTreeMap::new();
+        for unreadable in stored.unreadable {
+            applied.withheld.insert(unreadable.value.clone());
+            not_applied.insert(unreadable.value, unreadable.reason);
+        }
+        for StoredGrantRule { rule, .. } in stored.rules {
+            if self.config_values.contains(&rule.value) {
+                continue;
+            }
+            match rule.validate() {
+                Ok(()) => applied.rules.push(rule),
+                Err(error) => {
+                    applied.withheld.insert(rule.value.clone());
+                    not_applied.insert(rule.value, error.to_string());
+                }
+            }
+        }
         let mut snapshot = self
             .snapshot
             .write()
             .unwrap_or_else(PoisonError::into_inner);
-        if started >= snapshot.checked_at && generation >= snapshot.generation {
+        if started >= snapshot.checked_at && stored.generation >= snapshot.generation {
+            if stored.generation != snapshot.generation {
+                for (value, reason) in &not_applied {
+                    eprintln!(
+                        "tenkai.auth stored_grant_rule={value:?} applied=false detail={reason}"
+                    );
+                }
+            }
             *snapshot = Snapshot {
-                generation,
-                rules: Arc::new(rules),
+                generation: stored.generation,
+                applied: Arc::new(applied),
                 checked_at: started,
             };
         }
@@ -305,9 +407,10 @@ impl StoredGrants {
         Ok(removed)
     }
 
-    /// Every stored rule as the store holds it, with its generation: what
-    /// an administrator lists, including rules the file overrides.
-    pub fn stored(&self) -> Result<(i64, Vec<StoredGrantRule>)> {
+    /// Every stored row as the store holds it, with its generation: what
+    /// an administrator lists, including rules the file overrides and rows
+    /// this release cannot read.
+    pub fn stored(&self) -> Result<StoredGrantRules> {
         self.store.grant_rules()
     }
 
@@ -340,24 +443,56 @@ impl StoredGrants {
     }
 }
 
-/// Encode and decode a stored rule as the store keeps it.
+/// Encode a stored rule as the store keeps it. Format 1 rows carry no
+/// `format` field, so releases before #850, which refuse unknown fields,
+/// still read them during a rolling deploy.
 pub fn encode(rule: &StoredGrantRule) -> Result<String> {
     serde_json::to_string(rule).map_err(|error| StoreError::Database(error.to_string()))
 }
 
-pub fn decode(raw: &str) -> Result<StoredGrantRule> {
-    serde_json::from_str(raw)
-        .map_err(|error| StoreError::Database(format!("stored grant rule: {error}")))
+/// The row's format: absent means 1.
+#[derive(Deserialize)]
+struct RowFormat {
+    #[serde(default = "legacy_format")]
+    format: u32,
+}
+
+fn legacy_format() -> u32 {
+    1
+}
+
+/// Decode one row stored under `value`; why not, when it cannot be read.
+fn decode(value: &str, raw: &str) -> std::result::Result<StoredGrantRule, String> {
+    let row: serde_json::Value =
+        serde_json::from_str(raw).map_err(|error| format!("not a stored grant rule: {error}"))?;
+    let RowFormat { format } = RowFormat::deserialize(&row)
+        .map_err(|error| format!("not a stored grant rule: {error}"))?;
+    if format != STORED_FORMAT {
+        return Err(format!(
+            "stored format {format}; this release reads format {STORED_FORMAT}"
+        ));
+    }
+    let stored = StoredGrantRule::deserialize(row)
+        .map_err(|error| format!("not readable by this release: {error}"))?;
+    if stored.rule.value != value {
+        return Err(format!(
+            "stored under {value:?} but names claim value {:?}",
+            stored.rule.value
+        ));
+    }
+    Ok(stored)
 }
 
 /// The contract every [`GrantRuleStore`] meets, for each backend's tests:
 /// `store` and `other` are two replicas' connections to one database, which
-/// this run uses alone.
+/// this run uses alone. `put_row(value, row)` stores a raw row and moves the
+/// generation, as a newer release would.
 #[cfg(any(test, feature = "test-support"))]
 pub fn assert_grant_rule_store_contract(
     store: Arc<dyn GrantRuleStore>,
     other: Arc<dyn GrantRuleStore>,
     prefix: &str,
+    put_row: &dyn Fn(&str, &str),
 ) {
     let rule = |value: &str, capabilities: &[&str]| OidcGrantRule {
         value: value.into(),
@@ -373,7 +508,7 @@ pub fn assert_grant_rule_store_contract(
     let first = StoredGrants::load(store.clone(), [declared.clone()]).unwrap();
     let second = StoredGrants::load(other, [declared.clone()]).unwrap();
     let start = first.generation();
-    assert!(first.rules().iter().all(|r| r.value != admins));
+    assert!(first.rules().rules.iter().all(|r| r.value != admins));
 
     // A value the configuration file declares is refused.
     assert!(matches!(
@@ -410,17 +545,21 @@ pub fn assert_grant_rule_store_contract(
         Err(GrantRuleError::StaleGeneration { .. })
     ));
     // The writing replica applies it at once.
-    assert!(first.rules().iter().any(|r| r.value == admins));
+    assert!(first.rules().rules.iter().any(|r| r.value == admins));
     assert_eq!(first.first_administrator(), FirstAdministrator::Configured);
     assert_eq!(first.generation(), start + 1);
     // Another replica sees it once it checks the generation.
-    assert!(second.rules().iter().all(|r| r.value != admins));
+    assert!(second.rules().rules.iter().all(|r| r.value != admins));
     assert!(second.refresh().unwrap());
-    assert!(second.rules().iter().any(|r| r.value == admins));
+    assert!(second.rules().rules.iter().any(|r| r.value == admins));
     assert!(!second.refresh().unwrap(), "unchanged generation");
-    let (generation, stored) = store.grant_rules().unwrap();
-    assert_eq!(generation, start + 1);
-    let stored = stored.into_iter().find(|s| s.rule.value == admins).unwrap();
+    let stored = store.grant_rules().unwrap();
+    assert_eq!(stored.generation, start + 1);
+    let stored = stored
+        .rules
+        .into_iter()
+        .find(|s| s.rule.value == admins)
+        .unwrap();
     assert_eq!(
         (stored.reason.as_str(), stored.created_at_ms),
         ("first administrator", 10)
@@ -438,12 +577,77 @@ pub fn assert_grant_rule_store_contract(
 
     assert!(first.remove(&admins, None).unwrap());
     assert!(!first.remove(&admins, None).unwrap());
-    assert!(first.rules().iter().all(|r| r.value != admins));
+    assert!(first.rules().rules.iter().all(|r| r.value != admins));
     assert!(second.refresh().unwrap());
-    assert!(second.rules().iter().all(|r| r.value != admins));
-    assert!(second.rules().iter().any(|r| r.value == readers));
+    assert!(second.rules().rules.iter().all(|r| r.value != admins));
+    assert!(second.rules().rules.iter().any(|r| r.value == readers));
     assert!(second.remove(&readers, None).unwrap());
     assert_eq!(store.grant_rule_generation().unwrap(), start + 4);
+
+    // Rows a newer release wrote (#850): a newer format and an unknown rule
+    // field are unreadable, an unknown capability fails validation, and an
+    // unknown field beside the rule is ignored. Each is withheld on its own;
+    // the other rules still apply.
+    let row = |value: &str, rule: serde_json::Value, extra: serde_json::Value| {
+        let mut row = serde_json::json!({
+            "rule": rule, "created_by": "admin", "created_at_ms": 20, "reason": "newer",
+        });
+        row.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        put_row(value, &row.to_string());
+    };
+    let plain = |value: &str| serde_json::json!({"value": value, "capabilities": ["read"]});
+    let (future, field, capability, annotated, garbage) = (
+        format!("{prefix}-future"),
+        format!("{prefix}-field"),
+        format!("{prefix}-capability"),
+        format!("{prefix}-annotated"),
+        format!("{prefix}-garbage"),
+    );
+    first
+        .create(rule(&readers, &["read"]), "admin", "readers", 21, None)
+        .unwrap();
+    row(&future, plain(&future), serde_json::json!({"format": 2}));
+    let mut confined = plain(&field);
+    confined["expires_at_ms"] = 1.into();
+    row(&field, confined, serde_json::json!({}));
+    row(
+        &capability,
+        serde_json::json!({"value": capability, "capabilities": ["read", "audit"]}),
+        serde_json::json!({}),
+    );
+    row(
+        &annotated,
+        plain(&annotated),
+        serde_json::json!({"format": 1, "labels": {"team": "ops"}}),
+    );
+    put_row(&garbage, "not json");
+    assert!(second.refresh().unwrap());
+    let applied = second.rules();
+    let values: BTreeSet<&str> = applied.rules.iter().map(|r| r.value.as_str()).collect();
+    assert!(values.contains(readers.as_str()) && values.contains(annotated.as_str()));
+    for withheld in [&future, &field, &capability] {
+        assert!(!values.contains(withheld.as_str()));
+        assert!(applied.withheld.contains(withheld));
+    }
+    let listed = second.stored().unwrap();
+    let unreadable: BTreeSet<&str> = listed.unreadable.iter().map(|u| u.value.as_str()).collect();
+    assert_eq!(
+        unreadable,
+        BTreeSet::from([future.as_str(), field.as_str(), garbage.as_str()])
+    );
+    let capability_rule = listed
+        .rules
+        .iter()
+        .find(|s| s.rule.value == capability)
+        .unwrap();
+    assert!(second.not_applied_reason(&capability_rule.rule).is_some());
+    // Removing works on any row, readable or not.
+    for value in [&readers, &future, &field, &capability, &annotated, &garbage] {
+        assert!(second.remove(value, None).unwrap(), "{value}");
+    }
+    assert!(second.rules().withheld.is_empty());
 }
 
 #[cfg(test)]
@@ -482,7 +686,7 @@ mod tests {
             self.check()?;
             self.inner.grant_rule_generation()
         }
-        fn grant_rules(&self) -> Result<(i64, Vec<StoredGrantRule>)> {
+        fn grant_rules(&self) -> Result<StoredGrantRules> {
             self.check()?;
             let read = self.inner.grant_rules();
             if let Some(delay) = *self.slow.lock().unwrap() {
@@ -535,19 +739,19 @@ mod tests {
         grants
             .create(rule, "management-token", "first administrator", 1, None)
             .unwrap();
-        assert_eq!(grants.rules().len(), 1);
+        assert_eq!(grants.rules().rules.len(), 1);
         store.down.store(true, Ordering::SeqCst);
         assert!(grants.refresh().is_err());
-        assert_eq!(grants.rules().len(), 1, "within the stale bound");
+        assert_eq!(grants.rules().rules.len(), 1, "within the stale bound");
         std::thread::sleep(Duration::from_millis(80));
         assert!(grants.refresh().is_err());
         assert!(grants.is_stale());
-        assert!(grants.rules().is_empty(), "fails closed");
+        assert!(grants.rules().rules.is_empty(), "fails closed");
         assert_eq!(grants.first_administrator(), FirstAdministrator::Missing);
         store.down.store(false, Ordering::SeqCst);
         assert!(!grants.refresh().unwrap());
         assert!(!grants.is_stale());
-        assert_eq!(grants.rules().len(), 1);
+        assert_eq!(grants.rules().rules.len(), 1);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -560,6 +764,30 @@ mod tests {
             products: Vec::new(),
             kind: None,
         }
+    }
+
+    /// Format 1 rows keep the shape releases before #850 read, which refuse
+    /// unknown fields, so a rolling deploy can still mix them.
+    #[test]
+    fn rows_keep_the_shape_older_releases_read() {
+        let stored = StoredGrantRule {
+            rule: rule("tenkai-admins"),
+            created_by: "admin".into(),
+            created_at_ms: 1,
+            reason: "first".into(),
+        };
+        let row: serde_json::Value = serde_json::from_str(&encode(&stored).unwrap()).unwrap();
+        let keys: BTreeSet<&str> = row
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            BTreeSet::from(["rule", "created_by", "created_at_ms", "reason"])
+        );
+        assert_eq!(decode("tenkai-admins", &row.to_string()), Ok(stored));
     }
 
     /// A check counts from when it was asked: an answer that took longer
@@ -594,7 +822,7 @@ mod tests {
         *store.slow.lock().unwrap() = Some(Duration::from_millis(150));
         assert!(grants.refresh().unwrap());
         assert!(grants.is_stale(), "the read began more than the bound ago");
-        assert!(grants.rules().is_empty());
+        assert!(grants.rules().rules.is_empty());
 
         // A slow read of the old rules, overtaken by a fast read of new ones.
         *store.slow.lock().unwrap() = None;
@@ -609,10 +837,10 @@ mod tests {
         *store.slow.lock().unwrap() = None;
         writer.remove("tenkai-admins", None).unwrap();
         assert!(grants.refresh().unwrap());
-        assert!(grants.rules().is_empty());
+        assert!(grants.rules().rules.is_empty());
         slow.join().unwrap().unwrap();
         assert!(
-            grants.rules().is_empty(),
+            grants.rules().rules.is_empty(),
             "the earlier read did not bring the removed rule back"
         );
         let _ = std::fs::remove_dir_all(dir);
