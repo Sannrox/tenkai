@@ -215,6 +215,16 @@ without editing the file and restarting every replica (#836). The
   authoritative for what it names: a stored rule may not use a claim value
   the file declares, and if the file gains a value later, the stored rule
   for it is ignored.
+- For a token the file grants anything, stored rules only add. The file's
+  matching rules are merged first; then each matching stored rule applies
+  only if the grant with it still has every capability, the same principal
+  kind (`human` or `service`), the same or no environment, and no channel
+  or product binding the grant left open.
+  A stored rule that fails this is skipped for that token, and the server
+  logs `OIDC stored grant rule ... ignored` once per rule. So a stored rule for another
+  group cannot lock out, relabel, or confine a member of a group the file
+  declares. Tokens the file grants nothing merge stored rules as the file's
+  merge its own: matching two environments is refused with `403`.
 - There is one stored rule per claim value, at most 256. Each records who
   created it, when, and why. The store keeps a generation that grows with
   every change; every replica checks it every 5 seconds and reloads the

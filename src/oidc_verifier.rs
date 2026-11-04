@@ -738,6 +738,9 @@ pub struct OidcAuthExtension {
     require_tenant: bool,
     /// Rules stored in the hub's store (#836), matched after the file's.
     stored: Option<Arc<crate::grant_rules::StoredGrants>>,
+    /// Stored rule values already logged as skipped for narrowing a file
+    /// grant, so each is logged once rather than on every request.
+    skipped_logged: Mutex<BTreeSet<String>>,
 }
 
 impl OidcAuthExtension {
@@ -761,6 +764,7 @@ impl OidcAuthExtension {
             refresh,
             require_tenant,
             stored: None,
+            skipped_logged: Mutex::default(),
         })
     }
 
@@ -846,64 +850,38 @@ impl OidcAuthExtension {
         }
 
         let values = claim_values(claims.rest.get(&self.config.grants.claim));
-        let mut fleet = BTreeSet::new();
-        let mut scoped: BTreeMap<&str, BTreeSet<DeliveryCapability>> = BTreeMap::new();
-        let mut channel_bindings = BTreeSet::new();
-        let mut product_bindings = BTreeSet::new();
-        let mut unrestricted_publication = false;
-        let mut principal_kind = PrincipalKind::Human;
+        let matches = |rule: &&OidcGrantRule| values.contains(rule.value.as_str());
+        let mut matched = RuleGrants::default();
+        for rule in self.config.grants.rules.iter().filter(matches) {
+            matched.add(rule)?;
+        }
         let stored = self
             .stored
             .as_ref()
             .map(|stored| stored.rules())
             .unwrap_or_default();
-        for rule in self.config.grants.rules.iter().chain(stored.iter()) {
-            if !values.contains(rule.value.as_str()) {
-                continue;
+        let effective = if matched.is_empty() {
+            for rule in stored.iter().filter(matches) {
+                matched.add(rule)?;
             }
-            let capabilities = parse_delivery_capabilities(&rule.capabilities)?;
-            if capabilities.contains(&DeliveryCapability::Publish)
-                || capabilities.contains(&DeliveryCapability::Management)
-            {
-                unrestricted_publication |= rule.products.is_empty();
-                product_bindings.extend(rule.products.iter().cloned());
-            }
-            match &rule.environment {
-                None => fleet.extend(capabilities),
-                Some(environment) => scoped.entry(environment).or_default().extend(capabilities),
-            }
-            if rule.kind.as_deref() == Some("service") {
-                principal_kind = PrincipalKind::Service;
-            }
-            for channel in &rule.channels {
-                let channel = channel.trim();
-                if !channel.is_empty() {
-                    channel_bindings.insert(channel.to_string());
+            matched.resolve()?
+        } else {
+            // The file stays authoritative for a principal it grants (#847):
+            // a stored rule applies only if it confines nothing the file's
+            // grant leaves open; otherwise it is skipped, never refused.
+            let mut effective = matched.resolve()?;
+            for rule in stored.iter().filter(matches) {
+                let mut widened = matched.clone();
+                match widened.add(rule).and_then(|()| widened.resolve()) {
+                    Ok(next) if next.covers(&effective) => {
+                        matched = widened;
+                        effective = next;
+                    }
+                    _ => self.log_skipped(&rule.value),
                 }
             }
-        }
-        // Fleet management already covers every environment.
-        let fleet_management = fleet.contains(&DeliveryCapability::Management);
-        let (capabilities, environment) = match scoped.len() {
-            0 => (fleet, None),
-            _ if fleet_management => (fleet, None),
-            1 => {
-                let (environment, capabilities) = scoped.pop_first().expect("one entry");
-                fleet.extend(capabilities);
-                (fleet, Some(environment.to_string()))
-            }
-            _ => {
-                return Err(AuthError::Forbidden(
-                    "OIDC grants confine management to more than one environment; grant fleet management or one environment".into(),
-                ));
-            }
+            effective
         };
-        if fleet_management {
-            channel_bindings.clear();
-        }
-        if fleet_management || unrestricted_publication {
-            product_bindings.clear();
-        }
 
         let tenant = match &self.config.grants.tenant_claim {
             Some(claim) => match claims.rest.get(claim) {
@@ -922,13 +900,152 @@ impl OidcAuthExtension {
         Ok(Grants {
             subject: format!("{}@{}", claims.sub, claims.iss),
             tenant,
+            capabilities: effective.capabilities,
+            environment: effective.environment,
+            channel_bindings: effective.channel_bindings,
+            product_bindings: effective.product_bindings,
+            principal_kind: effective.principal_kind,
+            actor_chain,
+        })
+    }
+}
+
+impl OidcAuthExtension {
+    /// Log, once per value, a stored rule skipped because it would narrow
+    /// what the grant file gives a token.
+    fn log_skipped(&self, value: &str) {
+        let mut logged = self
+            .skipped_logged
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if logged.insert(value.to_string()) {
+            eprintln!(
+                "OIDC stored grant rule {value:?} ignored for a principal the grant file grants: it would narrow that grant"
+            );
+        }
+    }
+}
+
+/// The grants of the rules a token matched, before its environment binding
+/// is resolved.
+#[derive(Clone)]
+struct RuleGrants<'a> {
+    fleet: BTreeSet<DeliveryCapability>,
+    scoped: BTreeMap<&'a str, BTreeSet<DeliveryCapability>>,
+    channel_bindings: BTreeSet<String>,
+    product_bindings: BTreeSet<String>,
+    unrestricted_publication: bool,
+    principal_kind: PrincipalKind,
+}
+
+impl Default for RuleGrants<'_> {
+    fn default() -> Self {
+        Self {
+            fleet: BTreeSet::new(),
+            scoped: BTreeMap::new(),
+            channel_bindings: BTreeSet::new(),
+            product_bindings: BTreeSet::new(),
+            unrestricted_publication: false,
+            principal_kind: PrincipalKind::Human,
+        }
+    }
+}
+
+impl<'a> RuleGrants<'a> {
+    /// Whether no rule matched (every valid rule grants a capability).
+    fn is_empty(&self) -> bool {
+        self.fleet.is_empty() && self.scoped.is_empty()
+    }
+
+    /// Add one matched rule.
+    fn add(&mut self, rule: &'a OidcGrantRule) -> Result<(), AuthError> {
+        let capabilities = parse_delivery_capabilities(&rule.capabilities)?;
+        if capabilities.contains(&DeliveryCapability::Publish)
+            || capabilities.contains(&DeliveryCapability::Management)
+        {
+            self.unrestricted_publication |= rule.products.is_empty();
+            self.product_bindings.extend(rule.products.iter().cloned());
+        }
+        match &rule.environment {
+            None => self.fleet.extend(capabilities),
+            Some(environment) => self
+                .scoped
+                .entry(environment)
+                .or_default()
+                .extend(capabilities),
+        }
+        if rule.kind.as_deref() == Some("service") {
+            self.principal_kind = PrincipalKind::Service;
+        }
+        for channel in &rule.channels {
+            let channel = channel.trim();
+            if !channel.is_empty() {
+                self.channel_bindings.insert(channel.to_string());
+            }
+        }
+        Ok(())
+    }
+
+    /// The effective grants; refused when management is confined to more
+    /// than one environment.
+    fn resolve(&self) -> Result<EffectiveGrants, AuthError> {
+        let mut capabilities = self.fleet.clone();
+        let mut channel_bindings = self.channel_bindings.clone();
+        let mut product_bindings = self.product_bindings.clone();
+        // Fleet management already covers every environment.
+        let fleet_management = capabilities.contains(&DeliveryCapability::Management);
+        let environment = match self.scoped.len() {
+            0 => None,
+            _ if fleet_management => None,
+            1 => {
+                let (environment, scoped) = self.scoped.first_key_value().expect("one entry");
+                capabilities.extend(scoped.iter().copied());
+                Some(environment.to_string())
+            }
+            _ => {
+                return Err(AuthError::Forbidden(
+                    "OIDC grants confine management to more than one environment; grant fleet management or one environment".into(),
+                ));
+            }
+        };
+        if fleet_management {
+            channel_bindings.clear();
+        }
+        if fleet_management || self.unrestricted_publication {
+            product_bindings.clear();
+        }
+        Ok(EffectiveGrants {
             capabilities,
             environment,
             channel_bindings,
             product_bindings,
-            principal_kind,
-            actor_chain,
+            principal_kind: self.principal_kind,
         })
+    }
+}
+
+/// What a token is granted. Empty binding sets confine nothing.
+struct EffectiveGrants {
+    capabilities: BTreeSet<DeliveryCapability>,
+    environment: Option<String>,
+    channel_bindings: BTreeSet<String>,
+    product_bindings: BTreeSet<String>,
+    principal_kind: PrincipalKind,
+}
+
+impl EffectiveGrants {
+    /// Whether this grants at least what `base` does: every capability, the
+    /// same principal kind, and no environment, channel or product binding
+    /// that confines what `base` leaves open.
+    fn covers(&self, base: &Self) -> bool {
+        let open = |after: &BTreeSet<String>, before: &BTreeSet<String>| {
+            after.is_empty() || (!before.is_empty() && after.is_superset(before))
+        };
+        self.capabilities.is_superset(&base.capabilities)
+            && self.principal_kind == base.principal_kind
+            && (self.environment.is_none() || self.environment == base.environment)
+            && open(&self.channel_bindings, &base.channel_bindings)
+            && open(&self.product_bindings, &base.product_bindings)
     }
 }
 

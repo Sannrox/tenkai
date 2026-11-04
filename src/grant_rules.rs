@@ -6,7 +6,9 @@
 //! the file and restarting every replica. Effective rules are the file's plus
 //! the stored ones. The file stays authoritative for what it declares: a
 //! stored rule may not use a claim value the file names, and one that does
-//! (because the file gained it later) is ignored.
+//! (because the file gained it later) is ignored. For a token the file
+//! grants anything, a stored rule only adds: one that would narrow that
+//! grant is skipped (#847, see `OidcAuthExtension::grants`).
 //!
 //! The store keeps one rule per claim value and a generation that grows with
 //! every change, shared by every replica (the hub-wide tables on PostgreSQL).
