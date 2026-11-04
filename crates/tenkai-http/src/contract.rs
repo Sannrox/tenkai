@@ -31,6 +31,7 @@ use tenkai::management_lifecycle::{
     ApplyRequest, ApproveRequest, ChannelHoldRequest, DeliveryHoldRequest,
     ManagementLifecycleResult, PlanRequest, PromoteRequest, PublishRequest, RecallRequest,
     RetireEnvironmentRequest, RetryFailedTargetRequest, RollbackRequest, SubscribeRequest,
+    UnsubscribeRequest,
 };
 use tenkai::observed_runtime::EnvironmentRuntimeReport;
 use tenkai::offline_import::{ImportJob, ImportJobList, ImportRequest, StagedBundle};
@@ -467,6 +468,13 @@ pub fn http_contract() -> Value {
             path: "/v1/environments/{environment}/subscriptions",
             auth: Auth::Management,
             request: Some(schema::<SubscribeRequest>(&mut g)),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "DELETE",
+            path: "/v1/environments/{environment}/subscriptions/{product}",
+            auth: Auth::Management,
+            request: Some(schema::<UnsubscribeRequest>(&mut g)),
             response: lifecycle.clone(),
         },
         Route {

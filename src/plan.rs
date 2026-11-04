@@ -60,6 +60,9 @@ pub enum Action {
     Downgrade,
     Rollback,
     Restart,
+    /// Remove a product the environment no longer subscribes to. Only host
+    /// releases are removed by a plan, as a host `uninstall` step.
+    Remove,
 }
 
 impl std::fmt::Display for Action {
@@ -70,6 +73,7 @@ impl std::fmt::Display for Action {
             Action::Downgrade => "downgrade",
             Action::Rollback => "rollback",
             Action::Restart => "restart",
+            Action::Remove => "remove",
         };
         f.write_str(s)
     }

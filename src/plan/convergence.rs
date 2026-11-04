@@ -161,6 +161,12 @@ async fn bind_host_steps(
             continue;
         };
         if manifest.deploy.executor != Some(crate::software_executor::SoftwareExecutorKind::Host) {
+            if step.action == Action::Remove {
+                bail!(
+                    "{} is not a host release; only host releases are removed by a plan",
+                    step.release_id
+                );
+            }
             bound.push(step);
             continue;
         }
@@ -185,6 +191,18 @@ async fn bind_host_steps(
                 "host release {} is never restarted; plan a new install instead",
                 step.release_id
             ),
+            // Uninstall acts on the release the record holds, which the
+            // planner pinned; its `from` is the release itself.
+            None if step.action == Action::Remove => {
+                step.from = Some(step.to.clone());
+                step.restore = None;
+                step.host = Some(HostStep {
+                    action: HostAction::Uninstall,
+                    expected_generation: record.generation,
+                });
+                bound.push(step);
+                continue;
+            }
             None => {}
         }
         let from = host_source(&record, step.from.as_deref());
@@ -599,6 +617,109 @@ async fn compute_snapshot_with_policy(
             None => pending.push((product, Action::Install, None, desired, target, None, kind)),
         }
     }
+    // A host product the environment no longer subscribes to is removed
+    // like any other change: by an approved host uninstall step, from what
+    // the applier's record holds (ADR 0041 section 2).
+    // Host products to consider for removal: every one the applier keeps a
+    // record of, and every one the server records as deployed from a host
+    // release, so a missing or unreadable record refuses the plan instead
+    // of passing for "nothing to remove".
+    let mut removable = std::collections::BTreeSet::new();
+    let unknown = |product: &str| {
+        env_obj
+            .properties
+            .get(&format!("deployment_health.{product}"))
+            .is_some_and(|health| health == "unknown")
+    };
+    for (key, value) in &env_obj.properties {
+        // The deployed release, or the target of a failed step that left
+        // the deployment unknown.
+        let (product, release) = if let Some(product) = key.strip_prefix("deployed.") {
+            (product, release_id(product, value))
+        } else if let Some(product) = key.strip_prefix("failed_target.")
+            && unknown(product)
+        {
+            (product, value.clone())
+        } else {
+            continue;
+        };
+        if !products.contains(product)
+            && readable_manifest(ctx, &release)
+                .await?
+                .is_some_and(|manifest| {
+                    manifest.deploy.executor
+                        == Some(crate::software_executor::SoftwareExecutorKind::Host)
+                })
+        {
+            removable.insert(product.to_string());
+        }
+    }
+    match executors.host() {
+        Ok(host) => {
+            // Only products this server delivered to the environment: its
+            // deployment history names them, or the step that last started
+            // for them is one of its plans (a first install whose outcome
+            // was never recorded). A record of a product it never managed
+            // here is not its to remove.
+            for record in host.applied_states(env)? {
+                let recorded = ["deployed", "deployed_prev", "deployment_health"]
+                    .iter()
+                    .any(|key| {
+                        env_obj
+                            .properties
+                            .contains_key(&format!("{key}.{}", record.product))
+                    });
+                let planned = match &record.last_started {
+                    Some(started) => ctx.get(&started.plan_id).await?.is_some(),
+                    None => false,
+                };
+                if (recorded || planned) && !products.contains(&record.product) {
+                    removable.insert(record.product);
+                }
+            }
+            for product in removable {
+                let record = host.applied_state(env, &product)?;
+                let deployed = env_obj
+                    .properties
+                    .get(&format!("deployed.{product}"))
+                    .cloned();
+                let Some(version) = host_source(&record, deployed.as_deref()) else {
+                    let server = match deployed {
+                        Some(deployed) => Some(deployed),
+                        None if unknown(&product) => Some("it as unknown".to_string()),
+                        None => None,
+                    };
+                    if let Some(server) = server {
+                        bail!(
+                            "the host applier records nothing applied for {product} in {env} at generation {}, but this server records {server}; once no apply runs, record it with `tenkaictl env reconcile {env} {product}`",
+                            record.generation
+                        );
+                    }
+                    continue;
+                };
+                // A recalled release can still be removed: removal deploys
+                // nothing, and its signature and integrity are still checked.
+                let target =
+                    pin_release_for_recovery(ctx, &release_id(&product, &version), env).await?;
+                pending.push((
+                    product,
+                    Action::Remove,
+                    Some(version.clone()),
+                    version,
+                    target,
+                    None,
+                    crate::manifest::ProductKind::Software,
+                ));
+            }
+        }
+        // Without the applier's records nothing here can remove a host
+        // release that is deployed but no longer subscribed.
+        Err(error) => {
+            if let Some(product) = removable.first() {
+                bail!("{product} is a host release to remove from {env}: {error:#}");
+            }
+        }
+    }
     inputs.sort_by(|a, b| a.product.cmp(&b.product));
     if held_model {
         pending.retain(|entry| entry.6 != crate::manifest::ProductKind::RoutingConfig);
@@ -618,8 +739,12 @@ async fn compute_snapshot_with_policy(
     pending.sort_by(|a, b| {
         let agent = |product: &str| product == crate::runtime_self_upgrade::SELF_PRODUCT;
         let not_host = |product: &String| !host_products.contains(product);
+        // Removals run after everything else: what runs in a cluster a host
+        // release provides has to go before the cluster does.
+        let remove = |action: Action| action == Action::Remove;
         agent(&a.0)
             .cmp(&agent(&b.0))
+            .then_with(|| remove(a.1).cmp(&remove(b.1)))
             .then_with(|| not_host(&a.0).cmp(&not_host(&b.0)))
             .then_with(|| {
                 model_routing_rollout_rank(a.6, a.1).cmp(&model_routing_rollout_rank(b.6, b.1))
@@ -670,7 +795,7 @@ pub(super) fn model_routing_rollout_rank(kind: crate::manifest::ProductKind, act
     use crate::product_kind::RolloutDirection;
     let direction = match action {
         Action::Install | Action::Upgrade | Action::Restart => RolloutDirection::Forward,
-        Action::Downgrade | Action::Rollback => RolloutDirection::Reverse,
+        Action::Downgrade | Action::Rollback | Action::Remove => RolloutDirection::Reverse,
     };
     kind.policy().rollout_rank(direction)
 }

@@ -38,7 +38,10 @@ pub(super) async fn execute(
         artifact_digest: step.artifact_digest.clone(),
         workdir: step.workdir.clone(),
     };
-    let admit_recalled = recalled_recovery && step.action == Action::Rollback;
+    // Removing a recalled release deploys nothing, so it is admitted like an
+    // audited recovery; signature and integrity are still checked.
+    let admit_recalled =
+        (recalled_recovery && step.action == Action::Rollback) || step.action == Action::Remove;
     let mut content =
         admit_release(ctx, &target, environment, &step.product, admit_recalled).await?;
     let mut restore_content = match step.restore.as_ref() {
@@ -109,17 +112,22 @@ pub(super) async fn execute(
         )?;
     }
 
-    crate::software_compatibility::require_manifest(
-        ctx,
-        environment,
-        &content.manifest,
-        &content.manifest_digest,
-    )
-    .await?;
-    // Replica facts may have moved since the plan was made (#689). The
-    // release a failure would restore is checked too, before anything is
-    // removed, so neither outcome lands in a placement its manifest forbids.
-    crate::topology::require_manifest_placement(ctx, environment, &content.manifest).await?;
+    // A removal deploys nothing: it need not prove the release is still
+    // compatible with, or placeable in, the environment.
+    if step.action != Action::Remove {
+        crate::software_compatibility::require_manifest(
+            ctx,
+            environment,
+            &content.manifest,
+            &content.manifest_digest,
+        )
+        .await?;
+        // Replica facts may have moved since the plan was made (#689).
+        crate::topology::require_manifest_placement(ctx, environment, &content.manifest).await?;
+    }
+    // The release a failure would restore is checked too, before anything
+    // is removed, so neither outcome lands in a placement its manifest
+    // forbids.
     if let Some(restore) = restore_content.as_ref() {
         crate::topology::require_manifest_placement(ctx, environment, &restore.manifest).await?;
     }
@@ -368,12 +376,13 @@ async fn execute_host(
         started_at_ms,
     } = step_context;
     let executor = adapters.software.host()?;
-    if host.action == crate::plan::HostAction::Uninstall {
-        bail!("this server does not run host uninstall steps yet");
-    }
     // The product may have been deployed with another executor since the
     // plan was made; admission leaves host steps to the applier.
     crate::plan::require_host_product(ctx, adapters.software, environment, &step.product).await?;
+    // Subscribing does not wait for an apply, so a removal approved and
+    // admitted earlier must not uninstall a product that is desired again.
+    let resubscribed = host.action == crate::plan::HostAction::Uninstall
+        && crate::environment::subscribes(ctx, environment, &step.product).await?;
     let request = match crate::catalog::signature_envelope(ctx, &step.release_id).await {
         Ok(signature) => host_request(
             plan,
@@ -387,6 +396,10 @@ async fn execute_host(
         Err(error) => Err(format!("{error:#}")),
     };
     let ended = match request {
+        _ if resubscribed => host_step::HostStepEnd::NotRun(format!(
+            "{environment} subscribes to {} again",
+            step.product
+        )),
         Ok(request) => host_step::run(ctx, lease, executor, &request, content).await?,
         Err(detail) => host_step::HostStepEnd::NotRun(detail),
     };
@@ -397,15 +410,27 @@ async fn execute_host(
                 StepOutcomeStatus::Succeeded,
                 result.detail.clone(),
             ),
-            Some(crate::environment::DeploymentTransition::Deployed {
-                version: step.to.clone(),
+            Some(match host.action {
+                crate::plan::HostAction::Install => {
+                    crate::environment::DeploymentTransition::Deployed {
+                        version: step.to.clone(),
+                        previous: step.from.clone(),
+                    }
+                }
                 // A health step proves the applied release healthy again,
                 // also after a failed health step made it unknown; it
                 // leaves the rollback history alone.
-                previous: match host.action {
-                    crate::plan::HostAction::Install => step.from.clone(),
-                    crate::plan::HostAction::Health | crate::plan::HostAction::Uninstall => None,
-                },
+                crate::plan::HostAction::Health => {
+                    crate::environment::DeploymentTransition::Deployed {
+                        version: step.to.clone(),
+                        previous: None,
+                    }
+                }
+                crate::plan::HostAction::Uninstall => {
+                    crate::environment::DeploymentTransition::Removed {
+                        version: step.to.clone(),
+                    }
+                }
             }),
         ),
         host_step::HostStepEnd::Recorded(result) => host_step_failed(

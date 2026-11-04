@@ -102,6 +102,22 @@ pub(crate) async fn run(
         }
         Command::Env {
             command:
+                EnvCommand::Unsubscribe {
+                    env,
+                    product,
+                    generation,
+                },
+        } => {
+            let generation = generation
+                .ok_or_else(|| anyhow::anyhow!("--generation is required with --target remote"))?;
+            let result = client
+                .unsubscribe_environment(&env, &product, generation)
+                .await?;
+            println!("{}", result.message);
+            Ok(())
+        }
+        Command::Env {
+            command:
                 EnvCommand::Subscribe {
                     env,
                     spec,

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::Router;
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use serde::Serialize;
 
 use tenkai::management_operations::ManagementOperations;
@@ -35,7 +35,7 @@ use super::lifecycle::{
     record_software_compatibility_evidence, release_channel_hold, release_environment_hold,
     retire_environment, retry_failed_target, rollback_environment, set_channel_hold,
     set_environment_hold, set_product_criticality, software_compatibility_report,
-    subscribe_environment,
+    subscribe_environment, unsubscribe_environment,
 };
 use super::package_migration::{
     apply_package_migration, package_migration_status, preview_package_migration,
@@ -279,6 +279,10 @@ pub fn router(
         .route(
             "/v1/environments/{environment}/subscriptions",
             post(subscribe_environment),
+        )
+        .route(
+            "/v1/environments/{environment}/subscriptions/{product}",
+            delete(unsubscribe_environment),
         )
         .route(
             "/v1/environments/{environment}/retire",

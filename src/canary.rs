@@ -394,6 +394,8 @@ fn evidence_release(step: &crate::plan::Step) -> Option<&str> {
         Action::Install | Action::Upgrade | Action::Downgrade | Action::Restart => {
             Some(&step.release_id)
         }
+        // A removal deploys nothing to gather canary evidence on.
+        Action::Remove => None,
     }
 }
 

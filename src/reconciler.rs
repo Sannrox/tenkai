@@ -880,6 +880,14 @@ mod tests {
         })
         .await
         .unwrap();
+        // Plans for a channel need the environment to subscribe to it.
+        ctx.link(
+            &crate::ontology::env_id("stage"),
+            "tenkai:channel:api/stable",
+            crate::ontology::REL_SUBSCRIBES,
+        )
+        .await
+        .unwrap();
 
         let reconciler = Reconciler::new(ctx.clone(), config()).unwrap();
         let report = reconciler.run_once().await.unwrap();
@@ -930,6 +938,14 @@ mod tests {
             created: crate::now_millis(),
             updated: crate::now_millis(),
         })
+        .await
+        .unwrap();
+        // Plans for a channel need the environment to subscribe to it.
+        ctx.link(
+            &crate::ontology::env_id("stage"),
+            "tenkai:channel:api/stable",
+            crate::ontology::REL_SUBSCRIBES,
+        )
         .await
         .unwrap();
 
@@ -983,6 +999,14 @@ mod tests {
             created: crate::now_millis(),
             updated: crate::now_millis(),
         })
+        .await
+        .unwrap();
+        // Plans for a channel need the environment to subscribe to it.
+        ctx.link(
+            &crate::ontology::env_id("stage"),
+            "tenkai:channel:api/stable",
+            crate::ontology::REL_SUBSCRIBES,
+        )
         .await
         .unwrap();
 
@@ -1460,6 +1484,14 @@ mod tests {
             created: crate::now_millis(),
             updated: crate::now_millis(),
         })
+        .await
+        .unwrap();
+        // Plans for a channel need the environment to subscribe to it.
+        ctx.link(
+            &crate::ontology::env_id("stage"),
+            "tenkai:channel:api/stable",
+            crate::ontology::REL_SUBSCRIBES,
+        )
         .await
         .unwrap();
     }

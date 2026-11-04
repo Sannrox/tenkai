@@ -867,3 +867,384 @@ async fn a_unit_left_running_by_an_earlier_holder_is_stopped_before_the_next_app
     .unwrap();
     assert_eq!(result.outcome, HostApplyOutcome::Stopped);
 }
+
+#[tokio::test]
+async fn an_unsubscribed_host_release_is_uninstalled_by_an_approved_plan() {
+    let mut host = Host::new("uninstall").await;
+    host.release("1.0.0", false).await;
+    let plan = host.plan().await;
+    host.apply(&plan).await.unwrap();
+    // Without a host executor nothing could plan the uninstall.
+    let error = crate::environment::unsubscribe(
+        &mut host.ctx,
+        "edge",
+        "cluster",
+        &SoftwareExecutors::default(),
+        |_| Ok(()),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("host executor is not available"), "{error}");
+
+    crate::environment::unsubscribe(
+        &mut host.ctx,
+        "edge",
+        "cluster",
+        &host.executors,
+        |_| Ok(()),
+    )
+    .await
+    .unwrap();
+    let remove = host.plan().await;
+
+    let bindings: Vec<_> = remove
+        .steps
+        .iter()
+        .map(|step| (step.action, step.from.clone(), step.to.clone(), step.host))
+        .collect();
+    assert_eq!(
+        bindings,
+        [(
+            Action::Remove,
+            Some("1.0.0".into()),
+            "1.0.0".into(),
+            Some(HostStep {
+                action: HostAction::Uninstall,
+                expected_generation: 1
+            })
+        )]
+    );
+    // A failed uninstall stays failed; the next plan tries it again.
+    host.applier
+        .fail
+        .lock()
+        .unwrap()
+        .insert(HostAction::Uninstall);
+    let outcomes = host.apply(&remove).await.unwrap();
+    assert_eq!(
+        statuses(&outcomes),
+        [StepOutcomeStatus::Failed],
+        "{outcomes:?}"
+    );
+    host.applier.fail.lock().unwrap().clear();
+    let retry = host.plan().await;
+    assert_eq!(
+        retry.steps[0].host,
+        Some(HostStep {
+            action: HostAction::Uninstall,
+            expected_generation: 2
+        })
+    );
+
+    let outcomes = host.apply(&retry).await.unwrap();
+
+    assert_eq!(
+        statuses(&outcomes),
+        [StepOutcomeStatus::Succeeded],
+        "{outcomes:?}"
+    );
+    assert_eq!(host.record().state, AppliedState::Empty);
+    assert_eq!(host.deployed().await, None);
+    let environment = crate::environment::environment(&mut host.ctx, "edge")
+        .await
+        .unwrap();
+    assert_eq!(
+        environment
+            .properties
+            .get("deployed_prev.cluster")
+            .map(String::as_str),
+        Some("1.0.0")
+    );
+    assert!(host.plan().await.steps.is_empty(), "removed");
+    assert_eq!(
+        *host.applier.runs.lock().unwrap(),
+        [
+            "install cluster@1.0.0",
+            "uninstall cluster@1.0.0",
+            "uninstall cluster@1.0.0"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn only_a_host_release_is_removed_by_unsubscribing() {
+    let mut host = Host::new("unsubscribe").await;
+    let dir = host.root.join("api-1.0.0");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("tenkai.toml"),
+        "[product]\nname = \"api\"\nversion = \"1.0.0\"\n\n[deploy]\ninstall = \"true\"\n",
+    )
+    .unwrap();
+    crate::catalog::publish(
+        &mut host.ctx,
+        &dir.join("tenkai.toml"),
+        &crate::catalog::PublishOptions {
+            allow_unsigned_development: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let actor = crate::auth_context::test_management_context("host-step");
+    crate::catalog::promote(&mut host.ctx, &actor, "api@1.0.0", "stable")
+        .await
+        .unwrap();
+    crate::plan::subscribe(&mut host.ctx, "edge", "api", "stable")
+        .await
+        .unwrap();
+    crate::environment::reconcile_deployment(&mut host.ctx, "edge", "api", Some("1.0.0"))
+        .await
+        .unwrap();
+
+    let error =
+        crate::environment::unsubscribe(&mut host.ctx, "edge", "api", &host.executors, |_| Ok(()))
+            .await
+            .unwrap_err()
+            .to_string();
+
+    assert!(error.contains("not a host release"), "{error}");
+    // A product with nothing deployed simply leaves the desired state.
+    crate::environment::reconcile_deployment(&mut host.ctx, "edge", "api", None)
+        .await
+        .unwrap();
+    let message =
+        crate::environment::unsubscribe(&mut host.ctx, "edge", "api", &host.executors, |_| Ok(()))
+            .await
+            .unwrap();
+    assert_eq!(message, "edge unsubscribed from api");
+}
+
+#[tokio::test]
+async fn a_removal_is_stale_once_the_product_is_subscribed_again() {
+    let mut host = Host::new("resubscribe").await;
+    host.release("1.0.0", false).await;
+    let plan = host.plan().await;
+    host.apply(&plan).await.unwrap();
+    crate::environment::unsubscribe(
+        &mut host.ctx,
+        "edge",
+        "cluster",
+        &host.executors,
+        |_| Ok(()),
+    )
+    .await
+    .unwrap();
+    let remove = host.plan().await;
+    crate::plan::subscribe(&mut host.ctx, "edge", "cluster", "stable")
+        .await
+        .unwrap();
+
+    let error = host.apply(&remove).await.unwrap_err().to_string();
+
+    assert!(error.contains("subscribes to it again"), "{error}");
+    assert_eq!(
+        *host.applier.runs.lock().unwrap(),
+        ["install cluster@1.0.0"]
+    );
+}
+
+#[tokio::test]
+async fn a_recalled_host_release_can_still_be_removed() {
+    let mut host = Host::new("recalled").await;
+    host.release("1.0.0", false).await;
+    let plan = host.plan().await;
+    host.apply(&plan).await.unwrap();
+    let actor = crate::auth_context::test_management_context("host-step");
+    crate::catalog::recall(&mut host.ctx, &actor, "cluster@1.0.0")
+        .await
+        .unwrap();
+    crate::environment::unsubscribe(
+        &mut host.ctx,
+        "edge",
+        "cluster",
+        &host.executors,
+        |_| Ok(()),
+    )
+    .await
+    .unwrap();
+
+    let remove = host.plan().await;
+    let outcomes = host.apply(&remove).await.unwrap();
+
+    assert_eq!(
+        statuses(&outcomes),
+        [StepOutcomeStatus::Succeeded],
+        "{outcomes:?}"
+    );
+    assert_eq!(host.record().state, AppliedState::Empty);
+}
+
+#[tokio::test]
+async fn a_plan_is_stale_once_its_product_is_unsubscribed() {
+    let mut host = Host::new("unsubscribed").await;
+    host.release("1.0.0", false).await;
+    let install = host.plan().await;
+    crate::environment::unsubscribe(
+        &mut host.ctx,
+        "edge",
+        "cluster",
+        &host.executors,
+        |_| Ok(()),
+    )
+    .await
+    .unwrap();
+
+    let error = host.apply(&install).await.unwrap_err().to_string();
+
+    assert!(error.contains("no longer subscribes to it"), "{error}");
+    assert!(host.applier.runs.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn unsubscribing_waits_for_no_apply_to_run() {
+    let mut host = Host::new("unsubscribe-lease").await;
+    host.release("1.0.0", false).await;
+    let lease = super::claim_environment(&mut host.ctx, "edge", "running-apply")
+        .await
+        .unwrap();
+
+    let error =
+        crate::environment::unsubscribe(&mut host.ctx, "edge", "cluster", &host.executors, |_| {
+            Ok(())
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("apply in progress"), "{error}");
+    super::release_environment(&mut host.ctx, &lease)
+        .await
+        .unwrap();
+    // A stale generation is refused inside the lease and changes nothing.
+    assert!(
+        crate::environment::unsubscribe(&mut host.ctx, "edge", "cluster", &host.executors, |_| {
+            anyhow::bail!("stale fencing generation")
+        })
+        .await
+        .is_err()
+    );
+    assert!(
+        crate::environment::subscribes(&mut host.ctx, "edge", "cluster")
+            .await
+            .unwrap()
+    );
+    crate::environment::unsubscribe(
+        &mut host.ctx,
+        "edge",
+        "cluster",
+        &host.executors,
+        |_| Ok(()),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_deployed_host_release_without_a_record_is_not_reported_removed() {
+    let mut host = Host::new("record-missing").await;
+    host.release("1.0.0", false).await;
+    let plan = host.plan().await;
+    host.apply(&plan).await.unwrap();
+    crate::environment::unsubscribe(
+        &mut host.ctx,
+        "edge",
+        "cluster",
+        &host.executors,
+        |_| Ok(()),
+    )
+    .await
+    .unwrap();
+    std::fs::remove_file(record_path(&host.applier.state, "edge", "cluster")).unwrap();
+
+    let error = crate::plan::create_with(&mut host.ctx, "edge", &host.executors)
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(
+        error.contains("tenkaictl env reconcile edge cluster"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn a_record_of_a_product_this_server_never_delivered_is_left_alone() {
+    let mut host = Host::new("foreign-record").await;
+    let mut record = AppliedStateRecord::empty("edge", "other");
+    record.generation = 1;
+    record.state = AppliedState::Applied {
+        release: crate::host_apply::HostRelease {
+            version: "9.9.9".into(),
+            manifest_digest: "d".into(),
+        },
+    };
+    Applier::write(&record_path(&host.applier.state, "edge", "other"), &record).unwrap();
+
+    assert!(host.plan().await.steps.is_empty());
+}
+
+#[tokio::test]
+async fn an_unknown_host_deployment_without_a_record_is_not_reported_removed() {
+    let mut host = Host::new("unknown-missing").await;
+    host.release("1.0.0", false).await;
+    host.applier
+        .fail
+        .lock()
+        .unwrap()
+        .insert(HostAction::Install);
+    let plan = host.plan().await;
+    host.apply(&plan).await.unwrap();
+    assert_eq!(host.deployed().await, None);
+    crate::environment::unsubscribe(
+        &mut host.ctx,
+        "edge",
+        "cluster",
+        &host.executors,
+        |_| Ok(()),
+    )
+    .await
+    .unwrap();
+    std::fs::remove_file(record_path(&host.applier.state, "edge", "cluster")).unwrap();
+
+    let error = crate::plan::create_with(&mut host.ctx, "edge", &host.executors)
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(
+        error.contains("records it as unknown") && error.contains("tenkaictl env reconcile"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn an_install_whose_outcome_was_never_recorded_can_still_be_removed() {
+    let mut host = Host::new("unrecorded").await;
+    host.release("1.0.0", false).await;
+    let plan = host.plan().await;
+    host.apply(&plan).await.unwrap();
+    // As if the server crashed before recording the first install.
+    let mut environment = crate::environment::environment(&mut host.ctx, "edge")
+        .await
+        .unwrap();
+    environment
+        .properties
+        .retain(|key, _| !key.ends_with(".cluster"));
+    host.ctx.put(environment).await.unwrap();
+    crate::environment::unsubscribe(
+        &mut host.ctx,
+        "edge",
+        "cluster",
+        &host.executors,
+        |_| Ok(()),
+    )
+    .await
+    .unwrap();
+
+    let remove = host.plan().await;
+
+    assert_eq!(remove.steps.len(), 1);
+    assert_eq!(remove.steps[0].action, Action::Remove);
+}

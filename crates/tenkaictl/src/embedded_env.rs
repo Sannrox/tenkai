@@ -117,6 +117,19 @@ pub(crate) async fn run(
                 println!("{message}");
             }
         }
+        EnvCommand::Unsubscribe { env, product, .. } => {
+            println!(
+                "{}",
+                tenkai::environment::unsubscribe(
+                    ctx,
+                    &env,
+                    &product,
+                    &tenkai::software_executor::SoftwareExecutors::from_process(),
+                    |_| Ok(()),
+                )
+                .await?
+            );
+        }
         EnvCommand::Unlock { env } => {
             println!("{}", apply::unlock_environment(ctx, &env).await?);
         }

@@ -58,7 +58,13 @@ pub(super) async fn admit(
     plan: &mut Plan,
     policy: AdmissionPolicy<'_>,
 ) -> Result<Option<Vec<Outcome>>> {
-    for step in &plan.steps {
+    // A removal deploys nothing, so it need not prove the release could
+    // still be deployed here.
+    for step in plan
+        .steps
+        .iter()
+        .filter(|step| step.action != Action::Remove)
+    {
         crate::software_compatibility::require_release(ctx, &plan.environment, &step.release_id)
             .await?;
     }
@@ -99,7 +105,8 @@ pub(super) async fn admit(
             return Ok(Some(outcomes.unwrap_or_default()));
         }
         for step in &plan.steps.clone() {
-            if step.action == Action::Rollback {
+            // A removal deploys nothing, so no eval gate applies to it.
+            if matches!(step.action, Action::Rollback | Action::Remove) {
                 continue;
             }
             let target = ReleasePin {

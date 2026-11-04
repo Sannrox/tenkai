@@ -27,6 +27,7 @@ pub enum ManagementLifecycleOperation {
     Publish,
     Promote,
     Subscribe,
+    Unsubscribe,
     Plan,
     Approve,
     Apply,
@@ -48,6 +49,7 @@ impl ManagementLifecycleOperation {
             Self::Publish => "publish",
             Self::Promote => "promote",
             Self::Subscribe => "subscribe",
+            Self::Unsubscribe => "unsubscribe",
             Self::Plan => "plan",
             Self::Approve => "approve",
             Self::Apply => "apply",
@@ -88,6 +90,7 @@ impl ManagementLifecycleOperation {
         matches!(
             self,
             Self::Subscribe
+                | Self::Unsubscribe
                 | Self::Plan
                 | Self::Approve
                 | Self::Apply
@@ -134,6 +137,7 @@ pub fn parse_management_lifecycle_operation(name: &str) -> Result<ManagementLife
         "publish" => Ok(ManagementLifecycleOperation::Publish),
         "promote" => Ok(ManagementLifecycleOperation::Promote),
         "subscribe" => Ok(ManagementLifecycleOperation::Subscribe),
+        "unsubscribe" => Ok(ManagementLifecycleOperation::Unsubscribe),
         "plan" => Ok(ManagementLifecycleOperation::Plan),
         "approve" => Ok(ManagementLifecycleOperation::Approve),
         "apply" => Ok(ManagementLifecycleOperation::Apply),
@@ -308,6 +312,19 @@ pub struct SubscribeRequest {
     pub environment: String,
     pub expected_generation: u64,
     pub spec: String,
+}
+
+/// `DELETE /v1/environments/{environment}/subscriptions/{product}`: remove
+/// a product from the environment's desired state; the next approved plan
+/// uninstalls a host release.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UnsubscribeRequest {
+    pub version: u32,
+    pub operation: String,
+    pub environment: String,
+    pub expected_generation: u64,
+    pub product: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -606,6 +623,37 @@ pub fn admit_subscribe(
     if request.spec.split_once('=').is_none() {
         bail!("subscribe requires <product>=<channel>");
     }
+    Ok(admitted)
+}
+
+pub fn admit_unsubscribe(
+    request: &UnsubscribeRequest,
+    path_environment: &str,
+    path_product: &str,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<AdmittedManagementLifecycle> {
+    if request.environment != path_environment || request.product != path_product {
+        bail!(
+            "unsubscribe of {} from {} does not match path {path_product} in {path_environment}",
+            request.product,
+            request.environment
+        );
+    }
+    let admitted = admit_management_lifecycle(
+        &ManagementLifecycleEnvelope {
+            version: request.version,
+            operation: request.operation.clone(),
+            environment: Some(request.environment.clone()),
+            expected_generation: Some(request.expected_generation),
+        },
+        kind,
+        granted_environment,
+    )?;
+    require_route_operation(
+        admitted.operation,
+        ManagementLifecycleOperation::Unsubscribe,
+    )?;
     Ok(admitted)
 }
 
