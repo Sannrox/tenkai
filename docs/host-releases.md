@@ -244,7 +244,8 @@ By hand, or from a source build:
    `tenkai` must fail.
 
 The unit runs the applier with `NoNewPrivileges`, a bounded capability set
-(file ownership and modes, process signals, and binding low ports),
+(file ownership and modes, switching to another user, process signals, and
+binding low ports),
 `ProtectHome`, a private `/tmp`, and its own journal identifier
 (`journalctl -t tenkai-host-apply`). A release that loads kernel modules or
 changes network or mount configuration needs a drop-in that widens
