@@ -134,7 +134,7 @@ fn intake_copies_then_verifies_the_copy() {
     let intake = host.intake(&instance).unwrap();
     assert_eq!(intake.verified.instance, instance);
     let work = host.paths.work_dir(&instance);
-    assert_eq!(intake.copied.workdir, work.join("artifacts"));
+    assert_eq!(intake.workdir, work.join("artifacts"));
     assert_eq!(
         std::fs::read(work.join("artifacts/bin/lib/helper")).unwrap(),
         b"helper"
@@ -159,13 +159,13 @@ fn a_file_swapped_after_the_copy_is_never_read() {
     .unwrap();
     // The verified workdir is the copy, which still matches the signature.
     assert_eq!(
-        std::fs::read(intake.copied.workdir.join("install.sh")).unwrap(),
+        std::fs::read(intake.workdir.join("install.sh")).unwrap(),
         b"#!/bin/sh\nexit 0\n"
     );
     let reverified = tenkai::host_apply::verify_copied_request(
-        &intake.copied.request,
+        &intake.request,
         &instance,
-        &intake.copied.workdir,
+        &intake.workdir,
         &host.fixture.trust,
         tenkai::now_millis(),
     );
@@ -259,7 +259,7 @@ fn an_input_inside_another_input_is_copied_once() {
     let (instance, _) = host.spool_release(stage, release);
     let intake = host.intake(&instance).unwrap();
     assert_eq!(
-        std::fs::read(intake.copied.workdir.join("bin/sbom.json")).unwrap(),
+        std::fs::read(intake.workdir.join("bin/sbom.json")).unwrap(),
         b"{}"
     );
 }
@@ -308,4 +308,34 @@ fn trust_loads_only_from_files_no_other_user_can_write() {
     write_trusted(&etc.join(config::KEY_REVOCATIONS_FILE), "{}");
     let error = config::load_trust(&host.paths).unwrap_err();
     assert!(format!("{error:#}").contains("cannot verify revocations"));
+}
+
+#[test]
+fn a_failed_intake_leaves_no_copy_behind() {
+    let host = Host::new();
+    let (instance, _) = host.spool();
+    std::fs::write(
+        host.spooled(&instance).join("artifacts/bin/k3s"),
+        b"tampered",
+    )
+    .unwrap();
+    refusal(host.intake(&instance));
+    assert!(!host.paths.work_dir(&instance).exists());
+}
+
+#[test]
+fn an_unapproved_request_is_refused_before_any_artifact_is_copied() {
+    let mut host = Host::new();
+    // Too big to copy, so reaching the copy would fail on size instead.
+    host.config.max_artifact_bytes = 4;
+    let (instance, mut request) = host.spool();
+    request.approvals.clear();
+    std::fs::write(
+        host.spooled(&instance).join("request.json"),
+        serde_json::to_vec(&request).unwrap(),
+    )
+    .unwrap();
+    let message = refusal(host.intake(&instance));
+    assert!(message.contains("execute_plan"), "{message}");
+    assert!(!host.paths.work_dir(&instance).exists());
 }

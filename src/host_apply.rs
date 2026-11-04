@@ -4,12 +4,13 @@
 //! The server writes a [`HostApplyRequest`] and the release workdir into a
 //! spool directory it owns, under the name [`instance_key`] derives, and
 //! starts `tenkai-host-apply@<instance>.service`. The applier copies the
-//! request into root-owned storage and calls [`verify_copied_request`] on the
-//! copy: the release signature against root-owned trust roots (revocation and
-//! signer windows included), `executor = "host"`, every artifact digest, the
-//! plan digest and step, and the approvals against the root-owned
-//! [`HostApprovalPolicy`]. Only a verified step reaches the applied-state
-//! critical section and its command.
+//! request into root-owned storage and calls [`verify_request`] on the copy:
+//! the release signature against root-owned trust roots (revocation and
+//! signer windows included), `executor = "host"`, the plan digest and step,
+//! and the approvals against the root-owned [`HostApprovalPolicy`]. Only then
+//! does it copy the release workdir and check every artifact digest
+//! ([`VerifiedHostStep::verify_artifacts`]). Only a verified step reaches the
+//! applied-state critical section and its command.
 
 mod policy;
 mod request;
@@ -26,4 +27,4 @@ pub use request::{
     ARTIFACTS_DIR, HostApplyRequest, MAX_REQUEST_BYTES, REQUEST_FILE, REQUEST_SCHEMA, instance_key,
     product_key, validate_instance_name,
 };
-pub use verify::{HostRelease, HostTrust, VerifiedHostStep, verify_copied_request};
+pub use verify::{HostRelease, HostTrust, VerifiedHostStep, verify_copied_request, verify_request};

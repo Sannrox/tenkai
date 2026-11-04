@@ -15,14 +15,6 @@ use anyhow::{Context as _, Result, bail};
 use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, Stat};
 use tenkai::host_apply::{ARTIFACTS_DIR, HostApplyRequest, MAX_REQUEST_BYTES, REQUEST_FILE};
 
-/// A request and its release workdir, copied and parsed.
-#[derive(Debug)]
-pub struct CopiedRequest {
-    pub request: HostApplyRequest,
-    /// The copied release workdir the command runs in.
-    pub workdir: PathBuf,
-}
-
 /// Bounds on what one release may copy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CopyLimits {
@@ -32,15 +24,18 @@ pub struct CopyLimits {
     pub max_entries: u64,
 }
 
-/// Copy `<spool>/<instance>/request.json` and the deploy inputs its manifest
-/// declares under `<spool>/<instance>/artifacts/` into `dest`, which must not
-/// exist yet and whose parent is root-owned.
-pub fn copy_request(
-    spool: &Path,
-    instance: &str,
-    dest: &Path,
-    limits: CopyLimits,
-) -> Result<CopiedRequest> {
+/// A spooled request document, copied and parsed, with its spool directory
+/// still open so the artifacts come from the same directory.
+#[derive(Debug)]
+pub struct SpooledRequest {
+    pub request: HostApplyRequest,
+    instance_fd: OwnedFd,
+    dest: PathBuf,
+}
+
+/// Copy `<spool>/<instance>/request.json` into `dest`, which must not exist
+/// yet and whose parent is root-owned, and parse the copied bytes.
+pub fn copy_request(spool: &Path, instance: &str, dest: &Path) -> Result<SpooledRequest> {
     tenkai::host_apply::validate_instance_name(instance)?;
     let spool_fd = rustix::fs::open(
         spool,
@@ -52,40 +47,53 @@ pub fn copy_request(
         .with_context(|| format!("opening spooled instance {instance}"))?;
     std::fs::create_dir(dest).with_context(|| format!("creating {}", dest.display()))?;
     std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o700))?;
-
-    let mut budget = Budget {
-        bytes_left: MAX_REQUEST_BYTES,
-        entries_left: 0,
-    };
-    let bytes = copy_file_at(
-        instance_fd.as_fd(),
-        REQUEST_FILE,
-        &dest.join(REQUEST_FILE),
-        &mut budget,
-    )
-    .context("copying the host apply request")?;
-    let request = HostApplyRequest::parse(&bytes)?;
-    let manifest = tenkai::manifest::parse_raw(&request.manifest)
-        .context("host release manifest is not valid")?;
-
-    let workdir = dest.join(ARTIFACTS_DIR);
-    std::fs::create_dir(&workdir)?;
-    std::fs::set_permissions(&workdir, std::fs::Permissions::from_mode(0o755))?;
-    let mut budget = Budget {
-        bytes_left: limits.max_bytes,
-        entries_left: limits.max_entries,
-    };
-    let inputs = manifest.immutable_inputs();
-    if !inputs.is_empty() {
-        let artifacts_fd = open_dir_at(instance_fd.as_fd(), ARTIFACTS_DIR)
-            .context("opening the spooled release artifacts")?;
-        for input in disjoint_inputs(&inputs) {
-            budget.entry()?;
-            copy_input(artifacts_fd.as_fd(), input, &workdir, &mut budget)
-                .with_context(|| format!("copying deploy input {input}"))?;
-        }
+    let (file, mode, size) = open_regular_at(instance_fd.as_fd(), REQUEST_FILE)
+        .context("opening the host apply request")?;
+    if size > MAX_REQUEST_BYTES {
+        bail!("the host apply request exceeds {MAX_REQUEST_BYTES} bytes");
     }
-    Ok(CopiedRequest { request, workdir })
+    let mut bytes = Vec::with_capacity(size as usize);
+    file.take(size.saturating_add(1)).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 != size {
+        bail!("{REQUEST_FILE} changed size while it was copied");
+    }
+    let mut out = create_copy(&dest.join(REQUEST_FILE))?;
+    out.write_all(&bytes)?;
+    out.sync_all()?;
+    std::fs::set_permissions(
+        dest.join(REQUEST_FILE),
+        std::fs::Permissions::from_mode(mode),
+    )?;
+    Ok(SpooledRequest {
+        request: HostApplyRequest::parse(&bytes)?,
+        instance_fd,
+        dest: dest.to_path_buf(),
+    })
+}
+
+impl SpooledRequest {
+    /// Copy the deploy `inputs` from `<spool>/<instance>/artifacts/` into the
+    /// copy's `artifacts/` and return that workdir. Call it only after the
+    /// request verified; its `inputs` come from the signed manifest.
+    pub fn copy_artifacts(&self, inputs: &[String], limits: CopyLimits) -> Result<PathBuf> {
+        let workdir = self.dest.join(ARTIFACTS_DIR);
+        std::fs::create_dir(&workdir)?;
+        std::fs::set_permissions(&workdir, std::fs::Permissions::from_mode(0o755))?;
+        let mut budget = Budget {
+            bytes_left: limits.max_bytes,
+            entries_left: limits.max_entries,
+        };
+        if !inputs.is_empty() {
+            let artifacts_fd = open_dir_at(self.instance_fd.as_fd(), ARTIFACTS_DIR)
+                .context("opening the spooled release artifacts")?;
+            for input in disjoint_inputs(inputs) {
+                budget.entry()?;
+                copy_input(artifacts_fd.as_fd(), input, &workdir, &mut budget)
+                    .with_context(|| format!("copying deploy input {input}"))?;
+            }
+        }
+        Ok(workdir)
+    }
 }
 
 struct Budget {
@@ -163,10 +171,7 @@ fn copy_input(
 fn copy_entry_at(dir: BorrowedFd<'_>, name: &str, dest: &Path, budget: &mut Budget) -> Result<()> {
     let stat = entry_stat(dir, name)?;
     match FileType::from_raw_mode(stat.st_mode as _) {
-        FileType::RegularFile => {
-            copy_file_at(dir, name, dest, budget)?;
-            Ok(())
-        }
+        FileType::RegularFile => copy_file_at(dir, name, dest, budget),
         FileType::Directory => {
             let child = open_dir_at(dir, name)?;
             same_entry(&stat, &rustix::fs::fstat(&child)?, name)?;
@@ -200,14 +205,24 @@ fn copy_entry_at(dir: BorrowedFd<'_>, name: &str, dest: &Path, budget: &mut Budg
     }
 }
 
-/// Copy one regular file and return its bytes. The open descriptor must be
-/// the same single-link file the earlier `lstat` saw.
-fn copy_file_at(
-    dir: BorrowedFd<'_>,
-    name: &str,
-    dest: &Path,
-    budget: &mut Budget,
-) -> Result<Vec<u8>> {
+/// Stream one regular file into `dest` through a bounded buffer.
+fn copy_file_at(dir: BorrowedFd<'_>, name: &str, dest: &Path, budget: &mut Budget) -> Result<()> {
+    let (file, mode, size) = open_regular_at(dir, name)?;
+    budget.bytes(size)?;
+    let mut out = create_copy(dest)?;
+    let copied = std::io::copy(&mut file.take(size.saturating_add(1)), &mut out)?;
+    if copied != size {
+        bail!("{name} changed size while it was copied");
+    }
+    out.sync_all()?;
+    std::fs::set_permissions(dest, std::fs::Permissions::from_mode(mode))?;
+    Ok(())
+}
+
+/// Open a regular file without following links. The open descriptor must
+/// be the same single-link file the earlier `lstat` saw. Returns the file,
+/// its permission bits, and its size.
+fn open_regular_at(dir: BorrowedFd<'_>, name: &str) -> Result<(std::fs::File, u32, u64)> {
     let before = entry_stat(dir, name)?;
     if FileType::from_raw_mode(before.st_mode as _) != FileType::RegularFile {
         bail!("{name} is not a regular file");
@@ -226,25 +241,19 @@ fn copy_file_at(
     }
     let mode = permission_bits(&opened, name)?;
     let size = u64::try_from(opened.st_size).context("negative file size")?;
-    budget.bytes(size)?;
-    let mut bytes = Vec::with_capacity(size as usize);
-    std::fs::File::from(fd)
-        .take(size.saturating_add(1))
-        .read_to_end(&mut bytes)?;
-    if bytes.len() as u64 != size {
-        bail!("{name} changed size while it was copied");
-    }
-    let mut out = std::fs::OpenOptions::new()
+    Ok((std::fs::File::from(fd), mode, size))
+}
+
+/// A new file in the root-owned copy, readable only by root until its
+/// permission bits are set.
+fn create_copy(dest: &Path) -> Result<std::fs::File> {
+    std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
         .mode(0o600)
         .open(dest)
-        .with_context(|| format!("creating {}", dest.display()))?;
-    out.write_all(&bytes)?;
-    out.sync_all()?;
-    std::fs::set_permissions(dest, std::fs::Permissions::from_mode(mode))?;
-    Ok(bytes)
+        .with_context(|| format!("creating {}", dest.display()))
 }
 
 fn open_dir_at(dir: BorrowedFd<'_>, name: &str) -> Result<OwnedFd> {
