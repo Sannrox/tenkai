@@ -48,6 +48,15 @@ fn a_group_with_another_process_holds_the_product() {
     let error = execution_gone(&root, &step).unwrap_err();
     assert!(format!("{error:#}").contains("still running"), "{error:#}");
 
+    // A process in a group below the unit's group counts too.
+    std::fs::write(group.join("cgroup.procs"), "").unwrap();
+    let worker = group.join("workers");
+    std::fs::create_dir_all(&worker).unwrap();
+    std::fs::write(worker.join("cgroup.procs"), "4343\n").unwrap();
+    let error = execution_gone(&root, &step).unwrap_err();
+    assert!(format!("{error:#}").contains("4343"), "{error:#}");
+    std::fs::remove_dir_all(&worker).unwrap();
+
     // Only the settling applier itself is left.
     std::fs::write(
         group.join("cgroup.procs"),

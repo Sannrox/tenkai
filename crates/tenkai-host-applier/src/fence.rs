@@ -36,9 +36,10 @@ pub fn is_unit_group(path: &str) -> bool {
             .is_some_and(|instance| tenkai::host_apply::validate_instance_name(instance).is_ok())
 }
 
-/// Refuse while `started`'s control group under `root` still holds a process
-/// other than this applier. A group that no longer exists is empty; a start
-/// that recorded no group (outside the unit) has nothing to check.
+/// Refuse while `started`'s control group under `root`, or any group below
+/// it, still holds a process other than this applier. A group that no longer
+/// exists is empty; a start that recorded no group (outside the unit) has
+/// nothing to check.
 pub fn execution_gone(root: &Path, started: &HostApplyStarted) -> Result<()> {
     let Some(group) = &started.cgroup else {
         return Ok(());
@@ -46,24 +47,43 @@ pub fn execution_gone(root: &Path, started: &HostApplyStarted) -> Result<()> {
     if !is_unit_group(group) {
         bail!("recorded control group {group} is not an instance of tenkai-host-apply@.service");
     }
-    let procs = root
-        .join(group.trim_start_matches('/'))
-        .join("cgroup.procs");
-    let listed = match std::fs::read_to_string(&procs) {
-        Ok(listed) => listed,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(error).with_context(|| format!("reading {}", procs.display()));
-        }
-    };
     let me = std::process::id().to_string();
-    if listed.lines().any(|pid| !pid.is_empty() && pid != me) {
+    if let Some(pid) = other_process(&root.join(group.trim_start_matches('/')), &me)? {
         bail!(
-            "step {} of {} in {} was interrupted, but processes it started are still running in {group}; the product admits nothing until they are gone",
+            "step {} of {} in {} was interrupted, but process {pid} it started is still running in {group}; the product admits nothing until it is gone",
             started.instance,
             started.product,
             started.environment
         );
     }
     Ok(())
+}
+
+/// The first process in `dir`'s group or a group below it that is not `me`.
+fn other_process(dir: &Path, me: &str) -> Result<Option<String>> {
+    let procs = dir.join("cgroup.procs");
+    match std::fs::read_to_string(&procs) {
+        Ok(listed) => {
+            if let Some(pid) = listed.lines().find(|pid| !pid.is_empty() && *pid != me) {
+                return Ok(Some(pid.to_owned()));
+            }
+        }
+        // The group, or a subgroup, went away while it was walked.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("reading {}", procs.display())),
+    }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("listing {}", dir.display())),
+    };
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_type()?.is_dir()
+            && let Some(pid) = other_process(&entry.path(), me)?
+        {
+            return Ok(Some(pid));
+        }
+    }
+    Ok(None)
 }

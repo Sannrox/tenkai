@@ -99,55 +99,43 @@ pub async fn run_command(
         .context("the host command has no process id")?;
     tokio::pin!(stop);
     let end = tokio::select! {
-        status = child.wait() => {
-            let status = status.context("waiting for the host command")?;
-            match status.code() {
-                Some(0) => CommandEnd {
-                    outcome: HostApplyOutcome::Succeeded,
-                    exit_status: Some(0),
-                    detail: "the command exited with status 0".into(),
-                },
-                code => CommandEnd {
-                    outcome: HostApplyOutcome::Failed,
-                    exit_status: code,
-                    detail: format!("the command ended with {status}"),
-                },
-            }
-        }
-        _ = tokio::time::sleep(timeout) => {
-            kill_group_and_reap(&mut child, group).await?;
-            CommandEnd {
-                outcome: HostApplyOutcome::TimedOut,
-                exit_status: None,
-                detail: format!(
-                    "the command exceeded the applier's {}s timeout; its process group was killed",
-                    timeout.as_secs()
-                ),
-            }
-        }
-        _ = &mut stop => {
-            kill_group_and_reap(&mut child, group).await?;
-            CommandEnd {
-                outcome: HostApplyOutcome::Stopped,
-                exit_status: None,
-                detail: "the step was stopped; its process group was killed".into(),
-            }
-        }
+        status = child.wait() => match status {
+            Ok(status) if status.success() => Ok(CommandEnd {
+                outcome: HostApplyOutcome::Succeeded,
+                exit_status: Some(0),
+                detail: "the command exited with status 0".into(),
+            }),
+            Ok(status) => Ok(CommandEnd {
+                outcome: HostApplyOutcome::Failed,
+                exit_status: status.code(),
+                detail: format!("the command ended with {status}"),
+            }),
+            Err(error) => Err(anyhow::Error::from(error).context("waiting for the host command")),
+        },
+        _ = tokio::time::sleep(timeout) => Ok(CommandEnd {
+            outcome: HostApplyOutcome::TimedOut,
+            exit_status: None,
+            detail: format!(
+                "the command exceeded the applier's {}s timeout; its process group was killed",
+                timeout.as_secs()
+            ),
+        }),
+        _ = &mut stop => Ok(CommandEnd {
+            outcome: HostApplyOutcome::Stopped,
+            exit_status: None,
+            detail: "the step was stopped; its process group was killed".into(),
+        }),
     };
+    // Every path ends here. While the leader is unreaped the group id is
+    // still the command's; a group already empty (ESRCH) is fine, and the
+    // sweep below finds whatever left it.
+    if child.try_wait().ok().flatten().is_none() {
+        let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+    }
     stop_descendants();
-    Ok(end)
-}
-
-/// Kill the command's process group, then reap its leader. The leader is
-/// not reaped yet, so the group id is still the command's.
-async fn kill_group_and_reap(
-    child: &mut tokio::process::Child,
-    group: rustix::process::Pid,
-) -> Result<()> {
-    rustix::process::kill_process_group(group, rustix::process::Signal::KILL)
-        .context("killing the host command's process group")?;
-    child.wait().await.context("reaping the host command")?;
-    Ok(())
+    end
 }
 
 /// Kill and reap the applier's children until it has none. With
