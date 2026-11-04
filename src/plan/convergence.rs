@@ -656,17 +656,24 @@ async fn compute_snapshot_with_policy(
     }
     match executors.host() {
         Ok(host) => {
-            // Only products this server delivered to the environment: a
-            // record of a product it never managed here is not its to remove.
+            // Only products this server delivered to the environment: its
+            // deployment history names them, or the step that last started
+            // for them is one of its plans (a first install whose outcome
+            // was never recorded). A record of a product it never managed
+            // here is not its to remove.
             for record in host.applied_states(env)? {
-                let managed = ["deployed", "deployed_prev", "deployment_health"]
+                let recorded = ["deployed", "deployed_prev", "deployment_health"]
                     .iter()
                     .any(|key| {
                         env_obj
                             .properties
                             .contains_key(&format!("{key}.{}", record.product))
                     });
-                if managed && !products.contains(&record.product) {
+                let planned = match &record.last_started {
+                    Some(started) => ctx.get(&started.plan_id).await?.is_some(),
+                    None => false,
+                };
+                if (recorded || planned) && !products.contains(&record.product) {
                     removable.insert(record.product);
                 }
             }

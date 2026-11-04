@@ -1218,3 +1218,33 @@ async fn an_unknown_host_deployment_without_a_record_is_not_reported_removed() {
         "{error}"
     );
 }
+
+#[tokio::test]
+async fn an_install_whose_outcome_was_never_recorded_can_still_be_removed() {
+    let mut host = Host::new("unrecorded").await;
+    host.release("1.0.0", false).await;
+    let plan = host.plan().await;
+    host.apply(&plan).await.unwrap();
+    // As if the server crashed before recording the first install.
+    let mut environment = crate::environment::environment(&mut host.ctx, "edge")
+        .await
+        .unwrap();
+    environment
+        .properties
+        .retain(|key, _| !key.ends_with(".cluster"));
+    host.ctx.put(environment).await.unwrap();
+    crate::environment::unsubscribe(
+        &mut host.ctx,
+        "edge",
+        "cluster",
+        &host.executors,
+        |_| Ok(()),
+    )
+    .await
+    .unwrap();
+
+    let remove = host.plan().await;
+
+    assert_eq!(remove.steps.len(), 1);
+    assert_eq!(remove.steps[0].action, Action::Remove);
+}
