@@ -65,7 +65,9 @@ the failing step's adapters. Under this decision every operation resolves the
 executor of the release it acts on: activating the target uses the target's,
 and removing or restoring the previous release uses the previous release's.
 That covers apply, rollback, recovery, restart, and observation, including
-`cluster_observe_executor`, which reads the variable directly today.
+`cluster_observe_executor`, which reads the variable directly today. The one
+exception is `host` releases: they get no automatic restore (section 2), and a
+failed host step leaves the step failed until an approved rollback plan runs.
 
 A product keeps one executor across its releases in an environment. A plan
 whose target release resolves to a different executor than the currently
@@ -95,11 +97,11 @@ and its own journal stream. A polkit rule lets the `tenkai` user `start` and
 other verb, no sudoers entry.
 
 **Request.** For each host step the server writes a request into a spool
-directory it owns: the release id, the signed release, the signed plan approval
-for the plan that contains the step, and the step's action (`install`,
-`uninstall`, or `health`). The instance name is a digest of the approved plan
-digest, the step, and the action, so a retry of the same step addresses the
-same instance and a different step cannot reuse it.
+directory it owns: the executable plan in Tenkai's versioned plan encoding, the
+signed release, the plan approval envelopes, the step id, and the step's action
+(`install`, `uninstall`, or `health`). The server names the instance after a
+digest of the plan digest, the step, and the action; the applier recomputes that
+key from the verified request and refuses an instance whose name does not match.
 
 **Verification before anything runs.** The applier:
 
@@ -114,13 +116,18 @@ same instance and a different step cannot reuse it.
    that state;
 3. checks that the signed manifest declares `executor = "host"` and that every
    copied artifact matches its signed digest;
-4. verifies the plan approval ([ADR 0037](0037-multi-party-plan-approval.md))
-   against root-owned approval trust roots, checks it has not expired, and
-   checks that the approved plan contains exactly this release, environment,
-   and action. An `uninstall` needs an approved plan that removes the product,
-   like any other change;
+4. recomputes the plan digest from the copied plan, finds the step, and checks
+   that it names exactly this release, environment, and action. It then
+   evaluates the approval envelopes ([ADR 0037](0037-multi-party-plan-approval.md))
+   for that plan digest against a root-owned host approval policy in
+   `/etc/tenkai`: the trusted approvers, the quorum, and the purposes it allows.
+   It checks expiry and that purposes such as rollback and downgrade carry the
+   approvals the policy requires. An `uninstall` needs an approved plan that
+   removes the product, like any other change;
 5. refuses an instance it has already completed and returns that recorded
-   result instead of running again.
+   result instead of running again. Completion records live in persistent
+   root-owned state, `/var/lib/tenkai-host`, so a reboot does not reopen a
+   completed step.
 
 Only then does it run the copied release's command. It builds the command's
 environment itself from a fixed allowlist plus values from the signed manifest;
@@ -133,19 +140,34 @@ must equal the signed values.
 server does. It enforces its own timeout and kills the command's process group
 when it fires. The server cancels on lease loss with the allowed `stop`, which
 the unit maps to the same kill. The result record (instance, release digest,
-action, outcome, exit status, timestamps) is written root-owned and read-only to
-the `tenkai` user; the server accepts it only when it matches the instance it
+action, outcome, exit status, timestamps) is written to `/var/lib/tenkai-host`,
+root-owned and readable but not writable by the `tenkai` user; the server accepts it only when it matches the instance it
 started. A missing or mismatched result is a failed step. A completed instance
-is never re-run, so a restart or a replayed request cannot run the command
-twice.
+is never re-run, so a restart, a reboot, or a replayed request cannot run the
+command twice.
+
+**No automatic restore.** A host step authorizes one release and one action. The
+applier therefore never runs an unapproved restore of the release a failed step
+replaced. A failed host step stays failed, and returning to the previous release
+is a rollback plan with its own approvals.
+
+**Approvals for host steps are never the server's own.** Today the server can
+auto-approve with a key it owns. Such keys are excluded from the host approval
+policy, so every host step needs approval from a human or an external approver
+whose key the `tenkai` user cannot read. Host releases, such as installing or
+upgrading the cluster, are rare and high-impact, so they stay attended.
 
 **What this buys.** A compromised `tenkai` user can only cause the root side to
 run a release that a trusted signer signed for `host` execution, is not revoked
-or outside its validity window, and appears in an unexpired plan approval for
-that exact action, and each such step at most once. It cannot run arbitrary
-commands, alter what runs, replay an old release, or uninstall a product without
-an approved plan. Approval keys used for unattended approval must therefore not
-be readable by the `tenkai` user.
+or outside its validity window, and appears in a plan whose quorum of approvals
+satisfies the root-owned host policy for that exact action, and each such step
+at most once. It cannot run arbitrary commands, alter what runs, approve its own
+host steps, or uninstall a product without an approved plan.
+
+**Known limit: recall.** Catalog recall is server state the root side cannot
+see. A recalled host release can still run while a plan that approves it is
+unexpired. Approval expiry bounds that window, and a signed recall statement the
+applier can check is future work.
 
 ### 3. A cluster release hands Tenkai its own cluster identity
 
@@ -194,8 +216,10 @@ infer compatibility from a running process.
 - Hosts that use host releases install the template unit, the applier, the
   polkit rule, and root-owned trust roots. Hosts that do not are unchanged.
 - Host releases cost a unit start, an artifact copy, and a second signature and
-  approval verification per step. Unattended host changes need an approval key
-  the `tenkai` user cannot read.
+  approval verification per step.
+- Host steps are always attended: they need human or external approvals under
+  a root-owned policy, never the server's own auto-approval. They have no
+  automatic restore; rollback is an approved plan.
 - `TENKAI_SOFTWARE_EXECUTOR` remains, as the default for releases that declare
   nothing.
 
