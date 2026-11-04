@@ -368,7 +368,7 @@ async fn health_reports_a_stored_first_administrator_on_every_replica() {
     assert!(reader.refresh().unwrap());
     assert_eq!(status(second.clone()).await, "configured");
     // Removing the last stored management rule reports missing again.
-    assert!(writer.remove("tenkai-admins", None).unwrap());
+    assert!(writer.remove("tenkai-admins", None).unwrap().is_some());
     assert!(reader.refresh().unwrap());
     assert_eq!(status(second).await, "missing");
     let _ = std::fs::remove_dir_all(dir);

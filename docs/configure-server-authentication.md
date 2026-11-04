@@ -229,7 +229,11 @@ without editing the file and restarting every replica (#836). The
   created it, when, and why. The store keeps a generation that grows with
   every change; every replica checks it every 5 seconds and reloads the
   rules when it moved, and the replica that made a change applies it at
-  once. Stored rules sit in the hub-wide tables on PostgreSQL, so every
+  once: the change reads the rules back in its own transaction (#848). A
+  change whose write fails may still have committed, so the replica that
+  tried it applies no stored rules, and `/readyz` reports it not ready,
+  until it reads the rules again (at once if the store answers, else at
+  the next check). Stored rules sit in the hub-wide tables on PostgreSQL, so every
   replica shares them.
 - `first_administrator` on `/healthz` and in the startup line counts stored
   rules too (`stored_rules=` on the startup line).
@@ -267,8 +271,12 @@ Manage them over HTTP (#837):
   list. `DELETE /v1/grant-rules` with `{"value": ..., "reason": ...,
   "generation": ...}` removes one.
 - A change names the `generation` it listed and is refused with `409` when
-  the rules changed since. A claim value the file declares is refused with
-  `400`; one already stored with `409`.
+  the rules changed since. When the rules already hold the change, as when
+  a retry follows a change that committed, the `409` says so. A claim
+  value the file declares is refused with `400`; one already stored with
+  `409`. A change answers `201`/`200` once it commits; a `503` means its
+  write failed and may still have committed, so list the rules before
+  retrying.
 - Listing and every change need fleet management: the
   `TENKAI_MANAGEMENT_TOKEN` for that request (recorded as `management`,
   never stored or logged), or a signed-in principal whose grants give
@@ -277,7 +285,9 @@ Manage them over HTTP (#837):
   refused, and nothing is written.
 - Each change is audited before and after it is written
   (`grant_rule.create.*`, `grant_rule.remove.*`) with its principal and
-  reason (`grant-rule/<value> reason=<reason>`).
+  reason (`grant-rule/<value> reason=<reason>`): `requested`, then
+  `completed` once it commits, `refused` when nothing was written, or
+  `failed` when the write failed and may still have committed.
 
 To set up the first administrator with no rule in the file, list with the
 management token, then create `tenkai-admins` with `read` and

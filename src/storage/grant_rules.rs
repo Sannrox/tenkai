@@ -40,6 +40,17 @@ fn bump(connection: &Connection) -> Result<i64> {
     )?)
 }
 
+/// Every row and the generation, inside the caller's transaction.
+fn rules(connection: &Connection) -> Result<StoredGrantRules> {
+    let current = generation(connection)?;
+    let mut statement =
+        connection.prepare("SELECT value, rule_json FROM grant_rules ORDER BY value")?;
+    let rows = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(StoredGrantRules::decode(current, rows))
+}
+
 impl GrantRuleStore for SqliteStore {
     fn grant_rule_generation(&self) -> Result<i64> {
         generation(&*self.connection()?)
@@ -48,16 +59,9 @@ impl GrantRuleStore for SqliteStore {
     fn grant_rules(&self) -> Result<StoredGrantRules> {
         let mut connection = self.connection()?;
         let tx = connection.transaction()?;
-        let current = generation(&tx)?;
-        let rows = {
-            let mut statement =
-                tx.prepare("SELECT value, rule_json FROM grant_rules ORDER BY value")?;
-            statement
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-        };
+        let read = rules(&tx)?;
         tx.commit()?;
-        Ok(StoredGrantRules::decode(current, rows))
+        Ok(read)
     }
 
     fn insert_grant_rule(
@@ -82,9 +86,10 @@ impl GrantRuleStore for SqliteStore {
         if inserted == 0 {
             return Ok(GrantRuleWrite::Refused);
         }
-        let next = bump(&tx)?;
+        bump(&tx)?;
+        let after = rules(&tx)?;
         tx.commit()?;
-        Ok(GrantRuleWrite::Applied(next))
+        Ok(GrantRuleWrite::Applied(after))
     }
 
     fn delete_grant_rule(&self, value: &str, expected: Option<i64>) -> Result<GrantRuleWrite> {
@@ -96,9 +101,10 @@ impl GrantRuleStore for SqliteStore {
         if tx.execute("DELETE FROM grant_rules WHERE value = ?1", params![value])? == 0 {
             return Ok(GrantRuleWrite::Refused);
         }
-        let next = bump(&tx)?;
+        bump(&tx)?;
+        let after = rules(&tx)?;
         tx.commit()?;
-        Ok(GrantRuleWrite::Applied(next))
+        Ok(GrantRuleWrite::Applied(after))
     }
 }
 
