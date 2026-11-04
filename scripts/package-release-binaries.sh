@@ -7,13 +7,16 @@
 #   scripts/package-release-binaries.sh package-hub --out DIR [--bin-dir DIR]
 #       [--platform ID] [--strip]
 #   scripts/package-release-binaries.sh checksums --out DIR [--require-complete]
+#   scripts/package-release-binaries.sh check-glibc --out DIR
 #   scripts/package-release-binaries.sh names
 #   scripts/package-release-binaries.sh self-test
 #
 # Community hosts: tenkaictl, tenkai-server, tenkai-executor-guard,
 # tenkai-runtime, tenkai-runtime-guard. Hub host asset:
 # tenkai-server-postgres-<platform> (built with --features postgres,ui).
-# Platforms: linux-x86_64, darwin-aarch64.
+# Platforms: linux-x86_64, darwin-aarch64. check-glibc refuses a Linux host
+# that needs a glibc newer than LINUX_GLIBC_FLOOR (built by
+# scripts/build-linux-release-hosts.sh).
 # The HTTP API contract (api/tenkai-http-v1.schema.json) is attached and
 # checksummed with them. These files are GitHub Release packaging, not
 # Catalog artifacts.
@@ -25,9 +28,12 @@ HUB_SERVER_ASSET=tenkai-server-postgres
 PLATFORMS=(linux-x86_64 darwin-aarch64)
 CHECKSUMS_NAME=SHA256SUMS
 CONTRACT_ASSETS=(tenkai-http-v1.schema.json)
+# Oldest glibc a linux-x86_64 host may require (RHEL 8). Keep in step with the
+# build image in scripts/build-linux-release-hosts.sh.
+LINUX_GLIBC_FLOOR=2.28
 
 usage() {
-  sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-2}"
 }
 
@@ -98,6 +104,14 @@ complete_names() {
   for platform in "${PLATFORMS[@]}"; do
     packaged_hub_name "$platform"
   done
+}
+
+linux_host_names() {
+  local host
+  for host in "${HOSTS[@]}"; do
+    packaged_name "$host" linux-x86_64
+  done
+  packaged_hub_name linux-x86_64
 }
 
 checksum_tool() {
@@ -311,6 +325,41 @@ cmd_checksums() {
   verify_checksums "$out" >/dev/null
 }
 
+# Fail unless every linux-x86_64 host asset in --out is an x86-64 ELF
+# executable linked to glibc whose versioned glibc symbols are all at or below
+# LINUX_GLIBC_FLOOR, so it starts on every supported distribution (#904).
+cmd_check_glibc() {
+  local out=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --out)
+        [[ $# -ge 2 ]] || fail "--out requires a directory"
+        out="$2"
+        shift 2
+        ;;
+      -h | --help) usage 0 ;;
+      *) fail "unknown check-glibc argument: $1" ;;
+    esac
+  done
+  [[ -n "$out" ]] || fail "check-glibc requires --out"
+  command -v readelf >/dev/null 2>&1 || fail "readelf is required by check-glibc"
+
+  local name path header newest
+  while IFS= read -r name; do
+    path="${out}/${name}"
+    [[ -f "$path" ]] || fail "missing Linux host asset: ${name}"
+    header="$(readelf -hW "$path" 2>/dev/null)" || fail "${name} is not an ELF executable"
+    grep -Eq 'Type:[[:space:]]+(EXEC|DYN)' <<<"$header" || fail "${name} is not an ELF executable"
+    grep -Eq 'Machine:.*X86-64' <<<"$header" || fail "${name} is not an x86-64 executable"
+    newest="$(readelf -VW "$path" | { grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' || true; } | sed 's/^GLIBC_//' | sort -V | tail -n 1)"
+    # Hosts dlopen system PKCS#11 modules, so they must link glibc.
+    [[ -n "$newest" ]] || fail "${name} does not link glibc"
+    if [[ "$(printf '%s\n%s\n' "$LINUX_GLIBC_FLOOR" "$newest" | sort -V | tail -n 1)" != "$LINUX_GLIBC_FLOOR" ]]; then
+      fail "${name} requires glibc ${newest}, newer than the ${LINUX_GLIBC_FLOOR} floor"
+    fi
+  done < <(linux_host_names)
+}
+
 expect_fail() {
   local message="$1"
   shift
@@ -390,6 +439,26 @@ cmd_self_test() {
   printf 'tampered\n' >>"${out}/$(packaged_name tenkaictl "$platform")"
   expect_fail "FAILED" verify_checksums "$out"
 
+  # check-glibc: the passing case is the CI release dry run, which builds the
+  # real hosts. Here, refuse a missing asset, a non-ELF stub, and (on Linux)
+  # this machine's shell when its glibc is newer than the floor.
+  if command -v readelf >/dev/null 2>&1; then
+    local linux="${tmp}/linux" name shell_glibc
+    mkdir -p "$linux"
+    expect_fail "missing Linux host asset" bash "$0" check-glibc --out "$linux"
+    while IFS= read -r name; do
+      printf 'stub\n' >"${linux}/${name}"
+    done < <(linux_host_names)
+    expect_fail "is not an ELF executable" bash "$0" check-glibc --out "$linux"
+    shell_glibc="$(readelf -VW /bin/sh 2>/dev/null | grep -oE 'GLIBC_2\.(29|[3-9][0-9])' | head -n 1 || true)"
+    if [[ "$platform" == linux-x86_64 && -n "$shell_glibc" ]]; then
+      while IFS= read -r name; do
+        cp /bin/sh "${linux}/${name}"
+      done < <(linux_host_names)
+      expect_fail "newer than the ${LINUX_GLIBC_FLOOR} floor" bash "$0" check-glibc --out "$linux"
+    fi
+  fi
+
   printf 'package-release-binaries self-test passed\n'
 }
 
@@ -402,6 +471,7 @@ main() {
     package) cmd_package "$@" ;;
     package-hub) cmd_package_hub "$@" ;;
     checksums) cmd_checksums "$@" ;;
+    check-glibc) cmd_check_glibc "$@" ;;
     names) complete_names ;;
     self-test) cmd_self_test "$@" ;;
     -h | --help | "") usage 0 ;;
