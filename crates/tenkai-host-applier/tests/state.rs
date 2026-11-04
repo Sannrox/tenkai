@@ -456,3 +456,40 @@ fn a_missing_state_directory_fails_closed() {
     std::fs::remove_dir_all(&host.paths.state_dir).unwrap();
     assert!(refusal(host.admit(&instance)).contains("must be provisioned"));
 }
+
+#[test]
+fn a_crashed_instance_resolves_from_root_owned_records_without_its_request() {
+    let host = Host::new(Vec::new());
+    let a = host.release("1.0.0");
+    let (install_a, _) = host.spool(install(&a, None, 0));
+    let Admission::Run(running) = host.admit(&install_a).unwrap() else {
+        panic!("first admission runs");
+    };
+    drop(running);
+    // The server's spool is gone, or the approvals expired: recovery needs neither.
+    std::fs::remove_dir_all(host.config.spool_dir.join(&install_a)).unwrap();
+    let recovered = store::recover(&host.paths, &install_a).unwrap().unwrap();
+    assert_eq!(recovered.outcome, HostApplyOutcome::Interrupted);
+    assert_eq!(
+        store::recover(&host.paths, &install_a).unwrap(),
+        Some(recovered)
+    );
+}
+
+#[test]
+fn a_result_kept_only_in_the_record_is_recovered() {
+    let host = Host::new(Vec::new());
+    let a = host.release("1.0.0");
+    let (install_a, _) = host.spool(install(&a, None, 0));
+    let finished = host.step(&install_a, HostApplyOutcome::Succeeded).unwrap();
+    // A crash between the record write and the instance's result file.
+    std::fs::remove_file(
+        tenkai::host_apply::state::instance_dir(&host.paths.state_dir, &install_a)
+            .join(tenkai::host_apply::state::RESULT_FILE),
+    )
+    .unwrap();
+    assert_eq!(
+        store::recover(&host.paths, &install_a).unwrap(),
+        Some(finished)
+    );
+}

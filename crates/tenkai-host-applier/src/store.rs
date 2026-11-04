@@ -57,6 +57,31 @@ pub fn refusal(paths: &ApplierPaths, instance: &str) -> Result<Option<HostApplyR
     read_json(&instance_dir(&paths.state_dir, instance).join(REFUSED_FILE))
 }
 
+/// How `instance` ended, if it ever started, from root-owned records alone:
+/// its result, or, for a start without one, the result the product record
+/// kept or `interrupted`. Runs before any intake, so a crashed instance
+/// resolves even when its request is gone or no longer verifies. Waits for
+/// the product lock when the instance is still running.
+pub fn recover(paths: &ApplierPaths, instance: &str) -> Result<Option<HostApplyResult>> {
+    if let Some(result) = recorded_result(paths, instance)? {
+        return Ok(Some(result));
+    }
+    let started_path = instance_dir(&paths.state_dir, instance).join(STARTED_FILE);
+    let Some(started) = read_json::<HostApplyStarted>(&started_path)? else {
+        return Ok(None);
+    };
+    let _lock = lock_product(paths, &started.environment, &started.product)?;
+    let now_ms = tenkai::now_millis();
+    let mut record = read_record(paths, &started.environment, &started.product)?;
+    settle_last(paths, &mut record, now_ms)?;
+    if let Some(result) = recorded_result(paths, instance)? {
+        return Ok(Some(result));
+    }
+    let result = interrupted(&started, now_ms);
+    write_result(paths, &result)?;
+    Ok(Some(result))
+}
+
 /// What the critical section decided for one verified step.
 #[derive(Debug)]
 pub enum Admission {

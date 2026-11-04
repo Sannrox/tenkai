@@ -15,6 +15,7 @@ pub mod copy;
 pub mod run;
 pub mod store;
 
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
@@ -32,10 +33,10 @@ pub struct Intake {
     pub verified: VerifiedHostStep,
 }
 
-/// Copy `instance` from the spool into a fresh root-owned work directory and
+/// Copy `instance` from the spool into an empty root-owned work directory and
 /// verify the copy at `now_ms`: the request first, and only once it verified
-/// the release workdir. A work directory left by an earlier run of the same
-/// instance is discarded first; a failed intake removes its own.
+/// the release workdir. Whatever an earlier run of the same instance left in
+/// the work directory is discarded first; a failed intake empties its own.
 pub fn intake(
     paths: &ApplierPaths,
     config: &ApplierConfig,
@@ -45,9 +46,9 @@ pub fn intake(
 ) -> Result<Intake> {
     tenkai::host_apply::validate_instance_name(instance)?;
     let work = paths.work_dir(instance);
-    let parent = work.parent().context("work directory has no parent")?;
-    std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-    discard_work(&work)?;
+    std::fs::create_dir_all(&work).with_context(|| format!("creating {}", work.display()))?;
+    std::fs::set_permissions(&work, std::fs::Permissions::from_mode(0o700))?;
+    empty_dir(&work)?;
     let result = (|| {
         let spooled = copy::copy_request(&config.spool_dir, instance, &work)?;
         let verified =
@@ -66,11 +67,39 @@ pub fn intake(
     result
 }
 
-/// Remove an instance's root-owned copy, if there is one.
+/// Remove an instance's root-owned copy, if there is one. Under the unit the
+/// work directory is its `RuntimeDirectory=`, a mount point systemd removes
+/// when the unit stops, so only its contents go here.
 pub fn discard_work(work: &Path) -> Result<()> {
-    match std::fs::remove_dir_all(work) {
+    if !work.exists() {
+        return Ok(());
+    }
+    empty_dir(work)?;
+    match std::fs::remove_dir(work) {
         Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ResourceBusy
+            ) =>
+        {
+            Ok(())
+        }
         Err(error) => Err(error).with_context(|| format!("removing {}", work.display())),
     }
+}
+
+/// Remove everything inside `dir`, which is root-owned.
+fn empty_dir(dir: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        }
+        .with_context(|| format!("removing {}", path.display()))?;
+    }
+    Ok(())
 }

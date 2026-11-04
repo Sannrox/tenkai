@@ -264,3 +264,37 @@ fn stop_kills_the_process_group_and_records_the_step_as_stopped() {
     );
     assert!(matches!(host.record().state, AppliedState::Dirty { .. }));
 }
+
+/// Nothing a command started outlives its step, even when the command exits
+/// on its own and its children left its process group.
+#[cfg(target_os = "linux")]
+#[test]
+fn processes_a_finished_command_left_behind_are_stopped_before_the_step_ends() {
+    let host = host();
+    let out = evidence(&host);
+    let release = host.release_with(
+        "1.0.0",
+        [
+            &format!(
+                "sleep 300 & echo $! > {out}/background; setsid sh -c 'echo $$ > {out}/detached; exec sleep 300' & while [ ! -s {out}/detached ]; do sleep 0.01; done; exit 0",
+                out = out.display()
+            ),
+            "true",
+            "true",
+        ],
+    );
+    let (instance, _) = host.spool(install(&release, 0));
+    let started = Instant::now();
+    // The leftovers hold the applier's stdout, so this returns only once
+    // they are gone.
+    let output = applier(&host, &instance).output().unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(60),
+        "the leftovers ran to completion"
+    );
+    assert!(output.status.success(), "{output:?}");
+    for name in ["background", "detached"] {
+        let pid = std::fs::read_to_string(out.join(name)).unwrap();
+        assert!(!alive(&pid), "the {name} process outlived the step");
+    }
+}

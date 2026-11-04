@@ -30,7 +30,8 @@ impl Applied {
     }
 }
 
-/// Apply `instance`: return its recorded result if it already started;
+/// Apply `instance`: return how it ended if it already started, from
+/// root-owned records alone ([`store::recover`]);
 /// otherwise load root-owned config and trust, copy and verify the request,
 /// admit it in the per-product critical section, run its command until it
 /// exits, times out, or the future that `stop` returns resolves, and record the
@@ -43,7 +44,7 @@ pub async fn apply<F: Future<Output = ()>>(
     stop: impl FnOnce() -> Result<F>,
 ) -> Result<Applied> {
     tenkai::host_apply::validate_instance_name(instance)?;
-    if let Some(result) = store::recorded_result(paths, instance)? {
+    if let Some(result) = store::recover(paths, instance)? {
         return Ok(Applied::Result(result));
     }
     let admitted = (|| {
@@ -69,7 +70,7 @@ pub async fn apply<F: Future<Output = ()>>(
         }
         Admission::Run(running) => running,
     };
-    let end = match stop() {
+    let end = match run::adopt_descendants().and_then(|()| stop()) {
         Ok(stop) => {
             run::run_command(
                 &intake.verified,
