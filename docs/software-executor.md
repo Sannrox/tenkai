@@ -41,6 +41,8 @@ out of scope here. Custom-resource operators are refused.
 
 Hosts (`tenkaictl`, the reconciler) call `tenkai_executor::install()`, then
 select the adapter from `TENKAI_SOFTWARE_EXECUTOR` and pass it into apply.
+A release can also declare its executor with
+[`[deploy] executor`](manifest.md#executor), which accepts the same names.
 Apply does not read that env var during activate/deactivate. Helm and kubectl
 failures capture sanitized stderr. The in-process path waits on workload
 conditions with a short backoff starting at 100 ms (capped at 200 ms) and fails

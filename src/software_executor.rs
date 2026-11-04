@@ -336,34 +336,114 @@ pub fn k8s_label_value(raw: &str) -> String {
     }
 }
 
+/// A software executor named by `[deploy] executor` in a release manifest or by
+/// the process default `TENKAI_SOFTWARE_EXECUTOR` (ADR 0041). Both read the
+/// same name set through [`SoftwareExecutorKind::from_name`]; the test-only
+/// `fake` selector is the one process name a manifest cannot declare.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SoftwareExecutorKind {
+    /// `deploy.install` behind `tenkai-executor-guard`, as the server's user.
+    Shell,
+    /// `deploy.install` run by the root-side host applier.
+    Host,
+    Helm,
+    /// Native manifests through `kubectl`; also named `k8s` and `native`.
+    Kubernetes,
+    KubernetesInProcess,
+    Docker,
+}
+
+impl SoftwareExecutorKind {
+    pub const ALL: [Self; 6] = [
+        Self::Shell,
+        Self::Host,
+        Self::Helm,
+        Self::Kubernetes,
+        Self::KubernetesInProcess,
+        Self::Docker,
+    ];
+
+    /// Canonical name; aliases normalize to it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Shell => "shell",
+            Self::Host => "host",
+            Self::Helm => "helm",
+            Self::Kubernetes => "kubernetes",
+            Self::KubernetesInProcess => "kubernetes-inprocess",
+            Self::Docker => "docker",
+        }
+    }
+
+    /// Parse a canonical name or alias, ASCII case-insensitively, as
+    /// `TENKAI_SOFTWARE_EXECUTOR` always has.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|kind| name.eq_ignore_ascii_case(kind.as_str()))
+            .or_else(|| {
+                (name.eq_ignore_ascii_case("k8s") || name.eq_ignore_ascii_case("native"))
+                    .then_some(Self::Kubernetes)
+            })
+    }
+}
+
+impl std::fmt::Display for SoftwareExecutorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for SoftwareExecutorKind {
+    type Err = anyhow::Error;
+
+    fn from_str(name: &str) -> Result<Self> {
+        Self::from_name(name).with_context(|| {
+            format!(
+                "unknown software executor {name:?}; expected one of shell, host, helm, kubernetes (k8s, native), kubernetes-inprocess, docker"
+            )
+        })
+    }
+}
+
+impl Serialize for SoftwareExecutorKind {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for SoftwareExecutorKind {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        name.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+/// The installed adapter for `kind`. `None` for `shell` (the caller keeps the
+/// `deploy.install` path), for `host` (no adapter yet), and for an adapter the
+/// host binary did not install.
+pub fn software_executor_for(kind: SoftwareExecutorKind) -> Option<Box<dyn SoftwareExecutor>> {
+    let factory = match kind {
+        SoftwareExecutorKind::Shell | SoftwareExecutorKind::Host => return None,
+        SoftwareExecutorKind::Helm => HELM_EXECUTOR.get(),
+        SoftwareExecutorKind::Kubernetes => KUBERNETES_EXECUTOR.get(),
+        SoftwareExecutorKind::KubernetesInProcess => IN_PROCESS_EXECUTOR.get(),
+        SoftwareExecutorKind::Docker => DOCKER_EXECUTOR.get(),
+    };
+    factory.map(|factory| factory())
+}
+
 /// Select a software executor from host runtime configuration.
 ///
-/// Reads `TENKAI_SOFTWARE_EXECUTOR` (helm / kubernetes / kubernetes-inprocess / docker / fake). `None` means
-/// the caller should keep the shell `deploy.install` path. Apply does not
-/// consult this itself; hosts pass the result through `ExecutionOptions`.
+/// Reads `TENKAI_SOFTWARE_EXECUTOR` (a [`SoftwareExecutorKind`] name, or `fake`).
+/// `None` means the caller should keep the shell `deploy.install` path. Apply
+/// does not consult this itself; hosts pass the result through `ExecutionOptions`.
 pub fn selected_software_executor() -> Option<Box<dyn SoftwareExecutor>> {
-    match std::env::var("TENKAI_SOFTWARE_EXECUTOR") {
-        Ok(value) if value.eq_ignore_ascii_case("helm") => {
-            HELM_EXECUTOR.get().map(|factory| factory())
-        }
-        Ok(value) if value.eq_ignore_ascii_case("docker") => {
-            DOCKER_EXECUTOR.get().map(|factory| factory())
-        }
-        Ok(value)
-            if value.eq_ignore_ascii_case("kubernetes")
-                || value.eq_ignore_ascii_case("k8s")
-                || value.eq_ignore_ascii_case("native") =>
-        {
-            KUBERNETES_EXECUTOR.get().map(|factory| factory())
-        }
-        Ok(value) if value.eq_ignore_ascii_case("fake") => {
-            Some(Box::new(FakeSoftwareExecutor::new()))
-        }
-        Ok(value) if value.eq_ignore_ascii_case("kubernetes-inprocess") => {
-            IN_PROCESS_EXECUTOR.get().map(|factory| factory())
-        }
-        _ => None,
+    let value = std::env::var("TENKAI_SOFTWARE_EXECUTOR").ok()?;
+    if value.eq_ignore_ascii_case("fake") {
+        return Some(Box::new(FakeSoftwareExecutor::new()));
     }
+    software_executor_for(SoftwareExecutorKind::from_name(&value)?)
 }
 
 fn request_key(request: &SoftwareApplyRequest) -> String {
@@ -489,6 +569,23 @@ mod tests {
         request.product = "../evil".into();
         assert!(FakeSoftwareExecutor::new().apply(&request).is_err());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn executor_names_round_trip_and_reject_fake() {
+        for kind in SoftwareExecutorKind::ALL {
+            assert_eq!(SoftwareExecutorKind::from_name(kind.as_str()), Some(kind));
+            assert_eq!(
+                SoftwareExecutorKind::from_name(&kind.as_str().to_ascii_uppercase()),
+                Some(kind)
+            );
+        }
+        assert_eq!(
+            SoftwareExecutorKind::from_name("K8s"),
+            Some(SoftwareExecutorKind::Kubernetes)
+        );
+        let err = "fake".parse::<SoftwareExecutorKind>().unwrap_err();
+        assert!(err.to_string().contains("\"fake\""), "{err}");
     }
 
     #[test]

@@ -38,6 +38,42 @@ Deploy commands run with a cleared environment; see
 [environment variables](environment-variables.md#set-by-tenkai-for-deploy-commands)
 for what they receive.
 
+## Executor
+
+`[deploy] executor` names the software executor for this release
+([ADR 0041](decisions/0041-per-release-executor-and-privileged-host-releases.md)):
+
+```toml
+[deploy]
+executor = "kubernetes-inprocess"
+```
+
+| Value | Executor |
+| --- | --- |
+| `shell` | `deploy.install` behind `tenkai-executor-guard`, as the server's user |
+| `host` | `deploy.install` through the root-side host applier |
+| `helm` | Helm chart at the workdir |
+| `kubernetes` (aliases `k8s`, `native`) | `{workdir}/manifests/**` through `kubectl` |
+| `kubernetes-inprocess` | `{workdir}/manifests/**` with server-side apply |
+| `docker` | `{workdir}/docker/host.json` |
+
+These are the [`TENKAI_SOFTWARE_EXECUTOR`](software-executor.md) names, matched
+the same way (ASCII case-insensitively); `fake` is a test selector and is not
+accepted here. Publication refuses any other value and names it, and refuses
+the field on non-software products. When the field is absent, the process
+default applies as before.
+
+The manifest digest is a hash of the manifest text as published, so the value
+is covered by the release signature as written: `k8s` and `kubernetes` select
+the same executor but are different release content, and changing the value
+needs a new `product.version`. A manifest without the field keeps its digest.
+Servers older than this field refuse a manifest that declares it, so declare it
+only once every server and runtime that reads the catalog understands it.
+
+Apply does not read the field yet; it still uses the process default.
+Per-release resolution is tracked in
+[#910](https://github.com/Sannrox/tenkai/issues/910).
+
 ## Delivery signals
 
 Optional `[delivery]` flags are part of the signed manifest. Both default to

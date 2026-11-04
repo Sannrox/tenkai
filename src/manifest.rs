@@ -205,6 +205,11 @@ pub struct DeploySection {
     /// Optional health probe; exit 0 means healthy. Failure triggers rollback.
     #[serde(default)]
     pub health: Option<String>,
+    /// Executor this release declares (ADR 0041). Absent means the process
+    /// default. The manifest digest hashes the raw text, so the value as
+    /// written (alias or canonical) is what the release signature covers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executor: Option<crate::software_executor::SoftwareExecutorKind>,
 }
 
 impl Default for DeploySection {
@@ -215,6 +220,7 @@ impl Default for DeploySection {
             inputs: Vec::new(),
             uninstall: None,
             health: None,
+            executor: None,
         }
     }
 }
@@ -426,6 +432,7 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
     let manifest: Manifest =
         toml::from_str(&raw).with_context(|| format!("parsing manifest {}", path.display()))?;
     validate_software_compatibility(&manifest)?;
+    validate_deploy_executor(&manifest)?;
     manifest.gate.validate_slo()?;
     if let Some(topology) = &manifest.topology {
         topology.validate()?;
@@ -676,11 +683,25 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
 pub fn parse_raw(raw: &str) -> Result<Manifest> {
     let manifest: Manifest = toml::from_str(raw)?;
     validate_software_compatibility(&manifest)?;
+    validate_deploy_executor(&manifest)?;
     manifest.gate.validate_slo()?;
     if let Some(topology) = &manifest.topology {
         topology.validate()?;
     }
     Ok(manifest)
+}
+
+/// Only software releases run through a software executor.
+fn validate_deploy_executor(manifest: &Manifest) -> Result<()> {
+    if let Some(executor) = manifest.deploy.executor
+        && manifest.product.kind.policy().target() != crate::product_kind::ProductTarget::Software
+    {
+        bail!(
+            "deploy.executor = \"{executor}\" is only supported for software products, not {:?}",
+            manifest.product.kind
+        );
+    }
+    Ok(())
 }
 
 fn validate_software_compatibility(manifest: &Manifest) -> Result<()> {
@@ -1350,5 +1371,138 @@ max_startup_seconds = 30
                 .is_symlink()
         );
         std::fs::remove_dir_all(container).unwrap();
+    }
+
+    /// The quickstart manifest; its pinned digest predates `deploy.executor`.
+    const HELLO_LOCAL: &str = include_str!("../examples/hello-local/tenkai.toml");
+    const HELLO_LOCAL_DIGEST: &str =
+        "705d991834d37969ce9123f33fe9e64d8d96dbd379411e6cbe11ddc203b9b1d2";
+
+    fn with_executor(raw: &str, value: &str) -> String {
+        raw.replacen(
+            "[deploy]\n",
+            &format!("[deploy]\nexecutor = \"{value}\"\n"),
+            1,
+        )
+    }
+
+    #[test]
+    fn deploy_executor_normalizes_aliases_to_the_canonical_kind() {
+        use crate::software_executor::SoftwareExecutorKind as Kind;
+        for (written, kind) in [
+            ("shell", Kind::Shell),
+            ("host", Kind::Host),
+            ("helm", Kind::Helm),
+            ("kubernetes", Kind::Kubernetes),
+            ("k8s", Kind::Kubernetes),
+            ("native", Kind::Kubernetes),
+            ("kubernetes-inprocess", Kind::KubernetesInProcess),
+            ("docker", Kind::Docker),
+        ] {
+            let manifest = parse_raw(&with_executor(HELLO_LOCAL, written)).unwrap();
+            assert_eq!(manifest.deploy.executor, Some(kind), "{written}");
+        }
+    }
+
+    #[test]
+    fn absent_executor_keeps_the_existing_manifest_digest() {
+        assert_eq!(digest(HELLO_LOCAL), HELLO_LOCAL_DIGEST);
+        assert_eq!(parse_raw(HELLO_LOCAL).unwrap().deploy.executor, None);
+    }
+
+    #[test]
+    fn signature_over_one_executor_does_not_verify_another() {
+        use crate::release_signing::*;
+        use base64::Engine as _;
+        use ed25519_dalek::Signer as _;
+
+        let shell = with_executor(HELLO_LOCAL, "shell");
+        let k8s = with_executor(HELLO_LOCAL, "k8s");
+        let kubernetes = with_executor(HELLO_LOCAL, "kubernetes");
+        let digests = [HELLO_LOCAL, &shell, &k8s, &kubernetes].map(digest);
+        let unique: std::collections::HashSet<_> = digests.iter().collect();
+        // As-written bytes are hashed: even an alias is a different release.
+        assert_eq!(unique.len(), digests.len());
+
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[11_u8; 32]);
+        let public_key = signing_key.verifying_key().to_bytes();
+        let roots = TrustRoots {
+            version: TRUST_ROOT_VERSION,
+            signers: vec![TrustedSigner {
+                key_id: key_id(&public_key),
+                identity: "release@example.com".into(),
+                public_key: base64::engine::general_purpose::STANDARD.encode(public_key),
+                not_before: None,
+                not_after: None,
+            }],
+        };
+        let artifact = "3".repeat(64);
+        let mut envelope = SignatureEnvelope {
+            schema: ENVELOPE_SCHEMA.into(),
+            key_id: key_id(&public_key),
+            statement: ReleaseStatement {
+                manifest_digest: digest(&shell),
+                artifact_digest: artifact.clone(),
+                provenance: Provenance {
+                    source_uri: "https://github.com/example/service".into(),
+                    revision: "0123456789abcdef".into(),
+                    builder: "builder".into(),
+                    built_at_unix_ms: 1_700_000_000_000,
+                    materials: Default::default(),
+                },
+            },
+            signature: String::new(),
+        };
+        envelope.signature = base64::engine::general_purpose::STANDARD.encode(
+            signing_key
+                .sign(&envelope.signed_bytes().unwrap())
+                .to_bytes(),
+        );
+        verify_release(&envelope, &roots, &digest(&shell), &artifact).unwrap();
+        let err = verify_release(&envelope, &roots, &digest(&kubernetes), &artifact).unwrap_err();
+        assert!(err.to_string().contains("manifest digest"), "{err}");
+    }
+
+    #[test]
+    fn publication_refuses_an_unknown_executor_and_names_it() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-manifest-executor-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("tenkai.toml");
+        std::fs::write(&path, with_executor(HELLO_LOCAL, "podman")).unwrap();
+        let err = match load(&path) {
+            Ok(_) => panic!("unknown executor was admitted"),
+            Err(err) => format!("{err:#}"),
+        };
+        assert!(
+            err.contains("unknown software executor \"podman\""),
+            "{err}"
+        );
+        std::fs::write(&path, with_executor(HELLO_LOCAL, "kubernetes-inprocess")).unwrap();
+        assert!(load(&path).is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn executor_is_refused_on_non_software_products() {
+        let raw = r#"
+[product]
+name = "routes"
+version = "1.0.0"
+kind = "routing_config"
+
+[deploy]
+install = ""
+executor = "helm"
+
+[routing]
+config = "routing.json"
+allowed_providers = ["local"]
+"#;
+        let err = parse_raw(raw).unwrap_err().to_string();
+        assert!(err.contains("deploy.executor = \"helm\""), "{err}");
     }
 }
