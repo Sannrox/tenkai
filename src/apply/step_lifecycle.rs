@@ -112,17 +112,22 @@ pub(super) async fn execute(
         )?;
     }
 
-    crate::software_compatibility::require_manifest(
-        ctx,
-        environment,
-        &content.manifest,
-        &content.manifest_digest,
-    )
-    .await?;
-    // Replica facts may have moved since the plan was made (#689). The
-    // release a failure would restore is checked too, before anything is
-    // removed, so neither outcome lands in a placement its manifest forbids.
-    crate::topology::require_manifest_placement(ctx, environment, &content.manifest).await?;
+    // A removal deploys nothing: it need not prove the release is still
+    // compatible with, or placeable in, the environment.
+    if step.action != Action::Remove {
+        crate::software_compatibility::require_manifest(
+            ctx,
+            environment,
+            &content.manifest,
+            &content.manifest_digest,
+        )
+        .await?;
+        // Replica facts may have moved since the plan was made (#689).
+        crate::topology::require_manifest_placement(ctx, environment, &content.manifest).await?;
+    }
+    // The release a failure would restore is checked too, before anything
+    // is removed, so neither outcome lands in a placement its manifest
+    // forbids.
     if let Some(restore) = restore_content.as_ref() {
         crate::topology::require_manifest_placement(ctx, environment, &restore.manifest).await?;
     }

@@ -58,7 +58,13 @@ pub(super) async fn admit(
     plan: &mut Plan,
     policy: AdmissionPolicy<'_>,
 ) -> Result<Option<Vec<Outcome>>> {
-    for step in &plan.steps {
+    // A removal deploys nothing, so it need not prove the release could
+    // still be deployed here.
+    for step in plan
+        .steps
+        .iter()
+        .filter(|step| step.action != Action::Remove)
+    {
         crate::software_compatibility::require_release(ctx, &plan.environment, &step.release_id)
             .await?;
     }
