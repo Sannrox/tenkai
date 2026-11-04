@@ -1,8 +1,9 @@
 //! Signed recall notices and advisory-driven fix-forward proposals (#693).
 //!
-//! A notice is a small `tenkai.recall-notice.v1` artifact: recalled release
-//! digests, a reason, and an advisory id, signed under the same Ed25519 trust
-//! rules as [ADR 0036](../docs/decisions/0036-offline-key-revocation.md). Import
+//! A notice is a small `tenkai.recall-notice.v2` artifact: recalled release
+//! digests, a reason, and an advisory id, signed over the bytes sent under
+//! the same Ed25519 trust rules as
+//! [ADR 0036](../docs/decisions/0036-offline-key-revocation.md). Import
 //! verifies, refuses a revoked key, then stamps [`crate::catalog::recall`].
 //! Named releases that are not in the catalog still get a recall claim so a
 //! later publish of that identity is not deployable. `propose` validates the
@@ -28,28 +29,36 @@ use crate::providers::{EvidenceBinding, PROVIDER_CONTRACT_VERSION, ProviderEvent
 use crate::release_signing::TrustRoots;
 use crate::wave::{self, ExecutableWaveSpec, WaveRecord};
 
-/// Portable signed recall-notice schema.
-pub const NOTICE_SCHEMA: &str = "tenkai.recall-notice.v1";
+/// Portable signed recall-notice schema. Its signature covers the statement
+/// bytes the signer sent (#931); see `docs/recall-notices.md#wire-format`.
+pub const NOTICE_SCHEMA: &str = "tenkai.recall-notice.v2";
+/// Deprecated (#931): signed over Tenkai's re-encoding of the parsed
+/// statement. Verified for notices made by earlier releases, never
+/// produced, and removed in a later release.
+pub const LEGACY_NOTICE_SCHEMA: &str = "tenkai.recall-notice.v1";
 /// Stored imported-notice object kind.
 pub const KIND_RECALL_NOTICE: &str = "tenkai.recall_notice";
 /// First-writer claim that binds a wave name to one proposal identity.
 pub const KIND_RECALL_PROPOSAL: &str = "tenkai.recall_proposal";
 /// Optional outbox kind for imported notices. Off unless [`export_notice`] runs.
 pub const RECALL_NOTICE_PROVIDER_KIND: &str = "recall_notice";
-const SIGNING_DOMAIN: &[u8] = b"TENKAI-RECALL-NOTICE-V1\0";
+/// Prefix of every [`NOTICE_SCHEMA`] signed message.
+pub const SIGNING_DOMAIN: &[u8] = b"TENKAI-RECALL-NOTICE-V2\0";
+const LEGACY_SIGNING_DOMAIN: &[u8] = b"TENKAI-RECALL-NOTICE-V1\0";
+const SIGNATURE_LABEL: &str = "recall notice signature";
 const MAX_RECALLED: usize = 4_096;
 
-/// One release named by a notice.
+/// One release named by a notice. A verifier ignores fields it does not
+/// know; the signature still covers them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RecalledRelease {
     pub release: String,
     pub digest: String,
 }
 
-/// Signed payload of a recall notice.
+/// What a recall authority signs ([`NOTICE_SCHEMA`]). A verifier ignores
+/// fields it does not know; the signature still covers them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RecallNoticeStatement {
     pub issued_at: i64,
     pub advisory_id: String,
@@ -57,14 +66,87 @@ pub struct RecallNoticeStatement {
     pub recalled: Vec<RecalledRelease>,
 }
 
-/// Portable signed recall notice.
+/// Signed recall notice as sent (#931). Every field is a string, so the
+/// stored JSON of this envelope keeps the signed statement bytes exactly.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RecallNotice {
+pub struct NoticeEnvelope {
+    /// `tenkai.recall-notice.v2`.
     pub schema: String,
+    /// `sha256:` and the lowercase hex SHA-256 of the signer's Ed25519 public key.
+    pub key_id: String,
+    /// Standard padded base64 of the statement JSON bytes the signer signed.
+    pub statement: String,
+    /// Standard padded base64 Ed25519 signature over
+    /// `TENKAI-RECALL-NOTICE-V2`, one NUL byte, and the statement bytes.
+    pub signature: String,
+}
+
+/// Frozen [`LEGACY_NOTICE_SCHEMA`] types. The signature covers the
+/// serde_json encoding of [`legacy::Statement`], and a stored notice's
+/// object id hashes the encoding of [`legacy::Notice`], so neither changes.
+pub mod legacy {
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct Notice {
+        pub schema: String,
+        pub key_id: String,
+        pub statement: Statement,
+        pub signature: String,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct Statement {
+        pub issued_at: i64,
+        pub advisory_id: String,
+        pub reason: String,
+        pub recalled: Vec<Recalled>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct Recalled {
+        pub release: String,
+        pub digest: String,
+    }
+}
+
+impl From<legacy::Statement> for RecallNoticeStatement {
+    fn from(legacy: legacy::Statement) -> Self {
+        Self {
+            issued_at: legacy.issued_at,
+            advisory_id: legacy.advisory_id,
+            reason: legacy.reason,
+            recalled: legacy
+                .recalled
+                .into_iter()
+                .map(|entry| RecalledRelease {
+                    release: entry.release,
+                    digest: entry.digest,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// A recall notice as received, before its signature is checked. It
+/// serializes to the JSON Tenkai stores and hashes into the object id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum RecallNotice {
+    Current(NoticeEnvelope),
+    Legacy(legacy::Notice),
+}
+
+/// A recall notice whose signature verified, with its signer valid at
+/// `issued_at`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedNotice {
     pub key_id: String,
     pub statement: RecallNoticeStatement,
-    pub signature: String,
 }
 
 /// Inputs for [`propose`].
@@ -84,7 +166,7 @@ pub struct ProposeRequest {
 pub struct Proposal {
     pub advisory_id: String,
     pub recalled: Vec<String>,
-    pub notice: RecallNotice,
+    pub notice: NoticeEnvelope,
     pub wave: WaveRecord,
     pub environments: Vec<RunningEnvironment>,
 }
@@ -107,110 +189,170 @@ pub struct RunningEnvironment {
     pub deployed_release: String,
 }
 
-fn canonical_bytes(statement: &RecallNoticeStatement) -> Result<Vec<u8>> {
-    let mut bytes = SIGNING_DOMAIN.to_vec();
+/// The message a [`LEGACY_NOTICE_SCHEMA`] signature covers.
+fn legacy_signed_message(statement: &legacy::Statement) -> Result<Vec<u8>> {
+    let mut bytes = LEGACY_SIGNING_DOMAIN.to_vec();
     serde_json::to_writer(&mut bytes, statement)?;
     Ok(bytes)
 }
 
+/// Stored identity of a notice: the SHA-256 of its stored JSON. A v1
+/// notice keeps the id earlier releases gave it.
 fn notice_id(notice: &RecallNotice) -> Result<String> {
     let digest = format!("{:x}", Sha256::digest(serde_json::to_vec(notice)?));
     Ok(format!("tenkai:recall-notice:{digest}"))
 }
 
-fn notice_object(notice: &RecallNotice) -> Result<Object> {
+fn notice_object(notice: &RecallNotice, verified: &VerifiedNotice) -> Result<Object> {
     let now = crate::now_millis();
     let document = serde_json::to_string(notice)?;
     let digest = format!("{:x}", Sha256::digest(document.as_bytes()));
     Ok(Object {
         id: notice_id(notice)?,
         kind: KIND_RECALL_NOTICE.into(),
-        name: format!("recall-notice {}", notice.statement.advisory_id),
+        name: format!("recall-notice {}", verified.statement.advisory_id),
         namespace: NS.into(),
         external_id: String::new(),
         properties: HashMap::from([
             ("document".into(), document),
             ("digest".into(), digest),
             ("imported_at".into(), now.to_string()),
-            ("advisory_id".into(), notice.statement.advisory_id.clone()),
-            ("key_id".into(), notice.key_id.clone()),
+            ("advisory_id".into(), verified.statement.advisory_id.clone()),
+            ("key_id".into(), verified.key_id.clone()),
         ]),
         created: now,
         updated: now,
     })
 }
 
-/// Sign a notice with the 32-byte Ed25519 seed at `seed_path` (mode 0600).
-pub fn sign(statement: RecallNoticeStatement, seed_path: &Path) -> Result<RecallNotice> {
+/// Sign a notice with the 32-byte Ed25519 seed at `seed_path` (mode 0600):
+/// serialize the statement once and sign those bytes.
+pub fn sign(statement: &RecallNoticeStatement, seed_path: &Path) -> Result<NoticeEnvelope> {
+    statement.validate()?;
     let signing_key = SigningKey::from_bytes(&crate::approval_policy::load_signer_seed(seed_path)?);
-    let notice = RecallNotice {
+    let signed = crate::signed_bytes::sign(SIGNING_DOMAIN, statement, |message| {
+        Ok(signing_key.sign(message).to_bytes().to_vec())
+    })?;
+    Ok(NoticeEnvelope {
         schema: NOTICE_SCHEMA.into(),
         key_id: crate::signature_verification::key_id(&signing_key.verifying_key().to_bytes()),
-        signature: STANDARD.encode(signing_key.sign(&canonical_bytes(&statement)?).to_bytes()),
-        statement,
-    };
-    notice.validate_shape()?;
-    Ok(notice)
+        statement: signed.statement,
+        signature: STANDARD.encode(signed.signature),
+    })
 }
 
-impl RecallNotice {
-    pub fn load(path: &Path) -> Result<Self> {
-        let raw = std::fs::read(path)
-            .with_context(|| format!("reading recall notice {}", path.display()))?;
-        serde_json::from_slice(&raw)
-            .with_context(|| format!("parsing recall notice {}", path.display()))
-    }
-
-    fn validate_shape(&self) -> Result<()> {
-        if self.schema != NOTICE_SCHEMA {
-            bail!("unsupported recall notice schema {}", self.schema);
-        }
-        if self.statement.advisory_id.trim().is_empty()
-            || self.statement.advisory_id.chars().any(char::is_control)
-        {
+impl RecallNoticeStatement {
+    fn validate(&self) -> Result<()> {
+        if self.advisory_id.trim().is_empty() || self.advisory_id.chars().any(char::is_control) {
             bail!("recall notice needs an advisory id");
         }
-        if self.statement.reason.trim().is_empty()
-            || self.statement.reason.chars().any(char::is_control)
-        {
+        if self.reason.trim().is_empty() || self.reason.chars().any(char::is_control) {
             bail!("recall notice needs a reason");
         }
-        if self.statement.recalled.is_empty() {
+        if self.recalled.is_empty() {
             bail!("recall notice must name at least one release");
         }
-        if self.statement.recalled.len() > MAX_RECALLED {
+        if self.recalled.len() > MAX_RECALLED {
             bail!("recall notice exceeds {MAX_RECALLED} releases");
         }
         let mut seen = BTreeSet::new();
-        for recalled in &self.statement.recalled {
+        for recalled in &self.recalled {
             let (product, version) = parse_release_spec(&recalled.release)?;
             validate_release_digest(&recalled.digest)?;
             if !seen.insert(format!("{product}@{version}")) {
                 bail!("recall notice names {} twice", recalled.release);
             }
         }
-        crate::signature_verification::validate_key_id("recall notice key id", &self.key_id)?;
         Ok(())
     }
+}
 
-    /// Check the shape and the signature against the notice authorities.
+impl RecallNotice {
+    /// Read and parse a notice file. The signature is not checked here.
+    pub fn load(path: &Path) -> Result<Self> {
+        let raw = std::fs::read(path)
+            .with_context(|| format!("reading recall notice {}", path.display()))?;
+        Self::parse(&raw).with_context(|| format!("parsing recall notice {}", path.display()))
+    }
+
+    /// Parse a notice by its `schema`, without checking the signature. A
+    /// schema this release does not verify is refused by name.
+    pub fn parse(bytes: &[u8]) -> Result<Self> {
+        #[derive(Deserialize)]
+        struct Schema {
+            schema: String,
+        }
+        let Schema { schema } = serde_json::from_slice(bytes)
+            .context("recall notice is not a JSON object with a schema")?;
+        let notice = match schema.as_str() {
+            NOTICE_SCHEMA => Self::Current(
+                serde_json::from_slice(bytes).context("recall notice envelope is not valid")?,
+            ),
+            LEGACY_NOTICE_SCHEMA => Self::Legacy(
+                serde_json::from_slice(bytes).context("recall notice envelope is not valid")?,
+            ),
+            other => bail!(
+                "unsupported recall notice schema {other:?}; this release verifies {NOTICE_SCHEMA} and the deprecated {LEGACY_NOTICE_SCHEMA}"
+            ),
+        };
+        crate::signature_verification::validate_key_id("recall notice key id", notice.key_id())?;
+        Ok(notice)
+    }
+
+    pub fn key_id(&self) -> &str {
+        match self {
+            Self::Current(envelope) => &envelope.key_id,
+            Self::Legacy(notice) => &notice.key_id,
+        }
+    }
+
+    /// Check the signature against the notice authorities, then parse and
+    /// validate the statement. A v2 statement is parsed only from the bytes
+    /// the signature covers.
     ///
-    /// [`TrustRoots::resolve_signed_at`] refuses a revoked key, so a notice
-    /// signed by a revoked authority never reaches catalog mutation. The
-    /// authority must have been valid at `issued_at` (ADR 0042).
-    pub fn verify(&self, authorities: &TrustRoots) -> Result<()> {
-        self.validate_shape()?;
-        let signer = authorities.resolve_signed_at(
-            &self.key_id,
-            self.statement.issued_at,
-            crate::now_millis(),
-        )?;
-        crate::signature_verification::verify_strict(
-            &signer.verifying_key,
-            "recall notice signature",
-            &self.signature,
-            &canonical_bytes(&self.statement)?,
-        )
+    /// The key is looked up with revocation checked, so a notice signed by a
+    /// revoked authority never reaches catalog mutation. Once the signed
+    /// `issued_at` is known, the authority must have been valid then (ADR 0042).
+    pub fn verify(&self, authorities: &TrustRoots) -> Result<VerifiedNotice> {
+        let key = authorities.resolve_unwindowed(self.key_id())?.verifying_key;
+        let statement = match self {
+            Self::Current(envelope) => {
+                let signature = crate::signature_verification::decode_exact::<64>(
+                    SIGNATURE_LABEL,
+                    &envelope.signature,
+                )?;
+                crate::signed_bytes::verify::<RecallNoticeStatement>(
+                    SIGNING_DOMAIN,
+                    &envelope.statement,
+                    |message| {
+                        crate::signature_verification::verify_strict_bytes(
+                            &key,
+                            SIGNATURE_LABEL,
+                            &signature,
+                            message,
+                        )
+                        .is_ok()
+                    },
+                )
+                .map_err(|refusal| anyhow::anyhow!("recall notice refused: {refusal}"))?
+                .statement
+            }
+            Self::Legacy(notice) => {
+                crate::signature_verification::verify_strict(
+                    &key,
+                    SIGNATURE_LABEL,
+                    &notice.signature,
+                    &legacy_signed_message(&notice.statement)?,
+                )?;
+                RecallNoticeStatement::from(notice.statement.clone())
+            }
+        };
+        statement.validate()?;
+        authorities.resolve_signed_at(self.key_id(), statement.issued_at, crate::now_millis())?;
+        Ok(VerifiedNotice {
+            key_id: self.key_id().into(),
+            statement,
+        })
     }
 }
 
@@ -231,8 +373,12 @@ fn parse_release_spec(spec: &str) -> Result<(&str, &str)> {
     Ok((product, version))
 }
 
-async fn persist_notice(ctx: &mut Ctx, notice: &RecallNotice) -> Result<()> {
-    let proposed = notice_object(notice)?;
+async fn persist_notice(
+    ctx: &mut Ctx,
+    notice: &RecallNotice,
+    verified: &VerifiedNotice,
+) -> Result<()> {
+    let proposed = notice_object(notice, verified)?;
     match ctx.create_once(proposed.clone()).await {
         Ok(_) => Ok(()),
         Err(status) if crate::client::is_unique_conflict(&status) => {
@@ -458,9 +604,9 @@ pub async fn import(
     actor
         .require_delivery_capability(DeliveryCapability::Management)
         .map_err(|error| anyhow::anyhow!("{error}"))?;
-    notice.verify(authorities)?;
+    let verified = notice.verify(authorities)?;
     let mut missing = Vec::new();
-    for entry in &notice.statement.recalled {
+    for entry in &verified.statement.recalled {
         match release_digest(ctx, &entry.release).await? {
             Some((_, digest)) if digest_hex(&digest) == digest_hex(&entry.digest) => {}
             Some((_, digest)) => bail!(
@@ -471,10 +617,10 @@ pub async fn import(
             None => missing.push(entry.release.clone()),
         }
     }
-    persist_notice(ctx, notice).await?;
+    persist_notice(ctx, notice, &verified).await?;
     let mut recalled = Vec::new();
     let mut already_recalled = Vec::new();
-    for entry in &notice.statement.recalled {
+    for entry in &verified.statement.recalled {
         let (product, version) = parse_release_spec(&entry.release)?;
         let rid = release_id(product, version);
         if missing.iter().any(|spec| spec == &entry.release) {
@@ -488,9 +634,9 @@ pub async fn import(
             recalled.push(entry.release.clone());
         }
     }
-    let environments = environments_running(ctx, &notice.statement.recalled).await?;
+    let environments = environments_running(ctx, &verified.statement.recalled).await?;
     Ok(ImportReport {
-        advisory_id: notice.statement.advisory_id.clone(),
+        advisory_id: verified.statement.advisory_id.clone(),
         recalled,
         already_recalled,
         missing,
@@ -498,10 +644,12 @@ pub async fn import(
     })
 }
 
-/// Enqueue an imported notice on the optional integration outbox.
+/// Enqueue an imported notice on the optional integration outbox. The
+/// payload is the notice as stored, so a consumer can verify it again.
 pub fn export_notice(
     store: &impl ProviderEventStore,
     notice: &RecallNotice,
+    verified: &VerifiedNotice,
     now: i64,
 ) -> Result<()> {
     let payload = serde_json::to_string(notice)?;
@@ -510,7 +658,7 @@ pub fn export_notice(
         id: notice_id(notice)?,
         binding: EvidenceBinding {
             contract_version: PROVIDER_CONTRACT_VERSION,
-            release_digest: notice
+            release_digest: verified
                 .statement
                 .recalled
                 .first()
@@ -608,19 +756,17 @@ pub async fn propose(
         advisory.component,
         advisory.range
     );
-    let notice = sign(
-        RecallNoticeStatement {
-            issued_at: crate::now_millis(),
-            advisory_id: advisory.id.clone(),
-            reason,
-            recalled: recalled_entries.clone(),
-        },
-        &request.signing_key,
-    )?;
+    let statement = RecallNoticeStatement {
+        issued_at: crate::now_millis(),
+        advisory_id: advisory.id.clone(),
+        reason,
+        recalled: recalled_entries.clone(),
+    };
+    let notice = sign(&statement, &request.signing_key)?;
     if crate::key_revocation::is_revoked(&notice.key_id) {
         bail!("recall notice signer {} is revoked", notice.key_id);
     }
-    crate::atomic_state::write_json_verified::<RecallNotice, RecallNotice, _>(
+    crate::atomic_state::write_json_verified::<NoticeEnvelope, NoticeEnvelope, _>(
         &request.notice_out,
         &notice,
         |_| Ok(()),
@@ -652,7 +798,11 @@ pub async fn propose(
             recalled.push(entry.release.clone());
         }
     }
-    persist_notice(ctx, &notice).await?;
+    let verified = VerifiedNotice {
+        key_id: notice.key_id.clone(),
+        statement,
+    };
+    persist_notice(ctx, &RecallNotice::Current(notice.clone()), &verified).await?;
     let wave = wave::start_or_resume(ctx, &spec).await?;
     let environments = environments_running(ctx, &recalled_entries).await?;
     Ok(Proposal {
@@ -834,19 +984,147 @@ document = "suite.json"
     }
 
     fn sample_notice(dir: &Path, spec: &str, digest: &str) -> RecallNotice {
-        sign(
-            RecallNoticeStatement {
-                issued_at: 1,
-                advisory_id: "TENKAI-2026-1".into(),
-                reason: "openssl range matches".into(),
-                recalled: vec![RecalledRelease {
-                    release: spec.into(),
-                    digest: digest.into(),
-                }],
-            },
-            &seed_file(dir, &NOTICE),
+        RecallNotice::Current(
+            sign(
+                &RecallNoticeStatement {
+                    issued_at: 1,
+                    advisory_id: "TENKAI-2026-1".into(),
+                    reason: "openssl range matches".into(),
+                    recalled: vec![RecalledRelease {
+                        release: spec.into(),
+                        digest: digest.into(),
+                    }],
+                },
+                &seed_file(dir, &NOTICE),
+            )
+            .unwrap(),
         )
-        .unwrap()
+    }
+
+    /// A notice over `bytes` exactly as given, as a non-Rust signer would make it.
+    fn sign_bytes(seed: &[u8; 32], bytes: &[u8]) -> RecallNotice {
+        let key = SigningKey::from_bytes(seed);
+        let envelope = serde_json::json!({
+            "schema": NOTICE_SCHEMA,
+            "key_id": crate::signature_verification::key_id(&key.verifying_key().to_bytes()),
+            "statement": STANDARD.encode(bytes),
+            "signature": STANDARD.encode(key.sign(&[SIGNING_DOMAIN, bytes].concat()).to_bytes()),
+        });
+        RecallNotice::parse(&serde_json::to_vec(&envelope).unwrap()).unwrap()
+    }
+
+    const DIGEST: &str = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+
+    /// A signer's own bytes verify: any key order and spacing, and fields
+    /// this release does not know. The same statement re-encoded no longer
+    /// verifies, and the signer's window is checked at the signed `issued_at`.
+    #[test]
+    fn the_signature_covers_the_statement_bytes_the_signer_sent() {
+        let bytes = format!(
+            r#"{{ "recalled": [ {{ "digest": "{DIGEST}", "release": "api@1.0.0", "cve": "x" }} ],
+            "reason": "openssl", "advisory_id": "TENKAI-2026-1", "issued_at": 5, "note": "y" }}"#
+        );
+        let authorities = roots(vec![signer(&NOTICE, "recall-authority")]);
+        let sent = sign_bytes(&NOTICE, bytes.as_bytes());
+        let verified = sent.verify(&authorities).unwrap();
+        assert_eq!(verified.statement.issued_at, 5);
+        assert_eq!(verified.statement.recalled[0].release, "api@1.0.0");
+        assert_eq!(verified.key_id, sent.key_id());
+
+        let RecallNotice::Current(mut reencoded) = sent.clone() else {
+            panic!("expected a current notice");
+        };
+        reencoded.statement = STANDARD.encode(serde_json::to_vec(&verified.statement).unwrap());
+        let error = RecallNotice::Current(reencoded)
+            .verify(&authorities)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("signature does not verify"), "{error}");
+
+        let mut expired = signer(&NOTICE, "recall-authority");
+        expired.not_after = Some(4);
+        let error = sent.verify(&roots(vec![expired])).unwrap_err().to_string();
+        assert!(error.contains("not_after"), "{error}");
+    }
+
+    /// Bytes that verify are still validated before anything is imported.
+    #[test]
+    fn verified_bytes_that_are_not_a_valid_notice_are_refused() {
+        let authorities = roots(vec![signer(&NOTICE, "recall-authority")]);
+        for (bytes, expected) in [
+            ("not json".to_string(), "does not parse"),
+            (
+                r#"{"issued_at":1,"issued_at":2,"advisory_id":"a","reason":"r","recalled":[]}"#
+                    .into(),
+                "duplicate field",
+            ),
+            (
+                r#"{"issued_at":1,"advisory_id":"a","reason":"r","recalled":[]}"#.into(),
+                "at least one release",
+            ),
+        ] {
+            let error = sign_bytes(&NOTICE, bytes.as_bytes())
+                .verify(&authorities)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    /// A notice made before #931 still verifies, keeps the stored JSON and
+    /// object id earlier releases gave it, and refuses fields its signature
+    /// cannot cover.
+    #[test]
+    fn a_legacy_v1_notice_verifies_and_keeps_its_stored_identity() {
+        let key = SigningKey::from_bytes(&NOTICE);
+        let key_id = crate::signature_verification::key_id(&key.verifying_key().to_bytes());
+        let statement = legacy::Statement {
+            issued_at: 1,
+            advisory_id: "TENKAI-2026-1".into(),
+            reason: "openssl range matches".into(),
+            recalled: vec![legacy::Recalled {
+                release: "api@1.0.0".into(),
+                digest: DIGEST.into(),
+            }],
+        };
+        let signature = STANDARD.encode(
+            key.sign(&legacy_signed_message(&statement).unwrap())
+                .to_bytes(),
+        );
+        // The stored document of an earlier release, byte for byte.
+        let stored = format!(
+            r#"{{"schema":"tenkai.recall-notice.v1","key_id":"{key_id}","statement":{{"issued_at":1,"advisory_id":"TENKAI-2026-1","reason":"openssl range matches","recalled":[{{"release":"api@1.0.0","digest":"{DIGEST}"}}]}},"signature":"{signature}"}}"#
+        );
+        let notice = RecallNotice::parse(stored.as_bytes()).unwrap();
+        assert_eq!(serde_json::to_string(&notice).unwrap(), stored);
+        assert_eq!(
+            notice_id(&notice).unwrap(),
+            format!(
+                "tenkai:recall-notice:{:x}",
+                Sha256::digest(stored.as_bytes())
+            )
+        );
+        let authorities = roots(vec![signer(&NOTICE, "recall-authority")]);
+        let verified = notice.verify(&authorities).unwrap();
+        assert_eq!(verified.statement, RecallNoticeStatement::from(statement));
+
+        let mut document: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        document["statement"]["note"] = "unsigned".into();
+        let error = RecallNotice::parse(&serde_json::to_vec(&document).unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("envelope is not valid"), "{error}");
+    }
+
+    #[test]
+    fn an_unknown_schema_is_refused_by_name() {
+        let error = RecallNotice::parse(br#"{"schema":"tenkai.recall-notice.v3"}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("unsupported recall notice schema") && error.contains(NOTICE_SCHEMA),
+            "{error}"
+        );
     }
 
     #[tokio::test]
@@ -924,9 +1202,12 @@ document = "suite.json"
             .unwrap();
         let keys = root.join("notice-keys");
         std::fs::create_dir_all(&keys).unwrap();
-        let mut notice = sample_notice(&keys, "api@1.0.0", &digest);
+        let RecallNotice::Current(mut notice) = sample_notice(&keys, "api@1.0.0", &digest) else {
+            panic!("expected a current notice");
+        };
         let authorities = roots(vec![signer(&NOTICE, "recall-authority")]);
         notice.signature = STANDARD.encode([0u8; 64]);
+        let notice = RecallNotice::Current(notice);
         let bad_sig = import(&mut ctx, &actor, &notice, &authorities)
             .await
             .unwrap_err()
@@ -944,7 +1225,7 @@ document = "suite.json"
 
         let revoked_seed: [u8; 32] = [214; 32];
         let revoked_notice = sign(
-            RecallNoticeStatement {
+            &RecallNoticeStatement {
                 issued_at: 1,
                 advisory_id: "TENKAI-2026-1".into(),
                 reason: "openssl range matches".into(),
@@ -977,10 +1258,15 @@ document = "suite.json"
         )
         .unwrap();
         let notice_authorities = roots(vec![signer(&revoked_seed, "revoked-recall")]);
-        let revoked = import(&mut ctx, &actor, &revoked_notice, &notice_authorities)
-            .await
-            .unwrap_err()
-            .to_string();
+        let revoked = import(
+            &mut ctx,
+            &actor,
+            &RecallNotice::Current(revoked_notice),
+            &notice_authorities,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
         assert!(revoked.contains("revoked"), "{revoked}");
         assert!(
             ctx.get(&crate::ontology::release_recall_id(&rid))

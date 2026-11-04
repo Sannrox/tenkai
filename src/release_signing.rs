@@ -335,6 +335,14 @@ impl TrustRoots {
         Self::resolved(signer)
     }
 
+    /// Resolve a signer with revocation checked but not its validity
+    /// window, to check a signature over bytes that carry their own signed
+    /// time. Once those bytes are parsed, the caller must check the window
+    /// with [`Self::resolve_signed_at`].
+    pub(crate) fn resolve_unwindowed(&self, key_id: &str) -> Result<ResolvedSigner> {
+        Self::resolved(self.signer(key_id)?)
+    }
+
     fn signer(&self, key_id: &str) -> Result<&TrustedSigner> {
         self.signers
             .iter()

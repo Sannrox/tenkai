@@ -182,6 +182,34 @@ apply cannot overwrite the outage.
 It records the latest evidence on the drilled environment. It does not run
 unless requested.
 
+### Failover drill evidence
+
+The `--out` file and the drilled environment's `topology_drill_evidence`
+property hold the same `tenkai.topology-drill.v2` evidence:
+
+```json
+{
+  "schema": "tenkai.topology-drill.v2",
+  "key_id": "sha256:<64 lowercase hex>",
+  "statement": "<base64 of the statement bytes>",
+  "signature": "<base64 Ed25519 signature>"
+}
+```
+
+`statement` is standard padded base64 of the JSON statement bytes that were
+signed: `release`, `topology`, `product`, `min_available`, `replicas`,
+`passed`, `loss` (`replica`, `at_ms`), `recovery` (`remaining_available`,
+`confirmed_at_ms`, `duration_ms`, `traffic_continued`), and `restore`
+(`replica`, `at_ms`, `available`). `signature` is the Ed25519 signature
+over the ASCII bytes `TENKAI-TOPOLOGY-DRILL-V2`, one NUL byte, and the
+statement bytes. `key_id` is `sha256:` and the lowercase hex SHA-256 of the
+signer's public key. To verify, check the signature over the decoded bytes,
+then parse them; fields a verifier does not know stay covered by the
+signature. Evidence recorded by earlier releases keeps the deprecated
+`tenkai.topology-drill.v1` form, whose signature covers Tenkai's
+re-encoding of an inline statement; this release still verifies it and a
+later release removes it.
+
 ## Gates
 
 If a release declares `gate.eval_suite`, `apply` blocks unless the suite's
