@@ -124,8 +124,31 @@ pub struct SoftwareApplyRequest {
     pub apply_attempt: String,
 }
 
+/// An executor cannot reach its target, found before anything was applied:
+/// for example an in-cluster release whose cluster config file does not exist
+/// until a host release creates the cluster, or is not configured at all. The
+/// step fails with nothing to clean up, the deployment stays as it was, and
+/// reconcile retries with its backoff (ADR 0041 section 4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetUnavailable(pub String);
+
+impl std::fmt::Display for TargetUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for TargetUnavailable {}
+
 /// Pluggable software apply path. Tenkai never hard-depends on a cluster.
 pub trait SoftwareExecutor: Send + Sync {
+    /// Checks, before anything changes, that the target this adapter writes
+    /// to exists. Apply and restart call it first; a refusal means nothing
+    /// was applied. Default: nothing to check.
+    fn require_target(&self, request: &SoftwareApplyRequest) -> Result<(), TargetUnavailable> {
+        let _ = request;
+        Ok(())
+    }
     fn apply(&self, request: &SoftwareApplyRequest) -> Result<()>;
     fn remove(&self, request: &SoftwareApplyRequest) -> Result<()>;
     fn observe(&self, request: &SoftwareApplyRequest) -> Result<SoftwareObserveStatus>;

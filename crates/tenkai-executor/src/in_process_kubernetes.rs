@@ -19,8 +19,8 @@ use serde_json::{Map, Value};
 
 use tenkai::software_executor::{
     RolloutPhaseTimes, SoftwareApplyRequest, SoftwareExecutor, SoftwareObserveStatus,
-    k8s_label_value, kubernetes_manifests_dir, list_manifest_files, validate_cluster_config_path,
-    validate_request,
+    TargetUnavailable, k8s_label_value, kubernetes_manifests_dir, list_manifest_files,
+    validate_cluster_config_path, validate_request,
 };
 
 pub const FIELD_MANAGER: &str = "tenkai";
@@ -398,6 +398,15 @@ pub fn selected_in_process_executor() -> InProcessKubernetesExecutor<LiveKubeApi
 }
 
 impl<A: ClusterApplyApi> SoftwareExecutor for InProcessKubernetesExecutor<A> {
+    /// The cluster is the target: without a readable cluster config file
+    /// nothing can have been applied to it, whether the file is not there
+    /// yet or the environment names none.
+    fn require_target(&self, request: &SoftwareApplyRequest) -> Result<(), TargetUnavailable> {
+        Self::require_cluster_config(request)
+            .map(|_| ())
+            .map_err(|error| TargetUnavailable(format!("{error:#}")))
+    }
+
     fn apply(&self, request: &SoftwareApplyRequest) -> Result<()> {
         self.apply_timed(request).map(|_| ())
     }
@@ -1062,6 +1071,25 @@ mod tests {
             err.contains("implicit kubeconfig discovery is refused"),
             "{err}"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_missing_cluster_config_is_an_unavailable_target() {
+        let root = unique_root("target");
+        write_deployment(&root, "1.0.0", 1);
+        let kubeconfig = root.join("cluster.kubeconfig");
+        let executor = InProcessKubernetesExecutor::new(MemoryClusterApi::new());
+        let req = request(&root, &kubeconfig, "1.0.0");
+
+        let refused = executor.require_target(&req).unwrap_err();
+        assert!(
+            refused.0.contains("is not a readable kubeconfig file"),
+            "{refused}"
+        );
+
+        std::fs::write(&kubeconfig, "apiVersion: v1\n").unwrap();
+        executor.require_target(&req).unwrap();
         let _ = std::fs::remove_dir_all(root);
     }
 

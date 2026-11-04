@@ -5,7 +5,7 @@
 //! mutation or operator readback rules.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -1958,18 +1958,39 @@ pub async fn list_artifact_mirrors(
 pub async fn set_cluster_config_path(ctx: &mut Ctx, env: &str, path: &Path) -> Result<String> {
     validate_identifier("environment", env)?;
     crate::software_executor::validate_cluster_config_path(path)?;
-    let canonical = path.canonicalize().with_context(|| {
-        format!(
-            "cluster_config_path {} is not a readable kubeconfig file",
-            path.display()
-        )
-    })?;
-    if !canonical.is_file() {
-        bail!(
+    let canonical = match path.canonicalize() {
+        Ok(canonical) if canonical.is_file() => canonical,
+        Ok(canonical) => bail!(
             "cluster_config_path {} is not a readable kubeconfig file",
             canonical.display()
-        );
-    }
+        ),
+        // A file that does not exist yet is stored as given: a host release
+        // that installs the cluster writes it later, and in-cluster releases
+        // fail closed until then (ADR 0041 sections 3 and 4).
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound && path.symlink_metadata().is_err() =>
+        {
+            if !path.is_absolute()
+                || path
+                    .components()
+                    .any(|part| !matches!(part, Component::RootDir | Component::Normal(_)))
+            {
+                bail!(
+                    "cluster_config_path {} does not exist yet, so it must be an absolute path without . or .. components",
+                    path.display()
+                );
+            }
+            path.to_path_buf()
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "cluster_config_path {} is not a readable kubeconfig file",
+                    path.display()
+                )
+            });
+        }
+    };
     let stored = canonical.to_string_lossy().into_owned();
     crate::software_executor::validate_cluster_config_path(Path::new(&stored))?;
     let mut env_obj = environment(ctx, env).await?;
@@ -2948,6 +2969,20 @@ mod tests {
                 .unwrap_err()
                 .to_string();
         assert!(err.contains("file path"), "{err}");
+        // A file a host release has not written yet is stored as given.
+        let future = kubeconfig.with_extension("future");
+        set_cluster_config_path(&mut ctx, "lab", &future)
+            .await
+            .unwrap();
+        assert_eq!(
+            cluster_config_path(&mut ctx, "lab").await.unwrap(),
+            Some(future)
+        );
+        let err = set_cluster_config_path(&mut ctx, "lab", Path::new("relative.kubeconfig"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("absolute path"), "{err}");
         let _ = std::fs::remove_file(&database);
         let _ = std::fs::remove_file(&kubeconfig);
     }

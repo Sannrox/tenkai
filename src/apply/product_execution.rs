@@ -167,11 +167,13 @@ pub(super) async fn activate(
         .resolve(content.manifest.deploy.executor)?
     {
         let executor = executor.as_ref();
+        let request = software_request(ctx, content, lease).await?;
+        // A missing target is an outer error: nothing ran, nothing to clean up.
+        executor.require_target(&request)?;
         prepare_fenced_mutation(ctx, lease, content).await?;
         if let Err(detail) = require_artifact_pull_consumer(content, Some(executor)) {
             return Ok(Err(detail));
         }
-        let request = software_request(ctx, content, lease).await?;
         let install = software_blocking(|| executor.apply(&request)).map_err(|error| {
             software_phase_error(
                 crate::software_executor::SoftwareDeployPhase::Apply,
@@ -294,11 +296,12 @@ pub(super) async fn restart(
         .resolve(content.manifest.deploy.executor)?
     {
         let executor = executor.as_ref();
+        let request = software_request(ctx, content, lease).await?;
+        executor.require_target(&request)?;
         prepare_fenced_mutation(ctx, lease, content).await?;
         if let Err(detail) = require_artifact_pull_consumer(content, Some(executor)) {
             return Ok(Err(detail));
         }
-        let request = software_request(ctx, content, lease).await?;
         let bounce = software_blocking(|| executor.restart(&request)).map_err(|error| {
             software_phase_error(
                 crate::software_executor::SoftwareDeployPhase::Restart,

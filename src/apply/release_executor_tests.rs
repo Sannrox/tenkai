@@ -5,18 +5,20 @@ use std::sync::{Arc, Mutex};
 use crate::client::Ctx;
 use crate::software_executor::{
     SoftwareApplyRequest, SoftwareExecutor, SoftwareExecutorKind as Kind, SoftwareExecutors,
-    SoftwareObserveStatus,
+    SoftwareObserveStatus, TargetUnavailable,
 };
 
 use super::{ExecutionAuthorization, ExecutionOptions, Outcome, StepOutcomeStatus};
 
-/// Records what it applied as `product@version` and every call it got, and
-/// refuses versions in `fail`.
+/// Records what it applied as `product@version` and every call it got,
+/// refuses versions in `fail`, and reports its target missing while
+/// `target_missing` is set.
 #[derive(Default)]
 struct Recorder {
     applied: Mutex<Vec<String>>,
     calls: Mutex<Vec<String>>,
     fail: Mutex<Vec<String>>,
+    target_missing: Mutex<bool>,
 }
 
 impl Recorder {
@@ -34,6 +36,13 @@ impl Recorder {
 }
 
 impl SoftwareExecutor for Recorder {
+    fn require_target(&self, _request: &SoftwareApplyRequest) -> Result<(), TargetUnavailable> {
+        if *self.target_missing.lock().unwrap() {
+            return Err(TargetUnavailable("no cluster config yet".into()));
+        }
+        Ok(())
+    }
+
     fn apply(&self, request: &SoftwareApplyRequest) -> anyhow::Result<()> {
         self.calls
             .lock()
@@ -232,6 +241,43 @@ async fn a_failed_upgrade_restores_through_the_previous_release_executor() {
     );
     assert!(default.calls().is_empty());
     assert_eq!(fixture.deployed("api").await.as_deref(), Some("1.0.0"));
+}
+
+#[tokio::test]
+async fn an_unavailable_target_leaves_the_deployment_as_it_was_until_it_exists() {
+    let mut fixture = Fixture::new("target").await;
+    let in_process = Arc::new(Recorder::default());
+    *in_process.target_missing.lock().unwrap() = true;
+    let executors = SoftwareExecutors::with_default(Arc::new(Recorder::default()))
+        .with_adapter(Kind::KubernetesInProcess, in_process.clone());
+    fixture
+        .release("app", "1.0.0", "executor = \"kubernetes-inprocess\"")
+        .await;
+
+    let error = fixture.apply(&executors).await.unwrap_err();
+
+    assert!(
+        error.downcast_ref::<TargetUnavailable>().is_some(),
+        "{error:#}"
+    );
+    // Nothing ran, so nothing was cleaned up and nothing is unknown.
+    assert!(in_process.calls().is_empty(), "{:?}", in_process.calls());
+    let environment = crate::environment::environment(&mut fixture.ctx, "local")
+        .await
+        .unwrap();
+    assert_eq!(environment.properties.get("deployed.app"), None);
+    assert_eq!(environment.properties.get("deployment_health.app"), None);
+
+    // Once the target exists, the next plan installs it.
+    *in_process.target_missing.lock().unwrap() = false;
+    let outcomes = fixture.apply(&executors).await.unwrap();
+
+    assert_eq!(
+        statuses(&outcomes),
+        [StepOutcomeStatus::Succeeded],
+        "{outcomes:?}"
+    );
+    assert_eq!(fixture.deployed("app").await.as_deref(), Some("1.0.0"));
 }
 
 #[tokio::test]
