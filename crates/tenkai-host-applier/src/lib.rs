@@ -5,10 +5,13 @@
 //! ([`copy::copy_request`]), verifies only that copy
 //! ([`tenkai::host_apply::verify_request`]) against the root-owned trust in
 //! the config directory ([`config::load_trust`]), and only then copies and
-//! checks the release workdir.
+//! checks the release workdir. A verified step then passes the per-product
+//! critical section ([`store::admit`]) before its command runs, and its
+//! result is recorded durably ([`store::Running::finish`]).
 
 pub mod config;
 pub mod copy;
+pub mod store;
 
 use std::path::{Path, PathBuf};
 

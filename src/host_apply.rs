@@ -10,10 +10,12 @@
 //! and the approvals against the root-owned [`HostApprovalPolicy`]. Only then
 //! does it copy the release workdir and check every artifact digest
 //! ([`VerifiedHostStep::verify_artifacts`]). Only a verified step reaches the
-//! applied-state critical section and its command.
+//! applied-state critical section ([`state::AppliedStateRecord::admit`]) and
+//! its command.
 
 mod policy;
 mod request;
+pub mod state;
 mod verify;
 
 #[cfg(any(test, feature = "test-support"))]
