@@ -1069,3 +1069,25 @@ async fn a_plan_is_stale_once_its_product_is_unsubscribed() {
     assert!(error.contains("no longer subscribes to it"), "{error}");
     assert!(host.applier.runs.lock().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn unsubscribing_waits_for_no_apply_to_run() {
+    let mut host = Host::new("unsubscribe-lease").await;
+    host.release("1.0.0", false).await;
+    let lease = super::claim_environment(&mut host.ctx, "edge", "running-apply")
+        .await
+        .unwrap();
+
+    let error = crate::environment::unsubscribe(&mut host.ctx, "edge", "cluster", &host.executors)
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("apply in progress"), "{error}");
+    super::release_environment(&mut host.ctx, &lease)
+        .await
+        .unwrap();
+    crate::environment::unsubscribe(&mut host.ctx, "edge", "cluster", &host.executors)
+        .await
+        .unwrap();
+}

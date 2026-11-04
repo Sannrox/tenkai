@@ -926,6 +926,25 @@ pub async fn unsubscribe(
     executors: &crate::software_executor::SoftwareExecutors,
 ) -> Result<String> {
     validate_identifier("environment", env)?;
+    // Held so no apply starts, or installs the product, between reading what
+    // is deployed and removing the subscription.
+    let lease =
+        crate::apply::claim_environment(ctx, env, &format!("unsubscribe:{product}")).await?;
+    let unsubscribed = unsubscribe_held(ctx, env, product, executors).await;
+    let released = crate::apply::release_environment(ctx, &lease).await;
+    let message = unsubscribed?;
+    released?;
+    Ok(message)
+}
+
+/// [`unsubscribe`] under the environment's apply lease.
+async fn unsubscribe_held(
+    ctx: &mut Ctx,
+    env: &str,
+    product: &str,
+    executors: &crate::software_executor::SoftwareExecutors,
+) -> Result<String> {
+    validate_identifier("environment", env)?;
     validate_identifier("product", product)?;
     let eid = env_id(env);
     let existing = active_environment(ctx, env).await?;
