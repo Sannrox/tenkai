@@ -11,8 +11,8 @@ page is Tenkai-local: how a maintainer prepares and tags **this** repository.
 Agents never push `v*` tags. A prepare-release job checks the changelog and
 workspace version and opens the version-bump pull request. After merge, the
 maintainer or a keyless workflow identity creates an annotated, signed
-`vX.Y.Z` tag. The tag must equal the workspace version. The workflow refuses
-unsigned or lightweight tags.
+`vX.Y.Z` or `vX.Y.Z-rc.N` tag. The tag must equal the workspace version. The
+workflow refuses unsigned or lightweight tags.
 
 ## Tenkai-local surfaces
 
@@ -26,7 +26,8 @@ and signed release identity.
 1. Choose the target version. Do not invent one in a feature pull request.
 2. Draft notes with `scripts/changelog-draft.sh`. Pull requests never edit
    `CHANGELOG.md`; the release step writes the section from merged work.
-   The section heading is `## vX.Y.Z (date)` or `## [X.Y.Z]`; its body is the
+   The section heading is `## vX.Y.Z (date)` or `## [X.Y.Z]` (a release
+   candidate uses its full version, `## v0.7.0-rc.1 (date)`); its body is the
    GitHub Release body. List gate markers on one required line,
    `Gate flags: breaking, migration, realm` (any subset, or `none`), from the
    `risk:breaking` and `risk:migration` pull requests and any realm change in
@@ -43,7 +44,12 @@ Create an annotated, signed tag on the merged release commit:
 vX.Y.Z
 ```
 
-Pre-releases are `vX.Y.Z-rc.N` or `vX.Y.Z-beta.N`. Hotfixes are tagged on
+A release candidate is `vX.Y.Z-rc.N` (N from 1, no leading zeros), tagged
+at workspace version `X.Y.Z-rc.N`. It runs the same workflow and publishes a
+GitHub pre-release that is never marked latest, so a failed run burns a
+candidate number, not the version. If a candidate fails, fix it on `main` and
+tag the next `-rc.N`; then bump to `X.Y.Z` and tag the final. The workflow
+accepts no other suffix (no `-beta.N` yet). Hotfixes are tagged on
 `release/vX.Y`, never on `main` ahead of a minor. A tag is never moved,
 deleted, or reused.
 

@@ -49,7 +49,10 @@ _GATE_LINE = re.compile(r"^Gate flags: *(.*)$", re.M)
 
 
 def changelog_section(text: str, version: str) -> str:
-    """Body of the `## [X.Y.Z]` or `## vX.Y.Z (date)` section for version."""
+    """Body of the `## [X.Y.Z]` or `## vX.Y.Z (date)` section for version.
+
+    Versions match exactly, so `X.Y.Z-rc.N` has its own section.
+    """
     headings = list(_HEADING.finditer(text))
     for index, heading in enumerate(headings):
         if heading.group(1) != version:
@@ -221,12 +224,20 @@ def self_test() -> None:
     changelog = (
         "# Changelog\n\n## [Unreleased]\n\n"
         "## v0.7.0 (2026-11-03)\n\nGate flags: migration, breaking\n\n### What's Changed\n- feat: one\n\n"
+        "## v0.7.0-rc.1 (2026-11-02)\n\nGate flags: breaking\n\n- feat: candidate\n\n"
+        "## [0.6.2-rc.1] - 2026-11-01\n\nGate flags: none\n\n- fix: candidate\n\n"
         "## [0.6.1] - 2026-11-01\n\n- fix: two\n\n"
         "## v0.6.0 (2026-10-30)\n\n"
     )
     section = changelog_section(changelog, "0.7.0")
     assert "feat: one" in section and "fix: two" not in section, section
     assert changelog_section(changelog, "0.6.1") == "- fix: two"
+    # A release candidate has its own section; the final never borrows it.
+    candidate = changelog_section(changelog, "0.7.0-rc.1")
+    assert "feat: candidate" in candidate and "feat: one" not in candidate, candidate
+    assert gate_flags(candidate) == ["breaking"]
+    assert "fix: candidate" in changelog_section(changelog, "0.6.2-rc.1")
+    expect_exit("no section for 0.6.1-rc.1", lambda: changelog_section(changelog, "0.6.1-rc.1"))
     assert gate_flags(section) == ["breaking", "migration"]
     expect_exit("no 'Gate flags:' line", lambda: gate_flags("- fix: two"))
     assert gate_flags("- fix: two", required=False) == []
@@ -271,6 +282,9 @@ def self_test() -> None:
         assert manifest["binaries"][1]["digest"] == "sha256:" + hashlib.sha256(b"bin").hexdigest()
         expect_exit("full lowercase SHA", lambda: build_manifest(git_sha="abc", tag="v0.7.0", **common))
         expect_exit("does not match version", lambda: build_manifest(git_sha="a" * 40, tag="v0.7.1", **common))
+        candidate = build_manifest(git_sha="a" * 40, tag="v0.7.1-rc.1", **(common | {"version": "0.7.1-rc.1"}))
+        assert candidate["version"] == "0.7.1-rc.1" and candidate["tag"] == "v0.7.1-rc.1", candidate
+        expect_exit("does not match version", lambda: build_manifest(git_sha="a" * 40, tag="v0.7.0-rc.1", **common))
     print("release-metadata self-test passed")
 
 

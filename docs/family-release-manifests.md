@@ -17,8 +17,9 @@ The manifest is JSON with `schema`, `component`, `version`, `git_sha`, `tag`,
 `binaries` and `images` (each `{name, digest}`), `attestations`, and
 `gate_flags` (`breaking`, `migration`, `realm`). Admission requires:
 
-- `component` and `version` equal the release's product name and version, and
-  `tag`, when present, is `v<version>`;
+- `component` and `version` equal the release's product name and version
+  exactly (a release candidate is `0.7.0-rc.1`, never `0.7.0`), and `tag`, when
+  present, is `v<version>`;
 - `git_sha` is a full lowercase SHA;
 - every binary and image digest is `sha256:<64 lowercase hex>`;
 - no image is a tag-only reference: an image name ending in `:latest`, an
