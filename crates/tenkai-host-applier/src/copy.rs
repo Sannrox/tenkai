@@ -1,0 +1,267 @@
+//! Copy a spooled request into root-owned storage without following links.
+//!
+//! The spool belongs to the unprivileged server, which may swap files while
+//! the applier reads them. Every path component is opened relative to its
+//! parent's descriptor with `O_NOFOLLOW`, every entry is checked before it is
+//! opened and again on the open descriptor, and only regular files and
+//! directories are accepted. From then on the applier reads only the copy.
+
+use std::io::{Read as _, Write as _};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+use std::path::{Component, Path, PathBuf};
+
+use anyhow::{Context as _, Result, bail};
+use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, Stat};
+use tenkai::host_apply::{ARTIFACTS_DIR, HostApplyRequest, MAX_REQUEST_BYTES, REQUEST_FILE};
+
+/// Most entries one release may copy.
+const MAX_ENTRIES: u64 = 100_000;
+
+/// A request and its release workdir, copied and parsed.
+#[derive(Debug)]
+pub struct CopiedRequest {
+    pub request: HostApplyRequest,
+    /// The copied release workdir the command runs in.
+    pub workdir: PathBuf,
+}
+
+/// Copy `<spool>/<instance>/request.json` and the deploy inputs its manifest
+/// declares under `<spool>/<instance>/artifacts/` into `dest`, which must not
+/// exist yet and whose parent is root-owned. `max_bytes` bounds the copied
+/// artifacts.
+pub fn copy_request(
+    spool: &Path,
+    instance: &str,
+    dest: &Path,
+    max_bytes: u64,
+) -> Result<CopiedRequest> {
+    tenkai::host_apply::validate_instance_name(instance)?;
+    let spool_fd = rustix::fs::open(
+        spool,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .with_context(|| format!("opening spool directory {}", spool.display()))?;
+    let instance_fd = open_dir_at(spool_fd.as_fd(), instance)
+        .with_context(|| format!("opening spooled instance {instance}"))?;
+    std::fs::create_dir(dest).with_context(|| format!("creating {}", dest.display()))?;
+    std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o700))?;
+
+    let mut budget = Budget {
+        bytes_left: MAX_REQUEST_BYTES,
+        entries_left: 1,
+    };
+    let bytes = copy_file_at(
+        instance_fd.as_fd(),
+        REQUEST_FILE,
+        &dest.join(REQUEST_FILE),
+        &mut budget,
+    )
+    .context("copying the host apply request")?;
+    let request = HostApplyRequest::parse(&bytes)?;
+    let manifest = tenkai::manifest::parse_raw(&request.manifest)
+        .context("host release manifest is not valid")?;
+
+    let workdir = dest.join(ARTIFACTS_DIR);
+    std::fs::create_dir(&workdir)?;
+    std::fs::set_permissions(&workdir, std::fs::Permissions::from_mode(0o755))?;
+    let mut budget = Budget {
+        bytes_left: max_bytes,
+        entries_left: MAX_ENTRIES,
+    };
+    let inputs = manifest.immutable_inputs();
+    if !inputs.is_empty() {
+        let artifacts_fd = open_dir_at(instance_fd.as_fd(), ARTIFACTS_DIR)
+            .context("opening the spooled release artifacts")?;
+        for input in &inputs {
+            copy_input(artifacts_fd.as_fd(), input, &workdir, &mut budget)
+                .with_context(|| format!("copying deploy input {input}"))?;
+        }
+    }
+    Ok(CopiedRequest { request, workdir })
+}
+
+struct Budget {
+    bytes_left: u64,
+    entries_left: u64,
+}
+
+impl Budget {
+    fn take(&mut self, bytes: u64) -> Result<()> {
+        self.entries_left = self
+            .entries_left
+            .checked_sub(1)
+            .context("release artifacts have too many entries")?;
+        self.bytes_left = self
+            .bytes_left
+            .checked_sub(bytes)
+            .context("release artifacts exceed the size limit")?;
+        Ok(())
+    }
+}
+
+/// Walk `input`'s components from `root`, then copy what it names.
+fn copy_input(
+    root: BorrowedFd<'_>,
+    input: &str,
+    dest_root: &Path,
+    budget: &mut Budget,
+) -> Result<()> {
+    let names: Vec<&str> = Path::new(input)
+        .components()
+        .map(|component| match component {
+            Component::Normal(name) => name.to_str().context("deploy input is not UTF-8"),
+            _ => bail!("deploy input must be a safe relative path"),
+        })
+        .collect::<Result<_>>()?;
+    let Some((last, parents)) = names.split_last() else {
+        bail!("deploy input is empty");
+    };
+    let mut dir = rustix::io::dup(root)?;
+    let mut dest = dest_root.to_path_buf();
+    for name in parents {
+        dir = open_dir_at(dir.as_fd(), name)?;
+        dest.push(name);
+        if !dest.exists() {
+            std::fs::create_dir(&dest)?;
+            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
+        }
+    }
+    copy_entry_at(dir.as_fd(), last, &dest.join(last), budget)
+}
+
+/// Copy one entry (a regular file, or a directory recursively).
+fn copy_entry_at(dir: BorrowedFd<'_>, name: &str, dest: &Path, budget: &mut Budget) -> Result<()> {
+    let stat = entry_stat(dir, name)?;
+    match FileType::from_raw_mode(stat.st_mode as _) {
+        FileType::RegularFile => {
+            copy_file_at(dir, name, dest, budget)?;
+            Ok(())
+        }
+        FileType::Directory => {
+            budget.take(0)?;
+            let child = open_dir_at(dir, name)?;
+            same_entry(&stat, &rustix::fs::fstat(&child)?, name)?;
+            std::fs::create_dir(dest).with_context(|| format!("creating {}", dest.display()))?;
+            let mut names = Vec::new();
+            for entry in Dir::read_from(&child)? {
+                let entry = entry?;
+                let entry_name = entry.file_name().to_bytes();
+                if entry_name == b"." || entry_name == b".." {
+                    continue;
+                }
+                names.push(
+                    std::str::from_utf8(entry_name)
+                        .context("artifact entry name is not UTF-8")?
+                        .to_owned(),
+                );
+            }
+            names.sort();
+            for entry_name in names {
+                copy_entry_at(child.as_fd(), &entry_name, &dest.join(&entry_name), budget)?;
+            }
+            std::fs::set_permissions(
+                dest,
+                std::fs::Permissions::from_mode(permission_bits(&stat, name)?),
+            )?;
+            Ok(())
+        }
+        FileType::Symlink => bail!("artifact {name} is a symbolic link"),
+        _ => bail!("artifact {name} is not a regular file or directory"),
+    }
+}
+
+/// Copy one regular file and return its bytes. The open descriptor must be
+/// the same single-link file the earlier `lstat` saw.
+fn copy_file_at(
+    dir: BorrowedFd<'_>,
+    name: &str,
+    dest: &Path,
+    budget: &mut Budget,
+) -> Result<Vec<u8>> {
+    let before = entry_stat(dir, name)?;
+    if FileType::from_raw_mode(before.st_mode as _) != FileType::RegularFile {
+        bail!("{name} is not a regular file");
+    }
+    let fd = rustix::fs::openat(
+        dir,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .with_context(|| format!("opening {name}"))?;
+    let opened = rustix::fs::fstat(&fd)?;
+    same_entry(&before, &opened, name)?;
+    if opened.st_nlink != 1 {
+        bail!("{name} is a hard link");
+    }
+    let mode = permission_bits(&opened, name)?;
+    let size = u64::try_from(opened.st_size).context("negative file size")?;
+    budget.take(size)?;
+    let mut bytes = Vec::with_capacity(size as usize);
+    std::fs::File::from(fd)
+        .take(size.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 != size {
+        bail!("{name} changed size while it was copied");
+    }
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .mode(0o600)
+        .open(dest)
+        .with_context(|| format!("creating {}", dest.display()))?;
+    out.write_all(&bytes)?;
+    out.sync_all()?;
+    std::fs::set_permissions(dest, std::fs::Permissions::from_mode(mode))?;
+    Ok(bytes)
+}
+
+fn open_dir_at(dir: BorrowedFd<'_>, name: &str) -> Result<OwnedFd> {
+    let stat = entry_stat(dir, name)?;
+    if FileType::from_raw_mode(stat.st_mode as _) != FileType::Directory {
+        bail!("{name} is not a directory");
+    }
+    let fd = rustix::fs::openat(
+        dir,
+        name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .with_context(|| format!("opening directory {name}"))?;
+    same_entry(&stat, &rustix::fs::fstat(&fd)?, name)?;
+    Ok(fd)
+}
+
+/// `lstat` of `name` in `dir`, refusing links before anything opens them.
+fn entry_stat(dir: BorrowedFd<'_>, name: &str) -> Result<Stat> {
+    if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+        bail!("invalid artifact entry name {name:?}");
+    }
+    let stat = rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW)
+        .with_context(|| format!("reading {name}"))?;
+    if FileType::from_raw_mode(stat.st_mode as _) == FileType::Symlink {
+        bail!("{name} is a symbolic link");
+    }
+    Ok(stat)
+}
+
+/// The entry opened must be the entry checked: a swap in between is refused.
+fn same_entry(checked: &Stat, opened: &Stat, name: &str) -> Result<()> {
+    if checked.st_dev != opened.st_dev || checked.st_ino != opened.st_ino {
+        bail!("{name} was replaced while it was copied");
+    }
+    Ok(())
+}
+
+/// Permission bits to keep on the copy; the artifact digest covers them.
+/// Set-id and sticky bits are refused rather than copied as root.
+fn permission_bits(stat: &Stat, name: &str) -> Result<u32> {
+    let mode = stat.st_mode as u32;
+    if mode & 0o7000 != 0 {
+        bail!("{name} carries set-id or sticky bits");
+    }
+    Ok(mode & 0o777)
+}

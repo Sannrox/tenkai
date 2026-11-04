@@ -229,6 +229,7 @@ pub(super) async fn create_pin_plan(
         release_digest: descriptor.manifest_digest,
         artifact_digest: descriptor.artifact_digest,
         workdir: descriptor.content_path,
+        host: None,
         restore,
     };
     plan::create_from_steps(ctx, &record.environment, vec![step]).await

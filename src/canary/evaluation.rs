@@ -441,6 +441,7 @@ mod tests {
             release_digest: policy.release_digest.clone(),
             artifact_digest: policy.artifact_digest.clone(),
             workdir: ".".into(),
+            host: None,
             restore: None,
         }];
         let content_id = plan_content_id(environment, created_at, &steps);

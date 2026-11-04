@@ -822,6 +822,7 @@ mod tests {
                 release_digest: String::new(),
                 artifact_digest: String::new(),
                 workdir: String::new(),
+                host: None,
                 restore: None,
             }],
         )

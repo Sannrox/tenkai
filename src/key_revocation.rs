@@ -228,11 +228,19 @@ pub fn load_configured() -> Result<()> {
     let Some((installed, authorities)) = configured()? else {
         return Ok(());
     };
+    load_installed(&installed, &authorities)
+}
+
+/// Verify the list installed at `installed` against `authorities` and apply
+/// it to this process. A missing list applies nothing; one that fails to
+/// verify is an error. The root-side host applier calls this with its own
+/// root-owned copies instead of the process environment.
+pub fn load_installed(installed: &Path, authorities: &TrustRoots) -> Result<()> {
     if !installed.exists() {
         return Ok(());
     }
-    let list = RevocationList::load(&installed)?;
-    list.verify(&authorities).with_context(|| {
+    let list = RevocationList::load(installed)?;
+    list.verify(authorities).with_context(|| {
         format!(
             "verifying installed key revocations {}",
             installed.display()

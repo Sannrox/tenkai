@@ -2930,6 +2930,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tenkai-host-applier"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tenkai",
+ "toml",
+ "uuid",
+]
+
+[[package]]
 name = "tenkai-http"
 version = "0.6.0"
 dependencies = [

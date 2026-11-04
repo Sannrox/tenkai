@@ -101,6 +101,7 @@ mod tests {
             release_digest: "sha256:release".into(),
             artifact_digest: "sha256:artifact".into(),
             workdir: ".".into(),
+            host: None,
             restore: None,
         }
     }

@@ -434,6 +434,7 @@ mod tests {
             release_digest: "fixture".into(),
             artifact_digest: "fixture".into(),
             workdir: ".".into(),
+            host: None,
             restore: None,
         }
     }

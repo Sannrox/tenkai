@@ -436,6 +436,7 @@ mod tests {
             release_digest: "fixture".into(),
             artifact_digest: "fixture".into(),
             workdir: ".".into(),
+            host: None,
             restore: None,
         };
         let mut running = plan::create_from_steps(&mut ctx, "local", vec![step])
@@ -508,6 +509,7 @@ mod tests {
                     release_digest: "fixture".into(),
                     artifact_digest: "fixture".into(),
                     workdir: ".".into(),
+                    host: None,
                     restore: None,
                 };
                 let old = plan::create_from_steps(&mut ctx, "local", vec![step.clone()])

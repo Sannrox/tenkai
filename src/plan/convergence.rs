@@ -377,6 +377,7 @@ async fn compute_snapshot_with_policy(
                 release_digest: release.digest,
                 artifact_digest: release.artifact_digest,
                 workdir: release.workdir,
+                host: None,
                 restore,
             },
         )
@@ -667,6 +668,7 @@ pub(super) async fn rollback_step_with_recovery(
         release_digest: target.digest,
         artifact_digest: target.artifact_digest,
         workdir: target.workdir,
+        host: None,
         restore,
         product: product.into(),
         action: Action::Rollback,
@@ -700,6 +702,7 @@ pub(super) async fn restart_step(ctx: &mut Ctx, env: &str, product: &str) -> Res
         release_digest: target.digest,
         artifact_digest: target.artifact_digest,
         workdir: target.workdir,
+        host: None,
         restore: None,
         product: product.into(),
         action: Action::Restart,
