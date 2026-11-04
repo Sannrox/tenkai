@@ -51,7 +51,7 @@ executor = "kubernetes-inprocess"
 | Value | Executor |
 | --- | --- |
 | `shell` | `deploy.install` behind `tenkai-executor-guard`, as the server's user |
-| `host` | `deploy.install` through the root-side host applier |
+| `host` | `deploy.install` through the root-side host applier ([privileged host releases](host-releases.md)) |
 | `helm` | Helm chart at the workdir |
 | `kubernetes` (aliases `k8s`, `native`) | `{workdir}/manifests/**` through `kubectl` |
 | `kubernetes-inprocess` | `{workdir}/manifests/**` with server-side apply |

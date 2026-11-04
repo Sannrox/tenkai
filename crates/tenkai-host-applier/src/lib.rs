@@ -1,7 +1,7 @@
 //! The root-side applier for privileged host releases (ADR 0041 §2).
 //!
 //! `tenkai-host-apply@<instance>.service` runs it as root for one spooled
-//! request. Intake copies the request into root-owned storage
+//! request ([`apply`]); see `docs/host-releases.md`. Intake copies the request into root-owned storage
 //! ([`copy::copy_request`]), verifies only that copy
 //! ([`tenkai::host_apply::verify_request`]) against the root-owned trust in
 //! the config directory ([`config::load_trust`]), and only then copies and
@@ -9,8 +9,10 @@
 //! critical section ([`store::admit`]) before its command runs, and its
 //! result is recorded durably ([`store::Running::finish`]).
 
+mod apply;
 pub mod config;
 pub mod copy;
+pub mod run;
 pub mod store;
 
 use std::path::{Path, PathBuf};
@@ -18,6 +20,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result};
 use tenkai::host_apply::{HostApplyRequest, HostTrust, VerifiedHostStep};
 
+pub use apply::{Applied, apply};
 pub use config::{ApplierConfig, ApplierPaths};
 
 /// A spooled request, copied and verified.

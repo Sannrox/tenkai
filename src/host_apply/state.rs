@@ -6,7 +6,10 @@
 //!
 //! - `records/<product_key>.json`: [`AppliedStateRecord`];
 //! - `instances/<instance>/started.json`: [`HostApplyStarted`];
-//! - `instances/<instance>/result.json`: [`HostApplyResult`].
+//! - `instances/<instance>/result.json`: [`HostApplyResult`];
+//! - `instances/<instance>/refused.json`: [`HostApplyRefused`], the latest
+//!   refusal before anything started. It is not terminal: the same instance
+//!   may start again once the reason is fixed.
 
 use std::path::{Path, PathBuf};
 
@@ -20,10 +23,13 @@ use crate::plan::{Action, HostAction};
 pub const APPLIED_STATE_SCHEMA: &str = "tenkai.host-applied-state.v1";
 pub const STARTED_SCHEMA: &str = "tenkai.host-apply-started.v1";
 pub const RESULT_SCHEMA: &str = "tenkai.host-apply-result.v1";
+pub const REFUSED_SCHEMA: &str = "tenkai.host-apply-refused.v1";
 /// `instances/<instance>/started.json`.
 pub const STARTED_FILE: &str = "started.json";
 /// `instances/<instance>/result.json`.
 pub const RESULT_FILE: &str = "result.json";
+/// `instances/<instance>/refused.json`.
+pub const REFUSED_FILE: &str = "refused.json";
 
 /// `records/<product_key>.json` under `state_dir`.
 pub fn record_path(state_dir: &Path, environment: &str, product: &str) -> PathBuf {
@@ -136,6 +142,16 @@ pub struct HostApplyResult {
     pub generation: u64,
     pub started_at: i64,
     pub finished_at: i64,
+}
+
+/// Why the latest start of an instance was refused before anything ran.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostApplyRefused {
+    pub schema: String,
+    pub instance: String,
+    pub reason: String,
+    pub refused_at: i64,
 }
 
 impl HostApplyStarted {

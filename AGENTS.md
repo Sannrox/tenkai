@@ -11,11 +11,14 @@ requires provider evidence.
 
 Source code lives in `src/` (application core) and `crates/` (`tenkai-wire`,
 `tenkai-http`, `tenkai-server`, `tenkaictl`, `tenkai-executor`, `tenkai-runtime`,
-and optional `tenkai-postgres`). `src/lib.rs` exports the application core. Shipped binaries
-are `tenkaictl` (embedded and remote CLI), `tenkai-server` (network service),
-`tenkai-executor-guard` (local process fencing), `tenkai-runtime` and
-`tenkai-runtime-guard` (pull-only environment runtime), and
-`tenkai-worker-lifecycle-fixture` (live worker-lifecycle observation host).
+`tenkai-host-applier`, and optional `tenkai-postgres`). `src/lib.rs` exports
+the application core. Shipped binaries are `tenkaictl` (embedded and remote
+CLI), `tenkai-server` (network service), `tenkai-executor-guard` (local process
+fencing), `tenkai-runtime` and `tenkai-runtime-guard` (pull-only environment
+runtime), and `tenkai-worker-lifecycle-fixture` (live worker-lifecycle
+observation host).
+`tenkai-host-applier` is the root-side applier for privileged host releases
+([host releases](docs/host-releases.md)); it is built from source.
 The Postgres delivery-effect harness is the `tenkai-delivery-conformance`
 binary in `crates/tenkai-postgres`, behind feature `postgres`; see
 [delivery-effect conformance](docs/delivery-effect-conformance.md). Keep domain

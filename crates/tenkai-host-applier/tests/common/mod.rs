@@ -178,6 +178,35 @@ impl Host {
         store::read_record(&self.paths, "edge", "k3s").unwrap()
     }
 
+    /// Write the config and trust files where the binary reads them, owned
+    /// by this user and not writable by others.
+    pub fn write_config(&self) {
+        let etc = &self.paths.config_dir;
+        let write = |name: &str, contents: String| {
+            let path = etc.join(name);
+            std::fs::write(&path, contents).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        };
+        write(
+            tenkai_host_applier::config::CONFIG_FILE,
+            format!(
+                "version = 1\nspool_dir = {:?}\ntimeout_seconds = {}\nmax_artifact_bytes = {}\nmax_artifact_entries = {}\n",
+                self.config.spool_dir.display().to_string(),
+                self.config.timeout_seconds,
+                self.config.max_artifact_bytes,
+                self.config.max_artifact_entries,
+            ),
+        );
+        write(
+            tenkai_host_applier::config::RELEASE_TRUST_ROOTS_FILE,
+            toml::to_string(&self.fixture.trust.release_roots).unwrap(),
+        );
+        write(
+            tenkai_host_applier::config::HOST_APPROVAL_POLICY_FILE,
+            toml::to_string(&self.fixture.trust.policy).unwrap(),
+        );
+    }
+
     /// A reboot: everything under the run directory is gone.
     pub fn reboot(&self) {
         std::fs::remove_dir_all(&self.paths.run_dir).unwrap();

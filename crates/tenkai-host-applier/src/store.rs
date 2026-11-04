@@ -16,8 +16,8 @@ use anyhow::{Context as _, Result};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tenkai::host_apply::state::{
-    AppliedStateRecord, HostApplyOutcome, HostApplyResult, HostApplyStarted, RESULT_FILE,
-    STARTED_FILE, instance_dir, record_path,
+    AppliedStateRecord, HostApplyOutcome, HostApplyRefused, HostApplyResult, HostApplyStarted,
+    REFUSED_FILE, REFUSED_SCHEMA, RESULT_FILE, STARTED_FILE, instance_dir, record_path,
 };
 use tenkai::host_apply::{VerifiedHostStep, product_key};
 
@@ -28,6 +28,33 @@ use crate::ApplierPaths;
 pub fn recorded_result(paths: &ApplierPaths, instance: &str) -> Result<Option<HostApplyResult>> {
     tenkai::host_apply::validate_instance_name(instance)?;
     read_json(&instance_dir(&paths.state_dir, instance).join(RESULT_FILE))
+}
+
+/// Record why `instance` was refused before anything started. It replaces
+/// an earlier refusal and never blocks a later start.
+pub fn record_refusal(
+    paths: &ApplierPaths,
+    instance: &str,
+    reason: &str,
+    now_ms: i64,
+) -> Result<()> {
+    tenkai::host_apply::validate_instance_name(instance)?;
+    write_json(
+        paths,
+        &instance_dir(&paths.state_dir, instance).join(REFUSED_FILE),
+        &HostApplyRefused {
+            schema: REFUSED_SCHEMA.into(),
+            instance: instance.into(),
+            reason: reason.into(),
+            refused_at: now_ms,
+        },
+    )
+}
+
+/// The latest refusal of `instance`, if any.
+pub fn refusal(paths: &ApplierPaths, instance: &str) -> Result<Option<HostApplyRefused>> {
+    tenkai::host_apply::validate_instance_name(instance)?;
+    read_json(&instance_dir(&paths.state_dir, instance).join(REFUSED_FILE))
 }
 
 /// What the critical section decided for one verified step.
