@@ -141,7 +141,23 @@ pull request body, which becomes the squash commit; at release,
 - feat(ops): add dark-site local model and site-agent profile (#861)
 - feat(ops): add small-footprint spoke standby profile (#862)
 - feat(trust): signer validity windows in trust roots (#863)
-- chore: prepare 0.6.0 crate bump and release notes (#652)
+- chore: prepare 0.6.0 crate bump and release notes (#864)
+- feat(integration): deliver feedback observations to Sekai as evidence (#875)
+- fix(executor): run fenced deploys with /bin/sh and named stderr (#881)
+- feat(catalog): authorized tenant export of release pins as a digest-pinned bundle section (#882)
+- docs: record family versioning, tagging and release policy (#891)
+- ci: run cargo-semver-checks on library crates against the PR base (#892)
+- ci: run buf breaking against the last release tag (#893)
+- feat(catalog): admit signed family release manifests; gate flags hold channels (#894)
+- feat(catalog): signed family release trains with candidate to stable promotion (#895)
+- test(storage): open the previous release's state database and migrate it (#896)
+
+### Upgrade
+- Signer validity windows (#863): trust-root signers may carry `not_before` / `not_after`. 0.6.0 checks the window against the verifier's clock at verification time, not at signing time, for stored artifacts too: the installed revocation list at every start (a failure stops `tenkai-server` and `tenkaictl`), backup restore, audit exports, support bundles, offline bundles, and the stored release signature that `tenkai-server` re-verifies against `TENKAI_RELEASE_TRUST_ROOTS` before a non-local deploy. Once a signer passes `not_after`, what it signed stops verifying, so do not set `not_after` on a key whose signed artifacts you still need. A 0.5.0 binary refuses a trust-root file that carries the fields; remove them before rolling back. Checking stored artifacts at their signing time is tracked for 0.7.0 in #865.
+- `tenkai.terminal_outcome.v1` (#855, #867): tenant-mode hubs now export terminal outcomes. Their payload carries `tenant_id` and their `target_external_id` is `<tenant>:<deployment_id>` instead of `<deployment_id>`, under the unchanged schema version `1.0.0`. A consumer schema registered from the earlier field list refuses tenant-mode outcomes; add `tenant_id` before enabling export on a tenant-mode hub.
+- Feedback capture on tenant-mode PostgreSQL hubs (#868): committed deployment outcomes write no `tenkai.feedback_observation.v1` record on these hubs, with no error. SQLite hubs capture them. Do not rely on observation history from a tenant-mode PostgreSQL hub.
+- Release manifest sections: `[inventory]` (#856) and `[topology]` (#701) are new top-level manifest sections. A 0.5.0 hub or spoke refuses a release that declares either with an unknown-field error, so upgrade every host that receives a release before publishing one.
+- Feedback export (#875): opt-in delivery of captured feedback observations as evidence through the provider outbox. Off by default (`--feedback-provider` / `TENKAI_FEEDBACK_PROVIDER`, `disabled`). Enabling it needs embedded application state, `TENKAI_FEEDBACK_PROVIDER_URL`, `TENKAI_FEEDBACK_NAMESPACE` and an exact `TENKAI_FEEDBACK_PROVIDER_REGISTRATION`. While it is disabled, `tenkai-server` refuses to start if any of those feedback settings or `TENKAI_FEEDBACK_PROVIDER_TOKEN` is set. Disabled or unavailable export does not interrupt deploy or rollback.
 
 ## v0.5.0 (2026-10-10)
 
