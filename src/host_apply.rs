@@ -24,7 +24,7 @@ pub mod fixture;
 mod tests;
 
 pub use crate::plan::{HostAction, HostStep};
-pub use policy::{HostApprovalPolicy, HostApprovals};
+pub use policy::{HostApprovalPolicy, HostApprovals, plan_purposes};
 pub use request::{
     ARTIFACTS_DIR, HostApplyRequest, MAX_REQUEST_BYTES, REQUEST_FILE, REQUEST_SCHEMA, instance_key,
     product_key, validate_instance_name,

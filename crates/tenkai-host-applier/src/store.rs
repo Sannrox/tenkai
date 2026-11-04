@@ -79,8 +79,8 @@ impl Running {
 
 /// The critical section: under the per-product lock, settle the step that
 /// last advanced the record, return the recorded result of an instance that
-/// already started, then check that the approvals are still valid after the
-/// wait for the lock, the generation, source release, and downgrade
+/// already started, then recount the approvals still valid after the wait
+/// for the lock, check the generation, source release, and downgrade
 /// approvals, and durably write the advanced record and the `started` record
 /// before anything runs.
 pub fn admit(paths: &ApplierPaths, step: &VerifiedHostStep) -> Result<Admission> {
@@ -98,12 +98,16 @@ pub fn admit(paths: &ApplierPaths, step: &VerifiedHostStep) -> Result<Admission>
         write_result(paths, &result)?;
         return Ok(Admission::Recorded(result));
     }
-    step.approvals.require_unexpired(now_ms)?;
-    let (started, advanced) = record.admit(step, now_ms)?;
+    let step = VerifiedHostStep {
+        approvals: step.approvals.at(now_ms),
+        ..step.clone()
+    };
+    step.approvals.require_all(&step.purposes)?;
+    let (started, advanced) = record.admit(&step, now_ms)?;
     if let Some(advanced) = &advanced {
         write_record(paths, advanced)?;
     }
-    write_json(&started_path, &started)?;
+    write_json(paths, &started_path, &started)?;
     Ok(Admission::Run(Box::new(Running {
         paths: paths.clone(),
         started,
@@ -159,6 +163,7 @@ pub fn read_record(
 
 fn write_record(paths: &ApplierPaths, record: &AppliedStateRecord) -> Result<()> {
     write_json(
+        paths,
         &record_path(&paths.state_dir, &record.environment, &record.product),
         record,
     )
@@ -166,6 +171,7 @@ fn write_record(paths: &ApplierPaths, record: &AppliedStateRecord) -> Result<()>
 
 fn write_result(paths: &ApplierPaths, result: &HostApplyResult) -> Result<()> {
     write_json(
+        paths,
         &instance_dir(&paths.state_dir, &result.instance).join(RESULT_FILE),
         result,
     )
@@ -201,12 +207,12 @@ fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
     }
 }
 
-/// Replace `path` atomically and durably, readable by everyone and writable
-/// only by the applier.
-fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
+/// Replace `path`, under the state directory, atomically and durably,
+/// readable by everyone and writable only by the applier.
+fn write_json(paths: &ApplierPaths, path: &Path, value: &impl Serialize) -> Result<()> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let parent = path.parent().context("record path has no parent")?;
-    create_dirs(parent)?;
+    durable_dirs(&paths.state_dir, parent)?;
     let staged: PathBuf = parent.join(format!(
         ".{}.{}.{}.tmp",
         path.file_name()
@@ -226,14 +232,43 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
     drop(file);
     std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o644))?;
     std::fs::rename(&staged, path).with_context(|| format!("replacing {}", path.display()))?;
-    // The rename, and the entry of a directory created for it just now.
     std::fs::File::open(parent)?.sync_all()?;
-    if let Some(grandparent) = parent.parent() {
-        std::fs::File::open(grandparent)?.sync_all()?;
+    Ok(())
+}
+
+/// Create `dir` and every missing directory between it and `root`, syncing
+/// each new directory's parent so its entry survives a power loss. `root`
+/// itself must already exist (the unit's `StateDirectory=` provisions it): a
+/// missing state root fails closed instead of silently starting over.
+fn durable_dirs(root: &Path, dir: &Path) -> Result<()> {
+    if !root.is_dir() {
+        anyhow::bail!(
+            "state directory {} does not exist; it must be provisioned before the applier runs",
+            root.display()
+        );
+    }
+    let relative = dir
+        .strip_prefix(root)
+        .with_context(|| format!("{} is outside {}", dir.display(), root.display()))?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let parent = current.clone();
+        current.push(component);
+        match std::fs::create_dir(&current) {
+            Ok(()) => {
+                std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o755))?;
+                std::fs::File::open(&parent)?.sync_all()?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("creating {}", current.display()));
+            }
+        }
     }
     Ok(())
 }
 
+/// Create the run directory's lock directory; it holds no durable state.
 fn create_dirs(dir: &Path) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755))?;

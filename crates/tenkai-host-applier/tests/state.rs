@@ -411,3 +411,48 @@ fn approvals_that_expire_while_waiting_for_the_lock_do_not_start_the_step() {
     assert!(refused.contains("stopped being valid"), "{refused}");
     assert_eq!(host.record().generation, 0);
 }
+
+#[test]
+fn a_redundant_approval_that_expires_while_waiting_does_not_refuse_the_step() {
+    let host = Host::new(Vec::new());
+    let a = host.release("1.0.0");
+    let now = tenkai::now_millis();
+    let plan = host.fixture.plan(
+        "edge",
+        now,
+        &[tenkai::host_apply::fixture::StepSpec {
+            release: a.release.clone(),
+            action: HostAction::Install,
+            step_action: Action::Install,
+            from: None,
+            expected_generation: 0,
+        }],
+    );
+    let short = tenkai::host_apply::fixture::approve_with(
+        &host.fixture.approvers[1].key,
+        &plan,
+        "external-review",
+        now - 1_000,
+        now + 500,
+    );
+    let long = host.fixture.approve(&plan, 0, now);
+    let request = host
+        .fixture
+        .request(&plan, 0, &a.release, vec![short, long]);
+    let instance = host.spool_request(&request, &a.dir);
+    let intake = host.intake(&instance).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    assert!(matches!(
+        store::admit(&host.paths, &intake.verified).unwrap(),
+        Admission::Run(_)
+    ));
+}
+
+#[test]
+fn a_missing_state_directory_fails_closed() {
+    let host = Host::new(Vec::new());
+    let a = host.release("1.0.0");
+    let (instance, _) = host.spool(install(&a, None, 0));
+    std::fs::remove_dir_all(&host.paths.state_dir).unwrap();
+    assert!(refusal(host.admit(&instance)).contains("must be provisioned"));
+}
