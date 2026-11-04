@@ -308,6 +308,8 @@ mod live_grant_rules;
 #[cfg(feature = "postgres")]
 mod live_isolation;
 #[cfg(feature = "postgres")]
+mod live_property_lookup;
+#[cfg(feature = "postgres")]
 mod live_retirement;
 #[cfg(feature = "postgres")]
 mod live_sole_store;

@@ -186,7 +186,7 @@ mod schema;
 mod writer_lease;
 
 pub(crate) use leases::{lock_lease, require_lease, require_plan_environment};
-pub(crate) use schema::migrate_tenant_schema;
+pub(crate) use schema::{PROPERTY_LOOKUP_PREFIX_CHARS, migrate_tenant_schema};
 
 impl Inner {
     pub(crate) fn with_schema<T: Send + 'static>(

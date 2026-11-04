@@ -65,8 +65,9 @@ jobs:
         with:
           toolchain: 1.96.1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      # The hub writer lease and the kill-the-leader drill (#748, #749).
-      - run: cargo test --locked -p tenkai-postgres --features postgres --lib -- --ignored live_writer_lease live_failover_drill
+      # The hub writer lease and the kill-the-leader drill (#748, #749),
+      # and the large property value migration (#879).
+      - run: cargo test --locked -p tenkai-postgres --features postgres --lib -- --ignored live_writer_lease live_failover_drill live_property_lookup
 
   fmt:
     name: Rustfmt

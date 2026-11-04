@@ -108,10 +108,15 @@ impl Inner {
         self.with_schema(schema, move |tx| {
             let rows = tx
                 .query(
-                    "SELECT o.payload FROM catalog_objects o
-                     INNER JOIN catalog_object_properties p
-                       ON p.object_id = o.id AND p.kind = $1 AND p.key = $2 AND p.value = $3
-                     ORDER BY o.id",
+                    &format!(
+                        "SELECT o.payload FROM catalog_objects o
+                         INNER JOIN catalog_object_properties p
+                           ON p.object_id = o.id AND p.kind = $1 AND p.key = $2
+                          AND left(p.value, {PROPERTY_LOOKUP_PREFIX_CHARS})
+                              = left($3, {PROPERTY_LOOKUP_PREFIX_CHARS})
+                          AND p.value = $3
+                         ORDER BY o.id"
+                    ),
                     &[&kind, &key, &value],
                 )
                 .map_err(pg)?;
