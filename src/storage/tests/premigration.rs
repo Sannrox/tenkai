@@ -136,7 +136,11 @@ fn copies_are_bounded_and_crashed_temporaries_removed() {
     let database = previous_release_store(&dir);
     // Older copies, one stamped in the future: the new copy is kept anyway.
     for taken_ms in [1, 2, 3, i64::MAX] {
-        std::fs::write(dir.join(format!("tenkai.db.pre-v11.{taken_ms}.db")), b"old").unwrap();
+        std::fs::write(
+            dir.join(format!("tenkai.db.pre-v11.{taken_ms}.a.db")),
+            b"old",
+        )
+        .unwrap();
     }
     let stale = dir.join(".tenkai.db.pre-v12.1.crashed.tmp");
     std::fs::write(&stale, b"partial").unwrap();
@@ -152,8 +156,8 @@ fn copies_are_bounded_and_crashed_temporaries_removed() {
     drop(SqliteStore::open(&database).unwrap());
     let kept = copies(&dir);
     assert_eq!(kept.len(), 3, "{kept:?}");
-    assert!(kept.contains(&dir.join(format!("tenkai.db.pre-v11.{}.db", i64::MAX))));
-    assert!(kept.contains(&dir.join("tenkai.db.pre-v11.3.db")));
+    assert!(kept.contains(&dir.join(format!("tenkai.db.pre-v11.{}.a.db", i64::MAX))));
+    assert!(kept.contains(&dir.join("tenkai.db.pre-v11.3.a.db")));
     let new = kept
         .iter()
         .find(|copy| copy.to_str().unwrap().contains(".pre-v12."))

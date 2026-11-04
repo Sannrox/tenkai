@@ -1,7 +1,7 @@
 //! A verified copy of a SQLite store before this binary migrates it (#906).
 //!
 //! Whatever replaced the binary, the first start that moves a store to a newer
-//! schema first leaves `<db>.pre-v<found>.<ms>.db` beside it: a consistent,
+//! schema first leaves `<db>.pre-v<found>.<ms>.<id>.db` beside it: a consistent,
 //! self-contained single file at the old schema that the previous binary can
 //! open. A copy that cannot be written and verified refuses the start before
 //! the store is touched.
@@ -83,10 +83,8 @@ fn take_copy(connection: &Connection, database: &Path, found: u32) -> anyhow::Re
         .and_then(|name| name.to_str())
         .context("the store's file name is not UTF-8")?;
     let now_ms = crate::now_millis();
-    let temporary = dir.join(format!(
-        ".{name}.pre-v{found}.{now_ms}.{}.tmp",
-        uuid::Uuid::new_v4().simple()
-    ));
+    let id = &uuid::Uuid::new_v4().simple().to_string()[..12];
+    let temporary = dir.join(format!(".{name}.pre-v{found}.{now_ms}.{id}.tmp"));
     let written = write_copy(connection, &temporary, found);
     let kept = written.and_then(|()| {
         let newest = copies(dir, name)?
@@ -102,12 +100,9 @@ fn take_copy(connection: &Connection, database: &Path, found: u32) -> anyhow::Re
                 newest.path
             }
             _ => {
-                // A copy taken earlier in the same millisecond keeps its name.
-                // Two starts racing for one name each leave a valid copy under it.
-                let copy = (now_ms..)
-                    .map(|taken_ms| dir.join(format!("{name}.pre-v{found}.{taken_ms}.db")))
-                    .find(|copy| !copy.exists())
-                    .context("no free name for the copy")?;
+                // The random part keeps two starts in one millisecond from
+                // replacing each other's copy, without needing hard links.
+                let copy = dir.join(format!("{name}.pre-v{found}.{now_ms}.{id}.db"));
                 std::fs::rename(&temporary, &copy).with_context(|| {
                     format!("renaming {} to {}", temporary.display(), copy.display())
                 })?;
@@ -184,7 +179,10 @@ fn copies(dir: &Path, name: &str) -> anyhow::Result<Vec<Copy>> {
         else {
             continue;
         };
-        let Some((found, taken_ms)) = rest.split_once('.') else {
+        let Some((found, taken_ms, _id)) = rest
+            .split_once('.')
+            .and_then(|(found, rest)| rest.split_once('.').map(|(ms, id)| (found, ms, id)))
+        else {
             continue;
         };
         if let (Ok(found), Ok(taken_ms)) = (found.parse(), taken_ms.parse()) {

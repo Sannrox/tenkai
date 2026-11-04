@@ -82,7 +82,7 @@ a manual copy, or a newer `tenkaictl` in embedded mode), the first start that
 moves a SQLite store to a newer schema first copies it beside itself:
 
 ```text
-<db>.pre-v<found>.<ms>.db     the store at schema <found>, before the migration
+<db>.pre-v<found>.<ms>.<id>.db     the store at schema <found>, before the migration
 ```
 
 The copy is a consistent online backup in one file (no WAL), owner-only,
@@ -100,7 +100,7 @@ To go back to the previous binary after a migration:
 1. Stop every process that opens the store.
 2. Move `<db>`, `<db>-wal` and `<db>-shm` aside. Keep them: they hold what was
    written since the migration, which the rollback gives up.
-3. Copy the newest `<db>.pre-v<found>.<ms>.db` to `<db>`, owner-only.
+3. Copy the newest `<db>.pre-v<found>.<ms>.<id>.db` to `<db>`, owner-only.
 4. Start the previous binary (schema `<found>`).
 
 Self-upgrade hosts use `tenkaictl self-upgrade rollback --restore-backup`
