@@ -126,7 +126,14 @@ struct Started {
     interrupted: Option<&'static str>,
 }
 
-/// Start the unit and wait for its start job, keeping the fence fresh.
+/// Why the server stops a unit it started.
+enum Stop {
+    Interrupted(&'static str),
+    FenceLost(anyhow::Error),
+}
+
+/// Start the unit and wait until it ended, keeping the fence fresh. Losing
+/// the lease or a SIGINT/SIGTERM stops the unit.
 async fn start_and_wait(
     ctx: &mut Ctx,
     lease: &EnvironmentLease,
@@ -145,75 +152,86 @@ async fn start_and_wait(
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut refresh = tokio::time::interval(REFRESH_EVERY);
     refresh.tick().await;
-    enum Stop {
-        Interrupted(&'static str),
-        FenceLost(anyhow::Error),
-    }
-    let (ended, stop) = loop {
+    let mut stop: Option<Stop> = None;
+    let mut ended: Option<Result<()>> = None;
+    loop {
         tokio::select! {
-            ended = &mut start => break (Some(ended), None),
-            _ = interrupt.recv() => break (None, Some(Stop::Interrupted("the server was interrupted"))),
-            _ = terminate.recv() => break (None, Some(Stop::Interrupted("the server was terminated"))),
+            done = &mut start => {
+                ended = Some(done);
+                break;
+            }
+            _ = interrupt.recv() => {
+                stop = Some(Stop::Interrupted("the server was interrupted"));
+                break;
+            }
+            _ = terminate.recv() => {
+                stop = Some(Stop::Interrupted("the server was terminated"));
+                break;
+            }
             _ = refresh.tick() => {
                 if let Err(error) = refresh_environment_lease(ctx, lease).await {
-                    break (None, Some(Stop::FenceLost(error)));
+                    stop = Some(Stop::FenceLost(error));
+                    break;
+                }
+            }
+        }
+    }
+    // A start job can end, for example cancelled by a stop, while the
+    // applier is still stopping. Wait until the unit is gone as well, so the
+    // applier has recorded how the step ended before it is read. After a
+    // stop, stop the unit again whenever it is seen running, since its start
+    // job may reach it after the stop. A lease still held stays fresh.
+    let mut stopped = match stop {
+        Some(_) => host.units().stop(instance),
+        None => Ok(()),
+    };
+    let deadline = tokio::time::Instant::now() + STOP_GRACE;
+    let mut poll = tokio::time::interval(Duration::from_millis(200));
+    let settled = loop {
+        tokio::select! {
+            biased;
+            done = &mut start, if ended.is_none() => ended = Some(done),
+            _ = poll.tick() => {
+                let running = host
+                    .units()
+                    .running()
+                    .await
+                    .map(|running| running.iter().any(|unit| unit == instance));
+                match running {
+                    Ok(false) if ended.is_some() => break true,
+                    Ok(true) if stop.is_some() => stopped = host.units().stop(instance),
+                    _ => {}
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    break false;
+                }
+            }
+            _ = refresh.tick(), if !matches!(stop, Some(Stop::FenceLost(_))) => {
+                if let Err(error) = refresh_environment_lease(ctx, lease).await {
+                    stop = Some(Stop::FenceLost(error));
+                    stopped = host.units().stop(instance);
                 }
             }
         }
     };
-    let ended = match (ended, stop) {
-        (Some(ended), _) => ended,
-        (None, Some(stop)) => {
-            // The start was submitted when it was asked for, but its job may
-            // reach the unit after this stop. Stop the unit whenever it is
-            // seen running until the start job ends, so the applier records
-            // the stop; keep a lease still held fresh meanwhile.
-            let still_held = matches!(stop, Stop::Interrupted(_));
-            let deadline = tokio::time::Instant::now() + STOP_GRACE;
-            let mut stopped = host.units().stop(instance);
-            let mut poll = tokio::time::interval(Duration::from_millis(200));
-            let ended = loop {
-                tokio::select! {
-                    biased;
-                    ended = &mut start => break Some(ended),
-                    _ = poll.tick() => {
-                        if tokio::time::Instant::now() >= deadline {
-                            break None;
-                        }
-                        if host
-                            .units()
-                            .running()
-                            .await
-                            .is_ok_and(|running| running.iter().any(|unit| unit == instance))
-                        {
-                            stopped = host.units().stop(instance);
-                        }
-                    }
-                    _ = refresh.tick(), if still_held => {
-                        let _ = refresh_environment_lease(ctx, lease).await;
-                    }
-                }
-            };
-            stop_on_drop.armed = stopped.is_err() || ended.is_none();
-            match stop {
-                Stop::FenceLost(error) => return Err(error),
-                Stop::Interrupted(reason) => {
-                    return Ok(Started {
-                        since_ms,
-                        start_error: stopped.err().map(|error| format!("{error:#}")),
-                        interrupted: Some(reason),
-                    });
-                }
-            }
-        }
-        (None, None) => unreachable!("the loop breaks with an end or a stop"),
+    stop_on_drop.armed = !settled || stopped.is_err();
+    let start_error = match (stopped, ended) {
+        (Err(error), _) | (Ok(()), Some(Err(error))) => Some(format!("{error:#}")),
+        _ => None,
     };
-    stop_on_drop.armed = false;
-    Ok(Started {
-        since_ms,
-        start_error: ended.err().map(|error| format!("{error:#}")),
-        interrupted: None,
-    })
+    match stop {
+        Some(Stop::FenceLost(error)) => Err(error),
+        Some(Stop::Interrupted(reason)) => Ok(Started {
+            since_ms,
+            start_error,
+            interrupted: Some(reason),
+        }),
+        None => Ok(Started {
+            since_ms,
+            start_error,
+            interrupted: None,
+        }),
+    }
 }
 
 /// How a unit that left no result ended: refused since this start, which
