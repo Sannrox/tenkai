@@ -135,6 +135,27 @@ jobs:
         env:
           GITHUB_EVENT_BEFORE: ${{ github.event.before }}
 
+  # Linux proof for the root-side host applier (ADR 0041 §2): the template
+  # unit and polkit rule installed for real, driven by an unprivileged user.
+  host-applier-systemd:
+    name: Host applier systemd drill
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.96.1
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Install polkit
+        run: sudo apt-get update && sudo apt-get install -y polkitd
+      - name: Build the applier and the drill fixture
+        run: cargo build --locked -p tenkai-host-applier --bin tenkai-host-applier --example host_apply_drill
+      - name: Run the drill
+        run: bash scripts/host-applier-systemd-drill.sh target/debug/tenkai-host-applier target/debug/examples/host_apply_drill
+      - name: Applier journal
+        if: always()
+        run: sudo journalctl -t tenkai-host-apply --no-pager || true
+
   kubernetes-inprocess:
     name: Kind in-process apply
     runs-on: ubuntu-latest

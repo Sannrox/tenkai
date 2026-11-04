@@ -1,0 +1,51 @@
+# Root side of one privileged host release step (ADR 0041 §2).
+#
+# The unprivileged `tenkai` user may only start and stop instances of this
+# template (see tenkai-host-apply.rules). The instance name is the step's
+# instance key; the applier recomputes it from the verified request and
+# refuses any other. Install: docs/host-releases.md.
+[Unit]
+Description=Tenkai host release step %i
+Documentation=https://github.com/Sannrox/tenkai/blob/main/docs/host-releases.md
+After=local-fs.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/tenkai/tenkai-host-applier run %i
+User=root
+Group=root
+UMask=0022
+# The applier enforces its own timeout (timeout_seconds in
+# /etc/tenkai/host-applier.toml) and records the result; systemd must not
+# cut it short.
+TimeoutStartSec=infinity
+# `systemctl stop` sends SIGTERM to the applier only, which kills the
+# command's process group and records the step as stopped. Anything left in
+# the unit's control group is killed after the applier exits.
+KillMode=mixed
+TimeoutStopSec=60
+# Persistent records and per-run copies.
+StateDirectory=tenkai-host
+StateDirectoryMode=0755
+RuntimeDirectory=tenkai-host/work/%i
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=no
+# Sandboxing. Host releases install system software, so the file system
+# stays writable.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+RestrictRealtime=yes
+# Enough to install files, set owners and modes, and manage units over
+# D-Bus. A release that loads kernel modules or changes network or mount
+# state needs a drop-in that widens it.
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_FSETID CAP_KILL CAP_SETGID CAP_SETUID CAP_SETPCAP CAP_SETFCAP CAP_NET_BIND_SERVICE CAP_AUDIT_WRITE
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tenkai-host-apply

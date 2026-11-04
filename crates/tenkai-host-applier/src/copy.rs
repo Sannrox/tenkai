@@ -33,8 +33,8 @@ pub struct SpooledRequest {
     dest: PathBuf,
 }
 
-/// Copy `<spool>/<instance>/request.json` into `dest`, which must not exist
-/// yet and whose parent is root-owned, and parse the copied bytes.
+/// Copy `<spool>/<instance>/request.json` into `dest`, an empty root-owned
+/// directory, and parse the copied bytes.
 pub fn copy_request(spool: &Path, instance: &str, dest: &Path) -> Result<SpooledRequest> {
     tenkai::host_apply::validate_instance_name(instance)?;
     let spool_fd = rustix::fs::open(
@@ -45,8 +45,13 @@ pub fn copy_request(spool: &Path, instance: &str, dest: &Path) -> Result<Spooled
     .with_context(|| format!("opening spool directory {}", spool.display()))?;
     let instance_fd = open_dir_at(spool_fd.as_fd(), instance)
         .with_context(|| format!("opening spooled instance {instance}"))?;
-    std::fs::create_dir(dest).with_context(|| format!("creating {}", dest.display()))?;
-    std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o700))?;
+    if std::fs::read_dir(dest)
+        .with_context(|| format!("reading {}", dest.display()))?
+        .next()
+        .is_some()
+    {
+        bail!("{} is not empty", dest.display());
+    }
     let (file, mode, size) = open_regular_at(instance_fd.as_fd(), REQUEST_FILE)
         .context("opening the host apply request")?;
     if size > MAX_REQUEST_BYTES {

@@ -16,8 +16,8 @@ use anyhow::{Context as _, Result};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tenkai::host_apply::state::{
-    AppliedStateRecord, HostApplyOutcome, HostApplyResult, HostApplyStarted, RESULT_FILE,
-    STARTED_FILE, instance_dir, record_path,
+    AppliedStateRecord, HostApplyOutcome, HostApplyRefused, HostApplyResult, HostApplyStarted,
+    REFUSED_FILE, REFUSED_SCHEMA, RESULT_FILE, STARTED_FILE, instance_dir, record_path,
 };
 use tenkai::host_apply::{VerifiedHostStep, product_key};
 
@@ -28,6 +28,58 @@ use crate::ApplierPaths;
 pub fn recorded_result(paths: &ApplierPaths, instance: &str) -> Result<Option<HostApplyResult>> {
     tenkai::host_apply::validate_instance_name(instance)?;
     read_json(&instance_dir(&paths.state_dir, instance).join(RESULT_FILE))
+}
+
+/// Record why `instance` was refused before anything started. It replaces
+/// an earlier refusal and never blocks a later start.
+pub fn record_refusal(
+    paths: &ApplierPaths,
+    instance: &str,
+    reason: &str,
+    now_ms: i64,
+) -> Result<()> {
+    tenkai::host_apply::validate_instance_name(instance)?;
+    write_json(
+        paths,
+        &instance_dir(&paths.state_dir, instance).join(REFUSED_FILE),
+        &HostApplyRefused {
+            schema: REFUSED_SCHEMA.into(),
+            instance: instance.into(),
+            reason: reason.into(),
+            refused_at: now_ms,
+        },
+    )
+}
+
+/// The latest refusal of `instance`, if any.
+pub fn refusal(paths: &ApplierPaths, instance: &str) -> Result<Option<HostApplyRefused>> {
+    tenkai::host_apply::validate_instance_name(instance)?;
+    read_json(&instance_dir(&paths.state_dir, instance).join(REFUSED_FILE))
+}
+
+/// How `instance` ended, if it ever started, from root-owned records alone:
+/// its result, or, for a start without one, the result the product record
+/// kept or `interrupted`. Runs before any intake, so a crashed instance
+/// resolves even when its request is gone or no longer verifies. Waits for
+/// the product lock when the instance is still running.
+pub fn recover(paths: &ApplierPaths, instance: &str) -> Result<Option<HostApplyResult>> {
+    if let Some(result) = recorded_result(paths, instance)? {
+        return Ok(Some(result));
+    }
+    let started_path = instance_dir(&paths.state_dir, instance).join(STARTED_FILE);
+    let Some(started) = read_json::<HostApplyStarted>(&started_path)? else {
+        return Ok(None);
+    };
+    let _lock = lock_product(paths, &started.environment, &started.product)?;
+    let now_ms = tenkai::now_millis();
+    let mut record = read_record(paths, &started.environment, &started.product)?;
+    settle_last(paths, &mut record, now_ms)?;
+    if let Some(result) = recorded_result(paths, instance)? {
+        return Ok(Some(result));
+    }
+    let result = interrupted(&started, now_ms);
+    write_result(paths, &result)?;
+    Ok(Some(result))
 }
 
 /// What the critical section decided for one verified step.
@@ -46,8 +98,8 @@ pub enum Admission {
 pub struct Running {
     paths: ApplierPaths,
     started: HostApplyStarted,
-    /// The advanced record, for an install or uninstall.
-    record: Option<AppliedStateRecord>,
+    /// The record as it was written when the step started.
+    record: AppliedStateRecord,
     _lock: OwnedFd,
 }
 
@@ -68,9 +120,7 @@ impl Running {
         now_ms: i64,
     ) -> Result<HostApplyResult> {
         let result = self.started.result(outcome, exit_status, detail, now_ms);
-        if let Some(record) = &self.record {
-            write_record(&self.paths, &record.complete(&self.started, &result))?;
-        }
+        write_record(&self.paths, &self.record.complete(&self.started, &result))?;
         write_result(&self.paths, &result)?;
         Ok(result)
     }
@@ -92,7 +142,8 @@ pub fn admit(paths: &ApplierPaths, step: &VerifiedHostStep) -> Result<Admission>
     }
     let started_path = instance_dir(&paths.state_dir, &step.instance).join(STARTED_FILE);
     if let Some(started) = read_json::<HostApplyStarted>(&started_path)? {
-        // The lock is ours, so whoever started it is gone.
+        // Settled above when it was the product's last start; otherwise a
+        // later step already ran, so nothing of it is left.
         let result = interrupted(&started, now_ms);
         write_result(paths, &result)?;
         return Ok(Admission::Recorded(result));
@@ -102,10 +153,8 @@ pub fn admit(paths: &ApplierPaths, step: &VerifiedHostStep) -> Result<Admission>
         ..step.clone()
     };
     step.approvals.require_all(&step.purposes)?;
-    let (started, advanced) = record.admit(&step, now_ms)?;
-    if let Some(advanced) = &advanced {
-        write_record(paths, advanced)?;
-    }
+    let (started, advanced) = record.admit(&step, crate::fence::own_cgroup(), now_ms)?;
+    write_record(paths, &advanced)?;
     write_json(paths, &started_path, &started)?;
     Ok(Admission::Run(Box::new(Running {
         paths: paths.clone(),
@@ -115,8 +164,9 @@ pub fn admit(paths: &ApplierPaths, step: &VerifiedHostStep) -> Result<Admission>
     })))
 }
 
-/// Make sure the install or uninstall that last advanced `record` has a
-/// result file: the one its completion recorded, or interrupted.
+/// Make sure the step that last started for `record`'s product has a result
+/// file: the one its completion recorded, or, once nothing of it is left
+/// running ([`crate::fence::execution_gone`]), interrupted.
 fn settle_last(paths: &ApplierPaths, record: &mut AppliedStateRecord, now_ms: i64) -> Result<()> {
     let Some(last) = record.last_started.clone() else {
         return Ok(());
@@ -127,6 +177,7 @@ fn settle_last(paths: &ApplierPaths, record: &mut AppliedStateRecord, now_ms: i6
     let result = match &record.last_result {
         Some(result) if result.instance == last.instance => result.clone(),
         _ => {
+            crate::fence::execution_gone(Path::new(crate::fence::CGROUP_ROOT), &last)?;
             let result = interrupted(&last, now_ms);
             record.last_result = Some(result.clone());
             write_record(paths, record)?;

@@ -75,7 +75,9 @@ human signers from named groups per purpose. Distinctness is by key and by
 principal: two envelopes from the same key or the same identity count once.
 Purpose is derived from the plan and apply flags (`execute_plan`, `rollback`,
 `skip_gates`, `downgrade`). When no matching `[[quorum]]` is set, one trusted
-envelope still authorizes.
+envelope still authorizes. Host steps are approved again on the root side
+against a separate, root-owned policy that never counts automatic approvals
+([privileged host releases](host-releases.md#approvals)).
 
 ```toml
 [[signers]]
