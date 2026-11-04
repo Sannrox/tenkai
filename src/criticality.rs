@@ -277,12 +277,6 @@ pub struct VerifiedDerived {
     pub statement: DerivedStatement,
 }
 
-/// The message a [`DERIVED_SCHEMA`] signature covers: the domain, then the
-/// statement bytes exactly as sent.
-pub(crate) fn signed_message(statement: &[u8]) -> Vec<u8> {
-    [SIGNING_DOMAIN, statement].concat()
-}
-
 /// The message a [`LEGACY_DERIVED_SCHEMA`] signature covers.
 pub(crate) fn legacy_signed_message(statement: &LegacyStatement) -> Result<Vec<u8>> {
     let mut bytes = LEGACY_SIGNING_DOMAIN.to_vec();
@@ -291,21 +285,17 @@ pub(crate) fn legacy_signed_message(statement: &LegacyStatement) -> Result<Vec<u
 }
 
 impl DerivedEnvelope {
-    /// The statement bytes as the producer sent them.
-    pub(crate) fn statement_bytes(&self) -> Result<Vec<u8>> {
-        STANDARD
+    /// The statement without checking its signature. Only for a lint by a
+    /// holder of no trust roots (bundle build); every import verifies first.
+    pub(crate) fn unverified_statement(&self) -> Result<DerivedStatement> {
+        let bytes = STANDARD
             .decode(&self.statement)
-            .context("derived criticality statement is not standard padded base64")
+            .context("derived criticality statement is not standard padded base64")?;
+        let statement: DerivedStatement =
+            serde_json::from_slice(&bytes).context("derived criticality statement is not valid")?;
+        statement.validate()?;
+        Ok(statement)
     }
-}
-
-/// Parse statement bytes. Only call this on bytes whose signature verified,
-/// or to lint an envelope that is verified again before it is applied.
-pub(crate) fn parse_statement(bytes: &[u8]) -> Result<DerivedStatement> {
-    let statement: DerivedStatement =
-        serde_json::from_slice(bytes).context("derived criticality statement is not valid")?;
-    statement.validate()?;
-    Ok(statement)
 }
 
 pub(crate) fn require_owner_reason(owner: &str, reason: &str) -> Result<()> {

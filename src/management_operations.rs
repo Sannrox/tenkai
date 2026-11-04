@@ -3367,8 +3367,10 @@ mod tests {
         let public = key.verifying_key().to_bytes();
         let key_id = crate::signature_verification::key_id(&public);
         let statement = br#"{"generated_at":1,"max_age_ms":1,"assignments":[{"kind":"product","name":"other","level":"high","source":"governance-catalog"}]}"#;
-        let signature =
-            ed25519_dalek::Signer::sign(&key, &crate::criticality::signed_message(statement));
+        let signature = ed25519_dalek::Signer::sign(
+            &key,
+            &[crate::criticality::SIGNING_DOMAIN, &statement[..]].concat(),
+        );
         let envelope = crate::criticality::parse_envelope(
             &serde_json::to_vec(&serde_json::json!({
                 "schema": crate::criticality::DERIVED_SCHEMA,

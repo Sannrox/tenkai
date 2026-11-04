@@ -17,9 +17,9 @@ use crate::criticality::{
     DECLARED_OWNER, DECLARED_REASON, DECLARED_SET_AT, DERIVED_GENERATED_AT, DERIVED_IMPORTED_AT,
     DERIVED_KEY_ID, DERIVED_LEVEL, DERIVED_MAX_AGE_MS, DERIVED_REASON, DERIVED_SCHEMA,
     DERIVED_SOURCE, DerivedAssignment, DerivedEnvelope, DerivedStatement, EffectiveCriticality,
-    ReceivedEnvelope, SetCriticalityRequest, VerifiedDerived, legacy_signed_message,
-    parse_envelope, parse_statement, refuse_generated_after_issued, refuse_generated_in_the_future,
-    require_owner_reason, signed_message,
+    ReceivedEnvelope, SIGNING_DOMAIN, SetCriticalityRequest, VerifiedDerived,
+    legacy_signed_message, parse_envelope, refuse_generated_after_issued,
+    refuse_generated_in_the_future, require_owner_reason,
 };
 use crate::ontology::{env_id, product_id, validate_identifier};
 use crate::pb::sekai::Object;
@@ -272,12 +272,14 @@ fn load_seed(path: &Path) -> Result<[u8; 32]> {
 pub fn sign(statement: &DerivedStatement, seed_path: &Path) -> Result<DerivedEnvelope> {
     statement.validate()?;
     let signing_key = SigningKey::from_bytes(&load_seed(seed_path)?);
-    let bytes = serde_json::to_vec(statement)?;
+    let signed = crate::signed_bytes::sign(SIGNING_DOMAIN, statement, |message| {
+        Ok(signing_key.sign(message).to_bytes().to_vec())
+    })?;
     Ok(DerivedEnvelope {
         schema: DERIVED_SCHEMA.into(),
         key_id: crate::signature_verification::key_id(&signing_key.verifying_key().to_bytes()),
-        signature: STANDARD.encode(signing_key.sign(&signed_message(&bytes)).to_bytes()),
-        statement: STANDARD.encode(bytes),
+        statement: signed.statement,
+        signature: STANDARD.encode(signed.signature),
     })
 }
 
@@ -292,14 +294,24 @@ pub fn verify_envelope(
     let signer = authorities.resolve(envelope.key_id())?;
     let statement = match envelope {
         ReceivedEnvelope::Current(envelope) => {
-            let bytes = envelope.statement_bytes()?;
-            crate::signature_verification::verify_strict(
-                &signer.verifying_key,
-                LABEL,
-                &envelope.signature,
-                &signed_message(&bytes),
-            )?;
-            parse_statement(&bytes)?
+            let signature =
+                crate::signature_verification::decode_exact::<64>(LABEL, &envelope.signature)?;
+            let verified = crate::signed_bytes::verify::<DerivedStatement>(
+                SIGNING_DOMAIN,
+                &envelope.statement,
+                |message| {
+                    crate::signature_verification::verify_strict_bytes(
+                        &signer.verifying_key,
+                        LABEL,
+                        &signature,
+                        message,
+                    )
+                    .is_ok()
+                },
+            )
+            .map_err(|refusal| anyhow::anyhow!("derived criticality refused: {refusal}"))?;
+            verified.statement.validate()?;
+            verified.statement
         }
         ReceivedEnvelope::Legacy(envelope) => {
             crate::signature_verification::verify_strict(
@@ -758,7 +770,7 @@ mod tests {
             "schema": DERIVED_SCHEMA,
             "key_id": crate::signature_verification::key_id(&key.verifying_key().to_bytes()),
             "statement": STANDARD.encode(bytes),
-            "signature": STANDARD.encode(key.sign(&[crate::criticality::SIGNING_DOMAIN, bytes].concat()).to_bytes()),
+            "signature": STANDARD.encode(key.sign(&[SIGNING_DOMAIN, bytes].concat()).to_bytes()),
         });
         parse_envelope(&serde_json::to_vec(&envelope).unwrap()).unwrap()
     }
@@ -852,7 +864,7 @@ mod tests {
         let error = verify_envelope(&current(reencoded), &authorities)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("signature verification failed"), "{error}");
+        assert!(error.contains("signature does not verify"), "{error}");
     }
 
     /// Bytes that verify are still validated before anything is applied.
@@ -860,10 +872,10 @@ mod tests {
     fn verified_bytes_that_are_not_a_valid_statement_are_refused() {
         let authorities = roots(vec![signer(&AUTHORITY, "governance")]);
         for (bytes, expected) in [
-            (&b"not json"[..], "statement is not valid"),
+            (&b"not json"[..], "does not parse"),
             (
                 br#"{"generated_at":1,"generated_at":2,"max_age_ms":1,"assignments":[]}"#,
-                "statement is not valid",
+                "duplicate field",
             ),
             (
                 br#"{"generated_at":1,"max_age_ms":1,"assignments":[]}"#,

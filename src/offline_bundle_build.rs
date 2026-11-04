@@ -384,7 +384,7 @@ pub async fn build(ctx: &mut Ctx, request: &BundleBuildRequest<'_>) -> Result<Bu
                 crate::criticality::LEGACY_DERIVED_SCHEMA
             );
         };
-        let statement = crate::criticality::parse_statement(&envelope.statement_bytes()?)?;
+        let statement = envelope.unverified_statement()?;
         crate::criticality::refuse_generated_after_issued(
             statement.generated_at,
             request.issued_at_unix_ms,
