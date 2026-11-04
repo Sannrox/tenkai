@@ -7,6 +7,8 @@ set -eu
 
 # shellcheck source=cluster.env
 . ./cluster.env
+# shellcheck source=cluster-lib.sh
+. ./cluster-lib.sh
 
 environment=${TENKAI_ENVIRONMENT:?TENKAI_ENVIRONMENT is unset}
 
@@ -21,8 +23,15 @@ fi
 
 # 3. Containers, mounts, and network state. Unmounting and deleting
 # interfaces needs capabilities the applier's sandbox does not grant, so it
-# runs as a transient unit of its own.
-systemd-run --wait --collect --quiet --unit "k3s-cleanup-$$" /bin/sh "$PWD/cleanup.sh"
+# runs as a transient unit of its own, under one fixed name: a cleanup that
+# outlived an interrupted uninstall is waited for, here and by install.sh,
+# never run twice at once or raced by an install.
+await_cleanup || {
+  printf 'cluster uninstall: %s from an earlier attempt is still running\n' "$CLEANUP_UNIT" >&2
+  exit 1
+}
+systemctl reset-failed "$CLEANUP_UNIT" 2>/dev/null || true
+systemd-run --wait --collect --quiet --unit "$CLEANUP_UNIT" /bin/sh "$PWD/cleanup.sh"
 
 # 4. The binary and the unit.
 rm -f /usr/local/bin/k3s /etc/systemd/system/k3s.service

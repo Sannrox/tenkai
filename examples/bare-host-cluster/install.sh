@@ -47,6 +47,7 @@ wait_for() {
   done
 }
 
+await_cleanup || fail "${CLEANUP_UNIT} from an earlier uninstall is still running"
 changed=false
 
 # 1. The pinned binary, verified before it replaces anything.

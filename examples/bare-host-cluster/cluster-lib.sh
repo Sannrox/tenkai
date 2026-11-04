@@ -1,6 +1,20 @@
 # shellcheck shell=sh
-# Sourced by install.sh and health.sh, as root, with kubectl defined as the
-# cluster admin.
+# Sourced by install.sh, health.sh, and uninstall.sh, as root, with kubectl
+# defined as the cluster admin.
+
+# The transient unit uninstall.sh runs cleanup.sh in. It is not part of the
+# applier's unit, so it outlives an applier that crashed or was stopped.
+CLEANUP_UNIT=k3s-cleanup.service
+
+# Waits up to 600 s for a cleanup still running from an interrupted
+# uninstall, so nothing installs or cleans up over it.
+await_cleanup() {
+  deadline=$(($(date +%s) + 600))
+  while systemctl is-active --quiet "$CLEANUP_UNIT"; do
+    [ "$(date +%s)" -lt "$deadline" ] || return 1
+    sleep 2
+  done
+}
 
 # The version of k3s the API server runs, for example v1.36.5+k3s1.
 running_version() {
