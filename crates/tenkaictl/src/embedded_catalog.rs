@@ -139,7 +139,7 @@ pub(crate) async fn run(
                 envelope,
                 trust_roots,
             } => {
-                let envelope = tenkai::criticality::DerivedEnvelope::load(&envelope)?;
+                let envelope = tenkai::criticality::ReceivedEnvelope::load(&envelope)?;
                 let roots = tenkai::release_signing::TrustRoots::load(&trust_roots)?;
                 let applied = tenkai::criticality_store::import_envelope(
                     ctx,

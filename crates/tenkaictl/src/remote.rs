@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use tenkai::plan;
 
 use crate::args::{Cli, Command, OutputFormat};
@@ -344,8 +344,14 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         },
         Command::Criticality { command } => match command {
             crate::args::DerivedCriticalityCommand::Import { envelope, .. } => {
-                let envelope = tenkai::criticality::DerivedEnvelope::load(&envelope)?;
-                let result = client.import_derived_criticality(&envelope).await?;
+                // Send the file's bytes as they are; the server parses them by schema.
+                let raw = std::fs::read(&envelope).with_context(|| {
+                    format!("reading derived criticality {}", envelope.display())
+                })?;
+                tenkai::criticality::parse_envelope(&raw).with_context(|| {
+                    format!("parsing derived criticality {}", envelope.display())
+                })?;
+                let result = client.import_derived_criticality(raw).await?;
                 println!(
                     "imported {} derived criticality assignment(s)",
                     result.applied

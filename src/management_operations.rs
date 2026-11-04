@@ -1781,20 +1781,20 @@ impl ManagementOperations {
         Ok(view)
     }
 
+    /// Verify and apply a derived-criticality envelope from its received
+    /// bytes. The signature is checked before the statement is read, then
+    /// product assignments are checked against the caller's grants.
     pub async fn import_derived_criticality(
         &self,
         credential: &CredentialMaterial,
-        envelope: crate::criticality::DerivedEnvelope,
+        envelope: &[u8],
     ) -> Result<crate::criticality::DerivedImportResult, ManagementError> {
         let context = self.authenticate(credential)?;
         self.refuse_agent(&context, "catalog.criticality.derived")?;
         Self::require_capability(&context, DeliveryCapability::Management)?;
         self.require_fleet_management(credential, &context, "derived criticality import")?;
-        for assignment in &envelope.statement.assignments {
-            if assignment.kind == crate::criticality::CriticalityTargetKind::Product {
-                Self::require_product_grant(&context, &assignment.name)?;
-            }
-        }
+        let envelope = crate::criticality::parse_envelope(envelope)
+            .map_err(|error| ManagementError::BadRequest(format!("{error:#}")))?;
         let roots = crate::criticality_store::configured_trust_roots()
             .map_err(|error| ManagementError::BadRequest(error.to_string()))?
             .ok_or_else(|| {
@@ -1803,24 +1803,29 @@ impl ManagementOperations {
                     crate::criticality::CRITICALITY_TRUST_ROOTS_ENV
                 ))
             })?;
+        self.import_derived_with(&context, &envelope, &roots).await
+    }
+
+    async fn import_derived_with(
+        &self,
+        context: &AuthenticatedRequestContext,
+        envelope: &crate::criticality::ReceivedEnvelope,
+        roots: &crate::release_signing::TrustRoots,
+    ) -> Result<crate::criticality::DerivedImportResult, ManagementError> {
+        let verified = crate::criticality_store::verify_envelope(envelope, roots)
+            .map_err(|error| ManagementError::BadRequest(format!("{error:#}")))?;
+        for assignment in &verified.statement.assignments {
+            if assignment.kind == crate::criticality::CriticalityTargetKind::Product {
+                Self::require_product_grant(context, &assignment.name)?;
+            }
+        }
         let actor = &context.audit_principal();
         self.audit(actor, "catalog.criticality.derived.requested")?;
-        let mut ctx = self.catalog_ctx(&context)?;
-        let applied = crate::criticality_store::import_envelope(
-            &mut ctx,
-            &envelope,
-            &roots,
-            crate::now_millis(),
-        )
-        .await
-        .map_err(|error| {
-            let message = format!("{error:#}");
-            if message.contains("signature") || message.contains("schema") {
-                ManagementError::BadRequest(message)
-            } else {
-                map_config_error(error)
-            }
-        })?;
+        let mut ctx = self.catalog_ctx(context)?;
+        let applied =
+            crate::criticality_store::apply_verified(&mut ctx, &verified, crate::now_millis())
+                .await
+                .map_err(map_config_error)?;
         self.audit(actor, "catalog.criticality.derived.completed")?;
         Ok(crate::criticality::DerivedImportResult { applied })
     }
@@ -3357,26 +3362,34 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         let ops = catalog_ops(&root, grant_auth([DeliveryCapability::Management], [])).await;
-        let envelope = crate::criticality::DerivedEnvelope {
-            schema: crate::criticality::DERIVED_SCHEMA.into(),
-            key_id: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                .into(),
-            signature: "c2ln".into(),
-            statement: crate::criticality::DerivedStatement {
-                generated_at: 1,
-                max_age_ms: 1,
-                assignments: vec![crate::criticality::DerivedAssignment {
-                    kind: crate::criticality::CriticalityTargetKind::Product,
-                    name: "other".into(),
-                    level: crate::criticality::CriticalityLevel::High,
-                    source: "governance-catalog".into(),
-                    reason: "marked data".into(),
-                }],
-            },
+        let seed = [7u8; 32];
+        let key = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let public = key.verifying_key().to_bytes();
+        let key_id = crate::signature_verification::key_id(&public);
+        let statement = br#"{"generated_at":1,"max_age_ms":1,"assignments":[{"kind":"product","name":"other","level":"high","source":"governance-catalog"}]}"#;
+        let signature =
+            ed25519_dalek::Signer::sign(&key, &crate::criticality::signed_message(statement));
+        let envelope = crate::criticality::parse_envelope(
+            &serde_json::to_vec(&serde_json::json!({
+                "schema": crate::criticality::DERIVED_SCHEMA,
+                "key_id": key_id,
+                "statement": base64::engine::general_purpose::STANDARD.encode(statement),
+                "signature": base64::engine::general_purpose::STANDARD.encode(signature.to_bytes()),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let roots = crate::release_signing::TrustRoots {
+            version: 1,
+            signers: vec![crate::release_signing::TrustedSigner::new(
+                key_id,
+                "governance",
+                base64::engine::general_purpose::STANDARD.encode(public),
+            )],
         };
+        let context = ops.authenticate(&grant_credential()).unwrap();
         assert!(matches!(
-            ops.import_derived_criticality(&grant_credential(), envelope)
-                .await,
+            ops.import_derived_with(&context, &envelope, &roots).await,
             Err(ManagementError::Forbidden(ref msg)) if msg.contains("product")
         ));
         let _ = std::fs::remove_dir_all(&root);

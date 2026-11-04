@@ -455,14 +455,10 @@ pub(super) async fn import_derived_criticality(
         Ok(credential) => credential,
         Err(error) => return *error,
     };
-    let envelope = match parse_management_json(&body) {
-        Ok(envelope) => envelope,
-        Err(error) => return *error,
-    };
     manage_result(
         state
             .management
-            .import_derived_criticality(&credential, envelope)
+            .import_derived_criticality(&credential, &body)
             .await,
     )
 }
