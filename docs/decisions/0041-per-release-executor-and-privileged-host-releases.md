@@ -127,14 +127,22 @@ key from the verified request and refuses an instance whose name does not match.
    evaluated by the server and cannot be verified here, so the host policy is
    always applied at its strictest quorum, as if gates were skipped. An `uninstall` needs an approved plan that
    removes the product, like any other change;
-5. checks the step's expected generation against its own record (below), and
-   requires an exact match;
-6. refuses an instance it has already started, and returns the recorded result
+5. refuses an instance it has already started, and returns the recorded result
    instead of running again.
 
+Then, holding the per-environment, per-product lock (below) as one critical
+section, it re-reads the applied-state record, requires the step's expected
+generation to equal the record's, requires the step's source release to equal
+the record's state at that generation (the `applied` release, either side of a
+`dirty` pair, or nothing for `empty`), evaluates downgrade approvals against
+the record's high-water release, durably writes the `started` record together
+with the advanced generation and `dirty` state, and only then runs the command.
+Two plans that expect the same generation therefore cannot both run.
+
 **Applied-state record.** For each environment and product the applier keeps a
-generation number and a state: `empty`, `applied(release)`, or
-`dirty(from, to)`. Each host step in a plan names the generation it expects;
+generation number, a state (`empty`, `applied(release)`, or `dirty(from, to)`),
+and the high-water release: the newest release it ever applied for that
+product. `empty` keeps the high-water release. Each host step in a plan names the generation it expects;
 that number is part of the plan, so it is covered by the plan digest and the
 approvals. The server reads the record to build the plan; only the applier
 writes it.
@@ -145,8 +153,9 @@ writes it.
   generation.
 - `health` requires the current generation and changes nothing.
 - Any approved step for the current generation may move on from `dirty`. A step
-  whose target is not newer than the last applied release needs the rollback or
-  downgrade approvals the host policy requires.
+  whose target is not newer than the high-water release needs the rollback or
+  downgrade approvals the host policy requires, also when the product is
+  `empty` after an uninstall.
 
 Because every applied or interrupted step advances the generation, an approved
 plan that never ran can never run after any other host step for that product,
