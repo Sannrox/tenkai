@@ -194,7 +194,9 @@ pub struct DeploySection {
     /// Working directory for all commands, relative to the manifest file.
     #[serde(default = "default_workdir")]
     pub workdir: String,
-    /// Command that installs/activates this release.
+    /// Command that installs/activates this release. A release that declares
+    /// a Kubernetes executor may omit it.
+    #[serde(default)]
     pub install: String,
     /// Immutable files or directories, relative to workdir, used by deploy commands.
     #[serde(default)]
@@ -463,7 +465,17 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
             if manifest.worker_pool.is_some() {
                 bail!("software manifests cannot declare a worker_pool section");
             }
-            if manifest.deploy.install.trim().is_empty() {
+            // The Kubernetes executors read `{workdir}/manifests/**`, never
+            // `deploy.install`, so a release that declares one needs no
+            // placeholder command (ADR 0041).
+            let reads_install = !matches!(
+                manifest.deploy.executor,
+                Some(
+                    crate::software_executor::SoftwareExecutorKind::Kubernetes
+                        | crate::software_executor::SoftwareExecutorKind::KubernetesInProcess
+                )
+            );
+            if reads_install && manifest.deploy.install.trim().is_empty() {
                 bail!("software manifest needs a non-empty deploy.install command");
             }
         }
@@ -1483,6 +1495,36 @@ max_startup_seconds = 30
         );
         std::fs::write(&path, with_executor(HELLO_LOCAL, "kubernetes-inprocess")).unwrap();
         assert!(load(&path).is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn only_kubernetes_executors_may_omit_deploy_install() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-manifest-install-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("tenkai.toml");
+        let without_install = |executor: &str| {
+            format!("[product]\nname = \"api\"\nversion = \"1.0.0\"\n\n[deploy]\n{executor}\n")
+        };
+        for declared in ["executor = \"kubernetes-inprocess\"", "executor = \"k8s\""] {
+            std::fs::write(&path, without_install(declared)).unwrap();
+            assert!(load(&path).is_ok(), "{declared}");
+        }
+        for declared in ["", "executor = \"shell\"", "executor = \"helm\""] {
+            std::fs::write(&path, without_install(declared)).unwrap();
+            let err = match load(&path) {
+                Ok(_) => panic!("{declared:?} admitted a release without deploy.install"),
+                Err(err) => format!("{err:#}"),
+            };
+            assert!(
+                err.contains("non-empty deploy.install"),
+                "{declared}: {err}"
+            );
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 

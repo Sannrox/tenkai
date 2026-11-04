@@ -61,7 +61,7 @@ pub(crate) async fn run(
                                 .as_deref()
                                 .expect("clap requires a development reason"),
                         },
-                        software_executor: None,
+                        software_executors: tenkai::software_executor::SoftwareExecutors::default(),
                         model_runtime_executor:
                             tenkai::model_runtime::selected_model_runtime_executor_factory(),
                         worker_lifecycle: None,
@@ -127,8 +127,8 @@ pub(crate) async fn run(
                                 .as_deref()
                                 .expect("clap requires a development reason"),
                         },
-                        software_executor: tenkai::software_executor::selected_software_executor()
-                            .map(std::sync::Arc::from),
+                        software_executors:
+                            tenkai::software_executor::SoftwareExecutors::from_process(),
                         model_runtime_executor:
                             tenkai::model_runtime::selected_model_runtime_executor_factory(),
                         worker_lifecycle: None,

@@ -2363,7 +2363,7 @@ impl ManagementOperations {
                     trust_roots: &files.trust_roots,
                     requester: Some(context.principal_id()),
                 },
-                software_executor: None,
+                software_executors: crate::software_executor::SoftwareExecutors::from_process(),
                 model_runtime_executor:
                     crate::model_runtime::selected_model_runtime_executor_factory(),
                 worker_lifecycle: None,

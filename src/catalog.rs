@@ -1650,7 +1650,9 @@ media_type = "{}"
                 authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
                     reason: "oci artifact apply",
                 },
-                software_executor: Some(software.clone()),
+                software_executors: crate::software_executor::SoftwareExecutors::with_default(
+                    software.clone(),
+                ),
                 model_runtime_executor: None,
                 worker_lifecycle: None,
                 artifact_registry: Some(registry.clone()),
@@ -1693,7 +1695,9 @@ media_type = "{}"
                 authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
                     reason: "oci artifact apply",
                 },
-                software_executor: Some(software),
+                software_executors: crate::software_executor::SoftwareExecutors::with_default(
+                    software,
+                ),
                 model_runtime_executor: None,
                 worker_lifecycle: None,
                 artifact_registry: Some(mirror_only),
@@ -1834,7 +1838,9 @@ media_type = "{}"
                 authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
                     reason: "offline artifact apply",
                 },
-                software_executor: Some(software),
+                software_executors: crate::software_executor::SoftwareExecutors::with_default(
+                    software,
+                ),
                 model_runtime_executor: None,
                 worker_lifecycle: None,
                 artifact_registry: Some(mirror),
@@ -2003,9 +2009,9 @@ media_type = "{}"
                     authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
                         reason: "offline delta apply",
                     },
-                    software_executor: Some(std::sync::Arc::new(
-                        crate::software_executor::FakeSoftwareExecutor::new(),
-                    )),
+                    software_executors: crate::software_executor::SoftwareExecutors::with_default(
+                        std::sync::Arc::new(crate::software_executor::FakeSoftwareExecutor::new()),
+                    ),
                     model_runtime_executor: None,
                     worker_lifecycle: None,
                     artifact_registry: Some(store.clone()),

@@ -787,7 +787,7 @@ install = "true"
                 authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
                     reason: "change-set pin baseline",
                 },
-                software_executor: None,
+                software_executors: crate::software_executor::SoftwareExecutors::default(),
                 model_runtime_executor: None,
                 worker_lifecycle: None,
                 artifact_registry: None,
@@ -811,7 +811,7 @@ install = "true"
                 authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
                     reason: "change-set pin apply",
                 },
-                software_executor: None,
+                software_executors: crate::software_executor::SoftwareExecutors::default(),
                 model_runtime_executor: None,
                 worker_lifecycle: None,
                 artifact_registry: None,

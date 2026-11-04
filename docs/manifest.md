@@ -70,9 +70,11 @@ needs a new `product.version`. A manifest without the field keeps its digest.
 Servers older than this field refuse a manifest that declares it, so declare it
 only once every server and runtime that reads the catalog understands it.
 
-Apply does not read the field yet; it still uses the process default.
-Per-release resolution is tracked in
-[#910](https://github.com/Sannrox/tenkai/issues/910).
+Apply, rollback, restart, and reconcile observation run each release with the
+executor it declares; see
+[per-release selection](software-executor.md#per-release-selection). A release
+that declares `kubernetes` or `kubernetes-inprocess` may omit `deploy.install`;
+every other software release still needs it.
 
 ## Delivery signals
 

@@ -3558,7 +3558,9 @@ inputs = ["docker"]
                 authorization: tenkai::apply::ExecutionAuthorization::LocalDevelopment {
                     reason: "docker host executor drill",
                 },
-                software_executor: Some(executor.clone()),
+                software_executors: tenkai::software_executor::SoftwareExecutors::with_default(
+                    executor.clone(),
+                ),
                 model_runtime_executor: None,
                 worker_lifecycle: None,
                 artifact_registry: None,
@@ -3595,7 +3597,9 @@ inputs = ["docker"]
                 authorization: tenkai::apply::ExecutionAuthorization::LocalDevelopment {
                     reason: "docker host executor drill",
                 },
-                software_executor: Some(executor.clone()),
+                software_executors: tenkai::software_executor::SoftwareExecutors::with_default(
+                    executor.clone(),
+                ),
                 model_runtime_executor: None,
                 worker_lifecycle: None,
                 artifact_registry: None,

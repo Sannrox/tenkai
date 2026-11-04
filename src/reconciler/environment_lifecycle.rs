@@ -304,7 +304,7 @@ async fn execute_authorized(
     skip_gates: bool,
     authorization: apply::ExecutionAuthorization<'_>,
 ) -> Result<EnvironmentStatus> {
-    let software = crate::software_executor::selected_software_executor().map(std::sync::Arc::from);
+    let software = crate::software_executor::SoftwareExecutors::from_process();
     let worker_lifecycle =
         crate::worker_pool::selected_worker_lifecycle()?.map(std::sync::Arc::from);
     let outcomes = apply::execute_with_options(
@@ -314,7 +314,7 @@ async fn execute_authorized(
             skip_gates,
             emergency_reason: None,
             authorization,
-            software_executor: software,
+            software_executors: software,
             model_runtime_executor: crate::model_runtime::selected_model_runtime_executor_factory(),
             worker_lifecycle,
             artifact_registry: crate::oci_artifact::selected_registry()?,

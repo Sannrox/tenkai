@@ -212,9 +212,9 @@ pub async fn rehearse(
                     trust_roots: &trust,
                     requester: None,
                 },
-                software_executor: Some(std::sync::Arc::new(
-                    crate::software_executor::FakeSoftwareExecutor::new(),
-                )),
+                software_executors: crate::software_executor::SoftwareExecutors::with_default(
+                    std::sync::Arc::new(crate::software_executor::FakeSoftwareExecutor::new()),
+                ),
                 model_runtime_executor:
                     crate::model_runtime::selected_model_runtime_executor_factory(),
                 worker_lifecycle: None,

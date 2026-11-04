@@ -782,7 +782,7 @@ document = "agent.json"
                 authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
                     reason: "staged product e2e",
                 },
-                software_executor: None,
+                software_executors: crate::software_executor::SoftwareExecutors::default(),
                 model_runtime_executor: None,
                 worker_lifecycle: None,
                 artifact_registry: None,

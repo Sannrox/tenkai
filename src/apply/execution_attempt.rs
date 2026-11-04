@@ -26,8 +26,9 @@ pub struct ExecutionOptions<'a> {
     pub skip_gates: bool,
     pub emergency_reason: Option<&'a str>,
     pub authorization: ExecutionAuthorization<'a>,
-    /// Host-selected software adapter. `None` keeps the shell install path.
-    pub software_executor: Option<Arc<dyn crate::software_executor::SoftwareExecutor>>,
+    /// Software executors. Each release runs with the one it declares, or the
+    /// process default; hosts pass `SoftwareExecutors::from_process()`.
+    pub software_executors: crate::software_executor::SoftwareExecutors,
     /// Host-selected model-runtime executor factory. `None` still serves the
     /// in-tree `llama.cpp` and `mlx` host-process engines; other engines fail closed.
     pub model_runtime_executor: Option<Arc<dyn crate::model_runtime::ModelRuntimeExecutorFactory>>,
@@ -48,7 +49,7 @@ impl std::fmt::Debug for ExecutionOptions<'_> {
             .field("skip_gates", &self.skip_gates)
             .field("emergency_reason", &self.emergency_reason)
             .field("authorization", &self.authorization)
-            .field("software_executor", &self.software_executor.is_some())
+            .field("software_executors", &self.software_executors)
             .field(
                 "model_runtime_executor",
                 &self.model_runtime_executor.is_some(),
@@ -65,7 +66,7 @@ impl std::fmt::Debug for ExecutionOptions<'_> {
 pub(super) struct AttemptExecutionPolicy<'a> {
     pub skip_gates: bool,
     pub emergency_reason: Option<&'a str>,
-    pub software_executor: Option<&'a dyn crate::software_executor::SoftwareExecutor>,
+    pub software_executors: &'a crate::software_executor::SoftwareExecutors,
     pub model_runtime_executor: Option<&'a dyn crate::model_runtime::ModelRuntimeExecutorFactory>,
     pub worker_lifecycle: Option<&'a dyn crate::worker_pool::WorkerLifecyclePort>,
     pub artifact_registry: Option<&'a dyn crate::oci_artifact::ArtifactRegistry>,
@@ -210,7 +211,7 @@ async fn execute_with_options_inner(
     let execution_lease = lease.clone();
     let execution_emergency_reason = emergency_reason.map(str::to_string);
     let skip_gates = options.skip_gates;
-    let software_executor = options.software_executor;
+    let software_executors = options.software_executors;
     let model_runtime_executor = options.model_runtime_executor;
     let worker_lifecycle = options.worker_lifecycle;
     let artifact_registry = options.artifact_registry;
@@ -236,7 +237,7 @@ async fn execute_with_options_inner(
                     AttemptExecutionPolicy {
                         skip_gates,
                         emergency_reason: execution_emergency_reason.as_deref(),
-                        software_executor: software_executor.as_deref(),
+                        software_executors: &software_executors,
                         model_runtime_executor: model_runtime_executor.as_deref(),
                         worker_lifecycle: worker_lifecycle.as_deref(),
                         artifact_registry: artifact_registry.as_deref(),

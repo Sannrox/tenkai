@@ -14,13 +14,14 @@
 //! **Docker host (#528):** digest-pinned containers, networks, and volumes from
 //! `{workdir}/docker/host.json` via `TENKAI_SOFTWARE_EXECUTOR=docker`.
 //!
-//! Hosts call `tenkai_executor::install()` then [`selected_software_executor`].
-//! Community defaults keep the shell `deploy.install` path when no executor is
-//! supplied. Credential-free diagnostics live in the diagnostics module.
+//! Hosts call `tenkai_executor::install()` then [`SoftwareExecutors::from_process`].
+//! Each release runs with the executor it declares in `[deploy] executor`, or
+//! with the process default when it declares none (ADR 0041). Community
+//! defaults keep the shell `deploy.install` path when no executor is supplied. Credential-free diagnostics live in the diagnostics module.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use anyhow::{Context as _, Result, bail};
@@ -433,11 +434,162 @@ pub fn software_executor_for(kind: SoftwareExecutorKind) -> Option<Box<dyn Softw
     factory.map(|factory| factory())
 }
 
+/// The software executors one process runs releases with (ADR 0041).
+///
+/// A release that declares `[deploy] executor` runs with that executor or
+/// fails closed naming it; it never falls back. A release that declares
+/// nothing runs with the process default (`TENKAI_SOFTWARE_EXECUTOR`) exactly
+/// as before. Resolution reads only signed release content and this process's
+/// configuration, so two server versions agree on undeclared releases.
+#[derive(Clone)]
+pub struct SoftwareExecutors {
+    /// Kind the process default runs as. `None` is an unnamed test default
+    /// (`fake`), which no declared kind ever equals.
+    default_kind: Option<SoftwareExecutorKind>,
+    /// Process default adapter. `None` is the shell `deploy.install` path.
+    default: Option<Arc<dyn SoftwareExecutor>>,
+    /// Adapters for declared kinds. `shell` never has one.
+    declared: Vec<(SoftwareExecutorKind, Arc<dyn SoftwareExecutor>)>,
+}
+
+/// Shell default and no declared adapters.
+impl Default for SoftwareExecutors {
+    fn default() -> Self {
+        Self {
+            default_kind: Some(SoftwareExecutorKind::Shell),
+            default: None,
+            declared: Vec::new(),
+        }
+    }
+}
+
+impl SoftwareExecutors {
+    /// This process's executors: the `TENKAI_SOFTWARE_EXECUTOR` default and
+    /// every adapter the host installed (`tenkai_executor::install()`).
+    pub fn from_process() -> Self {
+        let default = selected_software_executor().map(Arc::from);
+        let default_kind = match std::env::var("TENKAI_SOFTWARE_EXECUTOR") {
+            Ok(value) if value.eq_ignore_ascii_case("fake") => None,
+            // A named default without an installed adapter keeps the shell path.
+            Ok(value) if default.is_some() => SoftwareExecutorKind::from_name(&value),
+            _ => Some(SoftwareExecutorKind::Shell),
+        };
+        let declared = SoftwareExecutorKind::ALL
+            .into_iter()
+            .filter_map(|kind| Some((kind, Arc::from(software_executor_for(kind)?))))
+            .collect();
+        Self {
+            default_kind,
+            default,
+            declared,
+        }
+    }
+
+    /// An unnamed default adapter (a test fake) and no declared adapters.
+    pub fn with_default(default: Arc<dyn SoftwareExecutor>) -> Self {
+        Self {
+            default_kind: None,
+            default: Some(default),
+            declared: Vec::new(),
+        }
+    }
+
+    /// Run releases that declare `kind` with `adapter`, replacing any earlier
+    /// one. Ignored for `shell`, which always keeps the `deploy.install` path.
+    pub fn with_adapter(
+        mut self,
+        kind: SoftwareExecutorKind,
+        adapter: Arc<dyn SoftwareExecutor>,
+    ) -> Self {
+        self.declared.retain(|(existing, _)| *existing != kind);
+        if kind != SoftwareExecutorKind::Shell {
+            self.declared.push((kind, adapter));
+        }
+        self
+    }
+
+    /// The kind a release with `declared` runs as here. Compare these, never
+    /// the written text: `k8s` and `kubernetes` are the same executor.
+    pub fn effective_kind(
+        &self,
+        declared: Option<SoftwareExecutorKind>,
+    ) -> Option<SoftwareExecutorKind> {
+        declared.or(self.default_kind)
+    }
+
+    /// The adapter for a release with `declared`; `None` is the shell
+    /// `deploy.install` path. A declared executor this process lacks is an
+    /// error naming it.
+    pub fn resolve(
+        &self,
+        declared: Option<SoftwareExecutorKind>,
+    ) -> Result<Option<Arc<dyn SoftwareExecutor>>> {
+        let Some(kind) = declared else {
+            return Ok(self.default.clone());
+        };
+        if kind == SoftwareExecutorKind::Shell {
+            return Ok(None);
+        }
+        if let Some((_, adapter)) = self.declared.iter().find(|(existing, _)| *existing == kind) {
+            return Ok(Some(adapter.clone()));
+        }
+        if kind == SoftwareExecutorKind::Host {
+            bail!(
+                "release declares deploy.executor = \"host\", and the host executor is not available in this process"
+            );
+        }
+        bail!(
+            "release declares deploy.executor = \"{kind}\", and that executor is not installed in this process"
+        )
+    }
+
+    /// Refuse to move `product` from its installed release's executor to
+    /// another. Moving executors is a remove followed by an install.
+    pub fn require_same_executor(
+        &self,
+        product: &str,
+        installed: Option<SoftwareExecutorKind>,
+        target: Option<SoftwareExecutorKind>,
+    ) -> Result<()> {
+        let (installed, target) = (self.effective_kind(installed), self.effective_kind(target));
+        if installed != target {
+            let name = |kind: Option<SoftwareExecutorKind>| {
+                kind.map_or("fake", SoftwareExecutorKind::as_str)
+            };
+            bail!(
+                "{product} is installed with the {} executor and the target release resolves to {}; a product keeps one executor, so remove it and install it again to change executor",
+                name(installed),
+                name(target)
+            );
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for SoftwareExecutors {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SoftwareExecutors")
+            .field("default_kind", &self.default_kind)
+            .field("default", &self.default.is_some())
+            .field(
+                "declared",
+                &self
+                    .declared
+                    .iter()
+                    .map(|(kind, _)| *kind)
+                    .collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
 /// Select a software executor from host runtime configuration.
 ///
 /// Reads `TENKAI_SOFTWARE_EXECUTOR` (a [`SoftwareExecutorKind`] name, or `fake`).
-/// `None` means the caller should keep the shell `deploy.install` path. Apply
-/// does not consult this itself; hosts pass the result through `ExecutionOptions`.
+/// `None` means the caller should keep the shell `deploy.install` path. This is
+/// the default for releases that declare no executor; hosts pass
+/// [`SoftwareExecutors::from_process`] through `ExecutionOptions`.
 pub fn selected_software_executor() -> Option<Box<dyn SoftwareExecutor>> {
     let value = std::env::var("TENKAI_SOFTWARE_EXECUTOR").ok()?;
     if value.eq_ignore_ascii_case("fake") {
@@ -586,6 +738,61 @@ mod tests {
         );
         let err = "fake".parse::<SoftwareExecutorKind>().unwrap_err();
         assert!(err.to_string().contains("\"fake\""), "{err}");
+    }
+
+    #[test]
+    fn a_declared_executor_resolves_to_its_adapter_or_fails_closed() {
+        let default: Arc<dyn SoftwareExecutor> = Arc::new(FakeSoftwareExecutor::new());
+        let helm: Arc<dyn SoftwareExecutor> = Arc::new(FakeSoftwareExecutor::new());
+        let executors = SoftwareExecutors::with_default(default.clone());
+        let resolved = executors.resolve(None).unwrap().unwrap();
+        assert!(Arc::ptr_eq(&resolved, &default));
+        // A declared shell never runs on a non-shell default.
+        assert!(
+            executors
+                .resolve(Some(SoftwareExecutorKind::Shell))
+                .unwrap()
+                .is_none()
+        );
+        let err = match executors.resolve(Some(SoftwareExecutorKind::Helm)) {
+            Ok(_) => panic!("an uninstalled helm fell back"),
+            Err(err) => err.to_string(),
+        };
+        assert!(err.contains("\"helm\""), "{err}");
+        let executors = executors.with_adapter(SoftwareExecutorKind::Helm, helm.clone());
+        let resolved = executors
+            .resolve(Some(SoftwareExecutorKind::Helm))
+            .unwrap()
+            .unwrap();
+        assert!(Arc::ptr_eq(&resolved, &helm));
+    }
+
+    #[test]
+    fn same_executor_compares_resolved_kinds() {
+        use SoftwareExecutorKind::{KubernetesInProcess, Shell};
+        let shell_default = SoftwareExecutors::default();
+        // Undeclared runs on the shell default, so declaring shell is no change.
+        shell_default
+            .require_same_executor("api", None, Some(Shell))
+            .unwrap();
+        let err = shell_default
+            .require_same_executor("api", None, Some(KubernetesInProcess))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("api is installed with the shell executor")
+                && err.contains("resolves to kubernetes-inprocess"),
+            "{err}"
+        );
+        let fake_default = SoftwareExecutors::with_default(Arc::new(FakeSoftwareExecutor::new()));
+        fake_default
+            .require_same_executor("api", None, None)
+            .unwrap();
+        assert!(
+            fake_default
+                .require_same_executor("api", None, Some(Shell))
+                .is_err()
+        );
     }
 
     #[test]

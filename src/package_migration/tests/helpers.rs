@@ -123,7 +123,7 @@ pub(super) async fn deploy_source(ctx: &mut Ctx) {
             authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
                 reason: "seed source package",
             },
-            software_executor: None,
+            software_executors: crate::software_executor::SoftwareExecutors::default(),
             model_runtime_executor: None,
             worker_lifecycle: None,
             artifact_registry: None,

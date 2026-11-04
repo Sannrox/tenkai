@@ -15,6 +15,8 @@ mod convergence;
 mod lifecycle;
 mod release_selection;
 
+pub(crate) use convergence::stored_release_executor;
+
 pub(crate) use release_selection::resolve_subscription_selection;
 pub use release_selection::{
     FitRefusal, dotted_version, gpu_requirements_fit, model_requirements_fit,

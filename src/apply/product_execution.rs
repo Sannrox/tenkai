@@ -162,7 +162,11 @@ pub(super) async fn activate(
         )
         .map_err(|error| error.to_string()));
     }
-    if let Some(executor) = adapters.software {
+    if let Some(executor) = adapters
+        .software
+        .resolve(content.manifest.deploy.executor)?
+    {
+        let executor = executor.as_ref();
         prepare_fenced_mutation(ctx, lease, content).await?;
         if let Err(detail) = require_artifact_pull_consumer(content, Some(executor)) {
             return Ok(Err(detail));
@@ -285,7 +289,11 @@ pub(super) async fn restart(
         return admit_worker_pool(ctx, lease, content, adapters.worker_lifecycle, false, true)
             .await;
     }
-    if let Some(executor) = adapters.software {
+    if let Some(executor) = adapters
+        .software
+        .resolve(content.manifest.deploy.executor)?
+    {
+        let executor = executor.as_ref();
         prepare_fenced_mutation(ctx, lease, content).await?;
         if let Err(detail) = require_artifact_pull_consumer(content, Some(executor)) {
             return Ok(Err(detail));
@@ -404,7 +412,11 @@ async fn deactivate_for(
         )
         .map_err(|error| error.to_string()));
     }
-    if let Some(executor) = adapters.software {
+    if let Some(executor) = adapters
+        .software
+        .resolve(content.manifest.deploy.executor)?
+    {
+        let executor = executor.as_ref();
         refresh_environment_lease(ctx, lease).await?;
         if let Err(detail) = require_artifact_pull_consumer(content, Some(executor)) {
             return Ok(Err(detail));

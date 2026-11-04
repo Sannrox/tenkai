@@ -668,7 +668,7 @@ replicas = 1
                 authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
                     reason: "worker pool apply",
                 },
-                software_executor: None,
+                software_executors: crate::software_executor::SoftwareExecutors::default(),
                 model_runtime_executor: None,
                 worker_lifecycle: Some(port),
                 artifact_registry: None,
@@ -1044,7 +1044,7 @@ drain_timeout_ms = 1000
                 authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
                     reason: "worker pool wait drain",
                 },
-                software_executor: None,
+                software_executors: crate::software_executor::SoftwareExecutors::default(),
                 model_runtime_executor: None,
                 worker_lifecycle: Some(port.clone()),
                 artifact_registry: None,
