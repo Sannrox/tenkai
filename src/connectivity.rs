@@ -2913,7 +2913,7 @@ install = "true"
             "operator",
         )
         .await
-        .unwrap();
+        .unwrap_or_else(|error| panic!("dry run errored instead of finishing: {error:#}"));
         assert_eq!(
             preview.state,
             ImportState::Previewed,
@@ -2938,7 +2938,7 @@ install = "true"
             "operator",
         )
         .await
-        .unwrap();
+        .unwrap_or_else(|error| panic!("import errored instead of finishing: {error:#}"));
         assert_eq!(
             imported.state,
             ImportState::Succeeded,
@@ -3083,7 +3083,7 @@ install = "true"
             "operator",
         )
         .await
-        .unwrap();
+        .unwrap_or_else(|error| panic!("refused import errored instead of failing: {error:#}"));
         assert_eq!(refused.state, ImportState::Failed);
         assert!(refused.refusal.unwrap().contains("scope"));
 
