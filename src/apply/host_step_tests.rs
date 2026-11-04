@@ -1140,3 +1140,31 @@ async fn unsubscribing_waits_for_no_apply_to_run() {
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn a_deployed_host_release_without_a_record_is_not_reported_removed() {
+    let mut host = Host::new("record-missing").await;
+    host.release("1.0.0", false).await;
+    let plan = host.plan().await;
+    host.apply(&plan).await.unwrap();
+    crate::environment::unsubscribe(
+        &mut host.ctx,
+        "edge",
+        "cluster",
+        &host.executors,
+        |_| Ok(()),
+    )
+    .await
+    .unwrap();
+    std::fs::remove_file(record_path(&host.applier.state, "edge", "cluster")).unwrap();
+
+    let error = crate::plan::create_with(&mut host.ctx, "edge", &host.executors)
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(
+        error.contains("tenkaictl env reconcile edge cluster"),
+        "{error}"
+    );
+}

@@ -620,61 +620,69 @@ async fn compute_snapshot_with_policy(
     // A host product the environment no longer subscribes to is removed
     // like any other change: by an approved host uninstall step, from what
     // the applier's record holds (ADR 0041 section 2).
-    let host = executors.host();
-    if let Err(error) = &host {
-        // Without the applier's records nothing here can remove a host
-        // release that is deployed but no longer subscribed.
-        for (key, version) in &env_obj.properties {
-            let Some(product) = key.strip_prefix("deployed.") else {
-                continue;
-            };
-            if products.contains(product) {
-                continue;
-            }
-            if readable_manifest(ctx, &release_id(product, version))
+    // Host products to consider for removal: every one the applier keeps a
+    // record of, and every one the server records as deployed from a host
+    // release, so a missing or unreadable record refuses the plan instead
+    // of passing for "nothing to remove".
+    let mut removable = std::collections::BTreeSet::new();
+    for (key, version) in &env_obj.properties {
+        let Some(product) = key.strip_prefix("deployed.") else {
+            continue;
+        };
+        if !products.contains(product)
+            && readable_manifest(ctx, &release_id(product, version))
                 .await?
                 .is_some_and(|manifest| {
                     manifest.deploy.executor
                         == Some(crate::software_executor::SoftwareExecutorKind::Host)
                 })
-            {
-                bail!("{product} is a host release to remove from {env}: {error:#}");
-            }
+        {
+            removable.insert(product.to_string());
         }
     }
-    if let Ok(host) = host {
-        for record in host.applied_states(env)? {
-            if products.contains(&record.product) {
-                continue;
-            }
-            let deployed = env_obj
-                .properties
-                .get(&format!("deployed.{}", record.product))
-                .cloned();
-            let Some(version) = host_source(&record, deployed.as_deref()) else {
-                if let Some(deployed) = deployed {
-                    bail!(
-                        "the host applier records {} removed from {env} at generation {}, but this server records {deployed}; once no apply runs, record it with `tenkaictl env reconcile {env} {}`",
-                        record.product,
-                        record.generation,
-                        record.product
-                    );
+    match executors.host() {
+        Ok(host) => {
+            for record in host.applied_states(env)? {
+                if !products.contains(&record.product) {
+                    removable.insert(record.product);
                 }
-                continue;
-            };
-            // A recalled release can still be removed: removal deploys
-            // nothing, and its signature and integrity are still checked.
-            let target =
-                pin_release_for_recovery(ctx, &release_id(&record.product, &version), env).await?;
-            pending.push((
-                record.product.clone(),
-                Action::Remove,
-                Some(version.clone()),
-                version,
-                target,
-                None,
-                crate::manifest::ProductKind::Software,
-            ));
+            }
+            for product in removable {
+                let record = host.applied_state(env, &product)?;
+                let deployed = env_obj
+                    .properties
+                    .get(&format!("deployed.{product}"))
+                    .cloned();
+                let Some(version) = host_source(&record, deployed.as_deref()) else {
+                    if let Some(deployed) = deployed {
+                        bail!(
+                            "the host applier records nothing applied for {product} in {env} at generation {}, but this server records {deployed}; once no apply runs, record it with `tenkaictl env reconcile {env} {product}`",
+                            record.generation
+                        );
+                    }
+                    continue;
+                };
+                // A recalled release can still be removed: removal deploys
+                // nothing, and its signature and integrity are still checked.
+                let target =
+                    pin_release_for_recovery(ctx, &release_id(&product, &version), env).await?;
+                pending.push((
+                    product,
+                    Action::Remove,
+                    Some(version.clone()),
+                    version,
+                    target,
+                    None,
+                    crate::manifest::ProductKind::Software,
+                ));
+            }
+        }
+        // Without the applier's records nothing here can remove a host
+        // release that is deployed but no longer subscribed.
+        Err(error) => {
+            if let Some(product) = removable.first() {
+                bail!("{product} is a host release to remove from {env}: {error:#}");
+            }
         }
     }
     inputs.sort_by(|a, b| a.product.cmp(&b.product));
