@@ -128,8 +128,10 @@ key from the verified request and refuses an instance whose name does not match.
    them, the requester's identity, and product criticality are server state,
    so the host policy is evaluated at its strictest quorum as if gates were
    skipped, every rule applies regardless of criticality, and a host policy
-   that uses requester exclusion is refused when it loads. Independence of
-   approvals comes from requiring distinct approver keys and groups. An `uninstall` needs an approved plan that
+   that uses requester exclusion is refused when it loads. As in ADR 0037,
+   approvals count only when they are distinct by key and by trust-root
+   principal, both read from the root-owned trust roots, and groups restrict
+   which signers are eligible. An `uninstall` needs an approved plan that
    removes the product, like any other change;
 5. refuses an instance it has already started, and returns the recorded result
    instead of running again.
