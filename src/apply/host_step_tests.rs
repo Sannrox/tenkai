@@ -995,3 +995,51 @@ async fn only_a_host_release_is_removed_by_unsubscribing() {
         .unwrap();
     assert_eq!(message, "edge unsubscribed from api");
 }
+
+#[tokio::test]
+async fn a_removal_is_stale_once_the_product_is_subscribed_again() {
+    let mut host = Host::new("resubscribe").await;
+    host.release("1.0.0", false).await;
+    let plan = host.plan().await;
+    host.apply(&plan).await.unwrap();
+    crate::environment::unsubscribe(&mut host.ctx, "edge", "cluster")
+        .await
+        .unwrap();
+    let remove = host.plan().await;
+    crate::plan::subscribe(&mut host.ctx, "edge", "cluster", "stable")
+        .await
+        .unwrap();
+
+    let error = host.apply(&remove).await.unwrap_err().to_string();
+
+    assert!(error.contains("subscribes to it again"), "{error}");
+    assert_eq!(
+        *host.applier.runs.lock().unwrap(),
+        ["install cluster@1.0.0"]
+    );
+}
+
+#[tokio::test]
+async fn a_recalled_host_release_can_still_be_removed() {
+    let mut host = Host::new("recalled").await;
+    host.release("1.0.0", false).await;
+    let plan = host.plan().await;
+    host.apply(&plan).await.unwrap();
+    let actor = crate::auth_context::test_management_context("host-step");
+    crate::catalog::recall(&mut host.ctx, &actor, "cluster@1.0.0")
+        .await
+        .unwrap();
+    crate::environment::unsubscribe(&mut host.ctx, "edge", "cluster")
+        .await
+        .unwrap();
+
+    let remove = host.plan().await;
+    let outcomes = host.apply(&remove).await.unwrap();
+
+    assert_eq!(
+        statuses(&outcomes),
+        [StepOutcomeStatus::Succeeded],
+        "{outcomes:?}"
+    );
+    assert_eq!(host.record().state, AppliedState::Empty);
+}

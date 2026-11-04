@@ -38,7 +38,10 @@ pub(super) async fn execute(
         artifact_digest: step.artifact_digest.clone(),
         workdir: step.workdir.clone(),
     };
-    let admit_recalled = recalled_recovery && step.action == Action::Rollback;
+    // Removing a recalled release deploys nothing, so it is admitted like an
+    // audited recovery; signature and integrity are still checked.
+    let admit_recalled =
+        (recalled_recovery && step.action == Action::Rollback) || step.action == Action::Remove;
     let mut content =
         admit_release(ctx, &target, environment, &step.product, admit_recalled).await?;
     let mut restore_content = match step.restore.as_ref() {

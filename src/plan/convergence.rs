@@ -640,7 +640,10 @@ async fn compute_snapshot_with_policy(
                 }
                 continue;
             };
-            let target = pin_release(ctx, &release_id(&record.product, &version), env).await?;
+            // A recalled release can still be removed: removal deploys
+            // nothing, and its signature and integrity are still checked.
+            let target =
+                pin_release_for_recovery(ctx, &release_id(&record.product, &version), env).await?;
             host_products.insert(record.product.clone());
             pending.push((
                 record.product.clone(),

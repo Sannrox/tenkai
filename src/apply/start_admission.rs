@@ -99,7 +99,8 @@ pub(super) async fn admit(
             return Ok(Some(outcomes.unwrap_or_default()));
         }
         for step in &plan.steps.clone() {
-            if step.action == Action::Rollback {
+            // A removal deploys nothing, so no eval gate applies to it.
+            if matches!(step.action, Action::Rollback | Action::Remove) {
                 continue;
             }
             let target = ReleasePin {
