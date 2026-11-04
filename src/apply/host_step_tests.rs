@@ -792,7 +792,7 @@ async fn a_unit_left_running_by_an_earlier_holder_is_stopped_before_the_next_app
         .await
         .unwrap();
 
-    assert_eq!(stopped, [instance.clone()]);
+    assert_eq!(stopped, std::slice::from_ref(&instance));
     orphan.await.unwrap().unwrap();
     let result: crate::host_apply::state::HostApplyResult = serde_json::from_slice(
         &std::fs::read(instance_dir(&host.applier.state, &instance).join(RESULT_FILE)).unwrap(),
