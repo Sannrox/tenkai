@@ -4,11 +4,12 @@
 //! lifecycle port. The fixture never claims or schedules individual runs.
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use tenkai::worker_pool::{
     LivePoolAdmission, LocalProcessWorkerLifecycle, WorkerLifecyclePort, WorkerLifecycleScope,
-    WorkerPoolDecision, WorkerPoolSpec, WorkerReplicaRequest, admit_live_pool,
-    authorize_observations, load_snapshots, ready_snapshot, retained_observation,
+    WorkerLifecycleSnapshot, WorkerPoolDecision, WorkerPoolSpec, WorkerReplicaRequest,
+    admit_live_pool, authorize_observations, load_snapshots, ready_snapshot, retained_observation,
 };
 
 /// Temp root for one test, removed on drop even when the test panics. The
@@ -37,47 +38,40 @@ impl Drop for TestRoot {
 const PRODUCT: &str = "edge-workers";
 const ENV: &str = "local";
 
+/// Cargo builds this crate's fixture binary for its own integration tests, so
+/// the path always points into the current tree's target directory.
 fn fixture_bin() -> PathBuf {
-    workspace_bin("tenkai-worker-lifecycle-fixture")
+    PathBuf::from(env!("CARGO_BIN_EXE_tenkai-worker-lifecycle-fixture"))
 }
 
-fn workspace_bin(name: &str) -> PathBuf {
-    let key = format!("CARGO_BIN_EXE_{name}");
-    if let Ok(path) = std::env::var(&key) {
-        let path = PathBuf::from(path);
-        if path.exists() {
-            return path;
+/// Upper bound for the fixture to apply a control command. The fixture polls
+/// every 50 ms; the slack is for a loaded machine.
+const CONTROL_DEADLINE: Duration = Duration::from_secs(10);
+
+/// Polls the single observed worker until `ready` holds, panicking with the
+/// last snapshot at the deadline. Use it after writing a control command
+/// instead of sleeping a fixed time.
+fn observe_until(
+    port: &LocalProcessWorkerLifecycle,
+    scope: &WorkerLifecycleScope,
+    ready: impl Fn(&WorkerLifecycleSnapshot) -> bool,
+) -> WorkerLifecycleSnapshot {
+    let deadline = Instant::now() + CONTROL_DEADLINE;
+    loop {
+        let last = port
+            .observe(scope)
+            .unwrap()
+            .into_iter()
+            .next()
+            .map(|observation| observation.snapshot);
+        match last {
+            Some(snapshot) if ready(&snapshot) => return snapshot,
+            last if Instant::now() >= deadline => {
+                panic!("fixture did not reach the expected state; last observed {last:?}")
+            }
+            _ => std::thread::sleep(Duration::from_millis(20)),
         }
     }
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(deps) = exe.parent()
-        && deps.file_name().is_some_and(|n| n == "deps")
-        && let Some(profile_dir) = deps.parent()
-    {
-        let candidate = profile_dir.join(name);
-        if candidate.is_file() {
-            return candidate;
-        }
-    }
-    let profile = if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    };
-    let mut dirs = Vec::new();
-    if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
-        dirs.push(PathBuf::from(target_dir).join(profile).join(name));
-    }
-    let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    for _ in 0..5 {
-        dirs.push(dir.join("target").join(profile).join(name));
-        if !dir.pop() {
-            break;
-        }
-    }
-    dirs.into_iter()
-        .find(|candidate| candidate.is_file())
-        .unwrap_or_else(|| panic!("workspace binary {name} not found under target/{profile}"))
 }
 
 fn spec(version: &str) -> WorkerPoolSpec {
@@ -195,10 +189,8 @@ fn busy_live_process_drains_and_lost_fence_cannot_complete_replacement() {
         .join(PRODUCT)
         .join("w1.control");
     std::fs::write(&control, "busy\n").unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(80));
-    let busy = port.observe(&scope("1.0.0", 1)).unwrap();
-    assert_eq!(busy[0].snapshot.state, "active");
-    assert_eq!(busy[0].snapshot.active_claims, 1);
+    let busy = observe_until(&port, &scope("1.0.0", 1), |s| s.state == "active");
+    assert_eq!(busy.active_claims, 1);
 
     let desired = spec("2.0.0");
     let (decision, _, drain, _) = admit_live_pool(LivePoolAdmission {
@@ -214,14 +206,15 @@ fn busy_live_process_drains_and_lost_fence_cannot_complete_replacement() {
     .unwrap();
     assert_eq!(decision, WorkerPoolDecision::WaitDrain);
     assert!(drain.is_some());
-    std::thread::sleep(std::time::Duration::from_millis(80));
-    let draining = port.observe(&scope("1.0.0", 1)).unwrap();
-    assert_eq!(draining[0].snapshot.state, "draining");
-    assert_eq!(draining[0].snapshot.active_claims, 0);
-    assert!(!draining[0].snapshot.accepting_claims);
+    let draining = observe_until(&port, &scope("1.0.0", 1), |s| s.state == "draining");
+    assert_eq!(draining.active_claims, 0);
+    assert!(!draining.accepting_claims);
 
     std::fs::write(&control, "fence_lost\n").unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(80));
+    // Admit only once the live observation reports the lost fence, so the
+    // denial below comes from the fence and not from a still-draining pool.
+    let lost = observe_until(&port, &scope("1.0.0", 1), |s| s.state == "fence_lost");
+    assert!(!lost.fencing_ok);
     let (denied, _, _, _) = admit_live_pool(LivePoolAdmission {
         spec: &desired,
         port: &port,
@@ -306,11 +299,11 @@ fn worker_exits_once_its_directory_is_removed() {
     // This test spawned the fixture, so reap it rather than probe it: an
     // exited but unreaped child still answers kill(pid, 0).
     let mut status = 0;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(5);
     let mut exited = false;
-    while !exited && std::time::Instant::now() < deadline {
+    while !exited && Instant::now() < deadline {
         exited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) } == pid;
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::thread::sleep(Duration::from_millis(20));
     }
     assert!(exited, "fixture {pid} outlived its directory");
 }
