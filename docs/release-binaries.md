@@ -27,9 +27,10 @@ Source `cargo build` remains valid.
 Platforms: `linux-x86_64`, `darwin-aarch64`. Community asset names are
 `<binary>-<platform>`. The hub host is `tenkai-server-postgres-<platform>`
 so it does not replace `tenkai-server-<platform>`. The release also attaches
-`SHA256SUMS`, `tenkai-http-v1.schema.json` (the HTTP API contract clients
-generate types from, see `api/` in the repository), the `tenkai.cdx.json`
-SBOM, and the `tenkai-release.json` family release manifest.
+`SHA256SUMS`, `install.sh` (the [install script](#install-with-one-command)),
+`tenkai-http-v1.schema.json` (the HTTP API contract clients generate types
+from, see `api/` in the repository), the `tenkai.cdx.json` SBOM, and the
+`tenkai-release.json` family release manifest.
 The fixture and Postgres conformance harness stay source-built.
 
 ## Supported Linux
@@ -48,7 +49,54 @@ workflow checks the floor again before it writes `SHA256SUMS`. v0.6.0 and
 earlier Linux hosts need glibc 2.39; build those from source on older
 systems.
 
-## Verify and install
+## Install with one command
+
+Each Release attaches `install.sh`, a POSIX shell script that installs that
+Release's hosts. Replace `vX.Y.Z` with the published tag, or use
+`releases/latest/download/install.sh` for the latest Release:
+
+```bash
+# tenkaictl
+curl -fsSL https://github.com/Sannrox/tenkai/releases/download/vX.Y.Z/install.sh | sh
+# server host: tenkaictl, tenkai-server and tenkai-executor-guard side by side
+curl -fsSL https://github.com/Sannrox/tenkai/releases/download/vX.Y.Z/install.sh | sudo sh -s -- --role server
+# runtime host: tenkai-runtime and tenkai-runtime-guard
+curl -fsSL https://github.com/Sannrox/tenkai/releases/download/vX.Y.Z/install.sh | sudo sh -s -- --role runtime
+```
+
+The script:
+
+- installs the version it is attached to; `--version X.Y.Z` picks another;
+- refuses an unsupported system: anything but `linux-x86_64` with glibc
+  2.28 or newer and `darwin-aarch64`, including musl distributions such as
+  Alpine;
+- downloads `SHA256SUMS` and the role's hosts and checks every file before
+  installing any. A checksum mismatch or a host missing from `SHA256SUMS`
+  installs nothing;
+- renames each host into `--prefix` (default `/usr/local/bin` as root,
+  `~/.local/bin` otherwise) under its unsuffixed name;
+- refuses a [self-upgrade home](#upgrade-a-server-host), or a host in the
+  prefix that is a symbolic link, because a plain replace would skip
+  self-upgrade's store check, backup, and rollback;
+- prints the `gh attestation verify` command for each installed host.
+
+`install.sh` is listed in `SHA256SUMS` and covered by the provenance
+attestation, so it can be checked before it runs:
+
+```bash
+curl -fsSL -O https://github.com/Sannrox/tenkai/releases/download/vX.Y.Z/install.sh
+gh attestation verify install.sh --repo Sannrox/tenkai \
+  --signer-workflow Sannrox/tenkai/.github/workflows/release-binaries.yml \
+  --source-ref refs/tags/vX.Y.Z
+sudo sh install.sh --role server
+```
+
+It writes no service unit; run the server or runtime under a supervisor as
+described in [run tenkai-server](run-tenkai-server.md#install-a-server-host).
+Re-running it replaces plain installs; upgrade a server installed into a
+self-upgrade home with `tenkaictl self-upgrade` instead.
+
+## Verify and install by hand
 
 Replace `vX.Y.Z` with the published tag. Checksums must match before the
 binary is executed.
@@ -79,7 +127,8 @@ every listed file is present.
 `tenkai-server` runs shell-executor deploys under `tenkai-executor-guard`. It
 finds a file named exactly `tenkai-executor-guard` beside its own binary or
 one directory up, or the path in `TENKAI_EXECUTOR_GUARD`. A server host
-therefore needs both assets, installed under their unsuffixed names:
+therefore needs both assets, installed under their unsuffixed names.
+`install.sh --role server` does that; by hand:
 
 ```bash
 for binary in tenkai-server tenkai-executor-guard; do
@@ -146,7 +195,9 @@ The workflow then builds the five community hosts with `--workspace --features t
 rebuilds `tenkai-server` with `-p tenkai-server --features postgres,ui` and names it
 `tenkai-server-postgres-<platform>` with
 `scripts/package-release-binaries.sh package-hub`. It adds the HTTP API
-contract, refuses Linux hosts above the glibc floor, and writes `SHA256SUMS`. `scripts/release-metadata.py` writes
+contract and `install.sh` with the tag's version written in
+(`scripts/package-release-binaries.sh install-script`), refuses Linux hosts
+above the glibc floor, and writes `SHA256SUMS`. `scripts/release-metadata.py` writes
 `tenkai.cdx.json`, a CycloneDX 1.5 SBOM of the locked Cargo graph and the
 pinned web console. A separate job validates it against the CycloneDX schema
 and SPDX license expressions; the attest job regenerates it and requires the

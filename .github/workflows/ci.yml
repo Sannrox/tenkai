@@ -112,6 +112,8 @@ jobs:
                 echo "${host} ok"
               done'
           done
+      - name: Install script on Ubuntu 22.04, Debian 12, RHEL 8 and 9; refused on Alpine
+        run: bash scripts/test-install-script.sh --linux-hosts linux-hosts
       - run: bash scripts/release-dry-run.sh --linux-hosts linux-hosts
 
   clippy:

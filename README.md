@@ -27,12 +27,8 @@ database, or network service. The example product only writes a file.
 ```bash
 git clone https://github.com/Sannrox/tenkai && cd tenkai
 
-# download the latest community host and check it against SHA256SUMS
-platform=darwin-aarch64   # or linux-x86_64
-base=https://github.com/Sannrox/tenkai/releases/latest/download
-curl -fsSL -O "$base/SHA256SUMS" -O "$base/tenkaictl-$platform"
-grep " tenkaictl-$platform\$" SHA256SUMS | shasum -a 256 -c -
-chmod 0755 "tenkaictl-$platform" && mv "tenkaictl-$platform" tenkaictl
+# install tenkaictl here, checked against the release's SHA256SUMS
+curl -fsSL https://github.com/Sannrox/tenkai/releases/latest/download/install.sh | sh -s -- --prefix .
 
 # initialize .tenkai-state/tenkai.db and the built-in local environment
 ./tenkaictl init
@@ -51,13 +47,20 @@ export TENKAI_MANAGEMENT_TOKEN='replace-from-secret-store'
 ./tenkaictl status
 ```
 
+Releases before v0.7.0 attach no `install.sh`. While one of them is the
+latest Release, download `tenkaictl` by hand as in
+[GitHub Release binaries](docs/release-binaries.md#verify-and-install-by-hand).
+
 `--allow-unsigned-development` and `--allow-unapproved-development` are
 development bypasses for the built-in `local` environment only. Every other
 environment fails closed without [signed releases](docs/release-signing.md)
 and [signed plan approvals](docs/plan-approval.md).
 
-To verify build provenance with GitHub attestations, see
-[GitHub Release binaries](docs/release-binaries.md). To build from source
+The install script supports `linux-x86_64` (glibc 2.28 or newer) and
+`darwin-aarch64`. It installs a server host with `--role server` and a
+runtime host with `--role runtime`, and prints the command that verifies
+build provenance; see [GitHub Release binaries](docs/release-binaries.md),
+which also keeps the manual download and verify path. To build from source
 instead, run `cargo build --bin tenkaictl` and use `./target/debug/tenkaictl`.
 Hub Postgres hosts are the GitHub asset `tenkai-server-postgres-<platform>`,
 built with `-p tenkai-server --features postgres,ui`. Source build uses the

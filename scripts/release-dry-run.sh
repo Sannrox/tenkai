@@ -60,6 +60,7 @@ if [[ -n "$linux_hosts" ]]; then
   bash scripts/package-release-binaries.sh check-glibc --out "$dist"
 fi
 cp api/tenkai-http-v1.schema.json "$dist/"
+bash scripts/package-release-binaries.sh install-script --out "$dist" --version "$version"
 bash scripts/package-release-binaries.sh checksums --out "$dist" --require-complete
 
 python3 scripts/release-metadata.py sbom "${dist}/tenkai.cdx.json"

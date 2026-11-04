@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 bash scripts/package-release-binaries.sh self-test
+bash scripts/test-install-script.sh
 bash scripts/verify-release-tag.sh self-test
 python3 scripts/release-metadata.py self-test
 
@@ -19,6 +20,10 @@ grep -Fq 'cargo build --release --locked -p tenkai-server --features postgres,ui
 grep -Fq 'build-linux-release-hosts.sh --out dist' "$workflow"
 grep -Fq 'package-release-binaries.sh check-glibc --out dist' "$workflow"
 grep -Fq 'release-dry-run.sh --linux-hosts' "$ROOT/.github/workflows/ci.yml"
+# install.sh is attached for the tag's version and installed on clean
+# distributions in CI (#905).
+grep -Fq 'install-script --out dist --version "${GITHUB_REF_NAME#v}"' "$workflow"
+grep -Fq 'test-install-script.sh --linux-hosts linux-hosts' "$ROOT/.github/workflows/ci.yml"
 grep -Fq 'verify-release-tag.sh verify-signed' "$workflow"
 grep -Fq 'release-metadata.py manifest' "$workflow"
 grep -Fq 'sbom-path: dist/tenkai.cdx.json' "$workflow"

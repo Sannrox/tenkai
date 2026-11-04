@@ -6,6 +6,7 @@
 #       [--platform ID] [--strip]
 #   scripts/package-release-binaries.sh package-hub --out DIR [--bin-dir DIR]
 #       [--platform ID] [--strip]
+#   scripts/package-release-binaries.sh install-script --out DIR --version X.Y.Z
 #   scripts/package-release-binaries.sh checksums --out DIR [--require-complete]
 #   scripts/package-release-binaries.sh check-glibc --out DIR
 #   scripts/package-release-binaries.sh names
@@ -17,9 +18,10 @@
 # Platforms: linux-x86_64, darwin-aarch64. check-glibc refuses a Linux host
 # that needs a glibc newer than LINUX_GLIBC_FLOOR (built by
 # scripts/build-linux-release-hosts.sh).
-# The HTTP API contract (api/tenkai-http-v1.schema.json) is attached and
-# checksummed with them. These files are GitHub Release packaging, not
-# Catalog artifacts.
+# The HTTP API contract (api/tenkai-http-v1.schema.json) and install.sh
+# (scripts/install.sh with the release version baked in by install-script)
+# are attached and checksummed with them. These files are GitHub Release
+# packaging, not Catalog artifacts.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -27,13 +29,14 @@ HOSTS=(tenkaictl tenkai-server tenkai-executor-guard tenkai-runtime tenkai-runti
 HUB_SERVER_ASSET=tenkai-server-postgres
 PLATFORMS=(linux-x86_64 darwin-aarch64)
 CHECKSUMS_NAME=SHA256SUMS
-CONTRACT_ASSETS=(tenkai-http-v1.schema.json)
+ATTACHED_FILES=(tenkai-http-v1.schema.json install.sh)
+INSTALL_SCRIPT=install.sh
 # Oldest glibc a linux-x86_64 host may require (RHEL 8). Keep in step with the
 # build image in scripts/build-linux-release-hosts.sh.
 LINUX_GLIBC_FLOOR=2.28
 
 usage() {
-  sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-2}"
 }
 
@@ -73,7 +76,7 @@ packaged_hub_name() {
 
 is_packaged_name() {
   local name="$1" host platform asset
-  for asset in "${CONTRACT_ASSETS[@]}"; do
+  for asset in "${ATTACHED_FILES[@]}"; do
     if [[ "$name" == "$asset" ]]; then
       return 0
     fi
@@ -95,7 +98,7 @@ is_packaged_name() {
 
 complete_names() {
   local host platform
-  printf '%s\n' "${CONTRACT_ASSETS[@]}"
+  printf '%s\n' "${ATTACHED_FILES[@]}"
   for host in "${HOSTS[@]}"; do
     for platform in "${PLATFORMS[@]}"; do
       packaged_name "$host" "$platform"
@@ -283,6 +286,36 @@ cmd_package_hub() {
   fi
 }
 
+# Write install.sh to --out with RELEASE_VERSION set, so the attached script
+# installs the release it is attached to unless told otherwise.
+cmd_install_script() {
+  local out="" version=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --out)
+        [[ $# -ge 2 ]] || fail "--out requires a directory"
+        out="$2"
+        shift 2
+        ;;
+      --version)
+        [[ $# -ge 2 ]] || fail "--version requires a version"
+        version="$2"
+        shift 2
+        ;;
+      -h | --help) usage 0 ;;
+      *) fail "unknown install-script argument: $1" ;;
+    esac
+  done
+  [[ -n "$out" ]] || fail "install-script requires --out"
+  [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$ ]] \
+    || fail "install-script requires --version X.Y.Z or X.Y.Z-rc.N, got '${version}'"
+  local src="${ROOT}/scripts/install.sh"
+  [[ "$(grep -c '^RELEASE_VERSION=""$' "$src")" == 1 ]] || fail "${src} has no single RELEASE_VERSION=\"\" line"
+  mkdir -p "$out"
+  sed "s/^RELEASE_VERSION=\"\"\$/RELEASE_VERSION=\"${version}\"/" "$src" >"${out}/${INSTALL_SCRIPT}"
+  chmod 0755 "${out}/${INSTALL_SCRIPT}"
+}
+
 cmd_checksums() {
   local out="" require_complete=false
   while [[ $# -gt 0 ]]; do
@@ -427,9 +460,9 @@ cmd_self_test() {
   expect_fail "incomplete GitHub Release set" \
     bash "$0" checksums --out "$out" --require-complete
 
-  printf '{}\n' >"${out}/${CONTRACT_ASSETS[0]}"
+  printf '{}\n' >"${out}/${ATTACHED_FILES[0]}"
   bash "$0" checksums --out "$out"
-  grep -Fq "  ${CONTRACT_ASSETS[0]}" "${out}/${CHECKSUMS_NAME}" || fail "self-test contract not checksummed"
+  grep -Fq "  ${ATTACHED_FILES[0]}" "${out}/${CHECKSUMS_NAME}" || fail "self-test contract not checksummed"
 
   printf 'junk\n' >"${out}/not-a-host"
   expect_fail "unexpected file in ${out}: not-a-host" \
@@ -472,6 +505,7 @@ main() {
     package-hub) cmd_package_hub "$@" ;;
     checksums) cmd_checksums "$@" ;;
     check-glibc) cmd_check_glibc "$@" ;;
+    install-script) cmd_install_script "$@" ;;
     names) complete_names ;;
     self-test) cmd_self_test "$@" ;;
     -h | --help | "") usage 0 ;;
