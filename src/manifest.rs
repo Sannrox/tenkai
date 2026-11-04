@@ -877,8 +877,17 @@ pub fn artifact_digest(root: &Path, inputs: &[String]) -> Result<String> {
         } else if metadata.is_file() {
             hash_bytes(&mut hasher, relative.to_string_lossy().as_bytes());
             hash_bytes(&mut hasher, b"file");
-            let bytes = std::fs::read(&path)?;
-            hash_bytes(&mut hasher, &bytes);
+            // Streamed with the same framing as `hash_bytes`: length, then bytes.
+            let mut file = std::fs::File::open(&path)?;
+            let len = file.metadata()?.len();
+            hasher.update(len.to_le_bytes());
+            let hashed = std::io::copy(&mut std::io::Read::take(&mut file, len), &mut hasher)?;
+            if hashed != len {
+                bail!(
+                    "deploy input changed while it was hashed: {}",
+                    path.display()
+                );
+            }
         } else {
             bail!(
                 "deploy input is not a file or directory: {}",
@@ -1286,6 +1295,39 @@ max_startup_seconds = 30
         std::fs::write(root.join("deploy.sh"), "echo two\n").unwrap();
         let second = artifact_digest(&root, &inputs).unwrap();
         assert_ne!(first, second);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A file input hashes as count, mode, path, kind, then length-prefixed
+    /// bytes; streaming it must keep every published digest.
+    #[test]
+    fn file_input_digest_keeps_its_published_framing() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-artifact-framing-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("deploy.sh"), "echo one\n").unwrap();
+        let mode = std::fs::metadata(root.join("deploy.sh"))
+            .unwrap()
+            .permissions()
+            .mode();
+        let framed = |hasher: &mut Sha256, value: &[u8]| {
+            hasher.update((value.len() as u64).to_le_bytes());
+            hasher.update(value);
+        };
+        let mut expected = Sha256::new();
+        expected.update(1_u64.to_le_bytes());
+        expected.update((mode & 0o7777).to_le_bytes());
+        framed(&mut expected, b"deploy.sh");
+        framed(&mut expected, b"file");
+        framed(&mut expected, b"echo one\n");
+        assert_eq!(
+            artifact_digest(&root, &["deploy.sh".to_string()]).unwrap(),
+            format!("{:x}", expected.finalize())
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
