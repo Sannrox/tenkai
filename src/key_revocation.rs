@@ -130,9 +130,15 @@ impl RevocationList {
     }
 
     /// Check the shape and the signature against the revocation authorities.
+    /// The authority must have been valid at the list's `issued_at`
+    /// (ADR 0042), so an installed list keeps verifying after rotation.
     pub fn verify(&self, authorities: &TrustRoots) -> Result<()> {
         self.validate_shape()?;
-        let signer = authorities.resolve(&self.key_id)?;
+        let signer = authorities.resolve_signed_at(
+            &self.key_id,
+            self.statement.issued_at,
+            crate::now_millis(),
+        )?;
         crate::signature_verification::verify_strict(
             &signer.verifying_key,
             "key revocation signature",
@@ -469,6 +475,33 @@ mod tests {
         new_bundle
             .verify(&overlap, "tenant-1", "site-1", 2_000)
             .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Rotating the authority (setting its `not_after`) keeps the list it
+    /// already issued verifying, so a restart after rotation still starts
+    /// (#865). A list issued after `not_after` is refused.
+    #[test]
+    fn an_installed_list_outlives_its_authoritys_window() {
+        let dir = temp_dir();
+        seed_file(&dir, &AUTHORITY);
+        let mut authority = signer(&AUTHORITY, "revocation-authority");
+        authority.not_after = Some(2);
+        let authorities = roots(vec![authority]);
+        let issued_at = |issued_at| {
+            sign(
+                RevocationStatement {
+                    sequence: 1,
+                    issued_at,
+                    revoked: Vec::new(),
+                },
+                &dir.join(format!("{}.ed25519", AUTHORITY[0])),
+            )
+            .unwrap()
+        };
+        issued_at(1).verify(&authorities).unwrap();
+        let late = issued_at(3).verify(&authorities).unwrap_err();
+        assert!(format!("{late:#}").contains("not_after"), "{late:#}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

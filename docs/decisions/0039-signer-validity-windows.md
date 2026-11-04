@@ -4,6 +4,8 @@
 - Date: 2026-10-30
 - Issue: [#812](https://github.com/Sannrox/tenkai/issues/812)
 - Owner: Tenkai maintainers
+- Amended by: [ADR 0042](0042-signer-window-at-signed-time.md) (§2: the
+  time at which the window is checked)
 - Related: [ADR 0036](0036-offline-key-revocation.md),
   [release signing](../release-signing.md),
   [plan approval](../plan-approval.md),

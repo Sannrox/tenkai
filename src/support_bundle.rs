@@ -351,13 +351,17 @@ async fn collect_store(
     store
 }
 
-/// Verify a bundle after transfer: schema, a trusted signer, and the
-/// embedded recovery diagnostics.
+/// Verify a bundle after transfer: schema, a signer trusted at the bundle's
+/// `created_at_ms` (ADR 0042), and the embedded recovery diagnostics.
 pub fn verify(bundle: &SupportBundle, roots: &TrustRoots) -> Result<()> {
     if bundle.schema != SUPPORT_BUNDLE_SCHEMA {
         bail!("unsupported support bundle schema {}", bundle.schema);
     }
-    let signer = roots.resolve(&bundle.key_id)?;
+    let signer = roots.resolve_signed_at(
+        &bundle.key_id,
+        bundle.statement.created_at_ms,
+        crate::now_millis(),
+    )?;
     crate::signature_verification::verify_strict(
         &signer.verifying_key,
         "support bundle signature",

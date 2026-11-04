@@ -77,6 +77,10 @@ pub(crate) fn verifying_key(label: &str, value: &str) -> Result<VerifyingKey> {
     Ok(key)
 }
 
+/// How far a signed artifact's signed time may run ahead of the verifier's
+/// clock, for replicas and signers whose clocks drift apart.
+pub(crate) const SIGNED_AT_CLOCK_SKEW_MS: i64 = 5 * 60 * 1000;
+
 /// Optional validity window on a trust-root signer, Unix milliseconds.
 ///
 /// Absent fields mean the window is not recorded: the signer is trusted
@@ -130,6 +134,22 @@ impl SignerValidityWindow {
             bail!("trusted signer {identity} is no longer valid (not_after)");
         }
         Ok(())
+    }
+
+    /// Check a signed artifact (ADR 0042): its signed time must not be
+    /// after `now_ms` (beyond [`SIGNED_AT_CLOCK_SKEW_MS`]), and the window is
+    /// checked at the signed time, so a key's later `not_after` does not
+    /// invalidate what it already signed.
+    pub(crate) fn check_signed_at(
+        &self,
+        identity: &str,
+        signed_at_ms: i64,
+        now_ms: i64,
+    ) -> Result<()> {
+        if signed_at_ms > now_ms.saturating_add(SIGNED_AT_CLOCK_SKEW_MS) {
+            bail!("artifact signed by {identity} carries a signed time in the future");
+        }
+        self.check(identity, signed_at_ms)
     }
 }
 
@@ -235,6 +255,29 @@ mod tests {
                 .is_err()
         );
         assert!(SignerValidityWindow::new(Some(0), None).validate().is_err());
+    }
+
+    #[test]
+    fn signed_artifact_window_is_checked_at_its_signed_time() {
+        let window = SignerValidityWindow::new(Some(10), Some(20));
+        window
+            .check_signed_at("backup@example.com", 15, 100)
+            .unwrap();
+        let early = window
+            .check_signed_at("backup@example.com", 9, 100)
+            .unwrap_err();
+        assert!(early.to_string().contains("not_before"), "{early:#}");
+        let late = window
+            .check_signed_at("backup@example.com", 21, 100)
+            .unwrap_err();
+        assert!(late.to_string().contains("not_after"), "{late:#}");
+        window
+            .check_signed_at("backup@example.com", 15, 15 - SIGNED_AT_CLOCK_SKEW_MS)
+            .unwrap();
+        let future = window
+            .check_signed_at("backup@example.com", 15, 14 - SIGNED_AT_CLOCK_SKEW_MS)
+            .unwrap_err();
+        assert!(future.to_string().contains("future"), "{future:#}");
     }
 
     #[test]

@@ -393,7 +393,10 @@ impl BundleEnvelope {
             bail!("offline bundle is outside its validity interval");
         }
         roots.validate()?;
-        let signer = roots.resolve(&self.key_id)?;
+        // The exporter must have been valid when it issued the bundle
+        // (ADR 0042); the bundle's own expiry bounds freshness above.
+        let signer =
+            roots.resolve_signed_at(&self.key_id, self.statement.issued_at_unix_ms, now_unix_ms)?;
         if self.statement.exporter_identity != signer.identity {
             bail!("bundle exporter identity does not match its trusted signing identity");
         }
@@ -1452,7 +1455,11 @@ impl ReceiptEnvelope {
             bail!("offline receipt completion time is invalid");
         }
         roots.validate()?;
-        let signer = roots.resolve(&self.key_id)?;
+        let signer = roots.resolve_signed_at(
+            &self.key_id,
+            self.statement.completed_at_unix_ms,
+            now_unix_ms,
+        )?;
         crate::signature_verification::verify_strict(
             &signer.verifying_key,
             "offline receipt signature",

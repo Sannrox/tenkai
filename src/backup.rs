@@ -523,11 +523,11 @@ pub fn drill(
     };
     let manifest_bytes = std::fs::read(manifest_path(backup))
         .with_context(|| format!("reading the manifest of {}", backup.display()))?;
-    if let Some(roots) = roots {
-        verify_manifest(backup, &manifest_bytes, roots)?;
-    }
     let manifest: BackupManifest =
         serde_json::from_slice(&manifest_bytes).context("parsing the backup manifest")?;
+    if let Some(roots) = roots {
+        verify_manifest(backup, &manifest_bytes, manifest.taken_at_ms, now_ms, roots)?;
+    }
     let (sha256, _) = sha256_file(backup)?;
     if sha256 != manifest.sha256 {
         bail!(
@@ -626,8 +626,15 @@ fn sign_manifest(manifest_bytes: &[u8], seed: &Path) -> Result<BackupSignature> 
     })
 }
 
-/// Refuse unless `backup`'s manifest carries a signature by one of `roots`.
-fn verify_manifest(backup: &Path, manifest_bytes: &[u8], roots: &TrustRoots) -> Result<()> {
+/// Refuse unless `backup`'s manifest carries a signature by one of `roots`,
+/// by a signer valid when the backup was taken (`taken_at_ms`, ADR 0042).
+fn verify_manifest(
+    backup: &Path,
+    manifest_bytes: &[u8],
+    taken_at_ms: i64,
+    now_ms: i64,
+    roots: &TrustRoots,
+) -> Result<()> {
     let path = signature_path(backup);
     let raw = match std::fs::read(&path) {
         Ok(raw) => raw,
@@ -641,7 +648,7 @@ fn verify_manifest(backup: &Path, manifest_bytes: &[u8], roots: &TrustRoots) -> 
     if signature.schema != SIGNATURE_SCHEMA {
         bail!("unsupported backup signature schema {}", signature.schema);
     }
-    let signer = roots.resolve(&signature.key_id)?;
+    let signer = roots.resolve_signed_at(&signature.key_id, taken_at_ms, now_ms)?;
     crate::signature_verification::verify_strict(
         &signer.verifying_key,
         "backup manifest signature",

@@ -38,6 +38,7 @@
 - [0036 — Signed offline key revocation](0036-offline-key-revocation.md)
 - [0037 — Multi-party plan approval](0037-multi-party-plan-approval.md)
 - [0038 — Tenant catalog object graph on PostgreSQL](0038-tenant-catalog-object-graph.md)
-- [0039 — Signer validity windows on trust-root format v1](0039-signer-validity-windows.md)
+- [0039 — Signer validity windows on trust-root format v1](0039-signer-validity-windows.md) (§2 amended by 0042)
 - [0040 — Family versioning, tagging, and release policy](0040-family-versioning-and-release-policy.md)
 - [0041 — Per-release software executor and privileged host releases](0041-per-release-executor-and-privileged-host-releases.md)
+- [0042 — Signer windows are checked at an artifact's signed time](0042-signer-window-at-signed-time.md)

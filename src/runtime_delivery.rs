@@ -2445,9 +2445,12 @@ mod tests {
         let plan = port.pending_work("prod".into()).await.unwrap().unwrap();
         // A runtime stored its completion, then stopped before applying it.
         let gone = runtime_owner("runtime-secret", "instance-a");
+        // Long enough that the check before the lapse runs inside it on a
+        // loaded machine; a 20 ms lease lapsed before it under parallel runs.
+        let lease_until = crate::now_millis() + 2_000;
         let claim = operations
             .store
-            .claim_runtime_plan("prod", &plan.id, &gone, crate::now_millis() + 20)
+            .claim_runtime_plan("prod", &plan.id, &gone, lease_until)
             .unwrap()
             .unwrap();
         let completion = RuntimeCompletion {
@@ -2473,7 +2476,8 @@ mod tests {
         assert!(before_lapse.claim.is_none());
         assert!(!port.calls.lock().unwrap().contains(&"complete"));
 
-        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        let remaining = lease_until - crate::now_millis() + 20;
+        tokio::time::sleep(std::time::Duration::from_millis(remaining.max(0) as u64)).await;
         let work = operations
             .claim_work(Some("runtime-secret"), Some("instance-b"), "prod")
             .await
