@@ -73,19 +73,10 @@ fn failed_target_is_held(
 }
 
 fn cluster_observe_executor() -> Option<Box<dyn crate::software_executor::SoftwareExecutor>> {
-    match std::env::var("TENKAI_SOFTWARE_EXECUTOR") {
-        Ok(value)
-            if value.eq_ignore_ascii_case("helm")
-                || value.eq_ignore_ascii_case("kubernetes")
-                || value.eq_ignore_ascii_case("k8s")
-                || value.eq_ignore_ascii_case("native")
-                || value.eq_ignore_ascii_case("kubernetes-inprocess")
-                || value.eq_ignore_ascii_case("docker") =>
-        {
-            crate::software_executor::selected_software_executor()
-        }
-        _ => None,
-    }
+    let value = std::env::var("TENKAI_SOFTWARE_EXECUTOR").ok()?;
+    crate::software_executor::software_executor_for(
+        crate::software_executor::SoftwareExecutorKind::from_name(&value)?,
+    )
 }
 
 async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateInput>, Vec<Step>)> {

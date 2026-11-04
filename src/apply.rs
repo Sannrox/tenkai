@@ -440,6 +440,7 @@ mod tests {
                     inputs: Vec::new(),
                     uninstall: uninstall.map(str::to_string),
                     health: health.map(str::to_string),
+                    executor: None,
                 },
                 routing: None,
                 model: None,
