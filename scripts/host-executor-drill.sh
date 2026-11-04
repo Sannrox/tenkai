@@ -142,7 +142,17 @@ for path in glob.glob("/var/lib/tenkai-host/instances/*/result.json"):
   fail "unexpected host results: $outcomes"
 remote env inspect drill | json_field 'r["latest_plan"]["state"]' >"$work/state"
 [ "$(cat "$work/state")" = succeeded ] || fail "the plan is $(cat "$work/state")"
-sudo test -z "$(sudo ls -A /var/lib/tenkai/host-spool)" || fail "the spool was not emptied"
+# The server removes what it spooled once a step ended; the applier drill's
+# own fixtures stay.
+left=$(sudo python3 -c '
+import glob, json, os
+for path in glob.glob("/var/lib/tenkai-host/instances/*/result.json"):
+    if json.load(open(path))["product"] == "host-drill":
+        instance = os.path.basename(os.path.dirname(path))
+        if os.path.exists(os.path.join("/var/lib/tenkai/host-spool", instance)):
+            print(instance)
+')
+[ -z "$left" ] || fail "the server left its spool behind: $left"
 
 echo "== the environment is converged"
 remote plan --env drill --generation "$(generation)" >"$work/again.txt"
