@@ -77,11 +77,11 @@ is_platform() {
   return 1
 }
 
-# Hosts packaged for platform $1, one per line.
-platform_hosts() {
-  printf '%s\n' "${HOSTS[@]}"
+# Set PLATFORM_HOSTS to the hosts packaged for platform $1.
+set_platform_hosts() {
+  PLATFORM_HOSTS=("${HOSTS[@]}")
   if [[ "$1" == linux-x86_64 ]]; then
-    printf '%s\n' "${LINUX_ONLY_HOSTS[@]}"
+    PLATFORM_HOSTS+=("${LINUX_ONLY_HOSTS[@]}")
   fi
 }
 
@@ -101,11 +101,12 @@ is_packaged_name() {
     fi
   done
   for platform in "${PLATFORMS[@]}"; do
-    while IFS= read -r host; do
+    set_platform_hosts "$platform"
+    for host in "${PLATFORM_HOSTS[@]}"; do
       if [[ "$name" == "$(packaged_name "$host" "$platform")" ]]; then
         return 0
       fi
-    done < <(platform_hosts "$platform")
+    done
   done
   for platform in "${PLATFORMS[@]}"; do
     if [[ "$name" == "$(packaged_hub_name "$platform")" ]]; then
@@ -119,9 +120,10 @@ complete_names() {
   local host platform
   printf '%s\n' "${ATTACHED_FILES[@]}"
   for platform in "${PLATFORMS[@]}"; do
-    while IFS= read -r host; do
+    set_platform_hosts "$platform"
+    for host in "${PLATFORM_HOSTS[@]}"; do
       packaged_name "$host" "$platform"
-    done < <(platform_hosts "$platform")
+    done
   done
   for platform in "${PLATFORMS[@]}"; do
     packaged_hub_name "$platform"
@@ -130,9 +132,10 @@ complete_names() {
 
 linux_host_names() {
   local host
-  while IFS= read -r host; do
+  set_platform_hosts linux-x86_64
+  for host in "${PLATFORM_HOSTS[@]}"; do
     packaged_name "$host" linux-x86_64
-  done < <(platform_hosts linux-x86_64)
+  done
   packaged_hub_name linux-x86_64
 }
 
@@ -233,7 +236,8 @@ cmd_package() {
 
   mkdir -p "$out"
   local host src dest
-  while IFS= read -r host; do
+  set_platform_hosts "$platform"
+  for host in "${PLATFORM_HOSTS[@]}"; do
     src="${bin_dir}/${host}"
     dest="${out}/$(packaged_name "$host" "$platform")"
     [[ -f "$src" ]] || fail "missing host binary: ${src}"
@@ -244,7 +248,7 @@ cmd_package() {
       command -v strip >/dev/null 2>&1 || fail "strip is required with --strip"
       strip "$dest"
     fi
-  done < <(platform_hosts "$platform")
+  done
 }
 
 cmd_package_hub() {
@@ -464,8 +468,10 @@ cmd_self_test() {
   else
     [[ ! -e "${out}/$(packaged_name tenkai-host-applier "$platform")" ]] || fail "self-test packaged tenkai-host-applier for ${platform}"
   fi
-  complete_names | grep -Fxq tenkai-host-applier-linux-x86_64 || fail "self-test release set lacks the Linux applier"
-  if complete_names | grep -Fxq tenkai-host-applier-darwin-aarch64; then
+  local names
+  names="$(complete_names)"
+  grep -Fxq tenkai-host-applier-linux-x86_64 <<<"$names" || fail "self-test release set lacks the Linux applier"
+  if grep -Fxq tenkai-host-applier-darwin-aarch64 <<<"$names"; then
     fail "self-test release set requires a darwin applier"
   fi
 
