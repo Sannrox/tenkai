@@ -131,7 +131,7 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | `TENKAI_FEEDBACK_NAMESPACE` | unset | Namespace authorized for feedback-observation admission |
 | `TENKAI_FEEDBACK_PROVIDER_PRINCIPAL` | `tenkai.feedback` | Authenticated telemetry-writer principal for feedback admission |
 | `TENKAI_FEEDBACK_PROVIDER_TOKEN` | unset | Optional feedback-adapter bearer secret; environment-only and never persisted |
-| `TENKAI_FEEDBACK_PROVIDER_REGISTRATION` | unset | Required exact attestation of the administrator-registered Sekai producer, `feedback.observation@1.0.0` schema, and `feedback.observation.record` Action when feedback export is enabled |
+| `TENKAI_FEEDBACK_PROVIDER_REGISTRATION` | unset | Required exact attestation of the administrator-registered Sekai producer, `feedback.observation@1.0.0` schema, target kind (`feedback_observation`, or `tenant_feedback_observation` on a tenant-mode hub), and `feedback.observation.record` Action when feedback export is enabled |
 
 ## `tenkai-runtime`
 

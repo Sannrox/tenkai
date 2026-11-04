@@ -39,7 +39,7 @@ const LEGACY_TERMINAL_OUTCOME_SCHEMA_VERSION: &str = "1.0.0";
 /// deployment id.
 pub const DEPLOYMENT_TARGET_KIND: &str = "tenkai.deployment";
 /// Evidence target kind of a tenant-mode outcome: the target id is
-/// [`tenant_deployment_target_id`].
+/// [`tenant_scoped_target_id`].
 pub const TENANT_DEPLOYMENT_TARGET_KIND: &str = "tenkai.tenant_deployment";
 pub const OUTCOME_PROVIDER_KIND: &str = "outcome";
 pub const OUTCOME_PROVIDER_REGISTRATION_ENV: &str = "TENKAI_OUTCOME_PROVIDER_REGISTRATION";
@@ -267,12 +267,13 @@ pub fn terminal_outcome_payload_schema() -> serde_json::Value {
     schema.to_value()
 }
 
-/// Target id of a tenant-mode outcome: `<tenant>:<deployment_id>` with `%`
-/// and `:` in the tenant percent-encoded, so the first `:` always ends the
-/// tenant and the deployment id is kept verbatim.
-pub fn tenant_deployment_target_id(tenant_id: &str, deployment_id: &str) -> String {
+/// Target id of a tenant-mode export (outcome deployment, feedback
+/// observation): `<tenant>:<object_id>` with `%` and `:` in the tenant
+/// percent-encoded, so the first `:` always ends the tenant and the object id
+/// is kept verbatim.
+pub fn tenant_scoped_target_id(tenant_id: &str, object_id: &str) -> String {
     let tenant = tenant_id.replace('%', "%25").replace(':', "%3A");
-    format!("{tenant}:{deployment_id}")
+    format!("{tenant}:{object_id}")
 }
 
 impl TerminalOutcomePayload {
@@ -1027,7 +1028,7 @@ impl ChiseiOutcomeProvider {
             schema_id: TERMINAL_OUTCOME_SCHEMA,
             schema_version: TERMINAL_OUTCOME_SCHEMA_VERSION,
             external_id: if self.tenant_mode {
-                tenant_deployment_target_id(tenant, deployment)
+                tenant_scoped_target_id(tenant, deployment)
             } else {
                 deployment.into()
             },
@@ -1510,16 +1511,16 @@ mod tests {
 
     /// A tenant containing `:` or `%` cannot shift the tenant/deployment split.
     #[test]
-    fn tenant_deployment_target_id_splits_at_the_first_colon() {
+    fn tenant_scoped_target_id_splits_at_the_first_colon() {
         assert_ne!(
-            tenant_deployment_target_id("a:b", "c"),
-            tenant_deployment_target_id("a", "b:c")
+            tenant_scoped_target_id("a:b", "c"),
+            tenant_scoped_target_id("a", "b:c")
         );
         assert_ne!(
-            tenant_deployment_target_id("a%3Ab", "c"),
-            tenant_deployment_target_id("a:b", "c")
+            tenant_scoped_target_id("a%3Ab", "c"),
+            tenant_scoped_target_id("a:b", "c")
         );
-        assert_eq!(tenant_deployment_target_id("a:b%", "x:y"), "a%3Ab%25:x:y");
+        assert_eq!(tenant_scoped_target_id("a:b%", "x:y"), "a%3Ab%25:x:y");
     }
 
     /// Payloads Tenkai builds, community and tenant-bound, satisfy the shape

@@ -23,7 +23,7 @@ use crate::provider_event::{
 };
 use crate::providers::{
     EvidenceBinding, PROVIDER_CONTRACT_VERSION, ProviderError, ProviderEvent,
-    evidence_submission_succeeded, provider_transport_is_safe,
+    evidence_submission_succeeded, provider_transport_is_safe, tenant_scoped_target_id,
 };
 use crate::storage::ProviderEventRecord;
 
@@ -31,18 +31,39 @@ pub const FEEDBACK_PROVIDER_KIND: &str = "feedback";
 pub const FEEDBACK_PROVIDER_REGISTRATION_ENV: &str = "TENKAI_FEEDBACK_PROVIDER_REGISTRATION";
 pub const FEEDBACK_EVIDENCE_TYPE: &str = "feedback.observation";
 pub const FEEDBACK_EVIDENCE_SCHEMA_VERSION: &str = "1.0.0";
+/// Evidence target kind of a community-host observation: the target id is the
+/// observation id.
 pub const FEEDBACK_OBJECT_KIND: &str = "feedback_observation";
+/// Evidence target kind of a tenant-mode observation (#945): the target id is
+/// [`tenant_scoped_target_id`] over the tenant and observation id.
+pub const TENANT_FEEDBACK_OBJECT_KIND: &str = "tenant_feedback_observation";
 pub const FEEDBACK_ACTION_TYPE: &str = "feedback.observation.record";
 pub const FEEDBACK_ACTION_VERSION: &str = "1";
 pub const FEEDBACK_PACKAGE_ID: &str = "pkg:feedback.evidence-finding/v1";
 
 const MAX_PROVIDER_EVENT_ID_BYTES: usize = 512;
 
+/// Outbox wrapper version. Delivery derives the evidence envelope (target kind
+/// and target id) from it, so a queued row is always resent with the envelope
+/// of the release that enqueued it. Rows queued before 0.7.0 carry no
+/// `schema` (implicitly `.v1`) and keep the `feedback_observation` target
+/// with the unescaped `<tenant>:<observation>` join. `.v2` (#945) added the
+/// tenant-scoped target. Releases before 0.7.0 refuse `.v2` rows (the wrapper
+/// is closed) as a retryable failure instead of resending them differently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FeedbackExportSchema {
+    #[serde(rename = "tenkai.feedback_export.v2")]
+    V2,
+}
+
 /// Outbox envelope around one captured observation. `tenant_id` is delivery
 /// metadata for tenant-mode identity; evidence content is only `observation`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackExportPayload {
+    /// `None` only on rows queued before 0.7.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<FeedbackExportSchema>,
     pub observation: FeedbackObservation,
     pub observed_at: i64,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -68,11 +89,26 @@ pub trait FeedbackProvider: Send + Sync {
 }
 
 /// Exact, non-secret registration an operator must attest after registering
-/// the producer, evidence schema, and observation Action in Sekai.
-pub fn feedback_provider_registration_attestation(principal: &str, namespace: &str) -> String {
+/// the producer, evidence schema, and observation Action in Sekai. A
+/// tenant-mode hub exports tenant-scoped targets, so its registration names
+/// [`TENANT_FEEDBACK_OBJECT_KIND`].
+pub fn feedback_provider_registration_attestation(
+    principal: &str,
+    namespace: &str,
+    tenant_mode: bool,
+) -> String {
+    let target_kind = feedback_target_kind(tenant_mode);
     format!(
-        "producer={principal};source_type={FEEDBACK_PROVIDER_KIND};source_instance={namespace}:{FEEDBACK_PROVIDER_KIND};namespace={namespace};evidence_type={FEEDBACK_EVIDENCE_TYPE};schema={FEEDBACK_EVIDENCE_TYPE}@{FEEDBACK_EVIDENCE_SCHEMA_VERSION};target_kind={FEEDBACK_OBJECT_KIND};classification=internal;intent=upsert;action={FEEDBACK_ACTION_TYPE}"
+        "producer={principal};source_type={FEEDBACK_PROVIDER_KIND};source_instance={namespace}:{FEEDBACK_PROVIDER_KIND};namespace={namespace};evidence_type={FEEDBACK_EVIDENCE_TYPE};schema={FEEDBACK_EVIDENCE_TYPE}@{FEEDBACK_EVIDENCE_SCHEMA_VERSION};target_kind={target_kind};classification=internal;intent=upsert;action={FEEDBACK_ACTION_TYPE}"
     )
+}
+
+fn feedback_target_kind(tenant_mode: bool) -> &'static str {
+    if tenant_mode {
+        TENANT_FEEDBACK_OBJECT_KIND
+    } else {
+        FEEDBACK_OBJECT_KIND
+    }
 }
 
 /// Build durable outbox records for captured observations. A record that
@@ -119,6 +155,7 @@ fn export_event(
         ));
     }
     let payload = FeedbackExportPayload {
+        schema: Some(FeedbackExportSchema::V2),
         observation: observation.clone(),
         observed_at: observation.observed_at_ms,
         tenant_id: tenant_id.to_owned(),
@@ -351,6 +388,10 @@ pub struct ChiseiFeedbackProvider {
     principal: String,
     bearer_token: Option<String>,
     registration_attested: bool,
+    /// Whether this adapter exports tenant-scoped observations. It must match
+    /// every `.v2` payload's `tenant_id` presence, so the target kind always
+    /// matches the attested registration.
+    tenant_mode: bool,
     client: SekaiServiceClient<tonic::transport::Channel>,
 }
 
@@ -365,6 +406,7 @@ impl std::fmt::Debug for ChiseiFeedbackProvider {
                 &self.bearer_token.as_ref().map(|_| "[redacted]"),
             )
             .field("registration_attested", &self.registration_attested)
+            .field("tenant_mode", &self.tenant_mode)
             .finish_non_exhaustive()
     }
 }
@@ -375,6 +417,7 @@ impl ChiseiFeedbackProvider {
         namespace: impl Into<String>,
         principal: impl Into<String>,
         bearer_token: Option<String>,
+        tenant_mode: bool,
     ) -> Result<Self, ProviderError> {
         let endpoint = endpoint.into();
         let namespace = namespace.into();
@@ -417,6 +460,7 @@ impl ChiseiFeedbackProvider {
             principal,
             bearer_token,
             registration_attested: false,
+            tenant_mode,
             client: SekaiServiceClient::new(channel.connect_lazy()),
         })
     }
@@ -426,11 +470,15 @@ impl ChiseiFeedbackProvider {
         namespace: impl Into<String>,
         principal: impl Into<String>,
         bearer_token: Option<String>,
+        tenant_mode: bool,
         registration_attestation: impl AsRef<str>,
     ) -> Result<Self, ProviderError> {
-        let provider = Self::new(endpoint, namespace, principal, bearer_token)?;
-        let expected =
-            feedback_provider_registration_attestation(&provider.principal, &provider.namespace);
+        let provider = Self::new(endpoint, namespace, principal, bearer_token, tenant_mode)?;
+        let expected = feedback_provider_registration_attestation(
+            &provider.principal,
+            &provider.namespace,
+            tenant_mode,
+        );
         if registration_attestation.as_ref() != expected {
             return Err(ProviderError::InvalidEvidence(format!(
                 "{FEEDBACK_PROVIDER_REGISTRATION_ENV} must exactly confirm the configured Sekai producer, schema, and observation Action registration"
@@ -442,6 +490,37 @@ impl ChiseiFeedbackProvider {
         })
     }
 
+    /// Target id and kind for one queued observation. A row queued before
+    /// 0.7.0 resends exactly the target an earlier attempt may already have
+    /// admitted.
+    fn delivery_target(
+        &self,
+        payload: &FeedbackExportPayload,
+    ) -> Result<(String, &'static str), ProviderError> {
+        let tenant = payload.tenant_id.as_str();
+        let observation = payload.observation.id.as_str();
+        if payload.schema.is_none() {
+            let external_id = if tenant.is_empty() {
+                observation.into()
+            } else {
+                format!("{tenant}:{observation}")
+            };
+            return Ok((external_id, FEEDBACK_OBJECT_KIND));
+        }
+        if tenant.is_empty() == self.tenant_mode {
+            return Err(ProviderError::InvalidEvidence(
+                "feedback observation tenant scope does not match the registered target kind"
+                    .into(),
+            ));
+        }
+        let external_id = if self.tenant_mode {
+            tenant_scoped_target_id(tenant, observation)
+        } else {
+            observation.into()
+        };
+        Ok((external_id, feedback_target_kind(self.tenant_mode)))
+    }
+
     pub(crate) fn evidence(
         &self,
         event: &ProviderEvent,
@@ -450,11 +529,7 @@ impl ChiseiFeedbackProvider {
         let content_value = serde_json::to_value(&payload.observation)?;
         let content_json = serde_json::to_vec(&content_value)?;
         let content_digest = format!("{:x}", Sha256::digest(&content_json));
-        let target_external_id = if payload.tenant_id.is_empty() {
-            payload.observation.id.clone()
-        } else {
-            format!("{}:{}", payload.tenant_id, payload.observation.id)
-        };
+        let (target_external_id, target_kind) = self.delivery_target(&payload)?;
         let mut provenance = HashMap::from([
             (
                 "environment".into(),
@@ -511,7 +586,7 @@ impl ChiseiFeedbackProvider {
             })?,
             namespace: self.namespace.clone(),
             target_external_id,
-            target_kind: FEEDBACK_OBJECT_KIND.into(),
+            target_kind: target_kind.into(),
             evidence_type: FEEDBACK_EVIDENCE_TYPE.into(),
             signal: "other".into(),
             schema_id: FEEDBACK_EVIDENCE_TYPE.into(),
@@ -780,6 +855,7 @@ mod tests {
             "delivery-learning",
             "tenkai.feedback",
             None,
+            false,
         )
         .unwrap();
         let (envelope, parameters) = provider.evidence(&event).unwrap();
@@ -806,29 +882,121 @@ mod tests {
 
     #[tokio::test]
     async fn registration_attestation_is_exact() {
-        let expected =
-            feedback_provider_registration_attestation("tenkai.feedback", "delivery-learning");
-        ChiseiFeedbackProvider::new_for_export(
-            "http://127.0.0.1:50051",
-            "delivery-learning",
+        let expected = feedback_provider_registration_attestation(
             "tenkai.feedback",
-            None,
-            &expected,
-        )
-        .unwrap();
-        assert!(
+            "delivery-learning",
+            false,
+        );
+        assert!(expected.contains("target_kind=feedback_observation;"));
+        let export = |tenant_mode, attestation: &str| {
             ChiseiFeedbackProvider::new_for_export(
                 "http://127.0.0.1:50051",
                 "delivery-learning",
                 "tenkai.feedback",
                 None,
-                "wrong",
+                tenant_mode,
+                attestation,
             )
-            .is_err()
+        };
+        export(false, &expected).unwrap();
+        assert!(export(false, "wrong").is_err());
+        // A tenant-mode hub must attest the tenant-scoped target kind.
+        assert!(export(true, &expected).is_err());
+        let tenant = feedback_provider_registration_attestation(
+            "tenkai.feedback",
+            "delivery-learning",
+            true,
         );
+        assert!(tenant.contains("target_kind=tenant_feedback_observation;"));
+        export(true, &tenant).unwrap();
         assert!(
-            ChiseiFeedbackProvider::new("http://example.invalid/sekai", "ns", "p", None).is_err()
+            ChiseiFeedbackProvider::new("http://example.invalid/sekai", "ns", "p", None, false)
+                .is_err()
         );
+    }
+
+    fn collected(record: &ProviderEventRecord) -> ProviderEvent {
+        let mut event: ProviderEvent = serde_json::from_str(&record.payload_json).unwrap();
+        event.collected_at_ms = Some(2_100);
+        event.source_sequence = Some(4);
+        event
+    }
+
+    fn feedback_provider(tenant_mode: bool) -> ChiseiFeedbackProvider {
+        ChiseiFeedbackProvider::new(
+            "http://127.0.0.1:50051",
+            "delivery-learning",
+            "tenkai.feedback",
+            None,
+            tenant_mode,
+        )
+        .unwrap()
+    }
+
+    /// New tenant-mode rows use the tenant-scoped kind with the tenant
+    /// encoded, and an adapter only emits the kind its registration attests.
+    #[tokio::test]
+    async fn tenant_observation_targets_are_scoped_and_unambiguous() {
+        let captured = observation("failed", Reason::ProductFailed);
+        let record = record(&captured).unwrap();
+        let tenant = collected(&bind_tenant_to_feedback_event(&record, "tenant:a").unwrap());
+        let community = collected(&record);
+
+        let (envelope, _) = feedback_provider(true).evidence(&tenant).unwrap();
+        assert_eq!(envelope.target_kind, TENANT_FEEDBACK_OBJECT_KIND);
+        assert_eq!(
+            envelope.target_external_id,
+            "tenant%3Aa:deployment:prod:api:2000"
+        );
+        let (envelope, _) = feedback_provider(false).evidence(&community).unwrap();
+        assert_eq!(envelope.target_kind, FEEDBACK_OBJECT_KIND);
+        assert_eq!(envelope.target_external_id, captured.id);
+
+        assert!(feedback_provider(false).evidence(&tenant).is_err());
+        assert!(feedback_provider(true).evidence(&community).is_err());
+    }
+
+    /// Rows queued before 0.7.0 carry no wrapper schema. They resend the
+    /// target an earlier attempt may already have admitted, under their
+    /// original id; an unknown wrapper schema fails closed.
+    #[tokio::test]
+    async fn observations_queued_before_the_v2_wrapper_keep_their_target() {
+        let captured = observation("failed", Reason::ProductFailed);
+        let legacy_payload = FeedbackExportPayload {
+            schema: None,
+            observation: captured.clone(),
+            observed_at: captured.observed_at_ms,
+            tenant_id: "tenant:a".into(),
+        };
+        let binding = binding_for(&captured).unwrap();
+        let payload_json = serde_json::to_string(&legacy_payload).unwrap();
+        assert!(!payload_json.contains("\"schema\":\"tenkai.feedback_export"));
+        let legacy = ProviderEvent {
+            id: feedback_event_id(&binding, &legacy_payload).unwrap(),
+            binding,
+            payload_json,
+            collected_at_ms: Some(2_100),
+            source_sequence: Some(4),
+        };
+        let (envelope, _) = feedback_provider(true).evidence(&legacy).unwrap();
+        assert_eq!(envelope.target_kind, FEEDBACK_OBJECT_KIND);
+        assert_eq!(
+            envelope.target_external_id,
+            "tenant:a:deployment:prod:api:2000"
+        );
+        assert_eq!(envelope.idempotency_key, legacy.id);
+
+        let current = collected(
+            &bind_tenant_to_feedback_event(&record(&captured).unwrap(), "tenant:a").unwrap(),
+        );
+        assert_ne!(current.id, legacy.id);
+        let unknown = ProviderEvent {
+            payload_json: current
+                .payload_json
+                .replace("tenkai.feedback_export.v2", "tenkai.feedback_export.v9"),
+            ..current
+        };
+        assert!(feedback_provider(true).evidence(&unknown).is_err());
     }
 
     #[tokio::test]
