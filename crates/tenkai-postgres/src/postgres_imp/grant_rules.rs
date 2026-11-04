@@ -31,36 +31,39 @@ fn bump(tx: &mut Transaction<'_>) -> Result<i64> {
         .get(0))
 }
 
+/// Every row and the generation, inside the caller's transaction.
+fn rules(tx: &mut Transaction<'_>) -> Result<StoredGrantRules> {
+    // One statement, so the generation and the rules are one snapshot.
+    let rows = tx
+        .query(
+            "SELECT g.generation, r.value, r.rule_json
+             FROM (SELECT coalesce(
+                     (SELECT generation FROM tenkai_grant_rule_generation WHERE id = 1),
+                     0) AS generation) g
+             LEFT JOIN tenkai_grant_rules r ON true
+             ORDER BY r.value",
+            &[],
+        )
+        .map_err(pg)?;
+    let current = rows.first().map_or(0, |row| row.get(0));
+    // Each row decodes on its own: one this release cannot read is
+    // withheld, not a failed read (#850).
+    let stored = rows.iter().filter_map(|row| {
+        Some((
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(2)?,
+        ))
+    });
+    Ok(StoredGrantRules::decode(current, stored))
+}
+
 impl Inner {
     pub(crate) fn grant_rule_generation(&self) -> Result<i64> {
         self.with_schema("public", generation)
     }
 
     pub(crate) fn grant_rules(&self) -> Result<StoredGrantRules> {
-        self.with_schema("public", |tx| {
-            // One statement, so the generation and the rules are one snapshot.
-            let rows = tx
-                .query(
-                    "SELECT g.generation, r.value, r.rule_json
-                     FROM (SELECT coalesce(
-                             (SELECT generation FROM tenkai_grant_rule_generation WHERE id = 1),
-                             0) AS generation) g
-                     LEFT JOIN tenkai_grant_rules r ON true
-                     ORDER BY r.value",
-                    &[],
-                )
-                .map_err(pg)?;
-            let current = rows.first().map_or(0, |row| row.get(0));
-            // Each row decodes on its own: one this release cannot read is
-            // withheld, not a failed read (#850).
-            let stored = rows.iter().filter_map(|row| {
-                Some((
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                ))
-            });
-            Ok(StoredGrantRules::decode(current, stored))
-        })
+        self.with_schema("public", rules)
     }
 
     pub(crate) fn insert_grant_rule(
@@ -92,7 +95,8 @@ impl Inner {
             if inserted == 0 {
                 return Ok(GrantRuleWrite::Refused);
             }
-            bump(tx).map(GrantRuleWrite::Applied)
+            bump(tx)?;
+            rules(tx).map(GrantRuleWrite::Applied)
         })
     }
 
@@ -113,7 +117,8 @@ impl Inner {
             if deleted == 0 {
                 return Ok(GrantRuleWrite::Refused);
             }
-            bump(tx).map(GrantRuleWrite::Applied)
+            bump(tx)?;
+            rules(tx).map(GrantRuleWrite::Applied)
         })
     }
 }

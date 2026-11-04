@@ -13,11 +13,16 @@
 //! The store keeps one rule per claim value and a generation that grows with
 //! every change, shared by every replica (the hub-wide tables on PostgreSQL).
 //! Each replica checks the generation every [`REFRESH_INTERVAL`] and reloads
-//! the rules when it moved; the replica that made a change reloads at once.
+//! the rules when it moved. A change reads the rules back in its own
+//! transaction, so the replica that made it applies it at once and reports
+//! it done as soon as it commits, with no second read that could fail
+//! after the commit (#848).
 //! A replica that cannot read the store for longer than [`STALE_AFTER`]
 //! stops applying stored rules (the file's still apply) until a check
 //! succeeds again, so a cut-off replica never keeps honouring a rule removed
-//! meanwhile; `/readyz` reports it not ready.
+//! meanwhile; `/readyz` reports it not ready. A change whose write failed
+//! may still have committed, so the replica that tried it applies no stored
+//! rules, and is not ready, until it reads them again.
 //! Each rule records who created it, when and why. Older replicas ignore the
 //! stored rules, so they take effect everywhere only once every replica runs a
 //! release with this change.
@@ -123,22 +128,24 @@ pub trait GrantRuleStore: Send + Sync {
     fn grant_rules(&self) -> Result<StoredGrantRules>;
     /// Store `rule` unless a rule for its claim value exists, the store
     /// already holds [`MAX_STORED_RULES`], or the generation is not
-    /// `expected` (when given).
+    /// `expected` (when given). Applied carries every row as of the write,
+    /// read in its transaction.
     fn insert_grant_rule(
         &self,
         rule: &StoredGrantRule,
         expected: Option<i64>,
     ) -> Result<GrantRuleWrite>;
     /// Remove the rule for `value`, unless there is none or the generation
-    /// is not `expected` (when given).
+    /// is not `expected` (when given). Applied carries every row as of the
+    /// write, read in its transaction.
     fn delete_grant_rule(&self, value: &str, expected: Option<i64>) -> Result<GrantRuleWrite>;
 }
 
 /// What a conditional write did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GrantRuleWrite {
-    /// Written; the new generation.
-    Applied(i64),
+    /// Written; every row at the new generation, read before the commit.
+    Applied(StoredGrantRules),
     /// Nothing written: the value exists (insert) or does not (delete), or
     /// the store is full.
     Refused,
@@ -167,6 +174,12 @@ pub enum GrantRuleError {
     Exists(String),
     #[error("the stored grant rules changed (generation {current}); read them again")]
     StaleGeneration { current: i64 },
+    /// The generation moved and the rules already hold the change, as when
+    /// a retry follows a change that committed.
+    #[error(
+        "the stored grant rules changed (generation {current}) and already hold this change; an earlier attempt may have written it"
+    )]
+    AlreadyApplied { current: i64 },
     #[error(transparent)]
     Store(#[from] StoreError),
 }
@@ -176,6 +189,18 @@ struct Snapshot {
     applied: Arc<AppliedGrantRules>,
     /// When the last check the store answered was asked.
     checked_at: Instant,
+    /// When a write this replica tried answered with an error, until a
+    /// read started after that succeeds: the write may have committed, so
+    /// the snapshot may hold a rule it removed. A read started earlier may
+    /// have run before the commit.
+    unsure_since: Option<Instant>,
+}
+
+impl Snapshot {
+    /// Whether stored rules are suspended on this replica.
+    fn suspended(&self, stale_after: Duration) -> bool {
+        self.unsure_since.is_some() || self.checked_at.elapsed() > stale_after
+    }
 }
 
 /// One replica's view of the stored rules, kept current by
@@ -211,6 +236,7 @@ impl StoredGrants {
                 generation: -1,
                 applied: Arc::default(),
                 checked_at: Instant::now(),
+                unsure_since: None,
             }),
             stale_after,
         });
@@ -219,11 +245,11 @@ impl StoredGrants {
     }
 
     /// The stored rules in effect: those the configuration file does not
-    /// override and this release can read and validate, and none while the
-    /// store has not answered a check for longer than the stale bound.
+    /// override and this release can read and validate, and none while
+    /// [`StoredGrants::is_stale`].
     pub fn rules(&self) -> Arc<AppliedGrantRules> {
         let snapshot = self.snapshot.read().unwrap_or_else(PoisonError::into_inner);
-        if snapshot.checked_at.elapsed() > self.stale_after {
+        if snapshot.suspended(self.stale_after) {
             return Arc::default();
         }
         snapshot.applied.clone()
@@ -248,15 +274,14 @@ impl StoredGrants {
         rule.validate().err().map(|error| error.to_string())
     }
 
-    /// Whether stored rules are suspended because the store has not
-    /// answered a check within the stale bound.
+    /// Whether stored rules are suspended: the store has not answered a
+    /// check within the stale bound, or a write this replica tried failed
+    /// and the rules were not read since.
     pub fn is_stale(&self) -> bool {
         self.snapshot
             .read()
             .unwrap_or_else(PoisonError::into_inner)
-            .checked_at
-            .elapsed()
-            > self.stale_after
+            .suspended(self.stale_after)
     }
 
     pub fn generation(&self) -> i64 {
@@ -280,7 +305,8 @@ impl StoredGrants {
         }
     }
 
-    /// Reload when the store's generation moved; whether it did.
+    /// Reload when the store's generation moved, or a failed write left
+    /// the snapshot unsure; whether it did.
     pub fn refresh(&self) -> Result<bool> {
         // A check counts from when it was asked, not when the answer came:
         // a slow answer must not extend how long the rules stay in effect.
@@ -291,7 +317,7 @@ impl StoredGrants {
                 .snapshot
                 .write()
                 .unwrap_or_else(PoisonError::into_inner);
-            if generation == snapshot.generation {
+            if generation == snapshot.generation && snapshot.unsure_since.is_none() {
                 snapshot.checked_at = snapshot.checked_at.max(started);
                 return Ok(false);
             }
@@ -304,10 +330,17 @@ impl StoredGrants {
         self.reload_from(Instant::now())
     }
 
-    /// Replace the snapshot with a read started at `started`, unless a read
-    /// started later, or of a newer generation, already replaced it.
     fn reload_from(&self, started: Instant) -> Result<()> {
         let stored = self.store.grant_rules()?;
+        self.apply(stored, started);
+        Ok(())
+    }
+
+    /// Replace the snapshot with rules read by a check started at
+    /// `started`, unless it already holds a newer generation. A generation
+    /// names one set of rows, so an equal one only refreshes when the store
+    /// last answered.
+    fn apply(&self, stored: StoredGrantRules, started: Instant) {
         let mut applied = AppliedGrantRules::default();
         let mut not_applied = BTreeMap::new();
         for unreadable in stored.unreadable {
@@ -330,25 +363,44 @@ impl StoredGrants {
             .snapshot
             .write()
             .unwrap_or_else(PoisonError::into_inner);
-        if started >= snapshot.checked_at && stored.generation >= snapshot.generation {
-            if stored.generation != snapshot.generation {
-                for (value, reason) in &not_applied {
-                    eprintln!(
-                        "tenkai.auth stored_grant_rule={value:?} applied=false detail={reason}"
-                    );
-                }
-            }
-            *snapshot = Snapshot {
-                generation: stored.generation,
-                applied: Arc::new(applied),
-                checked_at: started,
-            };
+        if stored.generation < snapshot.generation {
+            return;
         }
-        Ok(())
+        if stored.generation != snapshot.generation {
+            for (value, reason) in &not_applied {
+                eprintln!("tenkai.auth stored_grant_rule={value:?} applied=false detail={reason}");
+            }
+        }
+        *snapshot = Snapshot {
+            generation: stored.generation,
+            applied: Arc::new(applied),
+            checked_at: snapshot.checked_at.max(started),
+            unsure_since: snapshot.unsure_since.filter(|since| *since > started),
+        };
     }
 
-    /// Store a rule and apply it on this replica at once. With `expected`,
-    /// only while the rules are still at that generation.
+    /// A write answered with an error and may have committed: suspend
+    /// stored rules until a read started after that answer succeeds, and
+    /// try one now.
+    fn write_failed(&self) {
+        let failed = Instant::now();
+        {
+            let mut snapshot = self
+                .snapshot
+                .write()
+                .unwrap_or_else(PoisonError::into_inner);
+            snapshot.unsure_since = snapshot.unsure_since.max(Some(failed));
+        }
+        if let Err(error) = self.reload() {
+            eprintln!(
+                "tenkai.auth stored_grant_rules=stale detail=a grant rule write failed and the rules cannot be read; applying none until they are: {error}"
+            );
+        }
+    }
+
+    /// Store a rule and apply it on this replica at once; every stored row
+    /// after it. With `expected`, only while the rules are still at that
+    /// generation.
     pub fn create(
         &self,
         rule: OidcGrantRule,
@@ -356,7 +408,7 @@ impl StoredGrants {
         reason: &str,
         now_ms: i64,
         expected: Option<i64>,
-    ) -> std::result::Result<StoredGrantRule, GrantRuleError> {
+    ) -> std::result::Result<StoredGrantRules, GrantRuleError> {
         rule.validate()
             .map_err(|error| GrantRuleError::Invalid(error.to_string()))?;
         let reason = reason.trim();
@@ -377,34 +429,66 @@ impl StoredGrants {
             created_at_ms: now_ms,
             reason: reason.into(),
         };
-        match self.store.insert_grant_rule(&stored, expected)? {
-            GrantRuleWrite::Applied(_) => {}
-            GrantRuleWrite::Refused => return Err(GrantRuleError::Exists(stored.rule.value)),
-            GrantRuleWrite::Stale { current } => {
-                return Err(GrantRuleError::StaleGeneration { current });
-            }
-        }
-        self.reload()?;
-        Ok(stored)
+        let written = self.write(
+            |store| store.insert_grant_rule(&stored, expected),
+            |rules| {
+                rules.rules.iter().any(|held| {
+                    (&held.rule, &held.created_by, &held.reason)
+                        == (&stored.rule, &stored.created_by, &stored.reason)
+                })
+            },
+        )?;
+        written.ok_or(GrantRuleError::Exists(stored.rule.value))
     }
 
     /// Remove the stored rule for `value` and apply it on this replica at
-    /// once; whether there was one. With `expected`, only while the rules
-    /// are still at that generation.
+    /// once; every stored row after it, or `None` when there was no rule
+    /// for `value`. With `expected`, only while the rules are still at that
+    /// generation.
     pub fn remove(
         &self,
         value: &str,
         expected: Option<i64>,
-    ) -> std::result::Result<bool, GrantRuleError> {
-        let removed = match self.store.delete_grant_rule(value, expected)? {
-            GrantRuleWrite::Applied(_) => true,
-            GrantRuleWrite::Refused => false,
-            GrantRuleWrite::Stale { current } => {
-                return Err(GrantRuleError::StaleGeneration { current });
+    ) -> std::result::Result<Option<StoredGrantRules>, GrantRuleError> {
+        self.write(
+            |store| store.delete_grant_rule(value, expected),
+            |rules| {
+                rules.rules.iter().all(|held| held.rule.value != value)
+                    && rules.unreadable.iter().all(|held| held.value != value)
+            },
+        )
+    }
+
+    /// Run one conditional write: apply what it committed on this replica,
+    /// `None` when it was refused. On a stale generation, `holds` tells
+    /// whether the current rules already hold the change, so a retry of a
+    /// change that committed learns it did.
+    fn write(
+        &self,
+        write: impl FnOnce(&dyn GrantRuleStore) -> Result<GrantRuleWrite>,
+        holds: impl FnOnce(&StoredGrantRules) -> bool,
+    ) -> std::result::Result<Option<StoredGrantRules>, GrantRuleError> {
+        let started = Instant::now();
+        match write(self.store.as_ref()) {
+            Ok(GrantRuleWrite::Applied(after)) => {
+                self.apply(after.clone(), started);
+                Ok(Some(after))
             }
-        };
-        self.reload()?;
-        Ok(removed)
+            Ok(GrantRuleWrite::Refused) => Ok(None),
+            Ok(GrantRuleWrite::Stale { current }) => {
+                // Best effort: a failed read leaves the plain stale answer.
+                let held = self.store.grant_rules().is_ok_and(|rules| holds(&rules));
+                Err(if held {
+                    GrantRuleError::AlreadyApplied { current }
+                } else {
+                    GrantRuleError::StaleGeneration { current }
+                })
+            }
+            Err(error) => {
+                self.write_failed();
+                Err(error.into())
+            }
+        }
     }
 
     /// Every stored row as the store holds it, with its generation: what
@@ -534,7 +618,21 @@ pub fn assert_grant_rule_store_contract(
             Some(start),
         )
         .unwrap();
-    assert_eq!(created.created_by, "management-token");
+    // The change answers with the rows it committed (#848).
+    assert_eq!(created.generation, start + 1);
+    let created_rule = created.rules.iter().find(|s| s.rule.value == admins);
+    assert_eq!(created_rule.unwrap().created_by, "management-token");
+    // A retry of a change that committed learns it did.
+    assert!(matches!(
+        first.create(
+            rule(&admins, &["read", "management"]),
+            "management-token",
+            "first administrator",
+            11,
+            Some(start),
+        ),
+        Err(GrantRuleError::AlreadyApplied { current }) if current == start + 1
+    ));
     // A write against a generation that moved is refused, writing nothing.
     assert!(matches!(
         second.create(rule(&readers, &["read"]), "admin", "stale", 11, Some(start)),
@@ -575,13 +673,20 @@ pub fn assert_grant_rule_store_contract(
         .unwrap();
     assert_eq!(store.grant_rule_generation().unwrap(), start + 2);
 
-    assert!(first.remove(&admins, None).unwrap());
-    assert!(!first.remove(&admins, None).unwrap());
+    let before = store.grant_rule_generation().unwrap();
+    let after = first.remove(&admins, Some(before)).unwrap().unwrap();
+    assert_eq!(after.generation, before + 1);
+    assert!(after.rules.iter().all(|r| r.rule.value != admins));
+    assert!(first.remove(&admins, None).unwrap().is_none());
+    assert!(matches!(
+        first.remove(&admins, Some(before)),
+        Err(GrantRuleError::AlreadyApplied { .. })
+    ));
     assert!(first.rules().rules.iter().all(|r| r.value != admins));
     assert!(second.refresh().unwrap());
     assert!(second.rules().rules.iter().all(|r| r.value != admins));
     assert!(second.rules().rules.iter().any(|r| r.value == readers));
-    assert!(second.remove(&readers, None).unwrap());
+    assert!(second.remove(&readers, None).unwrap().is_some());
     assert_eq!(store.grant_rule_generation().unwrap(), start + 4);
 
     // Rows a newer release wrote (#850): a newer format and an unknown rule
@@ -645,7 +750,7 @@ pub fn assert_grant_rule_store_contract(
     assert!(second.not_applied_reason(&capability_rule.rule).is_some());
     // Removing works on any row, readable or not.
     for value in [&readers, &future, &field, &capability, &annotated, &garbage] {
-        assert!(second.remove(value, None).unwrap(), "{value}");
+        assert!(second.remove(value, None).unwrap().is_some(), "{value}");
     }
     assert!(second.rules().withheld.is_empty());
 }
@@ -660,6 +765,10 @@ mod tests {
     struct Flaky {
         inner: Arc<dyn GrantRuleStore>,
         down: AtomicBool,
+        /// Reads fail while set; writes still work.
+        reads_down: AtomicBool,
+        /// Writes commit, then fail as if the answer was lost, while set.
+        lose_write_answers: AtomicBool,
         /// Reads of the rules sleep this long while set.
         slow: std::sync::Mutex<Option<Duration>>,
     }
@@ -669,6 +778,8 @@ mod tests {
             Arc::new(Self {
                 inner,
                 down: AtomicBool::new(false),
+                reads_down: AtomicBool::new(false),
+                lose_write_answers: AtomicBool::new(false),
                 slow: std::sync::Mutex::new(None),
             })
         }
@@ -679,15 +790,31 @@ mod tests {
             }
             Ok(())
         }
+
+        fn check_read(&self) -> Result<()> {
+            self.check()?;
+            if self.reads_down.load(Ordering::SeqCst) {
+                return Err(StoreError::Database("read timed out".into()));
+            }
+            Ok(())
+        }
+
+        fn answer(&self, written: Result<GrantRuleWrite>) -> Result<GrantRuleWrite> {
+            if self.lose_write_answers.load(Ordering::SeqCst) {
+                written?;
+                return Err(StoreError::Database("connection dropped".into()));
+            }
+            written
+        }
     }
 
     impl GrantRuleStore for Flaky {
         fn grant_rule_generation(&self) -> Result<i64> {
-            self.check()?;
+            self.check_read()?;
             self.inner.grant_rule_generation()
         }
         fn grant_rules(&self) -> Result<StoredGrantRules> {
-            self.check()?;
+            self.check_read()?;
             let read = self.inner.grant_rules();
             if let Some(delay) = *self.slow.lock().unwrap() {
                 std::thread::sleep(delay);
@@ -700,12 +827,95 @@ mod tests {
             expected: Option<i64>,
         ) -> Result<GrantRuleWrite> {
             self.check()?;
-            self.inner.insert_grant_rule(rule, expected)
+            self.answer(self.inner.insert_grant_rule(rule, expected))
         }
         fn delete_grant_rule(&self, value: &str, expected: Option<i64>) -> Result<GrantRuleWrite> {
             self.check()?;
-            self.inner.delete_grant_rule(value, expected)
+            self.answer(self.inner.delete_grant_rule(value, expected))
         }
+    }
+
+    fn flaky_store(name: &str) -> (std::path::PathBuf, Arc<Flaky>) {
+        let dir = std::env::temp_dir().join(format!(
+            "tenkai-grant-rules-{name}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Flaky::new(Arc::new(
+            crate::storage::SqliteStore::open(dir.join("tenkai.db")).unwrap(),
+        ));
+        (dir, store)
+    }
+
+    /// A change that commits succeeds and applies on this replica although
+    /// every read after the commit fails (#848).
+    #[test]
+    fn a_committed_change_succeeds_when_reads_fail_after_it() {
+        let (dir, store) = flaky_store("commit-reads");
+        let grants = StoredGrants::load(store.clone(), Vec::<String>::new()).unwrap();
+        store.reads_down.store(true, Ordering::SeqCst);
+        let created = grants
+            .create(rule("tenkai-admins"), "token", "first", 1, Some(0))
+            .unwrap();
+        assert_eq!(created.generation, 1);
+        assert_eq!(grants.generation(), 1);
+        assert_eq!(grants.rules().rules.len(), 1);
+        let removed = grants.remove("tenkai-admins", Some(1)).unwrap().unwrap();
+        assert_eq!((removed.generation, removed.rules.len()), (2, 0));
+        assert!(grants.rules().rules.is_empty());
+        assert!(!grants.is_stale());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A remove whose answer is lost may have committed: this replica
+    /// applies no stored rule, and is not ready, until it reads them again.
+    /// A retry then learns the change landed.
+    #[test]
+    fn a_write_without_an_answer_suspends_stored_rules_until_a_read() {
+        let (dir, store) = flaky_store("lost-answer");
+        let grants = StoredGrants::load(store.clone(), Vec::<String>::new()).unwrap();
+        grants
+            .create(rule("tenkai-admins"), "token", "first", 1, None)
+            .unwrap();
+        grants
+            .create(rule("tenkai-operators"), "token", "second", 1, None)
+            .unwrap();
+        store.reads_down.store(true, Ordering::SeqCst);
+        store.lose_write_answers.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            grants.remove("tenkai-admins", Some(2)),
+            Err(GrantRuleError::Store(_))
+        ));
+        assert!(grants.rules().rules.is_empty(), "fails closed");
+        assert!(grants.is_stale());
+        assert!(grants.refresh().is_err());
+        assert!(grants.is_stale());
+
+        store.reads_down.store(false, Ordering::SeqCst);
+        store.lose_write_answers.store(false, Ordering::SeqCst);
+        assert!(grants.refresh().unwrap());
+        assert!(!grants.is_stale());
+        let values: Vec<_> = grants
+            .rules()
+            .rules
+            .iter()
+            .map(|r| r.value.clone())
+            .collect();
+        assert_eq!(values, ["tenkai-operators"]);
+        assert!(matches!(
+            grants.remove("tenkai-admins", Some(2)),
+            Err(GrantRuleError::AlreadyApplied { current: 3 })
+        ));
+        // The same holds when the store answers the read the write starts.
+        store.lose_write_answers.store(true, Ordering::SeqCst);
+        assert!(grants.remove("tenkai-operators", Some(3)).is_err());
+        assert!(
+            !grants.is_stale(),
+            "the read after the failed write cleared it"
+        );
+        assert!(grants.rules().rules.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A replica cut off from the store stops applying stored rules once
