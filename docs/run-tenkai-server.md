@@ -170,7 +170,10 @@ Hosts that run no host releases skip this section.
 
 The applier's record for a product, not the server's view, decides what a
 host release has applied: a plan installs the channel's release unless the
-record holds exactly that release. Each host step starts from the release the
+record holds exactly that release, and plans its health step alone when the
+release is applied but its last health step failed or never ran. A host
+release never replaces a product the server records as deployed with another
+executor. Each host step starts from the release the
 record holds, at the record's generation, and when the release declares
 `deploy.health` a `health` step follows. Both are part of the plan, so its
 digest and approvals cover them; a plan made before another host step changed

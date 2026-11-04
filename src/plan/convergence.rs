@@ -164,16 +164,29 @@ async fn bind_host_steps(
             bound.push(step);
             continue;
         }
-        if step.host.is_some() {
-            bail!("step for host release {} is already bound", step.release_id);
-        }
-        if step.action == Action::Restart {
-            bail!(
+        require_host_product(ctx, executors, env, &step.product).await?;
+        let record = executors.host()?.applied_state(env, &step.product)?;
+        match step.host {
+            // An applied release's outstanding health step, at the record's
+            // generation.
+            Some(HostStep {
+                action: HostAction::Health,
+                ..
+            }) => {
+                step.host = Some(HostStep {
+                    action: HostAction::Health,
+                    expected_generation: record.generation,
+                });
+                bound.push(step);
+                continue;
+            }
+            Some(_) => bail!("step for host release {} is already bound", step.release_id),
+            None if step.action == Action::Restart => bail!(
                 "host release {} is never restarted; plan a new install instead",
                 step.release_id
-            );
+            ),
+            None => {}
         }
-        let record = executors.host()?.applied_state(env, &step.product)?;
         let from = host_source(&record, step.from.as_deref());
         if step.action != Action::Rollback {
             step.action = match from.as_deref() {
@@ -187,12 +200,7 @@ async fn bind_host_steps(
             action: HostAction::Install,
             expected_generation: record.generation,
         });
-        let health = manifest
-            .deploy
-            .health
-            .as_deref()
-            .is_some_and(|command| !command.trim().is_empty());
-        if health {
+        if declares_health(&manifest) {
             let installed = record
                 .generation
                 .checked_add(1)
@@ -208,6 +216,80 @@ async fn bind_host_steps(
         bound.push(step);
     }
     Ok(bound)
+}
+
+/// Whether a release declares a `deploy.health` command.
+fn declares_health(manifest: &crate::manifest::Manifest) -> bool {
+    manifest
+        .deploy
+        .health
+        .as_deref()
+        .is_some_and(|command| !command.trim().is_empty())
+}
+
+/// How far the applier's record has taken a host product toward `desired`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostProgress {
+    /// `desired` is applied, and its health step succeeded since if it
+    /// declares one.
+    Converged,
+    /// `desired` is applied, but its health step failed or never ran.
+    NeedsHealth,
+    /// Anything else, a dirty record included.
+    NeedsInstall,
+}
+
+fn host_progress(
+    record: &crate::host_apply::state::AppliedStateRecord,
+    desired: &str,
+    health: bool,
+) -> HostProgress {
+    use crate::host_apply::state::AppliedState;
+    let AppliedState::Applied { release } = &record.state else {
+        return HostProgress::NeedsInstall;
+    };
+    if release.version != desired {
+        return HostProgress::NeedsInstall;
+    }
+    // The last step the applier started for this product is a health step
+    // of this very release, and it succeeded.
+    let healthy = matches!(
+        (&record.last_started, &record.last_result),
+        (Some(started), Some(result))
+            if started.action == HostAction::Health
+                && &started.release == release
+                && result.instance == started.instance
+                && result.outcome.succeeded()
+    );
+    if health && !healthy {
+        HostProgress::NeedsHealth
+    } else {
+        HostProgress::Converged
+    }
+}
+
+/// Refuse to install a host release over a product the server records as
+/// deployed with another executor; moving executors is a remove and an
+/// install (ADR 0041 section 1). The applier's record, empty for a product
+/// it never touched, cannot tell.
+pub(crate) async fn require_host_product(
+    ctx: &mut Ctx,
+    executors: &crate::software_executor::SoftwareExecutors,
+    env: &str,
+    product: &str,
+) -> Result<()> {
+    let environment = crate::environment::environment(ctx, env).await?;
+    let Some(deployed) = environment.properties.get(&format!("deployed.{product}")) else {
+        return Ok(());
+    };
+    let Some(installed) = readable_manifest(ctx, &release_id(product, deployed)).await? else {
+        return Ok(());
+    };
+    executors.require_same_executor(
+        product,
+        installed.deploy.executor,
+        Some(crate::software_executor::SoftwareExecutorKind::Host),
+    )
 }
 
 /// The version a host step starts from: what the applier's record holds.
@@ -282,6 +364,9 @@ async fn compute_snapshot_with_policy(
 
     let mut inputs = Vec::new();
     let mut pending = Vec::new();
+    // Host products whose release is applied but whose health step has not
+    // succeeded since: they get that health step alone.
+    let mut host_health_only = std::collections::HashSet::new();
     let mut held_model = false;
     let mut held_routing = false;
     for ch in channels {
@@ -323,15 +408,17 @@ async fn compute_snapshot_with_policy(
         crate::topology::require_placement(ctx, env, &release).await?;
         // The root-side applier's record, not the server's view, says what a
         // host release has applied (ADR 0041 section 2).
-        let host_record = if readable_manifest(ctx, &release)
-            .await?
-            .is_some_and(|manifest| {
-                manifest.deploy.executor
-                    == Some(crate::software_executor::SoftwareExecutorKind::Host)
-            }) {
-            Some(executors.host()?.applied_state(env, &product)?)
-        } else {
-            None
+        let host_record = match readable_manifest(ctx, &release).await? {
+            Some(manifest)
+                if manifest.deploy.executor
+                    == Some(crate::software_executor::SoftwareExecutorKind::Host) =>
+            {
+                Some((
+                    executors.host()?.applied_state(env, &product)?,
+                    declares_health(&manifest),
+                ))
+            }
+            _ => None,
         };
         if host_record.is_none()
             && env_obj
@@ -371,17 +458,22 @@ async fn compute_snapshot_with_policy(
             artifact_digest: target.artifact_digest.clone(),
             deployed_version: deployed.clone(),
         });
-        if let Some(record) = &host_record {
-            // Converged only when the record holds exactly the desired
-            // release; anything else, a dirty record included, takes an
-            // install that binding starts from what the record holds.
-            let applied = matches!(
-                &record.state,
-                crate::host_apply::state::AppliedState::Applied { release }
-                    if release.version == desired
-            );
-            if !applied {
-                pending.push((
+        if let Some((record, health)) = &host_record {
+            match host_progress(record, &desired, *health) {
+                HostProgress::Converged => {}
+                HostProgress::NeedsHealth => {
+                    host_health_only.insert(product.clone());
+                    pending.push((
+                        product,
+                        Action::Restart,
+                        Some(desired.clone()),
+                        desired,
+                        target,
+                        None,
+                        kind,
+                    ));
+                }
+                HostProgress::NeedsInstall => pending.push((
                     product,
                     Action::Install,
                     deployed,
@@ -389,7 +481,7 @@ async fn compute_snapshot_with_policy(
                     target,
                     None,
                     kind,
-                ));
+                )),
             }
             continue;
         }
@@ -515,6 +607,11 @@ async fn compute_snapshot_with_policy(
         .map(
             |(index, (product, action, from, to, release, restore, _kind))| Step {
                 id: format!("{}:step:{index}", env_id(env)),
+                // Binding sets the generation from the applier's record.
+                host: host_health_only.contains(&product).then_some(HostStep {
+                    action: HostAction::Health,
+                    expected_generation: 0,
+                }),
                 order: index as u32,
                 product,
                 action,
@@ -524,7 +621,6 @@ async fn compute_snapshot_with_policy(
                 release_digest: release.digest,
                 artifact_digest: release.artifact_digest,
                 workdir: release.workdir,
-                host: None,
                 restore,
             },
         )

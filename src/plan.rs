@@ -15,7 +15,7 @@ mod convergence;
 mod lifecycle;
 mod release_selection;
 
-pub(crate) use convergence::stored_release_executor;
+pub(crate) use convergence::{require_host_product, stored_release_executor};
 
 pub(crate) use release_selection::resolve_subscription_selection;
 pub use release_selection::{

@@ -448,6 +448,95 @@ async fn a_failed_host_install_stays_failed_and_nothing_is_restored() {
 }
 
 #[tokio::test]
+async fn a_failed_health_step_is_planned_again_on_its_own() {
+    let mut host = Host::new("health").await;
+    host.release("1.0.0", true).await;
+    host.applier.fail.lock().unwrap().insert(HostAction::Health);
+    let plan = host.plan().await;
+
+    let outcomes = host.apply(&plan).await.unwrap();
+
+    assert_eq!(
+        statuses(&outcomes),
+        [StepOutcomeStatus::Succeeded, StepOutcomeStatus::Failed],
+        "{outcomes:?}"
+    );
+    assert_eq!(host.deployed().await, None);
+    // The release is applied; only its health step is outstanding.
+    host.applier.fail.lock().unwrap().clear();
+    let health = host.plan().await;
+    let bindings: Vec<_> = health
+        .steps
+        .iter()
+        .map(|step| (step.action, step.from.clone(), step.host))
+        .collect();
+    assert_eq!(
+        bindings,
+        [(
+            Action::Restart,
+            Some("1.0.0".into()),
+            Some(HostStep {
+                action: HostAction::Health,
+                expected_generation: 1
+            })
+        )]
+    );
+    let outcomes = host.apply(&health).await.unwrap();
+    assert_eq!(
+        statuses(&outcomes),
+        [StepOutcomeStatus::Succeeded],
+        "{outcomes:?}"
+    );
+    assert_eq!(host.deployed().await.as_deref(), Some("1.0.0"));
+    assert!(host.plan().await.steps.is_empty(), "converged");
+    assert_eq!(
+        *host.applier.runs.lock().unwrap(),
+        [
+            "install cluster@1.0.0",
+            "health cluster@1.0.0",
+            "health cluster@1.0.0"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_host_release_never_replaces_one_deployed_with_another_executor() {
+    let mut host = Host::new("executor").await;
+    // 0.9.0 ran on the shell executor.
+    let dir = host.root.join("cluster-0.9.0");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("tenkai.toml"),
+        "[product]\nname = \"cluster\"\nversion = \"0.9.0\"\n\n[deploy]\ninstall = \"true\"\n",
+    )
+    .unwrap();
+    crate::catalog::publish(
+        &mut host.ctx,
+        &dir.join("tenkai.toml"),
+        &crate::catalog::PublishOptions {
+            allow_unsigned_development: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    crate::environment::reconcile_deployment(&mut host.ctx, "edge", "cluster", Some("0.9.0"))
+        .await
+        .unwrap();
+    host.release("1.0.0", false).await;
+
+    let error = crate::plan::create_with(&mut host.ctx, "edge", &host.executors)
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(
+        error.contains("installed with the shell executor") && error.contains("resolves to host"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
 async fn an_slo_gate_on_a_host_release_is_refused_before_anything_runs() {
     let mut host = Host::new("slo").await;
     host.release_with(

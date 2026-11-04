@@ -110,26 +110,15 @@ echo "== an approval the root side does not trust runs nothing"
 tenkaictl dev init-keys --dir "$work/other-keys" >/dev/null
 tenkaictl dev sign-approval --plan-digest "$digest" --env drill --keys "$work/other-keys" \
   --approval "$work/untrusted.json" --trust-roots "$work/untrusted-approvers.toml" >/dev/null
-before_ms=$(date +%s%3N)
+before=$(date +%s)
 if remote apply "$plan" --approval "$work/untrusted.json" \
   --approval-trust-roots "$work/untrusted-approvers.toml" --generation "$(generation)" >/dev/null 2>&1; then
   fail "a plan approved only by an untrusted approver applied"
 fi
 sudo test ! -e "$evidence/installed" || fail "an unapproved host step ran"
-# Refusals name no product; this apply's are the ones since it started.
-refusal=$(sudo python3 - "$before_ms" <<'PY'
-import glob, json, sys
-since = int(sys.argv[1])
-for path in glob.glob("/var/lib/tenkai-host/instances/*/refused.json"):
-    refused = json.load(open(path))
-    if refused["refused_at"] >= since:
-        print(refused["reason"])
-PY
-)
-case "$refusal" in
-*"host approval policy"*) ;;
-*) fail "the applier did not refuse the untrusted approval: $refusal" ;;
-esac
+sudo journalctl -t tenkai-host-apply --since "@$before" --no-pager -o cat |
+  grep -q 'refused: host approval policy' ||
+  fail "the applier did not refuse the untrusted approval"
 remote plan --env drill --generation "$(generation)" >"$work/plan.txt"
 plan=$(sed -n 's/^plan id: //p' "$work/plan.txt")
 digest=$(sed -n 's/^plan digest: //p' "$work/plan.txt")
