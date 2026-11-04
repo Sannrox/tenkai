@@ -17,7 +17,8 @@ use crate::criticality::{
     DECLARED_OWNER, DECLARED_REASON, DECLARED_SET_AT, DERIVED_GENERATED_AT, DERIVED_IMPORTED_AT,
     DERIVED_KEY_ID, DERIVED_LEVEL, DERIVED_MAX_AGE_MS, DERIVED_REASON, DERIVED_SCHEMA,
     DERIVED_SOURCE, DerivedAssignment, DerivedEnvelope, DerivedStatement, EffectiveCriticality,
-    SetCriticalityRequest, canonical_bytes, parse_envelope, refuse_generated_after_issued,
+    ReceivedEnvelope, SIGNING_DOMAIN, SetCriticalityRequest, VerifiedDerived,
+    legacy_signed_message, parse_envelope, refuse_generated_after_issued,
     refuse_generated_in_the_future, require_owner_reason,
 };
 use crate::ontology::{env_id, product_id, validate_identifier};
@@ -266,29 +267,68 @@ fn load_seed(path: &Path) -> Result<[u8; 32]> {
     })
 }
 
-/// Sign a derived-criticality statement with the 32-byte Ed25519 seed at `seed_path`.
-pub fn sign(statement: DerivedStatement, seed_path: &Path) -> Result<DerivedEnvelope> {
+/// Sign a derived-criticality statement with the 32-byte Ed25519 seed at
+/// `seed_path`: serialize it once and sign those bytes.
+pub fn sign(statement: &DerivedStatement, seed_path: &Path) -> Result<DerivedEnvelope> {
+    statement.validate()?;
     let signing_key = SigningKey::from_bytes(&load_seed(seed_path)?);
-    let envelope = DerivedEnvelope {
+    let signed = crate::signed_bytes::sign(SIGNING_DOMAIN, statement, |message| {
+        Ok(signing_key.sign(message).to_bytes().to_vec())
+    })?;
+    Ok(DerivedEnvelope {
         schema: DERIVED_SCHEMA.into(),
         key_id: crate::signature_verification::key_id(&signing_key.verifying_key().to_bytes()),
-        signature: STANDARD.encode(signing_key.sign(&canonical_bytes(&statement)?).to_bytes()),
-        statement,
-    };
-    envelope.validate_shape()?;
-    Ok(envelope)
+        statement: signed.statement,
+        signature: STANDARD.encode(signed.signature),
+    })
 }
 
-/// Check the shape and the signature against the criticality authorities.
-pub fn verify_envelope(envelope: &DerivedEnvelope, authorities: &TrustRoots) -> Result<()> {
-    envelope.validate_shape()?;
-    let signer = authorities.resolve(&envelope.key_id)?;
-    crate::signature_verification::verify_strict(
-        &signer.verifying_key,
-        "derived criticality signature",
-        &envelope.signature,
-        &canonical_bytes(&envelope.statement)?,
-    )
+/// Check the signature against the criticality authorities, then parse and
+/// validate the statement. A v2 statement is parsed only from the bytes the
+/// signature covers.
+pub fn verify_envelope(
+    envelope: &ReceivedEnvelope,
+    authorities: &TrustRoots,
+) -> Result<VerifiedDerived> {
+    const LABEL: &str = "derived criticality signature";
+    let signer = authorities.resolve(envelope.key_id())?;
+    let statement = match envelope {
+        ReceivedEnvelope::Current(envelope) => {
+            let signature =
+                crate::signature_verification::decode_exact::<64>(LABEL, &envelope.signature)?;
+            let verified = crate::signed_bytes::verify::<DerivedStatement>(
+                SIGNING_DOMAIN,
+                &envelope.statement,
+                |message| {
+                    crate::signature_verification::verify_strict_bytes(
+                        &signer.verifying_key,
+                        LABEL,
+                        &signature,
+                        message,
+                    )
+                    .is_ok()
+                },
+            )
+            .map_err(|refusal| anyhow::anyhow!("derived criticality refused: {refusal}"))?;
+            verified.statement.validate()?;
+            verified.statement
+        }
+        ReceivedEnvelope::Legacy(envelope) => {
+            crate::signature_verification::verify_strict(
+                &signer.verifying_key,
+                LABEL,
+                &envelope.signature,
+                &legacy_signed_message(&envelope.statement)?,
+            )?;
+            let statement = DerivedStatement::from(envelope.statement.clone());
+            statement.validate()?;
+            statement
+        }
+    };
+    Ok(VerifiedDerived {
+        key_id: envelope.key_id().into(),
+        statement,
+    })
 }
 
 /// Trust roots configured for derived criticality, if any.
@@ -300,22 +340,32 @@ pub fn configured_trust_roots() -> Result<Option<TrustRoots>> {
     Ok(Some(TrustRoots::load(&path)?))
 }
 
-/// Parse `criticality/derived.json` before any catalog mutation.
-pub fn preflight_derived_payload(
+/// Verify `criticality/derived.json` from a verified bundle and check it
+/// against the bundle's issued-at and bound environment.
+fn verify_bundle_payload(
     bytes: &[u8],
     issued_at: i64,
     bound_environment: &str,
-) -> Result<()> {
+) -> Result<VerifiedDerived> {
     let envelope = parse_envelope(bytes)?;
-    refuse_generated_after_issued(envelope.statement.generated_at, issued_at)?;
-    refuse_bundle_scope(&envelope, bound_environment)?;
     let Some(roots) = configured_trust_roots()? else {
         bail!(
             "offline bundle carries derived criticality, but {CRITICALITY_TRUST_ROOTS_ENV} is not set"
         );
     };
-    verify_envelope(&envelope, &roots)?;
-    Ok(())
+    let verified = verify_envelope(&envelope, &roots)?;
+    refuse_generated_after_issued(verified.statement.generated_at, issued_at)?;
+    refuse_bundle_scope(&verified.statement, bound_environment)?;
+    Ok(verified)
+}
+
+/// Check `criticality/derived.json` before any catalog mutation.
+pub fn preflight_derived_payload(
+    bytes: &[u8],
+    issued_at: i64,
+    bound_environment: &str,
+) -> Result<()> {
+    verify_bundle_payload(bytes, issued_at, bound_environment).map(|_| ())
 }
 
 /// Import `criticality/derived.json` from a verified bundle payload.
@@ -325,26 +375,16 @@ pub async fn import_derived_payload(
     issued_at: i64,
     bound_environment: &str,
 ) -> Result<usize> {
-    let mut envelope = parse_envelope(bytes)?;
-    refuse_generated_after_issued(envelope.statement.generated_at, issued_at)?;
-    refuse_bundle_scope(&envelope, bound_environment)?;
-    let Some(roots) = configured_trust_roots()? else {
-        bail!(
-            "offline bundle carries derived criticality, but {CRITICALITY_TRUST_ROOTS_ENV} is not set"
-        );
-    };
-    if envelope.statement.generated_at <= 0 {
-        envelope.statement.generated_at = issued_at;
-    }
-    import_envelope(ctx, &envelope, &roots, crate::now_millis()).await
+    let verified = verify_bundle_payload(bytes, issued_at, bound_environment)?;
+    apply_verified(ctx, &verified, crate::now_millis()).await
 }
 
 /// A bundle bound to one environment may only assign that environment.
 pub(crate) fn refuse_bundle_scope(
-    envelope: &DerivedEnvelope,
+    statement: &DerivedStatement,
     bound_environment: &str,
 ) -> Result<()> {
-    for assignment in &envelope.statement.assignments {
+    for assignment in &statement.assignments {
         match assignment.kind {
             CriticalityTargetKind::Environment if assignment.name == bound_environment => {}
             CriticalityTargetKind::Environment => bail!(
@@ -363,24 +403,29 @@ pub(crate) fn refuse_bundle_scope(
 /// Verify and apply a signed derived envelope. A bad signature changes nothing.
 pub async fn import_envelope(
     ctx: &mut Ctx,
-    envelope: &DerivedEnvelope,
+    envelope: &ReceivedEnvelope,
     authorities: &TrustRoots,
     now: i64,
 ) -> Result<usize> {
-    verify_envelope(envelope, authorities)?;
-    refuse_generated_in_the_future(envelope.statement.generated_at, now)?;
-    apply_assignments(ctx, envelope, now).await
+    let verified = verify_envelope(envelope, authorities)?;
+    apply_verified(ctx, &verified, now).await
 }
 
-async fn apply_assignments(ctx: &mut Ctx, envelope: &DerivedEnvelope, now: i64) -> Result<usize> {
+/// Apply a verified statement, newest generation wins per target.
+pub async fn apply_verified(ctx: &mut Ctx, verified: &VerifiedDerived, now: i64) -> Result<usize> {
+    refuse_generated_in_the_future(verified.statement.generated_at, now)?;
+    apply_assignments(ctx, verified, now).await
+}
+
+async fn apply_assignments(ctx: &mut Ctx, verified: &VerifiedDerived, now: i64) -> Result<usize> {
     let mut applied = 0usize;
-    for assignment in &envelope.statement.assignments {
+    for assignment in &verified.statement.assignments {
         let wrote = match assignment.kind {
             CriticalityTargetKind::Environment => {
-                apply_environment_assignment(ctx, envelope, assignment, now).await?
+                apply_environment_assignment(ctx, verified, assignment, now).await?
             }
             CriticalityTargetKind::Product => {
-                apply_product_assignment(ctx, envelope, assignment, now).await?
+                apply_product_assignment(ctx, verified, assignment, now).await?
             }
         };
         if wrote {
@@ -392,7 +437,7 @@ async fn apply_assignments(ctx: &mut Ctx, envelope: &DerivedEnvelope, now: i64) 
 
 async fn apply_product_assignment(
     ctx: &mut Ctx,
-    envelope: &DerivedEnvelope,
+    verified: &VerifiedDerived,
     assignment: &DerivedAssignment,
     now: i64,
 ) -> Result<bool> {
@@ -402,10 +447,10 @@ async fn apply_product_assignment(
         let wrote = apply_derived_if_newer(
             &mut object,
             assignment,
-            envelope.statement.generated_at,
+            verified.statement.generated_at,
             now,
-            envelope.statement.max_age_ms,
-            &envelope.key_id,
+            verified.statement.max_age_ms,
+            &verified.key_id,
         )?;
         if wrote {
             persist_product(ctx, object, &lease).await?;
@@ -477,7 +522,7 @@ pub(crate) async fn finish_product_mutation<T>(
 
 async fn apply_environment_assignment(
     ctx: &mut Ctx,
-    envelope: &DerivedEnvelope,
+    verified: &VerifiedDerived,
     assignment: &DerivedAssignment,
     now: i64,
 ) -> Result<bool> {
@@ -488,10 +533,10 @@ async fn apply_environment_assignment(
         let wrote = apply_derived_if_newer(
             &mut object,
             assignment,
-            envelope.statement.generated_at,
+            verified.statement.generated_at,
             now,
-            envelope.statement.max_age_ms,
-            &envelope.key_id,
+            verified.statement.max_age_ms,
+            &verified.key_id,
         )?;
         if wrote {
             persist_environment(ctx, object, &lease).await?;
@@ -714,11 +759,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    fn current(envelope: DerivedEnvelope) -> ReceivedEnvelope {
+        ReceivedEnvelope::Current(envelope)
+    }
+
+    /// An envelope over `bytes` exactly as given, as a non-Rust producer would sign it.
+    fn sign_bytes(seed: &[u8; 32], bytes: &[u8]) -> ReceivedEnvelope {
+        let key = SigningKey::from_bytes(seed);
+        let envelope = serde_json::json!({
+            "schema": DERIVED_SCHEMA,
+            "key_id": crate::signature_verification::key_id(&key.verifying_key().to_bytes()),
+            "statement": STANDARD.encode(bytes),
+            "signature": STANDARD.encode(key.sign(&[SIGNING_DOMAIN, bytes].concat()).to_bytes()),
+        });
+        parse_envelope(&serde_json::to_vec(&envelope).unwrap()).unwrap()
+    }
+
     #[tokio::test]
     async fn derived_import_refuses_a_bad_signature_without_writes() {
         let root = temp_dir("bad-sig");
         let seed = seed_file(&root, &AUTHORITY);
-        let mut envelope = sign(statement(CriticalityLevel::Critical), &seed).unwrap();
+        let mut envelope = sign(&statement(CriticalityLevel::Critical), &seed).unwrap();
         envelope.signature = STANDARD.encode([0u8; 64]);
         let mut ctx = seeded_env(&root, "prod").await;
         set_environment(
@@ -733,10 +794,15 @@ mod tests {
         .await
         .unwrap();
         let authorities = roots(vec![signer(&AUTHORITY, "governance")]);
-        let error = import_envelope(&mut ctx, &envelope, &authorities, 1_700_000_000_050)
-            .await
-            .unwrap_err()
-            .to_string();
+        let error = import_envelope(
+            &mut ctx,
+            &current(envelope),
+            &authorities,
+            1_700_000_000_050,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("signature"), "{error}");
         let view = inspect_environment(&mut ctx, "prod").await.unwrap();
         assert_eq!(view.effective, Some(CriticalityLevel::High));
@@ -748,24 +814,126 @@ mod tests {
     async fn derived_import_applies_a_verified_envelope() {
         let root = temp_dir("good-sig");
         let seed = seed_file(&root, &AUTHORITY);
-        let envelope = sign(statement(CriticalityLevel::Critical), &seed).unwrap();
+        let first = statement(CriticalityLevel::Critical);
+        let envelope = sign(&first, &seed).unwrap();
         let mut ctx = seeded_env(&root, "prod").await;
         let authorities = roots(vec![signer(&AUTHORITY, "governance")]);
-        import_envelope(&mut ctx, &envelope, &authorities, crate::now_millis())
-            .await
-            .unwrap();
+        import_envelope(
+            &mut ctx,
+            &current(envelope),
+            &authorities,
+            crate::now_millis(),
+        )
+        .await
+        .unwrap();
         let view = inspect_environment(&mut ctx, "prod").await.unwrap();
         assert_eq!(view.effective, Some(CriticalityLevel::Critical));
         assert_eq!(view.derived.as_ref().unwrap().source, "governance-catalog");
         let mut older = statement(CriticalityLevel::Low);
-        older.generated_at = envelope.statement.generated_at - 1;
-        let older = sign(older, &seed).unwrap();
-        import_envelope(&mut ctx, &older, &authorities, crate::now_millis())
+        older.generated_at = first.generated_at - 1;
+        let older = sign(&older, &seed).unwrap();
+        import_envelope(&mut ctx, &current(older), &authorities, crate::now_millis())
             .await
             .unwrap();
         let view = inspect_environment(&mut ctx, "prod").await.unwrap();
         assert_eq!(view.effective, Some(CriticalityLevel::Critical));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A producer signs its own bytes: any key order and spacing, no
+    /// `reason`, and a field this release does not know. The signature
+    /// covers those bytes, so the same statement re-encoded no longer
+    /// verifies with it.
+    #[test]
+    fn the_signature_covers_the_statement_bytes_the_producer_sent() {
+        let bytes = br#"{ "assignments": [ { "source": "risk-feed", "level": "high",
+            "name": "prod", "kind": "environment", "expires_at": 1 } ],
+            "max_age_ms": 60000, "generated_at": 1700000000000, "note": "x" }"#;
+        let authorities = roots(vec![signer(&AUTHORITY, "governance")]);
+        let sent = sign_bytes(&AUTHORITY, bytes);
+        let verified = verify_envelope(&sent, &authorities).unwrap();
+        let assignment = &verified.statement.assignments[0];
+        assert_eq!(assignment.level, CriticalityLevel::High);
+        assert_eq!(assignment.reason, "");
+        assert_eq!(verified.key_id, sent.key_id());
+
+        let ReceivedEnvelope::Current(mut reencoded) = sent else {
+            panic!("expected a current envelope");
+        };
+        reencoded.statement = STANDARD.encode(serde_json::to_vec(&verified.statement).unwrap());
+        let error = verify_envelope(&current(reencoded), &authorities)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("signature does not verify"), "{error}");
+    }
+
+    /// Bytes that verify are still validated before anything is applied.
+    #[test]
+    fn verified_bytes_that_are_not_a_valid_statement_are_refused() {
+        let authorities = roots(vec![signer(&AUTHORITY, "governance")]);
+        for (bytes, expected) in [
+            (&b"not json"[..], "does not parse"),
+            (
+                br#"{"generated_at":1,"generated_at":2,"max_age_ms":1,"assignments":[]}"#,
+                "duplicate field",
+            ),
+            (
+                br#"{"generated_at":1,"max_age_ms":1,"assignments":[]}"#,
+                "at least one assignment",
+            ),
+        ] {
+            let error = verify_envelope(&sign_bytes(&AUTHORITY, bytes), &authorities)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    /// Envelopes made before #866 still verify during the upgrade window, by
+    /// their frozen re-encoding, and refuse fields the signature cannot cover.
+    #[test]
+    fn a_legacy_v1_envelope_verifies_and_stays_strict() {
+        let key = SigningKey::from_bytes(&AUTHORITY);
+        let legacy = crate::criticality::LegacyStatement {
+            generated_at: 1_700_000_000_000,
+            max_age_ms: 60_000,
+            assignments: vec![crate::criticality::LegacyAssignment {
+                kind: CriticalityTargetKind::Environment,
+                name: "prod".into(),
+                level: CriticalityLevel::Critical,
+                source: "governance-catalog".into(),
+                reason: String::new(),
+            }],
+        };
+        let message = legacy_signed_message(&legacy).unwrap();
+        let mut document = serde_json::json!({
+            "schema": crate::criticality::LEGACY_DERIVED_SCHEMA,
+            "key_id": crate::signature_verification::key_id(&key.verifying_key().to_bytes()),
+            "statement": legacy,
+            "signature": STANDARD.encode(key.sign(&message).to_bytes()),
+        });
+        let authorities = roots(vec![signer(&AUTHORITY, "governance")]);
+        let envelope = parse_envelope(&serde_json::to_vec(&document).unwrap()).unwrap();
+        let verified = verify_envelope(&envelope, &authorities).unwrap();
+        assert_eq!(verified.statement, DerivedStatement::from(legacy.clone()));
+
+        document["statement"]["note"] = "unsigned".into();
+        let error = parse_envelope(&serde_json::to_vec(&document).unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("envelope is not valid"), "{error}");
+    }
+
+    #[test]
+    fn an_unknown_schema_is_refused_by_name() {
+        let error = parse_envelope(br#"{"schema":"tenkai.derived-criticality.v3"}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("unsupported derived criticality schema")
+                && error.contains(DERIVED_SCHEMA),
+            "{error}"
+        );
     }
 
     #[tokio::test]
@@ -775,10 +943,10 @@ mod tests {
         let now = crate::now_millis();
         let mut future = statement(CriticalityLevel::Low);
         future.generated_at = now + 86_400_000;
-        let envelope = sign(future, &seed).unwrap();
+        let envelope = sign(&future, &seed).unwrap();
         let mut ctx = seeded_env(&root, "prod").await;
         let authorities = roots(vec![signer(&AUTHORITY, "governance")]);
-        let error = import_envelope(&mut ctx, &envelope, &authorities, now)
+        let error = import_envelope(&mut ctx, &current(envelope), &authorities, now)
             .await
             .unwrap_err()
             .to_string();
@@ -790,13 +958,9 @@ mod tests {
 
     #[test]
     fn bundle_scope_refuses_other_environments_and_products() {
-        let root = temp_dir("bundle-scope");
-        let seed = seed_file(&root, &AUTHORITY);
-        let allowed = sign(statement(CriticalityLevel::High), &seed).unwrap();
-        refuse_bundle_scope(&allowed, "prod").unwrap();
+        refuse_bundle_scope(&statement(CriticalityLevel::High), "prod").unwrap();
         let mut other_env = statement(CriticalityLevel::High);
         other_env.assignments[0].name = "lab".into();
-        let other_env = sign(other_env, &seed).unwrap();
         let error = refuse_bundle_scope(&other_env, "prod")
             .unwrap_err()
             .to_string();
@@ -804,11 +968,9 @@ mod tests {
         let mut product = statement(CriticalityLevel::High);
         product.assignments[0].kind = CriticalityTargetKind::Product;
         product.assignments[0].name = "api".into();
-        let product = sign(product, &seed).unwrap();
         let error = refuse_bundle_scope(&product, "prod")
             .unwrap_err()
             .to_string();
         assert!(error.contains("cannot assign product api"), "{error}");
-        let _ = std::fs::remove_dir_all(root);
     }
 }

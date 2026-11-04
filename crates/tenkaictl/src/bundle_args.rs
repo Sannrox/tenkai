@@ -44,7 +44,7 @@ pub(crate) struct BundleBuild {
     /// Signed `tenkai.advisory-feed.v1` JSON carried as `advisories/feed.json`.
     #[arg(long)]
     pub(crate) advisory_feed: Option<PathBuf>,
-    /// Signed `tenkai.derived-criticality.v1` JSON carried as `criticality/derived.json`.
+    /// Signed `tenkai.derived-criticality.v2` JSON carried as `criticality/derived.json`.
     #[arg(long)]
     pub(crate) derived_criticality: Option<PathBuf>,
 }

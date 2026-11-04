@@ -26,7 +26,7 @@ roots, model weights, `checksums/manifest.json`
 (`tenkai.offline-sbom.v1`) per component. Those two manifests are ordinary
 signed entries: the bundle signature covers them. `--advisory-feed FILE` adds
 a `tenkai.advisory-feed.v1` document at `advisories/feed.json`.
-`--derived-criticality FILE` adds a `tenkai.derived-criticality.v1` envelope
+`--derived-criticality FILE` adds a `tenkai.derived-criticality.v2` envelope
 at `criticality/derived.json`. A missing
 image, weight, or schema fails the build and names the item. A release input
 or the trust roots holding a private key block fail the build naming the
@@ -95,7 +95,8 @@ to the bundle issued-at, then import time). An environment property
 verify. A bundle whose authenticated revocation list revokes its exporter
 is refused.
 
-A signed `tenkai.derived-criticality.v1` travels as `criticality/derived.json`.
+A signed `tenkai.derived-criticality.v2` travels as `criticality/derived.json`,
+byte for byte as the producer signed it ([wire format](manage-environments.md#derived-criticality-wire-format)).
 Bind, first install, and reinstall verify it against
 `TENKAI_CRITICALITY_TRUST_ROOTS` when the entry is present, then apply
 assignments. A bad signature writes nothing. `tenkaictl criticality import`

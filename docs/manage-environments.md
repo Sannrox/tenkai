@@ -28,8 +28,9 @@ digests, work directories, payloads, and bearer tokens are not returned.
 
 Environments and products may carry optional criticality (`low`, `medium`,
 `high`, `critical`) with an owner and a reason. The declared value is set
-through an audited mutation. A signed `tenkai.derived-criticality.v1`
-envelope can add a derived value from an external evidence source. The
+through an audited mutation. A signed `tenkai.derived-criticality.v2`
+envelope can add a derived value from an external evidence source
+([wire format](#derived-criticality-wire-format)). The
 effective value is the higher of the two; a stale or missing derived value
 is shown and never lowers it.
 
@@ -44,6 +45,75 @@ filter by the effective value (`tenkaictl exposure query --min-criticality high`
 An environment-scoped token can declare only its own environment; product
 criticality and derived import need fleet management. Unset criticality
 behaves as before.
+
+#### Derived criticality wire format
+
+A producer serializes its statement once, signs those bytes, and sends them
+as they are. Tenkai checks the signature over the received bytes before it
+parses them, so the producer's JSON encoder, key order, and spacing are not
+part of the contract. The envelope (`POST /v1/criticality/derived`, the
+`--envelope` file, and the bundle entry `criticality/derived.json`) is:
+
+```json
+{
+  "schema": "tenkai.derived-criticality.v2",
+  "key_id": "sha256:<64 lowercase hex>",
+  "statement": "<base64 of the statement bytes>",
+  "signature": "<base64 Ed25519 signature>"
+}
+```
+
+- `statement` is the standard base64 alphabet with padding, of the UTF-8
+  JSON statement bytes.
+- The signed message is the 29 ASCII bytes `TENKAI-DERIVED-CRITICALITY-V2`
+  and one NUL byte (`0x00`), then the statement bytes. `signature` is the 64-byte Ed25519
+  (RFC 8032) signature over that message, standard base64 with padding.
+- `key_id` is `sha256:` and the lowercase hex SHA-256 of the 32-byte public
+  key. It must name a signer in the criticality trust roots
+  (`TENKAI_CRITICALITY_TRUST_ROOTS`, or `--trust-roots` for an embedded
+  import), in the [trust-root format](release-signing.md).
+- The envelope has exactly these four fields; any other is refused.
+
+The statement is a JSON object:
+
+| Field | Type | Rule |
+| --- | --- | --- |
+| `generated_at` | integer | Unix milliseconds, positive, at most 60 s after the import clock and not after a carrying bundle's issued-at |
+| `max_age_ms` | integer | positive; the derived value is stale after it |
+| `assignments` | array | 1 to 4096 objects, each `kind` and `name` pair once |
+| `assignments[].kind` | string | `environment` or `product` |
+| `assignments[].name` | string | ASCII letter or digit first, then letters, digits, `.`, `_`, `-`, `+` |
+| `assignments[].level` | string | `low`, `medium`, `high`, or `critical` |
+| `assignments[].source` | string | required, no control characters |
+| `assignments[].reason` | string | optional (empty when omitted), at most 1024 bytes, no control characters |
+
+A key may appear once per object. Fields Tenkai does not know are ignored
+and stay covered by the signature, so a producer may add a field that an
+older verifier can safely ignore. A field that changes what an assignment
+means (for example, an expiry an older verifier would not enforce) needs a
+new schema id instead.
+
+To sign without Tenkai, in any language:
+
+```text
+bytes     = utf8(json(statement))            # serialize once, keep the bytes
+message   = "TENKAI-DERIVED-CRITICALITY-V2" || 0x00 || bytes
+signature = ed25519_sign(private_key, message)
+envelope  = {schema, key_id, statement: base64(bytes), signature: base64(signature)}
+```
+
+Tenkai stores the values it applied (level, source, reason, `generated_at`,
+`max_age_ms`, and `key_id`) on the environment or product, not the
+envelope. An offline bundle carries the envelope bytes unchanged, so
+verifying the bundle again checks the producer's own bytes.
+
+`tenkai.derived-criticality.v1` is deprecated: its signature covered
+Tenkai's re-encoding of the parsed statement, which no other encoder can
+reproduce. This release still verifies v1 envelopes and bundles made by
+earlier releases, never produces them, and `tenkaictl bundle build` refuses
+them. A later release removes v1. Releases before 0.7.0 refuse a v2
+envelope as malformed. Upgrade every server and every `tenkaictl` that
+imports envelopes or bundles first, then switch producers to v2.
 
 ### Remote configuration
 

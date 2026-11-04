@@ -70,7 +70,7 @@ pub struct BundleBuildRequest<'a> {
     pub base: Option<String>,
     /// Optional `tenkai.advisory-feed.v1` JSON carried as `advisories/feed.json`.
     pub advisory_feed: Option<&'a [u8]>,
-    /// Optional `tenkai.derived-criticality.v1` JSON carried as `criticality/derived.json`.
+    /// Optional `tenkai.derived-criticality.v2` JSON carried as `criticality/derived.json`.
     pub derived_criticality: Option<&'a [u8]>,
 }
 
@@ -373,9 +373,20 @@ pub async fn build(ctx: &mut Ctx, request: &BundleBuildRequest<'_>) -> Result<Bu
         );
     }
     if let Some(bytes) = request.derived_criticality {
-        let envelope = crate::criticality::parse_envelope(bytes)?;
+        // The builder holds no criticality trust roots: lint the statement
+        // here, and every importer verifies the signature before applying it.
+        let crate::criticality::ReceivedEnvelope::Current(envelope) =
+            crate::criticality::parse_envelope(bytes)?
+        else {
+            bail!(
+                "derived criticality must use {}; re-sign the deprecated {} envelope",
+                crate::criticality::DERIVED_SCHEMA,
+                crate::criticality::LEGACY_DERIVED_SCHEMA
+            );
+        };
+        let statement = envelope.unverified_statement()?;
         crate::criticality::refuse_generated_after_issued(
-            envelope.statement.generated_at,
+            statement.generated_at,
             request.issued_at_unix_ms,
         )?;
         refuse_private_keys(crate::criticality::DERIVED_PATH, bytes)?;

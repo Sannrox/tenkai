@@ -218,12 +218,13 @@ impl RemoteClient {
 
     pub async fn import_derived_criticality(
         &self,
-        envelope: &tenkai::criticality::DerivedEnvelope,
+        envelope: Vec<u8>,
     ) -> anyhow::Result<tenkai::criticality::DerivedImportResult> {
+        let envelope = serde_json::value::RawValue::from_string(String::from_utf8(envelope)?)?;
         self.request_json_body(
             reqwest::Method::POST,
             "/v1/criticality/derived",
-            Some(envelope),
+            Some(&envelope),
         )
         .await
     }

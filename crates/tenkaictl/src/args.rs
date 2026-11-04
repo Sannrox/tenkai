@@ -516,7 +516,7 @@ pub(crate) enum ExposureCommand {
 
 #[derive(Subcommand)]
 pub(crate) enum DerivedCriticalityCommand {
-    /// Verify and apply a signed `tenkai.derived-criticality.v1` envelope.
+    /// Verify and apply a signed `tenkai.derived-criticality.v2` envelope.
     Import {
         #[arg(long)]
         envelope: PathBuf,

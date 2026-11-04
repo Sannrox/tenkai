@@ -1,7 +1,7 @@
 //! Declared and imported derived criticality on environments and products (#694).
 //!
 //! An operator declares `low`, `medium`, `high`, or `critical` with an owner
-//! and a reason. A signed `tenkai.derived-criticality.v1` envelope can add a
+//! and a reason. A signed `tenkai.derived-criticality.v2` envelope can add a
 //! derived value from an external evidence source. The effective value is the
 //! higher of the two; a stale or missing derived value is shown and never
 //! lowers it. Tenkai does not read or interpret markings.
@@ -14,18 +14,28 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context as _, Result, bail};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
 
-/// Signed derived-criticality envelope schema.
-pub const DERIVED_SCHEMA: &str = "tenkai.derived-criticality.v1";
+/// Signed derived-criticality envelope schema. Its signature covers the
+/// statement bytes the producer sent (#866); see
+/// `docs/manage-environments.md#derived-criticality-wire-format`.
+pub const DERIVED_SCHEMA: &str = "tenkai.derived-criticality.v2";
+/// Deprecated (#866): signed over Tenkai's re-encoding of the parsed
+/// statement. Verified for envelopes and bundles made by earlier releases,
+/// never produced, and removed in a later release.
+pub const LEGACY_DERIVED_SCHEMA: &str = "tenkai.derived-criticality.v1";
 /// Signed bundle path for a derived-criticality envelope.
 pub const DERIVED_PATH: &str = "criticality/derived.json";
 /// Media type of [`DERIVED_PATH`].
-pub const DERIVED_MEDIA: &str = "application/vnd.tenkai.derived-criticality.v1+json";
+pub const DERIVED_MEDIA: &str = "application/vnd.tenkai.derived-criticality.v2+json";
 /// Trust roots that may sign derived criticality.
 pub const CRITICALITY_TRUST_ROOTS_ENV: &str = "TENKAI_CRITICALITY_TRUST_ROOTS";
 
-pub(crate) const SIGNING_DOMAIN: &[u8] = b"TENKAI-DERIVED-CRITICALITY-V1\0";
+/// Prefix of every [`DERIVED_SCHEMA`] signed message.
+pub const SIGNING_DOMAIN: &[u8] = b"TENKAI-DERIVED-CRITICALITY-V2\0";
+const LEGACY_SIGNING_DOMAIN: &[u8] = b"TENKAI-DERIVED-CRITICALITY-V1\0";
 const MAX_ASSIGNMENTS: usize = 4_096;
 pub(crate) const MAX_REASON_BYTES: usize = 1_024;
 pub(crate) const DECLARED_LEVEL: &str = "criticality.declared";
@@ -163,9 +173,9 @@ pub struct DerivedImportResult {
     pub applied: usize,
 }
 
-/// One assignment inside a signed derived envelope.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
+/// One assignment of a [`DerivedStatement`]. A verifier ignores fields it
+/// does not know; the signature still covers them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DerivedAssignment {
     pub kind: CriticalityTargetKind,
     pub name: String,
@@ -175,29 +185,117 @@ pub struct DerivedAssignment {
     pub reason: String,
 }
 
-/// Signed bytes of a derived-criticality envelope.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
+/// What a derived-criticality producer signs ([`DERIVED_SCHEMA`]). A
+/// verifier ignores fields it does not know; the signature still covers them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DerivedStatement {
     pub generated_at: i64,
     pub max_age_ms: i64,
     pub assignments: Vec<DerivedAssignment>,
 }
 
-/// Signed derived criticality from an external evidence source.
+/// Signed derived criticality from an external evidence source (#866).
+/// Wire format: docs/manage-environments.md#derived-criticality-wire-format.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DerivedEnvelope {
+    /// `tenkai.derived-criticality.v2`.
     pub schema: String,
+    /// `sha256:` and the lowercase hex SHA-256 of the signer's Ed25519 public key.
     pub key_id: String,
-    pub statement: DerivedStatement,
+    /// Standard padded base64 of the statement JSON bytes the producer signed.
+    pub statement: String,
+    /// Standard padded base64 Ed25519 signature over
+    /// `TENKAI-DERIVED-CRITICALITY-V2`, one NUL byte, and the statement bytes.
     pub signature: String,
 }
 
-pub(crate) fn canonical_bytes(statement: &DerivedStatement) -> Result<Vec<u8>> {
-    let mut bytes = SIGNING_DOMAIN.to_vec();
+/// A deprecated [`LEGACY_DERIVED_SCHEMA`] envelope. Its signature covers
+/// the serde_json encoding of [`LegacyStatement`], so these types are frozen.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegacyEnvelope {
+    pub schema: String,
+    pub key_id: String,
+    pub statement: LegacyStatement,
+    pub signature: String,
+}
+
+/// Statement of a [`LegacyEnvelope`], frozen with it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegacyStatement {
+    pub generated_at: i64,
+    pub max_age_ms: i64,
+    pub assignments: Vec<LegacyAssignment>,
+}
+
+/// Assignment of a [`LegacyStatement`], frozen with it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegacyAssignment {
+    pub kind: CriticalityTargetKind,
+    pub name: String,
+    pub level: CriticalityLevel,
+    pub source: String,
+    #[serde(default)]
+    pub reason: String,
+}
+
+impl From<LegacyStatement> for DerivedStatement {
+    fn from(legacy: LegacyStatement) -> Self {
+        Self {
+            generated_at: legacy.generated_at,
+            max_age_ms: legacy.max_age_ms,
+            assignments: legacy
+                .assignments
+                .into_iter()
+                .map(|assignment| DerivedAssignment {
+                    kind: assignment.kind,
+                    name: assignment.name,
+                    level: assignment.level,
+                    source: assignment.source,
+                    reason: assignment.reason,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// A derived-criticality envelope as received, before its signature is checked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum ReceivedEnvelope {
+    Current(DerivedEnvelope),
+    Legacy(LegacyEnvelope),
+}
+
+/// A derived-criticality statement whose signature verified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedDerived {
+    pub key_id: String,
+    pub statement: DerivedStatement,
+}
+
+/// The message a [`LEGACY_DERIVED_SCHEMA`] signature covers.
+pub(crate) fn legacy_signed_message(statement: &LegacyStatement) -> Result<Vec<u8>> {
+    let mut bytes = LEGACY_SIGNING_DOMAIN.to_vec();
     serde_json::to_writer(&mut bytes, statement)?;
     Ok(bytes)
+}
+
+impl DerivedEnvelope {
+    /// The statement without checking its signature. Only for a lint by a
+    /// holder of no trust roots (bundle build); every import verifies first.
+    pub(crate) fn unverified_statement(&self) -> Result<DerivedStatement> {
+        let bytes = STANDARD
+            .decode(&self.statement)
+            .context("derived criticality statement is not standard padded base64")?;
+        let statement: DerivedStatement =
+            serde_json::from_slice(&bytes).context("derived criticality statement is not valid")?;
+        statement.validate()?;
+        Ok(statement)
+    }
 }
 
 pub(crate) fn require_owner_reason(owner: &str, reason: &str) -> Result<()> {
@@ -299,7 +397,8 @@ pub(crate) fn higher(
     }
 }
 
-impl DerivedEnvelope {
+impl ReceivedEnvelope {
+    /// Read and parse an envelope file. The signature is not checked here.
     pub fn load(path: &Path) -> Result<Self> {
         let raw = std::fs::read(path)
             .with_context(|| format!("reading derived criticality {}", path.display()))?;
@@ -307,25 +406,30 @@ impl DerivedEnvelope {
             .with_context(|| format!("parsing derived criticality {}", path.display()))
     }
 
-    pub(crate) fn validate_shape(&self) -> Result<()> {
-        if self.schema != DERIVED_SCHEMA {
-            bail!("unsupported derived criticality schema {}", self.schema);
+    pub fn key_id(&self) -> &str {
+        match self {
+            Self::Current(envelope) => &envelope.key_id,
+            Self::Legacy(envelope) => &envelope.key_id,
         }
-        validate_key_id_shape(&self.key_id)?;
-        if self.statement.generated_at <= 0 {
+    }
+}
+
+impl DerivedStatement {
+    pub(crate) fn validate(&self) -> Result<()> {
+        if self.generated_at <= 0 {
             bail!("derived criticality generated_at must be positive");
         }
-        if self.statement.max_age_ms <= 0 {
+        if self.max_age_ms <= 0 {
             bail!("derived criticality max_age_ms must be positive");
         }
-        if self.statement.assignments.is_empty() {
+        if self.assignments.is_empty() {
             bail!("derived criticality needs at least one assignment");
         }
-        if self.statement.assignments.len() > MAX_ASSIGNMENTS {
+        if self.assignments.len() > MAX_ASSIGNMENTS {
             bail!("derived criticality exceeds {MAX_ASSIGNMENTS} assignments");
         }
         let mut seen = std::collections::BTreeSet::new();
-        for assignment in &self.statement.assignments {
+        for assignment in &self.assignments {
             validate_assignment_name(assignment)?;
             if assignment.source.trim().is_empty()
                 || assignment.source.chars().any(char::is_control)
@@ -377,11 +481,27 @@ fn validate_key_id_shape(value: &str) -> Result<()> {
     Ok(())
 }
 
-/// Parse a derived-criticality envelope. Used by bundle build and import.
-pub fn parse_envelope(bytes: &[u8]) -> Result<DerivedEnvelope> {
-    let envelope: DerivedEnvelope =
-        serde_json::from_slice(bytes).context("derived criticality is not JSON")?;
-    envelope.validate_shape()?;
+/// Parse a derived-criticality envelope by its `schema`, without checking
+/// the signature. A schema this release does not verify is refused by name.
+pub fn parse_envelope(bytes: &[u8]) -> Result<ReceivedEnvelope> {
+    #[derive(Deserialize)]
+    struct Schema {
+        schema: String,
+    }
+    let Schema { schema } = serde_json::from_slice(bytes)
+        .context("derived criticality is not a JSON object with a schema")?;
+    let envelope = match schema.as_str() {
+        DERIVED_SCHEMA => ReceivedEnvelope::Current(
+            serde_json::from_slice(bytes).context("derived criticality envelope is not valid")?,
+        ),
+        LEGACY_DERIVED_SCHEMA => ReceivedEnvelope::Legacy(
+            serde_json::from_slice(bytes).context("derived criticality envelope is not valid")?,
+        ),
+        other => bail!(
+            "unsupported derived criticality schema {other:?}; this release verifies {DERIVED_SCHEMA} and the deprecated {LEGACY_DERIVED_SCHEMA}"
+        ),
+    };
+    validate_key_id_shape(envelope.key_id())?;
     Ok(envelope)
 }
 
