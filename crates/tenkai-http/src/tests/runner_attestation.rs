@@ -160,13 +160,39 @@ async fn an_environment_requiring_attestation_enrolls_only_attested_runners() {
             .unwrap()
             .contains("attestation_missing")
     );
+    // The 428 names the schemas to send (#849); a schema this server does
+    // not know is a named refusal with the same list, not a JSON error,
+    // and spends no token either.
+    let accepted = serde_json::json!(tenkai::runner_attestation::ACCEPTED_SCHEMAS);
+    assert_eq!(body["accepted_schemas"], accepted, "{body}");
+    let future = serde_json::json!({"schema": "tenkai.runner-attestation.v9", "proof": "x"});
+    let (status, body) = call(
+        &app,
+        "POST",
+        enroll,
+        None,
+        serde_json::json!({"token": token, "csr": csr, "attestation": future}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("attestation_schema_unsupported"),
+        "{body}"
+    );
+    assert_eq!(body["accepted_schemas"], accepted, "{body}");
     let attestation = tenkai::runner_attestation::sign(
-        "stage",
-        Vec::new(),
-        Default::default(),
+        tenkai::runner_attestation::AttestationSchema::V2,
+        tenkai::runner_attestation::HostEvidence {
+            environment: "stage".into(),
+            checks: Vec::new(),
+            facts: Default::default(),
+            checked_at: tenkai::now_millis(),
+        },
         &runner_key.serialize_pem(),
         &csr,
-        tenkai::now_millis(),
     )
     .unwrap();
     let (status, enrolled) = call(
@@ -293,12 +319,15 @@ async fn hardware_key_policy_refuses_a_file_runner_key() {
     .await;
     assert_eq!(status, StatusCode::PRECONDITION_REQUIRED, "{body}");
     let attestation = tenkai::runner_attestation::sign(
-        "stage",
-        Vec::new(),
-        Default::default(),
+        tenkai::runner_attestation::AttestationSchema::V2,
+        tenkai::runner_attestation::HostEvidence {
+            environment: "stage".into(),
+            checks: Vec::new(),
+            facts: Default::default(),
+            checked_at: tenkai::now_millis(),
+        },
         &runner_key.serialize_pem(),
         &csr,
-        tenkai::now_millis(),
     )
     .unwrap();
     let (status, body) = call(

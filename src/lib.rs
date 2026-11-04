@@ -262,6 +262,7 @@ pub mod secret_source;
 pub mod server_self_upgrade;
 pub mod shutdown;
 mod signature_verification;
+mod signed_bytes;
 pub mod signer;
 pub mod smtp_digest;
 pub mod software_compatibility;

@@ -259,34 +259,24 @@ impl RunnerKey {
         }
     }
 
-    /// Host evidence signed with this key for `csr`.
+    /// Host evidence signed as `schema` with this key for `csr`.
     pub fn sign_attestation(
         &self,
-        environment: &str,
-        checks: Vec<crate::host_preflight::CheckResult>,
-        facts: std::collections::BTreeMap<String, String>,
+        schema: crate::runner_attestation::AttestationSchema,
+        evidence: crate::runner_attestation::HostEvidence,
         csr: &str,
-        now_ms: i64,
     ) -> Result<crate::runner_attestation::RunnerAttestation> {
         match self {
-            Self::File { pem } => crate::runner_attestation::sign_with(
-                environment,
-                checks,
-                facts,
-                csr,
-                now_ms,
-                false,
-                |message| sign_pem(pem, message),
-            ),
-            Self::Hardware(key) => crate::runner_attestation::sign_with(
-                environment,
-                checks,
-                facts,
-                csr,
-                now_ms,
-                true,
-                |message| key.sign_ecdsa(message),
-            ),
+            Self::File { pem } => {
+                crate::runner_attestation::sign_with(schema, evidence, csr, false, |message| {
+                    sign_pem(pem, message)
+                })
+            }
+            Self::Hardware(key) => {
+                crate::runner_attestation::sign_with(schema, evidence, csr, true, |message| {
+                    key.sign_ecdsa(message)
+                })
+            }
         }
     }
 
@@ -839,15 +829,17 @@ mod tests {
         assert!(csr.contains("CERTIFICATE REQUEST") && !csr.contains("PRIVATE KEY"));
         let attestation = key
             .sign_attestation(
-                "prod",
-                Vec::new(),
-                Default::default(),
+                crate::runner_attestation::AttestationSchema::V2,
+                crate::runner_attestation::HostEvidence {
+                    environment: "prod".into(),
+                    checks: Vec::new(),
+                    facts: Default::default(),
+                    checked_at: 1_800_000_000_000,
+                },
                 &csr,
-                1_800_000_000_000,
             )
             .unwrap();
-        assert!(attestation.statement.hardware_backed);
-        crate::runner_attestation::verify(
+        let binding = crate::runner_attestation::verify(
             Some(&attestation),
             &csr,
             "prod",
@@ -860,6 +852,7 @@ mod tests {
             1_800_000_000_000,
         )
         .unwrap();
+        assert!(binding.hardware_backed);
         let _ = std::fs::remove_dir_all(dir);
     }
 }
