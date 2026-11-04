@@ -357,3 +357,24 @@ fn health_checks_the_generation_without_advancing_it() {
     assert_eq!(result.outcome, HostApplyOutcome::Interrupted);
     assert_eq!(host.record().generation, 1);
 }
+
+#[test]
+fn a_release_that_does_not_compare_keeps_the_high_water_release() {
+    let host = Host::new(downgrade_needs_qa());
+    let three = host.release("3.0.0");
+    let nightly = host.release("nightly");
+    let two = host.release("2.0.0");
+    let (install_three, _) = host.spool(install(&three, None, 0));
+    host.step(&install_three, HostApplyOutcome::Succeeded)
+        .unwrap();
+    let (install_nightly, _) = host.spool(Step {
+        approvers: &[0, 2],
+        ..install(&nightly, Some("3.0.0"), 1)
+    });
+    host.step(&install_nightly, HostApplyOutcome::Succeeded)
+        .unwrap();
+    assert_eq!(host.record().high_water.unwrap().version, "3.0.0");
+    // 2.0.0 is still older than 3.0.0, which was applied.
+    let (install_two, _) = host.spool(install(&two, Some("nightly"), 2));
+    assert!(refusal(host.admit(&install_two)).contains("high-water release 3.0.0"));
+}

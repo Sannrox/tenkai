@@ -64,8 +64,9 @@ pub struct AppliedStateRecord {
     pub generation: u64,
     #[serde(flatten)]
     pub state: AppliedState,
-    /// The newest release ever applied; `empty` keeps it. A target that is
-    /// not newer needs downgrade or rollback approvals.
+    /// The newest release ever applied, by semantic-version precedence (a
+    /// release that does not compare never replaces it); `empty` keeps it.
+    /// A target that is not newer needs downgrade or rollback approvals.
     pub high_water: Option<HostRelease>,
     /// The install or uninstall that last advanced the generation, written
     /// in the same atomic replace that advanced it.
@@ -276,8 +277,10 @@ impl AppliedStateRecord {
                     next.state = AppliedState::Applied {
                         release: started.release.clone(),
                     };
+                    // Only a provably newer release raises it; one that does
+                    // not compare keeps the mark it would otherwise erase.
                     if next.high_water.as_ref().is_none_or(|high_water| {
-                        !is_newer(&high_water.version, &started.release.version)
+                        is_newer(&started.release.version, &high_water.version)
                     }) {
                         next.high_water = Some(started.release.clone());
                     }
@@ -324,15 +327,31 @@ impl AppliedStateRecord {
     }
 }
 
-/// `candidate` is a strictly newer semantic version than `than`. Versions
-/// that are not semantic versions are never newer, so they always need
-/// downgrade approvals once anything was applied.
+/// `candidate` has strictly higher semantic-version precedence than `than`;
+/// build metadata does not count. Versions that are not semantic versions
+/// are never newer, so they always need downgrade approvals once anything
+/// was applied, and never raise the high-water release.
 pub fn is_newer(candidate: &str, than: &str) -> bool {
     match (
         semver::Version::parse(candidate),
         semver::Version::parse(than),
     ) {
-        (Ok(candidate), Ok(than)) => candidate > than,
+        (Ok(candidate), Ok(than)) => candidate.cmp_precedence(&than).is_gt(),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_newer;
+
+    #[test]
+    fn newer_means_higher_precedence_of_two_semantic_versions() {
+        assert!(is_newer("1.2.0", "1.1.9"));
+        assert!(is_newer("1.0.0", "1.0.0-rc.1"));
+        assert!(!is_newer("1.0.0", "1.0.0"));
+        assert!(!is_newer("1.0.0+2", "1.0.0+1"));
+        assert!(!is_newer("nightly", "1.0.0"));
+        assert!(!is_newer("2.0.0", "nightly"));
     }
 }
