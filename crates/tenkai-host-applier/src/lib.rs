@@ -40,12 +40,7 @@ pub fn intake(
         std::fs::remove_dir_all(&work)
             .with_context(|| format!("removing stale {}", work.display()))?;
     }
-    let copied = copy::copy_request(
-        &config.spool_dir,
-        instance,
-        &work,
-        config.max_artifact_bytes,
-    )?;
+    let copied = copy::copy_request(&config.spool_dir, instance, &work, config.copy_limits())?;
     let verified = tenkai::host_apply::verify_copied_request(
         &copied.request,
         instance,

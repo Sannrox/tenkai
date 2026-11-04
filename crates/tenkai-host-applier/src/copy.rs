@@ -15,9 +15,6 @@ use anyhow::{Context as _, Result, bail};
 use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, Stat};
 use tenkai::host_apply::{ARTIFACTS_DIR, HostApplyRequest, MAX_REQUEST_BYTES, REQUEST_FILE};
 
-/// Most entries one release may copy.
-const MAX_ENTRIES: u64 = 100_000;
-
 /// A request and its release workdir, copied and parsed.
 #[derive(Debug)]
 pub struct CopiedRequest {
@@ -26,15 +23,23 @@ pub struct CopiedRequest {
     pub workdir: PathBuf,
 }
 
+/// Bounds on what one release may copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CopyLimits {
+    pub max_bytes: u64,
+    /// Files and directories, counted as they are listed, so an oversized
+    /// directory fails before its names are held in memory.
+    pub max_entries: u64,
+}
+
 /// Copy `<spool>/<instance>/request.json` and the deploy inputs its manifest
 /// declares under `<spool>/<instance>/artifacts/` into `dest`, which must not
-/// exist yet and whose parent is root-owned. `max_bytes` bounds the copied
-/// artifacts.
+/// exist yet and whose parent is root-owned.
 pub fn copy_request(
     spool: &Path,
     instance: &str,
     dest: &Path,
-    max_bytes: u64,
+    limits: CopyLimits,
 ) -> Result<CopiedRequest> {
     tenkai::host_apply::validate_instance_name(instance)?;
     let spool_fd = rustix::fs::open(
@@ -50,7 +55,7 @@ pub fn copy_request(
 
     let mut budget = Budget {
         bytes_left: MAX_REQUEST_BYTES,
-        entries_left: 1,
+        entries_left: 0,
     };
     let bytes = copy_file_at(
         instance_fd.as_fd(),
@@ -67,14 +72,15 @@ pub fn copy_request(
     std::fs::create_dir(&workdir)?;
     std::fs::set_permissions(&workdir, std::fs::Permissions::from_mode(0o755))?;
     let mut budget = Budget {
-        bytes_left: max_bytes,
-        entries_left: MAX_ENTRIES,
+        bytes_left: limits.max_bytes,
+        entries_left: limits.max_entries,
     };
     let inputs = manifest.immutable_inputs();
     if !inputs.is_empty() {
         let artifacts_fd = open_dir_at(instance_fd.as_fd(), ARTIFACTS_DIR)
             .context("opening the spooled release artifacts")?;
-        for input in &inputs {
+        for input in disjoint_inputs(&inputs) {
+            budget.entry()?;
             copy_input(artifacts_fd.as_fd(), input, &workdir, &mut budget)
                 .with_context(|| format!("copying deploy input {input}"))?;
         }
@@ -88,17 +94,39 @@ struct Budget {
 }
 
 impl Budget {
-    fn take(&mut self, bytes: u64) -> Result<()> {
+    fn entry(&mut self) -> Result<()> {
         self.entries_left = self
             .entries_left
             .checked_sub(1)
             .context("release artifacts have too many entries")?;
+        Ok(())
+    }
+
+    fn bytes(&mut self, bytes: u64) -> Result<()> {
         self.bytes_left = self
             .bytes_left
             .checked_sub(bytes)
             .context("release artifacts exceed the size limit")?;
         Ok(())
     }
+}
+
+/// The inputs to copy, each source path once: an input inside another input
+/// (a document under a declared directory, or a duplicate) is already part
+/// of that copy. The digest is still computed over the full input list.
+fn disjoint_inputs(inputs: &[String]) -> Vec<&str> {
+    let mut sorted: Vec<&str> = inputs.iter().map(String::as_str).collect();
+    sorted.sort_by(|left, right| Path::new(left).cmp(Path::new(right)));
+    let mut kept: Vec<&str> = Vec::new();
+    for input in sorted {
+        if !kept
+            .iter()
+            .any(|parent| Path::new(input).starts_with(Path::new(parent)))
+        {
+            kept.push(input);
+        }
+    }
+    kept
 }
 
 /// Walk `input`'s components from `root`, then copy what it names.
@@ -140,7 +168,6 @@ fn copy_entry_at(dir: BorrowedFd<'_>, name: &str, dest: &Path, budget: &mut Budg
             Ok(())
         }
         FileType::Directory => {
-            budget.take(0)?;
             let child = open_dir_at(dir, name)?;
             same_entry(&stat, &rustix::fs::fstat(&child)?, name)?;
             std::fs::create_dir(dest).with_context(|| format!("creating {}", dest.display()))?;
@@ -151,6 +178,7 @@ fn copy_entry_at(dir: BorrowedFd<'_>, name: &str, dest: &Path, budget: &mut Budg
                 if entry_name == b"." || entry_name == b".." {
                     continue;
                 }
+                budget.entry()?;
                 names.push(
                     std::str::from_utf8(entry_name)
                         .context("artifact entry name is not UTF-8")?
@@ -198,7 +226,7 @@ fn copy_file_at(
     }
     let mode = permission_bits(&opened, name)?;
     let size = u64::try_from(opened.st_size).context("negative file size")?;
-    budget.take(size)?;
+    budget.bytes(size)?;
     let mut bytes = Vec::with_capacity(size as usize);
     std::fs::File::from(fd)
         .take(size.saturating_add(1))

@@ -57,6 +57,9 @@ pub struct ApplierConfig {
     /// Largest total size of one release's copied artifacts.
     #[serde(default = "default_max_artifact_bytes")]
     pub max_artifact_bytes: u64,
+    /// Most files and directories one release's artifacts may hold.
+    #[serde(default = "default_max_artifact_entries")]
+    pub max_artifact_entries: u64,
 }
 
 fn default_timeout_seconds() -> u64 {
@@ -67,7 +70,19 @@ fn default_max_artifact_bytes() -> u64 {
     4 * 1024 * 1024 * 1024
 }
 
+fn default_max_artifact_entries() -> u64 {
+    100_000
+}
+
 impl ApplierConfig {
+    /// The copy bounds this configuration sets.
+    pub fn copy_limits(&self) -> crate::copy::CopyLimits {
+        crate::copy::CopyLimits {
+            max_bytes: self.max_artifact_bytes,
+            max_entries: self.max_artifact_entries,
+        }
+    }
+
     pub fn load(paths: &ApplierPaths) -> Result<Self> {
         let path = paths.config_dir.join(CONFIG_FILE);
         let raw = read_trusted(&path)?;
@@ -79,9 +94,12 @@ impl ApplierConfig {
         if !config.spool_dir.is_absolute() {
             bail!("{} spool_dir must be an absolute path", path.display());
         }
-        if config.timeout_seconds == 0 || config.max_artifact_bytes == 0 {
+        if config.timeout_seconds == 0
+            || config.max_artifact_bytes == 0
+            || config.max_artifact_entries == 0
+        {
             bail!(
-                "{} timeout_seconds and max_artifact_bytes must be positive",
+                "{} timeout_seconds, max_artifact_bytes, and max_artifact_entries must be positive",
                 path.display()
             );
         }

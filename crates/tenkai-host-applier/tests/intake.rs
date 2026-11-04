@@ -37,6 +37,7 @@ impl Host {
             spool_dir: root.join("spool"),
             timeout_seconds: 60,
             max_artifact_bytes: 1024 * 1024,
+            max_artifact_entries: 1_000,
         };
         std::fs::create_dir_all(&config.spool_dir).unwrap();
         Self {
@@ -67,6 +68,10 @@ impl Host {
     /// Spool a signed, approved install request and return its instance.
     fn spool(&self) -> (String, HostApplyRequest) {
         let (stage, release) = self.release();
+        self.spool_release(stage, release)
+    }
+
+    fn spool_release(&self, stage: PathBuf, release: SignedRelease) -> (String, HostApplyRequest) {
         let now = tenkai::now_millis();
         let plan = self.fixture.plan(
             "edge",
@@ -237,6 +242,34 @@ fn artifacts_over_the_size_limit_are_refused() {
     host.config.max_artifact_bytes = 4;
     let (instance, _) = host.spool();
     assert!(refusal(host.intake(&instance)).contains("size limit"));
+}
+
+#[test]
+fn an_input_inside_another_input_is_copied_once() {
+    let host = Host::new();
+    let stage = host.root.join("stage-overlap");
+    let release = host.fixture.release_with_inputs(
+        &stage,
+        "k3s",
+        "1.2.0",
+        ["./bin/install.sh", "./bin/install.sh", "./bin/install.sh"],
+        &[("bin/install.sh", b"#!/bin/sh\n"), ("bin/sbom.json", b"{}")],
+        &["bin/sbom.json", "bin"],
+    );
+    let (instance, _) = host.spool_release(stage, release);
+    let intake = host.intake(&instance).unwrap();
+    assert_eq!(
+        std::fs::read(intake.copied.workdir.join("bin/sbom.json")).unwrap(),
+        b"{}"
+    );
+}
+
+#[test]
+fn a_directory_over_the_entry_limit_fails_while_it_is_listed() {
+    let mut host = Host::new();
+    host.config.max_artifact_entries = 3;
+    let (instance, _) = host.spool();
+    assert!(refusal(host.intake(&instance)).contains("too many entries"));
 }
 
 #[test]

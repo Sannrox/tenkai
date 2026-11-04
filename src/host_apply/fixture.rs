@@ -121,9 +121,9 @@ impl HostFixture {
         }
     }
 
-    /// Write `files` under `workdir` as the release's deploy inputs and sign
-    /// a manifest declaring `executor = "host"` with `install`, `uninstall`,
-    /// and `health` commands.
+    /// Write `files` under `workdir` as the release's deploy inputs (each
+    /// file's top-level entry) and sign a manifest declaring
+    /// `executor = "host"` with `install`, `uninstall`, and `health` commands.
     pub fn release(
         &self,
         workdir: &Path,
@@ -132,17 +132,31 @@ impl HostFixture {
         commands: [&str; 3],
         files: &[(&str, &[u8])],
     ) -> SignedRelease {
+        let inputs: std::collections::BTreeSet<&str> = files
+            .iter()
+            .map(|(name, _)| name.split('/').next().unwrap())
+            .collect();
+        let inputs: Vec<&str> = inputs.into_iter().collect();
+        self.release_with_inputs(workdir, product, version, commands, files, &inputs)
+    }
+
+    /// [`Self::release`] with explicit `deploy.inputs`.
+    pub fn release_with_inputs(
+        &self,
+        workdir: &Path,
+        product: &str,
+        version: &str,
+        commands: [&str; 3],
+        files: &[(&str, &[u8])],
+        inputs: &[&str],
+    ) -> SignedRelease {
+        std::fs::create_dir_all(workdir).unwrap();
         for (name, bytes) in files {
             let path = workdir.join(name);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, bytes).unwrap();
         }
-        let inputs: Vec<String> = files
-            .iter()
-            .map(|(name, _)| format!("{:?}", name.split('/').next().unwrap()))
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect();
+        let inputs: Vec<String> = inputs.iter().map(|input| format!("{input:?}")).collect();
         let manifest = format!(
             "[product]\nname = {product:?}\nversion = {version:?}\n\n[deploy]\nexecutor = \"host\"\ninstall = {:?}\nuninstall = {:?}\nhealth = {:?}\ninputs = [{}]\n",
             commands[0],
