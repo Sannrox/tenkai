@@ -73,9 +73,11 @@ impl Host {
 
     fn spool_release(&self, stage: PathBuf, release: SignedRelease) -> (String, HostApplyRequest) {
         let now = tenkai::now_millis();
+        // Plans made in the same millisecond must still differ.
+        static NEXT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
         let plan = self.fixture.plan(
             "edge",
-            now,
+            now + NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             &[StepSpec {
                 release: release.clone(),
                 action: HostAction::Install,
