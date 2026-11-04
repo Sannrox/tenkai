@@ -522,6 +522,7 @@ mod tests {
             release_digest: "target-digest".into(),
             artifact_digest: "target-artifact-digest".into(),
             workdir: "/srv/api".into(),
+            host: None,
             restore: Some(ReleasePin {
                 release_id: format!("tenkai:release:api@{from}"),
                 digest: "restore-digest".into(),

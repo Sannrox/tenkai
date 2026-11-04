@@ -266,6 +266,13 @@ impl TrustRoots {
             .with_context(|| format!("reading plan approval trust roots {}", path.display()))?;
         let roots: Self = toml::from_str(&raw)
             .with_context(|| format!("parsing plan approval trust roots {}", path.display()))?;
+        roots.validate()?;
+        Ok(roots)
+    }
+
+    /// The structural checks [`Self::load`] applies, for roots built in memory.
+    pub fn validate(&self) -> Result<()> {
+        let roots = self;
         if roots.version != TRUST_ROOT_VERSION || roots.signers.is_empty() {
             bail!("plan approval trust roots must use version 1 and contain at least one signer");
         }
@@ -311,7 +318,7 @@ impl TrustRoots {
                 bail!("plan approval trust roots contain duplicate keys or identities");
             }
         }
-        Ok(roots)
+        Ok(())
     }
 
     pub(crate) fn signer(&self, key_id: &str) -> Result<&TrustedSigner> {
@@ -705,21 +712,25 @@ impl VerificationEvidence {
     }
 }
 
+/// One verified envelope as quorum counting sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct CountedApproval {
-    key_id: String,
-    identity: String,
-    groups: Vec<String>,
-    auto: bool,
+pub(crate) struct CountedApproval {
+    pub(crate) key_id: String,
+    pub(crate) identity: String,
+    pub(crate) groups: Vec<String>,
+    pub(crate) auto: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct QuorumTally {
-    counted: Vec<CountedApproval>,
-    missing: u32,
+pub(crate) struct QuorumTally {
+    pub(crate) counted: Vec<CountedApproval>,
+    pub(crate) missing: u32,
 }
 
-fn count_quorum(
+/// Count distinct approvals for `rule` (ADR 0037): distinct by key and by
+/// trust-root identity, restricted to the rule's groups, automatic approvals
+/// never toward `n > 1`, and the requester excluded when the rule says so.
+pub(crate) fn count_quorum(
     rule: &crate::approval_policy::QuorumRule,
     candidates: &[CountedApproval],
     requester: Option<&str>,
@@ -757,7 +768,10 @@ fn count_quorum(
     QuorumTally { counted, missing }
 }
 
-fn quorum_refusal(rule: &crate::approval_policy::QuorumRule, tally: &QuorumTally) -> String {
+pub(crate) fn quorum_refusal(
+    rule: &crate::approval_policy::QuorumRule,
+    tally: &QuorumTally,
+) -> String {
     let groups = if rule.groups.is_empty() {
         String::new()
     } else {

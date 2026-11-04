@@ -242,6 +242,7 @@ fn sample_plan(env: &str, created_at: i64) -> Plan {
             release_digest: "abc".into(),
             artifact_digest: "abc".into(),
             workdir: ".".into(),
+            host: None,
             restore: None,
         }],
         state: PlanState::Computed,

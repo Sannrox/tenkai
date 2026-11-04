@@ -74,7 +74,19 @@ pub struct ApprovalPolicy {
 
 /// Purpose a quorum rule applies to. Derived from the plan and apply flags;
 /// the v1 envelope purpose stays `execute_plan`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum QuorumPurpose {
     ExecutePlan,
@@ -1171,6 +1183,7 @@ mod tests {
                 release_digest: "abc".into(),
                 artifact_digest: "abc".into(),
                 workdir: ".".into(),
+                host: None,
                 restore: match action {
                     Action::Rollback => Some(ReleasePin {
                         release_id: "tenkai:release:api@0.9.0".into(),

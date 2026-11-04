@@ -462,6 +462,7 @@ mod tests {
             release_digest: "digest".into(),
             artifact_digest: "artifact".into(),
             workdir: "/srv/api".into(),
+            host: None,
             restore: None,
         }
     }

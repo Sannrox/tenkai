@@ -361,6 +361,7 @@ mod tests {
             release_digest: "d".into(),
             artifact_digest: "a".into(),
             workdir: ".".into(),
+            host: None,
             restore: None,
         }
     }

@@ -94,6 +94,54 @@ pub struct Step {
     pub artifact_digest: String,
     pub workdir: String,
     pub restore: Option<ReleasePin>,
+    /// Set only on steps the root-side host applier runs (ADR 0041). Absent
+    /// on every other step and omitted from the encoding, so plan digests of
+    /// steps without it are unchanged. A binary that predates the field
+    /// drops it, computes a different digest, and fails approval closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<HostStep>,
+}
+
+/// What a host step authorizes the root-side applier to do (ADR 0041).
+///
+/// The step's `release_id`, `release_digest`, `artifact_digest`, and `to`
+/// name the release whose command runs: `deploy.install` for `install`,
+/// `deploy.uninstall` for `uninstall`, `deploy.health` for `health`. `from`
+/// is the release the applier's record must hold at `expected_generation`
+/// (`None` for a product with nothing applied). `uninstall` and `health` act
+/// on the installed release, so their `from` equals `to`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostStep {
+    pub action: HostAction,
+    /// Generation of the applier's per-environment, per-product record this
+    /// step was planned against. The applier refuses any other.
+    pub expected_generation: u64,
+}
+
+/// The one action a host step runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HostAction {
+    Install,
+    Uninstall,
+    Health,
+}
+
+impl HostAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Install => "install",
+            Self::Uninstall => "uninstall",
+            Self::Health => "health",
+        }
+    }
+}
+
+impl std::fmt::Display for HostAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -612,6 +660,7 @@ mod tests {
                 release_digest: "target-digest".into(),
                 artifact_digest: "target-artifact-digest".into(),
                 workdir: "/srv/api".into(),
+                host: None,
                 restore: Some(ReleasePin {
                     release_id: "tenkai:release:api@1.0.0".into(),
                     digest: "restore-digest".into(),

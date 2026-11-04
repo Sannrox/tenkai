@@ -491,6 +491,7 @@ mod tests {
                 release_digest: outcome.release_digest.clone(),
                 artifact_digest: outcome.artifact_digest.clone(),
                 workdir: ".".into(),
+                host: None,
                 restore: None,
             }],
             state,

@@ -27,6 +27,7 @@ fn plan_with_steps(id: &str, environment: &str, steps: u32) -> Plan {
                 release_digest: digest(order + 1000),
                 artifact_digest: digest(order + 2000),
                 workdir: format!("/srv/product-{order}"),
+                host: None,
                 restore: None,
             })
             .collect(),

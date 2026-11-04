@@ -1547,6 +1547,7 @@ document = "sbom.json"
             release_digest: "fixture".into(),
             artifact_digest: "fixture".into(),
             workdir: ".".into(),
+            host: None,
             restore: None,
         };
         let mut env = crate::environment::environment(&mut ctx, "hub")
@@ -1677,6 +1678,7 @@ document = "sbom.json"
             release_digest: "fixture".into(),
             artifact_digest: "fixture".into(),
             workdir: ".".into(),
+            host: None,
             restore: None,
         };
         assert_eq!(plan_gate(&mut ctx, "hub", &[step]).await.unwrap(), None);
@@ -1738,6 +1740,7 @@ document = "sbom.json"
             release_digest: "fixture".into(),
             artifact_digest: "fixture".into(),
             workdir: ".".into(),
+            host: None,
             restore: None,
         };
         let stale = plan_gate(&mut ctx, "spoke", std::slice::from_ref(&step))

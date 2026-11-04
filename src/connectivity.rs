@@ -3697,6 +3697,7 @@ install = "true"
                 release_digest: release_digest.into(),
                 artifact_digest: artifact_digest.into(),
                 workdir: workdir.into(),
+                host: None,
                 restore: None,
             }],
             state: PlanState::Computed,
