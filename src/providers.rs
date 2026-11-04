@@ -29,6 +29,9 @@ pub const TERMINAL_OUTCOME_SCHEMA: &str = "tenkai.terminal_outcome.v1";
 /// `1.1.0` payload. The checked-in JSON Schema is
 /// `api/tenkai-terminal-outcome-v1.schema.json`.
 pub const TERMINAL_OUTCOME_SCHEMA_VERSION: &str = "1.1.0";
+/// Version, target kind, and `<tenant>:<deployment>` target id that rows
+/// queued before 0.7.0 were first delivered under; their retries keep them.
+const LEGACY_TERMINAL_OUTCOME_SCHEMA_VERSION: &str = "1.0.0";
 /// Evidence target kind of a community-host outcome: the target id is the
 /// deployment id.
 pub const DEPLOYMENT_TARGET_KIND: &str = "tenkai.deployment";
@@ -143,6 +146,13 @@ pub struct ProviderEvent {
     /// Source-instance ordering allocated durably on first delivery.
     #[serde(default)]
     pub source_sequence: Option<i64>,
+    /// Content version the event was enqueued under. Delivery stamps this
+    /// version, not the running release's, so a retry after an upgrade
+    /// resends the envelope an earlier attempt may already have admitted.
+    /// `None` for destinations without a versioned contract and for terminal
+    /// outcomes queued before 0.7.0, which keep the `1.0.0` envelope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_version: Option<String>,
 }
 
 impl ProviderEvent {
@@ -169,6 +179,15 @@ impl ProviderEvent {
         if self.source_sequence.is_some_and(|sequence| sequence <= 0) {
             return Err(ProviderError::InvalidEvidence(
                 "provider event source sequence must be positive".into(),
+            ));
+        }
+        if self
+            .schema_version
+            .as_ref()
+            .is_some_and(|version| version.trim().is_empty() || version.len() > 64)
+        {
+            return Err(ProviderError::InvalidEvidence(
+                "provider event schema version is empty or oversized".into(),
             ));
         }
         Ok(())
@@ -540,6 +559,7 @@ pub fn terminal_outcome_event(
         payload_json: serde_json::to_string(&payload)?,
         collected_at_ms: None,
         source_sequence: None,
+        schema_version: Some(TERMINAL_OUTCOME_SCHEMA_VERSION.into()),
     };
     event.validate()?;
     payload.validate_for_event(&event)?;
@@ -978,23 +998,55 @@ impl ChiseiOutcomeProvider {
         })
     }
 
+    /// Schema version, target id, and target kind for an outcome queued under
+    /// `queued_version`. Rows queued before 0.7.0 (`None`) resend exactly the
+    /// `1.0.0` envelope an earlier attempt may already have admitted.
+    fn delivery_target(
+        &self,
+        queued_version: Option<&str>,
+        payload: &TerminalOutcomePayload,
+    ) -> Result<(&'static str, String, &'static str), ProviderError> {
+        let tenant = payload.tenant_id.as_str();
+        let deployment = payload.deployment_id.as_str();
+        match queued_version {
+            None if tenant.is_empty() => Ok((
+                LEGACY_TERMINAL_OUTCOME_SCHEMA_VERSION,
+                deployment.into(),
+                DEPLOYMENT_TARGET_KIND,
+            )),
+            None => Ok((
+                LEGACY_TERMINAL_OUTCOME_SCHEMA_VERSION,
+                format!("{tenant}:{deployment}"),
+                DEPLOYMENT_TARGET_KIND,
+            )),
+            Some(TERMINAL_OUTCOME_SCHEMA_VERSION) if tenant.is_empty() == self.tenant_mode => {
+                Err(ProviderError::InvalidEvidence(
+                    "terminal outcome tenant scope does not match the registered target kind"
+                        .into(),
+                ))
+            }
+            Some(TERMINAL_OUTCOME_SCHEMA_VERSION) if self.tenant_mode => Ok((
+                TERMINAL_OUTCOME_SCHEMA_VERSION,
+                tenant_deployment_target_id(tenant, deployment),
+                TENANT_DEPLOYMENT_TARGET_KIND,
+            )),
+            Some(TERMINAL_OUTCOME_SCHEMA_VERSION) => Ok((
+                TERMINAL_OUTCOME_SCHEMA_VERSION,
+                deployment.into(),
+                DEPLOYMENT_TARGET_KIND,
+            )),
+            Some(_) => Err(ProviderError::InvalidEvidence(
+                "terminal outcome was queued under an unsupported schema version".into(),
+            )),
+        }
+    }
+
     fn evidence(&self, event: &ProviderEvent) -> Result<EvidenceEnvelope, ProviderError> {
         event.validate()?;
         let payload: TerminalOutcomePayload = serde_json::from_str(&event.payload_json)?;
         payload.validate_for_event(event)?;
-        if payload.tenant_id.is_empty() == self.tenant_mode {
-            return Err(ProviderError::InvalidEvidence(
-                "terminal outcome tenant scope does not match the registered target kind".into(),
-            ));
-        }
-        let (target_external_id, target_kind) = if self.tenant_mode {
-            (
-                tenant_deployment_target_id(&payload.tenant_id, &payload.deployment_id),
-                TENANT_DEPLOYMENT_TARGET_KIND,
-            )
-        } else {
-            (payload.deployment_id.clone(), DEPLOYMENT_TARGET_KIND)
-        };
+        let (schema_version, target_external_id, target_kind) =
+            self.delivery_target(event.schema_version.as_deref(), &payload)?;
         let content_value: serde_json::Value = serde_json::from_str(&event.payload_json)?;
         let content_json = serde_json::to_vec(&content_value)?;
         let content_digest = format!("{:x}", Sha256::digest(&content_json));
@@ -1015,7 +1067,7 @@ impl ChiseiOutcomeProvider {
             evidence_type: "operations.terminal_outcome".into(),
             signal: "other".into(),
             schema_id: TERMINAL_OUTCOME_SCHEMA.into(),
-            schema_version: TERMINAL_OUTCOME_SCHEMA_VERSION.into(),
+            schema_version: schema_version.into(),
             schema_compatibility: "exact".into(),
             observed_at_ms: payload.observed_at,
             collected_at_ms: event.collected_at_ms.ok_or_else(|| {
@@ -1323,6 +1375,7 @@ mod tests {
             payload_json: "{}".into(),
             collected_at_ms: None,
             source_sequence: None,
+            schema_version: None,
         };
         let generic_record = provider_event_record(OUTCOME_PROVIDER_KIND, &generic, 1_000).unwrap();
         assert_eq!(
@@ -1384,6 +1437,84 @@ mod tests {
         // An adapter only emits the target kind its registration attests.
         assert!(community_provider.evidence(&collected_a).is_err());
         assert!(tenant_provider.evidence(&collected_community).is_err());
+    }
+
+    /// Outcomes queued before 0.7.0 carry no version. A retry after the
+    /// upgrade resends the `1.0.0` envelope an earlier attempt may already
+    /// have admitted, and a replayed enqueue keeps the stored row.
+    #[tokio::test]
+    async fn outcomes_queued_before_the_version_bump_keep_their_envelope() {
+        let event = terminal_event();
+        let record = provider_event_record(OUTCOME_PROVIDER_KIND, &event, 1_000).unwrap();
+        let bound = bind_tenant_to_provider_events(Some("tenant:a"), std::slice::from_ref(&record))
+            .unwrap();
+        let mut current: ProviderEvent = serde_json::from_str(&bound[0].payload_json).unwrap();
+        assert_eq!(
+            current.schema_version.as_deref(),
+            Some(TERMINAL_OUTCOME_SCHEMA_VERSION)
+        );
+        current.collected_at_ms = Some(1_000);
+        current.source_sequence = Some(1);
+        let legacy = ProviderEvent {
+            schema_version: None,
+            ..current.clone()
+        };
+        let tenant_provider = ChiseiOutcomeProvider::new(
+            "http://127.0.0.1:50051",
+            "tenkai-prod",
+            "tenkai.outcome",
+            None,
+            true,
+        )
+        .unwrap();
+
+        let resent = tenant_provider.evidence(&legacy).unwrap();
+        assert_eq!(resent.schema_version, "1.0.0");
+        assert_eq!(resent.target_kind, DEPLOYMENT_TARGET_KIND);
+        assert_eq!(
+            resent.target_external_id,
+            "tenant:a:tenkai:deployment:prod:api:1"
+        );
+        let fresh = tenant_provider.evidence(&current).unwrap();
+        assert_eq!(fresh.schema_version, TERMINAL_OUTCOME_SCHEMA_VERSION);
+        assert_eq!(
+            fresh.target_external_id,
+            "tenant%3Aa:tenkai:deployment:prod:api:1"
+        );
+        assert_eq!(resent.idempotency_key, fresh.idempotency_key);
+        assert_eq!(resent.content_json, fresh.content_json);
+
+        let unknown = ProviderEvent {
+            schema_version: Some("9.0.0".into()),
+            ..current.clone()
+        };
+        assert!(tenant_provider.evidence(&unknown).is_err());
+
+        let legacy_queued = ProviderEvent {
+            collected_at_ms: None,
+            source_sequence: None,
+            ..legacy
+        };
+        let store = SqliteStore::open_in_memory().unwrap();
+        store
+            .enqueue_provider_event(&ProviderEventRecord {
+                payload_json: serde_json::to_string(&legacy_queued).unwrap(),
+                ..bound[0].clone()
+            })
+            .unwrap();
+        store.enqueue_provider_event(&bound[0]).unwrap();
+        let replayed_content = ProviderEvent {
+            payload_json: event.payload_json.clone(),
+            ..legacy_queued
+        };
+        assert!(
+            store
+                .enqueue_provider_event(&ProviderEventRecord {
+                    payload_json: serde_json::to_string(&replayed_content).unwrap(),
+                    ..bound[0].clone()
+                })
+                .is_err()
+        );
     }
 
     /// A tenant containing `:` or `%` cannot shift the tenant/deployment split.
@@ -1583,6 +1714,7 @@ mod tests {
             payload_json: "{}".into(),
             collected_at_ms: None,
             source_sequence: None,
+            schema_version: None,
         };
         let generic_record =
             provider_event_record(OUTCOME_PROVIDER_KIND, &generic_event, 1_000).unwrap();
@@ -2060,6 +2192,7 @@ mod tests {
             payload_json: "{\"result\":\"ok\"}".into(),
             collected_at_ms: None,
             source_sequence: None,
+            schema_version: None,
         };
         enqueue_optional_event(&store, "audit", &event, 100).unwrap();
         enqueue_optional_event(&store, "audit", &event, 100).unwrap();
@@ -2122,6 +2255,7 @@ mod tests {
             payload_json: "{}".into(),
             collected_at_ms: None,
             source_sequence: None,
+            schema_version: None,
         };
         enqueue_optional_event(&store, "audit", &event, 10).unwrap();
         enqueue_optional_event(&store, "outcome", &event, 10).unwrap();

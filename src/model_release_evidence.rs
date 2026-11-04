@@ -763,6 +763,7 @@ pub fn runtime_evidence_event(
         payload_json,
         collected_at_ms: None,
         source_sequence: None,
+        schema_version: None,
     };
     event.validate().map_err(anyhow::Error::from)?;
     Ok(event)

@@ -124,9 +124,11 @@ any change to its content changes the version. An additive change (a new
 optional field; every older payload stays valid) bumps the minor version
 under the same `.v1` id. A change that makes an older payload invalid needs a
 new id (`.v2`). `1.1.0` added the optional `tenant_id` (#867). Every Tenkai
-host emits the current version, community and tenant-mode alike; the version
-is stamped at delivery, so rows queued by an older release deliver under it
-with their original event ids.
+host enqueues the current version, community and tenant-mode alike. The
+outbox envelope records the version an event was enqueued under, and every
+delivery attempt uses that version, so a retry after an upgrade resends the
+envelope an earlier attempt may already have admitted. A replayed enqueue of
+the same event keeps the stored version.
 
 When a failed restore makes deployment state unknown, Tenkai records the
 originating deployment, plan, and step identities on the environment in the
@@ -311,10 +313,17 @@ registration:
    `@1.1.0` (and, on a tenant-mode hub, `target_kind=tenkai.tenant_deployment`).
    A host with the old attestation refuses to start. During a rolling
    upgrade, old replicas keep sending `1.0.0` and new ones `1.1.0`.
-3. Rows already queued deliver as `1.1.0` with their original event ids and
-   content; nothing is rewritten. Once no older replica runs and env inspect
-   shows no `retrying` outcome from before the upgrade, `1.0.0` and, on a
-   tenant-mode hub, the `tenkai.deployment` target kind can be removed.
+3. Outcomes queued before the upgrade keep the `1.0.0` envelope (and, on a
+   tenant-mode hub, target kind `tenkai.deployment` with the unescaped
+   `<tenant>:<deployment ID>`) on every retry, so an admission whose
+   acknowledgement was lost is not resent with a different envelope. Once no
+   older replica runs and env inspect shows no undelivered outcome from
+   before the upgrade, `1.0.0` and, on a tenant-mode hub, the
+   `tenkai.deployment` target kind can be removed.
+
+Rolling back to an earlier release delivers queued `1.1.0` outcomes as
+`1.0.0`, because earlier releases ignore the recorded version; keep both
+registrations until a rollback is no longer possible.
 
 Evidence keyed on a tenant-mode target id sees a new key for later outcomes:
 `tenkai.tenant_deployment` with the encoded tenant. Community target ids do

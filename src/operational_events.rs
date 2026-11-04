@@ -143,6 +143,7 @@ fn record(
             payload_json: serde_json::to_string(&envelope)?,
             collected_at_ms: None,
             source_sequence: None,
+            schema_version: None,
         },
         now,
     )

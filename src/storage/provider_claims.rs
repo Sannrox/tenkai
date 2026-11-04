@@ -260,9 +260,11 @@ pub(crate) fn enqueue_provider_event_in(
     Ok(())
 }
 
-/// A first-delivery collection timestamp is the only field allowed to be
-/// added to a durable provider envelope after enqueue. Preserve enqueue
-/// idempotency when the same event is submitted again after that binding.
+/// Delivery metadata is the only part of a durable provider envelope that
+/// may differ from a replayed enqueue of the same event: the first-delivery
+/// collection timestamp and sequence, added after enqueue, and the content
+/// `schema_version`, pinned by whichever release enqueued the event first
+/// (the stored row keeps it). Preserve enqueue idempotency across both.
 pub fn provider_event_payloads_match(left: &str, right: &str) -> bool {
     if left == right {
         return true;
@@ -282,17 +284,16 @@ pub fn provider_event_payloads_match(left: &str, right: &str) -> bool {
     };
     let left_metadata = metadata(left);
     let right_metadata = metadata(right);
-    if left_metadata == right_metadata
-        || !((left_metadata.iter().all(Option::is_none)
-            && right_metadata.iter().all(Option::is_some))
-            || (right_metadata.iter().all(Option::is_none)
-                && left_metadata.iter().all(Option::is_some)))
-    {
+    let one_side_collected = (left_metadata.iter().all(Option::is_none)
+        && right_metadata.iter().all(Option::is_some))
+        || (right_metadata.iter().all(Option::is_none)
+            && left_metadata.iter().all(Option::is_some));
+    if left_metadata != right_metadata && !one_side_collected {
         return false;
     }
-    left.remove("collected_at_ms");
-    left.remove("source_sequence");
-    right.remove("collected_at_ms");
-    right.remove("source_sequence");
+    for key in ["collected_at_ms", "source_sequence", "schema_version"] {
+        left.remove(key);
+        right.remove(key);
+    }
     left == right
 }
