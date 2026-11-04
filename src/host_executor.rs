@@ -300,7 +300,7 @@ impl HostExecutor {
             file.sync_all()?;
             let artifacts = staging.join(ARTIFACTS_DIR);
             std::fs::DirBuilder::new().mode(0o700).create(&artifacts)?;
-            for input in inputs {
+            for input in disjoint_inputs(inputs)? {
                 let relative = Path::new(input);
                 let target = artifacts.join(relative);
                 if let Some(parent) = target.parent() {
@@ -452,6 +452,33 @@ fn read_bounded(path: &Path, max: u64) -> Result<Option<Vec<u8>>> {
         bail!("{} is larger than {max} bytes", path.display());
     }
     Ok(Some(bytes))
+}
+
+/// The inputs to copy, each source path once: an input inside another input
+/// is already part of that copy, as the applier copies them. The digest is
+/// still computed over the full list. Every input must be a plain relative
+/// path.
+fn disjoint_inputs(inputs: &[String]) -> Result<Vec<&str>> {
+    let mut sorted: Vec<&str> = inputs.iter().map(String::as_str).collect();
+    for input in &sorted {
+        if Path::new(input)
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            bail!("deploy input must be a relative path without '..': {input}");
+        }
+    }
+    sorted.sort_by(|left, right| Path::new(left).cmp(Path::new(right)));
+    let mut kept: Vec<&str> = Vec::new();
+    for input in sorted {
+        if !kept
+            .iter()
+            .any(|parent| Path::new(input).starts_with(Path::new(parent)))
+        {
+            kept.push(input);
+        }
+    }
+    Ok(kept)
 }
 
 /// Copy one deploy input (a file or a directory tree) with its permission

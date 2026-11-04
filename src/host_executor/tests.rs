@@ -140,6 +140,30 @@ fn spool_writes_the_request_and_an_exact_copy_of_the_inputs() {
 }
 
 #[test]
+fn spool_copies_an_input_inside_another_input_once() {
+    let dirs = Dirs::new("overlap");
+    let (request, workdir, _) = request(&dirs);
+    let inputs = vec!["bin/install.sh".to_string(), "bin".to_string()];
+    let digest = crate::manifest::artifact_digest(&workdir, &inputs).unwrap();
+
+    let instance = dirs
+        .executor
+        .spool(&request, &workdir, &inputs, &digest)
+        .unwrap();
+
+    let artifacts = dirs.executor.spool_dir.join(&instance).join(ARTIFACTS_DIR);
+    assert_eq!(
+        crate::manifest::artifact_digest(&artifacts, &inputs).unwrap(),
+        digest
+    );
+    assert!(
+        dirs.executor
+            .spool(&request, &workdir, &["../etc".to_string()], &digest)
+            .is_err()
+    );
+}
+
+#[test]
 fn spool_refuses_links_in_the_release_workdir() {
     let dirs = Dirs::new("links");
     let (request, workdir, digest) = request(&dirs);
