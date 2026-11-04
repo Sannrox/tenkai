@@ -24,6 +24,8 @@ mod outcome;
 mod plan_completion;
 mod product_execution;
 mod release_content;
+#[cfg(test)]
+mod release_executor_tests;
 mod start_admission;
 mod step_lifecycle;
 
@@ -40,7 +42,7 @@ use release_content::{ReleaseContent, admit as admit_release, verify_integrity};
 
 #[derive(Clone)]
 struct TargetAdapters<'a> {
-    software: Option<&'a dyn crate::software_executor::SoftwareExecutor>,
+    software: &'a crate::software_executor::SoftwareExecutors,
     model_runtime: Option<&'a dyn crate::model_runtime::ModelRuntimeExecutorFactory>,
     worker_lifecycle: Option<&'a dyn crate::worker_pool::WorkerLifecyclePort>,
     artifact_registry: Option<&'a dyn crate::oci_artifact::ArtifactRegistry>,
@@ -366,7 +368,7 @@ async fn execute_locked(
             .as_deref()
             .is_some_and(|reason| !reason.trim().is_empty());
         let adapters = TargetAdapters {
-            software: options.software_executor,
+            software: options.software_executors,
             model_runtime: options.model_runtime_executor,
             worker_lifecycle: options.worker_lifecycle,
             artifact_registry: options.artifact_registry,

@@ -1430,7 +1430,7 @@ max_startup_seconds = 30
                 authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
                     reason: "classical onnx lab fixture",
                 },
-                software_executor: None,
+                software_executors: crate::software_executor::SoftwareExecutors::default(),
                 model_runtime_executor: None,
                 worker_lifecycle: None,
                 artifact_registry: None,
@@ -1540,7 +1540,7 @@ max_startup_seconds = 30
                 authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
                     reason: "classical onnx lab rollback",
                 },
-                software_executor: None,
+                software_executors: crate::software_executor::SoftwareExecutors::default(),
                 model_runtime_executor: None,
                 worker_lifecycle: None,
                 artifact_registry: None,
@@ -1600,7 +1600,7 @@ max_startup_seconds = 30
                     authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
                         reason: "classical onnx digest mismatch",
                     },
-                    software_executor: None,
+                    software_executors: crate::software_executor::SoftwareExecutors::default(),
                     model_runtime_executor: None,
                     worker_lifecycle: None,
                     artifact_registry: None,

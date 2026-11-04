@@ -10,7 +10,7 @@ Source: `src/software_executor.rs` (port, fake, selector) and
 `crates/tenkai-executor` (Helm, kubectl, Docker CLI, in-process Kubernetes).
 Apply wiring: `src/apply.rs`. Rollout-time harness: `src/rollout_time.rs`,
 baseline `perf/rollout-baseline.json`. Hosts call `tenkai_executor::install()`
-before `selected_software_executor`.
+before `SoftwareExecutors::from_process`.
 
 ## Strategies
 
@@ -33,6 +33,7 @@ out of scope here. Custom-resource operators are refused.
 | Type | Role |
 | --- | --- |
 | `SoftwareExecutor` | apply / remove / observe / restart, plus `cleanup_failed_apply` (defaults to remove) |
+| `SoftwareExecutors` | the process default plus adapters for declared kinds; resolves one per release |
 | `FakeSoftwareExecutor` | CI without cluster |
 | `HelmSoftwareExecutor` | Helm chart path (`tenkai-executor`) |
 | `KubernetesSoftwareExecutor` | Native manifests path (`kubectl`, `tenkai-executor`) |
@@ -40,14 +41,43 @@ out of scope here. Custom-resource operators are refused.
 | `DockerHostExecutor` | Digest-pinned host containers, networks, and volumes (`tenkai-executor`) |
 
 Hosts (`tenkaictl`, the reconciler) call `tenkai_executor::install()`, then
-select the adapter from `TENKAI_SOFTWARE_EXECUTOR` and pass it into apply.
-A release can also declare its executor with
-[`[deploy] executor`](manifest.md#executor), which accepts the same names.
-Apply does not read that env var during activate/deactivate. Helm and kubectl
+pass `SoftwareExecutors::from_process()` into apply: the
+`TENKAI_SOFTWARE_EXECUTOR` default plus every installed adapter. Apply does not
+read that env var during activate/deactivate. Helm and kubectl
 failures capture sanitized stderr. The in-process path waits on workload
 conditions with a short backoff starting at 100 ms (capped at 200 ms) and fails
 closed when `Available` is not `True`, naming the condition. A foreign field
 manager is an explicit conflict, not a silent overwrite.
+
+## Per-release selection
+
+A release can declare its executor with
+[`[deploy] executor`](manifest.md#executor), which accepts the same names
+([ADR 0041](decisions/0041-per-release-executor-and-privileged-host-releases.md)).
+Every operation resolves the executor of the release it acts on: activating a
+target uses the target's, and removing or restoring the previous release uses
+the previous release's. That covers apply, rollback, failed-apply recovery,
+restart, and reconcile observation. One process can therefore apply a `shell`
+release and a `kubernetes-inprocess` release in the same environment.
+
+- A release without the field uses the process default, exactly as before.
+- A declared `shell` always runs `deploy.install`, even when the process default
+  is another executor.
+- A declared executor this process does not have fails the step before anything
+  runs and names it. It never falls back to another executor. `host` is not
+  available yet.
+- A product keeps one executor in an environment. A plan whose target release
+  resolves to a different executor than the installed release of that product
+  is refused, at plan creation and again at apply, and the error names both.
+  Kinds are compared, not text: `k8s` and `kubernetes` are the same executor,
+  and an undeclared release counts as the process default. To move a product,
+  remove it and install it again.
+- A `host` release is never cleaned up, restored, or re-applied automatically
+  after a failure, and reconcile neither observes nor restarts it. A failed host
+  step stays failed until an approved rollback plan runs.
+
+Resolution reads only signed release content and the process configuration, so
+two server versions in a rolling deploy agree on undeclared releases.
 
 Kubeconfig is never placed on CLI argv and is never stored as file bytes in
 SQLite. The in-process path requires an environment-scoped file path:

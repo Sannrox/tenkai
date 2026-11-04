@@ -72,11 +72,72 @@ fn failed_target_is_held(
         .is_some_and(|failed_target| failed_target == release)
 }
 
-fn cluster_observe_executor() -> Option<Box<dyn crate::software_executor::SoftwareExecutor>> {
-    let value = std::env::var("TENKAI_SOFTWARE_EXECUTOR").ok()?;
-    crate::software_executor::software_executor_for(
-        crate::software_executor::SoftwareExecutorKind::from_name(&value)?,
+/// The stored manifest of a catalog release.
+async fn stored_release_manifest(
+    ctx: &mut Ctx,
+    release: &str,
+) -> Result<crate::manifest::Manifest> {
+    let object = ctx
+        .get(release)
+        .await?
+        .with_context(|| format!("release {release} not found"))?;
+    let raw = object
+        .properties
+        .get("manifest")
+        .with_context(|| format!("release {release} has no stored manifest"))?;
+    crate::manifest::parse_raw(raw).with_context(|| format!("parsing stored manifest of {release}"))
+}
+
+/// The executor the stored manifest of `release` declares.
+pub(crate) async fn stored_release_executor(
+    ctx: &mut Ctx,
+    release: &str,
+) -> Result<Option<crate::software_executor::SoftwareExecutorKind>> {
+    Ok(stored_release_manifest(ctx, release).await?.deploy.executor)
+}
+
+/// Refuse a step whose target release resolves to a different executor than
+/// the installed release of the same product (ADR 0041), when the plan is
+/// made. Apply admission checks again and refuses releases that are missing,
+/// so a step naming one is left to it. Install and restart steps have
+/// nothing to compare.
+async fn require_same_executor(
+    ctx: &mut Ctx,
+    executors: &crate::software_executor::SoftwareExecutors,
+    step: &Step,
+) -> Result<()> {
+    let Some(installed) = step.from.as_deref() else {
+        return Ok(());
+    };
+    if step.action == Action::Restart {
+        return Ok(());
+    }
+    let installed = release_id(&step.product, installed);
+    for release in [step.release_id.as_str(), installed.as_str()] {
+        if ctx.get(release).await?.is_none() {
+            return Ok(());
+        }
+    }
+    executors.require_same_executor(
+        &step.product,
+        stored_release_executor(ctx, &installed).await?,
+        stored_release_executor(ctx, &step.release_id).await?,
     )
+}
+
+/// The adapter reconcile observes a deployed release with: the one its own
+/// executor resolves to. The shell path and the unnamed test default observe
+/// nothing, as before, and host releases get no periodic observation (ADR 0041
+/// section 2).
+fn observe_executor(
+    executors: &crate::software_executor::SoftwareExecutors,
+    manifest: &crate::manifest::Manifest,
+) -> Result<Option<std::sync::Arc<dyn crate::software_executor::SoftwareExecutor>>> {
+    let declared = manifest.deploy.executor;
+    match executors.effective_kind(declared) {
+        None | Some(crate::software_executor::SoftwareExecutorKind::Host) => Ok(None),
+        Some(_) => executors.resolve(declared),
+    }
 }
 
 async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateInput>, Vec<Step>)> {
@@ -106,6 +167,7 @@ async fn compute_snapshot_with_policy(
         }
     }
 
+    let executors = crate::software_executor::SoftwareExecutors::from_process();
     let mut inputs = Vec::new();
     let mut pending = Vec::new();
     let mut held_model = false;
@@ -188,8 +250,19 @@ async fn compute_snapshot_with_policy(
             Some(v) if v == desired => {
                 let mut restart = !policy.observe_live
                     && failed_target_is_held(&env_obj.properties, &product, &release);
-                if policy.observe_live
-                    && let Some(executor) = cluster_observe_executor()
+                // Reconcile observes each release with its own executor, and
+                // never restarts a host release on its own (ADR 0041).
+                let live = if policy.observe_live {
+                    Some(stored_release_manifest(ctx, &release).await?)
+                } else {
+                    None
+                };
+                let host = live.as_ref().is_some_and(|manifest| {
+                    manifest.deploy.executor
+                        == Some(crate::software_executor::SoftwareExecutorKind::Host)
+                });
+                if let Some(manifest) = live.as_ref()
+                    && let Some(executor) = observe_executor(&executors, manifest)?
                 {
                     let request = crate::software_executor::request_from_parts(
                         product.clone(),
@@ -236,7 +309,7 @@ async fn compute_snapshot_with_policy(
                 {
                     restart = true;
                 }
-                if restart {
+                if restart && !host {
                     pending.push((
                         product,
                         Action::Restart,
@@ -506,6 +579,10 @@ async fn create_with_content(
     steps: &mut [Step],
     recalled_recovery_reason: Option<String>,
 ) -> Result<Plan> {
+    let executors = crate::software_executor::SoftwareExecutors::from_process();
+    for step in steps.iter() {
+        require_same_executor(ctx, &executors, step).await?;
+    }
     let mut plan = assemble_plan(env, inputs, steps, recalled_recovery_reason)?;
     // Optional advisory priors (default off). Never hard-block or change steps.
     if let Ok(inspect) = inspect_environment(ctx, env).await {
@@ -634,6 +711,46 @@ pub(super) async fn restart_step(ctx: &mut Ctx, env: &str, product: &str) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reconcile_observes_with_the_release_executor_and_never_a_host_release() {
+        use crate::software_executor::{
+            FakeSoftwareExecutor, SoftwareExecutor, SoftwareExecutorKind as Kind, SoftwareExecutors,
+        };
+        let manifest = |executor: &str| {
+            crate::manifest::parse_raw(&format!(
+                "[product]\nname = \"api\"\nversion = \"1.0.0\"\n\n[deploy]\ninstall = \"true\"\n{executor}\n"
+            ))
+            .unwrap()
+        };
+        let in_process: std::sync::Arc<dyn SoftwareExecutor> =
+            std::sync::Arc::new(FakeSoftwareExecutor::new());
+        let executors = SoftwareExecutors::default()
+            .with_adapter(Kind::KubernetesInProcess, in_process.clone())
+            .with_adapter(Kind::Host, std::sync::Arc::new(FakeSoftwareExecutor::new()));
+        let observed =
+            observe_executor(&executors, &manifest("executor = \"kubernetes-inprocess\""))
+                .unwrap()
+                .unwrap();
+        assert!(std::sync::Arc::ptr_eq(&observed, &in_process));
+        // The shell default and a host release are never observed.
+        for executor in ["", "executor = \"host\""] {
+            assert!(
+                observe_executor(&executors, &manifest(executor))
+                    .unwrap()
+                    .is_none(),
+                "{executor}"
+            );
+        }
+        // Nor is an unnamed test default, as before.
+        let fake_default =
+            SoftwareExecutors::with_default(std::sync::Arc::new(FakeSoftwareExecutor::new()));
+        assert!(
+            observe_executor(&fake_default, &manifest(""))
+                .unwrap()
+                .is_none()
+        );
+    }
 
     #[test]
     fn restart_is_neutral_for_model_routing_order() {

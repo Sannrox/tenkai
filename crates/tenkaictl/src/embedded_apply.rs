@@ -85,7 +85,7 @@ pub(crate) async fn run(
                     skip_gates,
                     emergency_reason: emergency_reason.as_deref(),
                     authorization,
-                    software_executor: None,
+                    software_executors: tenkai::software_executor::SoftwareExecutors::default(),
                     model_runtime_executor:
                         tenkai::model_runtime::selected_model_runtime_executor_factory(),
                     worker_lifecycle: None,
@@ -189,15 +189,14 @@ pub(crate) async fn run_plan(
     execution: apply::ExecutionOptions<'_>,
     result_context: PlanResultContext<'_>,
 ) -> Result<()> {
-    let software =
-        tenkai::software_executor::selected_software_executor().map(std::sync::Arc::from);
+    let software = tenkai::software_executor::SoftwareExecutors::from_process();
     let worker_lifecycle =
         tenkai::worker_pool::selected_worker_lifecycle()?.map(std::sync::Arc::from);
     let execution = apply::ExecutionOptions {
         skip_gates: execution.skip_gates,
         emergency_reason: execution.emergency_reason,
         authorization: execution.authorization,
-        software_executor: software,
+        software_executors: software,
         model_runtime_executor: tenkai::model_runtime::selected_model_runtime_executor_factory(),
         worker_lifecycle,
         artifact_registry: tenkai::oci_artifact::selected_registry()?,

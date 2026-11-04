@@ -58,7 +58,7 @@ async fn compatible_migration_approves_executes_resumes_and_rolls_back() {
             authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
                 reason: "sneak apply during migration",
             },
-            software_executor: None,
+            software_executors: crate::software_executor::SoftwareExecutors::default(),
             model_runtime_executor: None,
             worker_lifecycle: None,
             artifact_registry: None,

@@ -923,9 +923,9 @@ mod tests {
             authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
                 reason: "slo gate fixture",
             },
-            software_executor: Some(std::sync::Arc::new(
-                crate::software_executor::FakeSoftwareExecutor::new(),
-            )),
+            software_executors: crate::software_executor::SoftwareExecutors::with_default(
+                std::sync::Arc::new(crate::software_executor::FakeSoftwareExecutor::new()),
+            ),
             model_runtime_executor: None,
             worker_lifecycle: None,
             artifact_registry: None,

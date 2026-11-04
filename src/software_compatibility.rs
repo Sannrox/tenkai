@@ -836,7 +836,7 @@ mod tests {
             authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
                 reason: "compatibility lifecycle fixture",
             },
-            software_executor: Some(executor),
+            software_executors: crate::software_executor::SoftwareExecutors::with_default(executor),
             model_runtime_executor: None,
             worker_lifecycle: None,
             artifact_registry: None,

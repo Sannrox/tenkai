@@ -819,7 +819,7 @@ max_startup_seconds = 30
                 authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
                     reason: "model_runtime canary e2e fixture",
                 },
-                software_executor: None,
+                software_executors: crate::software_executor::SoftwareExecutors::default(),
                 model_runtime_executor: None,
                 worker_lifecycle: None,
                 artifact_registry: None,

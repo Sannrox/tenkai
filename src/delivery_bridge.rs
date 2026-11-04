@@ -831,7 +831,7 @@ exclude_requester = true
                 trust_roots: trust,
                 requester: None,
             },
-            software_executor: None,
+            software_executors: crate::software_executor::SoftwareExecutors::default(),
             model_runtime_executor: None,
             worker_lifecycle: None,
             artifact_registry: None,

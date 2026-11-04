@@ -663,7 +663,10 @@ mod tests {
                         authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
                             reason: "otel delivery drill",
                         },
-                        software_executor: Some(software.clone()),
+                        software_executors:
+                            crate::software_executor::SoftwareExecutors::with_default(
+                                software.clone(),
+                            ),
                         model_runtime_executor: None,
                         worker_lifecycle: None,
                         artifact_registry: None,
@@ -688,7 +691,10 @@ mod tests {
                         authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
                             reason: "otel delivery drill",
                         },
-                        software_executor: Some(software.clone()),
+                        software_executors:
+                            crate::software_executor::SoftwareExecutors::with_default(
+                                software.clone(),
+                            ),
                         model_runtime_executor: None,
                         worker_lifecycle: None,
                         artifact_registry: None,
@@ -716,7 +722,8 @@ mod tests {
                         authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
                             reason: "otel delivery drill",
                         },
-                        software_executor: Some(software),
+                        software_executors:
+                            crate::software_executor::SoftwareExecutors::with_default(software),
                         model_runtime_executor: None,
                         worker_lifecycle: None,
                         artifact_registry: None,

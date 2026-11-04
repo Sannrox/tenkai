@@ -779,7 +779,7 @@ document = "module.json"
                 authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
                     reason: "workshop module e2e",
                 },
-                software_executor: None,
+                software_executors: crate::software_executor::SoftwareExecutors::default(),
                 model_runtime_executor: None,
                 worker_lifecycle: None,
                 artifact_registry: None,
@@ -827,7 +827,7 @@ document = "module.json"
                 authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
                     reason: "workshop module restart",
                 },
-                software_executor: None,
+                software_executors: crate::software_executor::SoftwareExecutors::default(),
                 model_runtime_executor: None,
                 worker_lifecycle: None,
                 artifact_registry: None,
@@ -860,7 +860,7 @@ document = "module.json"
                 authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
                     reason: "workshop module upgrade",
                 },
-                software_executor: None,
+                software_executors: crate::software_executor::SoftwareExecutors::default(),
                 model_runtime_executor: None,
                 worker_lifecycle: None,
                 artifact_registry: None,
@@ -894,7 +894,7 @@ document = "module.json"
                 authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
                     reason: "workshop module rollback",
                 },
-                software_executor: None,
+                software_executors: crate::software_executor::SoftwareExecutors::default(),
                 model_runtime_executor: None,
                 worker_lifecycle: None,
                 artifact_registry: None,
@@ -1078,7 +1078,7 @@ document = "module.json"
                 authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
                     reason: "workshop restore setup",
                 },
-                software_executor: None,
+                software_executors: crate::software_executor::SoftwareExecutors::default(),
                 model_runtime_executor: None,
                 worker_lifecycle: None,
                 artifact_registry: None,
@@ -1109,7 +1109,7 @@ document = "module.json"
                 authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
                     reason: "workshop restore fail",
                 },
-                software_executor: None,
+                software_executors: crate::software_executor::SoftwareExecutors::default(),
                 model_runtime_executor: None,
                 worker_lifecycle: None,
                 artifact_registry: None,

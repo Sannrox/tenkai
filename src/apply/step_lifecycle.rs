@@ -47,6 +47,37 @@ pub(super) async fn execute(
         }
         None => None,
     };
+    // Each release runs with its own executor (ADR 0041). Resolve both before
+    // anything mutates, so an unavailable one fails closed and is never
+    // replaced by another, and refuse a step that changes the product's executor.
+    adapters
+        .software
+        .resolve(content.manifest.deploy.executor)?;
+    if let Some(restore) = restore_content.as_ref() {
+        adapters
+            .software
+            .resolve(restore.manifest.deploy.executor)?;
+    }
+    if step.action != Action::Restart
+        && let Some(installed) = step.from.as_deref()
+    {
+        // The restore pin, when there is one, is the installed release.
+        let installed = match restore_content.as_ref() {
+            Some(restore) => restore.manifest.deploy.executor,
+            None => {
+                crate::plan::stored_release_executor(
+                    ctx,
+                    &crate::ontology::release_id(&step.product, installed),
+                )
+                .await?
+            }
+        };
+        adapters.software.require_same_executor(
+            &step.product,
+            installed,
+            content.manifest.deploy.executor,
+        )?;
+    }
     let env_object = crate::environment::environment(ctx, environment).await?;
     content.artifact_pulls = crate::oci_artifact::verify_environment_pull(
         &content.manifest.artifacts,
@@ -294,6 +325,31 @@ pub(super) async fn execute(
     Ok(outcome)
 }
 
+/// Why a failed host step is left failed (ADR 0041 section 2).
+const HOST_NOT_RESTORED: &str =
+    "host releases are never restored or re-applied automatically; run an approved rollback plan";
+
+/// Whether a failure of `content` may trigger unapproved cleanup, restore, or
+/// re-apply. A host step authorizes one release and one action, once.
+fn restores_automatically(content: &ReleaseContent) -> bool {
+    content.manifest.deploy.executor != Some(crate::software_executor::SoftwareExecutorKind::Host)
+}
+
+/// A failed host step: no automatic recovery, and the deployment is unknown.
+fn host_step_failed(
+    step: &Step,
+    detail: String,
+) -> (Outcome, Option<crate::environment::DeploymentTransition>) {
+    (
+        Outcome::new(
+            step.clone(),
+            StepOutcomeStatus::Failed,
+            format!("{detail}; {HOST_NOT_RESTORED}"),
+        ),
+        Some(crate::environment::DeploymentTransition::Unknown),
+    )
+}
+
 async fn recover_restart(
     ctx: &mut Ctx,
     step_context: StepContext<'_>,
@@ -301,6 +357,9 @@ async fn recover_restart(
     content: &ReleaseContent,
     detail: String,
 ) -> Result<(Outcome, Option<crate::environment::DeploymentTransition>)> {
+    if !restores_automatically(content) {
+        return Ok(host_step_failed(step, detail));
+    }
     let reapplied = match product_execution::activate(
         ctx,
         step_context.lease,
@@ -340,6 +399,9 @@ async fn recover_activation(
     detail: String,
 ) -> Result<(Outcome, Option<crate::environment::DeploymentTransition>)> {
     let started_at_ms = step_context.started_at_ms;
+    if !restores_automatically(content) {
+        return Ok(host_step_failed(step, detail));
+    }
     let (cleaned, detail) = product_execution::cleanup_failed_activation(
         ctx,
         step_context.lease,
@@ -483,6 +545,12 @@ async fn compensate_activation(
         return Ok(());
     }
     let failure = format!("deployment bookkeeping failed after activation: {failure}");
+    if !restores_automatically(content) {
+        let _ =
+            crate::environment::record_unknown(ctx, lease, environment, &step.product, &failure)
+                .await;
+        return Ok(());
+    }
     let cleaned = match product_execution::deactivate(ctx, lease, content, adapters.clone()).await {
         Ok(Ok(())) => true,
         Err(error) if is_execution_fence_lost(&error) => return Err(error),
@@ -579,6 +647,18 @@ async fn restore_after_health_gate(
             .await;
         }
     };
+    if !restores_automatically(&current) {
+        return record_live_restore_failure(
+            ctx,
+            started_at_ms,
+            lease,
+            environment,
+            plan_id,
+            step,
+            format!("{detail}; {HOST_NOT_RESTORED}"),
+        )
+        .await;
+    }
     let mut previous = match admit_release(ctx, pin, environment, &step.product, false).await {
         Ok(content) => content,
         Err(error) => {
@@ -659,7 +739,10 @@ async fn restore_after_health_gate(
     }
     let software_shell_without_cleanup = current.manifest.product.kind.policy().target()
         == crate::product_kind::ProductTarget::Software
-        && adapters.software.is_none()
+        && adapters
+            .software
+            .resolve(current.manifest.deploy.executor)?
+            .is_none()
         && current
             .manifest
             .deploy

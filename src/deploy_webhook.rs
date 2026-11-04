@@ -1123,7 +1123,9 @@ mod tests {
             authorization: ExecutionAuthorization::LocalDevelopment {
                 reason: "webhook fixture",
             },
-            software_executor: Some(std::sync::Arc::new(FakeSoftwareExecutor::new())),
+            software_executors: crate::software_executor::SoftwareExecutors::with_default(
+                std::sync::Arc::new(FakeSoftwareExecutor::new()),
+            ),
             model_runtime_executor: None,
             worker_lifecycle: None,
             artifact_registry: None,

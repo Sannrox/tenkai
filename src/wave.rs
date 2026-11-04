@@ -804,9 +804,9 @@ document = "suite.json"
                     trust_roots: &trust,
                     requester: None,
                 },
-                software_executor: Some(std::sync::Arc::new(
-                    crate::software_executor::FakeSoftwareExecutor::new(),
-                )),
+                software_executors: crate::software_executor::SoftwareExecutors::with_default(
+                    std::sync::Arc::new(crate::software_executor::FakeSoftwareExecutor::new()),
+                ),
                 model_runtime_executor: None,
                 worker_lifecycle: None,
                 artifact_registry: None,
@@ -936,10 +936,12 @@ document = "suite.json"
                     trust_roots: &trust,
                     requester: None,
                 },
-                software_executor: Some(std::sync::Arc::new(
-                    crate::software_executor::FakeSoftwareExecutor::new()
-                        .with_apply_delay(std::time::Duration::from_millis(500)),
-                )),
+                software_executors: crate::software_executor::SoftwareExecutors::with_default(
+                    std::sync::Arc::new(
+                        crate::software_executor::FakeSoftwareExecutor::new()
+                            .with_apply_delay(std::time::Duration::from_millis(500)),
+                    ),
+                ),
                 model_runtime_executor: None,
                 worker_lifecycle: None,
                 artifact_registry: None,
