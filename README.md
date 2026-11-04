@@ -21,6 +21,8 @@ behind health probes, and rolls back automatically when a probe fails.
 - **Offline bundles.** Deliver to sites that never reach your network.
 - **One binary to start.** Embedded mode needs no server, database, or network.
 
+![Deploying a release, then watching Tenkai roll back one whose health probe fails](docs/assets/quickstart-demo.gif)
+
 ## Try it in five minutes
 
 Install `tenkaictl` into the current directory (Linux x86-64 or Apple Silicon).
