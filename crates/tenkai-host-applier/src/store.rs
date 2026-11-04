@@ -11,7 +11,6 @@ use std::io::Write as _;
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context as _, Result};
 use serde::Serialize;
@@ -210,16 +209,16 @@ fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
 /// Replace `path`, under the state directory, atomically and durably,
 /// readable by everyone and writable only by the applier.
 fn write_json(paths: &ApplierPaths, path: &Path, value: &impl Serialize) -> Result<()> {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
     let parent = path.parent().context("record path has no parent")?;
     durable_dirs(&paths.state_dir, parent)?;
+    // Random, so a staging file a crash left behind never blocks the next
+    // write, whatever process id the next applier gets.
     let staged: PathBuf = parent.join(format!(
-        ".{}.{}.{}.tmp",
+        ".{}.{}.tmp",
         path.file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("record"),
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
+        uuid::Uuid::new_v4()
     ));
     let mut file = std::fs::OpenOptions::new()
         .write(true)
