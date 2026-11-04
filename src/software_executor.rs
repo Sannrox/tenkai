@@ -124,11 +124,11 @@ pub struct SoftwareApplyRequest {
     pub apply_attempt: String,
 }
 
-/// An executor's target is not there yet, found before anything was applied:
+/// An executor cannot reach its target, found before anything was applied:
 /// for example an in-cluster release whose cluster config file does not exist
-/// until a host release creates the cluster. The step fails with nothing to
-/// clean up, the deployment stays as it was, and reconcile retries with its
-/// backoff (ADR 0041 section 4).
+/// until a host release creates the cluster, or is not configured at all. The
+/// step fails with nothing to clean up, the deployment stays as it was, and
+/// reconcile retries with its backoff (ADR 0041 section 4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TargetUnavailable(pub String);
 

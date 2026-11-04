@@ -183,8 +183,9 @@ Rules beyond the native workdir contract:
 - Field manager is always `tenkai`. Apply never sets `force`.
 - Apply re-reads the signed workdir and the environment-scoped kubeconfig file.
   Cached cluster objects cannot grant apply authority.
-- A missing or unreadable kubeconfig file refuses the step before anything is
-  applied. The plan fails, the deployment stays as it was, and reconcile
+- A missing or unreadable kubeconfig file, or an environment without
+  `cluster-config`, refuses the step before anything is applied. The plan
+  fails naming the reason, the deployment stays as it was, and reconcile
   retries with its backoff until the file exists, for example once a host
   release has installed the cluster
   ([ADR 0041](decisions/0041-per-release-executor-and-privileged-host-releases.md)).

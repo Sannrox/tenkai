@@ -398,8 +398,9 @@ pub fn selected_in_process_executor() -> InProcessKubernetesExecutor<LiveKubeApi
 }
 
 impl<A: ClusterApplyApi> SoftwareExecutor for InProcessKubernetesExecutor<A> {
-    /// The cluster is the target: until the environment's cluster config file
-    /// exists, nothing can have been applied to it.
+    /// The cluster is the target: without a readable cluster config file
+    /// nothing can have been applied to it, whether the file is not there
+    /// yet or the environment names none.
     fn require_target(&self, request: &SoftwareApplyRequest) -> Result<(), TargetUnavailable> {
         Self::require_cluster_config(request)
             .map(|_| ())
