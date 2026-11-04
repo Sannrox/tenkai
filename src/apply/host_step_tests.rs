@@ -401,6 +401,63 @@ async fn install_and_health_run_through_the_applier_at_the_planned_generations()
 }
 
 #[tokio::test]
+async fn host_steps_run_before_the_releases_that_need_what_they_install() {
+    let mut host = Host::new("order").await;
+    // `api` sorts before `cluster` and stands for a release that runs in a
+    // cluster the host release installs.
+    let dir = host.root.join("api-1.0.0");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("tenkai.toml"),
+        "[product]\nname = \"api\"\nversion = \"1.0.0\"\n\n[deploy]\ninstall = \"true\"\n",
+    )
+    .unwrap();
+    let roots = host.root.join("release-trust.toml");
+    crate::dev_sign::sign_release(
+        &host.root.join("keys"),
+        &dir.join("tenkai.toml"),
+        &dir.join("signature.json"),
+        &roots,
+    )
+    .unwrap();
+    crate::catalog::publish(
+        &mut host.ctx,
+        &dir.join("tenkai.toml"),
+        &crate::catalog::PublishOptions {
+            signature: Some(dir.join("signature.json")),
+            trust_roots: Some(roots),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let actor = crate::auth_context::test_management_context("host-step");
+    crate::catalog::promote(&mut host.ctx, &actor, "api@1.0.0", "stable")
+        .await
+        .unwrap();
+    crate::plan::subscribe(&mut host.ctx, "edge", "api", "stable")
+        .await
+        .unwrap();
+    host.release("1.0.0", true).await;
+
+    let plan = host.plan().await;
+
+    let order: Vec<_> = plan
+        .steps
+        .iter()
+        .map(|step| (step.product.as_str(), step.host.map(|host| host.action)))
+        .collect();
+    assert_eq!(
+        order,
+        [
+            ("cluster", Some(HostAction::Install)),
+            ("cluster", Some(HostAction::Health)),
+            ("api", None)
+        ]
+    );
+}
+
+#[tokio::test]
 async fn a_failed_host_install_stays_failed_and_nothing_is_restored() {
     let mut host = Host::new("failed").await;
     host.release("1.0.0", false).await;

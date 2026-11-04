@@ -176,7 +176,9 @@ release is applied but its last health step failed or never ran. A host
 release never replaces a product the server records as deployed with another
 executor. Each host step starts from the release the
 record holds, at the record's generation, and when the release declares
-`deploy.health` a `health` step follows. Both are part of the plan, so its
+`deploy.health` a `health` step follows. Host steps come first in a plan:
+a plan stops at its first failed step, and releases that run in a cluster a
+host release installs fail closed until it exists. Both are part of the plan, so its
 digest and approvals cover them; a plan made before another host step changed
 the record is refused by the applier. Host releases do not evaluate SLO
 gates (`[[gate.slo]]`); a plan that would need one is refused before anything

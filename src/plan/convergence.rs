@@ -371,6 +371,8 @@ async fn compute_snapshot_with_policy(
     // Host products whose release is applied but whose health step has not
     // succeeded since: they get that health step alone.
     let mut host_health_only = std::collections::HashSet::new();
+    // Products whose release runs on the host executor.
+    let mut host_products = std::collections::HashSet::new();
     let mut held_model = false;
     let mut held_routing = false;
     for ch in channels {
@@ -463,6 +465,7 @@ async fn compute_snapshot_with_policy(
             deployed_version: deployed.clone(),
         });
         if let Some((record, health)) = &host_record {
+            host_products.insert(product.clone());
             match host_progress(record, &desired, *health) {
                 HostProgress::Converged => {
                     // The applier finished, but the server never recorded
@@ -608,11 +611,16 @@ async fn compute_snapshot_with_policy(
     }
     // Enforce model_runtime ↔ routing_config rollout order (see docs). The
     // runtime agent's own release always runs last: switching restarts the
-    // agent, so nothing may follow it in the plan (#685).
+    // agent, so nothing may follow it in the plan (#685). Host releases run
+    // first: a plan stops at its first failed step, and releases in a cluster
+    // a host release installs fail closed until it exists (ADR 0041 section
+    // 4), so a host step sorted after them would never run.
     pending.sort_by(|a, b| {
         let agent = |product: &str| product == crate::runtime_self_upgrade::SELF_PRODUCT;
+        let not_host = |product: &String| !host_products.contains(product);
         agent(&a.0)
             .cmp(&agent(&b.0))
+            .then_with(|| not_host(&a.0).cmp(&not_host(&b.0)))
             .then_with(|| {
                 model_routing_rollout_rank(a.6, a.1).cmp(&model_routing_rollout_rank(b.6, b.1))
             })
