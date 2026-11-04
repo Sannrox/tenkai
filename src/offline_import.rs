@@ -535,8 +535,9 @@ fn archive_path(jobs: &Path, id: &str) -> PathBuf {
 
 /// Exclusive lock on `<jobs>/.lock`. One import at a time on this host: a
 /// bind rewrites the whole upgrade record, and imports share the OCI store
-/// and the weight cache.
-fn lock_jobs(jobs: &Path) -> Result<std::fs::File> {
+/// and the weight cache. A held lock is retried for `settle` (see
+/// [`crate::file_lock`]).
+fn lock_jobs(jobs: &Path, settle: std::time::Duration) -> Result<std::fs::File> {
     let path = jobs.join(".lock");
     let lock = std::fs::OpenOptions::new()
         .create(true)
@@ -544,15 +545,12 @@ fn lock_jobs(jobs: &Path) -> Result<std::fs::File> {
         .write(true)
         .open(&path)
         .with_context(|| format!("creating {}", path.display()))?;
-    match lock.try_lock() {
-        Ok(()) => Ok(lock),
-        Err(std::fs::TryLockError::WouldBlock) => {
-            bail!("another import is already running")
-        }
-        Err(std::fs::TryLockError::Error(error)) => {
-            Err(error).context("locking the import job directory")
-        }
+    if !crate::file_lock::try_lock_within(&lock, settle)
+        .context("locking the import job directory")?
+    {
+        bail!("another import is already running")
     }
+    Ok(lock)
 }
 
 /// Run one import or dry run and return its finished job. A refusal is a
@@ -567,7 +565,7 @@ pub async fn run(
     let id = job_id(request);
     let jobs = staging.join(JOB_DIR);
     std::fs::create_dir_all(&jobs).with_context(|| format!("creating {}", jobs.display()))?;
-    let lock = lock_jobs(&jobs)?;
+    let lock = lock_jobs(&jobs, crate::file_lock::SETTLE)?;
     // A retry replaces the job file; a failure not yet announced moves aside
     // first, so its `import.failed` event is not lost.
     let previous = self::job(staging, &id).ok();
@@ -748,7 +746,8 @@ pub fn unannounced_failures(staging: &Path) -> Result<Vec<ImportJob>> {
 /// `false`.
 pub fn mark_announced(staging: &Path, job: &ImportJob) -> Result<bool> {
     let jobs = staging.join(JOB_DIR);
-    let _lock = match lock_jobs(&jobs) {
+    // Busy only defers the mark to the next pass: do not wait.
+    let _lock = match lock_jobs(&jobs, std::time::Duration::ZERO) {
         Ok(lock) => lock,
         Err(error) if error.to_string().contains("already running") => return Ok(false),
         Err(error) => return Err(error),
@@ -881,13 +880,13 @@ mod tests {
         ));
         let jobs = staging.join(JOB_DIR);
         std::fs::create_dir_all(&jobs).unwrap();
-        let held = lock_jobs(&jobs).unwrap();
-        let contended = lock_jobs(&jobs);
+        let held = lock_jobs(&jobs, std::time::Duration::ZERO).unwrap();
+        let contended = lock_jobs(&jobs, std::time::Duration::ZERO);
         drop(held);
         if let Err(error) = contended {
             assert!(error.to_string().contains("already running"), "{error:#}");
         }
-        lock_jobs(&jobs).unwrap();
+        lock_jobs(&jobs, crate::file_lock::SETTLE).unwrap();
         let _ = std::fs::remove_dir_all(staging);
     }
 }
