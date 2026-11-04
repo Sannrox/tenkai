@@ -1184,3 +1184,37 @@ async fn a_record_of_a_product_this_server_never_delivered_is_left_alone() {
 
     assert!(host.plan().await.steps.is_empty());
 }
+
+#[tokio::test]
+async fn an_unknown_host_deployment_without_a_record_is_not_reported_removed() {
+    let mut host = Host::new("unknown-missing").await;
+    host.release("1.0.0", false).await;
+    host.applier
+        .fail
+        .lock()
+        .unwrap()
+        .insert(HostAction::Install);
+    let plan = host.plan().await;
+    host.apply(&plan).await.unwrap();
+    assert_eq!(host.deployed().await, None);
+    crate::environment::unsubscribe(
+        &mut host.ctx,
+        "edge",
+        "cluster",
+        &host.executors,
+        |_| Ok(()),
+    )
+    .await
+    .unwrap();
+    std::fs::remove_file(record_path(&host.applier.state, "edge", "cluster")).unwrap();
+
+    let error = crate::plan::create_with(&mut host.ctx, "edge", &host.executors)
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(
+        error.contains("records it as unknown") && error.contains("tenkaictl env reconcile"),
+        "{error}"
+    );
+}

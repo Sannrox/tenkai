@@ -625,12 +625,26 @@ async fn compute_snapshot_with_policy(
     // release, so a missing or unreadable record refuses the plan instead
     // of passing for "nothing to remove".
     let mut removable = std::collections::BTreeSet::new();
-    for (key, version) in &env_obj.properties {
-        let Some(product) = key.strip_prefix("deployed.") else {
+    let unknown = |product: &str| {
+        env_obj
+            .properties
+            .get(&format!("deployment_health.{product}"))
+            .is_some_and(|health| health == "unknown")
+    };
+    for (key, value) in &env_obj.properties {
+        // The deployed release, or the target of a failed step that left
+        // the deployment unknown.
+        let (product, release) = if let Some(product) = key.strip_prefix("deployed.") {
+            (product, release_id(product, value))
+        } else if let Some(product) = key.strip_prefix("failed_target.")
+            && unknown(product)
+        {
+            (product, value.clone())
+        } else {
             continue;
         };
         if !products.contains(product)
-            && readable_manifest(ctx, &release_id(product, version))
+            && readable_manifest(ctx, &release)
                 .await?
                 .is_some_and(|manifest| {
                     manifest.deploy.executor
@@ -663,9 +677,14 @@ async fn compute_snapshot_with_policy(
                     .get(&format!("deployed.{product}"))
                     .cloned();
                 let Some(version) = host_source(&record, deployed.as_deref()) else {
-                    if let Some(deployed) = deployed {
+                    let server = match deployed {
+                        Some(deployed) => Some(deployed),
+                        None if unknown(&product) => Some("it as unknown".to_string()),
+                        None => None,
+                    };
+                    if let Some(server) = server {
                         bail!(
-                            "the host applier records nothing applied for {product} in {env} at generation {}, but this server records {deployed}; once no apply runs, record it with `tenkaictl env reconcile {env} {product}`",
+                            "the host applier records nothing applied for {product} in {env} at generation {}, but this server records {server}; once no apply runs, record it with `tenkaictl env reconcile {env} {product}`",
                             record.generation
                         );
                     }
