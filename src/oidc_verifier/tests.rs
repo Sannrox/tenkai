@@ -730,3 +730,49 @@ fn stored_rules_cannot_narrow_or_lock_out_a_file_principal() {
     ));
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A stored rule this replica withholds (#850), here one with a field a
+/// newer release added, only removes grants: a token it matches gets no
+/// stored rule unless the file grants it, and the other stored rules apply.
+#[test]
+fn a_withheld_stored_rule_never_widens_a_grant() {
+    let signer = Signer::new("k1");
+    let (ext, stored, dir) = stored_extension(&signer, config(""));
+    stored
+        .create(
+            OidcGrantRule {
+                value: "readers".into(),
+                capabilities: vec!["read".into(), "publish".into()],
+                environment: None,
+                channels: Vec::new(),
+                products: Vec::new(),
+                kind: None,
+            },
+            "management-token",
+            "test",
+            1,
+            None,
+        )
+        .unwrap();
+    let raw = rusqlite::Connection::open(dir.join("tenkai.db")).unwrap();
+    raw.execute_batch(
+        r#"INSERT INTO grant_rules(value, rule_json) VALUES('confined',
+             '{"rule":{"value":"confined","capabilities":["read"],"products_only":["api"]},
+               "created_by":"admin","created_at_ms":2,"reason":"newer"}');
+           UPDATE grant_rule_generation SET generation = generation + 1;"#,
+    )
+    .unwrap();
+    assert!(stored.refresh().unwrap());
+    assert_eq!(stored.withheld(), 1);
+    let login = |groups: serde_json::Value| authenticate(&ext, signer.sign(&far_future(groups)));
+
+    let reader = login(serde_json::json!(["readers"])).unwrap();
+    assert!(reader.has_delivery_capability(DeliveryCapability::Publish));
+    assert!(matches!(
+        login(serde_json::json!(["readers", "confined"])),
+        Err(AuthError::Forbidden(_))
+    ));
+    let viewer = login(serde_json::json!(["tenkai-viewers", "confined"])).unwrap();
+    assert!(viewer.has_delivery_capability(DeliveryCapability::Read));
+    let _ = std::fs::remove_dir_all(dir);
+}

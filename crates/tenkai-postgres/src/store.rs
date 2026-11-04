@@ -273,7 +273,7 @@ impl tenkai::grant_rules::GrantRuleStore for PostgresTenantOperationalStore {
         Err(unavailable())
     }
 
-    fn grant_rules(&self) -> Result<(i64, Vec<tenkai::grant_rules::StoredGrantRule>)> {
+    fn grant_rules(&self) -> Result<tenkai::grant_rules::StoredGrantRules> {
         #[cfg(feature = "postgres")]
         return self.inner.grant_rules();
         #[cfg(not(feature = "postgres"))]

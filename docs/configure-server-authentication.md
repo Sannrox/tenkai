@@ -233,17 +233,34 @@ without editing the file and restarting every replica (#836). The
   replica shares them.
 - `first_administrator` on `/healthz` and in the startup line counts stored
   rules too (`stored_rules=` on the startup line).
+- Each stored rule is read on its own (#850). A row this release cannot
+  read (a newer stored format, or a rule field it does not know) or a rule
+  that fails its checks (a capability or kind it does not know) is
+  withheld: this replica does not apply it, logs
+  `tenkai.auth stored_grant_rule=<value> applied=false detail=...` when the
+  rules change, and counts it in `stored_grant_rules_withheld` on
+  `/healthz`. The other stored rules still apply and readiness is not
+  affected. Withholding only removes grants: a token the file grants
+  nothing that matches a withheld claim value is refused with `403` on
+  that replica, since the withheld rule might have confined what the other
+  rules give it. A token the file grants keeps the file's grant.
 - Rolling deploys: releases before this one ignore stored rules. Change
   stored rules only once every replica runs a release with this change,
   or a request on an older replica will not see them. The console's
   first-run form uses the API below; use it only once every replica runs
-  this release.
+  this release. Rows keep the shape releases before #850 read, so those
+  replicas still read every rule a newer replica stores; but they stop
+  applying all stored rules on one row they cannot read, so a new stored
+  format or rule field waits until every replica reads rows one at a time.
 
 Manage them over HTTP (#837):
 
 - `GET /v1/grant-rules` lists the stored rules with their `generation`,
   who created each, when and why, and `declared_by_config` for a rule the
-  file now overrides.
+  file now overrides. `applied` is `false`, with a `not_applied_reason`,
+  for a rule the file overrides or that fails this release's checks;
+  `unreadable` lists the `value` and `reason` of each row this release
+  cannot read. `DELETE` removes any of them by `value`.
 - `POST /v1/grant-rules` with `{"rule": {"value": ..., "capabilities":
   [...], ...}, "reason": ..., "generation": ...}` stores one rule (the same
   fields as a `[[grants.rules]]` entry) and answers `201` with the new

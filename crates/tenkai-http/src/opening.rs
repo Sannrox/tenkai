@@ -36,6 +36,7 @@ pub fn opening_router(profile: impl Into<String>, capabilities: Vec<String>) -> 
         backup: None,
         clock: None,
         first_administrator: None,
+        stored_grant_rules_withheld: None,
     };
     Router::new()
         .route("/healthz", get(opening_health))

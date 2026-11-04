@@ -77,6 +77,13 @@ pub(super) struct ServiceStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(transform = tenkai::schema_contract::omitted_when_none)]
     pub(super) first_administrator: Option<tenkai::oidc_verifier::FirstAdministrator>,
+    /// How many stored grant rules this replica withholds (#850): rows it
+    /// cannot read or rules that fail its checks, for example written by a
+    /// newer release. Never names a rule; `GET /v1/grant-rules` lists them.
+    /// Absent when none; it never fails readiness.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = tenkai::schema_contract::omitted_when_none)]
+    pub(super) stored_grant_rules_withheld: Option<usize>,
     /// Backup age when backups are configured. `stale` or `missing` degrades
     /// health without failing readiness: the server can still do its work.
     #[serde(skip_serializing_if = "Option::is_none")]

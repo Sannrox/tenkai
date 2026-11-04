@@ -13,7 +13,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use super::*;
-use crate::grant_rules::{GrantRuleError, StoredGrantRule, StoredGrants};
+use crate::grant_rules::{GrantRuleError, StoredGrantRule, StoredGrants, UnreadableGrantRule};
 use crate::oidc_verifier::OidcGrantRule;
 
 /// `GET /v1/grant-rules`: the stored rules and their generation.
@@ -23,6 +23,10 @@ pub struct GrantRuleList {
     /// refused.
     pub generation: i64,
     pub rules: Vec<GrantRuleView>,
+    /// Stored rows this release cannot read (#850), for example written by
+    /// a newer release. No replica of this release applies them; remove one
+    /// by its `value`.
+    pub unreadable: Vec<UnreadableGrantRule>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
@@ -32,6 +36,14 @@ pub struct GrantRuleView {
     /// The configuration file declares this claim value, so the stored
     /// rule is ignored.
     pub declared_by_config: bool,
+    /// Whether replicas of this release apply the rule: false when the
+    /// configuration file declares its claim value or the rule fails this
+    /// release's checks (#850).
+    pub applied: bool,
+    /// Why the rule is not applied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub not_applied_reason: Option<String>,
 }
 
 /// `POST /v1/grant-rules`.
@@ -88,18 +100,25 @@ impl ManagementOperations {
     }
 
     fn grant_rule_list(stored: &StoredGrants) -> Result<GrantRuleList, ManagementError> {
-        let (generation, rules) = stored
+        let list = stored
             .stored()
             .map_err(|error| ManagementError::Unavailable(error.to_string()))?;
         Ok(GrantRuleList {
-            generation,
-            rules: rules
+            generation: list.generation,
+            rules: list
+                .rules
                 .into_iter()
-                .map(|stored_rule| GrantRuleView {
-                    declared_by_config: stored.declared_by_config(&stored_rule.rule.value),
-                    stored: stored_rule,
+                .map(|stored_rule| {
+                    let not_applied_reason = stored.not_applied_reason(&stored_rule.rule);
+                    GrantRuleView {
+                        declared_by_config: stored.declared_by_config(&stored_rule.rule.value),
+                        applied: not_applied_reason.is_none(),
+                        not_applied_reason,
+                        stored: stored_rule,
+                    }
                 })
                 .collect(),
+            unreadable: list.unreadable,
         })
     }
 

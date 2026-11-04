@@ -329,7 +329,7 @@ fn load_oidc_extension(
             config.fleet_administrator_values().join(","),
             stored_grants
                 .as_ref()
-                .map_or(0, |stored| stored.rules().len())
+                .map_or(0, |stored| stored.rules().rules.len())
         ),
     }
     if require_tenant

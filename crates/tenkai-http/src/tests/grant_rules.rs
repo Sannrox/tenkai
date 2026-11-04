@@ -326,3 +326,69 @@ async fn config_values_and_stale_generations_are_refused() {
     assert_eq!(list["generation"], 1);
     assert_eq!(list["rules"].as_array().unwrap().len(), 1);
 }
+
+/// Rows this release cannot apply (#850) are listed as such, counted on
+/// `/healthz`, never fail readiness or the other rules, and can be removed.
+#[tokio::test]
+async fn rows_this_release_cannot_apply_are_listed_and_removable() {
+    let signer = Signer::new("k1");
+    let hub = hub(&signer);
+    rusqlite::Connection::open(hub.dir.join("tenkai.db"))
+        .unwrap()
+        .execute_batch(
+            r#"INSERT INTO grant_rules(value, rule_json) VALUES
+                 ('future', '{"format":2,"rule":{"value":"future","capabilities":["read"]}}'),
+                 ('auditors', '{"rule":{"value":"auditors","capabilities":["audit"]},
+                   "created_by":"admin","created_at_ms":1,"reason":"newer"}');
+               INSERT INTO grant_rule_generation(id, generation) VALUES(1, 1);"#,
+        )
+        .unwrap();
+    let (code, created) = call(
+        &hub.app,
+        "POST",
+        "/v1/grant-rules",
+        Some("management-secret"),
+        Some(admins_rule(1)),
+    )
+    .await;
+    assert_eq!(code, StatusCode::CREATED, "{created}");
+    assert_eq!(
+        created["unreadable"],
+        serde_json::json!([{
+            "value": "future",
+            "reason": "stored format 2; this release reads format 1",
+        }])
+    );
+    let rules = created["rules"].as_array().unwrap();
+    let auditors = rules
+        .iter()
+        .find(|r| r["rule"]["value"] == "auditors")
+        .unwrap();
+    assert_eq!(auditors["applied"], false);
+    assert!(auditors["not_applied_reason"].is_string(), "{auditors}");
+    let admins = rules
+        .iter()
+        .find(|r| r["rule"]["value"] == "tenkai-admins")
+        .unwrap();
+    assert_eq!(admins["applied"], true);
+    assert!(admins.get("not_applied_reason").is_none());
+
+    let (_, health) = call(&hub.app, "GET", "/healthz", None, None).await;
+    assert_eq!(health["first_administrator"], "configured");
+    assert_eq!(health["stored_grant_rules_withheld"], 2);
+    let (code, _) = call(&hub.app, "GET", "/readyz", None, None).await;
+    assert_eq!(code, StatusCode::OK);
+
+    let (code, removed) = call(
+        &hub.app,
+        "DELETE",
+        "/v1/grant-rules",
+        Some("management-secret"),
+        Some(serde_json::json!({"value": "future", "reason": "cleanup", "generation": 2})),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{removed}");
+    assert_eq!(removed["unreadable"], serde_json::json!([]));
+    let (_, health) = call(&hub.app, "GET", "/healthz", None, None).await;
+    assert_eq!(health["stored_grant_rules_withheld"], 1);
+}
