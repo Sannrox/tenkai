@@ -41,6 +41,9 @@ enum Rejection {
     Resubscribed {
         product: String,
     },
+    Unsubscribed {
+        product: String,
+    },
 }
 
 impl fmt::Display for Rejection {
@@ -71,6 +74,10 @@ impl fmt::Display for Rejection {
                 formatter,
                 "is stale for {product}: the environment subscribes to it again"
             ),
+            Self::Unsubscribed { product } => write!(
+                formatter,
+                "is stale for {product}: the environment no longer subscribes to it"
+            ),
         }
     }
 }
@@ -98,12 +105,21 @@ async fn inspect(ctx: &mut Ctx, plan: &Plan) -> Result<Result<(), Rejection>> {
         }));
     }
     // A removal is planned because the environment stopped subscribing to
-    // the product; it is stale once the environment subscribes again.
+    // the product, and everything else because it subscribes: either is
+    // stale once that changed.
+    let subscriptions = ctx.linked(&environment.id, REL_SUBSCRIBES, "out").await?;
+    if let Some(input) = plan.inputs.iter().find(|input| {
+        !subscriptions
+            .iter()
+            .any(|channel| channel.id == input.channel_id)
+    }) {
+        return Ok(Err(Rejection::Unsubscribed {
+            product: input.product.clone(),
+        }));
+    }
     if plan.steps.iter().any(|step| step.action == Action::Remove) {
-        let subscribed: Vec<String> = ctx
-            .linked(&environment.id, REL_SUBSCRIBES, "out")
-            .await?
-            .into_iter()
+        let subscribed: Vec<String> = subscriptions
+            .iter()
             .filter_map(|channel| channel.properties.get("product").cloned())
             .collect();
         if let Some(step) = plan
@@ -279,6 +295,13 @@ mod tests {
                 ("current_release".into(), "tenkai:release:api@2.0.0".into()),
             ]),
         ))
+        .await
+        .unwrap();
+        ctx.link(
+            &env_id("prod"),
+            &channel_id("api", "stable"),
+            REL_SUBSCRIBES,
+        )
         .await
         .unwrap();
     }

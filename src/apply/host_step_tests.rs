@@ -1054,3 +1054,18 @@ async fn a_recalled_host_release_can_still_be_removed() {
     );
     assert_eq!(host.record().state, AppliedState::Empty);
 }
+
+#[tokio::test]
+async fn a_plan_is_stale_once_its_product_is_unsubscribed() {
+    let mut host = Host::new("unsubscribed").await;
+    host.release("1.0.0", false).await;
+    let install = host.plan().await;
+    crate::environment::unsubscribe(&mut host.ctx, "edge", "cluster", &host.executors)
+        .await
+        .unwrap();
+
+    let error = host.apply(&install).await.unwrap_err().to_string();
+
+    assert!(error.contains("no longer subscribes to it"), "{error}");
+    assert!(host.applier.runs.lock().unwrap().is_empty());
+}

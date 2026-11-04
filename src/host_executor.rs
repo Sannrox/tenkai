@@ -279,7 +279,10 @@ impl HostExecutor {
 
     /// Every applied-state record the applier keeps for `environment`.
     /// Planning reads them to remove host products the environment no
-    /// longer subscribes to.
+    /// longer subscribes to. A record that does not parse or is not where
+    /// its environment and product put it cannot be attributed to any
+    /// environment, so it is skipped: it can only keep a removal from being
+    /// planned, never cause one, and the applier refuses steps against it.
     pub fn applied_states(&self, environment: &str) -> Result<Vec<AppliedStateRecord>> {
         let dir = self.state_dir.join("records");
         let entries = match std::fs::read_dir(&dir) {
@@ -293,20 +296,16 @@ impl HostExecutor {
             if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
                 continue;
             }
-            let Some(bytes) = read_record(&path)? else {
+            let Ok(Some(bytes)) = read_record(&path) else {
                 continue;
             };
-            let record: AppliedStateRecord = serde_json::from_slice(&bytes)
-                .with_context(|| format!("parsing host applied-state record {}", path.display()))?;
-            if record.schema != APPLIED_STATE_SCHEMA
-                || path != record_path(&self.state_dir, &record.environment, &record.product)
+            let Ok(record) = serde_json::from_slice::<AppliedStateRecord>(&bytes) else {
+                continue;
+            };
+            if record.schema == APPLIED_STATE_SCHEMA
+                && record.environment == environment
+                && path == record_path(&self.state_dir, &record.environment, &record.product)
             {
-                bail!(
-                    "host applied-state record {} is not where its environment and product put it",
-                    path.display()
-                );
-            }
-            if record.environment == environment {
                 records.push(record);
             }
         }
