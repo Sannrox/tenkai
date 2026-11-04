@@ -18,7 +18,7 @@ pub(crate) async fn run(
             if registered.is_empty() {
                 println!("schema already registered");
             } else {
-                println!("registered schema types: {}", registered.join(", "));
+                println!("registered schema types ({})", registered.len());
             }
             println!("{}", plan::env_add(ctx, "local", "this machine").await?);
             let migrated = maintenance::migrate_all(ctx).await?;
