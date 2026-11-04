@@ -19,11 +19,10 @@ pub(crate) async fn run(ctx: &mut Ctx, command: TopologyCommand) -> Result<()> {
                 .create_new(true)
                 .open(&out)
                 .map_err(|error| anyhow::anyhow!("writing {}: {error}", out.display()))?;
-            let evidence =
-                tenkai::topology_drill::run(ctx, &release, &replica, &signing_key).await?;
-            file.write_all(&serde_json::to_vec_pretty(&evidence)?)
+            let drill = tenkai::topology_drill::run(ctx, &release, &replica, &signing_key).await?;
+            file.write_all(&serde_json::to_vec_pretty(&drill.evidence)?)
                 .map_err(|error| anyhow::anyhow!("writing {}: {error}", out.display()))?;
-            let statement = &evidence.statement;
+            let statement = &drill.statement;
             println!(
                 "loss: {} at {}",
                 statement.loss.replica, statement.loss.at_ms
@@ -40,7 +39,7 @@ pub(crate) async fn run(ctx: &mut Ctx, command: TopologyCommand) -> Result<()> {
             println!(
                 "wrote topology drill evidence {} signed by {}",
                 out.display(),
-                evidence.key_id
+                drill.evidence.key_id
             );
             Ok(())
         }

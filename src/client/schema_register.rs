@@ -389,7 +389,11 @@ pub fn known_object_types() -> Vec<ObjectType> {
             crate::recall_notice::KIND_RECALL_NOTICE,
             "An imported signed recall notice",
             vec![
-                prop("document", true, "tenkai.recall-notice.v1 JSON"),
+                prop(
+                    "document",
+                    true,
+                    "tenkai.recall-notice.v2 (or deprecated v1) notice JSON",
+                ),
                 prop("digest", true, "sha256 of the notice document"),
                 prop("imported_at", true, "Unix-ms timestamp when imported"),
                 prop("advisory_id", true, "Advisory referenced by the notice"),

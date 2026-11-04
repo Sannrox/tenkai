@@ -23,32 +23,49 @@ use serde::{Deserialize, Serialize};
 use crate::client::Ctx;
 use crate::topology::{self, AvailabilityRefused, TopologySection};
 
-pub const DRILL_SCHEMA: &str = "tenkai.topology-drill.v1";
+/// Signed drill evidence schema. Its signature covers the statement bytes
+/// as signed (#931); see `docs/manifest.md#failover-drill-evidence`.
+pub const DRILL_SCHEMA: &str = "tenkai.topology-drill.v2";
+/// Deprecated (#931): signed over Tenkai's re-encoding of the parsed
+/// statement. Verified for evidence recorded by earlier releases, never
+/// produced, and removed in a later release.
+pub const LEGACY_DRILL_SCHEMA: &str = "tenkai.topology-drill.v1";
 /// Environment property holding the latest signed drill evidence as JSON.
 pub const EVIDENCE_PROPERTY: &str = "topology_drill_evidence";
 /// Durable restoration state written with the outage so a crash can resume.
 /// Keyed by topology and product so two products sharing an environment
 /// cannot overwrite each other's restore records.
 pub const OUTAGE_PROPERTY_PREFIX: &str = "topology_drill.outage";
-const SIGNING_DOMAIN: &[u8] = b"TENKAI-TOPOLOGY-DRILL-V1\0";
+/// Prefix of every [`DRILL_SCHEMA`] signed message.
+pub const SIGNING_DOMAIN: &[u8] = b"TENKAI-TOPOLOGY-DRILL-V2\0";
+const LEGACY_SIGNING_DOMAIN: &[u8] = b"TENKAI-TOPOLOGY-DRILL-V1\0";
+const SIGNATURE_LABEL: &str = "topology drill signature";
 const OUT_OF_SERVICE: &str = "out_of_service";
 
 fn outage_property(topology: &str, product: &str) -> String {
     format!("{OUTAGE_PROPERTY_PREFIX}.{topology}.{product}")
 }
 
-/// Signed drill result as stored on the drilled replica and written to `--out`.
+/// Signed drill evidence as stored on the drilled replica and written to
+/// `--out` (#931). Every field is a string, so the stored JSON keeps the
+/// signed statement bytes exactly.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DrillEvidence {
+    /// `tenkai.topology-drill.v2`.
     pub schema: String,
+    /// `sha256:` and the lowercase hex SHA-256 of the signer's Ed25519 public key.
     pub key_id: String,
-    pub statement: DrillStatement,
+    /// Standard padded base64 of the statement JSON bytes that were signed.
+    pub statement: String,
+    /// Standard padded base64 Ed25519 signature over
+    /// `TENKAI-TOPOLOGY-DRILL-V2`, one NUL byte, and the statement bytes.
     pub signature: String,
 }
 
+/// What a drill signs ([`DRILL_SCHEMA`]). A verifier ignores fields it
+/// does not know; the signature still covers them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct DrillStatement {
     pub release: String,
     pub topology: String,
@@ -62,14 +79,12 @@ pub struct DrillStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct LossRecord {
     pub replica: String,
     pub at_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RecoveryRecord {
     pub remaining_available: Vec<String>,
     pub confirmed_at_ms: i64,
@@ -78,15 +93,111 @@ pub struct RecoveryRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RestoreRecord {
     pub replica: String,
     pub at_ms: i64,
     pub available: Vec<String>,
 }
 
-fn canonical_bytes(statement: &DrillStatement) -> Result<Vec<u8>> {
-    let mut bytes = SIGNING_DOMAIN.to_vec();
+/// Frozen [`LEGACY_DRILL_SCHEMA`] types. The signature covers the
+/// serde_json encoding of [`legacy::Statement`], so none of them change.
+pub mod legacy {
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct Evidence {
+        pub schema: String,
+        pub key_id: String,
+        pub statement: Statement,
+        pub signature: String,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct Statement {
+        pub release: String,
+        pub topology: String,
+        pub product: String,
+        pub min_available: usize,
+        pub replicas: Vec<String>,
+        pub passed: bool,
+        pub loss: Loss,
+        pub recovery: Recovery,
+        pub restore: Restore,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct Loss {
+        pub replica: String,
+        pub at_ms: i64,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct Recovery {
+        pub remaining_available: Vec<String>,
+        pub confirmed_at_ms: i64,
+        pub duration_ms: i64,
+        pub traffic_continued: bool,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct Restore {
+        pub replica: String,
+        pub at_ms: i64,
+        pub available: Vec<String>,
+    }
+}
+
+impl From<legacy::Statement> for DrillStatement {
+    fn from(legacy: legacy::Statement) -> Self {
+        Self {
+            release: legacy.release,
+            topology: legacy.topology,
+            product: legacy.product,
+            min_available: legacy.min_available,
+            replicas: legacy.replicas,
+            passed: legacy.passed,
+            loss: LossRecord {
+                replica: legacy.loss.replica,
+                at_ms: legacy.loss.at_ms,
+            },
+            recovery: RecoveryRecord {
+                remaining_available: legacy.recovery.remaining_available,
+                confirmed_at_ms: legacy.recovery.confirmed_at_ms,
+                duration_ms: legacy.recovery.duration_ms,
+                traffic_continued: legacy.recovery.traffic_continued,
+            },
+            restore: RestoreRecord {
+                replica: legacy.restore.replica,
+                at_ms: legacy.restore.at_ms,
+                available: legacy.restore.available,
+            },
+        }
+    }
+}
+
+/// Drill evidence as read back from a file or the stored property, before
+/// its signature is checked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReceivedDrill {
+    Current(DrillEvidence),
+    Legacy(Box<legacy::Evidence>),
+}
+
+/// A finished drill: the evidence as signed and stored, and its statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedDrill {
+    pub evidence: DrillEvidence,
+    pub statement: DrillStatement,
+}
+
+/// The message a [`LEGACY_DRILL_SCHEMA`] signature covers.
+fn legacy_signed_message(statement: &legacy::Statement) -> Result<Vec<u8>> {
+    let mut bytes = LEGACY_SIGNING_DOMAIN.to_vec();
     serde_json::to_writer(&mut bytes, statement)?;
     Ok(bytes)
 }
@@ -109,7 +220,7 @@ pub async fn run(
     release: &str,
     replica: &str,
     seed_path: &Path,
-) -> Result<DrillEvidence> {
+) -> Result<SignedDrill> {
     crate::ontology::validate_identifier("environment", replica)?;
     let release_id = release_object_id(release)?;
     let Some((topology, product)) = topology::availability_manifest(ctx, &release_id).await? else {
@@ -186,7 +297,7 @@ struct HeldDrill<'a> {
     fencing_token: &'a str,
 }
 
-async fn run_held(ctx: &mut Ctx, drill: HeldDrill<'_>) -> Result<DrillEvidence> {
+async fn run_held(ctx: &mut Ctx, drill: HeldDrill<'_>) -> Result<SignedDrill> {
     let HeldDrill {
         release,
         replica,
@@ -226,7 +337,7 @@ async fn finish_held(
     drill: HeldDrill<'_>,
     minimum: usize,
     env_fencing_token: &str,
-) -> Result<DrillEvidence> {
+) -> Result<SignedDrill> {
     let HeldDrill {
         release,
         replica,
@@ -272,9 +383,12 @@ async fn finish_held(
             available: available.into_iter().collect(),
         },
     };
-    let evidence = sign(statement, seed_path)?;
+    let evidence = sign(&statement, seed_path)?;
     record(ctx, replica, env_fencing_token, &evidence).await?;
-    Ok(evidence)
+    Ok(SignedDrill {
+        evidence,
+        statement,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -484,14 +598,18 @@ async fn observe_remaining(
     })
 }
 
-fn sign(statement: DrillStatement, seed_path: &Path) -> Result<DrillEvidence> {
+/// Serialize the statement once and sign those bytes with the Ed25519 seed
+/// at `seed_path`.
+fn sign(statement: &DrillStatement, seed_path: &Path) -> Result<DrillEvidence> {
     let signing_key = SigningKey::from_bytes(&crate::approval_policy::load_signer_seed(seed_path)?);
-    let signature = signing_key.sign(&canonical_bytes(&statement)?);
+    let signed = crate::signed_bytes::sign(SIGNING_DOMAIN, statement, |message| {
+        Ok(signing_key.sign(message).to_bytes().to_vec())
+    })?;
     Ok(DrillEvidence {
         schema: DRILL_SCHEMA.into(),
         key_id: crate::signature_verification::key_id(&signing_key.verifying_key().to_bytes()),
-        statement,
-        signature: STANDARD.encode(signature.to_bytes()),
+        statement: signed.statement,
+        signature: STANDARD.encode(signed.signature),
     })
 }
 
@@ -508,23 +626,73 @@ async fn record(
     put_env_fenced(ctx, environment, replica, env_fencing_token).await
 }
 
-impl DrillEvidence {
-    /// Check the signature against the signer's public key.
-    pub fn verify(&self, public_key: &[u8; 32]) -> Result<()> {
-        if self.schema != DRILL_SCHEMA {
-            bail!("topology drill schema is not {DRILL_SCHEMA}");
+impl ReceivedDrill {
+    /// Parse evidence by its `schema`, without checking the signature. A
+    /// schema this release does not verify is refused by name.
+    pub fn parse(bytes: &[u8]) -> Result<Self> {
+        #[derive(Deserialize)]
+        struct Schema {
+            schema: String,
         }
-        if self.key_id != crate::signature_verification::key_id(public_key) {
+        let Schema { schema } = serde_json::from_slice(bytes)
+            .context("topology drill evidence is not a JSON object with a schema")?;
+        Ok(match schema.as_str() {
+            DRILL_SCHEMA => Self::Current(
+                serde_json::from_slice(bytes).context("topology drill evidence is not valid")?,
+            ),
+            LEGACY_DRILL_SCHEMA => Self::Legacy(Box::new(
+                serde_json::from_slice(bytes).context("topology drill evidence is not valid")?,
+            )),
+            other => bail!(
+                "unsupported topology drill schema {other:?}; this release verifies {DRILL_SCHEMA} and the deprecated {LEGACY_DRILL_SCHEMA}"
+            ),
+        })
+    }
+
+    /// Check the signature against the signer's public key and return the
+    /// statement. A v2 statement is parsed only from the bytes it covers.
+    pub fn verify(&self, public_key: &[u8; 32]) -> Result<DrillStatement> {
+        let key_id = match self {
+            Self::Current(evidence) => &evidence.key_id,
+            Self::Legacy(evidence) => &evidence.key_id,
+        };
+        if *key_id != crate::signature_verification::key_id(public_key) {
             bail!("topology drill key_id does not match the signer");
         }
         let key = VerifyingKey::from_bytes(public_key)
             .map_err(|_| anyhow::anyhow!("topology drill public key is invalid"))?;
-        crate::signature_verification::verify_strict(
-            &key,
-            "topology drill signature",
-            &self.signature,
-            &canonical_bytes(&self.statement)?,
-        )
+        match self {
+            Self::Current(evidence) => {
+                let signature = crate::signature_verification::decode_exact::<64>(
+                    SIGNATURE_LABEL,
+                    &evidence.signature,
+                )?;
+                let verified = crate::signed_bytes::verify::<DrillStatement>(
+                    SIGNING_DOMAIN,
+                    &evidence.statement,
+                    |message| {
+                        crate::signature_verification::verify_strict_bytes(
+                            &key,
+                            SIGNATURE_LABEL,
+                            &signature,
+                            message,
+                        )
+                        .is_ok()
+                    },
+                )
+                .map_err(|refusal| anyhow::anyhow!("topology drill refused: {refusal}"))?;
+                Ok(verified.statement)
+            }
+            Self::Legacy(evidence) => {
+                crate::signature_verification::verify_strict(
+                    &key,
+                    SIGNATURE_LABEL,
+                    &evidence.signature,
+                    &legacy_signed_message(&evidence.statement)?,
+                )?;
+                Ok(DrillStatement::from(evidence.statement.clone()))
+            }
+        }
     }
 }
 
@@ -646,14 +814,13 @@ install = "true"
     #[tokio::test]
     async fn a_lab_drill_signs_loss_recovery_and_restore() {
         let (_root, mut ctx, seed) = lab(Some(2)).await;
-        let evidence = run(&mut ctx, "ledger@1.0.0", "ledger-a", &seed)
+        let drill = run(&mut ctx, "ledger@1.0.0", "ledger-a", &seed)
             .await
             .unwrap();
         let public_key = SigningKey::from_bytes(&[7u8; 32])
             .verifying_key()
             .to_bytes();
-        evidence.verify(&public_key).unwrap();
-        let statement = &evidence.statement;
+        let statement = &drill.statement;
         assert_eq!(statement.topology, "ledger-ha");
         assert_eq!(statement.min_available, 2);
         assert_eq!(statement.loss.replica, "ledger-a");
@@ -682,9 +849,83 @@ install = "true"
             .get(EVIDENCE_PROPERTY)
             .cloned()
             .unwrap();
-        let recorded: DrillEvidence = serde_json::from_str(&stored).unwrap();
-        assert_eq!(recorded, evidence);
+        let recorded = ReceivedDrill::parse(stored.as_bytes()).unwrap();
+        assert_eq!(recorded, ReceivedDrill::Current(drill.evidence));
+        assert_eq!(&recorded.verify(&public_key).unwrap(), statement);
         let _ = std::fs::remove_dir_all(_root);
+    }
+
+    const DRILL_JSON: &str = r#"{"release":"ledger@1.0.0","topology":"ledger-ha","product":"ledger","min_available":2,"replicas":["ledger-a","ledger-b"],"passed":true,"loss":{"replica":"ledger-a","at_ms":1},"recovery":{"remaining_available":["ledger-b"],"confirmed_at_ms":2,"duration_ms":1,"traffic_continued":true},"restore":{"replica":"ledger-a","at_ms":3,"available":["ledger-a","ledger-b"]}}"#;
+
+    fn drill_key() -> (SigningKey, [u8; 32]) {
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let public = key.verifying_key().to_bytes();
+        (key, public)
+    }
+
+    /// The signature covers the statement bytes as signed: a field this
+    /// release does not know still verifies, and the same statement
+    /// re-encoded does not.
+    #[test]
+    fn the_signature_covers_the_statement_bytes_as_signed() {
+        let (key, public) = drill_key();
+        let bytes = DRILL_JSON.replacen('{', r#"{"note":"x","#, 1);
+        let evidence = DrillEvidence {
+            schema: DRILL_SCHEMA.into(),
+            key_id: crate::signature_verification::key_id(&public),
+            statement: STANDARD.encode(&bytes),
+            signature: STANDARD.encode(
+                key.sign(&[SIGNING_DOMAIN, bytes.as_bytes()].concat())
+                    .to_bytes(),
+            ),
+        };
+        let statement = ReceivedDrill::Current(evidence.clone())
+            .verify(&public)
+            .unwrap();
+        assert_eq!(statement.loss.replica, "ledger-a");
+
+        let reencoded = DrillEvidence {
+            statement: STANDARD.encode(serde_json::to_vec(&statement).unwrap()),
+            ..evidence
+        };
+        let error = ReceivedDrill::Current(reencoded)
+            .verify(&public)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("signature does not verify"), "{error}");
+    }
+
+    /// Evidence recorded before #931 still verifies by its frozen
+    /// re-encoding and refuses fields its signature cannot cover.
+    #[test]
+    fn legacy_v1_evidence_verifies_and_stays_strict() {
+        let (key, public) = drill_key();
+        let statement: legacy::Statement = serde_json::from_str(DRILL_JSON).unwrap();
+        let signature = key.sign(&legacy_signed_message(&statement).unwrap());
+        let mut stored = serde_json::json!({
+            "schema": LEGACY_DRILL_SCHEMA,
+            "key_id": crate::signature_verification::key_id(&public),
+            "statement": statement,
+            "signature": STANDARD.encode(signature.to_bytes()),
+        });
+        let parsed = ReceivedDrill::parse(&serde_json::to_vec(&stored).unwrap()).unwrap();
+        assert_eq!(
+            parsed.verify(&public).unwrap(),
+            DrillStatement::from(statement)
+        );
+
+        stored["statement"]["note"] = "unsigned".into();
+        let error = ReceivedDrill::parse(&serde_json::to_vec(&stored).unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("evidence is not valid"), "{error}");
+        let error = ReceivedDrill::parse(br#"{"schema":"tenkai.topology-drill.v3"}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("unsupported topology drill schema"),
+            "{error}"
+        );
     }
 
     #[tokio::test]

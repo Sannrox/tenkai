@@ -32,7 +32,7 @@ Its Rust contract version is `CATALOG_CONTRACT_VERSION = 1`.
   restoring the recalled pin. Rollback onto recalled content is denied unless
   the Plan records an audited `--allow-recalled-recovery --recovery-reason`
   inside the signed executable digest. Ordinary lookup and channel-head
-  planning stay fail-closed. A signed `tenkai.recall-notice.v1` file carries
+  planning stay fail-closed. A signed `tenkai.recall-notice.v2` file carries
   the same recall to an isolated spoke
   ([recall notices](recall-notices.md)) under the trust rules of
   [ADR 0036](decisions/0036-offline-key-revocation.md). See
