@@ -152,7 +152,8 @@ Hosts that run no host releases skip this section.
 
 1. Install the root-side applier, its systemd template unit, the polkit rule,
    and its root-owned trust and approval policy next to the server, as
-   [privileged host releases](host-releases.md#install) describes. The
+   [privileged host releases](host-releases.md#install) describes; the
+   install script's `--with-host-applier` places the binary, unit, and rule. The
    applier's `spool_dir` is the server's spool directory, here
    `/var/lib/tenkai/host-spool`, owned by `tenkai` with mode `0750`.
 2. Point the server at it in `/etc/tenkai/server.env`:
