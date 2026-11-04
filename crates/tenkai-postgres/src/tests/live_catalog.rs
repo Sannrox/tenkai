@@ -196,6 +196,7 @@ async fn live_postgres_catalog_enqueues_provider_events_atomically_and_exports()
             Some(&tenant_a),
             updated.clone(),
             std::slice::from_ref(&event),
+            &[],
         )
         .unwrap();
     let partition_a = store.partition_by_id(&tenant_a).unwrap();
@@ -221,7 +222,7 @@ async fn live_postgres_catalog_enqueues_provider_events_atomically_and_exports()
     rolled.name = "must-roll-back".into();
     assert!(
         store
-            .put_with_provider_events(Some(&tenant_a), rolled.clone(), &[conflicting])
+            .put_with_provider_events(Some(&tenant_a), rolled.clone(), &[conflicting], &[])
             .is_err()
     );
     assert_eq!(
@@ -234,7 +235,7 @@ async fn live_postgres_catalog_enqueues_provider_events_atomically_and_exports()
     rolled.name = "invalid-must-roll-back".into();
     assert!(
         store
-            .put_with_provider_events(Some(&tenant_a), rolled, &[invalid])
+            .put_with_provider_events(Some(&tenant_a), rolled, &[invalid], &[])
             .is_err()
     );
     assert_eq!(
@@ -269,6 +270,7 @@ async fn live_postgres_catalog_enqueues_provider_events_atomically_and_exports()
             Some(&tenant_export),
             export_object,
             std::slice::from_ref(&export_event),
+            &[],
         )
         .unwrap();
     let partition_export = store.partition_by_id(&tenant_export).unwrap();
@@ -317,6 +319,7 @@ async fn live_postgres_catalog_enqueues_provider_events_atomically_and_exports()
             Some(&tenant_export_b),
             export_b_object,
             std::slice::from_ref(&export_event_b),
+            &[],
         )
         .unwrap();
     let partition_export_b = store.partition_by_id(&tenant_export_b).unwrap();

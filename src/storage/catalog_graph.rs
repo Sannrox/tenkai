@@ -8,6 +8,7 @@ use std::sync::Mutex;
 
 use anyhow::{Context as _, Result as AnyResult, bail};
 
+use crate::feedback_observation::FeedbackObservation;
 use crate::pb::graph_action::{ActionResult, ActionTypeDef};
 use crate::pb::sekai::{Decision, Lease, Link, Object, ObjectChange, ObjectType};
 use crate::storage::{ProviderEventRecord, Result, SqliteStore, StoreError};
@@ -105,32 +106,24 @@ pub trait CatalogGraph: Send + Sync {
         }
         Ok(())
     }
-    /// Write `object` and enqueue `events` in one catalog transaction.
+    /// Write `object`, enqueue `events`, and capture feedback `observations`
+    /// in one catalog transaction. A refused observation is logged and the
+    /// write still commits (#802, #868).
     fn put_with_provider_events(
         &self,
         tenant: Option<&str>,
         object: Object,
         events: &[ProviderEventRecord],
-    ) -> AnyResult<Object> {
-        if events.is_empty() {
-            return self.put(tenant, object);
-        }
-        anyhow::bail!("catalog cannot atomically enqueue Tenkai provider events")
-    }
+        observations: &[FeedbackObservation],
+    ) -> AnyResult<Object>;
     fn put_objects_with_provider_events(
         &self,
         tenant: Option<&str>,
         objects: &[Object],
         events: &[ProviderEventRecord],
-    ) -> AnyResult<()> {
-        if events.is_empty() {
-            for object in objects {
-                self.put(tenant, object.clone())?;
-            }
-            return Ok(());
-        }
-        anyhow::bail!("catalog cannot atomically enqueue Tenkai provider events")
-    }
+        observations: &[FeedbackObservation],
+    ) -> AnyResult<()>;
+    #[allow(clippy::too_many_arguments)]
     fn guarded_put_objects_with_provider_events(
         &self,
         tenant: Option<&str>,
@@ -139,12 +132,14 @@ pub trait CatalogGraph: Send + Sync {
         key: &str,
         fencing_token: &str,
         events: &[ProviderEventRecord],
-    ) -> AnyResult<()> {
-        if events.is_empty() {
-            return self.guarded_put_many(tenant, objects, namespace, key, fencing_token);
-        }
-        anyhow::bail!("catalog cannot atomically enqueue Tenkai provider events")
-    }
+        observations: &[FeedbackObservation],
+    ) -> AnyResult<()>;
+    /// Feedback observations of `environment` in `tenant`, oldest first.
+    fn feedback_observations(
+        &self,
+        tenant: Option<&str>,
+        environment: &str,
+    ) -> AnyResult<Vec<FeedbackObservation>>;
     fn register_schema(&self, tenant: Option<&str>, schema: ObjectType) -> Result<()>;
     fn schemas(&self, tenant: Option<&str>) -> AnyResult<Vec<ObjectType>>;
     fn register_action(&self, tenant: Option<&str>, action: ActionTypeDef) -> Result<()>;
@@ -182,6 +177,7 @@ struct Partition {
     decisions: Vec<Decision>,
     changes: BTreeMap<String, Vec<ObjectChange>>,
     events: BTreeMap<(String, String), ProviderEventRecord>,
+    observations: BTreeMap<String, FeedbackObservation>,
 }
 
 impl MemoryCatalogGraph {
@@ -560,6 +556,7 @@ impl CatalogGraph for MemoryCatalogGraph {
             key,
             fencing_token,
             &[],
+            &[],
         )
     }
 
@@ -568,8 +565,14 @@ impl CatalogGraph for MemoryCatalogGraph {
         tenant: Option<&str>,
         object: Object,
         events: &[ProviderEventRecord],
+        observations: &[FeedbackObservation],
     ) -> AnyResult<Object> {
-        self.put_objects_with_provider_events(tenant, std::slice::from_ref(&object), events)?;
+        self.put_objects_with_provider_events(
+            tenant,
+            std::slice::from_ref(&object),
+            events,
+            observations,
+        )?;
         Ok(object)
     }
 
@@ -578,8 +581,9 @@ impl CatalogGraph for MemoryCatalogGraph {
         tenant: Option<&str>,
         objects: &[Object],
         events: &[ProviderEventRecord],
+        observations: &[FeedbackObservation],
     ) -> AnyResult<()> {
-        self.apply_objects_with_provider_events(tenant, objects, events, None)
+        self.apply_objects_with_provider_events(tenant, objects, events, observations, None)
     }
 
     fn guarded_put_objects_with_provider_events(
@@ -590,13 +594,38 @@ impl CatalogGraph for MemoryCatalogGraph {
         key: &str,
         fencing_token: &str,
         events: &[ProviderEventRecord],
+        observations: &[FeedbackObservation],
     ) -> AnyResult<()> {
         self.apply_objects_with_provider_events(
             tenant,
             &objects,
             events,
+            observations,
             Some((namespace, key, fencing_token)),
         )
+    }
+
+    fn feedback_observations(
+        &self,
+        tenant: Option<&str>,
+        environment: &str,
+    ) -> AnyResult<Vec<FeedbackObservation>> {
+        let partitions = self.lock()?;
+        let mut observations: Vec<FeedbackObservation> = partitions
+            .get(&Self::key(tenant))
+            .map(|partition| {
+                partition
+                    .observations
+                    .values()
+                    .filter(|observation| observation.environment == environment)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        observations.sort_by(|left, right| {
+            (left.observed_at_ms, &left.id).cmp(&(right.observed_at_ms, &right.id))
+        });
+        Ok(observations)
     }
 
     fn register_schema(&self, tenant: Option<&str>, schema: ObjectType) -> Result<()> {
@@ -749,6 +778,7 @@ impl MemoryCatalogGraph {
         tenant: Option<&str>,
         objects: &[Object],
         events: &[ProviderEventRecord],
+        observations: &[FeedbackObservation],
         lease: Option<(&str, &str, &str)>,
     ) -> AnyResult<()> {
         anyhow::ensure!(!objects.is_empty(), "embedded object update is empty");
@@ -782,6 +812,13 @@ impl MemoryCatalogGraph {
         }
         for event in &events {
             enqueue_memory_provider_event(&mut partition, event)?;
+        }
+        // First write wins, like the durable stores' immutable table.
+        for observation in observations {
+            partition
+                .observations
+                .entry(observation.id.clone())
+                .or_insert_with(|| observation.clone());
         }
         partitions.insert(key, partition);
         Ok(())
@@ -1082,8 +1119,9 @@ impl CatalogGraph for SqliteStore {
         _tenant: Option<&str>,
         object: Object,
         events: &[ProviderEventRecord],
+        observations: &[FeedbackObservation],
     ) -> AnyResult<Object> {
-        SqliteStore::put_with_provider_events(self, object, events, &[])
+        SqliteStore::put_with_provider_events(self, object, events, observations)
     }
 
     fn put_objects_with_provider_events(
@@ -1091,8 +1129,9 @@ impl CatalogGraph for SqliteStore {
         _tenant: Option<&str>,
         objects: &[Object],
         events: &[ProviderEventRecord],
+        observations: &[FeedbackObservation],
     ) -> AnyResult<()> {
-        SqliteStore::put_objects_with_provider_events(self, objects, events, &[])
+        SqliteStore::put_objects_with_provider_events(self, objects, events, observations)
     }
 
     fn guarded_put_objects_with_provider_events(
@@ -1103,6 +1142,7 @@ impl CatalogGraph for SqliteStore {
         key: &str,
         fencing_token: &str,
         events: &[ProviderEventRecord],
+        observations: &[FeedbackObservation],
     ) -> AnyResult<()> {
         SqliteStore::guarded_put_objects_with_provider_events(
             self,
@@ -1111,8 +1151,16 @@ impl CatalogGraph for SqliteStore {
             key,
             fencing_token,
             events,
-            &[],
+            observations,
         )
+    }
+
+    fn feedback_observations(
+        &self,
+        _tenant: Option<&str>,
+        environment: &str,
+    ) -> AnyResult<Vec<FeedbackObservation>> {
+        SqliteStore::feedback_observations(self, environment)
     }
 
     fn register_schema(&self, _tenant: Option<&str>, schema: ObjectType) -> Result<()> {
@@ -1428,6 +1476,27 @@ mod tests {
         }
     }
 
+    fn sample_observation(id: &str, status: &str) -> FeedbackObservation {
+        FeedbackObservation::capture(crate::feedback_observation::Capture {
+            id,
+            operation: crate::feedback_observation::Operation::ApplyStep,
+            environment: "prod",
+            product: "api",
+            plan_id: "plan-1",
+            step_id: "step-1",
+            action: Some(crate::plan::Action::Upgrade),
+            release_id: "release:api:1.1.0",
+            status,
+            reason: crate::feedback_observation::Reason::None,
+            started_at_ms: Some(1_000),
+            lease_generation: 1,
+            observed_at_ms: 2_000,
+            context: Default::default(),
+        })
+    }
+
+    /// Events and feedback observations commit with the object, replay
+    /// idempotently, and roll back with it (#765, #868).
     fn assert_atomic_outbox(
         graph: &dyn CatalogGraph,
         tenant: Option<&str>,
@@ -1440,35 +1509,65 @@ mod tests {
         let mut updated = original.clone();
         updated.name = "terminal".into();
         let event = sample_event("event-1", "prod");
+        let observation = sample_observation("deployment:prod:api:2000", "succeeded");
         graph
-            .put_with_provider_events(tenant, updated.clone(), std::slice::from_ref(&event))
+            .put_with_provider_events(
+                tenant,
+                updated.clone(),
+                std::slice::from_ref(&event),
+                std::slice::from_ref(&observation),
+            )
             .unwrap();
         assert_eq!(graph.get(tenant, id).unwrap().unwrap().name, "terminal");
         assert_eq!(list().len(), 1);
+        assert_eq!(
+            graph.feedback_observations(tenant, "prod").unwrap(),
+            std::slice::from_ref(&observation)
+        );
+        let conflicting_observation = sample_observation(&observation.id, "failed");
         graph
-            .put_with_provider_events(tenant, updated.clone(), std::slice::from_ref(&event))
+            .put_with_provider_events(
+                tenant,
+                updated.clone(),
+                std::slice::from_ref(&event),
+                &[conflicting_observation],
+            )
             .unwrap();
         assert_eq!(list().len(), 1);
+        assert_eq!(
+            graph.feedback_observations(tenant, "prod").unwrap(),
+            std::slice::from_ref(&observation)
+        );
 
         let mut conflicting = event.clone();
         conflicting.payload_json =
             r#"{"binding":{"environment_id":"prod"},"payload_json":"{\"different\":true}"}"#.into();
         let mut rolled = updated.clone();
         rolled.name = "must-roll-back".into();
+        let rolled_observation = sample_observation("deployment:prod:api:rolled", "failed");
         assert!(
             graph
-                .put_with_provider_events(tenant, rolled.clone(), &[conflicting])
+                .put_with_provider_events(
+                    tenant,
+                    rolled.clone(),
+                    &[conflicting],
+                    std::slice::from_ref(&rolled_observation),
+                )
                 .is_err()
         );
         assert_eq!(graph.get(tenant, id).unwrap().unwrap().name, "terminal");
         assert_eq!(list().len(), 1);
+        assert_eq!(
+            graph.feedback_observations(tenant, "prod").unwrap(),
+            [observation]
+        );
 
         let mut invalid = event;
         invalid.id.clear();
         rolled.name = "invalid-must-roll-back".into();
         assert!(
             graph
-                .put_with_provider_events(tenant, rolled, &[invalid])
+                .put_with_provider_events(tenant, rolled, &[invalid], &[])
                 .is_err()
         );
         assert_eq!(graph.get(tenant, id).unwrap().unwrap().name, "terminal");
@@ -1487,6 +1586,12 @@ mod tests {
             .listed_provider_events(Some("tenant-b"), "outcome", "prod")
             .unwrap();
         assert!(other.is_empty());
+        assert!(
+            graph
+                .feedback_observations(Some("tenant-b"), "prod")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1518,10 +1623,16 @@ mod tests {
                 Some("tenant-a"),
                 updated.clone(),
                 std::slice::from_ref(&record),
+                &[],
             )
             .unwrap();
         graph
-            .put_with_provider_events(Some("tenant-b"), updated, std::slice::from_ref(&record))
+            .put_with_provider_events(
+                Some("tenant-b"),
+                updated,
+                std::slice::from_ref(&record),
+                &[],
+            )
             .unwrap();
         let listed_a = graph
             .listed_provider_events(Some("tenant-a"), "outcome", "prod")

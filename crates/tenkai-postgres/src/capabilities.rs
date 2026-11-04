@@ -61,7 +61,7 @@ pub struct AuthoritativeSurface {
 
 /// Every surface the enterprise profile requires, in a fixed order (#747).
 /// An entry becomes available when its PostgreSQL implementation lands.
-pub fn enterprise_authoritative_surfaces() -> [AuthoritativeSurface; 5] {
+pub fn enterprise_authoritative_surfaces() -> [AuthoritativeSurface; 6] {
     let available = |name| AuthoritativeSurface {
         name,
         available: true,
@@ -73,6 +73,7 @@ pub fn enterprise_authoritative_surfaces() -> [AuthoritativeSurface; 5] {
         available("shared replica state"),
         available("catalog object graph"),
         available("terminal-outcome export"),
+        available("feedback observation capture"),
     ]
 }
 

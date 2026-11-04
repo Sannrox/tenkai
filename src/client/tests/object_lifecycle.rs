@@ -159,3 +159,53 @@ async fn tenant_hub_catalog_enqueues_provider_events() {
         .unwrap();
     assert_eq!(ctx.get(&object.id).await.unwrap().unwrap().name, "terminal");
 }
+
+/// A tenant-mode hub captures feedback observations in the bound tenant's
+/// catalog partition, even when no provider event rides with them (#868).
+#[tokio::test]
+async fn tenant_hub_catalog_captures_feedback_observations() {
+    use crate::feedback_observation::{Capture, FeedbackObservation, Operation, Reason};
+    use crate::storage::{CatalogGraph, MemoryCatalogGraph};
+    use std::sync::Arc;
+
+    let graph = Arc::new(MemoryCatalogGraph::new());
+    let object = Object {
+        id: "tenkai:conformance:observed".into(),
+        kind: "tenkai.conformance".into(),
+        name: "original".into(),
+        ..Default::default()
+    };
+    graph.create(Some("tenant-a"), object.clone()).unwrap();
+    let observation = FeedbackObservation::capture(Capture {
+        id: "deployment:prod:api:2000",
+        operation: Operation::ApplyStep,
+        environment: "prod",
+        product: "api",
+        plan_id: "plan-1",
+        step_id: "step-1",
+        action: Some(crate::plan::Action::Upgrade),
+        release_id: "release:api:1.1.0",
+        status: "succeeded",
+        reason: Reason::None,
+        started_at_ms: Some(1_000),
+        lease_generation: 1,
+        observed_at_ms: 2_000,
+        context: Default::default(),
+    });
+    let mut ctx = Ctx::tenant_hub_catalog(graph.clone()).with_catalog_tenant("tenant-a");
+    ctx.put_with_provider_events(object, &[], std::slice::from_ref(&observation))
+        .await
+        .unwrap();
+    assert_eq!(
+        graph
+            .feedback_observations(Some("tenant-a"), "prod")
+            .unwrap(),
+        [observation]
+    );
+    assert!(
+        graph
+            .feedback_observations(Some("tenant-b"), "prod")
+            .unwrap()
+            .is_empty()
+    );
+}

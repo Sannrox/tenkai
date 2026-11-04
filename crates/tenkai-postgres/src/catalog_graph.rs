@@ -1,4 +1,5 @@
 use anyhow::Context as _;
+use tenkai::feedback_observation::FeedbackObservation;
 use tenkai::pb::graph_action::{ActionResult, ActionTypeDef};
 use tenkai::pb::sekai::{Decision, Lease, Link, Object, ObjectChange, ObjectType};
 use tenkai::storage::{CatalogGraph, ProviderEventRecord, Result, StoreError};
@@ -380,23 +381,15 @@ impl CatalogGraph for PostgresTenantOperationalStore {
         tenant: Option<&str>,
         object: Object,
         events: &[ProviderEventRecord],
+        observations: &[FeedbackObservation],
     ) -> anyhow::Result<Object> {
-        let schema = self.catalog_schema(tenant)?;
-        #[cfg(feature = "postgres")]
-        {
-            let events = tenkai::providers::bind_tenant_to_provider_events(tenant, events)?;
-            self.inner.catalog_put_objects_with_provider_events(
-                &schema,
-                std::slice::from_ref(&object),
-                &events,
-            )?;
-            Ok(object)
-        }
-        #[cfg(not(feature = "postgres"))]
-        {
-            let _ = (schema, object, events);
-            Err(postgres_disabled().into())
-        }
+        self.put_objects_with_provider_events(
+            tenant,
+            std::slice::from_ref(&object),
+            events,
+            observations,
+        )?;
+        Ok(object)
     }
 
     fn put_objects_with_provider_events(
@@ -404,18 +397,22 @@ impl CatalogGraph for PostgresTenantOperationalStore {
         tenant: Option<&str>,
         objects: &[Object],
         events: &[ProviderEventRecord],
+        observations: &[FeedbackObservation],
     ) -> anyhow::Result<()> {
         let schema = self.catalog_schema(tenant)?;
         #[cfg(feature = "postgres")]
         {
             let events = tenkai::providers::bind_tenant_to_provider_events(tenant, events)?;
-            Ok(self
-                .inner
-                .catalog_put_objects_with_provider_events(&schema, objects, &events)?)
+            Ok(self.inner.catalog_put_objects_with_provider_events(
+                &schema,
+                objects,
+                &events,
+                observations,
+            )?)
         }
         #[cfg(not(feature = "postgres"))]
         {
-            let _ = (schema, objects, events);
+            let _ = (schema, objects, events, observations);
             Err(postgres_disabled().into())
         }
     }
@@ -428,6 +425,7 @@ impl CatalogGraph for PostgresTenantOperationalStore {
         key: &str,
         fencing_token: &str,
         events: &[ProviderEventRecord],
+        observations: &[FeedbackObservation],
     ) -> anyhow::Result<()> {
         let schema = self.catalog_schema(tenant)?;
         #[cfg(feature = "postgres")]
@@ -442,11 +440,39 @@ impl CatalogGraph for PostgresTenantOperationalStore {
                     key,
                     fencing_token,
                     &events,
+                    observations,
                 )?)
         }
         #[cfg(not(feature = "postgres"))]
         {
-            let _ = (schema, objects, namespace, key, fencing_token, events);
+            let _ = (
+                schema,
+                objects,
+                namespace,
+                key,
+                fencing_token,
+                events,
+                observations,
+            );
+            Err(postgres_disabled().into())
+        }
+    }
+
+    fn feedback_observations(
+        &self,
+        tenant: Option<&str>,
+        environment: &str,
+    ) -> anyhow::Result<Vec<FeedbackObservation>> {
+        let schema = self.catalog_schema(tenant)?;
+        #[cfg(feature = "postgres")]
+        {
+            Ok(self
+                .inner
+                .catalog_feedback_observations(&schema, environment)?)
+        }
+        #[cfg(not(feature = "postgres"))]
+        {
+            let _ = (schema, environment);
             Err(postgres_disabled().into())
         }
     }

@@ -143,7 +143,9 @@ whether or not any export is on. Delivery to Sekai is a separate opt-in
 adapter (#783). The record is not a provider event until that adapter is
 enabled, and the terminal outcome event is unchanged. It is written
 in the same transaction as the outcome, into a dedicated
-`feedback_observations` table that refuses updates. An identical replay is a
+`feedback_observations` table that refuses updates. On a tenant-mode
+PostgreSQL hub that table lives in the tenant's schema, beside the catalog
+objects the outcome commits (#868). An identical replay is a
 no-op; a conflicting one keeps the stored record. A capture that cannot be
 built keeps only the outcome's identity (`reason: degraded`), and one that
 cannot be stored never interrupts the deployment or rollback.

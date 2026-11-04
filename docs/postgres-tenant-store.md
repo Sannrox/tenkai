@@ -164,7 +164,8 @@ In-memory adapter remains for unit tests (`ServerConfig.tenant_store = Some(Arc:
 
 `--replica-count > 1` passes capability negotiation when the Postgres hub store
 is composed (#128). Multi-active reconcile uses tick fencing (#129). Catalog
-lifecycle and terminal-outcome export share one tenant-schema transaction.
+lifecycle, terminal-outcome export and feedback observation capture share one
+tenant-schema transaction.
 `--outcome-provider chisei` starts on a tenant-mode hub and drains each tenant
 outbox, allocating `source_sequence` from the hub producer identity. Catalog
 enqueue stamps the tenant into the outcome payload so exported event IDs stay

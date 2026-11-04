@@ -300,6 +300,8 @@ mod live_enrollment;
 #[cfg(feature = "postgres")]
 mod live_failover_drill;
 #[cfg(feature = "postgres")]
+mod live_feedback_capture;
+#[cfg(feature = "postgres")]
 mod live_feedback_denial;
 #[cfg(feature = "postgres")]
 mod live_fence;
