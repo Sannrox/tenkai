@@ -235,10 +235,11 @@ fn write_json(paths: &ApplierPaths, path: &Path, value: &impl Serialize) -> Resu
     Ok(())
 }
 
-/// Create `dir` and every missing directory between it and `root`, syncing
-/// each new directory's parent so its entry survives a power loss. `root`
-/// itself must already exist (the unit's `StateDirectory=` provisions it): a
-/// missing state root fails closed instead of silently starting over.
+/// Create `dir` and every missing directory between it and `root`, and sync
+/// each one's parent so its entry survives a power loss, also when it already
+/// existed: an earlier applier may have died between creating it and syncing.
+/// `root` itself must already exist (the unit's `StateDirectory=` provisions
+/// it): a missing state root fails closed instead of silently starting over.
 fn durable_dirs(root: &Path, dir: &Path) -> Result<()> {
     if !root.is_dir() {
         anyhow::bail!(
@@ -254,15 +255,13 @@ fn durable_dirs(root: &Path, dir: &Path) -> Result<()> {
         let parent = current.clone();
         current.push(component);
         match std::fs::create_dir(&current) {
-            Ok(()) => {
-                std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o755))?;
-                std::fs::File::open(&parent)?.sync_all()?;
-            }
+            Ok(()) => std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o755))?,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => {
                 return Err(error).with_context(|| format!("creating {}", current.display()));
             }
         }
+        std::fs::File::open(&parent)?.sync_all()?;
     }
     Ok(())
 }
