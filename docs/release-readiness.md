@@ -67,6 +67,8 @@ cargo build --all-targets --locked
 - [ ] Tag `vX.Y.Z` GitHub Release attaches community hosts and
       `tenkai-server-postgres-<platform>` for `linux-x86_64` and
       `darwin-aarch64` plus `SHA256SUMS` ([release binaries](release-binaries.md))
+- [ ] Release dry run green: `linux-x86_64` hosts within the glibc floor and
+      started on older distributions ([supported Linux](release-binaries.md#supported-linux))
 - [ ] GitHub attestations verify for downloaded executables against the
       release-binaries workflow; checksums match before run
 - [ ] Optional container/bundle packaging (if any) version-aligned

@@ -4,6 +4,10 @@
 # CycloneDX SBOM validated against its schema, and the family release
 # manifest. Never attests, tags, or publishes. Needs cargo, python3 and
 # network access for the pinned SBOM validator.
+#
+# --linux-hosts DIR takes the linux-x86_64 hosts from DIR (written by
+# scripts/build-linux-release-hosts.sh) instead of stubs and requires them to
+# pass check-glibc. CI passes the hosts it built.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -13,6 +17,18 @@ fail() {
   printf 'release-dry-run: %s\n' "$1" >&2
   exit 1
 }
+
+linux_hosts=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --linux-hosts)
+      [[ $# -ge 2 ]] || fail "--linux-hosts requires a directory"
+      linux_hosts="$2"
+      shift 2
+      ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/tenkai-release-dry-run.$$.XXXXXX")"
 trap "rm -rf $(printf '%q' "$tmp")" EXIT
@@ -34,8 +50,15 @@ python3 scripts/release-metadata.py notes "$version" >"${tmp}/notes.md"
 dist="${tmp}/dist"
 mkdir -p "$dist"
 while IFS= read -r name; do
-  printf 'dry-run %s\n' "$name" >"${dist}/${name}"
+  if [[ -n "$linux_hosts" && "$name" == *-linux-x86_64 ]]; then
+    cp "${linux_hosts}/${name}" "${dist}/${name}" || fail "missing ${name} in ${linux_hosts}"
+  else
+    printf 'dry-run %s\n' "$name" >"${dist}/${name}"
+  fi
 done < <(bash scripts/package-release-binaries.sh names)
+if [[ -n "$linux_hosts" ]]; then
+  bash scripts/package-release-binaries.sh check-glibc --out "$dist"
+fi
 cp api/tenkai-http-v1.schema.json "$dist/"
 bash scripts/package-release-binaries.sh checksums --out "$dist" --require-complete
 

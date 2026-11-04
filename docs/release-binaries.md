@@ -31,6 +31,22 @@ generate types from, see `api/` in the repository), the `tenkai.cdx.json`
 SBOM, and the `tenkai-release.json` family release manifest.
 The fixture and Postgres conformance harness stay source-built.
 
+## Supported Linux
+
+`linux-x86_64` hosts need glibc 2.28 or newer on x86-64: RHEL 8 and 9 and
+their rebuilds, Debian 10 and newer, Ubuntu 20.04 and newer, Amazon Linux
+2023. Musl-only distributions are not supported. The hosts are built in a
+glibc 2.28 image (`scripts/build-linux-release-hosts.sh`) rather than on the
+CI runner, and stay dynamically linked so `TENKAI_SIGNER_MODULE` and
+`TENKAI_RUNTIME_PKCS11_MODULE` can load the system's PKCS#11 module.
+
+Every pull request builds the Linux hosts that way, refuses any that needs a
+newer glibc (`scripts/package-release-binaries.sh check-glibc`), and runs
+each one on RHEL 8, RHEL 9, Debian 12, and Ubuntu 22.04. The release
+workflow checks the floor again before it writes `SHA256SUMS`. v0.6.0 and
+earlier Linux hosts need glibc 2.39; build those from source on older
+systems.
+
 ## Verify and install
 
 Replace `vX.Y.Z` with the published tag. Checksums must match before the
@@ -124,11 +140,12 @@ commit, and equal the workspace version. Lightweight and unsigned tags stop
 the workflow before anything is built. The tag's CHANGELOG section must exist
 and carry its `Gate flags:` line.
 
-The workflow then builds the five community hosts with `--workspace --features tenkai-server/ui`,
+The workflow then builds the five community hosts with `--workspace --features tenkai-server/ui`
+(Linux hosts inside the glibc 2.28 image),
 rebuilds `tenkai-server` with `-p tenkai-server --features postgres,ui` and names it
 `tenkai-server-postgres-<platform>` with
 `scripts/package-release-binaries.sh package-hub`. It adds the HTTP API
-contract and writes `SHA256SUMS`. `scripts/release-metadata.py` writes
+contract, refuses Linux hosts above the glibc floor, and writes `SHA256SUMS`. `scripts/release-metadata.py` writes
 `tenkai.cdx.json`, a CycloneDX 1.5 SBOM of the locked Cargo graph and the
 pinned web console. A separate job validates it against the CycloneDX schema
 and SPDX license expressions; the attest job regenerates it and requires the
@@ -143,9 +160,11 @@ The upload job checks that the live tag resolves to the triggering commit,
 creates a draft GitHub Release whose body is the tag's `CHANGELOG.md`
 section, attaches the assets, and publishes it. A rerun resumes a draft. An
 already published Release is refused, not edited. A tag mismatch fails
-closed before assets are uploaded. Pull requests run
-`scripts/release-dry-run.sh` instead, which writes the same notes, SBOM, and
-manifest for stub hosts and never attests or publishes.
+closed before assets are uploaded. Pull requests build
+the Linux hosts the same way, run them on older distributions, and run
+`scripts/release-dry-run.sh --linux-hosts` instead, which writes the same
+notes, SBOM, and manifest (macOS hosts are stubs) and never attests or
+publishes.
 
 Verify the SBOM and manifest like a host:
 
