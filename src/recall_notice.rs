@@ -523,7 +523,6 @@ pub fn export_notice(
         payload_json: payload,
         collected_at_ms: None,
         source_sequence: None,
-        schema_version: None,
     };
     enqueue_optional_event(store, RECALL_NOTICE_PROVIDER_KIND, &event, now)
         .map_err(anyhow::Error::from)?;

@@ -859,7 +859,7 @@ mod tests {
     }
 
     const CHECKED_IN_TERMINAL_OUTCOME: &str =
-        include_str!("../../../api/tenkai-terminal-outcome-v1.schema.json");
+        include_str!("../../../api/tenkai-terminal-outcome-v2.schema.json");
 
     /// The terminal-outcome payload schema operators register (#867) lives
     /// beside the HTTP contract so `make update` and the API-contract
@@ -874,7 +874,7 @@ mod tests {
             std::fs::write(
                 concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/../../api/tenkai-terminal-outcome-v1.schema.json"
+                    "/../../api/tenkai-terminal-outcome-v2.schema.json"
                 ),
                 &rendered,
             )
@@ -883,7 +883,7 @@ mod tests {
         }
         assert!(
             rendered == CHECKED_IN_TERMINAL_OUTCOME,
-            "api/tenkai-terminal-outcome-v1.schema.json is stale; run `make update`"
+            "api/tenkai-terminal-outcome-v2.schema.json is stale; run `make update`"
         );
     }
 }

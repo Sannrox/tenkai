@@ -23,14 +23,17 @@ pub use crate::provider_event::{
 };
 
 pub const PROVIDER_CONTRACT_VERSION: u32 = 1;
-pub const TERMINAL_OUTCOME_SCHEMA: &str = "tenkai.terminal_outcome.v1";
-/// Version of the payload content under [`TERMINAL_OUTCOME_SCHEMA`]. `1.1.0`
-/// added the optional `tenant_id` (#867); every `1.0.0` payload is a valid
-/// `1.1.0` payload. The checked-in JSON Schema is
-/// `api/tenkai-terminal-outcome-v1.schema.json`.
-pub const TERMINAL_OUTCOME_SCHEMA_VERSION: &str = "1.1.0";
-/// Version, target kind, and `<tenant>:<deployment>` target id that rows
-/// queued before 0.7.0 were first delivered under; their retries keep them.
+/// Terminal-outcome schema id Tenkai enqueues. `.v2` (#867) added the
+/// optional `tenant_id` and the tenant-scoped target. Delivery derives the
+/// envelope from the payload's schema id, so every change takes a new id:
+/// older releases refuse rows with an unknown id instead of resending them
+/// with a different envelope under the same idempotency key. The checked-in
+/// JSON Schema is `api/tenkai-terminal-outcome-v2.schema.json`.
+pub const TERMINAL_OUTCOME_SCHEMA: &str = "tenkai.terminal_outcome.v2";
+pub const TERMINAL_OUTCOME_SCHEMA_VERSION: &str = "2.0.0";
+/// Schema id of outcomes queued before 0.7.0. They still deliver, with the
+/// `1.0.0` envelope and target an earlier attempt may already have sent.
+const LEGACY_TERMINAL_OUTCOME_SCHEMA: &str = "tenkai.terminal_outcome.v1";
 const LEGACY_TERMINAL_OUTCOME_SCHEMA_VERSION: &str = "1.0.0";
 /// Evidence target kind of a community-host outcome: the target id is the
 /// deployment id.
@@ -146,13 +149,6 @@ pub struct ProviderEvent {
     /// Source-instance ordering allocated durably on first delivery.
     #[serde(default)]
     pub source_sequence: Option<i64>,
-    /// Content version the event was enqueued under. Delivery stamps this
-    /// version, not the running release's, so a retry after an upgrade
-    /// resends the envelope an earlier attempt may already have admitted.
-    /// `None` for destinations without a versioned contract and for terminal
-    /// outcomes queued before 0.7.0, which keep the `1.0.0` envelope.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub schema_version: Option<String>,
 }
 
 impl ProviderEvent {
@@ -179,15 +175,6 @@ impl ProviderEvent {
         if self.source_sequence.is_some_and(|sequence| sequence <= 0) {
             return Err(ProviderError::InvalidEvidence(
                 "provider event source sequence must be positive".into(),
-            ));
-        }
-        if self
-            .schema_version
-            .as_ref()
-            .is_some_and(|version| version.trim().is_empty() || version.len() > 64)
-        {
-            return Err(ProviderError::InvalidEvidence(
-                "provider event schema version is empty or oversized".into(),
             ));
         }
         Ok(())
@@ -220,7 +207,8 @@ impl TerminalOutcomeState {
     }
 }
 
-/// Content of `tenkai.terminal_outcome.v1`. Its JSON Schema
+/// Content of `tenkai.terminal_outcome.v2` (and of queued `.v1` rows, which
+/// never carry `tenant_id`). Its JSON Schema
 /// ([`terminal_outcome_payload_schema`]) is what operators register.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -250,6 +238,10 @@ pub struct TerminalOutcomePayload {
     pub tenant_id: String,
 }
 
+fn is_terminal_outcome_schema(schema: &str) -> bool {
+    schema == TERMINAL_OUTCOME_SCHEMA || schema == LEGACY_TERMINAL_OUTCOME_SCHEMA
+}
+
 /// `tenant_id` is omitted rather than empty on the wire, so the schema does
 /// not advertise the serde default `""`.
 fn drop_default(schema: &mut schemars::Schema) {
@@ -258,7 +250,7 @@ fn drop_default(schema: &mut schemars::Schema) {
 
 /// The published JSON Schema of [`TerminalOutcomePayload`] at
 /// [`TERMINAL_OUTCOME_SCHEMA_VERSION`], checked in as
-/// `api/tenkai-terminal-outcome-v1.schema.json`.
+/// `api/tenkai-terminal-outcome-v2.schema.json`.
 pub fn terminal_outcome_payload_schema() -> serde_json::Value {
     let mut schema = schemars::generate::SchemaSettings::draft2020_12()
         .into_generator()
@@ -285,7 +277,7 @@ pub fn tenant_deployment_target_id(tenant_id: &str, deployment_id: &str) -> Stri
 
 impl TerminalOutcomePayload {
     fn validate_for_event(&self, event: &ProviderEvent) -> Result<(), ProviderError> {
-        if self.schema != TERMINAL_OUTCOME_SCHEMA || self.observed_at <= 0 {
+        if !is_terminal_outcome_schema(&self.schema) || self.observed_at <= 0 {
             return Err(ProviderError::InvalidEvidence(
                 "terminal outcome schema or observation time is invalid".into(),
             ));
@@ -364,10 +356,10 @@ pub fn project_terminal_outcome(
         ));
     }
     let payload_value: serde_json::Value = serde_json::from_str(&event.payload_json)?;
-    if payload_value
+    if !payload_value
         .get("schema")
         .and_then(serde_json::Value::as_str)
-        != Some(TERMINAL_OUTCOME_SCHEMA)
+        .is_some_and(is_terminal_outcome_schema)
     {
         return Ok(None);
     }
@@ -559,7 +551,6 @@ pub fn terminal_outcome_event(
         payload_json: serde_json::to_string(&payload)?,
         collected_at_ms: None,
         source_sequence: None,
-        schema_version: Some(TERMINAL_OUTCOME_SCHEMA_VERSION.into()),
     };
     event.validate()?;
     payload.validate_for_event(&event)?;
@@ -899,6 +890,14 @@ pub fn outcome_provider_registration_attestation(
     )
 }
 
+/// Envelope fields that depend on the queued schema and the hub mode.
+struct DeliveryTarget {
+    schema_id: &'static str,
+    schema_version: &'static str,
+    external_id: String,
+    kind: &'static str,
+}
+
 fn outcome_target_kind(tenant_mode: bool) -> &'static str {
     if tenant_mode {
         TENANT_DEPLOYMENT_TARGET_KIND
@@ -998,55 +997,49 @@ impl ChiseiOutcomeProvider {
         })
     }
 
-    /// Schema version, target id, and target kind for an outcome queued under
-    /// `queued_version`. Rows queued before 0.7.0 (`None`) resend exactly the
-    /// `1.0.0` envelope an earlier attempt may already have admitted.
+    /// Schema id, version, target id, and target kind for one queued outcome.
+    /// A `.v1` row queued before 0.7.0 resends exactly the `1.0.0` envelope an
+    /// earlier attempt may already have admitted.
     fn delivery_target(
         &self,
-        queued_version: Option<&str>,
         payload: &TerminalOutcomePayload,
-    ) -> Result<(&'static str, String, &'static str), ProviderError> {
+    ) -> Result<DeliveryTarget, ProviderError> {
         let tenant = payload.tenant_id.as_str();
         let deployment = payload.deployment_id.as_str();
-        match queued_version {
-            None if tenant.is_empty() => Ok((
-                LEGACY_TERMINAL_OUTCOME_SCHEMA_VERSION,
-                deployment.into(),
-                DEPLOYMENT_TARGET_KIND,
-            )),
-            None => Ok((
-                LEGACY_TERMINAL_OUTCOME_SCHEMA_VERSION,
-                format!("{tenant}:{deployment}"),
-                DEPLOYMENT_TARGET_KIND,
-            )),
-            Some(TERMINAL_OUTCOME_SCHEMA_VERSION) if tenant.is_empty() == self.tenant_mode => {
-                Err(ProviderError::InvalidEvidence(
-                    "terminal outcome tenant scope does not match the registered target kind"
-                        .into(),
-                ))
-            }
-            Some(TERMINAL_OUTCOME_SCHEMA_VERSION) if self.tenant_mode => Ok((
-                TERMINAL_OUTCOME_SCHEMA_VERSION,
-                tenant_deployment_target_id(tenant, deployment),
-                TENANT_DEPLOYMENT_TARGET_KIND,
-            )),
-            Some(TERMINAL_OUTCOME_SCHEMA_VERSION) => Ok((
-                TERMINAL_OUTCOME_SCHEMA_VERSION,
-                deployment.into(),
-                DEPLOYMENT_TARGET_KIND,
-            )),
-            Some(_) => Err(ProviderError::InvalidEvidence(
-                "terminal outcome was queued under an unsupported schema version".into(),
-            )),
+        if payload.schema == LEGACY_TERMINAL_OUTCOME_SCHEMA {
+            return Ok(DeliveryTarget {
+                schema_id: LEGACY_TERMINAL_OUTCOME_SCHEMA,
+                schema_version: LEGACY_TERMINAL_OUTCOME_SCHEMA_VERSION,
+                external_id: if tenant.is_empty() {
+                    deployment.into()
+                } else {
+                    format!("{tenant}:{deployment}")
+                },
+                kind: DEPLOYMENT_TARGET_KIND,
+            });
         }
+        if tenant.is_empty() == self.tenant_mode {
+            return Err(ProviderError::InvalidEvidence(
+                "terminal outcome tenant scope does not match the registered target kind".into(),
+            ));
+        }
+        Ok(DeliveryTarget {
+            schema_id: TERMINAL_OUTCOME_SCHEMA,
+            schema_version: TERMINAL_OUTCOME_SCHEMA_VERSION,
+            external_id: if self.tenant_mode {
+                tenant_deployment_target_id(tenant, deployment)
+            } else {
+                deployment.into()
+            },
+            kind: outcome_target_kind(self.tenant_mode),
+        })
     }
 
     fn evidence(&self, event: &ProviderEvent) -> Result<EvidenceEnvelope, ProviderError> {
         event.validate()?;
         let payload: TerminalOutcomePayload = serde_json::from_str(&event.payload_json)?;
         payload.validate_for_event(event)?;
-        let (schema_version, target_external_id, target_kind) =
-            self.delivery_target(event.schema_version.as_deref(), &payload)?;
+        let target = self.delivery_target(&payload)?;
         let content_value: serde_json::Value = serde_json::from_str(&event.payload_json)?;
         let content_json = serde_json::to_vec(&content_value)?;
         let content_digest = format!("{:x}", Sha256::digest(&content_json));
@@ -1062,12 +1055,12 @@ impl ChiseiOutcomeProvider {
                 )
             })?,
             namespace: self.namespace.clone(),
-            target_external_id,
-            target_kind: target_kind.into(),
+            target_external_id: target.external_id,
+            target_kind: target.kind.into(),
             evidence_type: "operations.terminal_outcome".into(),
             signal: "other".into(),
-            schema_id: TERMINAL_OUTCOME_SCHEMA.into(),
-            schema_version: schema_version.into(),
+            schema_id: target.schema_id.into(),
+            schema_version: target.schema_version.into(),
             schema_compatibility: "exact".into(),
             observed_at_ms: payload.observed_at,
             collected_at_ms: event.collected_at_ms.ok_or_else(|| {
@@ -1375,7 +1368,6 @@ mod tests {
             payload_json: "{}".into(),
             collected_at_ms: None,
             source_sequence: None,
-            schema_version: None,
         };
         let generic_record = provider_event_record(OUTCOME_PROVIDER_KIND, &generic, 1_000).unwrap();
         assert_eq!(
@@ -1439,26 +1431,25 @@ mod tests {
         assert!(tenant_provider.evidence(&collected_community).is_err());
     }
 
-    /// Outcomes queued before 0.7.0 carry no version. A retry after the
-    /// upgrade resends the `1.0.0` envelope an earlier attempt may already
-    /// have admitted, and a replayed enqueue keeps the stored row.
+    /// `.v1` outcomes queued before 0.7.0 resend the `1.0.0` envelope and
+    /// target an earlier attempt may already have admitted, and still project.
     #[tokio::test]
-    async fn outcomes_queued_before_the_version_bump_keep_their_envelope() {
+    async fn outcomes_queued_before_the_v2_bump_keep_their_envelope() {
         let event = terminal_event();
         let record = provider_event_record(OUTCOME_PROVIDER_KIND, &event, 1_000).unwrap();
         let bound = bind_tenant_to_provider_events(Some("tenant:a"), std::slice::from_ref(&record))
             .unwrap();
         let mut current: ProviderEvent = serde_json::from_str(&bound[0].payload_json).unwrap();
-        assert_eq!(
-            current.schema_version.as_deref(),
-            Some(TERMINAL_OUTCOME_SCHEMA_VERSION)
-        );
         current.collected_at_ms = Some(1_000);
         current.source_sequence = Some(1);
         let legacy = ProviderEvent {
-            schema_version: None,
+            payload_json: current.payload_json.replace(
+                &format!("\"{TERMINAL_OUTCOME_SCHEMA}\""),
+                &format!("\"{LEGACY_TERMINAL_OUTCOME_SCHEMA}\""),
+            ),
             ..current.clone()
         };
+        assert_ne!(legacy.payload_json, current.payload_json);
         let tenant_provider = ChiseiOutcomeProvider::new(
             "http://127.0.0.1:50051",
             "tenkai-prod",
@@ -1469,6 +1460,7 @@ mod tests {
         .unwrap();
 
         let resent = tenant_provider.evidence(&legacy).unwrap();
+        assert_eq!(resent.schema_id, "tenkai.terminal_outcome.v1");
         assert_eq!(resent.schema_version, "1.0.0");
         assert_eq!(resent.target_kind, DEPLOYMENT_TARGET_KIND);
         assert_eq!(
@@ -1476,45 +1468,44 @@ mod tests {
             "tenant:a:tenkai:deployment:prod:api:1"
         );
         let fresh = tenant_provider.evidence(&current).unwrap();
+        assert_eq!(fresh.schema_id, TERMINAL_OUTCOME_SCHEMA);
         assert_eq!(fresh.schema_version, TERMINAL_OUTCOME_SCHEMA_VERSION);
+        assert_eq!(fresh.target_kind, TENANT_DEPLOYMENT_TARGET_KIND);
         assert_eq!(
             fresh.target_external_id,
             "tenant%3Aa:tenkai:deployment:prod:api:1"
         );
-        assert_eq!(resent.idempotency_key, fresh.idempotency_key);
-        assert_eq!(resent.content_json, fresh.content_json);
+
+        let legacy_community = ProviderEvent {
+            payload_json: event.payload_json.replace(
+                &format!("\"{TERMINAL_OUTCOME_SCHEMA}\""),
+                &format!("\"{LEGACY_TERMINAL_OUTCOME_SCHEMA}\""),
+            ),
+            ..event.clone()
+        };
+        let legacy_id = terminal_outcome_event_id(
+            &legacy_community.binding,
+            &serde_json::from_str(&legacy_community.payload_json).unwrap(),
+        )
+        .unwrap();
+        let legacy_community = ProviderEvent {
+            id: legacy_id,
+            ..legacy_community
+        };
+        let legacy_record =
+            provider_event_record(OUTCOME_PROVIDER_KIND, &legacy_community, 1_000).unwrap();
+        let projected = project_terminal_outcome(&legacy_record, 2_000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(projected.schema, "tenkai.terminal_outcome.v1");
 
         let unknown = ProviderEvent {
-            schema_version: Some("9.0.0".into()),
-            ..current.clone()
+            payload_json: current
+                .payload_json
+                .replace(TERMINAL_OUTCOME_SCHEMA, "tenkai.terminal_outcome.v9"),
+            ..current
         };
         assert!(tenant_provider.evidence(&unknown).is_err());
-
-        let legacy_queued = ProviderEvent {
-            collected_at_ms: None,
-            source_sequence: None,
-            ..legacy
-        };
-        let store = SqliteStore::open_in_memory().unwrap();
-        store
-            .enqueue_provider_event(&ProviderEventRecord {
-                payload_json: serde_json::to_string(&legacy_queued).unwrap(),
-                ..bound[0].clone()
-            })
-            .unwrap();
-        store.enqueue_provider_event(&bound[0]).unwrap();
-        let replayed_content = ProviderEvent {
-            payload_json: event.payload_json.clone(),
-            ..legacy_queued
-        };
-        assert!(
-            store
-                .enqueue_provider_event(&ProviderEventRecord {
-                    payload_json: serde_json::to_string(&replayed_content).unwrap(),
-                    ..bound[0].clone()
-                })
-                .is_err()
-        );
     }
 
     /// A tenant containing `:` or `%` cannot shift the tenant/deployment split.
@@ -1714,7 +1705,6 @@ mod tests {
             payload_json: "{}".into(),
             collected_at_ms: None,
             source_sequence: None,
-            schema_version: None,
         };
         let generic_record =
             provider_event_record(OUTCOME_PROVIDER_KIND, &generic_event, 1_000).unwrap();
@@ -1815,7 +1805,7 @@ mod tests {
 
         let registration =
             outcome_provider_registration_attestation("tenkai.outcome", "tenkai-prod", false);
-        assert!(registration.contains("schema=tenkai.terminal_outcome.v1@1.1.0;"));
+        assert!(registration.contains("schema=tenkai.terminal_outcome.v2@2.0.0;"));
         assert!(registration.contains("target_kind=tenkai.deployment;"));
         let export_provider = ChiseiOutcomeProvider::new_for_export(
             "http://127.0.0.1:50051",
@@ -2192,7 +2182,6 @@ mod tests {
             payload_json: "{\"result\":\"ok\"}".into(),
             collected_at_ms: None,
             source_sequence: None,
-            schema_version: None,
         };
         enqueue_optional_event(&store, "audit", &event, 100).unwrap();
         enqueue_optional_event(&store, "audit", &event, 100).unwrap();
@@ -2255,7 +2244,6 @@ mod tests {
             payload_json: "{}".into(),
             collected_at_ms: None,
             source_sequence: None,
-            schema_version: None,
         };
         enqueue_optional_event(&store, "audit", &event, 10).unwrap();
         enqueue_optional_event(&store, "outcome", &event, 10).unwrap();

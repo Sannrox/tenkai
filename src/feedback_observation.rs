@@ -5,7 +5,7 @@
 //! controller version, and the lease generation it ran under. It is written
 //! in the same transaction as the outcome and never changes afterwards.
 //! Delivery to Sekai is a separate opt-in adapter (#783).
-//! `tenkai.terminal_outcome.v1` is unchanged.
+//! The terminal outcome event is unchanged.
 //!
 //! An observation carries no detail text: no command output, credentials,
 //! signing material, environment facts or content. The reason is classified

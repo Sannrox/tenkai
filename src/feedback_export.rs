@@ -130,7 +130,6 @@ fn export_event(
         payload_json: serde_json::to_string(&payload)?,
         collected_at_ms: None,
         source_sequence: None,
-        schema_version: None,
     };
     event.validate()?;
     Ok(event)

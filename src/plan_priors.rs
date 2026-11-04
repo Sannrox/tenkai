@@ -505,7 +505,6 @@ mod tests {
             payload_json: serde_json::to_string(&payload).unwrap(),
             collected_at_ms: None,
             source_sequence: None,
-            schema_version: None,
         };
         let priors = project_priors_from_outcome_events(&[event]).unwrap();
         assert_eq!(priors.len(), 1);
@@ -617,7 +616,6 @@ mod tests {
             .unwrap(),
             collected_at_ms: None,
             source_sequence: None,
-            schema_version: None,
         };
         assert!(project_priors_from_outcome_events(&[event]).is_err());
     }

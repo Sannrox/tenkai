@@ -655,7 +655,6 @@ pub fn export_exposures(
             payload_json: payload,
             collected_at_ms: None,
             source_sequence: None,
-            schema_version: None,
         };
         enqueue_optional_event(store, EXPOSURE_PROVIDER_KIND, &event, now)
             .map_err(anyhow::Error::from)?;

@@ -468,7 +468,6 @@ fn enqueue_health_gate_event(ctx: &mut Ctx, plan: &Plan, evidence: &HealthGateEv
         payload_json: payload,
         collected_at_ms: None,
         source_sequence: None,
-        schema_version: None,
     };
     let _ = enqueue_optional_event(
         store.as_ref(),

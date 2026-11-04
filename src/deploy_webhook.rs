@@ -448,7 +448,6 @@ fn webhook_record(
         payload_json,
         collected_at_ms: None,
         source_sequence: None,
-        schema_version: None,
     };
     provider_event_record(DEPLOY_WEBHOOK_KIND, &provider_event, observed_at)
 }
