@@ -326,7 +326,7 @@ cmd_checksums() {
 }
 
 # Fail unless every linux-x86_64 host asset in --out is an x86-64 ELF
-# executable whose versioned glibc symbols are all at or below
+# executable linked to glibc whose versioned glibc symbols are all at or below
 # LINUX_GLIBC_FLOOR, so it starts on every supported distribution (#904).
 cmd_check_glibc() {
   local out=""
@@ -351,8 +351,10 @@ cmd_check_glibc() {
     header="$(readelf -hW "$path" 2>/dev/null)" || fail "${name} is not an ELF executable"
     grep -Eq 'Type:[[:space:]]+(EXEC|DYN)' <<<"$header" || fail "${name} is not an ELF executable"
     grep -Eq 'Machine:.*X86-64' <<<"$header" || fail "${name} is not an x86-64 executable"
-    newest="$(readelf -VW "$path" | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' | sed 's/^GLIBC_//' | sort -V | tail -n 1)"
-    if [[ -n "$newest" && "$(printf '%s\n%s\n' "$LINUX_GLIBC_FLOOR" "$newest" | sort -V | tail -n 1)" != "$LINUX_GLIBC_FLOOR" ]]; then
+    newest="$(readelf -VW "$path" | { grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' || true; } | sed 's/^GLIBC_//' | sort -V | tail -n 1)"
+    # Hosts dlopen system PKCS#11 modules, so they must link glibc.
+    [[ -n "$newest" ]] || fail "${name} does not link glibc"
+    if [[ "$(printf '%s\n%s\n' "$LINUX_GLIBC_FLOOR" "$newest" | sort -V | tail -n 1)" != "$LINUX_GLIBC_FLOOR" ]]; then
       fail "${name} requires glibc ${newest}, newer than the ${LINUX_GLIBC_FLOOR} floor"
     fi
   done < <(linux_host_names)
