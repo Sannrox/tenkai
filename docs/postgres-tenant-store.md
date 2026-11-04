@@ -66,6 +66,14 @@ database tenkai
 Cross-tenant reads use non-disclosing deny (`resource not found`). Never put
 identity-plane tables in this database (ADR 0005).
 
+Each tenant schema is migrated in place when a replica first uses it, under a
+per-schema advisory lock. Changes stay readable by the previous release during
+a rolling deploy. The catalog property lookup index keys on the first 256
+characters of each value and rechecks the full value, so plan JSON and long
+outcome details fit the btree row limit (#879). Upgrading rebuilds that index
+once per tenant schema, inside the first transaction that touches the schema;
+writes to that tenant's catalog properties wait for the rebuild.
+
 ## Build and configure
 
 ```bash

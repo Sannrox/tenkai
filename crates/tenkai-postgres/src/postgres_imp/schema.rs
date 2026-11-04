@@ -190,8 +190,6 @@ pub(crate) fn migrate_tenant_schema(tx: &mut Transaction<'_>) -> Result<()> {
             PRIMARY KEY (object_id, key),
             FOREIGN KEY (object_id) REFERENCES catalog_objects(id) ON DELETE CASCADE
         );
-        CREATE INDEX IF NOT EXISTS catalog_object_properties_lookup
-            ON catalog_object_properties(kind, key, value, object_id);
         CREATE TABLE IF NOT EXISTS catalog_links (
             id TEXT PRIMARY KEY, from_id TEXT NOT NULL, to_id TEXT NOT NULL,
             relation TEXT NOT NULL, payload BYTEA NOT NULL
@@ -223,6 +221,7 @@ pub(crate) fn migrate_tenant_schema(tx: &mut Transaction<'_>) -> Result<()> {
     .map_err(pg)?;
     seed_builtin_catalog_ontology(tx)?;
     migrate_environment_retirement(tx)?;
+    migrate_property_lookup_prefix(tx)?;
     let legacy_events = tx
         .query(
             "SELECT provider_kind,id,payload_json FROM provider_events
@@ -309,6 +308,48 @@ fn migrate_environment_retirement(tx: &mut Transaction<'_>) -> Result<()> {
         "CREATE INDEX IF NOT EXISTS environments_active
          ON environments(id) WHERE retired_at IS NULL",
     )
+    .map_err(pg)?;
+    Ok(())
+}
+
+/// Characters of a property value the lookup index keys on. 256 characters
+/// are at most 1 KiB of UTF-8, well under the btree row limit (about 2.7 KB),
+/// and cover every id, digest, and name a lookup asks for.
+pub(crate) const PROPERTY_LOOKUP_PREFIX_CHARS: i32 = 256;
+
+/// #879: index a prefix of each property value, not the whole value. A btree
+/// row over the full value rejects plan JSON and long outcome details, so
+/// those puts failed. Lookups match the prefix through the index and recheck
+/// the full value on the heap row.
+///
+/// The index keeps its old name, so an older binary's
+/// `CREATE INDEX IF NOT EXISTS` is a no-op during a rolling deploy, and its
+/// `value = $3` lookups stay correct on the leading `(kind, key)` columns.
+/// Only an index without expressions (the pre-#879 shape) is rebuilt, in the
+/// caller's transaction, so a crash leaves the old index in place.
+fn migrate_property_lookup_prefix(tx: &mut Transaction<'_>) -> Result<()> {
+    let full_value_index: bool = tx
+        .query_one(
+            "SELECT EXISTS(
+                SELECT 1 FROM pg_index i
+                JOIN pg_class c ON c.oid = i.indexrelid
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = current_schema()
+                  AND c.relname = 'catalog_object_properties_lookup'
+                  AND i.indexprs IS NULL
+             )",
+            &[],
+        )
+        .map_err(pg)?
+        .get(0);
+    if full_value_index {
+        tx.batch_execute("DROP INDEX catalog_object_properties_lookup")
+            .map_err(pg)?;
+    }
+    tx.batch_execute(&format!(
+        "CREATE INDEX IF NOT EXISTS catalog_object_properties_lookup
+         ON catalog_object_properties(kind, key, left(value, {PROPERTY_LOOKUP_PREFIX_CHARS}), object_id)"
+    ))
     .map_err(pg)?;
     Ok(())
 }
