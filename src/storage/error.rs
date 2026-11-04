@@ -79,6 +79,10 @@ pub enum StoreError {
     /// writes with (#748): it is a standby, or another replica took over.
     #[error("not the active hub writer: {0}")]
     NotActiveWriter(String),
+    /// The store was not copied before a schema upgrade, so it was not
+    /// migrated and this start is refused (#906).
+    #[error("pre-migration copy failed: {0}")]
+    PreMigrationCopy(String),
 }
 
 impl StoreError {

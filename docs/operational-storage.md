@@ -75,6 +75,37 @@ open a database whose schema is newer than the binary supports. Use
 database and its WAL files sequentially. Stop every writer before
 `tenkaictl restore <source>`. Restore and integrity checks require no provider.
 
+### Pre-migration copy
+
+However the binary was replaced (self-upgrade, a package, the install script,
+a manual copy, or a newer `tenkaictl` in embedded mode), the first start that
+moves a SQLite store to a newer schema first copies it beside itself:
+
+```text
+<db>.pre-v<found>.<ms>.db     the store at schema <found>, before the migration
+```
+
+The copy is a consistent online backup in one file (no WAL), owner-only,
+synced to disk, and checked to open at schema `<found>` with a clean
+integrity check before the store is touched. Startup logs its path. If the
+copy cannot be written or verified, startup is refused and the store keeps its
+schema, so the previous binary still opens it. A start that crashed after the
+copy reuses it when the store has not changed since. At most three copies stay
+beside a store; the newest is never deleted. The first start after a
+`tenkaictl self-upgrade` switch takes no copy, since the switch already backed
+up the store in `<home>/backups/`. PostgreSQL stores are unaffected.
+
+To go back to the previous binary after a migration:
+
+1. Stop every process that opens the store.
+2. Move `<db>`, `<db>-wal` and `<db>-shm` aside. Keep them: they hold what was
+   written since the migration, which the rollback gives up.
+3. Copy the newest `<db>.pre-v<found>.<ms>.db` to `<db>`, owner-only.
+4. Start the previous binary (schema `<found>`).
+
+Self-upgrade hosts use `tenkaictl self-upgrade rollback --restore-backup`
+instead (see [release binaries](release-binaries.md#upgrade-a-server-host)).
+
 Async embedded catalog queries and environment plan decode share Tokio's
 blocking pool (`spawn_blocking`), matching server `/readyz` store health
 checks. Embedded hosts run the property-index query and `from_object` in the

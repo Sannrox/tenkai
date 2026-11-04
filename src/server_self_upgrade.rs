@@ -76,11 +76,35 @@ pub fn check_store(database: &Path) -> Result<StoreCheck> {
             bail!("the store has schema {stored}; this binary supports up to {supported}");
         }
         // Opening migrates the copy, which is what this binary would do.
-        crate::storage::SqliteStore::open(&copy).context("this binary cannot open the store")?;
+        crate::storage::SqliteStore::open_scratch(&copy)
+            .context("this binary cannot open the store")?;
         Ok(StoreCheck { stored, supported })
     })();
     let _ = std::fs::remove_dir_all(&private);
     checked
+}
+
+/// The backup a self-upgrade switch took of `database` at schema `found`,
+/// when `exe` (canonical) is the server binary that switch made current and
+/// the switch is not yet confirmed or reverted: this start is that switch's
+/// first, and needs no second pre-migration copy (#906). Anything unexpected
+/// answers `None`, so the store is copied after all.
+pub(crate) fn switch_backup(exe: &Path, database: &Path, found: u32) -> Option<PathBuf> {
+    let version = exe.parent()?;
+    let versions = version.parent()?;
+    if versions.file_name()? != "versions" {
+        return None;
+    }
+    let record = Home::new(versions.parent()?).record().ok()??;
+    let backup = record.backup?;
+    let same_store =
+        std::fs::canonicalize(&record.database).ok()? == std::fs::canonicalize(database).ok()?;
+    let this_switch = !record.confirmed
+        && !record.reverted
+        && version.file_name()?.to_str()? == record.to
+        && same_store
+        && record.schema_before == found;
+    (this_switch && schema_version(&backup).ok()? == found).then_some(backup)
 }
 
 fn schema_version(database: &Path) -> Result<u32> {
@@ -873,6 +897,61 @@ mod tests {
             schema_version(&database).unwrap(),
             crate::storage::SCHEMA_VERSION + 1
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The first start of a version a self-upgrade switched to finds that
+    /// switch's backup of the same transition and takes no second copy; any
+    /// other binary, or a confirmed switch, gets its own (#906).
+    #[test]
+    fn the_first_start_after_a_switch_reuses_its_backup_as_the_pre_migration_copy() {
+        let root = root("premigration");
+        let home = Home::new(root.join("home"));
+        let database = root.join("state").join("tenkai.db");
+        std::fs::create_dir_all(database.parent().unwrap()).unwrap();
+        drop(crate::storage::SqliteStore::open(&database).unwrap());
+        let older = crate::storage::SCHEMA_VERSION - 1;
+        set_schema(&database, older);
+        let id = "candidate";
+        std::fs::create_dir_all(home.version(id)).unwrap();
+        std::fs::write(home.version(id).join(BINARIES[0]), b"").unwrap();
+        let switched = home.switch(id, &database, 1).unwrap();
+        let exe = std::fs::canonicalize(home.version(id).join(BINARIES[0])).unwrap();
+        let copies = || {
+            std::fs::read_dir(database.parent().unwrap())
+                .unwrap()
+                .filter(|entry| {
+                    entry
+                        .as_ref()
+                        .unwrap()
+                        .file_name()
+                        .to_str()
+                        .unwrap()
+                        .contains(".pre-v")
+                })
+                .count()
+        };
+
+        assert_eq!(switch_backup(&exe, &database, older), switched.backup);
+        assert!(switched.backup.is_some());
+        assert_eq!(switch_backup(&exe, &database, older - 1), None);
+        let elsewhere = root.join("versions").join(id).join(BINARIES[0]);
+        assert_eq!(switch_backup(&elsewhere, &database, older), None);
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        assert_eq!(
+            crate::storage::copy_before_migrate(&connection, &database, Some(&exe)).unwrap(),
+            None
+        );
+        assert_eq!(copies(), 0);
+
+        home.confirm().unwrap();
+        assert_eq!(switch_backup(&exe, &database, older), None);
+        assert!(
+            crate::storage::copy_before_migrate(&connection, &database, Some(&exe))
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(copies(), 1);
         let _ = std::fs::remove_dir_all(root);
     }
 }

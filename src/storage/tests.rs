@@ -4,6 +4,7 @@ mod feedback;
 mod fencing;
 mod lifecycle;
 mod migrations;
+mod premigration;
 
 fn environment(store: &SqliteStore) {
     store

@@ -5,15 +5,37 @@ pub struct SqliteStore {
     pub(super) principal: String,
 }
 
+/// Open the SQLite file at `path` and migrate it. With `copy`, a schema
+/// upgrade first leaves a verified copy of the store beside it, taken before
+/// anything (even the WAL switch) touches the store.
+fn open_file(path: &Path, copy: bool) -> Result<Connection> {
+    let mut connection = Connection::open(path)?;
+    connection.busy_timeout(std::time::Duration::from_secs(5))?;
+    if copy {
+        let exe = std::env::current_exe().and_then(std::fs::canonicalize).ok();
+        copy_before_migrate(&connection, path, exe.as_deref())?;
+    }
+    connection.pragma_update(None, "foreign_keys", "ON")?;
+    connection.pragma_update(None, "journal_mode", "WAL")?;
+    migrate(&mut connection)?;
+    Ok(connection)
+}
+
 impl SqliteStore {
+    /// Open and migrate the store at `path`. A schema upgrade first leaves a
+    /// verified pre-migration copy beside it, or refuses to start (#906).
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let mut connection = Connection::open(path)?;
-        connection.pragma_update(None, "foreign_keys", "ON")?;
-        connection.pragma_update(None, "journal_mode", "WAL")?;
-        connection.busy_timeout(std::time::Duration::from_secs(5))?;
-        migrate(&mut connection)?;
         Ok(Self {
-            connection: Mutex::new(connection),
+            connection: Mutex::new(open_file(path.as_ref(), true)?),
+            principal: "tenkai".into(),
+        })
+    }
+
+    /// Open and migrate a throwaway copy of a store, such as a store check
+    /// or a restore drill, without a pre-migration copy beside it.
+    pub(crate) fn open_scratch(path: impl AsRef<Path>) -> Result<Self> {
+        Ok(Self {
+            connection: Mutex::new(open_file(path.as_ref(), false)?),
             principal: "tenkai".into(),
         })
     }
@@ -44,13 +66,8 @@ impl SqliteStore {
                 ))
             })?;
         }
-        let mut connection = Connection::open(path)?;
-        connection.pragma_update(None, "foreign_keys", "ON")?;
-        connection.pragma_update(None, "journal_mode", "WAL")?;
-        connection.busy_timeout(std::time::Duration::from_secs(5))?;
-        migrate(&mut connection)?;
         Ok(Self {
-            connection: Mutex::new(connection),
+            connection: Mutex::new(open_file(path, true)?),
             principal: principal.into(),
         })
     }

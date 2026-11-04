@@ -253,6 +253,14 @@ once and only over a store the new version migrated, so a repeated rollback
 never overwrites what the older server wrote since. One self-upgrade
 command at a time holds a home.
 
+Any other way of replacing the binary (a package, the install script, a
+manual copy) relies on the server's own pre-migration copy: its first start at
+a newer schema leaves `<db>.pre-v<found>.<ms>.db` beside the store, or refuses
+to start. To roll back, stop the server, move the store and its `-wal` and
+`-shm` files aside, copy the newest pre-migration copy over the store, and
+start the previous binary
+([pre-migration copy](operational-storage.md#pre-migration-copy)).
+
 The record, backup and links cover one host. With several server replicas,
 upgrade one host at a time, with a schema both versions accept, as any
 rolling deploy requires. PostgreSQL (tenant-mode) hubs are upgraded and
