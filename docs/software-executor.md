@@ -61,8 +61,8 @@ restart, and reconcile observation. One process can therefore apply a `shell`
 release and a `kubernetes-inprocess` release in the same environment.
 
 - A release without the field uses the process default, exactly as before.
-  Apply through the management API keeps the shell path for undeclared
-  releases, as before, and uses the installed adapters for declared ones.
+  Apply through the management API now uses the same process default as the
+  reconciler; it used to run every release on the shell path.
 - A declared `shell` always runs `deploy.install`, even when the process default
   is another executor.
 - A declared executor this process does not have fails the step before anything
