@@ -181,6 +181,10 @@ tenkaictl reconcile --once
 Rules beyond the native workdir contract:
 
 - Field manager is always `tenkai`. Apply never sets `force`.
+- `env cluster-config set` stores an existing file by its canonical path. A
+  file that does not exist yet is stored as given, which must be absolute
+  without `.` or `..` components, so the path can be set when the
+  environment is created and before a host release writes the file.
 - Apply re-reads the signed workdir and the environment-scoped kubeconfig file.
   Cached cluster objects cannot grant apply authority.
 - A missing or unreadable kubeconfig file, or an environment without
