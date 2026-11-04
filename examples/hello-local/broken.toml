@@ -1,0 +1,10 @@
+[product]
+name = "hello-local"
+version = "0.2.0"
+description = "Demo release whose health probe always fails, to show automatic rollback"
+
+[deploy]
+workdir = "."
+install = "mkdir -p .state && echo 0.2.0 > .state/version"
+health = "false"
+uninstall = "rm -f .state/version"
