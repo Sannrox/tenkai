@@ -46,18 +46,34 @@ The manifest gains one optional field:
 executor = "kubernetes-inprocess"
 ```
 
-Values: `shell`, `host`, `helm`, `kubernetes`, `kubernetes-inprocess`,
-`docker`. The field is part of the manifest, so it is covered by the manifest
-digest and the release signature like every other field. Publication refuses an
-unknown value.
+Accepted values are the existing selector names: `shell`, `host`, `helm`,
+`kubernetes` (aliases `k8s` and `native`), `kubernetes-inprocess`, and `docker`.
+`host` is new (section 2). A declared `shell` runs the existing shell executor
+as the server's user, and pins that choice so a non-shell process default can
+never run the release. The field is part of the manifest, so it is covered by
+the manifest digest and the release signature. Publication refuses an unknown
+value.
 
 When the field is absent, the process default applies exactly as today:
 `TENKAI_SOFTWARE_EXECUTOR`, or the shell executor when that is unset. Existing
-manifests and hosts keep their behavior. A process selects the executor per
-release at plan, apply, rollback, recovery, and restart, in every place that
-reads `selected_software_executor()` today. A release whose declared executor is
-not available in the process fails closed and names the executor; it never
-falls back to another one.
+manifests and hosts keep their behavior.
+
+The executor is resolved **per release content**, not per apply attempt. Today
+one executor flows through `ExecutionOptions.software_executor` into the
+step's adapters, and `restore_previous` re-activates the previous release with
+the failing step's adapters. Under this decision every operation resolves the
+executor of the release it acts on: activating the target uses the target's,
+and removing or restoring the previous release uses the previous release's.
+That covers apply, rollback, recovery, restart, and observation, including
+`cluster_observe_executor`, which reads the variable directly today.
+
+A product keeps one executor across its releases in an environment. A plan
+whose target release resolves to a different executor than the currently
+installed release of the same product is refused and names both. Moving a
+product to another executor is an explicit remove of the old product followed
+by an install of the new one; no in-place transition is defined. A release
+whose executor is not available in the process fails closed and names it; it
+never falls back to another executor.
 
 Packaging stays where each executor already reads it: `deploy.install` for
 `shell` and `host`, `{workdir}/manifests/**` for the Kubernetes executors, the
@@ -67,31 +83,69 @@ declare a Kubernetes executor no longer need a placeholder `deploy.install`.
 ### 2. Privileged host releases run through a narrow systemd path
 
 `executor = "host"` is the only value that runs with root. The server stays an
-unprivileged `tenkai` user, with no sudo.
+unprivileged `tenkai` user, with no sudo. Everything the server hands to the
+root side is treated as untrusted; the root side relies only on what it can
+verify itself.
 
-- A root-owned template unit, `tenkai-host-apply@.service`, runs a root-owned
-  `tenkai-host-applier` binary with systemd sandboxing: `NoNewPrivileges`, a
-  bounded capability set, `ProtectHome`, a private `/tmp`, and its own journal
-  stream.
-- A polkit rule lets the `tenkai` user start instances of that one template and
-  nothing else. No other unit, no `systemctl` verb beyond start, no sudoers
-  entry.
-- For each host step the server writes a request (release id, manifest, release
-  artifact paths, environment, product, fencing generation, idempotency key)
-  into a spool directory it owns, and starts the instance named after the
-  request id.
-- The applier treats the request as untrusted. It re-verifies the release
-  signature against root-owned trust roots in `/etc/tenkai`, checks that the
-  signed manifest declares `executor = "host"`, and checks every artifact
-  against the signed digests. Only then does it run the release's `install`,
-  `uninstall`, or `health` command, under the same generation lock and
-  idempotency key the shell executor uses. It writes a result record the server
-  reads back; a missing or unreadable result is a failed step.
+**Entry point.** A root-owned template unit, `tenkai-host-apply@.service`, runs
+a root-owned `tenkai-host-applier` binary with systemd sandboxing:
+`NoNewPrivileges`, a bounded capability set, `ProtectHome`, a private `/tmp`,
+and its own journal stream. A polkit rule lets the `tenkai` user `start` and
+`stop` instances of that one template and nothing else: no other unit, no
+other verb, no sudoers entry.
 
-The property this buys: a compromised `tenkai` user can only cause releases that
-a trusted root already signed for `host` execution to run, not arbitrary
-commands. Rotating or removing a signer in the root-owned trust roots stops
-future host releases without touching the server.
+**Request.** For each host step the server writes a request into a spool
+directory it owns: the release id, the signed release, the signed plan approval
+for the plan that contains the step, and the step's action (`install`,
+`uninstall`, or `health`). The instance name is a digest of the approved plan
+digest, the step, and the action, so a retry of the same step addresses the
+same instance and a different step cannot reuse it.
+
+**Verification before anything runs.** The applier:
+
+1. copies the request and every release artifact into a fresh root-owned
+   directory under `/run/tenkai-host/<instance>`, opening each source with
+   `O_NOFOLLOW` and refusing links and special files, and from then on reads
+   only that copy;
+2. verifies the release signature against root-owned trust roots in
+   `/etc/tenkai`, including offline revocation
+   ([ADR 0036](0036-offline-key-revocation.md)) and signer validity windows
+   ([ADR 0039](0039-signer-validity-windows.md)), using root-owned copies of
+   that state;
+3. checks that the signed manifest declares `executor = "host"` and that every
+   copied artifact matches its signed digest;
+4. verifies the plan approval ([ADR 0037](0037-multi-party-plan-approval.md))
+   against root-owned approval trust roots, checks it has not expired, and
+   checks that the approved plan contains exactly this release, environment,
+   and action. An `uninstall` needs an approved plan that removes the product,
+   like any other change;
+5. refuses an instance it has already completed and returns that recorded
+   result instead of running again.
+
+Only then does it run the copied release's command. It builds the command's
+environment itself from a fixed allowlist plus values from the signed manifest;
+nothing the server supplies becomes an environment variable, argv, or a path the
+command interprets. Server-supplied identifiers are used only for lookup and
+must equal the signed values.
+
+**Fencing.** The applier holds a root-owned lock per environment and product in
+`/run/tenkai-host`, so one host step per product runs at a time whatever the
+server does. It enforces its own timeout and kills the command's process group
+when it fires. The server cancels on lease loss with the allowed `stop`, which
+the unit maps to the same kill. The result record (instance, release digest,
+action, outcome, exit status, timestamps) is written root-owned and read-only to
+the `tenkai` user; the server accepts it only when it matches the instance it
+started. A missing or mismatched result is a failed step. A completed instance
+is never re-run, so a restart or a replayed request cannot run the command
+twice.
+
+**What this buys.** A compromised `tenkai` user can only cause the root side to
+run a release that a trusted signer signed for `host` execution, is not revoked
+or outside its validity window, and appears in an unexpired plan approval for
+that exact action, and each such step at most once. It cannot run arbitrary
+commands, alter what runs, replay an old release, or uninstall a product without
+an approved plan. Approval keys used for unattended approval must therefore not
+be readable by the `tenkai` user.
 
 ### 3. A cluster release hands Tenkai its own cluster identity
 
@@ -133,11 +187,15 @@ infer compatibility from a running process.
 
 - One Tenkai can deliver host-level and in-cluster releases on the same host,
   and a bare host needs only Tenkai installed by hand.
-- The executor a release runs on is signed with the release; an operator
-  variable can no longer silently change how a signed release executes.
+- For releases that declare `deploy.executor`, the executor is signed with the
+  release, and an operator variable can no longer change how it executes.
+  Releases without the field still follow the process default.
+- A product cannot change executor in place; that takes a remove and an install.
 - Hosts that use host releases install the template unit, the applier, the
   polkit rule, and root-owned trust roots. Hosts that do not are unchanged.
-- Host releases cost a unit start per step and a second signature verification.
+- Host releases cost a unit start, an artifact copy, and a second signature and
+  approval verification per step. Unattended host changes need an approval key
+  the `tenkai` user cannot read.
 - `TENKAI_SOFTWARE_EXECUTOR` remains, as the default for releases that declare
   nothing.
 
