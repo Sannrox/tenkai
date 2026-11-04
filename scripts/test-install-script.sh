@@ -145,6 +145,10 @@ self_test() {
   ln -s "${home}/current/tenkai-server" "${tmp}/linked/tenkai-server"
   expect_refused "is a symbolic link" "$script" --base-url "$base" --prefix "${tmp}/linked" --role server
   expect_files "${tmp}/linked" tenkai-server
+  mkdir -p "${tmp}/dir/tenkai-executor-guard"
+  expect_refused "is not a regular file" "$script" --base-url "$base" --prefix "${tmp}/dir" --role server
+  expect_files "${tmp}/dir" tenkai-executor-guard
+  expect_files "${tmp}/dir/tenkai-executor-guard"
 
   printf 'install script self-test passed\n'
 }

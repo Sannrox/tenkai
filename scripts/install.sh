@@ -139,6 +139,10 @@ for binary in $binaries; do
   if [ -L "${prefix}/${binary}" ]; then
     die "${prefix}/${binary} is a symbolic link (to $(readlink "${prefix}/${binary}")); upgrade the host it points to with tenkaictl self-upgrade, or remove the link"
   fi
+  # mv would move the host into a directory and report success.
+  if [ -e "${prefix}/${binary}" ] && [ ! -f "${prefix}/${binary}" ]; then
+    die "${prefix}/${binary} exists and is not a regular file; refusing to install"
+  fi
 done
 
 if command -v curl >/dev/null 2>&1; then
