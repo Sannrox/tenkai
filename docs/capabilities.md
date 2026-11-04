@@ -51,6 +51,8 @@ it ([ADR 0001](decisions/0001-standalone-core-and-service-evolution.md),
 | Signed advisory feed import and local image assessment | [Advisory feed](offline-bundles.md#advisory-feed); `tenkaictl exposure inspect`; #645 |
 | Declared and imported derived criticality | [Manage environments](manage-environments.md#criticality); [Plan approval](plan-approval.md#multi-party-approval); #694 |
 | Signed Tenkai hosts in offline bundles | [Host binaries](offline-bundles.md#host-binaries); [Release binaries](release-binaries.md#disconnected-sites); #640 |
+| Checksummed host binaries on GitHub Releases | [Release binaries](release-binaries.md); [release notes](releases/0.6.0.md); #446 |
+| Verified server self-upgrade with store check and rollback | [Upgrade a server host](release-binaries.md#upgrade-a-server-host); #678 |
 | Optional governance/intelligence provider ports | [Provider contracts](provider-contracts.md) |
 | Web console served at `/ui/` from a pinned, checksum-verified release (feature `ui`, on in release binaries) | [Open the web console](run-tenkai-server.md#open-the-web-console); [ADR 0031](decisions/0031-web-console.md); #463 |
 | OIDC access tokens with group-to-grant mapping, for the web console | [Configure server authentication](configure-server-authentication.md#oidc-access-tokens-468); [ADR 0031](decisions/0031-web-console.md); #468 |
@@ -112,9 +114,8 @@ Postgres hub + multi-replica fencing) are landed on main. Remaining work is
 
 | Track | Intent |
 | --- | --- |
-| Release packaging | [GitHub Release binaries](release-binaries.md); [v0.6.0 notes](releases/0.6.0.md) |
-| Server self-upgrade with store check and rollback | [Upgrade a server host](release-binaries.md#upgrade-a-server-host); #678 |
-| Hub HA product claim | Criteria + automated drills before advertising `high_availability` (fence already shipped #135) |
+| Install and OS packaging | One-command install script, then OS packages and a package-manager tap; #905 |
+| Hub HA product claim | Criteria + automated drills before advertising `high_availability` (fence already shipped #135); #903 |
 | Intelligence loop depth | Fail-closed prior policy; live remote OutcomeProvider history |
 | Executor / model depth | Peer/regional weight caches; additional engines (vLLM, TGI and NIM on Kubernetes and MLX shipped: [research](research/additional-model-serving-executors.md)) |
 | Enterprise host | Live IdP drills, tenant-isolated prior stores (OIDC JWKS discovery and key rotation shipped in #468) |
