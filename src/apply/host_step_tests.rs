@@ -786,25 +786,27 @@ async fn a_unit_left_running_by_an_earlier_holder_is_stopped_before_the_next_app
     while !host.applier.running.lock().unwrap().contains(&instance) {
         tokio::task::yield_now().await;
     }
-
-    let stopped = executor
-        .fence_environment("edge", std::time::Duration::from_secs(5))
+    // Units of other environments are left alone.
+    assert!(
+        executor
+            .stop_environment_units("other")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let lease = super::claim_environment(&mut host.ctx, "edge", "next-holder")
         .await
         .unwrap();
 
-    assert_eq!(stopped, std::slice::from_ref(&instance));
+    super::host_step::fence_environment(&mut host.ctx, &lease, &executor)
+        .await
+        .unwrap();
+
     orphan.await.unwrap().unwrap();
+    assert!(host.applier.running.lock().unwrap().is_empty());
     let result: crate::host_apply::state::HostApplyResult = serde_json::from_slice(
         &std::fs::read(instance_dir(&host.applier.state, &instance).join(RESULT_FILE)).unwrap(),
     )
     .unwrap();
     assert_eq!(result.outcome, HostApplyOutcome::Stopped);
-    // Units of other environments are left alone.
-    assert!(
-        executor
-            .fence_environment("other", std::time::Duration::from_secs(1))
-            .await
-            .unwrap()
-            .is_empty()
-    );
 }

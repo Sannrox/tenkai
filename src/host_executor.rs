@@ -340,42 +340,20 @@ impl HostExecutor {
         Ok(instance)
     }
 
-    /// Stop every running host unit that acts on `environment`, and wait
-    /// until it is gone. Only the environment lease's holder may have one
-    /// running, so a unit still running when the lease is claimed belongs to
-    /// a holder that died or lost the lease; stopping it fences that holder
-    /// out even though the unit outlived the process that started it. A unit
-    /// is attributed by the applier's started record, else by its spooled
-    /// request. Fails closed when a unit does not stop within `patience`.
-    pub async fn fence_environment(
-        &self,
-        environment: &str,
-        patience: std::time::Duration,
-    ) -> Result<Vec<String>> {
+    /// Ask systemd to stop every running host unit that acts on
+    /// `environment`, and return their instances. Only the environment
+    /// lease's holder may have one running, so a unit still running when
+    /// the lease is claimed belongs to a holder that died or lost the lease;
+    /// stopping it fences that holder out even though the unit outlived the
+    /// process that started it. A unit is attributed by the applier's
+    /// started record, else by its spooled request.
+    pub async fn stop_environment_units(&self, environment: &str) -> Result<Vec<String>> {
         let mut stale = Vec::new();
         for instance in self.units.running().await? {
             if self.instance_environment(&instance).as_deref() == Some(environment) {
                 self.units.stop(&instance)?;
                 stale.push(instance);
             }
-        }
-        let deadline = tokio::time::Instant::now() + patience;
-        while !stale.is_empty() {
-            let running = self.units.running().await?;
-            if !stale.iter().any(|instance| running.contains(instance)) {
-                break;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                bail!(
-                    "host units of {environment} from an earlier lease holder are still running: {}",
-                    stale
-                        .iter()
-                        .map(|instance| unit_name(instance))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
         Ok(stale)
     }

@@ -21,7 +21,7 @@ use super::*;
 const REFRESH_EVERY: Duration = Duration::from_secs(10);
 /// How long a stopped unit may take to record the stop and exit. The unit's
 /// own `TimeoutStopSec` bounds it on the systemd side.
-pub(super) const STOP_GRACE: Duration = Duration::from_secs(120);
+const STOP_GRACE: Duration = Duration::from_secs(120);
 
 /// How a host step ended, short of a fence or control-plane failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +76,47 @@ pub(super) async fn run(
         Err(error) => HostStepEnd::Unknown(format!("{error:#}")),
         Ok(None) => missing_result(host, &instance, started),
     })
+}
+
+/// Stop every host unit an earlier holder of `lease` left running, and wait
+/// until they are gone while keeping the lease fresh. Fails closed when one
+/// is still running after [`STOP_GRACE`] or the lease is lost.
+pub(super) async fn fence_environment(
+    ctx: &mut Ctx,
+    lease: &EnvironmentLease,
+    host: &HostExecutor,
+) -> Result<()> {
+    let stale = host.stop_environment_units(&lease.environment).await?;
+    if stale.is_empty() {
+        return Ok(());
+    }
+    let deadline = tokio::time::Instant::now() + STOP_GRACE;
+    let mut refresh = tokio::time::interval(REFRESH_EVERY);
+    refresh.tick().await;
+    loop {
+        let running = host.units().running().await?;
+        let left: Vec<_> = stale
+            .iter()
+            .filter(|instance| running.contains(instance))
+            .collect();
+        if left.is_empty() {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!(
+                "host units of {} from an earlier lease holder are still running: {}",
+                lease.environment,
+                left.iter()
+                    .map(|instance| crate::host_executor::unit_name(instance))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+            _ = refresh.tick() => refresh_environment_lease(ctx, lease).await?,
+        }
+    }
 }
 
 /// How the unit's start ended, when it ended without the fence being lost.

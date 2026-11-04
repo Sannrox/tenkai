@@ -192,9 +192,7 @@ async fn execute_with_options_inner(
     // A host unit an earlier holder of this lease left running is stopped
     // before anything of this plan runs (ADR 0041 section 2).
     if let Ok(host) = options.software_executors.host()
-        && let Err(error) = host
-            .fence_environment(&environment, super::host_step::STOP_GRACE)
-            .await
+        && let Err(error) = super::host_step::fence_environment(ctx, &lease, host).await
     {
         let unlock = release_environment(ctx, &lease).await;
         return match unlock {
