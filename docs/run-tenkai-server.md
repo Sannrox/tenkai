@@ -142,6 +142,76 @@ A stop cancels an in-flight deploy command under its fence, so
 `TimeoutStopSec` only has to cover the current tick recording that outcome; the
 next start converges from durable state.
 
+### Run host releases
+
+A release that declares `executor = "host"` installs software on the host
+itself as root, for example a single-node cluster, while the server stays
+the unprivileged `tenkai` user
+([ADR 0041](decisions/0041-per-release-executor-and-privileged-host-releases.md)).
+Hosts that run no host releases skip this section.
+
+1. Install the root-side applier, its systemd template unit, the polkit rule,
+   and its root-owned trust and approval policy next to the server, as
+   [privileged host releases](host-releases.md#install) describes; the
+   install script's `--with-host-applier` places the binary, unit, and rule. The
+   applier's `spool_dir` is the server's spool directory, here
+   `/var/lib/tenkai/host-spool`, owned by `tenkai` with mode `0750`.
+2. Point the server at it in `/etc/tenkai/server.env`:
+
+   ```bash
+   TENKAI_HOST_SPOOL_DIR=/var/lib/tenkai/host-spool
+   # The applier's state directory; this is the default.
+   TENKAI_HOST_STATE_DIR=/var/lib/tenkai-host
+   ```
+
+3. Restart the server. `/readyz` lists `host_executor:v1` once the spool
+   directory is usable and `systemctl` is installed; otherwise the server
+   logs `tenkai-server warning: host executor unavailable` and every host
+   step fails closed, naming the setting.
+
+The applier's record for a product, not the server's view, decides what a
+host release has applied: a plan installs the channel's release unless the
+record holds exactly that release, and plans its health step alone when the
+release is applied but its last health step failed or never ran. A host
+release never replaces a product the server records as deployed with another
+executor. Each host step starts from the release the
+record holds, at the record's generation, and when the release declares
+`deploy.health` a `health` step follows. Host steps come first in a plan:
+a plan stops at its first failed step, and releases that run in a cluster a
+host release installs fail closed until it exists. Both are part of the plan, so its
+digest and approvals cover them; a plan made before another host step changed
+the record is refused by the applier. Host releases do not evaluate SLO
+gates (`[[gate.slo]]`); a plan that would need one is refused before anything
+runs.
+
+Host steps are always attended. The server never approves a plan with a host
+step itself, whatever the environment's approval policy says, and the
+applier counts only approvals from the root-owned host approval policy.
+Approve with keys the `tenkai` user cannot read, then apply as usual; the
+server hands the plan's approval envelopes to the applier.
+
+Each step runs `tenkai-host-apply@<instance>.service`, where the instance is
+derived from the plan digest, the step, and its action. The server keeps the
+environment lease fresh while the unit runs and stops the unit when it loses
+the lease or receives SIGTERM, like a shell deploy command. The unit outlives
+a server that dies, so whoever next claims the environment lease to apply a
+plan first stops any host unit still running for that environment, and
+refuses to go on while one runs. A server paused between its last lease
+refresh and the unit's start can still start that one step after its lease
+expired, as with the other executors; the applier's per-product lock and
+generation keep it from overlapping another step of the same product, and
+the server stops it at its next refresh. It accepts only a result that names
+the instance it started. A step the applier refused ran
+nothing and leaves the deployment as it was. A failed host step stays failed:
+nothing is cleaned up or restored, and the server marks the deployment
+unknown. The next approved plan moves on from the applier's record: it
+installs the channel's release again, or, after you promote the previous
+release, returns to it with the rollback or downgrade approvals the host
+policy requires. Reconcile neither observes nor restarts host releases. If the
+server died after the applier finished a step but before recording it, the
+next plan names the release the applier applied and asks you to record it
+with `tenkaictl env reconcile <environment> <product> --deployed <version>`.
+
 To authenticate with enterprise JWT assertions or with an identity provider
 (OIDC) instead of shared bearer tokens, see
 [configure server authentication](configure-server-authentication.md).

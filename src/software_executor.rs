@@ -444,8 +444,8 @@ impl<'de> Deserialize<'de> for SoftwareExecutorKind {
 }
 
 /// The installed adapter for `kind`. `None` for `shell` (the caller keeps the
-/// `deploy.install` path), for `host` (no adapter yet), and for an adapter the
-/// host binary did not install.
+/// `deploy.install` path), for `host` (see [`SoftwareExecutors::host`]), and
+/// for an adapter the host binary did not install.
 pub fn software_executor_for(kind: SoftwareExecutorKind) -> Option<Box<dyn SoftwareExecutor>> {
     let factory = match kind {
         SoftwareExecutorKind::Shell | SoftwareExecutorKind::Host => return None,
@@ -471,8 +471,19 @@ pub struct SoftwareExecutors {
     default_kind: Option<SoftwareExecutorKind>,
     /// Process default adapter. `None` is the shell `deploy.install` path.
     default: Option<Arc<dyn SoftwareExecutor>>,
-    /// Adapters for declared kinds. `shell` never has one.
+    /// Adapters for declared kinds. `shell` and `host` never have one.
     declared: Vec<(SoftwareExecutorKind, Arc<dyn SoftwareExecutor>)>,
+    /// Runs `host` releases through the root-side applier, as host plan
+    /// steps only; otherwise why it is unavailable.
+    host: std::result::Result<Arc<crate::host_executor::HostExecutor>, String>,
+}
+
+/// Why a process without `TENKAI_HOST_SPOOL_DIR` has no host executor.
+fn host_not_configured() -> String {
+    format!(
+        "set {} to the applier's spool directory",
+        crate::host_executor::SPOOL_DIR_ENV
+    )
 }
 
 /// Shell default and no declared adapters.
@@ -482,13 +493,18 @@ impl Default for SoftwareExecutors {
             default_kind: Some(SoftwareExecutorKind::Shell),
             default: None,
             declared: Vec::new(),
+            host: Err(host_not_configured()),
         }
     }
 }
 
 impl SoftwareExecutors {
-    /// This process's executors: the `TENKAI_SOFTWARE_EXECUTOR` default and
-    /// every adapter the host installed (`tenkai_executor::install()`).
+    /// This process's executors: the `TENKAI_SOFTWARE_EXECUTOR` default,
+    /// every adapter the host installed (`tenkai_executor::install()`), and
+    /// the host executor `TENKAI_HOST_SPOOL_DIR` configures. A host executor
+    /// whose configuration does not parse or that is not ready
+    /// ([`crate::host_executor::HostExecutor::check_ready`]) is unavailable,
+    /// so host steps fail closed naming why, as `/readyz` omits it.
     pub fn from_process() -> Self {
         let default = selected_software_executor().map(Arc::from);
         let default_kind = match std::env::var("TENKAI_SOFTWARE_EXECUTOR") {
@@ -505,6 +521,14 @@ impl SoftwareExecutors {
             default_kind,
             default,
             declared,
+            host: match crate::host_executor::HostExecutor::from_env() {
+                Ok(Some(host)) => host
+                    .check_ready()
+                    .map(|()| Arc::new(host))
+                    .map_err(|error| format!("{error:#}")),
+                Ok(None) => Err(host_not_configured()),
+                Err(error) => Err(format!("{error:#}")),
+            },
         }
     }
 
@@ -514,21 +538,49 @@ impl SoftwareExecutors {
             default_kind: None,
             default: Some(default),
             declared: Vec::new(),
+            host: Err(host_not_configured()),
         }
     }
 
     /// Run releases that declare `kind` with `adapter`, replacing any earlier
-    /// one. Ignored for `shell`, which always keeps the `deploy.install` path.
+    /// one. Ignored for `shell`, which always keeps the `deploy.install` path,
+    /// and for `host`, which runs only through [`Self::with_host`].
     pub fn with_adapter(
         mut self,
         kind: SoftwareExecutorKind,
         adapter: Arc<dyn SoftwareExecutor>,
     ) -> Self {
         self.declared.retain(|(existing, _)| *existing != kind);
-        if kind != SoftwareExecutorKind::Shell {
+        if !matches!(
+            kind,
+            SoftwareExecutorKind::Shell | SoftwareExecutorKind::Host
+        ) {
             self.declared.push((kind, adapter));
         }
         self
+    }
+
+    /// Run `host` releases with `host`, replacing any earlier one.
+    pub fn with_host(mut self, host: Arc<crate::host_executor::HostExecutor>) -> Self {
+        self.host = Ok(host);
+        self
+    }
+
+    /// The host executor, or an error naming what is missing.
+    pub fn host(&self) -> Result<&Arc<crate::host_executor::HostExecutor>> {
+        self.host.as_ref().map_err(|reason| {
+            anyhow::anyhow!(
+                "release declares deploy.executor = \"host\", and the host executor is not available in this process: {reason}"
+            )
+        })
+    }
+
+    /// Fail closed unless a release that declares `declared` can run here.
+    pub fn require_available(&self, declared: Option<SoftwareExecutorKind>) -> Result<()> {
+        if declared == Some(SoftwareExecutorKind::Host) {
+            return self.host().map(|_| ());
+        }
+        self.resolve(declared).map(|_| ())
     }
 
     /// The kind a release with `declared` runs as here. Compare these, never
@@ -542,7 +594,8 @@ impl SoftwareExecutors {
 
     /// The adapter for a release with `declared`; `None` is the shell
     /// `deploy.install` path. A declared executor this process lacks is an
-    /// error naming it.
+    /// error naming it. `host` releases have no adapter: they run only as
+    /// host plan steps, so asking for one is an error.
     pub fn resolve(
         &self,
         declared: Option<SoftwareExecutorKind>,
@@ -553,13 +606,12 @@ impl SoftwareExecutors {
         if kind == SoftwareExecutorKind::Shell {
             return Ok(None);
         }
+        if kind == SoftwareExecutorKind::Host {
+            self.host()?;
+            bail!("host releases run only as host plan steps through the root-side applier");
+        }
         if let Some((_, adapter)) = self.declared.iter().find(|(existing, _)| *existing == kind) {
             return Ok(Some(adapter.clone()));
-        }
-        if kind == SoftwareExecutorKind::Host {
-            bail!(
-                "release declares deploy.executor = \"host\", and the host executor is not available in this process"
-            );
         }
         bail!(
             "release declares deploy.executor = \"{kind}\", and that executor is not installed in this process"
@@ -603,6 +655,7 @@ impl std::fmt::Debug for SoftwareExecutors {
                     .map(|(kind, _)| *kind)
                     .collect::<Vec<_>>(),
             )
+            .field("host", &self.host.as_ref().ok())
             .finish()
     }
 }

@@ -312,6 +312,27 @@ pub async fn require_deployable_trust(
     require_deployable_trust_properties(&properties, environment)
 }
 
+/// The signature envelope a verified release was published with. Unsigned
+/// development releases have none and are refused.
+pub(crate) async fn signature_envelope(
+    ctx: &mut Ctx,
+    release_id: &str,
+) -> Result<release_signing::SignatureEnvelope> {
+    let release = ctx
+        .get(release_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("release {release_id} not found"))?;
+    let properties = stored_verification_properties(ctx, &release).await?;
+    verification_view(&release, &properties)?;
+    if property(&properties, "verification_status")? != "verified" {
+        bail!("release {release_id} is not signed");
+    }
+    Ok(serde_json::from_str(property(
+        &properties,
+        "signature_envelope",
+    )?)?)
+}
+
 pub(super) fn verification_view(
     release: &Object,
     properties: &HashMap<String, String>,

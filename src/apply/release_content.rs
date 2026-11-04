@@ -21,6 +21,10 @@ pub(super) struct ReleaseContent {
     pub(super) model_runtime_state: PathBuf,
     /// Environment-mirror refs admitted for this apply. Origin pull is refused.
     pub(super) artifact_pulls: Vec<crate::oci_artifact::OciArtifactRef>,
+    /// The manifest text exactly as signed; a host step hands it to the applier.
+    pub(super) raw_manifest: String,
+    /// Root the manifest's immutable inputs are relative to.
+    pub(super) content_root: PathBuf,
 }
 
 pub(super) fn verify_integrity(content: &ReleaseContent) -> Result<()> {
@@ -137,5 +141,7 @@ pub(super) async fn admit(
             .join("model_runtime")
             .join(format!("{product}.json")),
         artifact_pulls: Vec::new(),
+        content_root: PathBuf::from(&descriptor.content_path),
+        raw_manifest: raw,
     })
 }

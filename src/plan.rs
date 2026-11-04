@@ -15,7 +15,7 @@ mod convergence;
 mod lifecycle;
 mod release_selection;
 
-pub(crate) use convergence::stored_release_executor;
+pub(crate) use convergence::{require_host_product, stored_release_executor};
 
 pub(crate) use release_selection::resolve_subscription_selection;
 pub use release_selection::{
@@ -447,12 +447,27 @@ pub async fn compute(ctx: &mut Ctx, env: &str) -> Result<Vec<Step>> {
 }
 
 pub async fn create(ctx: &mut Ctx, env: &str) -> Result<Plan> {
+    create_with(
+        ctx,
+        env,
+        &crate::software_executor::SoftwareExecutors::from_process(),
+    )
+    .await
+}
+
+/// [`create`] with `executors` in place of this process's; host steps read
+/// the root-side applier's records through its host executor.
+pub async fn create_with(
+    ctx: &mut Ctx,
+    env: &str,
+    executors: &crate::software_executor::SoftwareExecutors,
+) -> Result<Plan> {
     let mut span = crate::telemetry::start_span(
         "tenkai.plan",
         &crate::telemetry::DeliveryAttributes::new(crate::telemetry::Operation::Plan)
             .environment(env),
     );
-    match convergence::create(ctx, env).await {
+    match convergence::create(ctx, env, executors).await {
         Ok(plan) => {
             span.set_plan(&plan);
             span.succeed();

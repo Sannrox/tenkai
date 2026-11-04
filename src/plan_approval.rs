@@ -912,6 +912,28 @@ pub async fn collect_envelope(
     })
 }
 
+/// Every approval envelope for `plan`'s digest: those in `approval` (a file
+/// or directory, as execution reads it) and those collected for the plan.
+/// A host step hands them to the root-side applier, which verifies them
+/// against its own policy (ADR 0041 section 2).
+pub(crate) async fn execution_envelopes(
+    ctx: &mut Ctx,
+    plan: &Plan,
+    approval: Option<&Path>,
+) -> Result<Vec<ApprovalEnvelope>> {
+    let digest = format!("sha256:{}", plan.executable_digest()?);
+    let mut envelopes = match approval {
+        Some(path) => load_envelopes(path)?,
+        None => Vec::new(),
+    };
+    envelopes.extend(list_collected_envelopes(ctx, &plan.id).await?);
+    let mut seen = std::collections::BTreeSet::new();
+    envelopes.retain(|envelope| {
+        envelope.statement.plan_digest == digest && seen.insert(envelope.signature.clone())
+    });
+    Ok(envelopes)
+}
+
 async fn list_collected_envelopes(ctx: &mut Ctx, plan_id: &str) -> Result<Vec<ApprovalEnvelope>> {
     let objects = ctx
         .find_by_property(

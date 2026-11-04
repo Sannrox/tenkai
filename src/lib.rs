@@ -202,6 +202,7 @@ pub mod grant_rules;
 pub mod health_gate;
 pub mod host_apply;
 pub mod host_env;
+pub mod host_executor;
 pub mod host_preflight;
 pub mod import_progress;
 pub mod import_scanner;

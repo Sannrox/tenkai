@@ -298,6 +298,12 @@ pub fn evaluate(
             reason: "policy mode is manual".into(),
         };
     }
+    // ADR 0041 section 2: the server never approves its own host steps.
+    if plan.steps.iter().any(|step| step.host.is_some()) {
+        return Decision::RequireHuman {
+            reason: "host steps require human or external approval".into(),
+        };
+    }
     if quorum_rule(policy, quorum_purpose(plan, skip_gates), criticality).n > 1 {
         return Decision::RequireHuman {
             reason: "multi-party approval requires human-signed envelopes".into(),
@@ -1883,6 +1889,16 @@ n = 2
         assert!(matches!(
             evaluate(&policy, &rollback, false, DeliverySignals::default(), None),
             Decision::RequireHuman { reason } if reason.contains("rollback")
+        ));
+        // ADR 0041: the server never approves its own host steps.
+        let mut host = sample_plan(Action::Install, "api");
+        host.steps[0].host = Some(crate::plan::HostStep {
+            action: crate::plan::HostAction::Install,
+            expected_generation: 0,
+        });
+        assert!(matches!(
+            evaluate(&policy, &host, false, DeliverySignals::default(), None),
+            Decision::RequireHuman { reason } if reason.contains("host steps")
         ));
         let downgrade = sample_plan(Action::Downgrade, "api");
         assert!(matches!(

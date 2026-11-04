@@ -91,6 +91,12 @@ async fn inspect(ctx: &mut Ctx, plan: &Plan) -> Result<Result<(), Rejection>> {
         }));
     }
     for step in &plan.steps {
+        // The root-side applier admits a host step only at the generation
+        // and from the release its own record names, so the server's view,
+        // unknown after a failed host step, does not hold it back.
+        if step.host.is_some() {
+            continue;
+        }
         if step.action != Action::Rollback
             && environment
                 .properties

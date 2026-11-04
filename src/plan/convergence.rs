@@ -88,6 +88,20 @@ async fn stored_release_manifest(
     crate::manifest::parse_raw(raw).with_context(|| format!("parsing stored manifest of {release}"))
 }
 
+/// The stored manifest of `release`, or `None` when the release is missing or
+/// its manifest does not parse; apply admission refuses such a release.
+async fn readable_manifest(
+    ctx: &mut Ctx,
+    release: &str,
+) -> Result<Option<crate::manifest::Manifest>> {
+    Ok(ctx.get(release).await?.and_then(|object| {
+        object
+            .properties
+            .get("manifest")
+            .and_then(|raw| crate::manifest::parse_raw(raw).ok())
+    }))
+}
+
 /// The executor the stored manifest of `release` declares.
 pub(crate) async fn stored_release_executor(
     ctx: &mut Ctx,
@@ -125,6 +139,186 @@ async fn require_same_executor(
     )
 }
 
+/// Bind each step of a `host` release to the root-side applier's record for
+/// its product (ADR 0041 section 2). The step installs its target from the
+/// release the record holds, at the record's generation; both are part of
+/// the plan, so its digest and approvals cover them. It gets no restore pin:
+/// a failed host step is never restored automatically. When the release
+/// declares `deploy.health`, an approved `health` step follows at the
+/// generation the install leaves. Steps of other releases are unchanged.
+async fn bind_host_steps(
+    ctx: &mut Ctx,
+    executors: &crate::software_executor::SoftwareExecutors,
+    env: &str,
+    steps: Vec<Step>,
+) -> Result<Vec<Step>> {
+    let mut bound = Vec::with_capacity(steps.len());
+    for mut step in steps {
+        // A release that is missing or unreadable is left to apply
+        // admission, which refuses it.
+        let Some(manifest) = readable_manifest(ctx, &step.release_id).await? else {
+            bound.push(step);
+            continue;
+        };
+        if manifest.deploy.executor != Some(crate::software_executor::SoftwareExecutorKind::Host) {
+            bound.push(step);
+            continue;
+        }
+        require_host_product(ctx, executors, env, &step.product).await?;
+        let record = executors.host()?.applied_state(env, &step.product)?;
+        match step.host {
+            // An applied release's outstanding health step, at the record's
+            // generation.
+            Some(HostStep {
+                action: HostAction::Health,
+                ..
+            }) => {
+                step.host = Some(HostStep {
+                    action: HostAction::Health,
+                    expected_generation: record.generation,
+                });
+                bound.push(step);
+                continue;
+            }
+            Some(_) => bail!("step for host release {} is already bound", step.release_id),
+            None if step.action == Action::Restart => bail!(
+                "host release {} is never restarted; plan a new install instead",
+                step.release_id
+            ),
+            None => {}
+        }
+        let from = host_source(&record, step.from.as_deref());
+        if step.action != Action::Rollback {
+            step.action = match from.as_deref() {
+                None => Action::Install,
+                Some(current) => classify_change(current, &step.to),
+            };
+        }
+        step.from = from;
+        step.restore = None;
+        step.host = Some(HostStep {
+            action: HostAction::Install,
+            expected_generation: record.generation,
+        });
+        if declares_health(&manifest) {
+            let installed = record
+                .generation
+                .checked_add(1)
+                .context("host applied-state generation overflow")?;
+            bound.push(step.clone());
+            // The health step of a rollback is part of that rollback, so it
+            // keeps the rollback's admission, recalled recovery included.
+            if step.action != Action::Rollback {
+                step.action = Action::Restart;
+            }
+            step.from = Some(step.to.clone());
+            step.host = Some(HostStep {
+                action: HostAction::Health,
+                expected_generation: installed,
+            });
+        }
+        bound.push(step);
+    }
+    Ok(bound)
+}
+
+/// Whether a release declares a `deploy.health` command.
+fn declares_health(manifest: &crate::manifest::Manifest) -> bool {
+    manifest
+        .deploy
+        .health
+        .as_deref()
+        .is_some_and(|command| !command.trim().is_empty())
+}
+
+/// How far the applier's record has taken a host product toward `desired`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostProgress {
+    /// `desired` is applied, and its health step succeeded since if it
+    /// declares one.
+    Converged,
+    /// `desired` is applied, but its health step failed or never ran.
+    NeedsHealth,
+    /// Anything else, a dirty record included.
+    NeedsInstall,
+}
+
+fn host_progress(
+    record: &crate::host_apply::state::AppliedStateRecord,
+    desired: &str,
+    health: bool,
+) -> HostProgress {
+    use crate::host_apply::state::AppliedState;
+    let AppliedState::Applied { release } = &record.state else {
+        return HostProgress::NeedsInstall;
+    };
+    if release.version != desired {
+        return HostProgress::NeedsInstall;
+    }
+    // The last step the applier started for this product is a health step
+    // of this very release, and it succeeded.
+    let healthy = matches!(
+        (&record.last_started, &record.last_result),
+        (Some(started), Some(result))
+            if started.action == HostAction::Health
+                && &started.release == release
+                && result.instance == started.instance
+                && result.outcome.succeeded()
+    );
+    if health && !healthy {
+        HostProgress::NeedsHealth
+    } else {
+        HostProgress::Converged
+    }
+}
+
+/// Refuse to install a host release over a product the server records as
+/// deployed with another executor; moving executors is a remove and an
+/// install (ADR 0041 section 1). The applier's record, empty for a product
+/// it never touched, cannot tell.
+pub(crate) async fn require_host_product(
+    ctx: &mut Ctx,
+    executors: &crate::software_executor::SoftwareExecutors,
+    env: &str,
+    product: &str,
+) -> Result<()> {
+    let environment = crate::environment::environment(ctx, env).await?;
+    let Some(deployed) = environment.properties.get(&format!("deployed.{product}")) else {
+        return Ok(());
+    };
+    let Some(installed) = readable_manifest(ctx, &release_id(product, deployed)).await? else {
+        return Ok(());
+    };
+    executors.require_same_executor(
+        product,
+        installed.deploy.executor,
+        Some(crate::software_executor::SoftwareExecutorKind::Host),
+    )
+}
+
+/// The version a host step starts from: what the applier's record holds.
+/// For a `dirty` record either side may be the source; the one the server
+/// recorded as deployed wins, else the side the interrupted step came from.
+fn host_source(
+    record: &crate::host_apply::state::AppliedStateRecord,
+    deployed: Option<&str>,
+) -> Option<String> {
+    use crate::host_apply::state::AppliedState;
+    match &record.state {
+        AppliedState::Empty => None,
+        AppliedState::Applied { release } => Some(release.version.clone()),
+        AppliedState::Dirty { from, to } => {
+            let sides = [from.as_ref(), to.as_ref()];
+            sides
+                .iter()
+                .flatten()
+                .find(|release| Some(release.version.as_str()) == deployed)
+                .or(sides.iter().flatten().next())
+                .map(|release| release.version.clone())
+        }
+    }
+}
+
 /// The adapter reconcile observes a deployed release with: the one its own
 /// executor resolves to. The shell path and the unnamed test default observe
 /// nothing, as before, and host releases get no periodic observation (ADR 0041
@@ -140,14 +334,19 @@ fn observe_executor(
     }
 }
 
-async fn compute_snapshot(ctx: &mut Ctx, env: &str) -> Result<(Vec<DesiredStateInput>, Vec<Step>)> {
-    compute_snapshot_with_policy(ctx, env, ConvergencePolicy::catalog_only()).await
+async fn compute_snapshot(
+    ctx: &mut Ctx,
+    env: &str,
+    executors: &crate::software_executor::SoftwareExecutors,
+) -> Result<(Vec<DesiredStateInput>, Vec<Step>)> {
+    compute_snapshot_with_policy(ctx, env, ConvergencePolicy::catalog_only(), executors).await
 }
 
 async fn compute_snapshot_with_policy(
     ctx: &mut Ctx,
     env: &str,
     policy: ConvergencePolicy,
+    executors: &crate::software_executor::SoftwareExecutors,
 ) -> Result<(Vec<DesiredStateInput>, Vec<Step>)> {
     let env_obj = crate::environment::active_environment(ctx, env).await?;
     crate::preview::admit_plan(&env_obj, crate::now_millis())?;
@@ -167,9 +366,13 @@ async fn compute_snapshot_with_policy(
         }
     }
 
-    let executors = crate::software_executor::SoftwareExecutors::from_process();
     let mut inputs = Vec::new();
     let mut pending = Vec::new();
+    // Host products whose release is applied but whose health step has not
+    // succeeded since: they get that health step alone.
+    let mut host_health_only = std::collections::HashSet::new();
+    // Products whose release runs on the host executor.
+    let mut host_products = std::collections::HashSet::new();
     let mut held_model = false;
     let mut held_routing = false;
     for ch in channels {
@@ -209,10 +412,25 @@ async fn compute_snapshot_with_policy(
         let target = pin_release(ctx, &release, env).await?;
         crate::software_compatibility::require_release(ctx, env, &release).await?;
         crate::topology::require_placement(ctx, env, &release).await?;
-        if env_obj
-            .properties
-            .get(&format!("deployment_health.{product}"))
-            .is_some_and(|health| health == "unknown")
+        // The root-side applier's record, not the server's view, says what a
+        // host release has applied (ADR 0041 section 2).
+        let host_record = match readable_manifest(ctx, &release).await? {
+            Some(manifest)
+                if manifest.deploy.executor
+                    == Some(crate::software_executor::SoftwareExecutorKind::Host) =>
+            {
+                Some((
+                    executors.host()?.applied_state(env, &product)?,
+                    declares_health(&manifest),
+                ))
+            }
+            _ => None,
+        };
+        if host_record.is_none()
+            && env_obj
+                .properties
+                .get(&format!("deployment_health.{product}"))
+                .is_some_and(|health| health == "unknown")
         {
             let detail = env_obj
                 .properties
@@ -246,6 +464,53 @@ async fn compute_snapshot_with_policy(
             artifact_digest: target.artifact_digest.clone(),
             deployed_version: deployed.clone(),
         });
+        if let Some((record, health)) = &host_record {
+            host_products.insert(product.clone());
+            match host_progress(record, &desired, *health) {
+                HostProgress::Converged => {
+                    // The applier finished, but the server never recorded
+                    // it (a crash or failed bookkeeping after the step).
+                    // Nothing observes host releases, so say how to settle it.
+                    let unknown = env_obj
+                        .properties
+                        .get(&format!("deployment_health.{product}"))
+                        .is_some_and(|health| health == "unknown");
+                    if unknown || deployed.as_deref() != Some(desired.as_str()) {
+                        bail!(
+                            "the host applier records {product} {desired} applied in {env} at generation {}, but this server records {}; once no apply runs, record it with `tenkaictl env reconcile {env} {product} --deployed {desired}`",
+                            record.generation,
+                            if unknown {
+                                "it as unknown".to_string()
+                            } else {
+                                deployed.as_deref().unwrap_or("nothing").to_string()
+                            }
+                        );
+                    }
+                }
+                HostProgress::NeedsHealth => {
+                    host_health_only.insert(product.clone());
+                    pending.push((
+                        product,
+                        Action::Restart,
+                        Some(desired.clone()),
+                        desired,
+                        target,
+                        None,
+                        kind,
+                    ));
+                }
+                HostProgress::NeedsInstall => pending.push((
+                    product,
+                    Action::Install,
+                    deployed,
+                    desired,
+                    target,
+                    None,
+                    kind,
+                )),
+            }
+            continue;
+        }
         match deployed {
             Some(v) if v == desired => {
                 let mut restart = !policy.observe_live
@@ -262,7 +527,7 @@ async fn compute_snapshot_with_policy(
                         == Some(crate::software_executor::SoftwareExecutorKind::Host)
                 });
                 if let Some(manifest) = live.as_ref()
-                    && let Some(executor) = observe_executor(&executors, manifest)?
+                    && let Some(executor) = observe_executor(executors, manifest)?
                 {
                     let request = crate::software_executor::request_from_parts(
                         product.clone(),
@@ -346,11 +611,16 @@ async fn compute_snapshot_with_policy(
     }
     // Enforce model_runtime ↔ routing_config rollout order (see docs). The
     // runtime agent's own release always runs last: switching restarts the
-    // agent, so nothing may follow it in the plan (#685).
+    // agent, so nothing may follow it in the plan (#685). Host releases run
+    // first: a plan stops at its first failed step, and releases in a cluster
+    // a host release installs fail closed until it exists (ADR 0041 section
+    // 4), so a host step sorted after them would never run.
     pending.sort_by(|a, b| {
         let agent = |product: &str| product == crate::runtime_self_upgrade::SELF_PRODUCT;
+        let not_host = |product: &String| !host_products.contains(product);
         agent(&a.0)
             .cmp(&agent(&b.0))
+            .then_with(|| not_host(&a.0).cmp(&not_host(&b.0)))
             .then_with(|| {
                 model_routing_rollout_rank(a.6, a.1).cmp(&model_routing_rollout_rank(b.6, b.1))
             })
@@ -368,6 +638,11 @@ async fn compute_snapshot_with_policy(
         .map(
             |(index, (product, action, from, to, release, restore, _kind))| Step {
                 id: format!("{}:step:{index}", env_id(env)),
+                // Binding sets the generation from the applier's record.
+                host: host_health_only.contains(&product).then_some(HostStep {
+                    action: HostAction::Health,
+                    expected_generation: 0,
+                }),
                 order: index as u32,
                 product,
                 action,
@@ -377,7 +652,6 @@ async fn compute_snapshot_with_policy(
                 release_digest: release.digest,
                 artifact_digest: release.artifact_digest,
                 workdir: release.workdir,
-                host: None,
                 restore,
             },
         )
@@ -458,13 +732,19 @@ pub(super) fn validate_model_routing_rollout_order(
 
 /// Compute the steps that converge the environment on its subscribed channels.
 pub(super) async fn compute(ctx: &mut Ctx, env: &str) -> Result<Vec<Step>> {
-    Ok(compute_snapshot(ctx, env).await?.1)
+    let executors = crate::software_executor::SoftwareExecutors::from_process();
+    Ok(compute_snapshot(ctx, env, &executors).await?.1)
 }
 
 /// Compute and persist an immutable executable plan before any step is run.
-pub(super) async fn create(ctx: &mut Ctx, env: &str) -> Result<Plan> {
-    let (inputs, mut steps) = compute_snapshot(ctx, env).await?;
-    create_with_content(ctx, env, inputs, &mut steps, None).await
+/// Host steps read the applier's records through `executors`.
+pub(super) async fn create(
+    ctx: &mut Ctx,
+    env: &str,
+    executors: &crate::software_executor::SoftwareExecutors,
+) -> Result<Plan> {
+    let (inputs, steps) = compute_snapshot(ctx, env, executors).await?;
+    create_with_content(ctx, executors, env, inputs, steps, None).await
 }
 
 /// Persist a catalog-only plan only when it includes `product` at `release`.
@@ -477,14 +757,15 @@ pub(super) async fn create_for_held_target(
     product: &str,
     release: &str,
 ) -> Result<Plan> {
-    let (inputs, mut steps) = compute_snapshot(ctx, env).await?;
+    let executors = crate::software_executor::SoftwareExecutors::from_process();
+    let (inputs, steps) = compute_snapshot(ctx, env, &executors).await?;
     if !steps
         .iter()
         .any(|step| step.product == product && step.release_id == release)
     {
         bail!("explicit retry did not include held failed target {product} ({release})");
     }
-    create_with_content(ctx, env, inputs, &mut steps, None).await
+    create_with_content(ctx, &executors, env, inputs, steps, None).await
 }
 
 /// Reconcile planning may emit Restart steps from live observe/health evidence.
@@ -493,40 +774,40 @@ pub(super) async fn create_for_held_target(
 /// and is not served to a runtime agent. Operator `create` still persists
 /// empty Computed plans so durable callers can reload the returned id.
 pub(super) async fn create_for_reconcile(ctx: &mut Ctx, env: &str) -> Result<Plan> {
+    let executors = crate::software_executor::SoftwareExecutors::from_process();
     let (inputs, mut steps) =
-        compute_snapshot_with_policy(ctx, env, ConvergencePolicy::reconcile()).await?;
+        compute_snapshot_with_policy(ctx, env, ConvergencePolicy::reconcile(), &executors).await?;
     if steps.is_empty() {
         return assemble_plan(env, inputs, &mut steps, None);
     }
-    create_with_content(ctx, env, inputs, &mut steps, None).await
+    create_with_content(ctx, &executors, env, inputs, steps, None).await
 }
 
 /// Persist a reconcile-policy plan, even with zero steps. Held failed targets
 /// stay held, unlike operator `create`, which retries them.
 pub(super) async fn create_holding_failed_targets(ctx: &mut Ctx, env: &str) -> Result<Plan> {
-    let (inputs, mut steps) =
-        compute_snapshot_with_policy(ctx, env, ConvergencePolicy::reconcile()).await?;
-    create_with_content(ctx, env, inputs, &mut steps, None).await
+    let executors = crate::software_executor::SoftwareExecutors::from_process();
+    let (inputs, steps) =
+        compute_snapshot_with_policy(ctx, env, ConvergencePolicy::reconcile(), &executors).await?;
+    create_with_content(ctx, &executors, env, inputs, steps, None).await
 }
 
 /// Persist an explicitly constructed operation, such as a rollback, as a plan.
-pub(super) async fn create_from_steps(
-    ctx: &mut Ctx,
-    env: &str,
-    mut steps: Vec<Step>,
-) -> Result<Plan> {
+pub(super) async fn create_from_steps(ctx: &mut Ctx, env: &str, steps: Vec<Step>) -> Result<Plan> {
     admit_preview_environment(ctx, env).await?;
-    create_with_content(ctx, env, Vec::new(), &mut steps, None).await
+    let executors = crate::software_executor::SoftwareExecutors::from_process();
+    create_with_content(ctx, &executors, env, Vec::new(), steps, None).await
 }
 
 pub(super) async fn create_from_steps_with_recovery(
     ctx: &mut Ctx,
     env: &str,
-    mut steps: Vec<Step>,
+    steps: Vec<Step>,
     reason: String,
 ) -> Result<Plan> {
     admit_preview_environment(ctx, env).await?;
-    create_with_content(ctx, env, Vec::new(), &mut steps, Some(reason)).await
+    let executors = crate::software_executor::SoftwareExecutors::from_process();
+    create_with_content(ctx, &executors, env, Vec::new(), steps, Some(reason)).await
 }
 
 async fn admit_preview_environment(ctx: &mut Ctx, env: &str) -> Result<()> {
@@ -575,16 +856,17 @@ fn assemble_plan(
 
 async fn create_with_content(
     ctx: &mut Ctx,
+    executors: &crate::software_executor::SoftwareExecutors,
     env: &str,
     inputs: Vec<DesiredStateInput>,
-    steps: &mut [Step],
+    steps: Vec<Step>,
     recalled_recovery_reason: Option<String>,
 ) -> Result<Plan> {
-    let executors = crate::software_executor::SoftwareExecutors::from_process();
-    for step in steps.iter() {
-        require_same_executor(ctx, &executors, step).await?;
+    let mut steps = bind_host_steps(ctx, executors, env, steps).await?;
+    for step in &steps {
+        require_same_executor(ctx, executors, step).await?;
     }
-    let mut plan = assemble_plan(env, inputs, steps, recalled_recovery_reason)?;
+    let mut plan = assemble_plan(env, inputs, &mut steps, recalled_recovery_reason)?;
     // Optional advisory priors (default off). Never hard-block or change steps.
     if let Ok(inspect) = inspect_environment(ctx, env).await {
         let _ = crate::plan_priors::annotate_plan_with_priors(
@@ -933,7 +1215,7 @@ anti_affinity = "host"
             .await
             .unwrap();
 
-        let err = create(&mut ctx, "ledger-a").await.unwrap_err();
+        let err = crate::plan::create(&mut ctx, "ledger-a").await.unwrap_err();
         let err = format!("{err:#}");
         assert!(
             err.contains("replicas ledger-a and ledger-b both have host=h1"),
@@ -943,7 +1225,7 @@ anti_affinity = "host"
         set_environment_fact(&mut ctx, "ledger-b", "host", "h2")
             .await
             .unwrap();
-        let plan = create(&mut ctx, "ledger-a").await.unwrap();
+        let plan = crate::plan::create(&mut ctx, "ledger-a").await.unwrap();
         assert_eq!(plan.steps.len(), 1);
         assert_eq!(plan.steps[0].product, "ledger");
 
@@ -1033,7 +1315,7 @@ anti_affinity = "host"
             .await
             .unwrap();
 
-        let plan = create(&mut ctx, "local").await.unwrap();
+        let plan = crate::plan::create(&mut ctx, "local").await.unwrap();
         assert_eq!(plan.steps.len(), 1);
         assert_eq!(plan.steps[0].product, "qwen-coder");
         assert_eq!(plan.steps[0].to, "1.0.0");
@@ -1043,7 +1325,10 @@ anti_affinity = "host"
         set_environment_fact(&mut ctx, "local", "memory_gib", "8")
             .await
             .unwrap();
-        let err = create(&mut ctx, "local").await.unwrap_err().to_string();
+        let err = crate::plan::create(&mut ctx, "local")
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(
             err.contains("no model_runtime variant") || err.contains("memory_gib"),
             "{err}"
@@ -1053,7 +1338,7 @@ anti_affinity = "host"
         set_environment_fact(&mut ctx, "local", "memory_gib", "64")
             .await
             .unwrap();
-        let plan = create(&mut ctx, "local").await.unwrap();
+        let plan = crate::plan::create(&mut ctx, "local").await.unwrap();
         assert_eq!(plan.steps[0].to, "1.1.0");
 
         let _ = std::fs::remove_dir_all(&root);
@@ -1108,7 +1393,7 @@ install = "true"
             .unwrap();
         env_add(&mut ctx, "local", "fixture").await.unwrap();
         subscribe(&mut ctx, "local", "api", "stable").await.unwrap();
-        let plan = create(&mut ctx, "local").await.unwrap();
+        let plan = crate::plan::create(&mut ctx, "local").await.unwrap();
         let lease = crate::apply::claim_environment(&mut ctx, "local", "feedback-test")
             .await
             .unwrap();
@@ -1204,7 +1489,7 @@ install = "true"
             .properties
             .insert("deployed.api".into(), "1.0.0".into());
         ctx.put(environment).await.unwrap();
-        let plan = create(&mut ctx, "local").await.unwrap();
+        let plan = crate::plan::create(&mut ctx, "local").await.unwrap();
         let lease = crate::apply::claim_environment(&mut ctx, "local", "hold-test")
             .await
             .unwrap();
@@ -1242,7 +1527,7 @@ install = "true"
                 .contains("held")
         );
         assert_eq!(
-            create(&mut ctx, "local").await.unwrap().steps[0].to,
+            crate::plan::create(&mut ctx, "local").await.unwrap().steps[0].to,
             "1.1.0"
         );
         let mut environment = crate::environment::environment(&mut ctx, "local")
@@ -1499,7 +1784,7 @@ allowed_providers = ["local"]
         set_environment_overlay(&mut ctx, "local", "api", "region", "eu")
             .await
             .unwrap();
-        let plan = create(&mut ctx, "local").await.unwrap();
+        let plan = crate::plan::create(&mut ctx, "local").await.unwrap();
         assert_eq!(plan.steps.len(), 1);
         assert_eq!(plan.steps[0].action, Action::Restart);
         assert_eq!(plan.steps[0].from.as_deref(), Some("1.0.0"));
@@ -1533,7 +1818,7 @@ allowed_providers = ["local"]
             .insert("deployed_release.api".into(), release_id("api", "1.0.0"));
         ctx.put(env).await.unwrap();
 
-        let stored = create(&mut ctx, "local").await.unwrap();
+        let stored = crate::plan::create(&mut ctx, "local").await.unwrap();
         assert!(stored.steps.is_empty(), "{stored:?}");
         let loaded = load(&mut ctx, &stored.id).await.unwrap();
         assert_eq!(loaded.id, stored.id);

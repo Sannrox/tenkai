@@ -20,6 +20,9 @@ use anyhow::{Context as _, Result, bail};
 mod execution_admission;
 mod execution_attempt;
 mod execution_lease;
+mod host_step;
+#[cfg(test)]
+mod host_step_tests;
 mod outcome;
 mod plan_completion;
 mod product_execution;
@@ -47,6 +50,9 @@ struct TargetAdapters<'a> {
     worker_lifecycle: Option<&'a dyn crate::worker_pool::WorkerLifecyclePort>,
     artifact_registry: Option<&'a dyn crate::oci_artifact::ArtifactRegistry>,
     artifact_registry_handle: Option<std::sync::Arc<dyn crate::oci_artifact::ArtifactRegistry>>,
+    /// The plan's approval envelopes, which host steps hand to the root-side
+    /// applier; empty for plans without host steps.
+    host_approvals: &'a [crate::plan_approval::ApprovalEnvelope],
 }
 
 #[allow(deprecated)]
@@ -227,6 +233,28 @@ async fn admit_plan_artifact_pulls(
     Ok(())
 }
 
+/// Host steps sample no SLO metrics and record no gate evidence; a host
+/// release proves health with its approved health step (ADR 0041 section 2).
+/// Refuse an SLO gate such a step would otherwise skip, before anything runs.
+async fn refuse_host_slo_gate(ctx: &mut Ctx, environment: &str, step: &Step) -> Result<()> {
+    if !crate::health_gate::step_requires_slo_evaluation(ctx, environment, step).await? {
+        return Ok(());
+    }
+    let gate =
+        crate::health_gate::load_release_gate_section(ctx, &step.release_id, &step.release_digest)
+            .await?;
+    if !crate::health_gate::resolve_spec(ctx, environment, &step.product, &gate)
+        .await?
+        .is_empty()
+    {
+        bail!(
+            "host step {} has SLO health gates, which host releases do not evaluate; drop the gate or apply with gates skipped",
+            step.id
+        );
+    }
+    Ok(())
+}
+
 async fn execute_locked(
     ctx: &mut Ctx,
     mut stored_plan: Plan,
@@ -257,6 +285,16 @@ async fn execute_locked(
     {
         plan_completion::fail(ctx, lease, &mut stored_plan, skip_gates, error.to_string()).await?;
         return Err(error);
+    }
+
+    if !skip_gates {
+        for step in steps.iter().filter(|step| step.host.is_some()) {
+            if let Err(error) = refuse_host_slo_gate(ctx, &env, step).await {
+                plan_completion::fail(ctx, lease, &mut stored_plan, skip_gates, error.to_string())
+                    .await?;
+                return Err(error);
+            }
+        }
     }
 
     if options.delivery_adapter.is_some() && !skip_gates {
@@ -315,6 +353,14 @@ async fn execute_locked(
     }
 
     if let Some(adapter) = options.delivery_adapter.clone() {
+        if steps.iter().any(|step| step.host.is_some()) {
+            let error = anyhow::anyhow!(
+                "host steps run only through the root-side applier; delegated delivery cannot run them"
+            );
+            plan_completion::fail(ctx, lease, &mut stored_plan, skip_gates, error.to_string())
+                .await?;
+            return Err(error);
+        }
         let report = crate::delivery_bridge::execute_bridged_plan(
             ctx,
             adapter.as_ref(),
@@ -351,6 +397,29 @@ async fn execute_locked(
             .collect());
     }
 
+    // Host steps hand the plan's approvals to the root-side applier, which
+    // verifies them itself (ADR 0041 section 2).
+    let host_approvals = if steps.iter().any(|step| step.host.is_some()) {
+        match crate::plan_approval::execution_envelopes(
+            ctx,
+            &stored_plan,
+            options
+                .approval
+                .as_ref()
+                .map(|(approval, _)| approval.as_path()),
+        )
+        .await
+        {
+            Ok(envelopes) => envelopes,
+            Err(error) => {
+                plan_completion::fail(ctx, lease, &mut stored_plan, skip_gates, error.to_string())
+                    .await?;
+                return Err(error);
+            }
+        }
+    } else {
+        Vec::new()
+    };
     let mut completion = plan_completion::ExecutionCompletion::new();
 
     for step in steps {
@@ -373,6 +442,7 @@ async fn execute_locked(
             worker_lifecycle: options.worker_lifecycle,
             artifact_registry: options.artifact_registry,
             artifact_registry_handle: options.artifact_registry_handle.clone(),
+            host_approvals: &host_approvals,
         };
         let outcome = match step_lifecycle::execute(
             ctx,
@@ -470,6 +540,8 @@ mod tests {
             routing_state: std::env::temp_dir().join("tenkai-test-routing-state.json"),
             model_runtime_state: std::env::temp_dir().join("tenkai-test-model-runtime-state.json"),
             artifact_pulls: Vec::new(),
+            raw_manifest: String::new(),
+            content_root: std::path::PathBuf::new(),
         }
     }
 

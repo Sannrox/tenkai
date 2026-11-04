@@ -9,14 +9,16 @@ that unit. Everything it hands over is untrusted: the applier verifies the
 release, the plan, and the approvals itself, against root-owned files, and
 runs each approved step at most once.
 
-The server side that writes requests and starts the unit is
-[#911](https://github.com/Sannrox/tenkai/issues/911). This page covers the
-root side: what it checks, how to install it, and what it records.
+This page covers the root side: what it checks, how to install it, and what
+it records. [Run host releases](run-tenkai-server.md#run-host-releases)
+covers the server side: planning, approvals, and configuration.
 
 ## What one step does
 
 For each host step the server writes a request into its spool directory and
-runs `systemctl start --no-block tenkai-host-apply@<instance>.service`. The
+runs `systemctl start tenkai-host-apply@<instance>.service`, which returns
+once the applier exited; meanwhile the server keeps its environment lease
+fresh, and stops the unit when it loses the lease or is itself stopped. The
 applier then:
 
 1. returns how this instance ended if it ever started, from its own records
@@ -128,7 +130,10 @@ A failed host step is never restored automatically: returning to the
 previous release is a rollback plan with its own approvals.
 
 The server reads these records. It accepts a result only when its `instance`
-is the unit it started; a missing or mismatched result is a failed step.
+is the unit it started and it names the step's environment, product, action,
+and release; a missing or mismatched result is a failed step. Before it
+starts a unit, the server returns an instance's existing result, so a retry
+of the same step never starts it again.
 
 ## Known limit: recall
 
