@@ -9,12 +9,17 @@
 #       security/release-tag-fingerprints, resolves to the commit, and equals
 #       the workspace version. Lightweight and unsigned tags are refused.
 #   scripts/verify-release-tag.sh self-test
+#
+# Release tags are vX.Y.Z or the pre-release vX.Y.Z-rc.N (N >= 1). Numbers
+# carry no leading zeros; any other suffix is refused.
 set -euo pipefail
 
 SCRIPT_PATH="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/$(basename -- "${BASH_SOURCE[0]}")"
 ROOT_PATH="${RELEASE_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)}"
 FINGERPRINTS_FILE="${RELEASE_TAG_FINGERPRINTS:-${ROOT_PATH}/security/release-tag-fingerprints}"
 KEY_FILE="${RELEASE_TAG_KEY:-${ROOT_PATH}/security/release-tag-key.asc}"
+
+RELEASE_TAG_PATTERN='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$'
 
 fail() {
   printf 'verify-release-tag: %s\n' "$1" >&2
@@ -23,7 +28,7 @@ fail() {
 
 verify_release_tag() {
   local tag="$1" expected_commit="$2" remote="${3:-origin}"
-  [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "invalid release tag: ${tag}"
+  [[ "$tag" =~ $RELEASE_TAG_PATTERN ]] || fail "invalid release tag: ${tag}"
   [[ "$expected_commit" =~ ^[0-9a-f]{40}$ ]] || fail "expected commit must be a full lowercase SHA"
 
   local direct_ref="refs/tags/${tag}" peeled_ref="refs/tags/${tag}^{}" refs direct peeled actual
@@ -52,7 +57,7 @@ normalize_fingerprint() {
 
 verify_signed_tag() {
   local tag="$1" expected_commit="$2" object_type actual raw fingerprint primary allowed line version
-  [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "invalid release tag: ${tag}"
+  [[ "$tag" =~ $RELEASE_TAG_PATTERN ]] || fail "invalid release tag: ${tag}"
   [[ "$expected_commit" =~ ^[0-9a-f]{40}$ ]] || fail "expected commit must be a full lowercase SHA"
 
   object_type="$(git cat-file -t "refs/tags/${tag}" 2>/dev/null)" || fail "tag ${tag} was not found"
@@ -132,6 +137,15 @@ self_test() {
   expect_failure "expected ${first}" v1.0.0 "$first" "$remote"
   bash "$SCRIPT_PATH" verify v1.0.0 "$second" "$remote" >/dev/null
   expect_failure "was not found" v1.0.2 "$second" "$remote"
+
+  git -C "$work" tag -a v1.0.3-rc.1 -m "release candidate" "$second"
+  git -C "$work" push -q "$remote" refs/tags/v1.0.3-rc.1
+  bash "$SCRIPT_PATH" verify v1.0.3-rc.1 "$second" "$remote" >/dev/null
+  local malformed
+  for malformed in v1.0.3-rc v1.0.3-rc.0 v1.0.3-rc.01 v1.0.3-beta.1 v1.0.3-rc.1.2 v1.0.3rc.1 v01.0.3 1.0.3; do
+    expect_failure "invalid release tag" "$malformed" "$second" "$remote"
+    expect_signed_failure "invalid release tag" "$malformed" "$second"
+  done
   signed_self_test "$tmp"
   printf 'release tag self-test passed\n'
 }
@@ -139,7 +153,7 @@ self_test() {
 # Signed-tag checks against a throwaway key and repository. GNUPGHOME and the
 # key paths stay inside the self-test's own temp directory.
 signed_self_test() {
-  local tmp="$1" work fpr first
+  local tmp="$1" work fpr first rc
   work="${tmp}/signed"
   export GNUPGHOME="${tmp}/gnupg"
   mkdir -m 700 "$GNUPGHOME"
@@ -176,15 +190,32 @@ signed_self_test() {
   (cd "$work" && expect_signed_failure "expected 0000000000000000000000000000000000000000" v1.2.3 0000000000000000000000000000000000000000)
   git -C "$work" tag -s v1.2.4 -m "wrong version" "$first"
   (cd "$work" && expect_signed_failure "does not match workspace version 1.2.3" v1.2.4 "$first")
+
+  # A release candidate equals the workspace version exactly, both ways.
+  git -C "$work" tag -s v1.2.3-rc.1 -m "rc at final version" "$first"
+  (cd "$work" && expect_signed_failure "does not match workspace version 1.2.3" v1.2.3-rc.1 "$first")
+  sed 's/^version = "1.2.3"$/version = "1.2.3-rc.1"/' "${work}/Cargo.toml" >"${work}/Cargo.toml.next"
+  mv "${work}/Cargo.toml.next" "${work}/Cargo.toml"
+  git -C "$work" commit -q -am rc
+  rc="$(git -C "$work" rev-parse HEAD)"
+  git -C "$work" tag -d v1.2.3-rc.1 >/dev/null
+  git -C "$work" tag -s v1.2.3-rc.1 -m "release candidate" "$rc"
+  (cd "$work" && bash "$SCRIPT_PATH" verify-signed v1.2.3-rc.1 "$rc" >/dev/null) \
+    || fail "signed rc tag at the workspace version was refused"
+  git -C "$work" tag -s v1.2.3-rc.2 -m "next candidate" "$rc"
+  (cd "$work" && expect_signed_failure "does not match workspace version 1.2.3-rc.1" v1.2.3-rc.2 "$rc")
+  git -C "$work" tag -d v1.2.3 >/dev/null
+  git -C "$work" tag -s v1.2.3 -m "final at rc version" "$rc"
+  (cd "$work" && expect_signed_failure "does not match workspace version 1.2.3-rc.1" v1.2.3 "$rc")
   printf 'AEDA618886BF0331105B9CFCE4DC1F4A579505FB\n' >"${tmp}/fingerprints"
-  (cd "$work" && expect_signed_failure "not listed" v1.2.3 "$first")
+  (cd "$work" && expect_signed_failure "not listed" v1.2.3-rc.1 "$rc")
   printf '%s\n' "$fpr" >"${tmp}/fingerprints"
   # The revocation certificate gpg wrote at key generation, armored with a
   # leading ':' so it is not imported by accident.
   sed 's/^:-----/-----/' "${GNUPGHOME}/openpgp-revocs.d/${fpr}.rev" | gpg --batch --quiet --import >/dev/null 2>&1 \
     || fail "could not revoke the self-test key"
   gpg --batch --armor --export "$fpr" >"${tmp}/key.asc"
-  (cd "$work" && expect_signed_failure "revoked or expired" v1.2.3 "$first")
+  (cd "$work" && expect_signed_failure "revoked or expired" v1.2.3-rc.1 "$rc")
   gpgconf --kill gpg-agent >/dev/null 2>&1 || true
 }
 

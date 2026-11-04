@@ -1,11 +1,13 @@
 name: Release binaries
 
-# Signed v* tags only. Pull requests run scripts/release-dry-run.sh from CI,
-# which never attests or publishes.
+# Signed v* tags only: vX.Y.Z publishes a release marked latest, vX.Y.Z-rc.N
+# a pre-release. verify-release-tag.sh refuses every other form. Pull requests
+# run scripts/release-dry-run.sh from CI, which never attests or publishes.
 on:
   push:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+"
 
 permissions:
   contents: read
@@ -210,7 +212,8 @@ jobs:
       - name: Notes from CHANGELOG
         run: python3 scripts/release-metadata.py notes "${GITHUB_REF_NAME#v}" >"${RUNNER_TEMP}/notes.md"
       # Draft, attach, then publish. A rerun resumes a draft; a published
-      # release is immutable and is never edited.
+      # release is immutable and is never edited. An rc tag publishes a
+      # pre-release that never becomes latest.
       - name: Draft, attach assets, and publish
         env:
           GH_TOKEN: ${{ github.token }}
@@ -218,6 +221,10 @@ jobs:
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
           notes="${RUNNER_TEMP}/notes.md"
+          prerelease=false latest=true
+          if [[ "$tag" == *-rc.* ]]; then
+            prerelease=true latest=false
+          fi
           bash scripts/verify-release-tag.sh verify "$tag" "$GITHUB_SHA"
           draft="$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null || echo missing)"
           case "$draft" in
@@ -226,9 +233,9 @@ jobs:
               exit 1
               ;;
             missing)
-              gh release create "$tag" --draft --verify-tag --title "$tag" --notes-file "$notes"
+              gh release create "$tag" --draft --prerelease="$prerelease" --verify-tag --title "$tag" --notes-file "$notes"
               ;;
           esac
           bash scripts/verify-release-tag.sh verify "$tag" "$GITHUB_SHA"
           gh release upload "$tag" dist/* --clobber
-          gh release edit "$tag" --notes-file "$notes" --draft=false --latest
+          gh release edit "$tag" --notes-file "$notes" --draft=false --prerelease="$prerelease" --latest="$latest"

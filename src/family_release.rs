@@ -350,7 +350,8 @@ mod tests {
         (manifest_path, signature, roots)
     }
 
-    fn admit_raw(raw: &str) -> Result<Admitted> {
+    /// Sign `raw` and admit it as release family-demo@`version`.
+    fn admit_raw(raw: &str, version: &str) -> Result<Admitted> {
         let dir = scratch("admit");
         let (manifest, signature, trust_roots) = signed(&dir, raw);
         let result = admit(
@@ -360,7 +361,7 @@ mod tests {
                 trust_roots: &trust_roots,
             },
             "family-demo",
-            "1.0.0",
+            version,
         );
         let _ = std::fs::remove_dir_all(&dir);
         result
@@ -369,13 +370,12 @@ mod tests {
     #[test]
     fn digest_pinned_manifest_admits_with_its_gate_flags() {
         let image = ("ghcr.io/sannrox/family-demo:1.0.0", digest('b'));
-        let plain = admit_raw(&manifest_json("1.0.0", (image.0, &image.1), &[])).unwrap();
+        let plain = admit_raw(&manifest_json("1.0.0", (image.0, &image.1), &[]), "1.0.0").unwrap();
         assert!(plain.gate_flags.is_empty());
-        let flagged = admit_raw(&manifest_json(
+        let flagged = admit_raw(
+            &manifest_json("1.0.0", (image.0, &image.1), &["migration", "breaking"]),
             "1.0.0",
-            (image.0, &image.1),
-            &["migration", "breaking"],
-        ))
+        )
         .unwrap();
         assert_eq!(
             flagged.gate_flags,
@@ -385,6 +385,23 @@ mod tests {
             flagged.properties()[GATE_FLAGS_PROPERTY],
             "breaking,migration"
         );
+    }
+
+    /// Release candidates (the v* workflow's `X.Y.Z-rc.N`) admit at their own
+    /// version and never stand in for the final, or the final for them.
+    #[test]
+    fn release_candidate_versions_match_exactly() {
+        let image = ("ghcr.io/sannrox/family-demo:1.0.0-rc.1", digest('b'));
+        let candidate = manifest_json("1.0.0-rc.1", (image.0, &image.1), &["breaking"]);
+        let admitted = admit_raw(&candidate, "1.0.0-rc.1").unwrap();
+        assert_eq!(admitted.gate_flags, BTreeSet::from([GateFlag::Breaking]));
+        let error = admit_raw(&candidate, "1.0.0").unwrap_err().to_string();
+        assert!(error.contains("version"), "{error}");
+        let final_release = manifest_json("1.0.0", (image.0, &image.1), &[]);
+        let error = admit_raw(&final_release, "1.0.0-rc.1")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("version"), "{error}");
     }
 
     #[test]
@@ -411,7 +428,7 @@ mod tests {
                 "digest field",
             ),
         ] {
-            let error = admit_raw(&manifest_json("1.0.0", (name, &image_digest), &[]))
+            let error = admit_raw(&manifest_json("1.0.0", (name, &image_digest), &[]), "1.0.0")
                 .unwrap_err()
                 .to_string();
             assert!(error.contains(expected), "{name}: {error}");
@@ -421,7 +438,7 @@ mod tests {
     #[test]
     fn identity_mismatch_and_tampering_are_refused() {
         let image = ("ghcr.io/sannrox/family-demo:1.0.0", digest('b'));
-        let error = admit_raw(&manifest_json("2.0.0", (image.0, &image.1), &[]))
+        let error = admit_raw(&manifest_json("2.0.0", (image.0, &image.1), &[]), "1.0.0")
             .unwrap_err()
             .to_string();
         assert!(error.contains("version"), "{error}");

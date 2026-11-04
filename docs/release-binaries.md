@@ -1,7 +1,8 @@
 # GitHub Release binaries
 
-Published tags `vX.Y.Z` attach community (default-feature) hosts to the GitHub
-Release. These files are packaging of Tenkai itself. They are not Catalog
+Published tags `vX.Y.Z` and release candidates `vX.Y.Z-rc.N` attach community
+(default-feature) hosts to the GitHub Release. A candidate's Release is a
+pre-release and is never marked latest. These files are packaging of Tenkai itself. They are not Catalog
 releases, OCI artifacts, or `tenkai.release-signature.v1` envelopes.
 
 The release workflow creates GitHub artifact attestations for every host and
@@ -131,7 +132,7 @@ Spoke and embedded CLI continue to refuse `TENKAI_POSTGRES_URL`.
 
 ## Packaging path
 
-Tag `v[0-9]+.[0-9]+.[0-9]+` starts `.github/workflows/release-binaries.yml`.
+Tag `vX.Y.Z` or `vX.Y.Z-rc.N` starts `.github/workflows/release-binaries.yml`.
 The first job fetches the tag object and runs
 `scripts/verify-release-tag.sh verify-signed`: the tag must be annotated,
 signed by a key listed in `security/release-tag-fingerprints`
@@ -158,7 +159,8 @@ validated digest. The attest job then creates:
 
 The upload job checks that the live tag resolves to the triggering commit,
 creates a draft GitHub Release whose body is the tag's `CHANGELOG.md`
-section, attaches the assets, and publishes it. A rerun resumes a draft. An
+section, attaches the assets, and publishes it: marked latest for `vX.Y.Z`,
+as a pre-release not marked latest for `vX.Y.Z-rc.N`. A rerun resumes a draft. An
 already published Release is refused, not edited. A tag mismatch fails
 closed before assets are uploaded. Pull requests build
 the Linux hosts the same way, run them on older distributions, and run
