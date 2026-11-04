@@ -164,6 +164,9 @@ pub(super) async fn execute(
                 .is_some()
                 || error
                     .downcast_ref::<crate::topology::PlacementRefused>()
+                    .is_some()
+                || error
+                    .downcast_ref::<crate::software_executor::TargetUnavailable>()
                     .is_some() =>
         {
             if outgoing_removed {

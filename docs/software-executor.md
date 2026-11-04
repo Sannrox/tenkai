@@ -183,6 +183,11 @@ Rules beyond the native workdir contract:
 - Field manager is always `tenkai`. Apply never sets `force`.
 - Apply re-reads the signed workdir and the environment-scoped kubeconfig file.
   Cached cluster objects cannot grant apply authority.
+- A missing or unreadable kubeconfig file refuses the step before anything is
+  applied. The plan fails, the deployment stays as it was, and reconcile
+  retries with its backoff until the file exists, for example once a host
+  release has installed the cluster
+  ([ADR 0041](decisions/0041-per-release-executor-and-privileged-host-releases.md)).
 - Health comes from Deployment / StatefulSet / DaemonSet conditions. A bounded
   wait refuses to complete when observed state disagrees with the payload.
 - Kind-cluster CI covers A → B → rollback and a failing rollout that names the
