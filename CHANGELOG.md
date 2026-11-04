@@ -6,6 +6,73 @@ pull request body, which becomes the squash commit; at release,
 
 ## [Unreleased]
 
+## v0.7.0 (2026-11-04)
+
+Gate flags: breaking, migration
+
+One Tenkai on a bare host. Tenkai installs a single-node cluster as a
+privileged host release and delivers releases into it from one control
+plane, with the server never running as root (ADR 0041). The release
+candidate `v0.7.0-rc.1` passed the bare-host drill on its published binaries.
+Full operator notes: [docs/releases/0.7.0.md](https://github.com/Sannrox/tenkai/blob/v0.7.0/docs/releases/0.7.0.md).
+
+### What's Changed
+- chore(release): prepare v0.7.0-rc.1 (#980)
+- feat(ops): bare host to cluster to in-cluster release with one Tenkai (#979)
+- feat(executor)!: uninstall a host release through an approved plan (#973)
+- fix(host): keep CAP_SETUID in the host applier's permitted set (#975)
+- feat(executor)!: host executor runs install and health steps through the root-side applier (#970)
+- fix(executor): an unavailable executor target leaves the deployment as it was (#972)
+- fix(tenkaictl): print the schema type count on init, not every name (#964)
+- docs: make the README a five-minute front door (#961)
+- feat(release): ship tenkai-host-applier with the Linux release hosts (#965)
+- test(connectivity): name the error when a staged bundle import errors (#966)
+- feat(host): tenkai-host-applier binary, systemd unit, and polkit rule (#948)
+- feat(host): durable applied-state record and generation critical section (#941)
+- feat(host): host apply request format and root-side verification (#937)
+- fix(providers)!: scope tenant-mode feedback targets under tenkai.feedback_export.v2 (#959)
+- test(postgres): give every live test unique tenant and environment names (#957)
+- fix(catalog): settle a just-released file lock before refusing as held (#955)
+- fix(providers): capture feedback observations in tenant-mode catalog partitions (#954)
+- fix(auth): report a committed grant-rule change as done, and fail closed when unsure (#952)
+- fix(providers)!: move terminal outcomes to tenkai.terminal_outcome.v2 with tenant-scoped targets (#944)
+- fix(catalog)!: sign recall notices and topology drills over the bytes sent (#951)
+- test(worker-pool): poll the live fixture instead of sleeping a fixed 80 ms (#950)
+- fix(providers): mark a feedback observation delivered only when admitted (#946)
+- fix(auth): read stored grant rules one row at a time (#936)
+- feat(apply)!: resolve the software executor per release (#938)
+- fix(catalog): index a prefix of PostgreSQL property values so large plans store (#942)
+- fix(criticality)!: sign derived criticality over the bytes the producer sent (#933)
+- fix(postgres): live lease tests do not wait on the runner's disk at commit (#939)
+- feat(storage): take a verified pre-migration copy of the SQLite store (#927)
+- fix(executor)!: sign runner attestations over the bytes sent and name accepted schemas (#929)
+- feat(ops): install Tenkai hosts with one verified command (#928)
+- fix(release): stop the Linux host build failing on SIGPIPE from ldd (#930)
+- fix(trust): check signer windows at an artifact's signed time (#925)
+- feat(manifest): signed deploy.executor field (#922)
+- fix(auth): stored grant rules only add to what the grant file grants (#924)
+- ci(release): accept signed vX.Y.Z-rc.N tags and publish them as pre-releases (#923)
+- fix(release): build Linux hosts at a glibc 2.28 floor and refuse newer (#921)
+- docs(capabilities): list server self-upgrade and release binaries as shipped (#918)
+- docs(release): complete the 0.6.0 upgrade notes (#919)
+- docs(adr): per-release software executor and privileged host releases (#908)
+- ci(release): signed-tag verification, SBOM, family release manifest, notes from CHANGELOG (#897)
+
+### Upgrade
+- Signed statements (#929, #933, #951): runner attestations, derived criticality, recall notices and topology drills move to `.v2` schemas signed over the bytes sent. `.v1` is still verified and never produced. Upgrade every server and `tenkaictl` that imports derived criticality, recall notices or drill evidence before switching producers to `.v2`; releases before 0.7.0 refuse `.v2` as malformed. Runner agents and servers upgrade in either order. Re-sign `.v1` derived criticality before `tenkaictl bundle build`.
+- Outcome export (#944): register `tenkai.terminal_outcome.v2@2.0.0` from `api/tenkai-terminal-outcome-v2.schema.json` (keep `.v1`; tenant-mode hubs also add target kind `tenkai.tenant_deployment`), then upgrade with `TENKAI_OUTCOME_PROVIDER_REGISTRATION` naming `.v2`. A host whose registration still attests `.v1@1.0.0` refuses to start. Remove the `.v1` registration once no older replica runs and nothing queued before the upgrade is undelivered.
+- Tenant-mode feedback export (#959): add target kind `tenant_feedback_observation` (keep `feedback_observation`), then upgrade with `TENKAI_FEEDBACK_PROVIDER_REGISTRATION` using `target_kind=tenant_feedback_observation`. Rows queued before the upgrade keep their old target. Community hosts are unchanged.
+- Per-release executor (#922, #938): declare `[deploy] executor` only after every server and runtime that reads the catalog runs 0.7.0. Moving a product to another executor is a remove followed by an install. On a server that sets `TENKAI_SOFTWARE_EXECUTOR`, management API apply now uses it for undeclared releases, like the reconciler.
+- Host releases (#937, #941, #948, #965, #970, #973, #975): hosts without `executor = "host"` releases need no change. To use them, install the applier with `install.sh --role server --with-host-applier`, add the root-owned trust roots and host approval policy in `/etc/tenkai`, and set `TENKAI_HOST_SPOOL_DIR`. Host steps are never auto-approved. A 0.6.0 server refuses plans with host or `remove` steps.
+- In-cluster releases (#972): `env cluster-config set` accepts a path whose file does not exist yet; a release with a missing cluster config is refused before it changes anything and converges once the file appears.
+- Signer windows (#925, ADR 0042): stored artifacts are checked at their signed time, so `not_after` on a rotated key no longer breaks what it already signed. Live admissions still check at now. Older binaries in a rolling deploy still check at their own clock (they refuse more, never accept more).
+- Stored grant rules (#924, #936, #952): a stored rule only adds to what the grant file grants. An unreadable or invalid row is withheld and reported (`stored_grant_rules_withheld` on `/healthz`). A write whose outcome is unknown is audited `grant_rule.*.failed` (was `refused`) and makes that replica not ready until it reads again; alerts on `*.refused` should also match `*.failed`. Do not write a later rule format until every replica runs 0.7.0.
+- SQLite (#927): the first start that migrates an older schema writes `<db>.pre-v<found>.<ms>.<id>.db` beside the store; it needs free space about the store's size, or the start is refused with the store untouched. The schema stays 13, so a 0.6.0 store opens without migration.
+- Hub PostgreSQL (#942, migration): the first use of each tenant schema rebuilds `catalog_object_properties_lookup` on a 256-character value prefix. Writes to that tenant's catalog properties wait for it. Rolling deploys and rollback stay correct.
+- Linux hosts (#921): glibc 2.28+ on x86-64 (0.6.0 needed 2.39). Musl is not supported.
+- Rollback to 0.6.0: the SQLite schema is unchanged, so the store opens without a restore. Restore the 0.6.0 values of `TENKAI_OUTCOME_PROVIDER_REGISTRATION` and, on tenant-mode hubs, `TENKAI_FEEDBACK_PROVIDER_REGISTRATION` first; 0.6.0 refuses to start with the 0.7.0 values. 0.6.0 refuses `.v2` signed statements, manifests that declare `[deploy] executor`, and plans with host or `remove` steps.
+- Rust library API (breaking): `ExecutionOptions.software_executors` replaces `software_executor`; `DeploySection.executor`, `plan::Step.host` and `plan::Action::Remove` are new; grant-rule store types, `CatalogGraph` observation writes and runner attestation signing changed. See the pull requests for exact signatures.
+
 ## v0.7.0-rc.1 (2026-11-04)
 
 Gate flags: breaking, migration
