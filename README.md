@@ -47,6 +47,10 @@ export TENKAI_MANAGEMENT_TOKEN='replace-from-secret-store'
 ./tenkaictl status
 ```
 
+Releases before v0.7.0 attach no `install.sh`. While one of them is the
+latest Release, download `tenkaictl` by hand as in
+[GitHub Release binaries](docs/release-binaries.md#verify-and-install-by-hand).
+
 `--allow-unsigned-development` and `--allow-unapproved-development` are
 development bypasses for the built-in `local` environment only. Every other
 environment fails closed without [signed releases](docs/release-signing.md)
