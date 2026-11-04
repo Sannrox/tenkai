@@ -66,17 +66,19 @@ release and a `kubernetes-inprocess` release in the same environment.
 - A declared `shell` always runs `deploy.install`, even when the process default
   is another executor.
 - A declared executor this process does not have fails the step before anything
-  runs and names it. It never falls back to another executor. `host` is not
-  available yet.
+  runs and names it. It never falls back to another executor. `host` needs
+  the host executor ([run host releases](run-tenkai-server.md#run-host-releases)).
 - A product keeps one executor in an environment. A plan whose target release
   resolves to a different executor than the installed release of that product
   is refused, at plan creation and again at apply, and the error names both.
   Kinds are compared, not text: `k8s` and `kubernetes` are the same executor,
   and an undeclared release counts as the process default. To move a product,
   remove it and install it again.
-- A `host` release is never cleaned up, restored, or re-applied automatically
-  after a failure, and reconcile neither observes nor restarts it. A failed host
-  step stays failed until an approved rollback plan runs.
+- A `host` release runs only as a host plan step through the root-side applier
+  ([privileged host releases](host-releases.md)). It is never cleaned up,
+  restored, or re-applied automatically after a failure, and reconcile
+  neither observes nor restarts it. A failed host step stays failed until an
+  approved rollback plan runs.
 
 Resolution reads only signed release content and the process configuration, so
 two server versions in a rolling deploy agree on undeclared releases.

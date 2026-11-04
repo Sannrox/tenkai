@@ -125,6 +125,107 @@ async fn require_same_executor(
     )
 }
 
+/// Bind each step of a `host` release to the root-side applier's record for
+/// its product (ADR 0041 section 2). The step installs its target from the
+/// release the record holds, at the record's generation; both are part of
+/// the plan, so its digest and approvals cover them. It gets no restore pin:
+/// a failed host step is never restored automatically. When the release
+/// declares `deploy.health`, an approved `health` step follows at the
+/// generation the install leaves. Steps of other releases are unchanged.
+async fn bind_host_steps(
+    ctx: &mut Ctx,
+    executors: &crate::software_executor::SoftwareExecutors,
+    env: &str,
+    steps: Vec<Step>,
+) -> Result<Vec<Step>> {
+    let mut bound = Vec::with_capacity(steps.len());
+    for mut step in steps {
+        // A release that is missing or unreadable is left to apply
+        // admission, which refuses it.
+        let manifest = match ctx.get(&step.release_id).await? {
+            Some(release) => release
+                .properties
+                .get("manifest")
+                .and_then(|raw| crate::manifest::parse_raw(raw).ok()),
+            None => None,
+        };
+        let Some(manifest) = manifest else {
+            bound.push(step);
+            continue;
+        };
+        if manifest.deploy.executor != Some(crate::software_executor::SoftwareExecutorKind::Host) {
+            bound.push(step);
+            continue;
+        }
+        if step.host.is_some() {
+            bail!("step for host release {} is already bound", step.release_id);
+        }
+        if step.action == Action::Restart {
+            bail!(
+                "host release {} is never restarted; plan a new install instead",
+                step.release_id
+            );
+        }
+        let record = executors.host()?.applied_state(env, &step.product)?;
+        let from = host_source(&record, step.from.as_deref());
+        if step.action != Action::Rollback {
+            step.action = match from.as_deref() {
+                None => Action::Install,
+                Some(current) => classify_change(current, &step.to),
+            };
+        }
+        step.from = from;
+        step.restore = None;
+        step.host = Some(HostStep {
+            action: HostAction::Install,
+            expected_generation: record.generation,
+        });
+        let health = manifest
+            .deploy
+            .health
+            .as_deref()
+            .is_some_and(|command| !command.trim().is_empty());
+        if health {
+            let installed = record
+                .generation
+                .checked_add(1)
+                .context("host applied-state generation overflow")?;
+            bound.push(step.clone());
+            step.action = Action::Restart;
+            step.from = Some(step.to.clone());
+            step.host = Some(HostStep {
+                action: HostAction::Health,
+                expected_generation: installed,
+            });
+        }
+        bound.push(step);
+    }
+    Ok(bound)
+}
+
+/// The version a host step starts from: what the applier's record holds.
+/// For a `dirty` record either side may be the source; the one the server
+/// recorded as deployed wins, else the side the interrupted step came from.
+fn host_source(
+    record: &crate::host_apply::state::AppliedStateRecord,
+    deployed: Option<&str>,
+) -> Option<String> {
+    use crate::host_apply::state::AppliedState;
+    match &record.state {
+        AppliedState::Empty => None,
+        AppliedState::Applied { release } => Some(release.version.clone()),
+        AppliedState::Dirty { from, to } => {
+            let sides = [from.as_ref(), to.as_ref()];
+            sides
+                .iter()
+                .flatten()
+                .find(|release| Some(release.version.as_str()) == deployed)
+                .or(sides.iter().flatten().next())
+                .map(|release| release.version.clone())
+        }
+    }
+}
+
 /// The adapter reconcile observes a deployed release with: the one its own
 /// executor resolves to. The shell path and the unnamed test default observe
 /// nothing, as before, and host releases get no periodic observation (ADR 0041
@@ -462,9 +563,14 @@ pub(super) async fn compute(ctx: &mut Ctx, env: &str) -> Result<Vec<Step>> {
 }
 
 /// Compute and persist an immutable executable plan before any step is run.
-pub(super) async fn create(ctx: &mut Ctx, env: &str) -> Result<Plan> {
-    let (inputs, mut steps) = compute_snapshot(ctx, env).await?;
-    create_with_content(ctx, env, inputs, &mut steps, None).await
+/// Host steps read the applier's records through `executors`.
+pub(super) async fn create(
+    ctx: &mut Ctx,
+    env: &str,
+    executors: &crate::software_executor::SoftwareExecutors,
+) -> Result<Plan> {
+    let (inputs, steps) = compute_snapshot(ctx, env).await?;
+    create_with_content(ctx, executors, env, inputs, steps, None).await
 }
 
 /// Persist a catalog-only plan only when it includes `product` at `release`.
@@ -477,14 +583,15 @@ pub(super) async fn create_for_held_target(
     product: &str,
     release: &str,
 ) -> Result<Plan> {
-    let (inputs, mut steps) = compute_snapshot(ctx, env).await?;
+    let (inputs, steps) = compute_snapshot(ctx, env).await?;
     if !steps
         .iter()
         .any(|step| step.product == product && step.release_id == release)
     {
         bail!("explicit retry did not include held failed target {product} ({release})");
     }
-    create_with_content(ctx, env, inputs, &mut steps, None).await
+    let executors = crate::software_executor::SoftwareExecutors::from_process();
+    create_with_content(ctx, &executors, env, inputs, steps, None).await
 }
 
 /// Reconcile planning may emit Restart steps from live observe/health evidence.
@@ -498,35 +605,35 @@ pub(super) async fn create_for_reconcile(ctx: &mut Ctx, env: &str) -> Result<Pla
     if steps.is_empty() {
         return assemble_plan(env, inputs, &mut steps, None);
     }
-    create_with_content(ctx, env, inputs, &mut steps, None).await
+    let executors = crate::software_executor::SoftwareExecutors::from_process();
+    create_with_content(ctx, &executors, env, inputs, steps, None).await
 }
 
 /// Persist a reconcile-policy plan, even with zero steps. Held failed targets
 /// stay held, unlike operator `create`, which retries them.
 pub(super) async fn create_holding_failed_targets(ctx: &mut Ctx, env: &str) -> Result<Plan> {
-    let (inputs, mut steps) =
+    let (inputs, steps) =
         compute_snapshot_with_policy(ctx, env, ConvergencePolicy::reconcile()).await?;
-    create_with_content(ctx, env, inputs, &mut steps, None).await
+    let executors = crate::software_executor::SoftwareExecutors::from_process();
+    create_with_content(ctx, &executors, env, inputs, steps, None).await
 }
 
 /// Persist an explicitly constructed operation, such as a rollback, as a plan.
-pub(super) async fn create_from_steps(
-    ctx: &mut Ctx,
-    env: &str,
-    mut steps: Vec<Step>,
-) -> Result<Plan> {
+pub(super) async fn create_from_steps(ctx: &mut Ctx, env: &str, steps: Vec<Step>) -> Result<Plan> {
     admit_preview_environment(ctx, env).await?;
-    create_with_content(ctx, env, Vec::new(), &mut steps, None).await
+    let executors = crate::software_executor::SoftwareExecutors::from_process();
+    create_with_content(ctx, &executors, env, Vec::new(), steps, None).await
 }
 
 pub(super) async fn create_from_steps_with_recovery(
     ctx: &mut Ctx,
     env: &str,
-    mut steps: Vec<Step>,
+    steps: Vec<Step>,
     reason: String,
 ) -> Result<Plan> {
     admit_preview_environment(ctx, env).await?;
-    create_with_content(ctx, env, Vec::new(), &mut steps, Some(reason)).await
+    let executors = crate::software_executor::SoftwareExecutors::from_process();
+    create_with_content(ctx, &executors, env, Vec::new(), steps, Some(reason)).await
 }
 
 async fn admit_preview_environment(ctx: &mut Ctx, env: &str) -> Result<()> {
@@ -575,16 +682,17 @@ fn assemble_plan(
 
 async fn create_with_content(
     ctx: &mut Ctx,
+    executors: &crate::software_executor::SoftwareExecutors,
     env: &str,
     inputs: Vec<DesiredStateInput>,
-    steps: &mut [Step],
+    steps: Vec<Step>,
     recalled_recovery_reason: Option<String>,
 ) -> Result<Plan> {
-    let executors = crate::software_executor::SoftwareExecutors::from_process();
-    for step in steps.iter() {
-        require_same_executor(ctx, &executors, step).await?;
+    let mut steps = bind_host_steps(ctx, executors, env, steps).await?;
+    for step in &steps {
+        require_same_executor(ctx, executors, step).await?;
     }
-    let mut plan = assemble_plan(env, inputs, steps, recalled_recovery_reason)?;
+    let mut plan = assemble_plan(env, inputs, &mut steps, recalled_recovery_reason)?;
     // Optional advisory priors (default off). Never hard-block or change steps.
     if let Ok(inspect) = inspect_environment(ctx, env).await {
         let _ = crate::plan_priors::annotate_plan_with_priors(
@@ -933,7 +1041,7 @@ anti_affinity = "host"
             .await
             .unwrap();
 
-        let err = create(&mut ctx, "ledger-a").await.unwrap_err();
+        let err = crate::plan::create(&mut ctx, "ledger-a").await.unwrap_err();
         let err = format!("{err:#}");
         assert!(
             err.contains("replicas ledger-a and ledger-b both have host=h1"),
@@ -943,7 +1051,7 @@ anti_affinity = "host"
         set_environment_fact(&mut ctx, "ledger-b", "host", "h2")
             .await
             .unwrap();
-        let plan = create(&mut ctx, "ledger-a").await.unwrap();
+        let plan = crate::plan::create(&mut ctx, "ledger-a").await.unwrap();
         assert_eq!(plan.steps.len(), 1);
         assert_eq!(plan.steps[0].product, "ledger");
 
@@ -1033,7 +1141,7 @@ anti_affinity = "host"
             .await
             .unwrap();
 
-        let plan = create(&mut ctx, "local").await.unwrap();
+        let plan = crate::plan::create(&mut ctx, "local").await.unwrap();
         assert_eq!(plan.steps.len(), 1);
         assert_eq!(plan.steps[0].product, "qwen-coder");
         assert_eq!(plan.steps[0].to, "1.0.0");
@@ -1043,7 +1151,10 @@ anti_affinity = "host"
         set_environment_fact(&mut ctx, "local", "memory_gib", "8")
             .await
             .unwrap();
-        let err = create(&mut ctx, "local").await.unwrap_err().to_string();
+        let err = crate::plan::create(&mut ctx, "local")
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(
             err.contains("no model_runtime variant") || err.contains("memory_gib"),
             "{err}"
@@ -1053,7 +1164,7 @@ anti_affinity = "host"
         set_environment_fact(&mut ctx, "local", "memory_gib", "64")
             .await
             .unwrap();
-        let plan = create(&mut ctx, "local").await.unwrap();
+        let plan = crate::plan::create(&mut ctx, "local").await.unwrap();
         assert_eq!(plan.steps[0].to, "1.1.0");
 
         let _ = std::fs::remove_dir_all(&root);
@@ -1108,7 +1219,7 @@ install = "true"
             .unwrap();
         env_add(&mut ctx, "local", "fixture").await.unwrap();
         subscribe(&mut ctx, "local", "api", "stable").await.unwrap();
-        let plan = create(&mut ctx, "local").await.unwrap();
+        let plan = crate::plan::create(&mut ctx, "local").await.unwrap();
         let lease = crate::apply::claim_environment(&mut ctx, "local", "feedback-test")
             .await
             .unwrap();
@@ -1204,7 +1315,7 @@ install = "true"
             .properties
             .insert("deployed.api".into(), "1.0.0".into());
         ctx.put(environment).await.unwrap();
-        let plan = create(&mut ctx, "local").await.unwrap();
+        let plan = crate::plan::create(&mut ctx, "local").await.unwrap();
         let lease = crate::apply::claim_environment(&mut ctx, "local", "hold-test")
             .await
             .unwrap();
@@ -1242,7 +1353,7 @@ install = "true"
                 .contains("held")
         );
         assert_eq!(
-            create(&mut ctx, "local").await.unwrap().steps[0].to,
+            crate::plan::create(&mut ctx, "local").await.unwrap().steps[0].to,
             "1.1.0"
         );
         let mut environment = crate::environment::environment(&mut ctx, "local")
@@ -1499,7 +1610,7 @@ allowed_providers = ["local"]
         set_environment_overlay(&mut ctx, "local", "api", "region", "eu")
             .await
             .unwrap();
-        let plan = create(&mut ctx, "local").await.unwrap();
+        let plan = crate::plan::create(&mut ctx, "local").await.unwrap();
         assert_eq!(plan.steps.len(), 1);
         assert_eq!(plan.steps[0].action, Action::Restart);
         assert_eq!(plan.steps[0].from.as_deref(), Some("1.0.0"));
@@ -1533,7 +1644,7 @@ allowed_providers = ["local"]
             .insert("deployed_release.api".into(), release_id("api", "1.0.0"));
         ctx.put(env).await.unwrap();
 
-        let stored = create(&mut ctx, "local").await.unwrap();
+        let stored = crate::plan::create(&mut ctx, "local").await.unwrap();
         assert!(stored.steps.is_empty(), "{stored:?}");
         let loaded = load(&mut ctx, &stored.id).await.unwrap();
         assert_eq!(loaded.id, stored.id);

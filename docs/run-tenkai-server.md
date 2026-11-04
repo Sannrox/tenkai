@@ -142,6 +142,53 @@ A stop cancels an in-flight deploy command under its fence, so
 `TimeoutStopSec` only has to cover the current tick recording that outcome; the
 next start converges from durable state.
 
+### Run host releases
+
+A release that declares `executor = "host"` installs software on the host
+itself as root, for example a single-node cluster, while the server stays
+the unprivileged `tenkai` user
+([ADR 0041](decisions/0041-per-release-executor-and-privileged-host-releases.md)).
+Hosts that run no host releases skip this section.
+
+1. Install the root-side applier, its systemd template unit, the polkit rule,
+   and its root-owned trust and approval policy next to the server, as
+   [privileged host releases](host-releases.md#install) describes. The
+   applier's `spool_dir` is the server's spool directory, here
+   `/var/lib/tenkai/host-spool`, owned by `tenkai` with mode `0750`.
+2. Point the server at it in `/etc/tenkai/server.env`:
+
+   ```bash
+   TENKAI_HOST_SPOOL_DIR=/var/lib/tenkai/host-spool
+   # The applier's state directory; this is the default.
+   TENKAI_HOST_STATE_DIR=/var/lib/tenkai-host
+   ```
+
+3. Restart the server. `/readyz` lists `host_executor:v1` once the spool
+   directory is usable and `systemctl` is installed; otherwise the server
+   logs `tenkai-server warning: host executor unavailable` and every host
+   step fails closed, naming the setting.
+
+A plan binds each host step to the applier's record for its product: the
+step starts from the release the record holds, at the record's generation,
+and when the release declares `deploy.health` a `health` step follows. Both
+are part of the plan, so its digest and approvals cover them; a plan made
+before another host step changed the record is refused by the applier.
+
+Host steps are always attended. The server never approves a plan with a host
+step itself, whatever the environment's approval policy says, and the
+applier counts only approvals from the root-owned host approval policy.
+Approve with keys the `tenkai` user cannot read, then apply as usual; the
+server hands the plan's approval envelopes to the applier.
+
+Each step runs `tenkai-host-apply@<instance>.service`, where the instance is
+derived from the plan digest, the step, and its action. The server keeps the
+environment lease fresh while the unit runs and stops the unit when it loses
+the lease or receives SIGTERM, like a shell deploy command. It accepts only a
+result that names the instance it started. A failed host step stays failed:
+nothing is cleaned up or restored, and returning to the previous release is a
+rollback plan with its own approvals. Reconcile neither observes nor restarts
+host releases.
+
 To authenticate with enterprise JWT assertions or with an identity provider
 (OIDC) instead of shared bearer tokens, see
 [configure server authentication](configure-server-authentication.md).

@@ -47,16 +47,33 @@ pub(super) async fn execute(
         }
         None => None,
     };
-    // Each release runs with its own executor (ADR 0041). Resolve both before
+    // A host release runs only as a host step, and a host step only runs a
+    // host release (ADR 0041 section 2).
+    let host_release = !restores_automatically(&content);
+    if host_release != step.host.is_some() {
+        if host_release {
+            bail!(
+                "step {} runs host release {} without a host binding; create the plan again",
+                step.id,
+                step.release_id
+            );
+        }
+        bail!(
+            "step {} is a host step, but release {} does not declare deploy.executor = \"host\"",
+            step.id,
+            step.release_id
+        );
+    }
+    // Each release runs with its own executor (ADR 0041). Check both before
     // anything mutates, so an unavailable one fails closed and is never
     // replaced by another, and refuse a step that changes the product's executor.
     adapters
         .software
-        .resolve(content.manifest.deploy.executor)?;
+        .require_available(content.manifest.deploy.executor)?;
     if let Some(restore) = restore_content.as_ref() {
         adapters
             .software
-            .resolve(restore.manifest.deploy.executor)?;
+            .require_available(restore.manifest.deploy.executor)?;
     }
     if step.action != Action::Restart
         && let Some(installed) = step.from.as_deref()
@@ -111,6 +128,10 @@ pub(super) async fn execute(
     {
         crate::health_gate::resolve_spec(ctx, environment, &step.product, &content.manifest.gate)
             .await?;
+    }
+
+    if let Some(host) = step.host {
+        return execute_host(ctx, step_context, plan, step, host, &content).await;
     }
 
     let mut outgoing_removed = false;
@@ -326,6 +347,143 @@ pub(super) async fn execute(
         .await?;
     }
     Ok(outcome)
+}
+
+/// Run one host step through the root-side applier and record its outcome.
+/// It never restores, re-applies, or cleans up: the applier authorizes one
+/// release and one action, once, and a failed step stays failed.
+async fn execute_host(
+    ctx: &mut Ctx,
+    step_context: StepContext<'_>,
+    plan: &Plan,
+    step: &Step,
+    host: crate::plan::HostStep,
+    content: &ReleaseContent,
+) -> Result<Outcome> {
+    let StepContext {
+        lease,
+        environment,
+        plan_id,
+        adapters,
+        started_at_ms,
+    } = step_context;
+    let executor = adapters.software.host()?;
+    if host.action == crate::plan::HostAction::Uninstall {
+        bail!("this server does not run host uninstall steps yet");
+    }
+    let request = match crate::catalog::signature_envelope(ctx, &step.release_id).await {
+        Ok(signature) => host_request(
+            plan,
+            step,
+            host,
+            content,
+            signature,
+            adapters.host_approvals,
+        )
+        .map_err(|error| format!("{error:#}")),
+        Err(error) => Err(format!("{error:#}")),
+    };
+    let ended = match request {
+        Ok(request) => host_step::run(ctx, lease, executor, &request, content).await?,
+        Err(detail) => host_step::HostStepEnd::NotRun(detail),
+    };
+    let (outcome, transition) = match ended {
+        host_step::HostStepEnd::Recorded(result) if result.outcome.succeeded() => (
+            Outcome::new(
+                step.clone(),
+                StepOutcomeStatus::Succeeded,
+                result.detail.clone(),
+            ),
+            Some(match host.action {
+                crate::plan::HostAction::Install => {
+                    crate::environment::DeploymentTransition::Deployed {
+                        version: step.to.clone(),
+                        previous: step.from.clone(),
+                    }
+                }
+                crate::plan::HostAction::Health | crate::plan::HostAction::Uninstall => {
+                    crate::environment::DeploymentTransition::Refreshed
+                }
+            }),
+        ),
+        host_step::HostStepEnd::Recorded(result) => host_step_failed(
+            step,
+            format!(
+                "host {} of {} {} ended {:?}: {}",
+                host.action, step.product, step.to, result.outcome, result.detail
+            ),
+        ),
+        host_step::HostStepEnd::Unknown(detail) => host_step_failed(
+            step,
+            format!(
+                "host {} of {} {} failed: {detail}",
+                host.action, step.product, step.to
+            ),
+        ),
+        // Nothing ran, so what is deployed did not change.
+        host_step::HostStepEnd::NotRun(detail) => (
+            Outcome::new(
+                step.clone(),
+                StepOutcomeStatus::Failed,
+                format!(
+                    "host {} of {} {} did not run: {detail}",
+                    host.action, step.product, step.to
+                ),
+            ),
+            Some(crate::environment::DeploymentTransition::Unchanged),
+        ),
+    };
+    let transition = transition.unwrap_or(crate::environment::DeploymentTransition::Unknown);
+    if let Err(error) = record(
+        ctx,
+        started_at_ms,
+        lease,
+        environment,
+        plan_id,
+        &outcome,
+        transition,
+    )
+    .await
+    {
+        return Err(
+            compensate_or_fence(ctx, lease, environment, step, content, adapters, error).await,
+        );
+    }
+    Ok(outcome)
+}
+
+/// The request for `step`: the stored plan, the signed release with its
+/// `signature`, and the plan's approval envelopes. The server's own automatic approvals never
+/// authorize a host step, so they are left out.
+pub(super) fn host_request(
+    plan: &Plan,
+    step: &Step,
+    host: crate::plan::HostStep,
+    content: &ReleaseContent,
+    signature: crate::release_signing::SignatureEnvelope,
+    approvals: &[crate::plan_approval::ApprovalEnvelope],
+) -> Result<crate::host_apply::HostApplyRequest> {
+    let approvals: Vec<_> = approvals
+        .iter()
+        .filter(|envelope| {
+            envelope.statement.policy_provider != crate::approval_policy::POLICY_PROVIDER
+        })
+        .cloned()
+        .collect();
+    if approvals.is_empty() {
+        bail!(
+            "host steps need human or external plan approvals; the server's own approvals never authorize them"
+        );
+    }
+    Ok(crate::host_apply::HostApplyRequest {
+        schema: crate::host_apply::REQUEST_SCHEMA.into(),
+        plan: plan.clone(),
+        step_id: step.id.clone(),
+        action: host.action,
+        manifest: content.raw_manifest.clone(),
+        signature,
+        approvals,
+    })
 }
 
 /// Why a failed host step is left failed (ADR 0041 section 2).

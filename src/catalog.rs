@@ -26,7 +26,9 @@ pub use pin_export::{
     WithheldReleasePin, export_release_pins, import_release_pins,
 };
 pub use trust::{inspect_release, require_deployable_trust, reverify_release};
-pub(crate) use trust::{load_deployable_snapshot, load_recoverable_snapshot, release_is_recalled};
+pub(crate) use trust::{
+    load_deployable_snapshot, load_recoverable_snapshot, release_is_recalled, signature_envelope,
+};
 
 /// Version of the transport-independent Catalog application contract.
 pub const CATALOG_CONTRACT_VERSION: u32 = 1;

@@ -30,6 +30,7 @@ runtime currently provides.
 | `enterprise_authentication` | Host can verify enterprise authentication assertions |
 | `operational_store_migration` | Supported operational schema / migration level |
 | `shell_executor` | Host resolved `tenkai-executor-guard` and can run shell-executor deploys |
+| `host_executor` | Host can spool host steps and start the root-side applier ([ADR 0041](decisions/0041-per-release-executor-and-privileged-host-releases.md)) |
 
 Each capability is versioned. Migration also carries a numeric `level` (the
 store schema version).
@@ -67,6 +68,7 @@ profile: community-sqlite
 capabilities:
   - operational_store_migration:v1:levelN   # N = SCHEMA_VERSION
   - shell_executor:v1                       # tenkai-server, when the guard resolves
+  - host_executor:v1                        # tenkai-server, when TENKAI_HOST_SPOOL_DIR is usable
 ```
 
 `tenkai-server` resolves `tenkai-executor-guard` at startup, beside its own
@@ -75,6 +77,11 @@ missing, the server logs `tenkai-server warning: shell executor unavailable`,
 omits `shell_executor`, and still starts; the first shell-executor apply then
 fails with the same instruction. See
 [install a server host](run-tenkai-server.md#install-a-server-host).
+Likewise, with `TENKAI_HOST_SPOOL_DIR` set, a spool directory the server's
+user does not own, others can write, or that is missing, or a host without
+`systemctl`, logs `tenkai-server warning: host executor unavailable` and
+omits `host_executor`; see
+[run host releases](run-tenkai-server.md#run-host-releases).
 
 They do **not** advertise tenant isolation, shared replica state, high
 availability, or enterprise authentication. Community operation is

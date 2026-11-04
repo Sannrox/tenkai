@@ -27,7 +27,8 @@ use tenkai::providers::{
 use tenkai::reconciler::{Config as ReconcilerConfig, Reconciler};
 use tenkai::runtime_capabilities::{
     RuntimeRequirements, community_auth_capabilities, community_sqlite_profile,
-    enterprise_auth_capabilities, shell_executor_capabilities, validate_runtime_capabilities,
+    enterprise_auth_capabilities, host_executor_capabilities, shell_executor_capabilities,
+    validate_runtime_capabilities,
 };
 use tenkai::storage::{OperationalStore, SqliteStore};
 use tenkai::tenant_store::TenantOperationalStore;
@@ -798,6 +799,15 @@ async fn main() -> Result<()> {
     match tenkai::fenced_mutation::executor_guard_executable() {
         Ok(_) => capabilities.components.push(shell_executor_capabilities()),
         Err(error) => eprintln!("tenkai-server warning: shell executor unavailable: {error:#}"),
+    }
+    // Likewise for host releases (ADR 0041): only a usable spool directory
+    // and systemctl advertise the host executor.
+    let host_executor = tenkai::host_executor::HostExecutor::from_env()
+        .and_then(|host| host.map(|host| host.check_ready()).transpose());
+    match host_executor {
+        Ok(Some(())) => capabilities.components.push(host_executor_capabilities()),
+        Ok(None) => {}
+        Err(error) => eprintln!("tenkai-server warning: host executor unavailable: {error:#}"),
     }
 
     let requirements = RuntimeRequirements {

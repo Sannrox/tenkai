@@ -135,8 +135,9 @@ jobs:
         env:
           GITHUB_EVENT_BEFORE: ${{ github.event.before }}
 
-  # Linux proof for the root-side host applier (ADR 0041 §2): the template
-  # unit and polkit rule installed for real, driven by an unprivileged user.
+  # Linux proof for privileged host releases (ADR 0041 §2): the template
+  # unit and polkit rule installed for real, driven by an unprivileged user,
+  # then tenkai-server as that user installing a host release through them.
   host-applier-systemd:
     name: Host applier systemd drill
     runs-on: ubuntu-latest
@@ -148,10 +149,12 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install polkit
         run: sudo apt-get update && sudo apt-get install -y polkitd
-      - name: Build the applier and the drill fixture
-        run: cargo build --locked -p tenkai-host-applier --bin tenkai-host-applier --example host_apply_drill
+      - name: Build the applier, the drill fixture, the server, and the CLI
+        run: cargo build --locked -p tenkai-host-applier --bin tenkai-host-applier --example host_apply_drill -p tenkai-server -p tenkaictl
       - name: Run the drill
         run: bash scripts/host-applier-systemd-drill.sh target/debug/tenkai-host-applier target/debug/examples/host_apply_drill
+      - name: Run the server-side drill
+        run: bash scripts/host-executor-drill.sh target/debug
       - name: Applier journal
         if: always()
         run: sudo journalctl -t tenkai-host-apply --no-pager || true

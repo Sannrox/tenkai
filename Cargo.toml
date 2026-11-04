@@ -60,6 +60,7 @@ default = []
 test-support = []
 
 [dev-dependencies]
+tokio = { version = "1", default-features = false, features = ["test-util"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 tower = { version = "0.5", features = ["util"] }
 tonic = { version = "0.14", default-features = false, features = ["channel", "codegen", "router", "server", "tls-ring", "tls-webpki-roots", "transport"] }

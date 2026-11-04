@@ -90,6 +90,9 @@ async fn inspect(ctx: &mut Ctx, plan: &Plan) -> Result<Result<(), Rejection>> {
             detail: error.to_string(),
         }));
     }
+    // A later step of the same product (a host health step after its
+    // install) starts from what the earlier step leaves deployed.
+    let mut planned: std::collections::HashMap<&str, &String> = std::collections::HashMap::new();
     for step in &plan.steps {
         if step.action != Action::Rollback
             && environment
@@ -101,9 +104,12 @@ async fn inspect(ctx: &mut Ctx, plan: &Plan) -> Result<Result<(), Rejection>> {
                 product: step.product.clone(),
             }));
         }
-        let actual = environment
-            .properties
-            .get(&format!("deployed.{}", step.product));
+        let actual = match planned.insert(&step.product, &step.to) {
+            Some(earlier) => Some(earlier),
+            None => environment
+                .properties
+                .get(&format!("deployed.{}", step.product)),
+        };
         if actual != step.from.as_ref() {
             return Ok(Err(Rejection::DeploymentChanged {
                 product: step.product.clone(),

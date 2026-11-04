@@ -34,6 +34,8 @@ pub enum CapabilityName {
     OperationalStoreMigration,
     /// Host resolved `tenkai-executor-guard` and can run shell-executor deploys.
     ShellExecutor,
+    /// Host can spool host steps and start the root-side applier (ADR 0041).
+    HostExecutor,
 }
 
 impl CapabilityName {
@@ -45,6 +47,7 @@ impl CapabilityName {
             Self::EnterpriseAuthentication => "enterprise_authentication",
             Self::OperationalStoreMigration => "operational_store_migration",
             Self::ShellExecutor => "shell_executor",
+            Self::HostExecutor => "host_executor",
         }
     }
 }
@@ -267,6 +270,18 @@ pub fn shell_executor_capabilities() -> ComponentCapabilities {
         "executor.shell",
         [Capability::named(
             CapabilityName::ShellExecutor,
+            RUNTIME_CAPABILITY_CONTRACT_VERSION,
+        )],
+    )
+}
+
+/// The host executor: its spool directory is usable and `systemctl` is
+/// installed, so host steps can reach the root-side applier.
+pub fn host_executor_capabilities() -> ComponentCapabilities {
+    ComponentCapabilities::new(
+        "executor.host",
+        [Capability::named(
+            CapabilityName::HostExecutor,
             RUNTIME_CAPABILITY_CONTRACT_VERSION,
         )],
     )

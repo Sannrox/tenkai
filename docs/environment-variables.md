@@ -151,6 +151,8 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `TENKAI_SOFTWARE_EXECUTOR` | unset | Host software adapter: `helm`, `kubernetes` (`k8s` / `native`), `kubernetes-inprocess`, `docker`, or `fake`; unset keeps the shell install path. The default for releases that declare no `[deploy] executor` ([software executors](software-executor.md#per-release-selection)) |
+| `TENKAI_HOST_SPOOL_DIR` | unset | Enables the host executor for `executor = "host"` releases: the directory the server spools host steps to, the applier's `spool_dir` ([run host releases](run-tenkai-server.md#run-host-releases)) |
+| `TENKAI_HOST_STATE_DIR` | `/var/lib/tenkai-host` | The host applier's state directory, which the server reads to plan host steps and accept their results |
 | `TENKAI_HELM_BIN` | `helm` | Helm binary used by the Helm software executor |
 | `TENKAI_KUBECTL_BIN` | `kubectl` | kubectl binary used by the native Kubernetes software executor |
 | `TENKAI_DOCKER_BIN` | `docker` | Docker CLI used by the Docker host software executor |
