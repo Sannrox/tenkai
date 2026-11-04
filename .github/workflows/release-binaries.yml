@@ -138,6 +138,8 @@ jobs:
           toolchain: 1.96.1
       - name: Add HTTP API contract
         run: cp api/tenkai-http-v1.schema.json dist/
+      - name: Add install script for this version
+        run: bash scripts/package-release-binaries.sh install-script --out dist --version "${GITHUB_REF_NAME#v}"
       - name: Refuse Linux hosts above the glibc floor
         run: bash scripts/package-release-binaries.sh check-glibc --out dist
       - name: Checksums

@@ -52,6 +52,7 @@ it ([ADR 0001](decisions/0001-standalone-core-and-service-evolution.md),
 | Declared and imported derived criticality | [Manage environments](manage-environments.md#criticality); [Plan approval](plan-approval.md#multi-party-approval); #694 |
 | Signed Tenkai hosts in offline bundles | [Host binaries](offline-bundles.md#host-binaries); [Release binaries](release-binaries.md#disconnected-sites); #640 |
 | Checksummed host binaries on GitHub Releases | [Release binaries](release-binaries.md); [release notes](releases/0.6.0.md); #446 |
+| One-command install script for CLI, server, and runtime hosts, checked against `SHA256SUMS` | [Install with one command](release-binaries.md#install-with-one-command); #905 |
 | Verified server self-upgrade with store check and rollback | [Upgrade a server host](release-binaries.md#upgrade-a-server-host); #678 |
 | Optional governance/intelligence provider ports | [Provider contracts](provider-contracts.md) |
 | Web console served at `/ui/` from a pinned, checksum-verified release (feature `ui`, on in release binaries) | [Open the web console](run-tenkai-server.md#open-the-web-console); [ADR 0031](decisions/0031-web-console.md); #463 |
@@ -114,7 +115,7 @@ Postgres hub + multi-replica fencing) are landed on main. Remaining work is
 
 | Track | Intent |
 | --- | --- |
-| Install and OS packaging | One-command install script, then OS packages and a package-manager tap; #905 |
+| OS packaging | `linux-aarch64` hosts, OS packages, a package-manager tap, and a macOS boot service; #917 |
 | Hub HA product claim | Criteria + automated drills before advertising `high_availability` (fence already shipped #135); #903 |
 | Intelligence loop depth | Fail-closed prior policy; live remote OutcomeProvider history |
 | Executor / model depth | Peer/regional weight caches; additional engines (vLLM, TGI and NIM on Kubernetes and MLX shipped: [research](research/additional-model-serving-executors.md)) |
