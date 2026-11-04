@@ -579,15 +579,18 @@ mod directory_bridge;
 
 /// Stored rules (#836) grant like the file's, change the first
 /// administrator status, and never override a value the file declares.
-#[test]
-fn stored_rules_grant_after_the_file_and_set_the_first_administrator() {
-    let signer = Signer::new("k1");
+/// An extension over `file` with stored rules in a fresh SQLite store under
+/// the returned directory, which the caller removes.
+fn stored_extension(
+    signer: &Signer,
+    file: OidcConfig,
+) -> (
+    OidcAuthExtension,
+    Arc<crate::grant_rules::StoredGrants>,
+    std::path::PathBuf,
+) {
     let cache =
-        JwksCache::with_min_interval(static_source(jwks(&[&signer])), Duration::ZERO).unwrap();
-    let mut file = config("");
-    file.grants
-        .rules
-        .retain(|rule| rule.value == "tenkai-viewers");
+        JwksCache::with_min_interval(static_source(jwks(&[signer])), Duration::ZERO).unwrap();
     let dir = std::env::temp_dir().join(format!(
         "tenkai-oidc-stored-{}-{}",
         std::process::id(),
@@ -603,6 +606,17 @@ fn stored_rules_grant_after_the_file_and_set_the_first_administrator() {
     let ext = OidcAuthExtension::new(file, Arc::new(cache), None, false)
         .unwrap()
         .with_stored_grants(stored.clone());
+    (ext, stored, dir)
+}
+
+#[test]
+fn stored_rules_grant_after_the_file_and_set_the_first_administrator() {
+    let signer = Signer::new("k1");
+    let mut file = config("");
+    file.grants
+        .rules
+        .retain(|rule| rule.value == "tenkai-viewers");
+    let (ext, stored, dir) = stored_extension(&signer, file);
     assert_eq!(ext.first_administrator(), FirstAdministrator::Missing);
     let admin = || signer.sign(&far_future(serde_json::json!(["tenkai-admins"])));
     assert!(
@@ -644,5 +658,75 @@ fn stored_rules_grant_after_the_file_and_set_the_first_administrator() {
     )
     .unwrap();
     assert!(!viewer.has_delivery_capability(DeliveryCapability::Management));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A stored rule only adds to what the file grants a principal (#847): one
+/// that would bind another environment, change the principal kind, or
+/// confine channels or products is skipped for that principal, while one
+/// that only widens applies.
+#[test]
+fn stored_rules_cannot_narrow_or_lock_out_a_file_principal() {
+    let signer = Signer::new("k1");
+    let (ext, stored, dir) = stored_extension(&signer, config(""));
+    let rule = |value: &str, capabilities: &[&str]| OidcGrantRule {
+        value: value.into(),
+        capabilities: capabilities.iter().map(|c| c.to_string()).collect(),
+        environment: None,
+        channels: Vec::new(),
+        products: Vec::new(),
+        kind: None,
+    };
+    let rules = [
+        OidcGrantRule {
+            environment: Some("stage".into()),
+            ..rule("eng", &["management"])
+        },
+        OidcGrantRule {
+            channels: vec!["beta".into()],
+            kind: Some("service".into()),
+            ..rule("beta-testers", &["read"])
+        },
+        OidcGrantRule {
+            products: vec!["api".into()],
+            ..rule("api-publishers", &["publish"])
+        },
+        rule("publishers", &["publish"]),
+        rule("admins", &["management"]),
+    ];
+    for (now, rule) in (1..).zip(rules) {
+        stored
+            .create(rule, "management-token", "test", now, None)
+            .unwrap();
+    }
+    let login = |groups: serde_json::Value| authenticate(&ext, signer.sign(&far_future(groups)));
+
+    // Lockout: a second environment no longer refuses the file's operator.
+    let operator = login(serde_json::json!(["prod-operators", "eng"])).unwrap();
+    assert_eq!(operator.environment_binding(), Some("prod"));
+    // Neither kind nor channels nor products change for the file's viewer.
+    let viewer = login(serde_json::json!([
+        "tenkai-viewers",
+        "beta-testers",
+        "api-publishers"
+    ]))
+    .unwrap();
+    assert_eq!(viewer.principal.kind, PrincipalKind::Human);
+    assert!(viewer.channel_bindings().is_empty());
+    assert!(viewer.product_bindings().is_empty());
+    assert!(!viewer.has_delivery_capability(DeliveryCapability::Publish));
+    // A rule that only adds applies: publish, then fleet management that
+    // lifts the file's environment binding.
+    let publisher = login(serde_json::json!(["tenkai-viewers", "publishers"])).unwrap();
+    assert!(publisher.has_delivery_capability(DeliveryCapability::Publish));
+    let admin = login(serde_json::json!(["prod-operators", "admins"])).unwrap();
+    assert_eq!(admin.environment_binding(), None);
+    // Without a file grant, stored rules still merge among themselves.
+    let tester = login(serde_json::json!(["beta-testers"])).unwrap();
+    assert_eq!(tester.principal.kind, PrincipalKind::Service);
+    assert!(matches!(
+        login(serde_json::json!(["eng", "beta-testers"])),
+        Ok(context) if context.environment_binding() == Some("stage")
+    ));
     let _ = std::fs::remove_dir_all(dir);
 }
