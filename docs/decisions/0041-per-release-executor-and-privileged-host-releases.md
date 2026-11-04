@@ -123,9 +123,13 @@ key from the verified request and refuses an instance whose name does not match.
    for that plan digest against a root-owned host approval policy in
    `/etc/tenkai`: the trusted approvers, the quorum, and the purposes it allows.
    It checks expiry and that purposes such as rollback and downgrade carry the
-   approvals the policy requires. Gates, and the flag that skips them, are
-   evaluated by the server and cannot be verified here, so the host policy is
-   always applied at its strictest quorum, as if gates were skipped. An `uninstall` needs an approved plan that
+   approvals the policy requires. The root side uses only inputs it can verify:
+   the plan, the envelopes, and its own record. Gates and the flag that skips
+   them, the requester's identity, and product criticality are server state,
+   so the host policy is evaluated at its strictest quorum as if gates were
+   skipped, every rule applies regardless of criticality, and a host policy
+   that uses requester exclusion is refused when it loads. Independence of
+   approvals comes from requiring distinct approver keys and groups. An `uninstall` needs an approved plan that
    removes the product, like any other change;
 5. refuses an instance it has already started, and returns the recorded result
    instead of running again.
