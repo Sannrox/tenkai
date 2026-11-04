@@ -68,6 +68,7 @@ Full operator notes: [docs/releases/0.7.0.md](https://github.com/Sannrox/tenkai/
 - SQLite (#927): the first start that migrates an older schema writes `<db>.pre-v<found>.<ms>.<id>.db` beside the store; it needs free space about the store's size, or the start is refused with the store untouched. The schema stays 13, so a 0.6.0 store opens without migration.
 - Hub PostgreSQL (#942, migration): the first use of each tenant schema rebuilds `catalog_object_properties_lookup` on a 256-character value prefix. Writes to that tenant's catalog properties wait for it. Rolling deploys and rollback stay correct.
 - Linux hosts (#921): glibc 2.28+ on x86-64 (0.6.0 needed 2.39). Musl is not supported.
+- Rollback to 0.6.0: the SQLite schema is unchanged, so the store opens without a restore. Restore the 0.6.0 values of `TENKAI_OUTCOME_PROVIDER_REGISTRATION` and, on tenant-mode hubs, `TENKAI_FEEDBACK_PROVIDER_REGISTRATION` first; 0.6.0 refuses to start with the 0.7.0 values. 0.6.0 refuses `.v2` signed statements, manifests that declare `[deploy] executor`, and plans with host or `remove` steps.
 - Rust library API (breaking): `ExecutionOptions.software_executors` replaces `software_executor`; `DeploySection.executor`, `plan::Step.host` and `plan::Action::Remove` are new; grant-rule store types, `CatalogGraph` observation writes and runner attestation signing changed. See the pull requests for exact signatures.
 
 ## v0.6.0 (2026-10-30)
