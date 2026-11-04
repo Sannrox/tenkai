@@ -273,6 +273,26 @@ fn a_directory_over_the_entry_limit_fails_while_it_is_listed() {
 }
 
 #[test]
+fn intermediate_directories_of_nested_inputs_count_as_entries() {
+    let mut host = Host::new();
+    host.config.max_artifact_entries = 2;
+    let stage = host.root.join("stage-nested");
+    let release = host.fixture.release_with_inputs(
+        &stage,
+        "k3s",
+        "1.2.0",
+        ["./a/b/c/run.sh", "./a/b/c/run.sh", "./a/b/c/run.sh"],
+        &[("a/b/c/run.sh", b"#!/bin/sh\n")],
+        &["a/b/c/run.sh"],
+    );
+    let (instance, _) = host.spool_release(stage, release);
+    assert!(refusal(host.intake(&instance)).contains("too many entries"));
+    // The input and its three new parent directories.
+    host.config.max_artifact_entries = 4;
+    host.intake(&instance).unwrap();
+}
+
+#[test]
 fn a_malformed_instance_name_never_touches_a_path() {
     let host = Host::new();
     assert!(refusal(host.intake("../../etc")).contains("host apply instance"));

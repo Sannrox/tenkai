@@ -160,6 +160,7 @@ fn copy_input(
         dir = open_dir_at(dir.as_fd(), name)?;
         dest.push(name);
         if !dest.exists() {
+            budget.entry()?;
             std::fs::create_dir(&dest)?;
             std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
         }
