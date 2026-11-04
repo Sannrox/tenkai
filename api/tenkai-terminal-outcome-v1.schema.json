@@ -1,0 +1,84 @@
+{
+  "$defs": {
+    "TerminalOutcomeState": {
+      "enum": [
+        "deployment_succeeded",
+        "deployment_failed",
+        "automatic_rollback_succeeded",
+        "rollback_succeeded",
+        "rollback_failed",
+        "execution_cancelled",
+        "unknown_reconciled"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Content of one Tenkai terminal deployment outcome, exported as evidence type operations.terminal_outcome.",
+  "properties": {
+    "configuration_id": {
+      "maxLength": 512,
+      "minLength": 1,
+      "type": "string"
+    },
+    "deployment_id": {
+      "maxLength": 512,
+      "minLength": 1,
+      "type": "string"
+    },
+    "environment_id": {
+      "maxLength": 512,
+      "minLength": 1,
+      "type": "string"
+    },
+    "observed_at": {
+      "description": "Tenkai observation time, milliseconds since the Unix epoch.",
+      "format": "int64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "plan_id": {
+      "maxLength": 512,
+      "minLength": 1,
+      "type": "string"
+    },
+    "product": {
+      "maxLength": 512,
+      "minLength": 1,
+      "type": "string"
+    },
+    "release_id": {
+      "maxLength": 512,
+      "minLength": 1,
+      "type": "string"
+    },
+    "schema": {
+      "const": "tenkai.terminal_outcome.v1",
+      "type": "string"
+    },
+    "tenant_id": {
+      "description": "Tenant that owns the outcome. Omitted on community hosts; present in\ntenant-mode export so two tenants cannot share a producer identity.",
+      "maxLength": 512,
+      "minLength": 1,
+      "type": "string"
+    },
+    "terminal_state": {
+      "$ref": "#/$defs/TerminalOutcomeState"
+    }
+  },
+  "required": [
+    "schema",
+    "deployment_id",
+    "plan_id",
+    "release_id",
+    "product",
+    "environment_id",
+    "configuration_id",
+    "terminal_state",
+    "observed_at"
+  ],
+  "title": "tenkai.terminal_outcome.v1",
+  "type": "object",
+  "x-tenkai-schema-version": "1.1.0"
+}

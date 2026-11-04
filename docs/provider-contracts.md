@@ -96,7 +96,11 @@ Delivery retries use the durable outbox; apply does not wait.
 
 ### Terminal outcome event v1
 
-`ProviderEvent.payload_json` contains `tenkai.terminal_outcome.v1` with:
+`ProviderEvent.payload_json` contains `tenkai.terminal_outcome.v1`, content
+version `1.1.0`. Its JSON Schema is
+[`api/tenkai-terminal-outcome-v1.schema.json`](../api/tenkai-terminal-outcome-v1.schema.json),
+generated from the payload type and checked by `make validate`. The payload
+has:
 
 - stable deployment, plan, release, product, environment, and configuration
   identities, plus the owning tenant on tenant-mode hubs (omitted on community
@@ -114,6 +118,15 @@ idempotent, while a later transition with the same operational inputs remains a
 distinct fact. Payloads are bounded to 16 KiB and contain no status detail,
 command output, environment facts, artifact/source content, approvals,
 credentials, or signing material.
+
+Versioning: the schema is closed and registered with exact compatibility, so
+any change to its content changes the version. An additive change (a new
+optional field; every older payload stays valid) bumps the minor version
+under the same `.v1` id. A change that makes an older payload invalid needs a
+new id (`.v2`). `1.1.0` added the optional `tenant_id` (#867). Every Tenkai
+host emits the current version, community and tenant-mode alike; the version
+is stamped at delivery, so rows queued by an older release deliver under it
+with their original event ids.
 
 When a failed restore makes deployment state unknown, Tenkai records the
 originating deployment, plan, and step identities on the environment in the
@@ -230,8 +243,14 @@ The adapter maps each terminal event to Sekai's canonical
 - configured namespace → `namespace`;
 - the Tenkai-owned outbox → a durable monotonic `source_sequence` per
   outcome producer;
-- deployment ID → `target_external_id` with target kind `tenkai.deployment`;
-- `tenkai.terminal_outcome.v1` → `schema_id`;
+- on a community host, deployment ID → `target_external_id` with target kind
+  `tenkai.deployment`;
+- on a tenant-mode hub, `<tenant>:<deployment ID>` → `target_external_id`
+  with target kind `tenkai.tenant_deployment`. `%` and `:` in the tenant are
+  percent-encoded (`%25`, `%3A`), so the first `:` ends the tenant and the
+  deployment ID follows verbatim;
+- `tenkai.terminal_outcome.v1` → `schema_id`, `1.1.0` → `schema_version`,
+  with `exact` compatibility;
 - the bounded payload → `content_json`, with a SHA-256 `content_digest`; and
 - the exact release, plan, configuration, and environment binding → bounded
   evidence provenance fields.
@@ -246,17 +265,22 @@ following for the configured principal and namespace:
 
 - a producer capability for `source_type=outcome`, source instance
   `<namespace>:outcome`, the configured namespace,
-  `operations.terminal_outcome`, target kind `tenkai.deployment`, internal
+  `operations.terminal_outcome`, target kind `tenkai.deployment` (community
+  host) or `tenkai.tenant_deployment` (tenant-mode hub), internal
   classification, and the `upsert` intent; and
-- the immutable schema `tenkai.terminal_outcome.v1@1.0.0` for evidence type
-  `operations.terminal_outcome`.
+- the immutable schema `tenkai.terminal_outcome.v1@1.1.0` for evidence type
+  `operations.terminal_outcome`, registered from
+  `api/tenkai-terminal-outcome-v1.schema.json` at the release tag.
 
 The Sekai 1.0 client contract does not expose producer-capability provisioning,
 so Tenkai cannot safely bootstrap this state with the telemetry-writer
 credential. Tenkai therefore fails startup unless
 `TENKAI_OUTCOME_PROVIDER_REGISTRATION` exactly attests to the configured
 registration. This is an operator confirmation, not a remote health probe; a
-rejected submission remains a visible, retryable failure.
+rejected submission remains a visible, retryable failure. An adapter exports
+only the target kind it attests: a tenant-mode hub refuses an outcome without
+a tenant, and a community host refuses one with a tenant, as retryable
+delivery failures.
 
 Configure the server explicitly:
 
@@ -265,9 +289,36 @@ export TENKAI_OUTCOME_PROVIDER_URL=https://sekai.example.internal
 export TENKAI_OUTCOME_NAMESPACE=delivery-learning
 export TENKAI_OUTCOME_PROVIDER_PRINCIPAL=tenkai.outcome
 export TENKAI_OUTCOME_PROVIDER_TOKEN='inject-from-secret-store'
-export TENKAI_OUTCOME_PROVIDER_REGISTRATION='producer=tenkai.outcome;source_type=outcome;source_instance=delivery-learning:outcome;namespace=delivery-learning;evidence_type=operations.terminal_outcome;schema=tenkai.terminal_outcome.v1@1.0.0;target_kind=tenkai.deployment;classification=internal;intent=upsert'
+export TENKAI_OUTCOME_PROVIDER_REGISTRATION='producer=tenkai.outcome;source_type=outcome;source_instance=delivery-learning:outcome;namespace=delivery-learning;evidence_type=operations.terminal_outcome;schema=tenkai.terminal_outcome.v1@1.1.0;target_kind=tenkai.deployment;classification=internal;intent=upsert'
 tenkai-server --outcome-provider chisei
 ```
+
+On a tenant-mode hub the attestation ends in
+`target_kind=tenkai.tenant_deployment;classification=internal;intent=upsert`.
+
+#### Upgrading from `1.0.0` (0.7.0)
+
+Releases before 0.7.0 delivered `tenkai.terminal_outcome.v1@1.0.0`, and a
+tenant-mode hub sent `<tenant>:<deployment ID>` unescaped under target kind
+`tenkai.deployment`. With exact compatibility the new version needs a new
+registration:
+
+1. Register `tenkai.terminal_outcome.v1@1.1.0` from
+   `api/tenkai-terminal-outcome-v1.schema.json`. Keep `1.0.0` registered.
+   On a tenant-mode hub, also add target kind `tenkai.tenant_deployment` to
+   the producer capability.
+2. Upgrade Tenkai with `TENKAI_OUTCOME_PROVIDER_REGISTRATION` changed to
+   `@1.1.0` (and, on a tenant-mode hub, `target_kind=tenkai.tenant_deployment`).
+   A host with the old attestation refuses to start. During a rolling
+   upgrade, old replicas keep sending `1.0.0` and new ones `1.1.0`.
+3. Rows already queued deliver as `1.1.0` with their original event ids and
+   content; nothing is rewritten. Once no older replica runs and env inspect
+   shows no `retrying` outcome from before the upgrade, `1.0.0` and, on a
+   tenant-mode hub, the `tenkai.deployment` target kind can be removed.
+
+Evidence keyed on a tenant-mode target id sees a new key for later outcomes:
+`tenkai.tenant_deployment` with the encoded tenant. Community target ids do
+not change.
 
 The token is environment-only, and remote plaintext endpoints are rejected
 even when no token is configured. Outcome export requires embedded Tenkai
