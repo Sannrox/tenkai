@@ -193,8 +193,12 @@ environment lease fresh while the unit runs and stops the unit when it loses
 the lease or receives SIGTERM, like a shell deploy command. The unit outlives
 a server that dies, so whoever next claims the environment lease to apply a
 plan first stops any host unit still running for that environment, and
-refuses to go on while one runs. It accepts only a result that names the
-instance it started. A step the applier refused ran
+refuses to go on while one runs. A server paused between its last lease
+refresh and the unit's start can still start that one step after its lease
+expired, as with the other executors; the applier's per-product lock and
+generation keep it from overlapping another step of the same product, and
+the server stops it at its next refresh. It accepts only a result that names
+the instance it started. A step the applier refused ran
 nothing and leaves the deployment as it was. A failed host step stays failed:
 nothing is cleaned up or restored, and the server marks the deployment
 unknown. The next approved plan moves on from the applier's record: it

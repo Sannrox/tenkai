@@ -45,9 +45,10 @@ pub type UnitFuture<'a, T = ()> = Pin<Box<dyn Future<Output = Result<T>> + Send 
 /// Starts and stops instances of `tenkai-host-apply@.service`: the only two
 /// systemd verbs the polkit rule grants the server's user.
 pub trait HostUnits: Send + Sync {
-    /// Start `instance` and resolve once its start job ended, that is once
-    /// the applier exited. An error only explains a missing result; the
-    /// caller decides from the records.
+    /// Submit the start of `instance` now, and resolve once its start job
+    /// ended, that is once the applier exited. The start is submitted when
+    /// this is called, not when the future is first polled. An error only
+    /// explains a missing result; the caller decides from the records.
     fn start<'a>(&'a self, instance: &'a str) -> UnitFuture<'a>;
     /// Ask systemd to stop `instance` without waiting. The pending
     /// [`Self::start`] resolves once the applier recorded the stop and exited.
@@ -68,18 +69,23 @@ pub fn unit_name(instance: &str) -> String {
 
 impl HostUnits for Systemctl {
     fn start<'a>(&'a self, instance: &'a str) -> UnitFuture<'a> {
+        // Blocking start: the template unit is a oneshot, so the job ends
+        // when the applier exits. The caller keeps the fence fresh and stops
+        // the unit concurrently.
+        let child = tokio::process::Command::new("systemctl")
+            .args(["start", "--no-ask-password"])
+            .arg(unit_name(instance))
+            .env_clear()
+            .env("PATH", SYSTEMCTL_PATH)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn();
         Box::pin(async move {
-            // Blocking start: the template unit is a oneshot, so the job ends
-            // when the applier exits. The caller keeps the fence fresh and
-            // stops the unit concurrently.
-            let output = tokio::process::Command::new("systemctl")
-                .args(["start", "--no-ask-password"])
-                .arg(unit_name(instance))
-                .env_clear()
-                .env("PATH", SYSTEMCTL_PATH)
-                .stdin(std::process::Stdio::null())
-                .kill_on_drop(true)
-                .output()
+            let output = child
+                .context("running systemctl start")?
+                .wait_with_output()
                 .await
                 .context("running systemctl start")?;
             if !output.status.success() {

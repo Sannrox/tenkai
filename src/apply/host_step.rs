@@ -164,10 +164,37 @@ async fn start_and_wait(
     let ended = match (ended, stop) {
         (Some(ended), _) => ended,
         (None, Some(stop)) => {
-            // Stop the unit and wait for the applier to record it.
-            let stopped = host.units().stop(instance);
-            let ended = tokio::time::timeout(STOP_GRACE, &mut start).await;
-            stop_on_drop.armed = stopped.is_err() || ended.is_err();
+            // The start was submitted when it was asked for, but its job may
+            // reach the unit after this stop. Stop the unit whenever it is
+            // seen running until the start job ends, so the applier records
+            // the stop; keep a lease still held fresh meanwhile.
+            let still_held = matches!(stop, Stop::Interrupted(_));
+            let deadline = tokio::time::Instant::now() + STOP_GRACE;
+            let mut stopped = host.units().stop(instance);
+            let mut poll = tokio::time::interval(Duration::from_millis(200));
+            let ended = loop {
+                tokio::select! {
+                    biased;
+                    ended = &mut start => break Some(ended),
+                    _ = poll.tick() => {
+                        if tokio::time::Instant::now() >= deadline {
+                            break None;
+                        }
+                        if host
+                            .units()
+                            .running()
+                            .await
+                            .is_ok_and(|running| running.iter().any(|unit| unit == instance))
+                        {
+                            stopped = host.units().stop(instance);
+                        }
+                    }
+                    _ = refresh.tick(), if still_held => {
+                        let _ = refresh_environment_lease(ctx, lease).await;
+                    }
+                }
+            };
+            stop_on_drop.armed = stopped.is_err() || ended.is_none();
             match stop {
                 Stop::FenceLost(error) => return Err(error),
                 Stop::Interrupted(reason) => {
