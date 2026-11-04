@@ -55,6 +55,8 @@ echo "== install runs as root under the unit, started by tenkai"
 as_tenkai systemctl start "tenkai-host-apply@$INSTALL.service"
 [ "$(result_field "$INSTALL" outcome)" = succeeded ] || fail "install did not succeed"
 [ "$(sudo cat "$evidence/uid")" = 0 ] || fail "the command did not run as root"
+# CAP_SETUID survives into the command: it may switch to another user.
+[ "$(sudo cat "$evidence/dropped-uid")" = 65534 ] || fail "the command could not switch to another user"
 [ "$(sudo cat "$evidence/payload")" = "host release payload" ] || fail "payload differs"
 if sudo grep -Eq '^(INVOCATION_ID|JOURNAL_STREAM|SYSTEMD_EXEC_PID|LD_PRELOAD)=' "$evidence/env"; then
   fail "the command saw the unit's environment"

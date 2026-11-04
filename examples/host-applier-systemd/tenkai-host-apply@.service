@@ -13,8 +13,9 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart=/usr/local/libexec/tenkai/tenkai-host-applier run %i
-User=root
-Group=root
+# Runs as root, the default. An explicit User=root with NoNewPrivileges=yes
+# leaves CAP_SETUID out of the permitted set (systemd 255), so a command could
+# not switch to another user.
 UMask=0022
 # The applier enforces its own timeout (timeout_seconds in
 # /etc/tenkai/host-applier.toml) and records the result; systemd must not

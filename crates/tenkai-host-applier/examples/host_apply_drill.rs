@@ -47,7 +47,7 @@ fn main() {
         "1.0.0",
         [
             &format!(
-                "mkdir -p {evidence} && cp bin/payload {evidence}/payload && id -u > {evidence}/uid && env > {evidence}/env && echo run >> {evidence}/runs"
+                "mkdir -p {evidence} && cp bin/payload {evidence}/payload && id -u > {evidence}/uid && setpriv --reuid=65534 --regid=65534 --clear-groups id -u > {evidence}/dropped-uid && env > {evidence}/env && echo run >> {evidence}/runs"
             ),
             "true",
             "true",
