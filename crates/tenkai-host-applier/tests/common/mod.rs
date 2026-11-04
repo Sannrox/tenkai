@@ -101,7 +101,7 @@ impl Host {
         let now = tenkai::now_millis();
         let plan = self.fixture.plan(
             "edge",
-            now + i64::from(rand_suffix()),
+            now + NEXT_PLAN.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             &[StepSpec {
                 release: step.release.release.clone(),
                 action: step.action,
@@ -191,10 +191,8 @@ impl Drop for Host {
     }
 }
 
-/// A small distinct offset so plans created in the same millisecond differ.
-fn rand_suffix() -> u16 {
-    (uuid::Uuid::new_v4().as_u128() & 0xffff) as u16
-}
+/// Offsets plan creation times so plans made in the same millisecond differ.
+static NEXT_PLAN: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
 fn copy_dir(from: &Path, to: &Path) {
     std::fs::create_dir_all(to).unwrap();
