@@ -99,20 +99,14 @@ fn take_copy(connection: &Connection, database: &Path, found: u32) -> anyhow::Re
             std::fs::remove_file(&temporary)?;
             return Ok(newest.path);
         }
-        // A link never replaces a copy another start took in the same
-        // millisecond; the temporary name goes once the copy has its own.
-        let mut taken_ms = now_ms;
-        let copy = loop {
-            let copy = dir.join(format!("{name}.pre-v{found}.{taken_ms}.db"));
-            match std::fs::hard_link(&temporary, &copy) {
-                Ok(()) => break copy,
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => taken_ms += 1,
-                Err(error) => {
-                    return Err(error).with_context(|| format!("publishing {}", copy.display()));
-                }
-            }
-        };
-        std::fs::remove_file(&temporary)?;
+        // A copy taken earlier in the same millisecond keeps its name. Two
+        // starts racing for one name each leave a valid copy under it.
+        let copy = (now_ms..)
+            .map(|taken_ms| dir.join(format!("{name}.pre-v{found}.{taken_ms}.db")))
+            .find(|copy| !copy.exists())
+            .context("no free name for the copy")?;
+        std::fs::rename(&temporary, &copy)
+            .with_context(|| format!("renaming {} to {}", temporary.display(), copy.display()))?;
         crate::runtime_self_upgrade::sync_dir(dir)?;
         Ok(copy)
     });
