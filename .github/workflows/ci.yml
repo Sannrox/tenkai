@@ -109,7 +109,7 @@ jobs:
             docker run --rm --network none -v "${PWD}/linux-hosts:/hosts:ro" "$image" sh -ec '
               /hosts/tenkaictl-linux-x86_64 --version
               for host in tenkaictl tenkai-server tenkai-server-postgres tenkai-executor-guard \
-                tenkai-runtime tenkai-runtime-guard; do
+                tenkai-runtime tenkai-runtime-guard tenkai-host-applier; do
                 /hosts/${host}-linux-x86_64 --help >/dev/null
                 echo "${host} ok"
               done'

@@ -13,30 +13,41 @@
 #   scripts/package-release-binaries.sh self-test
 #
 # Community hosts: tenkaictl, tenkai-server, tenkai-executor-guard,
-# tenkai-runtime, tenkai-runtime-guard. Hub host asset:
+# tenkai-runtime, tenkai-runtime-guard, and on linux-x86_64 only
+# tenkai-host-applier. Hub host asset:
 # tenkai-server-postgres-<platform> (built with --features postgres,ui).
 # Platforms: linux-x86_64, darwin-aarch64. check-glibc refuses a Linux host
 # that needs a glibc newer than LINUX_GLIBC_FLOOR (built by
 # scripts/build-linux-release-hosts.sh).
-# The HTTP API contract (api/tenkai-http-v1.schema.json) and install.sh
-# (scripts/install.sh with the release version baked in by install-script)
-# are attached and checksummed with them. These files are GitHub Release
-# packaging, not Catalog artifacts.
+# The HTTP API contract (api/tenkai-http-v1.schema.json), install.sh
+# (scripts/install.sh with the release version baked in by install-script),
+# and the host applier's systemd unit and polkit rule (copied by
+# install-script from examples/host-applier-systemd) are attached and
+# checksummed with them. These files are GitHub Release packaging, not
+# Catalog artifacts.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOSTS=(tenkaictl tenkai-server tenkai-executor-guard tenkai-runtime tenkai-runtime-guard)
+# Hosts published for linux-x86_64 only: the applier needs systemd (#949).
+LINUX_ONLY_HOSTS=(tenkai-host-applier)
 HUB_SERVER_ASSET=tenkai-server-postgres
 PLATFORMS=(linux-x86_64 darwin-aarch64)
 CHECKSUMS_NAME=SHA256SUMS
-ATTACHED_FILES=(tenkai-http-v1.schema.json install.sh)
+# Release asset names of the host applier unit and polkit rule. GitHub may
+# rename an asset with "@", so the unit's asset name drops it.
+HOST_APPLY_UNIT=tenkai-host-apply.service
+HOST_APPLY_RULES=tenkai-host-apply.rules
+HOST_APPLY_UNIT_SRC=examples/host-applier-systemd/tenkai-host-apply@.service
+HOST_APPLY_RULES_SRC=examples/host-applier-systemd/tenkai-host-apply.rules
+ATTACHED_FILES=(tenkai-http-v1.schema.json install.sh "$HOST_APPLY_UNIT" "$HOST_APPLY_RULES")
 INSTALL_SCRIPT=install.sh
 # Oldest glibc a linux-x86_64 host may require (RHEL 8). Keep in step with the
 # build image in scripts/build-linux-release-hosts.sh.
 LINUX_GLIBC_FLOOR=2.28
 
 usage() {
-  sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-2}"
 }
 
@@ -66,6 +77,14 @@ is_platform() {
   return 1
 }
 
+# Hosts packaged for platform $1, one per line.
+platform_hosts() {
+  printf '%s\n' "${HOSTS[@]}"
+  if [[ "$1" == linux-x86_64 ]]; then
+    printf '%s\n' "${LINUX_ONLY_HOSTS[@]}"
+  fi
+}
+
 packaged_name() {
   printf '%s-%s\n' "$1" "$2"
 }
@@ -81,12 +100,12 @@ is_packaged_name() {
       return 0
     fi
   done
-  for host in "${HOSTS[@]}"; do
-    for platform in "${PLATFORMS[@]}"; do
+  for platform in "${PLATFORMS[@]}"; do
+    while IFS= read -r host; do
       if [[ "$name" == "$(packaged_name "$host" "$platform")" ]]; then
         return 0
       fi
-    done
+    done < <(platform_hosts "$platform")
   done
   for platform in "${PLATFORMS[@]}"; do
     if [[ "$name" == "$(packaged_hub_name "$platform")" ]]; then
@@ -99,10 +118,10 @@ is_packaged_name() {
 complete_names() {
   local host platform
   printf '%s\n' "${ATTACHED_FILES[@]}"
-  for host in "${HOSTS[@]}"; do
-    for platform in "${PLATFORMS[@]}"; do
+  for platform in "${PLATFORMS[@]}"; do
+    while IFS= read -r host; do
       packaged_name "$host" "$platform"
-    done
+    done < <(platform_hosts "$platform")
   done
   for platform in "${PLATFORMS[@]}"; do
     packaged_hub_name "$platform"
@@ -111,9 +130,9 @@ complete_names() {
 
 linux_host_names() {
   local host
-  for host in "${HOSTS[@]}"; do
+  while IFS= read -r host; do
     packaged_name "$host" linux-x86_64
-  done
+  done < <(platform_hosts linux-x86_64)
   packaged_hub_name linux-x86_64
 }
 
@@ -214,7 +233,7 @@ cmd_package() {
 
   mkdir -p "$out"
   local host src dest
-  for host in "${HOSTS[@]}"; do
+  while IFS= read -r host; do
     src="${bin_dir}/${host}"
     dest="${out}/$(packaged_name "$host" "$platform")"
     [[ -f "$src" ]] || fail "missing host binary: ${src}"
@@ -225,7 +244,7 @@ cmd_package() {
       command -v strip >/dev/null 2>&1 || fail "strip is required with --strip"
       strip "$dest"
     fi
-  done
+  done < <(platform_hosts "$platform")
 }
 
 cmd_package_hub() {
@@ -287,7 +306,9 @@ cmd_package_hub() {
 }
 
 # Write install.sh to --out with RELEASE_VERSION set, so the attached script
-# installs the release it is attached to unless told otherwise.
+# installs the release it is attached to unless told otherwise, beside the
+# host applier unit and polkit rule that install.sh --with-host-applier
+# installs.
 cmd_install_script() {
   local out="" version=""
   while [[ $# -gt 0 ]]; do
@@ -314,6 +335,9 @@ cmd_install_script() {
   mkdir -p "$out"
   sed "s/^RELEASE_VERSION=\"\"\$/RELEASE_VERSION=\"${version}\"/" "$src" >"${out}/${INSTALL_SCRIPT}"
   chmod 0755 "${out}/${INSTALL_SCRIPT}"
+  cp "${ROOT}/${HOST_APPLY_UNIT_SRC}" "${out}/${HOST_APPLY_UNIT}"
+  cp "${ROOT}/${HOST_APPLY_RULES_SRC}" "${out}/${HOST_APPLY_RULES}"
+  chmod 0644 "${out}/${HOST_APPLY_UNIT}" "${out}/${HOST_APPLY_RULES}"
 }
 
 cmd_checksums() {
@@ -421,7 +445,7 @@ cmd_self_test() {
     other=linux-x86_64
   fi
 
-  for host in "${HOSTS[@]}"; do
+  for host in "${HOSTS[@]}" "${LINUX_ONLY_HOSTS[@]}"; do
     printf 'stub-%s\n' "$host" >"${bin}/${host}"
     chmod 0755 "${bin}/${host}"
   done
@@ -435,6 +459,15 @@ cmd_self_test() {
   [[ -f "${out}/$(packaged_name tenkai-server "$platform")" ]] || fail "self-test missing community tenkai-server asset"
   [[ ! -e "${out}/tenkai-worker-lifecycle-fixture-${platform}" ]] || fail "self-test packaged fixture host"
   [[ ! -e "${out}/tenkai-delivery-conformance-${platform}" ]] || fail "self-test packaged conformance harness"
+  if [[ "$platform" == linux-x86_64 ]]; then
+    [[ -f "${out}/$(packaged_name tenkai-host-applier "$platform")" ]] || fail "self-test missing tenkai-host-applier asset"
+  else
+    [[ ! -e "${out}/$(packaged_name tenkai-host-applier "$platform")" ]] || fail "self-test packaged tenkai-host-applier for ${platform}"
+  fi
+  complete_names | grep -Fxq tenkai-host-applier-linux-x86_64 || fail "self-test release set lacks the Linux applier"
+  if complete_names | grep -Fxq tenkai-host-applier-darwin-aarch64; then
+    fail "self-test release set requires a darwin applier"
+  fi
 
   expect_fail "hub tenkai-server matches community asset" \
     bash "$0" package-hub --out "$out" --bin-dir "$bin" --platform "$platform"
@@ -461,8 +494,13 @@ cmd_self_test() {
     bash "$0" checksums --out "$out" --require-complete
 
   printf '{}\n' >"${out}/${ATTACHED_FILES[0]}"
+  bash "$0" install-script --out "$out" --version 1.2.3
+  cmp -s "${ROOT}/${HOST_APPLY_UNIT_SRC}" "${out}/${HOST_APPLY_UNIT}" || fail "self-test unit differs from its source"
   bash "$0" checksums --out "$out"
-  grep -Fq "  ${ATTACHED_FILES[0]}" "${out}/${CHECKSUMS_NAME}" || fail "self-test contract not checksummed"
+  local attached
+  for attached in "${ATTACHED_FILES[@]}"; do
+    grep -Fq "  ${attached}" "${out}/${CHECKSUMS_NAME}" || fail "self-test ${attached} not checksummed"
+  done
 
   printf 'junk\n' >"${out}/not-a-host"
   expect_fail "unexpected file in ${out}: not-a-host" \

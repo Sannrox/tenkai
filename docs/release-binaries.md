@@ -23,11 +23,16 @@ Source `cargo build` remains valid.
 | `tenkai-runtime` | Pull-only environment runtime |
 | `tenkai-runtime-guard` | Runtime process fence |
 | `tenkai-executor-guard` | Local executor process fence |
+| `tenkai-host-applier` | Root side of [privileged host releases](host-releases.md); `linux-x86_64` only |
 
-Platforms: `linux-x86_64`, `darwin-aarch64`. Community asset names are
-`<binary>-<platform>`. The hub host is `tenkai-server-postgres-<platform>`
+Platforms: `linux-x86_64`, `darwin-aarch64`; `tenkai-host-applier` runs
+under systemd and is published for `linux-x86_64` only. Community asset names
+are `<binary>-<platform>`. The hub host is `tenkai-server-postgres-<platform>`
 so it does not replace `tenkai-server-<platform>`. The release also attaches
 `SHA256SUMS`, `install.sh` (the [install script](#install-with-one-command)),
+the applier's systemd unit `tenkai-host-apply.service` (installed as
+`tenkai-host-apply@.service`) and polkit rule `tenkai-host-apply.rules`, both
+from `examples/host-applier-systemd/`,
 `tenkai-http-v1.schema.json` (the HTTP API contract clients generate types
 from, see `api/` in the repository), the `tenkai.cdx.json` SBOM, and the
 `tenkai-release.json` family release manifest.
@@ -62,6 +67,8 @@ curl -fsSL https://github.com/Sannrox/tenkai/releases/download/vX.Y.Z/install.sh
 curl -fsSL https://github.com/Sannrox/tenkai/releases/download/vX.Y.Z/install.sh | sudo sh -s -- --role server
 # runtime host: tenkai-runtime and tenkai-runtime-guard
 curl -fsSL https://github.com/Sannrox/tenkai/releases/download/vX.Y.Z/install.sh | sudo sh -s -- --role runtime
+# server host that runs privileged host releases (linux-x86_64, as root)
+curl -fsSL https://github.com/Sannrox/tenkai/releases/download/vX.Y.Z/install.sh | sudo sh -s -- --role server --with-host-applier
 ```
 
 The script:
@@ -78,7 +85,11 @@ The script:
 - refuses a [self-upgrade home](#upgrade-a-server-host), or a host in the
   prefix that is a symbolic link, because a plain replace would skip
   self-upgrade's store check, backup, and rollback;
-- prints the `gh attestation verify` command for each installed host.
+- with `--with-host-applier`, also installs the
+  [host applier](host-releases.md#install) as root, owned by root, at fixed
+  paths, and refuses when any of their directories, or one above them, is a
+  symbolic link or writable by anyone but root. It starts nothing;
+- prints the `gh attestation verify` command for each installed file.
 
 `install.sh` is listed in `SHA256SUMS` and covered by the provenance
 attestation, so it can be checked before it runs:
@@ -91,7 +102,7 @@ gh attestation verify install.sh --repo Sannrox/tenkai \
 sudo sh install.sh --role server
 ```
 
-It writes no service unit; run the server or runtime under a supervisor as
+It writes no service unit for the server or runtime; run them under a supervisor as
 described in [run tenkai-server](run-tenkai-server.md#install-a-server-host).
 Re-running it replaces plain installs; upgrade a server installed into a
 self-upgrade home with `tenkaictl self-upgrade` instead.
@@ -191,11 +202,12 @@ the workflow before anything is built. The tag's CHANGELOG section must exist
 and carry its `Gate flags:` line.
 
 The workflow then builds the five community hosts with `--workspace --features tenkai-server/ui`
-(Linux hosts inside the glibc 2.28 image),
+(Linux hosts inside the glibc 2.28 image, with `tenkai-host-applier`),
 rebuilds `tenkai-server` with `-p tenkai-server --features postgres,ui` and names it
 `tenkai-server-postgres-<platform>` with
 `scripts/package-release-binaries.sh package-hub`. It adds the HTTP API
-contract and `install.sh` with the tag's version written in
+contract, and `install.sh` with the tag's version written in plus the
+applier's unit and polkit rule
 (`scripts/package-release-binaries.sh install-script`), refuses Linux hosts
 above the glibc floor, and writes `SHA256SUMS`. `scripts/release-metadata.py` writes
 `tenkai.cdx.json`, a CycloneDX 1.5 SBOM of the locked Cargo graph and the
@@ -203,7 +215,8 @@ pinned web console. A separate job validates it against the CycloneDX schema
 and SPDX license expressions; the attest job regenerates it and requires the
 validated digest. The attest job then creates:
 
-- a provenance attestation for every host, the contract, `SHA256SUMS`, and the SBOM;
+- a provenance attestation for every host, the contract, `install.sh`, the
+  applier unit and rule, `SHA256SUMS`, and the SBOM;
 - an SBOM attestation for every file listed in `SHA256SUMS`;
 - `tenkai-release.json`, the [family release manifest](family-release-manifests.md),
   and a provenance attestation for it.
