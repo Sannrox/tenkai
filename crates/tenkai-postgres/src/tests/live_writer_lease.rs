@@ -45,10 +45,21 @@ impl ScratchDatabase {
         } else {
             format!("{prefix}{name}?{query}")
         };
-        postgres::Client::connect(&admin_url, postgres::NoTls)
-            .expect("admin connection")
+        // These tests run the lease 10x shorter than the server does, so a
+        // commit that waits seconds on a busy runner's disk (other tests'
+        // CREATE and DROP DATABASE force checkpoints) outlives a renewal
+        // budget or the whole lease (#926). Commits here need not survive a
+        // crash of the throwaway server, so they do not wait for the flush.
+        let mut admin =
+            postgres::Client::connect(&admin_url, postgres::NoTls).expect("admin connection");
+        admin
             .batch_execute(&format!("CREATE DATABASE {name}"))
             .expect("create scratch database");
+        admin
+            .batch_execute(&format!(
+                "ALTER DATABASE {name} SET synchronous_commit = off"
+            ))
+            .expect("scratch database commits without waiting for the flush");
         Self {
             admin_url,
             name,
