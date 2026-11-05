@@ -72,7 +72,7 @@ spec:
 }
 
 /// `kubectl rollout status` waits for observedGeneration and updated replicas.
-/// Apply itself stays on the #376 Available=True contract.
+/// Apply waits on the same rollout completeness, not merely Available.
 fn wait_for_rollout(kubeconfig: &Path, env: &str, services: u32) -> Result<()> {
     for index in 1..=services {
         let name = format!("svc{index:02}");

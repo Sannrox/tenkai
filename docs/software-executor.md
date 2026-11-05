@@ -44,10 +44,10 @@ Hosts (`tenkaictl`, the reconciler) call `tenkai_executor::install()`, then
 pass `SoftwareExecutors::from_process()` into apply: the
 `TENKAI_SOFTWARE_EXECUTOR` default plus every installed adapter. Apply does not
 read that env var during activate/deactivate. Helm and kubectl
-failures capture sanitized stderr. The in-process path waits on workload
-conditions with a short backoff starting at 100 ms (capped at 200 ms) and fails
-closed when `Available` is not `True`, naming the condition and its cause
-([waiting for Available](#waiting-for-available)). A foreign field manager is
+failures capture sanitized stderr. The in-process path waits on the applied
+revision with a short backoff starting at 100 ms (capped at 200 ms) and fails
+closed until that revision is the one serving, naming the gap and its cause
+([waiting for rollout](#waiting-for-rollout)). A foreign field manager is
 an explicit conflict, not a silent overwrite.
 
 Apply renews the environment apply lease while a software executor runs, at a
@@ -210,20 +210,28 @@ Rules beyond the native workdir contract:
   retries with its backoff until the file exists, for example once a host
   release has installed the cluster
   ([ADR 0041](decisions/0041-per-release-executor-and-privileged-host-releases.md)).
-- Health comes from Deployment / StatefulSet / DaemonSet conditions. A bounded
-  wait refuses to complete when observed state disagrees with the payload.
+- Health comes from Deployment / StatefulSet / DaemonSet rollout status. A
+  bounded wait refuses to complete when observed state disagrees with the
+  applied revision.
 - Kind-cluster CI covers A → B → rollback, a slow but healthy rollout, and
   rollouts that fail on an image pull, a crash loop, and an admission refusal,
   each naming its cause. Default `make test` stays cluster-free.
 
-### Waiting for Available
+### Waiting for rollout
 
-The wait polls each applied workload until `Available=True` at the requested
-version, for at most 300 s. Every 2 s a workload that is not Available is
-diagnosed from its conditions and from up to 20 pods of its current revision
-(the Deployment's newest ReplicaSet, or the StatefulSet's update revision).
-Pods of an older revision are ignored, so a rollout that replaces a crashing
-release is not failed by the pods it replaces.
+The wait polls each applied workload until the applied revision is the one
+serving, for at most 300 s. `Available=True` is not enough: during an upgrade
+the previous ReplicaSet keeps a Deployment Available. A Deployment step
+succeeds only when `observedGeneration` has reached the applied generation,
+`updatedReplicas` and `availableReplicas` equal the desired count, and no old
+replicas remain. A StatefulSet step waits for `currentRevision ==
+updateRevision` with all replicas ready. A DaemonSet step waits until
+`updatedNumberScheduled` and `numberAvailable` equal `desiredNumberScheduled`.
+Every 2 s a workload that has not rolled out is diagnosed from its conditions
+and from up to 20 pods of its current revision (the Deployment's newest
+ReplicaSet, or the StatefulSet's update revision). Pods of an older revision
+are ignored, so a rollout that replaces a crashing release is not failed by
+the pods it replaces.
 
 | Signal | Fails the step |
 | --- | --- |

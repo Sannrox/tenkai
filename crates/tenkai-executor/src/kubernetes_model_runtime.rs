@@ -3,7 +3,7 @@
 //! lifecycle.
 //!
 //! Each descriptor generation is a candidate Deployment and Service. A candidate
-//! becomes active only after it is Available and passes a fixed completion smoke
+//! becomes active only after its Deployment rollout is complete and it passes a fixed completion smoke
 //! probe; then the stable Service selects it. The previous generation stays
 //! deployed so [`KubernetesModelRuntimeExecutor::rollback`] can re-select it.
 //!
