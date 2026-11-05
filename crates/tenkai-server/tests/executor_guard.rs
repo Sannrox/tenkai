@@ -9,11 +9,17 @@ use std::process::{Child, Command, Stdio};
 const TOKEN: &str = "executor-guard-test-management-token-0123456789";
 
 fn server(label: &str, guard: &Path, extra: &[&str]) -> Child {
-    server_with(label, guard, extra, None)
+    server_with(label, guard, extra, None, None)
 }
 
-/// A server with `TENKAI_HOST_SPOOL_DIR` set to `host_spool`, if given.
-fn server_with(label: &str, guard: &Path, extra: &[&str], host_spool: Option<&Path>) -> Child {
+/// A server with `TENKAI_HOST_SPOOL_DIR` / `TENKAI_SOFTWARE_EXECUTOR` set when given.
+fn server_with(
+    label: &str,
+    guard: &Path,
+    extra: &[&str],
+    host_spool: Option<&Path>,
+    software_executor: Option<&str>,
+) -> Child {
     let state = std::env::temp_dir().join(format!("tenkai-guard-{label}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&state);
     let mut command = Command::new(env!("CARGO_BIN_EXE_tenkai-server"));
@@ -25,10 +31,14 @@ fn server_with(label: &str, guard: &Path, extra: &[&str], host_spool: Option<&Pa
         .env("TENKAI_MANAGEMENT_TOKEN", TOKEN)
         .env("TENKAI_EXECUTOR_GUARD", guard)
         .env_remove("TENKAI_HOST_SPOOL_DIR")
+        .env_remove("TENKAI_SOFTWARE_EXECUTOR")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if let Some(spool) = host_spool {
         command.env("TENKAI_HOST_SPOOL_DIR", spool);
+    }
+    if let Some(executor) = software_executor {
+        command.env("TENKAI_SOFTWARE_EXECUTOR", executor);
     }
     command.spawn().unwrap()
 }
@@ -91,6 +101,7 @@ fn resolved_guard_is_advertised_in_readiness() {
     let guard = Path::new(env!("CARGO_BIN_EXE_tenkai-server"));
     let response = readyz(server("present", guard, &[]));
     assert!(response.contains("shell_executor:v1"), "{response}");
+    assert!(response.contains("software_executor:shell"), "{response}");
 }
 
 #[test]
@@ -113,7 +124,7 @@ fn require_executor_refuses_to_start_without_the_guard() {
 fn an_unusable_host_spool_is_reported_at_startup_and_absent_from_readiness() {
     let guard = Path::new(env!("CARGO_BIN_EXE_tenkai-server"));
     let spool = spool("open", 0o777);
-    let mut server = server_with("host-open", guard, &[], Some(&spool));
+    let mut server = server_with("host-open", guard, &[], Some(&spool), None);
     let mut stderr = BufReader::new(server.stderr.take().unwrap());
     let mut warning = String::new();
     stderr.read_line(&mut warning).unwrap();
@@ -134,7 +145,61 @@ fn an_unusable_host_spool_is_reported_at_startup_and_absent_from_readiness() {
 fn a_usable_host_spool_is_advertised_in_readiness() {
     let guard = Path::new(env!("CARGO_BIN_EXE_tenkai-server"));
     let spool = spool("private", 0o750);
-    let response = readyz(server_with("host-private", guard, &[], Some(&spool)));
+    let response = readyz(server_with("host-private", guard, &[], Some(&spool), None));
     assert!(response.contains("host_executor:v1"), "{response}");
     let _ = std::fs::remove_dir_all(spool);
+}
+
+#[test]
+fn host_as_process_default_refuses_to_start() {
+    let guard = Path::new(env!("CARGO_BIN_EXE_tenkai-server"));
+    let output = server_with("host-default", guard, &[], None, Some("host"))
+        .wait_with_output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(
+        stderr.contains("TENKAI_SOFTWARE_EXECUTOR is set to \"host\"")
+            && stderr.contains("not a process default"),
+        "{stderr}"
+    );
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn unknown_software_executor_refuses_to_start() {
+    let guard = Path::new(env!("CARGO_BIN_EXE_tenkai-server"));
+    let output = server_with(
+        "unknown-executor",
+        guard,
+        &[],
+        None,
+        Some("kuberntes-inprocess"),
+    )
+    .wait_with_output()
+    .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(
+        stderr.contains("unknown software executor") && stderr.contains("kuberntes-inprocess"),
+        "{stderr}"
+    );
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn in_process_software_executor_is_advertised_in_readiness() {
+    let guard = Path::new(env!("CARGO_BIN_EXE_tenkai-server"));
+    let response = readyz(server_with(
+        "inprocess-default",
+        guard,
+        &[],
+        None,
+        Some("kubernetes-inprocess"),
+    ));
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(
+        response.contains("software_executor:kubernetes-inprocess"),
+        "{response}"
+    );
 }

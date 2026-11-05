@@ -27,7 +27,7 @@ pub struct ExecutionOptions<'a> {
     pub emergency_reason: Option<&'a str>,
     pub authorization: ExecutionAuthorization<'a>,
     /// Software executors. Each release runs with the one it declares, or the
-    /// process default; hosts pass `SoftwareExecutors::from_process()`.
+    /// process default; hosts pass `SoftwareExecutors::try_from_process()?`.
     pub software_executors: crate::software_executor::SoftwareExecutors,
     /// Host-selected model-runtime executor factory. `None` still serves the
     /// in-tree `llama.cpp` and `mlx` host-process engines; other engines fail closed.

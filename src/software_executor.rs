@@ -14,10 +14,12 @@
 //! **Docker host (#528):** digest-pinned containers, networks, and volumes from
 //! `{workdir}/docker/host.json` via `TENKAI_SOFTWARE_EXECUTOR=docker`.
 //!
-//! Hosts call `tenkai_executor::install()` then [`SoftwareExecutors::from_process`].
+//! Hosts call `tenkai_executor::install()` then [`SoftwareExecutors::try_from_process`].
 //! Each release runs with the executor it declares in `[deploy] executor`, or
 //! with the process default when it declares none (ADR 0041). Community
-//! defaults keep the shell `deploy.install` path when no executor is supplied. Credential-free diagnostics live in the diagnostics module.
+//! defaults keep the shell `deploy.install` path when `TENKAI_SOFTWARE_EXECUTOR`
+//! is unset. An unknown or uninstalled value is refused; it never becomes
+//! shell. Credential-free diagnostics live in the diagnostics module.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -394,6 +396,9 @@ pub enum SoftwareExecutorKind {
     Docker,
 }
 
+const SOFTWARE_EXECUTOR_NAME_HINT: &str =
+    "shell, host, helm, kubernetes (k8s, native), kubernetes-inprocess, docker";
+
 impl SoftwareExecutorKind {
     pub const ALL: [Self; 6] = [
         Self::Shell,
@@ -441,7 +446,7 @@ impl std::str::FromStr for SoftwareExecutorKind {
     fn from_str(name: &str) -> Result<Self> {
         Self::from_name(name).with_context(|| {
             format!(
-                "unknown software executor {name:?}; expected one of shell, host, helm, kubernetes (k8s, native), kubernetes-inprocess, docker"
+                "unknown software executor {name:?}; expected one of {SOFTWARE_EXECUTOR_NAME_HINT}"
             )
         })
     }
@@ -493,6 +498,10 @@ pub struct SoftwareExecutors {
     /// Runs `host` releases through the root-side applier, as host plan
     /// steps only; otherwise why it is unavailable.
     host: std::result::Result<Arc<crate::host_executor::HostExecutor>, String>,
+    /// Set when `TENKAI_SOFTWARE_EXECUTOR` is unknown or its adapter is
+    /// missing. [`Self::resolve`] for an undeclared release fails closed
+    /// with this text instead of using the shell path.
+    process_default_error: Option<String>,
 }
 
 /// Why a process without `TENKAI_HOST_SPOOL_DIR` has no host executor.
@@ -511,6 +520,7 @@ impl Default for SoftwareExecutors {
             default: None,
             declared: Vec::new(),
             host: Err(host_not_configured()),
+            process_default_error: None,
         }
     }
 }
@@ -522,21 +532,49 @@ impl SoftwareExecutors {
     /// whose configuration does not parse or that is not ready
     /// ([`crate::host_executor::HostExecutor::check_ready`]) is unavailable,
     /// so host steps fail closed naming why, as `/readyz` omits it.
+    ///
+    /// An unknown name, or a known name whose adapter is not installed, is
+    /// stored as [`Self::process_default_error`]: undeclared releases fail
+    /// closed and never fall back to shell. Hosts that must refuse at start
+    /// call [`Self::try_from_process`].
     pub fn from_process() -> Self {
-        let default = selected_software_executor().map(Arc::from);
-        let default_kind = match std::env::var("TENKAI_SOFTWARE_EXECUTOR") {
-            Ok(value) if value.eq_ignore_ascii_case("fake") => None,
-            // A named default without an installed adapter keeps the shell path.
-            Ok(value) if default.is_some() => SoftwareExecutorKind::from_name(&value),
-            _ => Some(SoftwareExecutorKind::Shell),
+        match Self::try_from_process() {
+            Ok(this) => this,
+            Err(error) => Self {
+                default_kind: None,
+                default: None,
+                process_default_error: Some(format!("{error:#}")),
+                ..Self::installed_adapters()
+            },
+        }
+    }
+
+    /// Like [`Self::from_process`], but an unknown or uninstalled
+    /// `TENKAI_SOFTWARE_EXECUTOR` is an error. Shell remains the default only
+    /// when the variable is unset, or set to `shell`.
+    pub fn try_from_process() -> Result<Self> {
+        let value = match std::env::var("TENKAI_SOFTWARE_EXECUTOR") {
+            Err(std::env::VarError::NotPresent) => None,
+            Err(error) => return Err(error.into()),
+            Ok(value) => Some(value),
         };
+        let (default_kind, default) = process_default_from_value(value.as_deref())?;
+        Ok(Self {
+            default_kind,
+            default,
+            process_default_error: None,
+            ..Self::installed_adapters()
+        })
+    }
+
+    fn installed_adapters() -> Self {
         let declared = SoftwareExecutorKind::ALL
             .into_iter()
             .filter_map(|kind| Some((kind, Arc::from(software_executor_for(kind)?))))
             .collect();
         Self {
-            default_kind,
-            default,
+            default_kind: Some(SoftwareExecutorKind::Shell),
+            default: None,
             declared,
             host: match crate::host_executor::HostExecutor::from_env() {
                 Ok(Some(host)) => host
@@ -546,7 +584,22 @@ impl SoftwareExecutors {
                 Ok(None) => Err(host_not_configured()),
                 Err(error) => Err(format!("{error:#}")),
             },
+            process_default_error: None,
         }
+    }
+
+    /// `/readyz` token for the process default, for example
+    /// `software_executor:shell`. `fake` when the default is the unnamed test
+    /// adapter. Absent when the configured default was refused.
+    pub fn readiness_token(&self) -> Option<String> {
+        if self.process_default_error.is_some() {
+            return None;
+        }
+        Some(format!(
+            "software_executor:{}",
+            self.default_kind
+                .map_or("fake", SoftwareExecutorKind::as_str)
+        ))
     }
 
     /// An unnamed default adapter (a test fake) and no declared adapters.
@@ -556,6 +609,7 @@ impl SoftwareExecutors {
             default: Some(default),
             declared: Vec::new(),
             host: Err(host_not_configured()),
+            process_default_error: None,
         }
     }
 
@@ -618,6 +672,9 @@ impl SoftwareExecutors {
         declared: Option<SoftwareExecutorKind>,
     ) -> Result<Option<Arc<dyn SoftwareExecutor>>> {
         let Some(kind) = declared else {
+            if let Some(error) = &self.process_default_error {
+                bail!("{error}");
+            }
             return Ok(self.default.clone());
         };
         if kind == SoftwareExecutorKind::Shell {
@@ -673,6 +730,7 @@ impl std::fmt::Debug for SoftwareExecutors {
                     .collect::<Vec<_>>(),
             )
             .field("host", &self.host.as_ref().ok())
+            .field("process_default_error", &self.process_default_error)
             .finish()
     }
 }
@@ -680,15 +738,54 @@ impl std::fmt::Debug for SoftwareExecutors {
 /// Select a software executor from host runtime configuration.
 ///
 /// Reads `TENKAI_SOFTWARE_EXECUTOR` (a [`SoftwareExecutorKind`] name, or `fake`).
-/// `None` means the caller should keep the shell `deploy.install` path. This is
-/// the default for releases that declare no executor; hosts pass
-/// [`SoftwareExecutors::from_process`] through `ExecutionOptions`.
+/// `None` means the caller should keep the shell `deploy.install` path. An
+/// unknown name or a missing adapter is also `None`; hosts that must refuse
+/// those values call [`SoftwareExecutors::try_from_process`].
 pub fn selected_software_executor() -> Option<Box<dyn SoftwareExecutor>> {
     let value = std::env::var("TENKAI_SOFTWARE_EXECUTOR").ok()?;
     if value.eq_ignore_ascii_case("fake") {
         return Some(Box::new(FakeSoftwareExecutor::new()));
     }
     software_executor_for(SoftwareExecutorKind::from_name(&value)?)
+}
+
+/// Process default kind and adapter. `None` kind is the unnamed `fake`
+/// adapter; `None` adapter is the shell path.
+type ProcessDefault = (
+    Option<SoftwareExecutorKind>,
+    Option<Arc<dyn SoftwareExecutor>>,
+);
+
+/// Process default for `TENKAI_SOFTWARE_EXECUTOR`. `None` is unset: the shell
+/// path. `shell` is the same path. `fake` is the unnamed test adapter. Any
+/// other unknown name, `host`, or a known adapter this process did not
+/// install is an error; it never becomes shell.
+fn process_default_from_value(value: Option<&str>) -> Result<ProcessDefault> {
+    let Some(value) = value else {
+        return Ok((Some(SoftwareExecutorKind::Shell), None));
+    };
+    if value.eq_ignore_ascii_case("fake") {
+        return Ok((None, Some(Arc::new(FakeSoftwareExecutor::new()))));
+    }
+    let kind = SoftwareExecutorKind::from_name(value).ok_or_else(|| {
+        anyhow::anyhow!(
+            "unknown software executor {value:?}; expected one of {SOFTWARE_EXECUTOR_NAME_HINT}"
+        )
+    })?;
+    if kind == SoftwareExecutorKind::Shell {
+        return Ok((Some(kind), None));
+    }
+    if kind == SoftwareExecutorKind::Host {
+        bail!(
+            "TENKAI_SOFTWARE_EXECUTOR is set to \"host\", and that executor is not a process default"
+        );
+    }
+    match software_executor_for(kind) {
+        Some(adapter) => Ok((Some(kind), Some(Arc::from(adapter)))),
+        None => bail!(
+            "TENKAI_SOFTWARE_EXECUTOR is set to \"{kind}\", and that executor is not installed in this process"
+        ),
+    }
 }
 
 fn request_key(request: &SoftwareApplyRequest) -> String {
@@ -894,6 +991,92 @@ mod tests {
         if std::env::var_os("TENKAI_SOFTWARE_EXECUTOR").is_none() {
             assert!(selected_software_executor().is_none());
         }
+    }
+
+    #[test]
+    fn process_default_is_shell_only_when_unset_or_named_shell() {
+        let (kind, adapter) = process_default_from_value(None).unwrap();
+        assert_eq!(kind, Some(SoftwareExecutorKind::Shell));
+        assert!(adapter.is_none());
+        let (kind, adapter) = process_default_from_value(Some("shell")).unwrap();
+        assert_eq!(kind, Some(SoftwareExecutorKind::Shell));
+        assert!(adapter.is_none());
+        let (kind, adapter) = process_default_from_value(Some("SHELL")).unwrap();
+        assert_eq!(kind, Some(SoftwareExecutorKind::Shell));
+        assert!(adapter.is_none());
+        let (kind, adapter) = process_default_from_value(Some("fake")).unwrap();
+        assert_eq!(kind, None);
+        assert!(adapter.is_some());
+    }
+
+    #[test]
+    fn process_default_refuses_unknown_uninstalled_and_host() {
+        let err = match process_default_from_value(Some("kuberntes-inprocess")) {
+            Ok(_) => panic!("a typo became a process default"),
+            Err(err) => err.to_string(),
+        };
+        assert!(
+            err.contains("unknown software executor \"kuberntes-inprocess\"")
+                && err.contains("kubernetes-inprocess"),
+            "{err}"
+        );
+        let err = match process_default_from_value(Some("kubernetes-inprocess")) {
+            Ok(_) => panic!("uninstalled kubernetes-inprocess became a process default"),
+            Err(err) => err.to_string(),
+        };
+        assert!(
+            err.contains("TENKAI_SOFTWARE_EXECUTOR is set to \"kubernetes-inprocess\"")
+                && err.contains("not installed in this process"),
+            "{err}"
+        );
+        let err = match process_default_from_value(Some("helm")) {
+            Ok(_) => panic!("uninstalled helm became a process default"),
+            Err(err) => err.to_string(),
+        };
+        assert!(
+            err.contains("TENKAI_SOFTWARE_EXECUTOR is set to \"helm\"")
+                && err.contains("not installed in this process"),
+            "{err}"
+        );
+        let err = match process_default_from_value(Some("host")) {
+            Ok(_) => panic!("host became a process default"),
+            Err(err) => err.to_string(),
+        };
+        assert!(
+            err.contains("TENKAI_SOFTWARE_EXECUTOR is set to \"host\"")
+                && err.contains("not a process default"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn undeclared_resolve_fails_closed_when_the_process_default_was_refused() {
+        let executors = SoftwareExecutors {
+            process_default_error: Some(
+                "TENKAI_SOFTWARE_EXECUTOR is set to \"helm\", and that executor is not installed in this process"
+                    .into(),
+            ),
+            ..SoftwareExecutors::default()
+        };
+        let err = match executors.resolve(None) {
+            Ok(_) => panic!("an invalid process default fell back to shell"),
+            Err(err) => err.to_string(),
+        };
+        assert!(
+            err.contains("\"helm\"") && err.contains("not installed in this process"),
+            "{err}"
+        );
+        assert!(
+            executors
+                .resolve(Some(SoftwareExecutorKind::Shell))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(executors.readiness_token(), None);
+        assert_eq!(
+            SoftwareExecutors::default().readiness_token().as_deref(),
+            Some("software_executor:shell")
+        );
     }
 
     #[test]

@@ -41,8 +41,11 @@ out of scope here. Custom-resource operators are refused.
 | `DockerHostExecutor` | Digest-pinned host containers, networks, and volumes (`tenkai-executor`) |
 
 Hosts (`tenkaictl`, the reconciler) call `tenkai_executor::install()`, then
-pass `SoftwareExecutors::from_process()` into apply: the
-`TENKAI_SOFTWARE_EXECUTOR` default plus every installed adapter. Apply does not
+pass `SoftwareExecutors::try_from_process()` into apply: the
+`TENKAI_SOFTWARE_EXECUTOR` default plus every installed adapter. An unknown
+name, or a known name whose adapter is not installed, is refused there (and
+at `tenkai-server` start) with the same shape as a missing declared executor;
+it never falls back to shell. Apply does not
 read that env var during activate/deactivate. Helm and kubectl
 failures capture sanitized stderr. The in-process path waits on the applied
 revision with a short backoff starting at 100 ms (capped at 200 ms) and fails
@@ -77,7 +80,9 @@ release and a `kubernetes-inprocess` release in the same environment.
 
 - A release without the field uses the process default, exactly as before.
   Apply through the management API now uses the same process default as the
-  reconciler; it used to run every release on the shell path.
+  reconciler; it used to run every release on the shell path. Shell is that
+  default only when `TENKAI_SOFTWARE_EXECUTOR` is unset (or set to `shell`).
+  `/readyz` lists `software_executor:<kind>` for the effective default.
 - A declared `shell` always runs `deploy.install`, even when the process default
   is another executor.
 - A declared executor this process does not have fails the step before anything
@@ -380,7 +385,8 @@ so a container whose spec digest changed is recreated instead. Observe is
 version, release, config digest, and spec digest labels.
 
 Shell `deploy.install` remains the default when `TENKAI_SOFTWARE_EXECUTOR` is
-unset. Docker products should keep a fail-closed install reminder, the same
+unset. A typo or an adapter this process did not install is refused; it does
+not become shell. Docker products should keep a fail-closed install reminder, the same
 pattern as Helm and Kubernetes examples. Default tests drive a fake Docker CLI.
 
 ## Local dogfood

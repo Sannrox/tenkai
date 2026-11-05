@@ -150,6 +150,16 @@ impl ProvidedCapabilities {
             .iter()
             .map(Capability::diagnostic_name)
             .collect();
+        names.extend(
+            self.components
+                .iter()
+                .filter(|component| {
+                    component
+                        .component_id
+                        .starts_with(SOFTWARE_EXECUTOR_DEFAULT_PREFIX)
+                })
+                .map(|component| component.component_id.clone()),
+        );
         names.sort();
         names.dedup();
         names
@@ -273,6 +283,14 @@ pub fn shell_executor_capabilities() -> ComponentCapabilities {
             RUNTIME_CAPABILITY_CONTRACT_VERSION,
         )],
     )
+}
+
+/// Prefix of the `/readyz` token for the process software-executor default.
+pub const SOFTWARE_EXECUTOR_DEFAULT_PREFIX: &str = "software_executor:";
+
+/// Process default advertised on `/readyz`, for example `software_executor:shell`.
+pub fn software_executor_default_capabilities(kind: &str) -> ComponentCapabilities {
+    ComponentCapabilities::new(format!("{SOFTWARE_EXECUTOR_DEFAULT_PREFIX}{kind}"), [])
 }
 
 /// The host executor: its spool directory is usable and `systemctl` is
@@ -491,6 +509,21 @@ mod tests {
             provided
                 .diagnostic_names()
                 .contains(&"shell_executor:v1".to_string())
+        );
+    }
+
+    #[test]
+    fn diagnostics_include_the_software_executor_process_default() {
+        let mut provided = community_sqlite_profile(community_auth_capabilities());
+        provided
+            .components
+            .push(software_executor_default_capabilities(
+                "kubernetes-inprocess",
+            ));
+        assert!(
+            provided
+                .diagnostic_names()
+                .contains(&"software_executor:kubernetes-inprocess".to_string())
         );
     }
 

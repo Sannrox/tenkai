@@ -189,7 +189,7 @@ pub(crate) async fn run_plan(
     execution: apply::ExecutionOptions<'_>,
     result_context: PlanResultContext<'_>,
 ) -> Result<()> {
-    let software = tenkai::software_executor::SoftwareExecutors::from_process();
+    let software = tenkai::software_executor::SoftwareExecutors::try_from_process()?;
     let worker_lifecycle =
         tenkai::worker_pool::selected_worker_lifecycle()?.map(std::sync::Arc::from);
     let execution = apply::ExecutionOptions {

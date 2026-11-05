@@ -69,6 +69,7 @@ capabilities:
   - operational_store_migration:v1:levelN   # N = SCHEMA_VERSION
   - shell_executor:v1                       # tenkai-server, when the guard resolves
   - host_executor:v1                        # tenkai-server, when TENKAI_HOST_SPOOL_DIR is usable
+  - software_executor:shell                 # process default; kubernetes-inprocess, helm, …
 ```
 
 `tenkai-server` resolves `tenkai-executor-guard` at startup, beside its own

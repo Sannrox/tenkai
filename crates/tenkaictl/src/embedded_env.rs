@@ -124,7 +124,7 @@ pub(crate) async fn run(
                     ctx,
                     &env,
                     &product,
-                    &tenkai::software_executor::SoftwareExecutors::from_process(),
+                    &tenkai::software_executor::SoftwareExecutors::try_from_process()?,
                     |_| Ok(()),
                 )
                 .await?

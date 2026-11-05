@@ -454,7 +454,7 @@ pub async fn create(ctx: &mut Ctx, env: &str) -> Result<Plan> {
     create_with(
         ctx,
         env,
-        &crate::software_executor::SoftwareExecutors::from_process(),
+        &crate::software_executor::SoftwareExecutors::try_from_process()?,
     )
     .await
 }

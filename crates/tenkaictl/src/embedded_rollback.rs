@@ -128,7 +128,7 @@ pub(crate) async fn run(
                                 .expect("clap requires a development reason"),
                         },
                         software_executors:
-                            tenkai::software_executor::SoftwareExecutors::from_process(),
+                            tenkai::software_executor::SoftwareExecutors::try_from_process()?,
                         model_runtime_executor:
                             tenkai::model_runtime::selected_model_runtime_executor_factory(),
                         worker_lifecycle: None,
