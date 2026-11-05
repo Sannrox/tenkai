@@ -21,6 +21,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
@@ -160,6 +161,22 @@ pub trait SoftwareExecutor: Send + Sync {
     /// Same-version bounce. Default re-applies the current pin.
     fn restart(&self, request: &SoftwareApplyRequest) -> Result<()> {
         self.apply(request)
+    }
+    /// `apply` under an apply lease. Apply sets `stop` when it loses the
+    /// lease; an adapter that waits on its target returns an error soon after,
+    /// so its wait never outlives the lease. Default ignores `stop`.
+    fn apply_until_stopped(&self, request: &SoftwareApplyRequest, stop: &AtomicBool) -> Result<()> {
+        let _ = stop;
+        self.apply(request)
+    }
+    /// `restart` under an apply lease, stopping like [`Self::apply_until_stopped`].
+    fn restart_until_stopped(
+        &self,
+        request: &SoftwareApplyRequest,
+        stop: &AtomicBool,
+    ) -> Result<()> {
+        let _ = stop;
+        self.restart(request)
     }
     /// Whether this adapter deploys from admitted environment-mirror refs.
     fn consumes_admitted_artifact_pulls(&self) -> bool {

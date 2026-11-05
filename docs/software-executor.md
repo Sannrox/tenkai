@@ -46,8 +46,18 @@ pass `SoftwareExecutors::from_process()` into apply: the
 read that env var during activate/deactivate. Helm and kubectl
 failures capture sanitized stderr. The in-process path waits on workload
 conditions with a short backoff starting at 100 ms (capped at 200 ms) and fails
-closed when `Available` is not `True`, naming the condition. A foreign field
-manager is an explicit conflict, not a silent overwrite.
+closed when `Available` is not `True`, naming the condition and its cause
+([waiting for Available](#waiting-for-available)). A foreign field manager is
+an explicit conflict, not a silent overwrite.
+
+Apply renews the environment apply lease while a software executor runs, at a
+third of the shortest lease TTL it holds and at most every 10 s. A rollout may
+take longer than the lease TTL without losing its lease; the executor's own
+timeout bounds the step instead. When a renewal fails, apply tells the
+executor to stop, waits for it to return, and reports the lost lease. The
+in-process wait returns within one poll; other executors finish their current
+call. When a step fails and releasing the lease also fails, the error names the
+step failure first and the release failure after it.
 
 ## Per-release selection
 
@@ -197,8 +207,44 @@ Rules beyond the native workdir contract:
   ([ADR 0041](decisions/0041-per-release-executor-and-privileged-host-releases.md)).
 - Health comes from Deployment / StatefulSet / DaemonSet conditions. A bounded
   wait refuses to complete when observed state disagrees with the payload.
-- Kind-cluster CI covers A → B → rollback and a failing rollout that names the
-  disagreeing condition. Default `make test` stays cluster-free.
+- Kind-cluster CI covers A → B → rollback, a slow but healthy rollout, and
+  rollouts that fail on an image pull, a crash loop, and an admission refusal,
+  each naming its cause. Default `make test` stays cluster-free.
+
+### Waiting for Available
+
+The wait polls each applied workload until `Available=True` at the requested
+version, for at most 300 s. Every 2 s a workload that is not Available is
+diagnosed from its conditions and from up to 20 pods of its current revision
+(the Deployment's newest ReplicaSet, or the StatefulSet's update revision).
+Pods of an older revision are ignored, so a rollout that replaces a crashing
+release is not failed by the pods it replaces.
+
+| Signal | Fails the step |
+| --- | --- |
+| `ReplicaFailure=True`, reason `FailedCreate`, refused by admission (`is forbidden`, `denied the request`) | at once |
+| `Progressing=False`, reason `ProgressDeadlineExceeded` | at once |
+| Container waiting in `CrashLoopBackOff` with 3 or more restarts | at once |
+| Container waiting in `ImagePullBackOff`, `ErrImagePull` or `InvalidImageName` | after 45 s, at least three kubelet pull attempts |
+| `FailedCreate` for an exceeded quota or a missing service account | no, named as the cause |
+| `CreateContainerConfigError`, `CreateContainerError`, `RunContainerError` | no, named as the cause |
+| Pod not scheduled (`Unschedulable`, unbound PersistentVolumeClaims) | no, named as the cause |
+
+Conditions the controller has not yet reconciled against the applied
+generation are ignored. Containers that are still creating, pods that are not
+yet ready, and crash loops below the restart threshold keep the wait going, so
+a slow but healthy rollout completes. A timeout names the last cause seen.
+
+The cause carries the condition or container reason, the restart count, the
+last exit code and termination message, and the pending reason. Each message
+is cut to 240 characters and at most three causes are named per workload. It
+never contains environment variable values. The cause reaches the CLI error,
+the plan step detail, and the subscription error. A remote apply names the
+first failed step and its cause before the count of failed steps.
+
+Diagnosis lists ReplicaSets and pods, so the cluster credential needs `list`
+on both in the environment namespace. When it cannot read them, the wait
+names that as the cause and keeps going on conditions alone.
 
 ```bash
 # Requires kind + a copied kubeconfig file path; CI's kind job runs this, `make test` does not

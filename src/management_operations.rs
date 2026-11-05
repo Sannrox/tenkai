@@ -2421,17 +2421,9 @@ impl ManagementOperations {
         )
         .await
         .map_err(map_plan_lifecycle_error)?;
-        let mut failed = 0;
-        for outcome in &outcomes {
-            if !outcome
-                .classified_status()
-                .map_err(map_plan_lifecycle_error)?
-                .is_success()
-            {
-                failed += 1;
-            }
-        }
-        if failed > 0 {
+        if let Some(message) =
+            failed_steps_message(plan_id, &outcomes).map_err(map_plan_lifecycle_error)?
+        {
             self.audit(actor, "plan.apply.failed")?;
             self.record_change(
                 &context,
@@ -2439,10 +2431,7 @@ impl ManagementOperations {
                 plan_id,
                 Some(&request.environment),
             )?;
-            return Err(ManagementError::ExecutionFailed(format!(
-                "{failed} of {} step(s) for {plan_id} did not succeed",
-                outcomes.len()
-            )));
+            return Err(ManagementError::ExecutionFailed(message));
         }
         self.audit(actor, "plan.apply.completed")?;
         self.record_change(
@@ -2737,6 +2726,32 @@ fn map_catalog_error(error: anyhow::Error) -> ManagementError {
     }
 }
 
+/// Error for an apply whose steps did not all succeed: the first failed
+/// step and its recorded cause lead, then the count (#982). `None` when every
+/// step succeeded.
+fn failed_steps_message(
+    plan_id: &str,
+    outcomes: &[crate::apply::Outcome],
+) -> anyhow::Result<Option<String>> {
+    let mut failed = Vec::new();
+    for outcome in outcomes {
+        let status = outcome.classified_status()?;
+        if !status.is_success() {
+            failed.push((outcome, status));
+        }
+    }
+    let Some((first, status)) = failed.first() else {
+        return Ok(None);
+    };
+    let detail: String = first.detail.chars().take(2_000).collect();
+    Ok(Some(format!(
+        "step {} {status}: {detail}; {} of {} step(s) for {plan_id} did not succeed",
+        first.step.product,
+        failed.len(),
+        outcomes.len()
+    )))
+}
+
 fn map_plan_lifecycle_error(error: anyhow::Error) -> ManagementError {
     let message = format!("{error:#}");
     if message.contains("not registered")
@@ -2861,6 +2876,42 @@ mod tests {
     use ed25519_dalek::{Signer as _, SigningKey};
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
+
+    #[test]
+    fn a_failed_apply_names_the_first_failed_step_and_its_cause() {
+        let step = |product: &str| crate::plan::Step {
+            id: format!("step-{product}"),
+            order: 0,
+            product: product.into(),
+            action: crate::plan::Action::Install,
+            from: None,
+            to: "1.0.0".into(),
+            release_id: format!("tenkai:release:{product}@1.0.0"),
+            release_digest: "sha256:release".into(),
+            artifact_digest: "sha256:artifact".into(),
+            workdir: ".".into(),
+            host: None,
+            restore: None,
+        };
+        use crate::apply::{Outcome, StepOutcomeStatus};
+        let outcomes = [
+            Outcome::new(step("db"), StepOutcomeStatus::Succeeded, ""),
+            Outcome::new(
+                step("web"),
+                StepOutcomeStatus::Failed,
+                "Deployment web cannot become Available: pod web-1 container nginx CrashLoopBackOff after 3 restarts",
+            ),
+        ];
+        let message = failed_steps_message("plan-1", &outcomes).unwrap().unwrap();
+        assert_eq!(
+            message,
+            "step web failed: Deployment web cannot become Available: pod web-1 container nginx CrashLoopBackOff after 3 restarts; 1 of 2 step(s) for plan-1 did not succeed"
+        );
+        assert_eq!(
+            failed_steps_message("plan-1", &outcomes[..1]).unwrap(),
+            None
+        );
+    }
 
     struct FixedReconciler;
 

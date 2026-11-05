@@ -1,6 +1,8 @@
 //! Environment execution ownership, compatibility, and generation fencing.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context as _, Result, bail};
 
@@ -532,6 +534,60 @@ where
     Ok(guarded.map_err(|error| error.to_string()))
 }
 
+/// Renew at a third of the shortest TTL this apply holds, at most every 10 s,
+/// so two renewals can fail before any lease expires.
+fn renewal_interval(ctx: &Ctx, lease: &EnvironmentLease) -> std::time::Duration {
+    let shortest = ctx
+        .held_execution_leases
+        .iter()
+        .map(|held| held.ttl_ms)
+        .fold(lease.ttl_ms, i64::min);
+    let third = u64::try_from(shortest / 3).unwrap_or(0).max(10);
+    std::time::Duration::from_millis(third.min(10_000))
+}
+
+/// Run a blocking software-executor call while renewing the environment lease
+/// (#982). A rollout may wait longer than the lease TTL; renewal keeps the
+/// lease for as long as the call runs. When a renewal fails, `work` sees its
+/// stop flag set and should return soon after. This waits for `work` to
+/// return either way, so no executor call outlives this function, then
+/// reports the lost fence as the outer error.
+pub(super) async fn run_with_lease_renewal<T>(
+    ctx: &mut Ctx,
+    lease: &EnvironmentLease,
+    work: impl FnOnce(&AtomicBool) -> T + Send + 'static,
+) -> Result<T>
+where
+    T: Send + 'static,
+{
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut running = tokio::task::spawn_blocking({
+        let stop = stop.clone();
+        move || work(&stop)
+    });
+    let mut renew = tokio::time::interval(renewal_interval(ctx, lease));
+    renew.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    renew.tick().await;
+    let mut lost = None;
+    let finished = loop {
+        tokio::select! {
+            joined = &mut running => break joined,
+            _ = renew.tick(), if lost.is_none() => {
+                if let Err(error) = refresh_environment_lease(ctx, lease).await {
+                    stop.store(true, Ordering::SeqCst);
+                    lost = Some(error);
+                }
+            }
+        }
+    };
+    let finished = finished.context("software executor task failed")?;
+    if let Some(error) = lost {
+        return Err(error);
+    }
+    refresh_environment_lease(ctx, lease).await?;
+    Ok(finished)
+}
+
 pub(super) async fn run_mutation_command(
     ctx: &mut Ctx,
     lease: &EnvironmentLease,
@@ -938,6 +994,58 @@ mod tests {
         assert!(is_execution_fence_lost(&err), "{err:#}");
         assert!(err.to_string().contains("ledger-ha"), "{err:#}");
         release_environment(&mut ctx, &lease).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_wait_longer_than_the_lease_ttl_keeps_the_lease() {
+        let mut ctx = context("renew-slow");
+        let lease = claim_environment_with_options(&mut ctx, "prod", "plan-1", 300, false)
+            .await
+            .unwrap();
+        let waited = run_with_lease_renewal(&mut ctx, &lease, |stop| {
+            std::thread::sleep(std::time::Duration::from_millis(1_200));
+            stop.load(Ordering::SeqCst)
+        })
+        .await
+        .unwrap();
+        assert!(!waited, "a renewed lease must not stop the work");
+        // Releasing proves this apply is still the fenced holder.
+        release_environment(&mut ctx, &lease).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_lost_lease_stops_the_work_before_reporting_it() {
+        let mut ctx = context("renew-lost");
+        ctx.held_execution_leases = vec![crate::client::HeldExecutionLease {
+            namespace: "tenkai/topology-availability".into(),
+            key: "ledger-ha".into(),
+            fencing_token: "stale".into(),
+            ttl_ms: 60_000,
+        }];
+        let lease = claim_environment_with_options(&mut ctx, "prod", "plan-1", 300, false)
+            .await
+            .unwrap();
+        let stopped = Arc::new(AtomicBool::new(false));
+        let err = run_with_lease_renewal(&mut ctx, &lease, {
+            let stopped = stopped.clone();
+            move |stop| {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while std::time::Instant::now() < deadline {
+                    if stop.load(Ordering::SeqCst) {
+                        stopped.store(true, Ordering::SeqCst);
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+        })
+        .await
+        .unwrap_err();
+        assert!(is_execution_fence_lost(&err), "{err:#}");
+        assert!(
+            stopped.load(Ordering::SeqCst),
+            "the work must see the stop before the lost fence is reported"
+        );
     }
 
     #[test]

@@ -166,21 +166,27 @@ pub(super) async fn activate(
         .software
         .resolve(content.manifest.deploy.executor)?
     {
-        let executor = executor.as_ref();
         let request = software_request(ctx, content, lease).await?;
         // A missing target is an outer error: nothing ran, nothing to clean up.
         executor.require_target(&request)?;
         prepare_fenced_mutation(ctx, lease, content).await?;
-        if let Err(detail) = require_artifact_pull_consumer(content, Some(executor)) {
+        if let Err(detail) = require_artifact_pull_consumer(content, Some(executor.as_ref())) {
             return Ok(Err(detail));
         }
-        let install = software_blocking(|| executor.apply(&request)).map_err(|error| {
+        let install = run_with_lease_renewal(ctx, lease, {
+            let executor = executor.clone();
+            let request = request.clone();
+            move |stop| executor.apply_until_stopped(&request, stop)
+        })
+        .await?
+        .map_err(|error| {
             software_phase_error(
                 crate::software_executor::SoftwareDeployPhase::Apply,
                 content,
-                &error.to_string(),
+                &format!("{error:#}"),
             )
         });
+        let executor = executor.as_ref();
         let result = match install {
             Ok(()) => match &content.manifest.deploy.health {
                 Some(command) if !command.is_empty() => {
@@ -295,18 +301,21 @@ pub(super) async fn restart(
         .software
         .resolve(content.manifest.deploy.executor)?
     {
-        let executor = executor.as_ref();
         let request = software_request(ctx, content, lease).await?;
         executor.require_target(&request)?;
         prepare_fenced_mutation(ctx, lease, content).await?;
-        if let Err(detail) = require_artifact_pull_consumer(content, Some(executor)) {
+        if let Err(detail) = require_artifact_pull_consumer(content, Some(executor.as_ref())) {
             return Ok(Err(detail));
         }
-        let bounce = software_blocking(|| executor.restart(&request)).map_err(|error| {
+        let bounce = run_with_lease_renewal(ctx, lease, move |stop| {
+            executor.restart_until_stopped(&request, stop)
+        })
+        .await?
+        .map_err(|error| {
             software_phase_error(
                 crate::software_executor::SoftwareDeployPhase::Restart,
                 content,
-                &error.to_string(),
+                &format!("{error:#}"),
             )
         });
         let result = match bounce {
