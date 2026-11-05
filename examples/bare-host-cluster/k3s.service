@@ -10,14 +10,14 @@ After=network-online.target
 Type=notify
 ExecStartPre=-/sbin/modprobe br_netfilter
 ExecStartPre=-/sbin/modprobe overlay
-# No ingress controller, service load balancer, metrics server, or local
-# storage provisioner: releases bring what they need.
+# Keeps the two cluster-wide services a namespaced release cannot bring:
+# the service load balancer (a LoadBalancer Service binds its ports on the
+# host) and the local-path storage provisioner (the default StorageClass).
+# No ingress controller or metrics server: releases bring their own.
 ExecStart=/usr/local/bin/k3s server \
   --write-kubeconfig-mode 0600 \
   --disable traefik \
-  --disable servicelb \
-  --disable metrics-server \
-  --disable local-storage
+  --disable metrics-server
 KillMode=process
 Delegate=yes
 LimitNOFILE=1048576

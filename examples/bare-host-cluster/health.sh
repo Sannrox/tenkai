@@ -28,6 +28,10 @@ kubectl get --raw /readyz >/dev/null || fail "the API server is not ready"
 kubectl wait --for=condition=Ready node --all --timeout=60s >/dev/null ||
   fail "the node is not Ready"
 
+# In-cluster releases rely on a default StorageClass for their volumes.
+[ -n "$(kubectl get storageclass -o 'jsonpath={.items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")].metadata.name}')" ] ||
+  fail "the cluster has no default StorageClass"
+
 # Its namespaces keep workloads off the host: the restricted Pod Security
 # standard refuses privileged pods, host paths, and host namespaces.
 for namespace in "$environment" tenkai-system; do

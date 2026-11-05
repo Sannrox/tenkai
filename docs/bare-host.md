@@ -170,6 +170,16 @@ the identity can create namespaces, change its namespace, read secrets in
 is not the one `install` wrote. Root never loads that file: it is the
 `tenkai` user's to change, and a kubeconfig can name commands to run.
 
+The cluster keeps two cluster-wide services of the distribution that a
+namespaced release cannot install itself: the service load balancer and the
+local-path storage provisioner. A `LoadBalancer` Service in the environment's
+namespace binds its ports on the host's addresses, which is how a release
+serves traffic from outside. A PersistentVolumeClaim without a class gets a
+volume from the default `local-path` StorageClass, a directory on the host
+that only the provisioner creates; pods still cannot mount host paths
+themselves. `health` fails when there is no default StorageClass. Those volumes live under the distribution's data directory, so uninstalling the cluster deletes them. Treat
+namespace admin as the right to open host ports.
+
 In-cluster releases run as that identity, never as host root. Releases that
 need cluster-wide objects need a wider grant, made in the cluster release
 where it is signed and reviewed.
