@@ -226,6 +226,32 @@ fn a_crash_loop_fails_the_step_naming_the_exit_code() {
 
 #[test]
 #[ignore = "requires a kind cluster and TENKAI_CLUSTER_CONFIG"]
+fn a_rollout_that_replaces_a_crash_loop_succeeds() {
+    let kubeconfig = cluster_config();
+    let env = unique_env("heal");
+    let broken = std::env::temp_dir().join(format!("{env}-broken"));
+    let fixed = std::env::temp_dir().join(format!("{env}-fixed"));
+    let _ = std::fs::remove_dir_all(&broken);
+    let _ = std::fs::remove_dir_all(&fixed);
+    write_script_workdir(&broken, "edge", "exit 3", true);
+    write_script_workdir(&fixed, "edge", "touch /tmp/ready; exec sleep 3600", true);
+    let executor =
+        InProcessKubernetesExecutor::new(LiveKubeApi).with_timeout(Duration::from_secs(240));
+    let err = executor
+        .apply(&request(&broken, &kubeconfig, &env, "1.0.0"))
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("CrashLoopBackOff"), "{err:#}");
+    // The crash-looping pods of 1.0.0 are still there while 2.0.0 rolls out.
+    executor
+        .apply(&request(&fixed, &kubeconfig, &env, "2.0.0"))
+        .expect("the pods being replaced must not fail the new rollout");
+    let _ = kubectl(&kubeconfig, &["delete", "namespace", &env, "--wait=false"]);
+    let _ = std::fs::remove_dir_all(broken);
+    let _ = std::fs::remove_dir_all(fixed);
+}
+
+#[test]
+#[ignore = "requires a kind cluster and TENKAI_CLUSTER_CONFIG"]
 fn an_admission_refusal_fails_the_step_naming_the_policy() {
     let kubeconfig = cluster_config();
     let env = unique_env("psa");

@@ -352,9 +352,10 @@ fails to start or become healthy, apply removes the containers it started,
 renames and starts the previous ones, and reports
 `restored the previous containers`; failed-activation cleanup then only finishes
 a restore that apply could not complete, and the rollback to the previous
-release finds its containers already running. Host apply, restart, and remove run
-inside `tokio::task::block_in_place` on the multi-thread runtime so a long
-Docker wait does not pin a Tokio worker without the runtime knowing. Runtime names are `t` plus a 12-hex
+release finds its containers already running. Host apply and restart run on
+Tokio's blocking pool while apply renews the lease, and remove runs inside
+`tokio::task::block_in_place` on the multi-thread runtime, so a long Docker
+wait does not pin a Tokio worker without the runtime knowing. Runtime names are `t` plus a 12-hex
 digest of environment and product, then `-ctr-` / `-net-` / `-vol-` and the
 declared name, so hyphenated environment or product values cannot collide.
 Existing objects whose Tenkai ownership labels differ are refused rather than

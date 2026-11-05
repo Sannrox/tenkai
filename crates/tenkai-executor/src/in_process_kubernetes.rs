@@ -35,6 +35,9 @@ const MAX_HEALTH_POLL: Duration = Duration::from_millis(200);
 /// How often a workload that is not Available is diagnosed. Diagnosis lists
 /// pods, so it runs less often than the condition poll.
 const DIAGNOSIS_INTERVAL: Duration = Duration::from_secs(2);
+/// Bound on one live API call, so a stalled API server cannot hold the wait
+/// past a stop for longer than this.
+const LIVE_CALL_TIMEOUT: Duration = Duration::from_secs(10);
 /// Stop flag for a call outside an apply lease; it is never set.
 static NOT_STOPPED: AtomicBool = AtomicBool::new(false);
 
@@ -281,7 +284,12 @@ impl ClusterApplyApi for LiveKubeApi {
         field_manager: &str,
         object: &Value,
     ) -> Result<WorkloadObservation> {
-        block_on(live_apply(cluster_config, namespace, field_manager, object))
+        block_on(bounded(live_apply(
+            cluster_config,
+            namespace,
+            field_manager,
+            object,
+        )))
     }
 
     fn observe(
@@ -291,11 +299,11 @@ impl ClusterApplyApi for LiveKubeApi {
         name: &str,
         kind: &str,
     ) -> Result<Option<WorkloadObservation>> {
-        block_on(live_observe(cluster_config, namespace, name, kind))
+        block_on(bounded(live_observe(cluster_config, namespace, name, kind)))
     }
 
     fn remove(&self, cluster_config: &Path, namespace: &str, name: &str, kind: &str) -> Result<()> {
-        block_on(live_remove(cluster_config, namespace, name, kind))
+        block_on(bounded(live_remove(cluster_config, namespace, name, kind)))
     }
 
     fn workload_evidence(
@@ -305,12 +313,12 @@ impl ClusterApplyApi for LiveKubeApi {
         name: &str,
         kind: &str,
     ) -> Result<Option<WorkloadEvidence>> {
-        block_on(live_workload_evidence(
+        block_on(bounded(live_workload_evidence(
             cluster_config,
             namespace,
             name,
             kind,
-        ))
+        )))
     }
 }
 
@@ -480,7 +488,7 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
                 return Ok(());
             }
             let now = Instant::now();
-            if now >= next_diagnosis || now >= deadline {
+            if (now >= next_diagnosis || now >= deadline) && !stop.load(Ordering::SeqCst) {
                 next_diagnosis = now + DIAGNOSIS_INTERVAL;
                 causes.clear();
                 for (kind, name) in stalled {
@@ -823,6 +831,18 @@ where
     }
 }
 
+/// `fut`, failing after [`LIVE_CALL_TIMEOUT`].
+async fn bounded<T>(fut: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+    tokio::time::timeout(LIVE_CALL_TIMEOUT, fut)
+        .await
+        .unwrap_or_else(|_| {
+            bail!(
+                "kubernetes API call timed out after {}s",
+                LIVE_CALL_TIMEOUT.as_secs()
+            )
+        })
+}
+
 async fn live_client(cluster_config: &Path) -> Result<kube::Client> {
     validate_cluster_config_path(cluster_config)?;
     if !cluster_config.is_file() {
@@ -946,7 +966,8 @@ async fn live_workload_evidence(
 
 /// Label selector for the pods of the workload's current revision: the
 /// Deployment's newest ReplicaSet, or the StatefulSet's update revision.
-/// `None` while that revision does not exist yet, or for other kinds.
+/// `None` while the controller has not observed the applied generation or
+/// that revision does not exist yet, and for other kinds.
 async fn current_revision_selector(
     client: &kube::Client,
     namespace: &str,
@@ -954,6 +975,17 @@ async fn current_revision_selector(
     workload: &Value,
 ) -> Result<Option<String>> {
     use k8s_openapi::api::apps::v1::ReplicaSet;
+    // Until the controller observes the applied generation, the revision it
+    // reports is the previous rollout's, whose pods must not fail this one.
+    let generation = workload
+        .pointer("/metadata/generation")
+        .and_then(Value::as_i64);
+    let observed = workload
+        .pointer("/status/observedGeneration")
+        .and_then(Value::as_i64);
+    if observed.is_none() || observed < generation {
+        return Ok(None);
+    }
     let Some(match_labels) = workload
         .pointer("/spec/selector/matchLabels")
         .and_then(Value::as_object)

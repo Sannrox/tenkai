@@ -546,12 +546,22 @@ fn renewal_interval(ctx: &Ctx, lease: &EnvironmentLease) -> std::time::Duration 
     std::time::Duration::from_millis(third.min(10_000))
 }
 
+/// Sets the stop flag when dropped.
+struct StopOnDrop(Arc<AtomicBool>);
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
 /// Run a blocking software-executor call while renewing the environment lease
 /// (#982). A rollout may wait longer than the lease TTL; renewal keeps the
 /// lease for as long as the call runs. When a renewal fails, `work` sees its
 /// stop flag set and should return soon after. This waits for `work` to
 /// return either way, so no executor call outlives this function, then
-/// reports the lost fence as the outer error.
+/// reports the lost fence as the outer error. If this future is dropped
+/// instead, the stop flag is set as well.
 pub(super) async fn run_with_lease_renewal<T>(
     ctx: &mut Ctx,
     lease: &EnvironmentLease,
@@ -561,6 +571,9 @@ where
     T: Send + 'static,
 {
     let stop = Arc::new(AtomicBool::new(false));
+    // Dropping this future (a cancelled apply) also stops the work: renewal
+    // ends with the future, so the work must not keep running unfenced.
+    let _stop_on_drop = StopOnDrop(stop.clone());
     let mut running = tokio::task::spawn_blocking({
         let stop = stop.clone();
         move || work(&stop)
@@ -1046,6 +1059,35 @@ mod tests {
             stopped.load(Ordering::SeqCst),
             "the work must see the stop before the lost fence is reported"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cancelled_apply_stops_the_work() {
+        let mut ctx = context("renew-cancel");
+        let lease = claim_environment(&mut ctx, "prod", "plan-1").await.unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (stopped_tx, stopped_rx) = std::sync::mpsc::channel();
+        let apply = tokio::spawn(async move {
+            run_with_lease_renewal(&mut ctx, &lease, move |stop| {
+                started_tx.send(()).unwrap();
+                while !stop.load(Ordering::SeqCst) {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                stopped_tx.send(()).unwrap();
+            })
+            .await
+        });
+        tokio::task::spawn_blocking(move || started_rx.recv().unwrap())
+            .await
+            .unwrap();
+        apply.abort();
+        tokio::task::spawn_blocking(move || {
+            stopped_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("dropping the apply must stop the work")
+        })
+        .await
+        .unwrap();
     }
 
     #[test]
