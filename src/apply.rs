@@ -39,7 +39,9 @@ pub(crate) use execution_lease::{
     release_environment, release_environment_fence, runtime_may_take_over,
 };
 pub use execution_lease::{EnvironmentLeaseInspect, inspect_environment_lease, unlock_environment};
-use execution_lease::{claim_execution_environment, run_guarded_mutation, run_mutation_command};
+use execution_lease::{
+    claim_execution_environment, run_guarded_mutation, run_mutation_command, run_with_lease_renewal,
+};
 pub use outcome::{Outcome, StepOutcomeStatus};
 use release_content::{ReleaseContent, admit as admit_release, verify_integrity};
 

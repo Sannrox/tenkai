@@ -5,6 +5,7 @@ mod helm;
 mod in_process_kubernetes;
 mod kubernetes;
 mod kubernetes_model_runtime;
+mod workload_stall;
 
 pub use docker::{
     DOCKER_TOPOLOGY_DIR, DOCKER_TOPOLOGY_FILE, DockerHostExecutor, DockerHostTopology,
@@ -20,6 +21,7 @@ pub use kubernetes_model_runtime::{
     HttpSmokeProbe, KubernetesModelRuntimeExecutor, KubernetesModelRuntimeFactory, NgcEntitlement,
     ServingConfig, ServingEngine, SmokeProbe,
 };
+pub use workload_stall::WorkloadEvidence;
 
 /// Register CLI and in-process adapters with Tenkai's executor selector.
 pub fn install() {

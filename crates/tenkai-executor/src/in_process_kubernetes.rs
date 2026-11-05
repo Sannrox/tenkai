@@ -5,7 +5,9 @@
 //! authority: every apply re-reads the signed workdir and admits health from
 //! live workload conditions.
 
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 #[cfg(test)]
@@ -16,6 +18,8 @@ use std::sync::Mutex;
 use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
 use serde_json::{Map, Value};
+
+use crate::workload_stall::{Stall, StallClassifier, WorkloadEvidence};
 
 use tenkai::software_executor::{
     RolloutPhaseTimes, SoftwareApplyRequest, SoftwareExecutor, SoftwareObserveStatus,
@@ -28,6 +32,14 @@ pub const FIELD_MANAGER: &str = "tenkai";
 const DEFAULT_HEALTH_POLL: Duration = Duration::from_millis(100);
 /// Backoff cap so a long rollout cannot reintroduce a 1 s post-ready stall.
 const MAX_HEALTH_POLL: Duration = Duration::from_millis(200);
+/// How often a workload that is not Available is diagnosed. Diagnosis lists
+/// pods, so it runs less often than the condition poll.
+const DIAGNOSIS_INTERVAL: Duration = Duration::from_secs(2);
+/// Bound on one live API call, so a stalled API server cannot hold the wait
+/// past a stop for longer than this.
+const LIVE_CALL_TIMEOUT: Duration = Duration::from_secs(10);
+/// Stop flag for a call outside an apply lease; it is never set.
+static NOT_STOPPED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkloadCondition {
@@ -61,6 +73,18 @@ pub trait ClusterApplyApi: Send + Sync {
         kind: &str,
     ) -> Result<Option<WorkloadObservation>>;
     fn remove(&self, cluster_config: &Path, namespace: &str, name: &str, kind: &str) -> Result<()>;
+    /// The workload object and the pods of its current revision, read to
+    /// explain why it is not Available. `None` when this adapter cannot tell.
+    fn workload_evidence(
+        &self,
+        cluster_config: &Path,
+        namespace: &str,
+        name: &str,
+        kind: &str,
+    ) -> Result<Option<WorkloadEvidence>> {
+        let _ = (cluster_config, namespace, name, kind);
+        Ok(None)
+    }
 }
 
 impl<T: ClusterApplyApi + ?Sized> ClusterApplyApi for &T {
@@ -87,12 +111,23 @@ impl<T: ClusterApplyApi + ?Sized> ClusterApplyApi for &T {
     fn remove(&self, cluster_config: &Path, namespace: &str, name: &str, kind: &str) -> Result<()> {
         (**self).remove(cluster_config, namespace, name, kind)
     }
+
+    fn workload_evidence(
+        &self,
+        cluster_config: &Path,
+        namespace: &str,
+        name: &str,
+        kind: &str,
+    ) -> Result<Option<WorkloadEvidence>> {
+        (**self).workload_evidence(cluster_config, namespace, name, kind)
+    }
 }
 
 #[cfg(test)]
 #[derive(Default)]
 pub struct MemoryClusterApi {
     objects: Mutex<BTreeMap<String, StoredObject>>,
+    evidence: Mutex<BTreeMap<String, WorkloadEvidence>>,
 }
 
 #[cfg(test)]
@@ -128,6 +163,19 @@ impl MemoryClusterApi {
         if let Some(stored) = self.objects.lock().expect("cluster mutex").get_mut(&key) {
             stored.conditions = conditions;
         }
+    }
+
+    pub fn set_evidence(
+        &self,
+        namespace: &str,
+        name: &str,
+        kind: &str,
+        evidence: WorkloadEvidence,
+    ) {
+        self.evidence
+            .lock()
+            .expect("evidence mutex")
+            .insert(object_key(namespace, kind, name), evidence);
     }
 }
 
@@ -207,6 +255,21 @@ impl ClusterApplyApi for MemoryClusterApi {
             .remove(&object_key(namespace, kind, name));
         Ok(())
     }
+
+    fn workload_evidence(
+        &self,
+        _cluster_config: &Path,
+        namespace: &str,
+        name: &str,
+        kind: &str,
+    ) -> Result<Option<WorkloadEvidence>> {
+        Ok(self
+            .evidence
+            .lock()
+            .expect("evidence mutex")
+            .get(&object_key(namespace, kind, name))
+            .cloned())
+    }
 }
 
 /// Live cluster adapter. Builds a client from the environment-scoped file only.
@@ -221,7 +284,12 @@ impl ClusterApplyApi for LiveKubeApi {
         field_manager: &str,
         object: &Value,
     ) -> Result<WorkloadObservation> {
-        block_on(live_apply(cluster_config, namespace, field_manager, object))
+        block_on(bounded(live_apply(
+            cluster_config,
+            namespace,
+            field_manager,
+            object,
+        )))
     }
 
     fn observe(
@@ -231,11 +299,26 @@ impl ClusterApplyApi for LiveKubeApi {
         name: &str,
         kind: &str,
     ) -> Result<Option<WorkloadObservation>> {
-        block_on(live_observe(cluster_config, namespace, name, kind))
+        block_on(bounded(live_observe(cluster_config, namespace, name, kind)))
     }
 
     fn remove(&self, cluster_config: &Path, namespace: &str, name: &str, kind: &str) -> Result<()> {
-        block_on(live_remove(cluster_config, namespace, name, kind))
+        block_on(bounded(live_remove(cluster_config, namespace, name, kind)))
+    }
+
+    fn workload_evidence(
+        &self,
+        cluster_config: &Path,
+        namespace: &str,
+        name: &str,
+        kind: &str,
+    ) -> Result<Option<WorkloadEvidence>> {
+        block_on(bounded(live_workload_evidence(
+            cluster_config,
+            namespace,
+            name,
+            kind,
+        )))
     }
 }
 
@@ -285,6 +368,7 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
     fn apply_manifests_timed(
         &self,
         request: &SoftwareApplyRequest,
+        stop: &AtomicBool,
     ) -> Result<(Vec<WorkloadObservation>, RolloutPhaseTimes)> {
         let mut times = RolloutPhaseTimes::default();
         let planned = Instant::now();
@@ -308,6 +392,7 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
         let applied = Instant::now();
         let mut observations = Vec::new();
         for mut object in objects {
+            stop_if_lease_lost(stop, request)?;
             stamp_ownership(&mut object, request);
             let observed = self.api.apply_server_side(
                 cluster_config,
@@ -319,31 +404,48 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
         }
         times.apply_ms = applied.elapsed().as_millis() as u64;
         let health = Instant::now();
-        self.wait_for_health(request, cluster_config, &observations)?;
+        self.wait_for_health(request, cluster_config, &observations, stop)?;
         times.health_ms = health.elapsed().as_millis() as u64;
         Ok((observations, times))
     }
 
     /// Apply one generation and return wall time per phase. `apply` drops the times.
     pub fn apply_with_phases(&self, request: &SoftwareApplyRequest) -> Result<RolloutPhaseTimes> {
-        self.apply_timed(request)
+        self.apply_timed(request, &NOT_STOPPED)
     }
 
-    fn apply_timed(&self, request: &SoftwareApplyRequest) -> Result<RolloutPhaseTimes> {
-        self.apply_manifests_timed(request).map(|(_, times)| times)
+    fn apply_timed(
+        &self,
+        request: &SoftwareApplyRequest,
+        stop: &AtomicBool,
+    ) -> Result<RolloutPhaseTimes> {
+        self.apply_manifests_timed(request, stop)
+            .map(|(_, times)| times)
     }
 
+    /// Wait until every applied workload is Available at the requested
+    /// version. A workload that is not is diagnosed every
+    /// [`DIAGNOSIS_INTERVAL`]: a terminal stall fails the wait at once, and
+    /// the timeout error names the last cause seen. `stop` ends the wait
+    /// when the caller lost its apply lease.
     fn wait_for_health(
         &self,
         request: &SoftwareApplyRequest,
         cluster_config: &Path,
         applied: &[WorkloadObservation],
+        stop: &AtomicBool,
     ) -> Result<()> {
-        let deadline = Instant::now() + self.timeout;
+        let started = Instant::now();
+        let deadline = started + self.timeout;
         let mut interval = self.poll_interval;
+        let mut next_diagnosis = started;
+        let mut classifiers: HashMap<(String, String), StallClassifier> = HashMap::new();
+        let mut causes: Vec<String> = Vec::new();
         loop {
             let mut failed = Vec::new();
+            let mut stalled = Vec::new();
             for applied in applied {
+                stop_if_lease_lost(stop, request)?;
                 let Some(live) = self.api.observe(
                     cluster_config,
                     &request.environment,
@@ -357,8 +459,10 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
                     ));
                     continue;
                 };
+                let mut ready = true;
                 if let Some(error) = disagreeing_condition(&live) {
                     failed.push(error);
+                    ready = false;
                 }
                 if live.version_label.as_deref() != Some(k8s_label_value(&request.version).as_str())
                     && is_workload(&live.kind)
@@ -367,22 +471,88 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
                         "{} {} version label {:?} does not match {}",
                         live.kind, live.name, live.version_label, request.version
                     ));
+                    ready = false;
+                }
+                if !ready && is_workload(&live.kind) {
+                    stalled.push((live.kind, live.name));
                 }
             }
             if failed.is_empty() {
                 return Ok(());
             }
-            if Instant::now() >= deadline {
+            let now = Instant::now();
+            if now >= next_diagnosis || now >= deadline {
+                next_diagnosis = now + DIAGNOSIS_INTERVAL;
+                causes.clear();
+                for (kind, name) in stalled {
+                    stop_if_lease_lost(stop, request)?;
+                    let stall = self.diagnose(
+                        cluster_config,
+                        &request.environment,
+                        &kind,
+                        &name,
+                        classifiers.entry((kind.clone(), name.clone())).or_default(),
+                        now,
+                    );
+                    let Some(stall) = stall else { continue };
+                    if stall.terminal {
+                        bail!(
+                            "in-process kubernetes apply failed for {}@{} in {} after {}s: {kind} {name} cannot become Available: {}; {}",
+                            request.product,
+                            request.version,
+                            request.environment,
+                            started.elapsed().as_secs(),
+                            stall.cause,
+                            failed.join("; ")
+                        );
+                    }
+                    causes.push(stall.cause);
+                }
+            }
+            if now >= deadline {
+                let cause = if causes.is_empty() {
+                    String::new()
+                } else {
+                    format!("; cause: {}", causes.join("; "))
+                };
                 bail!(
-                    "in-process kubernetes apply refused to complete for {}@{} in {}: {}",
+                    "in-process kubernetes apply refused to complete for {}@{} in {} after {}s: {}{cause}",
                     request.product,
                     request.version,
                     request.environment,
+                    started.elapsed().as_secs(),
                     failed.join("; ")
                 );
             }
             wait_poll(interval);
             interval = next_health_poll(interval, self.poll_interval);
+        }
+    }
+
+    /// Classify one workload's live evidence. An error reading the evidence
+    /// never fails the wait; it is named as the cause instead.
+    fn diagnose(
+        &self,
+        cluster_config: &Path,
+        namespace: &str,
+        kind: &str,
+        name: &str,
+        classifier: &mut StallClassifier,
+        now: Instant,
+    ) -> Option<Stall> {
+        match self
+            .api
+            .workload_evidence(cluster_config, namespace, name, kind)
+        {
+            Ok(Some(evidence)) => classifier.classify(kind, name, &evidence, now),
+            Ok(None) => None,
+            Err(error) => Some(Stall {
+                cause: format!(
+                    "{kind} {name} could not be diagnosed: {}",
+                    format!("{error:#}").chars().take(240).collect::<String>()
+                ),
+                terminal: false,
+            }),
         }
     }
 }
@@ -408,11 +578,24 @@ impl<A: ClusterApplyApi> SoftwareExecutor for InProcessKubernetesExecutor<A> {
     }
 
     fn apply(&self, request: &SoftwareApplyRequest) -> Result<()> {
-        self.apply_timed(request).map(|_| ())
+        self.apply_timed(request, &NOT_STOPPED).map(|_| ())
+    }
+
+    fn apply_until_stopped(&self, request: &SoftwareApplyRequest, stop: &AtomicBool) -> Result<()> {
+        self.apply_timed(request, stop).map(|_| ())
+    }
+
+    /// Restart re-applies the current pin, so it stops like apply.
+    fn restart_until_stopped(
+        &self,
+        request: &SoftwareApplyRequest,
+        stop: &AtomicBool,
+    ) -> Result<()> {
+        self.apply_until_stopped(request, stop)
     }
 
     fn apply_with_phases(&self, request: &SoftwareApplyRequest) -> Result<RolloutPhaseTimes> {
-        self.apply_timed(request)
+        self.apply_timed(request, &NOT_STOPPED)
     }
 
     fn remove(&self, request: &SoftwareApplyRequest) -> Result<()> {
@@ -613,6 +796,20 @@ pub(crate) fn disagreeing_condition(observation: &WorkloadObservation) -> Option
     })
 }
 
+/// Checked before every live API call, so a lost lease stops apply and the
+/// wait within one call ([`LIVE_CALL_TIMEOUT`]) plus one poll.
+fn stop_if_lease_lost(stop: &AtomicBool, request: &SoftwareApplyRequest) -> Result<()> {
+    if stop.load(Ordering::SeqCst) {
+        bail!(
+            "in-process kubernetes apply for {}@{} in {} stopped: the apply lease was lost",
+            request.product,
+            request.version,
+            request.environment
+        );
+    }
+    Ok(())
+}
+
 fn next_health_poll(current: Duration, floor: Duration) -> Duration {
     current
         .saturating_mul(2)
@@ -640,6 +837,18 @@ where
             .context("in-process kubernetes runtime")?
             .block_on(fut),
     }
+}
+
+/// `fut`, failing after [`LIVE_CALL_TIMEOUT`].
+async fn bounded<T>(fut: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+    tokio::time::timeout(LIVE_CALL_TIMEOUT, fut)
+        .await
+        .unwrap_or_else(|_| {
+            bail!(
+                "kubernetes API call timed out after {}s",
+                LIVE_CALL_TIMEOUT.as_secs()
+            )
+        })
 }
 
 async fn live_client(cluster_config: &Path) -> Result<kube::Client> {
@@ -723,6 +932,163 @@ async fn live_remove(cluster_config: &Path, namespace: &str, name: &str, kind: &
             "removing {kind}/{name} in {namespace}: {error}"
         )),
     }
+}
+
+/// Pods read per diagnosis. Enough to name a cause, bounded for large
+/// workloads.
+const DIAGNOSED_PODS: u32 = 20;
+
+async fn live_workload_evidence(
+    cluster_config: &Path,
+    namespace: &str,
+    name: &str,
+    kind: &str,
+) -> Result<Option<WorkloadEvidence>> {
+    use k8s_openapi::api::core::v1::Pod;
+    let client = live_client(cluster_config).await?;
+    let api = dynamic_api(client.clone(), namespace, kind, builtin_api_version(kind)?)?;
+    let Some(object) = api
+        .get_opt(name)
+        .await
+        .with_context(|| format!("reading {kind}/{name} in {namespace}"))?
+    else {
+        return Ok(None);
+    };
+    let workload = serde_json::to_value(&object).context("encoding workload status")?;
+    // Pods only add detail; the workload's conditions are classified even
+    // when the pods cannot be read.
+    let pods = match current_revision_selector(&client, namespace, kind, &workload).await {
+        Ok(Some(selector)) => kube::Api::<Pod>::namespaced(client, namespace)
+            .list(
+                &kube::api::ListParams::default()
+                    .labels(&selector)
+                    .limit(DIAGNOSED_PODS),
+            )
+            .await
+            .map(|pods| pods.items)
+            .with_context(|| format!("listing pods of {kind}/{name} in {namespace}")),
+        Ok(None) => Ok(Vec::new()),
+        Err(error) => Err(error),
+    };
+    Ok(Some(match pods {
+        Ok(pods) => WorkloadEvidence {
+            workload,
+            pods,
+            pods_unavailable: None,
+        },
+        Err(error) => WorkloadEvidence {
+            workload,
+            pods: Vec::new(),
+            pods_unavailable: Some(format!("{error:#}")),
+        },
+    }))
+}
+
+/// Label selector for the pods of the workload's current revision: the
+/// Deployment's newest ReplicaSet, or the StatefulSet's update revision.
+/// `None` while the controller has not observed the applied generation or
+/// that revision does not exist yet, and for other kinds.
+async fn current_revision_selector(
+    client: &kube::Client,
+    namespace: &str,
+    kind: &str,
+    workload: &Value,
+) -> Result<Option<String>> {
+    use k8s_openapi::api::apps::v1::ReplicaSet;
+    // Until the controller observes the applied generation, the revision it
+    // reports is the previous rollout's, whose pods must not fail this one.
+    let generation = workload
+        .pointer("/metadata/generation")
+        .and_then(Value::as_i64);
+    let observed = workload
+        .pointer("/status/observedGeneration")
+        .and_then(Value::as_i64);
+    if observed.is_none() || observed < generation {
+        return Ok(None);
+    }
+    let Some(selector) = workload
+        .pointer("/spec/selector")
+        .and_then(label_selector_query)
+    else {
+        return Ok(None);
+    };
+    let revision = match kind {
+        "Deployment" => {
+            const REVISION: &str = "/metadata/annotations/deployment.kubernetes.io~1revision";
+            let Some(revision) = workload.pointer(REVISION).and_then(Value::as_str) else {
+                return Ok(None);
+            };
+            let uid = workload.pointer("/metadata/uid").and_then(Value::as_str);
+            let sets = kube::Api::<ReplicaSet>::namespaced(client.clone(), namespace)
+                .list(&kube::api::ListParams::default().labels(&selector))
+                .await
+                .with_context(|| format!("listing ReplicaSets in {namespace}"))?;
+            let hash = sets.items.into_iter().find_map(|set| {
+                let owned = set
+                    .metadata
+                    .owner_references
+                    .iter()
+                    .flatten()
+                    .any(|owner| Some(owner.uid.as_str()) == uid);
+                let current = set
+                    .metadata
+                    .annotations
+                    .as_ref()
+                    .and_then(|annotations| annotations.get("deployment.kubernetes.io/revision"))
+                    .is_some_and(|value| value == revision);
+                if owned && current {
+                    set.metadata.labels?.remove("pod-template-hash")
+                } else {
+                    None
+                }
+            });
+            hash.map(|hash| format!("pod-template-hash={hash}"))
+        }
+        "StatefulSet" => workload
+            .pointer("/status/updateRevision")
+            .and_then(Value::as_str)
+            .map(|revision| format!("controller-revision-hash={revision}")),
+        _ => None,
+    };
+    Ok(revision.map(|revision| format!("{selector},{revision}")))
+}
+
+/// A workload's `spec.selector` as a label selector query, with both
+/// `matchLabels` and `matchExpressions`. `None` when it selects nothing
+/// expressible, so no pods are read.
+fn label_selector_query(selector: &Value) -> Option<String> {
+    let labels = selector
+        .get("matchLabels")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .map(|(key, value)| Some(format!("{key}={}", value.as_str()?)));
+    let expressions = selector
+        .get("matchExpressions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|expression| {
+            let key = expression.get("key")?.as_str()?;
+            let values = || -> Option<String> {
+                let values = expression
+                    .get("values")?
+                    .as_array()?
+                    .iter()
+                    .map(|value| value.as_str())
+                    .collect::<Option<Vec<_>>>()?;
+                Some(values.join(","))
+            };
+            Some(match expression.get("operator")?.as_str()? {
+                "In" => format!("{key} in ({})", values()?),
+                "NotIn" => format!("{key} notin ({})", values()?),
+                "Exists" => key.to_string(),
+                "DoesNotExist" => format!("!{key}"),
+                _ => return None,
+            })
+        });
+    let terms = labels.chain(expressions).collect::<Option<Vec<_>>>()?;
+    (!terms.is_empty()).then(|| terms.join(","))
 }
 
 async fn ensure_namespace(client: &kube::Client, namespace: &str) -> Result<()> {
@@ -1237,6 +1603,17 @@ mod tests {
         ) -> Result<()> {
             self.inner.remove(cluster_config, namespace, name, kind)
         }
+
+        fn workload_evidence(
+            &self,
+            cluster_config: &Path,
+            namespace: &str,
+            name: &str,
+            kind: &str,
+        ) -> Result<Option<WorkloadEvidence>> {
+            self.inner
+                .workload_evidence(cluster_config, namespace, name, kind)
+        }
     }
 
     fn percentile(mut samples: Vec<Duration>, q: f64) -> Duration {
@@ -1311,6 +1688,206 @@ mod tests {
 
         released.store(true, std::sync::atomic::Ordering::SeqCst);
         apply.await.expect("join apply").expect("apply");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A Deployment held unavailable with the given evidence, and an executor
+    /// whose timeout is far longer than any fail-fast path may take.
+    fn stalled(
+        evidence: serde_json::Value,
+        pods: serde_json::Value,
+    ) -> (MemoryClusterApi, PathBuf) {
+        let root = unique_root("stall");
+        let _ = std::fs::remove_dir_all(&root);
+        let kubeconfig = write_deployment(&root, "1.0.0", 1);
+        let api = MemoryClusterApi::new();
+        api.apply_server_side(
+            Path::new("/unused"),
+            "lab",
+            FIELD_MANAGER,
+            &serde_json::json!({"kind":"Deployment","metadata":{"name":"edge","labels":{}}}),
+        )
+        .unwrap();
+        api.set_conditions("lab", "edge", "Deployment", unavailable_conditions());
+        api.set_evidence(
+            "lab",
+            "edge",
+            "Deployment",
+            WorkloadEvidence {
+                workload: evidence,
+                pods: serde_json::from_value(pods).unwrap(),
+                pods_unavailable: None,
+            },
+        );
+        (api, kubeconfig)
+    }
+
+    fn fail_fast(api: &MemoryClusterApi, kubeconfig: &Path) -> String {
+        let root = kubeconfig.parent().unwrap().to_path_buf();
+        let executor = InProcessKubernetesExecutor::new(api)
+            .with_timeout(Duration::from_secs(60))
+            .with_poll_interval(Duration::from_millis(10));
+        let started = Instant::now();
+        let err = executor
+            .apply(&request(&root, kubeconfig, "1.0.0"))
+            .unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "terminal stall waited {:?}",
+            started.elapsed()
+        );
+        let _ = std::fs::remove_dir_all(root);
+        format!("{err:#}")
+    }
+
+    #[test]
+    fn label_selectors_keep_match_expressions() {
+        let selector = serde_json::json!({
+            "matchLabels": {"app": "edge"},
+            "matchExpressions": [
+                {"key": "tier", "operator": "In", "values": ["web", "api"]},
+                {"key": "canary", "operator": "DoesNotExist"},
+            ],
+        });
+        assert_eq!(
+            label_selector_query(&selector).as_deref(),
+            Some("app=edge,tier in (web,api),!canary")
+        );
+        assert_eq!(label_selector_query(&serde_json::json!({})), None);
+        assert_eq!(
+            label_selector_query(&serde_json::json!({"matchExpressions": [
+                {"key": "tier", "operator": "Unknown"},
+            ]})),
+            None
+        );
+    }
+
+    #[test]
+    fn a_crash_loop_fails_the_wait_naming_the_exit() {
+        let (api, kubeconfig) = stalled(
+            serde_json::json!({"kind": "Deployment", "metadata": {"name": "edge"}}),
+            serde_json::json!([{
+                "metadata": {"name": "edge-7c9f-x2"},
+                "status": {"containerStatuses": [{
+                    "name": "nginx",
+                    "restartCount": 4,
+                    "state": {"waiting": {"reason": "CrashLoopBackOff"}},
+                    "lastState": {"terminated": {"exitCode": 1,
+                        "message": "host not found in upstream \"api\""}},
+                }]},
+            }]),
+        );
+        let err = fail_fast(&api, &kubeconfig);
+        assert!(
+            err.contains(
+                "Deployment edge cannot become Available: pod edge-7c9f-x2 container nginx CrashLoopBackOff after 4 restarts, last exit code 1: host not found in upstream"
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn an_admission_refusal_fails_the_wait_naming_the_refusal() {
+        let (api, kubeconfig) = stalled(
+            serde_json::json!({
+                "kind": "Deployment",
+                "metadata": {"name": "edge"},
+                "status": {"conditions": [{
+                    "type": "ReplicaFailure", "status": "True", "reason": "FailedCreate",
+                    "message": "pods \"edge-7c9f\" is forbidden: violates PodSecurity \"restricted:latest\": runAsNonRoot != true",
+                }]},
+            }),
+            serde_json::json!([]),
+        );
+        let err = fail_fast(&api, &kubeconfig);
+        assert!(
+            err.contains("ReplicaFailure=True FailedCreate: pods \"edge-7c9f\" is forbidden: violates PodSecurity"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_timeout_names_the_last_cause_seen() {
+        let (api, kubeconfig) = stalled(
+            serde_json::json!({"kind": "Deployment", "metadata": {"name": "edge"}}),
+            serde_json::json!([{
+                "metadata": {"name": "edge-7c9f-x2"},
+                "status": {"conditions": [{"type": "PodScheduled", "status": "False",
+                    "reason": "Unschedulable", "message": "0/1 nodes are available"}]},
+            }]),
+        );
+        let root = kubeconfig.parent().unwrap().to_path_buf();
+        let executor = InProcessKubernetesExecutor::new(&api)
+            .with_timeout(Duration::from_millis(50))
+            .with_poll_interval(Duration::from_millis(10));
+        let err = executor
+            .apply(&request(&root, &kubeconfig, "1.0.0"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("refused to complete"), "{err}");
+        assert!(
+            err.contains(
+                "cause: pod edge-7c9f-x2 is pending: Unschedulable: 0/1 nodes are available"
+            ),
+            "{err}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_slow_rollout_with_starting_pods_still_succeeds() {
+        let root = unique_root("slow");
+        let _ = std::fs::remove_dir_all(&root);
+        let kubeconfig = write_deployment(&root, "1.0.0", 1);
+        let api = DelayedReadyApi::new(Duration::from_millis(400));
+        api.inner.set_evidence(
+            "lab",
+            "edge",
+            "Deployment",
+            WorkloadEvidence {
+                workload: serde_json::json!({"kind": "Deployment"}),
+                pods: serde_json::from_value(serde_json::json!([{
+                    "metadata": {"name": "edge-7c9f-x2"},
+                    "status": {"containerStatuses": [{"name": "app", "restartCount": 0,
+                        "state": {"waiting": {"reason": "ContainerCreating"}}}]},
+                }]))
+                .unwrap(),
+                pods_unavailable: None,
+            },
+        );
+        InProcessKubernetesExecutor::new(&api)
+            .with_timeout(Duration::from_secs(10))
+            .with_poll_interval(Duration::from_millis(20))
+            .apply(&request(&root, &kubeconfig, "1.0.0"))
+            .expect("a slow healthy rollout completes");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_lost_lease_stops_the_wait() {
+        let root = unique_root("stop");
+        let _ = std::fs::remove_dir_all(&root);
+        let kubeconfig = write_deployment(&root, "1.0.0", 1);
+        let (api, _released, entered) = DelayedReadyApi::gated();
+        let executor = InProcessKubernetesExecutor::new(api)
+            .with_timeout(Duration::from_secs(60))
+            .with_poll_interval(Duration::from_millis(10));
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let waiting = std::thread::spawn({
+            let stop = stop.clone();
+            let req = request(&root, &kubeconfig, "1.0.0");
+            move || executor.apply_until_stopped(&req, &stop)
+        });
+        entered.recv().expect("apply entered the wait");
+        let stopped = Instant::now();
+        stop.store(true, Ordering::SeqCst);
+        let err = waiting.join().unwrap().unwrap_err().to_string();
+        assert!(
+            stopped.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            stopped.elapsed()
+        );
+        assert!(err.contains("the apply lease was lost"), "{err}");
         let _ = std::fs::remove_dir_all(root);
     }
 }

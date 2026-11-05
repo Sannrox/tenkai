@@ -124,25 +124,186 @@ fn apply_a_to_b_to_rollback_observes_rollout_conditions() {
     let _ = std::fs::remove_dir_all(root_b);
 }
 
+/// Busybox from the Kubernetes test image registry, for containers that
+/// need a shell.
+const BUSYBOX: &str = "registry.k8s.io/e2e-test-images/busybox:1.36.1-1";
+
+/// One Deployment whose container runs `script` under `sh -c`, with an
+/// optional readiness file probe.
+fn write_script_workdir(root: &Path, name: &str, script: &str, readiness: bool) {
+    let manifests = root.join("manifests");
+    std::fs::create_dir_all(&manifests).unwrap();
+    let probe = if readiness {
+        "          readinessProbe:\n            exec:\n              command: [\"cat\", \"/tmp/ready\"]\n            periodSeconds: 2\n"
+    } else {
+        ""
+    };
+    std::fs::write(
+        manifests.join("deploy.yaml"),
+        format!(
+            r#"apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {name}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {name}
+  template:
+    metadata:
+      labels:
+        app: {name}
+    spec:
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: app
+          image: {BUSYBOX}
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", {script:?}]
+{probe}"#
+        ),
+    )
+    .unwrap();
+}
+
+/// Apply that must fail before `timeout`; returns the error text.
+fn apply_fails_before_timeout(root: &Path, env: &str, timeout: Duration) -> String {
+    let kubeconfig = cluster_config();
+    let executor = InProcessKubernetesExecutor::new(LiveKubeApi).with_timeout(timeout);
+    let started = std::time::Instant::now();
+    let err = executor
+        .apply(&request(root, &kubeconfig, env, "1.0.0"))
+        .unwrap_err();
+    let err = format!("{err:#}");
+    eprintln!("{err}");
+    assert!(
+        started.elapsed() < timeout,
+        "a terminal stall must fail before the {timeout:?} timeout: {err}"
+    );
+    assert!(err.contains("cannot become Available"), "{err}");
+    let _ = kubectl(&kubeconfig, &["delete", "namespace", env, "--wait=false"]);
+    let _ = std::fs::remove_dir_all(root);
+    err
+}
+
 #[test]
 #[ignore = "requires a kind cluster and TENKAI_CLUSTER_CONFIG"]
-fn failing_rollout_names_workload_condition() {
-    let kubeconfig = cluster_config();
+fn failing_rollout_names_the_image_pull_failure() {
     let env = unique_env("fail");
     let root = std::env::temp_dir().join(format!("{env}-fail"));
     let _ = std::fs::remove_dir_all(&root);
     write_workdir(&root, "edge", "tenkai.invalid/missing:fail", 1);
-    let executor =
-        InProcessKubernetesExecutor::new(LiveKubeApi).with_timeout(Duration::from_secs(45));
-    let err = executor
-        .apply(&request(&root, &kubeconfig, &env, "1.0.0"))
-        .unwrap_err()
-        .to_string();
+    let err = apply_fails_before_timeout(&root, &env, Duration::from_secs(180));
     assert!(
-        err.contains("Available=")
-            || err.contains("has no Available condition")
-            || err.contains("Progressing=False"),
+        err.contains("ImagePullBackOff") || err.contains("ErrImagePull"),
         "{err}"
+    );
+    assert!(err.contains("Available="), "{err}");
+}
+
+#[test]
+#[ignore = "requires a kind cluster and TENKAI_CLUSTER_CONFIG"]
+fn a_crash_loop_fails_the_step_naming_the_exit_code() {
+    let env = unique_env("crash");
+    let root = std::env::temp_dir().join(format!("{env}-crash"));
+    let _ = std::fs::remove_dir_all(&root);
+    write_script_workdir(
+        &root,
+        "edge",
+        "echo upstream not found > /dev/termination-log; exit 3",
+        // The readiness probe never passes, so a container that exits right
+        // after starting never counts as available between restarts.
+        true,
+    );
+    let err = apply_fails_before_timeout(&root, &env, Duration::from_secs(240));
+    assert!(err.contains("CrashLoopBackOff after"), "{err}");
+    assert!(
+        err.contains("last exit code 3 (Error): upstream not found"),
+        "{err}"
+    );
+}
+
+#[test]
+#[ignore = "requires a kind cluster and TENKAI_CLUSTER_CONFIG"]
+fn a_rollout_that_replaces_a_crash_loop_succeeds() {
+    let kubeconfig = cluster_config();
+    let env = unique_env("heal");
+    let broken = std::env::temp_dir().join(format!("{env}-broken"));
+    let fixed = std::env::temp_dir().join(format!("{env}-fixed"));
+    let _ = std::fs::remove_dir_all(&broken);
+    let _ = std::fs::remove_dir_all(&fixed);
+    write_script_workdir(&broken, "edge", "exit 3", true);
+    write_script_workdir(&fixed, "edge", "touch /tmp/ready; exec sleep 3600", true);
+    let executor =
+        InProcessKubernetesExecutor::new(LiveKubeApi).with_timeout(Duration::from_secs(240));
+    let err = executor
+        .apply(&request(&broken, &kubeconfig, &env, "1.0.0"))
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("CrashLoopBackOff"), "{err:#}");
+    // The crash-looping pods of 1.0.0 are still there while 2.0.0 rolls out.
+    executor
+        .apply(&request(&fixed, &kubeconfig, &env, "2.0.0"))
+        .expect("the pods being replaced must not fail the new rollout");
+    let _ = kubectl(&kubeconfig, &["delete", "namespace", &env, "--wait=false"]);
+    let _ = std::fs::remove_dir_all(broken);
+    let _ = std::fs::remove_dir_all(fixed);
+}
+
+#[test]
+#[ignore = "requires a kind cluster and TENKAI_CLUSTER_CONFIG"]
+fn an_admission_refusal_fails_the_step_naming_the_policy() {
+    let kubeconfig = cluster_config();
+    let env = unique_env("psa");
+    let root = std::env::temp_dir().join(format!("{env}-psa"));
+    let _ = std::fs::remove_dir_all(&root);
+    write_workdir(&root, "edge", "registry.k8s.io/pause:3.10", 1);
+    let created = kubectl(&kubeconfig, &["create", "namespace", &env]);
+    assert!(created.status.success(), "{created:?}");
+    let labeled = kubectl(
+        &kubeconfig,
+        &[
+            "label",
+            "namespace",
+            &env,
+            "pod-security.kubernetes.io/enforce=restricted",
+        ],
+    );
+    assert!(labeled.status.success(), "{labeled:?}");
+    let started = std::time::Instant::now();
+    let err = apply_fails_before_timeout(&root, &env, Duration::from_secs(120));
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "an admission refusal must fail within seconds, took {:?}",
+        started.elapsed()
+    );
+    assert!(err.contains("ReplicaFailure=True FailedCreate"), "{err}");
+    assert!(err.contains("violates PodSecurity"), "{err}");
+}
+
+#[test]
+#[ignore = "requires a kind cluster and TENKAI_CLUSTER_CONFIG"]
+fn a_slow_healthy_rollout_still_succeeds() {
+    let kubeconfig = cluster_config();
+    let env = unique_env("slow");
+    let root = std::env::temp_dir().join(format!("{env}-slow"));
+    let _ = std::fs::remove_dir_all(&root);
+    write_script_workdir(
+        &root,
+        "edge",
+        "sleep 20; touch /tmp/ready; exec sleep 3600",
+        true,
+    );
+    let executor =
+        InProcessKubernetesExecutor::new(LiveKubeApi).with_timeout(Duration::from_secs(180));
+    let started = std::time::Instant::now();
+    executor
+        .apply(&request(&root, &kubeconfig, &env, "1.0.0"))
+        .expect("a slow but healthy rollout completes");
+    assert!(
+        started.elapsed() >= Duration::from_secs(20),
+        "the wait must cover the slow readiness, took {:?}",
+        started.elapsed()
     );
     let _ = kubectl(&kubeconfig, &["delete", "namespace", &env, "--wait=false"]);
     let _ = std::fs::remove_dir_all(root);

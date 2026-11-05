@@ -197,9 +197,7 @@ async fn execute_with_options_inner(
         let unlock = release_environment(ctx, &lease).await;
         return match unlock {
             Ok(()) => Err(error),
-            Err(unlock) => Err(error.context(format!(
-                "releasing environment apply lease also failed: {unlock}"
-            ))),
+            Err(unlock) => Err(with_release_failure(error, &unlock, "")),
         };
     }
     if let Err(error) = start_admission::authorize_maintenance(
@@ -214,9 +212,7 @@ async fn execute_with_options_inner(
         let unlock = release_environment(ctx, &lease).await;
         return match unlock {
             Ok(()) => Err(error),
-            Err(unlock) => Err(error.context(format!(
-                "releasing environment apply lease also failed: {unlock}"
-            ))),
+            Err(unlock) => Err(with_release_failure(error, &unlock, "")),
         };
     }
 
@@ -272,9 +268,13 @@ async fn execute_with_options_inner(
     let released_result = match (result, unlock) {
         (Ok(outcomes), Ok(())) => Ok(outcomes),
         (Err(error), Ok(())) => Err(error),
-        (Err(error), Err(unlock)) => Err(error.context(format!(
-            "releasing environment apply lease also failed: {unlock}; after verifying no apply is running, retry `tenkaictl env unlock {environment}` once the lease expires"
-        ))),
+        (Err(error), Err(unlock)) => Err(with_release_failure(
+            error,
+            &unlock,
+            &format!(
+                "; after verifying no apply is running, retry `tenkaictl env unlock {environment}` once the lease expires"
+            ),
+        )),
         (Ok(_), Err(error)) => Err(error.context(format!(
             "releasing environment apply lease failed; after verifying no apply is running, retry `tenkaictl env unlock {environment}` once the lease expires"
         ))),
@@ -308,5 +308,39 @@ async fn execute_with_options_inner(
                 "canary evidence finalization also failed: {finalization}"
             )))
         }
+    }
+}
+
+/// Report a failed lease release after the error that ended the attempt
+/// (#982). The attempt's error leads the message, and its chain stays intact
+/// so callers still classify it, for example as a lost fence.
+fn with_release_failure(error: anyhow::Error, unlock: &anyhow::Error, hint: &str) -> anyhow::Error {
+    let message = format!("{error}; releasing environment apply lease also failed: {unlock}{hint}");
+    error.context(message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_lease_release_follows_the_step_error_and_keeps_its_chain() {
+        let step = anyhow::Error::from(std::io::Error::other("connection refused"))
+            .context("software deploy phase=apply product=web@1.0.0: CrashLoopBackOff");
+        let unlock = anyhow::anyhow!("embedded lease is not the active fenced holder");
+        let error = with_release_failure(step, &unlock, "; retry `tenkaictl env unlock prod`");
+        let message = error.to_string();
+        assert!(
+            message.starts_with("software deploy phase=apply product=web@1.0.0: CrashLoopBackOff;"),
+            "{message}"
+        );
+        assert!(
+            message.contains("; releasing environment apply lease also failed: embedded lease"),
+            "{message}"
+        );
+        assert!(
+            error.downcast_ref::<std::io::Error>().is_some(),
+            "callers still classify the step error: {error:#}"
+        );
     }
 }

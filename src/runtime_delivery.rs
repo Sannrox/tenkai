@@ -354,6 +354,12 @@ pub(crate) async fn complete_runtime_work(
                 format!("failed_target_at.{}", step.product),
                 observed_at.to_string(),
             );
+            crate::environment::record_failed_target_error(
+                &mut object.properties,
+                &step.product,
+                &step.release_id,
+                &receipt.detail,
+            );
         } else if receipt.succeeded && object.properties.get(&key) == Some(&step.release_id) {
             object.properties.remove(&key);
             object

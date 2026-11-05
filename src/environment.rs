@@ -603,6 +603,12 @@ pub(crate) async fn record_deployment_observation(
                 format!("failed_target_at.{}", observation.step.product),
                 deployment.updated.to_string(),
             );
+            record_failed_target_error(
+                &mut environment.properties,
+                &observation.step.product,
+                &observation.step.release_id,
+                observation.detail,
+            );
         } else if observation.status == "succeeded"
             && environment.properties.get(&failed_target_key) == Some(&observation.step.release_id)
             && matches!(
@@ -1449,7 +1455,10 @@ async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<Statu
                 && env_obj.properties.get(&format!("deployment_health.{product}"))
                     .is_none_or(|health| health != "unknown")
             {
-                Some("target failed; automatic retry held; create and approve an explicit plan to retry".into())
+                let cause = held_failed_target_error(&env_obj.properties, &product)
+                    .map(|detail| format!(": {detail}"))
+                    .unwrap_or_default();
+                Some(format!("target failed{cause}; automatic retry held; create and approve an explicit plan to retry"))
             } else {
                 env_obj.properties.get(&format!("deployment_error.{product}")).cloned()
             },
@@ -2324,6 +2333,38 @@ pub fn failed_target_key(product: &str) -> String {
     format!("failed_target.{product}")
 }
 
+/// Longest failure cause kept for a held failed target.
+const FAILED_TARGET_ERROR_CHARS: usize = 1_000;
+
+/// Record why `release_id` failed next to the held failed target (#982).
+/// The value names the release, so a cause written for an older failed
+/// target is never shown for a newer one.
+pub(crate) fn record_failed_target_error(
+    properties: &mut HashMap<String, String>,
+    product: &str,
+    release_id: &str,
+    detail: &str,
+) {
+    let detail: String = detail.chars().take(FAILED_TARGET_ERROR_CHARS).collect();
+    properties.insert(
+        format!("failed_target_error.{product}"),
+        format!("{release_id}\n{detail}"),
+    );
+}
+
+/// Why the held failed target of `product` failed, when it was recorded for
+/// that release.
+fn held_failed_target_error<'a>(
+    properties: &'a HashMap<String, String>,
+    product: &str,
+) -> Option<&'a str> {
+    let held = held_failed_target_release(properties, product)?;
+    let (release, detail) = properties
+        .get(&format!("failed_target_error.{product}"))?
+        .split_once('\n')?;
+    (release == held && !detail.is_empty()).then_some(detail)
+}
+
 /// Release id of a held failed target, if automatic retry is paused for `product`.
 pub fn held_failed_target_release<'a>(
     properties: &'a HashMap<String, String>,
@@ -2835,6 +2876,30 @@ mod tests {
             "cleanup failed"
         );
         assert_eq!(environment.updated, 84);
+    }
+
+    #[test]
+    fn a_held_failed_target_names_its_own_cause_only() {
+        let mut properties = HashMap::from([(
+            failed_target_key("web"),
+            "tenkai:release:web@2.0.0".to_string(),
+        )]);
+        assert_eq!(held_failed_target_error(&properties, "web"), None);
+        record_failed_target_error(
+            &mut properties,
+            "web",
+            "tenkai:release:web@2.0.0",
+            "Deployment web cannot become Available: pod web-1 container app CrashLoopBackOff after 3 restarts",
+        );
+        assert_eq!(
+            held_failed_target_error(&properties, "web"),
+            Some(
+                "Deployment web cannot become Available: pod web-1 container app CrashLoopBackOff after 3 restarts"
+            )
+        );
+        // A newer failed target recorded without a cause hides the old one.
+        properties.insert(failed_target_key("web"), "tenkai:release:web@3.0.0".into());
+        assert_eq!(held_failed_target_error(&properties, "web"), None);
     }
 
     #[test]

@@ -853,6 +853,35 @@ document = "suite.json"
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// Releases the held topology lease from another store handle while the
+    /// step applies, as a takeover by another holder would.
+    struct LosesLeaseDuringApply {
+        database: std::path::PathBuf,
+        fencing_token: String,
+    }
+
+    impl crate::software_executor::SoftwareExecutor for LosesLeaseDuringApply {
+        fn apply(&self, _: &crate::software_executor::SoftwareApplyRequest) -> anyhow::Result<()> {
+            crate::storage::SqliteStore::open(&self.database)?.release_namespaced_lease(
+                "tenkai/topology-availability",
+                "ledger-ha",
+                &self.fencing_token,
+            )?;
+            Ok(())
+        }
+
+        fn remove(&self, _: &crate::software_executor::SoftwareApplyRequest) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn observe(
+            &self,
+            _: &crate::software_executor::SoftwareApplyRequest,
+        ) -> anyhow::Result<crate::software_executor::SoftwareObserveStatus> {
+            Ok(crate::software_executor::SoftwareObserveStatus::Unknown)
+        }
+    }
+
     #[tokio::test]
     async fn a_lost_topology_lease_during_activation_leaves_the_plan_running() {
         let root = temp_root("lost-topology-during-step");
@@ -916,14 +945,14 @@ document = "suite.json"
         let plan_id = planned.environments[0].plan_id.clone().unwrap();
         let approval = approvals.join(format!("{plan_id}.json"));
         let held = ctx
-            .acquire_lease("tenkai/topology-availability", "ledger-ha", "wave", 200)
+            .acquire_lease("tenkai/topology-availability", "ledger-ha", "wave", 60_000)
             .await
             .unwrap();
         ctx.held_execution_leases = vec![crate::client::HeldExecutionLease {
             namespace: "tenkai/topology-availability".into(),
             key: "ledger-ha".into(),
-            fencing_token: held.fencing_token,
-            ttl_ms: 200,
+            fencing_token: held.fencing_token.clone(),
+            ttl_ms: 60_000,
         }];
         let err = crate::apply::execute_with_options(
             &mut ctx,
@@ -936,11 +965,13 @@ document = "suite.json"
                     trust_roots: &trust,
                     requester: None,
                 },
+                // Renewal keeps a live lease through a slow activation, so
+                // the lease is taken away while the step runs.
                 software_executors: crate::software_executor::SoftwareExecutors::with_default(
-                    std::sync::Arc::new(
-                        crate::software_executor::FakeSoftwareExecutor::new()
-                            .with_apply_delay(std::time::Duration::from_millis(500)),
-                    ),
+                    std::sync::Arc::new(LosesLeaseDuringApply {
+                        database: database.clone(),
+                        fencing_token: held.fencing_token,
+                    }),
                 ),
                 model_runtime_executor: None,
                 worker_lifecycle: None,
