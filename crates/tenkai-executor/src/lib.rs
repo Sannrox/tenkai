@@ -14,7 +14,7 @@ pub use docker::{
 pub use helm::HelmSoftwareExecutor;
 pub use in_process_kubernetes::{
     ClusterApplyApi, FIELD_MANAGER, InProcessKubernetesExecutor, LiveKubeApi, WorkloadCondition,
-    WorkloadObservation, selected_in_process_executor,
+    WorkloadObservation, WorkloadRollout, selected_in_process_executor,
 };
 pub use kubernetes::KubernetesSoftwareExecutor;
 pub use kubernetes_model_runtime::{

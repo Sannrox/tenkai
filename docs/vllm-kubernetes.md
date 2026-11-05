@@ -113,7 +113,8 @@ weights between volumes.
 Each descriptor generation is a candidate Deployment and Service.
 
 1. Verify and unpack the digest-pinned weights into the claim.
-2. Apply the candidate objects and wait until the Deployment is Available.
+2. Apply the candidate objects and wait until the Deployment rollout of that
+   generation is complete.
 3. Smoke-probe a completion against the candidate Service (see the table above).
 4. On success, the stable Service selects that generation. The previous
    generation stays deployed so rollback can re-select it.
