@@ -51,10 +51,12 @@ closed when `Available` is not `True`, naming the condition and its cause
 an explicit conflict, not a silent overwrite.
 
 Apply renews the environment apply lease while a software executor runs, at a
-third of the shortest lease TTL it holds and at most every 10 s. A rollout may
-take longer than the lease TTL without losing its lease; the executor's own
-timeout bounds the step instead. When a renewal fails, apply tells the
-executor to stop, waits for it to return, and reports the lost lease; a
+quarter of the shortest lease TTL it holds and at most every 10 s. A rollout
+may take longer than the lease TTL without losing its lease; the executor's own
+timeout bounds the step instead. A renewal that fails, or takes longer than
+one interval, leaves at least half a TTL of the lease: apply tells the
+executor to stop, waits for it to return, and reports the lost lease after
+the step's own failure, if any; a
 cancelled apply stops it too. The in-process executor checks before every
 cluster call and bounds each call to 10 s, so it applies nothing more and
 returns within one call; other executors finish their current call. When a step fails and releasing the lease also fails, the error names the

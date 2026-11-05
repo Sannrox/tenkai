@@ -534,16 +534,34 @@ where
     Ok(guarded.map_err(|error| error.to_string()))
 }
 
-/// Renew at a third of the shortest TTL this apply holds, at most every 10 s,
-/// so two renewals can fail before any lease expires.
+/// Renew at a quarter of the shortest TTL this apply holds, at most every
+/// 10 s. A renewal that takes longer than one interval counts as failed, so
+/// the work is told to stop with at least half a TTL of the lease left.
 fn renewal_interval(ctx: &Ctx, lease: &EnvironmentLease) -> std::time::Duration {
     let shortest = ctx
         .held_execution_leases
         .iter()
         .map(|held| held.ttl_ms)
         .fold(lease.ttl_ms, i64::min);
-    let third = u64::try_from(shortest / 3).unwrap_or(0).max(10);
-    std::time::Duration::from_millis(third.min(10_000))
+    let quarter = u64::try_from(shortest / 4).unwrap_or(0).max(10);
+    std::time::Duration::from_millis(quarter.min(10_000))
+}
+
+/// One renewal, failing when it does not finish within `within`.
+async fn renew_within(
+    ctx: &mut Ctx,
+    lease: &EnvironmentLease,
+    within: std::time::Duration,
+) -> Result<()> {
+    match tokio::time::timeout(within, refresh_environment_lease(ctx, lease)).await {
+        Ok(renewed) => renewed,
+        Err(_) => Err(ExecutionFenceLost {
+            namespace: ENVIRONMENT_LEASE_NAMESPACE.into(),
+            key: lease.environment.clone(),
+            detail: format!("renewal did not finish within {} ms", within.as_millis()),
+        }
+        .into()),
+    }
 }
 
 /// Sets the stop flag when dropped.
@@ -557,16 +575,18 @@ impl Drop for StopOnDrop {
 
 /// Run a blocking software-executor call while renewing the environment lease
 /// (#982). A rollout may wait longer than the lease TTL; renewal keeps the
-/// lease for as long as the call runs. When a renewal fails, `work` sees its
-/// stop flag set and should return soon after. This waits for `work` to
-/// return either way, so no executor call outlives this function, then
-/// reports the lost fence as the outer error. If this future is dropped
-/// instead, the stop flag is set as well.
+/// lease for as long as the call runs. When a renewal fails or stalls, `work`
+/// sees its stop flag set and should return soon after. This waits for
+/// `work` to return either way, so no executor call outlives this function.
+/// If this future is dropped instead, the stop flag is set as well.
+///
+/// The inner result is the work's own. A lost fence is the outer error; when
+/// the work failed too, the outer error names the work's failure first.
 pub(super) async fn run_with_lease_renewal<T>(
     ctx: &mut Ctx,
     lease: &EnvironmentLease,
-    work: impl FnOnce(&AtomicBool) -> T + Send + 'static,
-) -> Result<T>
+    work: impl FnOnce(&AtomicBool) -> Result<T> + Send + 'static,
+) -> Result<Result<T>>
 where
     T: Send + 'static,
 {
@@ -578,7 +598,8 @@ where
         let stop = stop.clone();
         move || work(&stop)
     });
-    let mut renew = tokio::time::interval(renewal_interval(ctx, lease));
+    let interval = renewal_interval(ctx, lease);
+    let mut renew = tokio::time::interval(interval);
     renew.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     renew.tick().await;
     let mut lost = None;
@@ -586,7 +607,7 @@ where
         tokio::select! {
             joined = &mut running => break joined,
             _ = renew.tick(), if lost.is_none() => {
-                if let Err(error) = refresh_environment_lease(ctx, lease).await {
+                if let Err(error) = renew_within(ctx, lease, interval).await {
                     stop.store(true, Ordering::SeqCst);
                     lost = Some(error);
                 }
@@ -594,11 +615,20 @@ where
         }
     };
     let finished = finished.context("software executor task failed")?;
-    if let Some(error) = lost {
-        return Err(error);
+    let fenced = match lost {
+        Some(error) => Err(error),
+        None => renew_within(ctx, lease, interval).await,
+    };
+    match (fenced, finished) {
+        (Ok(()), finished) => Ok(finished),
+        (Err(fence), Ok(_)) => Err(fence),
+        (Err(fence), Err(failure)) => {
+            let failure =
+                crate::software_executor::sanitize_diagnostic_text(&format!("{failure:#}"));
+            let message = format!("{failure}; the apply lease was also lost: {fence}");
+            Err(fence.context(message))
+        }
     }
-    refresh_environment_lease(ctx, lease).await?;
-    Ok(finished)
 }
 
 pub(super) async fn run_mutation_command(
@@ -1012,14 +1042,15 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_wait_longer_than_the_lease_ttl_keeps_the_lease() {
         let mut ctx = context("renew-slow");
-        let lease = claim_environment_with_options(&mut ctx, "prod", "plan-1", 300, false)
+        let lease = claim_environment_with_options(&mut ctx, "prod", "plan-1", 1_000, false)
             .await
             .unwrap();
         let waited = run_with_lease_renewal(&mut ctx, &lease, |stop| {
-            std::thread::sleep(std::time::Duration::from_millis(1_200));
-            stop.load(Ordering::SeqCst)
+            std::thread::sleep(std::time::Duration::from_millis(2_500));
+            Ok(stop.load(Ordering::SeqCst))
         })
         .await
+        .unwrap()
         .unwrap();
         assert!(!waited, "a renewed lease must not stop the work");
         // Releasing proves this apply is still the fenced holder.
@@ -1041,15 +1072,16 @@ mod tests {
         let stopped = Arc::new(AtomicBool::new(false));
         let err = run_with_lease_renewal(&mut ctx, &lease, {
             let stopped = stopped.clone();
-            move |stop| {
+            move |stop| -> Result<()> {
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
                 while std::time::Instant::now() < deadline {
                     if stop.load(Ordering::SeqCst) {
                         stopped.store(true, Ordering::SeqCst);
-                        return;
+                        bail!("Deployment web cannot become Available: CrashLoopBackOff");
                     }
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }
+                Ok(())
             }
         })
         .await
@@ -1058,6 +1090,12 @@ mod tests {
         assert!(
             stopped.load(Ordering::SeqCst),
             "the work must see the stop before the lost fence is reported"
+        );
+        // The step's own failure leads; the lost lease follows it.
+        assert!(
+            err.to_string()
+                .starts_with("Deployment web cannot become Available: CrashLoopBackOff; the apply lease was also lost: lost tenkai/topology-availability lease ledger-ha"),
+            "{err}"
         );
     }
 
@@ -1074,6 +1112,7 @@ mod tests {
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }
                 stopped_tx.send(()).unwrap();
+                Ok(())
             })
             .await
         });
