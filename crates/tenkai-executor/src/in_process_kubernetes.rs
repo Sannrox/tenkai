@@ -545,7 +545,7 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
         let applied = Instant::now();
         let mut observations = Vec::new();
         for mut object in objects {
-            stop_if_lease_lost(stop, request)?;
+            stop_if_lease_lost(stop, request, &[], &[])?;
             stamp_ownership(&mut object, request);
             let observed = self.api.apply_server_side(
                 cluster_config,
@@ -579,8 +579,7 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
     /// Wait until every applied workload has rolled out the requested
     /// version. A workload that has not is diagnosed every
     /// [`DIAGNOSIS_INTERVAL`]: a terminal stall fails the wait at once, and
-    /// the timeout error names the last cause seen. `stop` ends the wait
-    /// when the caller lost its apply lease.
+    /// both the timeout and a lost-lease stop name the last cause seen.
     fn wait_for_health(
         &self,
         request: &SoftwareApplyRequest,
@@ -594,11 +593,12 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
         let mut next_diagnosis = started;
         let mut classifiers: HashMap<(String, String), StallClassifier> = HashMap::new();
         let mut causes: Vec<String> = Vec::new();
+        let mut last_failed: Vec<String> = Vec::new();
         loop {
             let mut failed = Vec::new();
             let mut stalled = Vec::new();
             for applied in applied {
-                stop_if_lease_lost(stop, request)?;
+                stop_if_lease_lost(stop, request, &last_failed, &causes)?;
                 let Some((live, rollout)) = self.api.observe_with_rollout(
                     cluster_config,
                     &request.environment,
@@ -633,12 +633,13 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
             if failed.is_empty() {
                 return Ok(());
             }
+            last_failed.clone_from(&failed);
             let now = Instant::now();
             if now >= next_diagnosis || now >= deadline {
                 next_diagnosis = now + DIAGNOSIS_INTERVAL;
-                causes.clear();
+                let mut next_causes = Vec::new();
                 for (kind, name) in stalled {
-                    stop_if_lease_lost(stop, request)?;
+                    stop_if_lease_lost(stop, request, &failed, &causes)?;
                     let stall = self.diagnose(
                         cluster_config,
                         &request.environment,
@@ -659,24 +660,21 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
                             failed.join("; ")
                         );
                     }
-                    causes.push(stall.cause);
+                    next_causes.push(stall.cause);
                 }
+                causes = next_causes;
             }
             if now >= deadline {
-                let cause = if causes.is_empty() {
-                    String::new()
-                } else {
-                    format!("; cause: {}", causes.join("; "))
-                };
                 bail!(
-                    "in-process kubernetes apply refused to complete for {}@{} in {} after {}s: {}{cause}",
+                    "in-process kubernetes apply refused to complete for {}@{} in {} after {}s: {}",
                     request.product,
                     request.version,
                     request.environment,
                     started.elapsed().as_secs(),
-                    failed.join("; ")
+                    health_wait_detail(&failed, &causes)
                 );
             }
+            stop_if_lease_lost(stop, request, &failed, &causes)?;
             wait_poll(interval);
             interval = next_health_poll(interval, self.poll_interval);
         }
@@ -1023,10 +1021,33 @@ fn incomplete_rollout(
     }
 }
 
+/// Last observed failures and diagnosed stall causes, formatted the way the
+/// timeout path already reports them.
+fn health_wait_detail(failed: &[String], causes: &[String]) -> String {
+    let failed_part = failed.join("; ");
+    if causes.is_empty() {
+        failed_part
+    } else if failed_part.is_empty() {
+        format!("cause: {}", causes.join("; "))
+    } else {
+        format!("{failed_part}; cause: {}", causes.join("; "))
+    }
+}
+
 /// Checked before every live API call, so a lost lease stops apply and the
-/// wait within one call ([`LIVE_CALL_TIMEOUT`]) plus one poll.
-fn stop_if_lease_lost(stop: &AtomicBool, request: &SoftwareApplyRequest) -> Result<()> {
-    if stop.load(Ordering::SeqCst) {
+/// wait within one call ([`LIVE_CALL_TIMEOUT`]) plus one poll. A wait that
+/// already diagnosed a stall names those causes the same way a timeout does.
+fn stop_if_lease_lost(
+    stop: &AtomicBool,
+    request: &SoftwareApplyRequest,
+    failed: &[String],
+    causes: &[String],
+) -> Result<()> {
+    if !stop.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    let detail = health_wait_detail(failed, causes);
+    if detail.is_empty() {
         bail!(
             "in-process kubernetes apply for {}@{} in {} stopped: the apply lease was lost",
             request.product,
@@ -1034,7 +1055,12 @@ fn stop_if_lease_lost(stop: &AtomicBool, request: &SoftwareApplyRequest) -> Resu
             request.environment
         );
     }
-    Ok(())
+    bail!(
+        "in-process kubernetes apply for {}@{} in {} stopped: the apply lease was lost: {detail}",
+        request.product,
+        request.version,
+        request.environment
+    );
 }
 
 fn next_health_poll(current: Duration, floor: Duration) -> Duration {
@@ -1864,6 +1890,7 @@ mod tests {
         applied_at: Mutex<Option<Instant>>,
         identity: Mutex<Option<(String, String, String)>>,
         entered_wait: Mutex<Option<std::sync::mpsc::SyncSender<()>>>,
+        diagnosed: Mutex<Option<std::sync::mpsc::SyncSender<()>>>,
         released: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     }
 
@@ -1875,8 +1902,14 @@ mod tests {
                 applied_at: Mutex::new(None),
                 identity: Mutex::new(None),
                 entered_wait: Mutex::new(None),
+                diagnosed: Mutex::new(None),
                 released: None,
             }
+        }
+
+        fn notify_on_diagnosis(self, tx: std::sync::mpsc::SyncSender<()>) -> Self {
+            *self.diagnosed.lock().expect("diagnosed") = Some(tx);
+            self
         }
 
         fn gated() -> (
@@ -1892,6 +1925,7 @@ mod tests {
                 applied_at: Mutex::new(None),
                 identity: Mutex::new(None),
                 entered_wait: Mutex::new(Some(entered_tx)),
+                diagnosed: Mutex::new(None),
                 released: Some(released.clone()),
             };
             (api, released, entered_rx)
@@ -1991,8 +2025,13 @@ mod tests {
             name: &str,
             kind: &str,
         ) -> Result<Option<WorkloadEvidence>> {
-            self.inner
-                .workload_evidence(cluster_config, namespace, name, kind)
+            let evidence = self
+                .inner
+                .workload_evidence(cluster_config, namespace, name, kind)?;
+            if let Some(tx) = self.diagnosed.lock().expect("diagnosed").take() {
+                let _ = tx.send(());
+            }
+            Ok(evidence)
         }
 
         fn workload_rollout(
@@ -2293,6 +2332,59 @@ mod tests {
             stopped.elapsed()
         );
         assert!(err.contains("the apply lease was lost"), "{err}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_lost_lease_names_the_last_cause_seen() {
+        let root = unique_root("stop-cause");
+        let _ = std::fs::remove_dir_all(&root);
+        let kubeconfig = write_deployment(&root, "1.0.0", 1);
+        let (api, _released, _entered) = DelayedReadyApi::gated();
+        api.inner.set_evidence(
+            "lab",
+            "edge",
+            "Deployment",
+            WorkloadEvidence {
+                workload: serde_json::json!({"kind": "Deployment", "metadata": {"name": "edge"}}),
+                pods: serde_json::from_value(serde_json::json!([{
+                    "metadata": {"name": "edge-7c9f-x2"},
+                    "status": {"conditions": [{"type": "PodScheduled", "status": "False",
+                        "reason": "Unschedulable", "message": "0/1 nodes are available"}]},
+                }]))
+                .unwrap(),
+                pods_unavailable: None,
+            },
+        );
+        let (diagnosed_tx, diagnosed_rx) = std::sync::mpsc::sync_channel(1);
+        let api = api.notify_on_diagnosis(diagnosed_tx);
+        let executor = InProcessKubernetesExecutor::new(api)
+            .with_timeout(Duration::from_secs(60))
+            .with_poll_interval(Duration::from_millis(10));
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let waiting = std::thread::spawn({
+            let stop = stop.clone();
+            let req = request(&root, &kubeconfig, "1.0.0");
+            move || executor.apply_until_stopped(&req, &stop)
+        });
+        diagnosed_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("wait diagnosed the stall");
+        let stopped = Instant::now();
+        stop.store(true, Ordering::SeqCst);
+        let err = waiting.join().unwrap().unwrap_err().to_string();
+        assert!(
+            stopped.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            stopped.elapsed()
+        );
+        assert!(err.contains("the apply lease was lost"), "{err}");
+        assert!(
+            err.contains(
+                "cause: pod edge-7c9f-x2 is pending: Unschedulable: 0/1 nodes are available"
+            ),
+            "{err}"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
