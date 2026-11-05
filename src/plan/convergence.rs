@@ -857,7 +857,7 @@ pub(super) fn validate_model_routing_rollout_order(
 
 /// Compute the steps that converge the environment on its subscribed channels.
 pub(super) async fn compute(ctx: &mut Ctx, env: &str) -> Result<Vec<Step>> {
-    let executors = crate::software_executor::SoftwareExecutors::from_process();
+    let executors = crate::software_executor::SoftwareExecutors::try_from_process()?;
     Ok(compute_snapshot(ctx, env, &executors).await?.1)
 }
 
@@ -882,7 +882,7 @@ pub(super) async fn create_for_held_target(
     product: &str,
     release: &str,
 ) -> Result<Plan> {
-    let executors = crate::software_executor::SoftwareExecutors::from_process();
+    let executors = crate::software_executor::SoftwareExecutors::try_from_process()?;
     let (inputs, steps) = compute_snapshot(ctx, env, &executors).await?;
     if !steps
         .iter()
@@ -899,7 +899,7 @@ pub(super) async fn create_for_held_target(
 /// and is not served to a runtime agent. Operator `create` still persists
 /// empty Computed plans so durable callers can reload the returned id.
 pub(super) async fn create_for_reconcile(ctx: &mut Ctx, env: &str) -> Result<Plan> {
-    let executors = crate::software_executor::SoftwareExecutors::from_process();
+    let executors = crate::software_executor::SoftwareExecutors::try_from_process()?;
     let (inputs, mut steps) =
         compute_snapshot_with_policy(ctx, env, ConvergencePolicy::reconcile(), &executors).await?;
     if steps.is_empty() {
@@ -911,7 +911,7 @@ pub(super) async fn create_for_reconcile(ctx: &mut Ctx, env: &str) -> Result<Pla
 /// Persist a reconcile-policy plan, even with zero steps. Held failed targets
 /// stay held, unlike operator `create`, which retries them.
 pub(super) async fn create_holding_failed_targets(ctx: &mut Ctx, env: &str) -> Result<Plan> {
-    let executors = crate::software_executor::SoftwareExecutors::from_process();
+    let executors = crate::software_executor::SoftwareExecutors::try_from_process()?;
     let (inputs, steps) =
         compute_snapshot_with_policy(ctx, env, ConvergencePolicy::reconcile(), &executors).await?;
     create_with_content(ctx, &executors, env, inputs, steps, None).await
@@ -920,7 +920,7 @@ pub(super) async fn create_holding_failed_targets(ctx: &mut Ctx, env: &str) -> R
 /// Persist an explicitly constructed operation, such as a rollback, as a plan.
 pub(super) async fn create_from_steps(ctx: &mut Ctx, env: &str, steps: Vec<Step>) -> Result<Plan> {
     admit_preview_environment(ctx, env).await?;
-    let executors = crate::software_executor::SoftwareExecutors::from_process();
+    let executors = crate::software_executor::SoftwareExecutors::try_from_process()?;
     create_with_content(ctx, &executors, env, Vec::new(), steps, None).await
 }
 
@@ -931,7 +931,7 @@ pub(super) async fn create_from_steps_with_recovery(
     reason: String,
 ) -> Result<Plan> {
     admit_preview_environment(ctx, env).await?;
-    let executors = crate::software_executor::SoftwareExecutors::from_process();
+    let executors = crate::software_executor::SoftwareExecutors::try_from_process()?;
     create_with_content(ctx, &executors, env, Vec::new(), steps, Some(reason)).await
 }
 

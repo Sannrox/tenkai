@@ -28,7 +28,7 @@ use tenkai::reconciler::{Config as ReconcilerConfig, Reconciler};
 use tenkai::runtime_capabilities::{
     RuntimeRequirements, community_auth_capabilities, community_sqlite_profile,
     enterprise_auth_capabilities, host_executor_capabilities, shell_executor_capabilities,
-    validate_runtime_capabilities,
+    software_executor_default_capabilities, validate_runtime_capabilities,
 };
 use tenkai::storage::{OperationalStore, SqliteStore};
 use tenkai::tenant_store::TenantOperationalStore;
@@ -568,6 +568,10 @@ async fn main() -> Result<()> {
         tenkai::fenced_mutation::executor_guard_executable()
             .context("--require-executor: the shell executor is unavailable")?;
     }
+    // An unknown or uninstalled TENKAI_SOFTWARE_EXECUTOR must not fall back to
+    // shell for undeclared releases. Refuse before binding.
+    let software_executors = tenkai::software_executor::SoftwareExecutors::try_from_process()
+        .context("TENKAI_SOFTWARE_EXECUTOR")?;
 
     // Bind and serve /healthz before SqliteStore::open so a large legacy import
     // cannot delay the listener (#516). /readyz stays 503 until the store is open.
@@ -809,6 +813,14 @@ async fn main() -> Result<()> {
         Ok(None) => {}
         Err(error) => eprintln!("tenkai-server warning: host executor unavailable: {error:#}"),
     }
+    capabilities
+        .components
+        .push(software_executor_default_capabilities(
+            software_executors.effective_kind(None).map_or(
+                "fake",
+                tenkai::software_executor::SoftwareExecutorKind::as_str,
+            ),
+        ));
 
     let requirements = RuntimeRequirements {
         tenant_mode: cli.tenant_mode,

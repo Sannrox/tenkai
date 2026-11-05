@@ -106,6 +106,12 @@ unavailable`, omits `shell_executor:v1` from `/readyz` capabilities, and the
 first shell-executor apply fails with the same instruction. Pass
 `--require-executor` to refuse to start instead.
 
+`TENKAI_SOFTWARE_EXECUTOR` is the default for releases that omit
+`[deploy] executor`. Unset (or `shell`) keeps the shell path. An unknown
+name, or a known name whose adapter is not installed, is refused at start
+with that name; `/readyz` lists `software_executor:<kind>` for the default
+that actually runs.
+
 A reference systemd unit keeps secrets in an `EnvironmentFile` (never argv),
 listens on loopback behind a TLS proxy, and relies on the default SIGTERM stop:
 

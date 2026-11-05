@@ -1633,7 +1633,8 @@ impl ManagementOperations {
         let actor = &context.audit_principal();
         self.audit(actor, "catalog.unsubscribe.requested")?;
         let mut ctx = self.catalog_ctx(&context)?;
-        let executors = crate::software_executor::SoftwareExecutors::from_process();
+        let executors = crate::software_executor::SoftwareExecutors::try_from_process()
+            .map_err(map_catalog_error)?;
         let expected = request.expected_generation;
         let message = crate::environment::unsubscribe(
             &mut ctx,
@@ -2410,7 +2411,8 @@ impl ManagementOperations {
                     trust_roots: &files.trust_roots,
                     requester: Some(context.principal_id()),
                 },
-                software_executors: crate::software_executor::SoftwareExecutors::from_process(),
+                software_executors: crate::software_executor::SoftwareExecutors::try_from_process()
+                    .map_err(map_plan_lifecycle_error)?,
                 model_runtime_executor:
                     crate::model_runtime::selected_model_runtime_executor_factory(),
                 worker_lifecycle: None,
