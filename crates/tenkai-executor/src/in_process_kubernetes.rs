@@ -955,21 +955,33 @@ async fn live_workload_evidence(
         return Ok(None);
     };
     let workload = serde_json::to_value(&object).context("encoding workload status")?;
-    let pods = match current_revision_selector(&client, namespace, kind, &workload).await? {
-        Some(selector) => {
-            kube::Api::<Pod>::namespaced(client, namespace)
-                .list(
-                    &kube::api::ListParams::default()
-                        .labels(&selector)
-                        .limit(DIAGNOSED_PODS),
-                )
-                .await
-                .with_context(|| format!("listing pods of {kind}/{name} in {namespace}"))?
-                .items
-        }
-        None => Vec::new(),
+    // Pods only add detail; the workload's conditions are classified even
+    // when the pods cannot be read.
+    let pods = match current_revision_selector(&client, namespace, kind, &workload).await {
+        Ok(Some(selector)) => kube::Api::<Pod>::namespaced(client, namespace)
+            .list(
+                &kube::api::ListParams::default()
+                    .labels(&selector)
+                    .limit(DIAGNOSED_PODS),
+            )
+            .await
+            .map(|pods| pods.items)
+            .with_context(|| format!("listing pods of {kind}/{name} in {namespace}")),
+        Ok(None) => Ok(Vec::new()),
+        Err(error) => Err(error),
     };
-    Ok(Some(WorkloadEvidence { workload, pods }))
+    Ok(Some(match pods {
+        Ok(pods) => WorkloadEvidence {
+            workload,
+            pods,
+            pods_unavailable: None,
+        },
+        Err(error) => WorkloadEvidence {
+            workload,
+            pods: Vec::new(),
+            pods_unavailable: Some(format!("{error:#}")),
+        },
+    }))
 }
 
 /// Label selector for the pods of the workload's current revision: the
@@ -1672,6 +1684,7 @@ mod tests {
             WorkloadEvidence {
                 workload: evidence,
                 pods: serde_json::from_value(pods).unwrap(),
+                pods_unavailable: None,
             },
         );
         (api, kubeconfig)
@@ -1785,6 +1798,7 @@ mod tests {
                         "state": {"waiting": {"reason": "ContainerCreating"}}}]},
                 }]))
                 .unwrap(),
+                pods_unavailable: None,
             },
         );
         InProcessKubernetesExecutor::new(&api)

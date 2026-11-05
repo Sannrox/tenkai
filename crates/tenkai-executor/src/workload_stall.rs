@@ -29,6 +29,9 @@ pub struct WorkloadEvidence {
     /// Pods of the workload's current revision. Pods of an older revision are
     /// left out, so a crash loop that the rollout replaces does not fail it.
     pub pods: Vec<Pod>,
+    /// Why the pods could not be read, for example a missing `list`
+    /// permission. The workload's own conditions are still classified.
+    pub pods_unavailable: Option<String>,
 }
 
 /// What the cluster says is holding a workload back.
@@ -63,6 +66,15 @@ impl StallClassifier {
         now: Instant,
     ) -> Option<Stall> {
         let mut signals = workload_signals(kind, name, &evidence.workload);
+        if let Some(error) = &evidence.pods_unavailable {
+            signals.push(Signal {
+                text: format!(
+                    "pods of {kind} {name} could not be read{}",
+                    message_suffix(Some(error))
+                ),
+                terminal: false,
+            });
+        }
         let mut pulling = Vec::new();
         for pod in &evidence.pods {
             signals.extend(self.pod_signals(pod, now, &mut pulling));
@@ -291,6 +303,7 @@ mod tests {
         WorkloadEvidence {
             workload: deployment(conditions),
             pods,
+            pods_unavailable: None,
         }
     }
 
@@ -391,7 +404,7 @@ mod tests {
             "web",
             &WorkloadEvidence {
                 workload: stale,
-                pods: Vec::new(),
+                ..WorkloadEvidence::default()
             },
             Instant::now(),
         );
@@ -483,6 +496,39 @@ mod tests {
             stall.cause.contains(
                 "pod web-2 container app CreateContainerConfigError: secret \"api-token\" not found"
             ),
+            "{}",
+            stall.cause
+        );
+    }
+
+    #[test]
+    fn unreadable_pods_still_classify_the_workload_conditions() {
+        let refused = json!([
+            {"type": "ReplicaFailure", "status": "True", "reason": "FailedCreate",
+             "message": "admission webhook \"policy.example\" denied the request: image not signed"},
+        ]);
+        let stall = StallClassifier::default()
+            .classify(
+                "Deployment",
+                "web",
+                &WorkloadEvidence {
+                    workload: deployment(refused),
+                    pods: Vec::new(),
+                    pods_unavailable: Some("pods is forbidden: cannot list resource".into()),
+                },
+                Instant::now(),
+            )
+            .unwrap();
+        assert!(stall.terminal, "{stall:?}");
+        assert!(
+            stall.cause.contains("denied the request: image not signed"),
+            "{}",
+            stall.cause
+        );
+        assert!(
+            stall
+                .cause
+                .contains("pods of Deployment web could not be read: pods is forbidden"),
             "{}",
             stall.cause
         );

@@ -547,21 +547,27 @@ fn renewal_interval(ctx: &Ctx, lease: &EnvironmentLease) -> std::time::Duration 
     std::time::Duration::from_millis(quarter.min(10_000))
 }
 
-/// One renewal, failing when it does not finish within `within`.
+/// One renewal, failing as a lost fence when it errs or does not finish
+/// within `within`.
 async fn renew_within(
     ctx: &mut Ctx,
     lease: &EnvironmentLease,
     within: std::time::Duration,
 ) -> Result<()> {
-    match tokio::time::timeout(within, refresh_environment_lease(ctx, lease)).await {
-        Ok(renewed) => renewed,
-        Err(_) => Err(ExecutionFenceLost {
-            namespace: ENVIRONMENT_LEASE_NAMESPACE.into(),
-            key: lease.environment.clone(),
-            detail: format!("renewal did not finish within {} ms", within.as_millis()),
-        }
-        .into()),
+    // Once the work is told to stop, every failed renewal is a lost fence,
+    // so the step takes the fence-loss exit instead of recovery.
+    let detail = match tokio::time::timeout(within, refresh_environment_lease(ctx, lease)).await {
+        Ok(Ok(())) => return Ok(()),
+        Ok(Err(error)) if is_execution_fence_lost(&error) => return Err(error),
+        Ok(Err(error)) => format!("renewal failed: {error:#}"),
+        Err(_) => format!("renewal did not finish within {} ms", within.as_millis()),
+    };
+    Err(ExecutionFenceLost {
+        namespace: ENVIRONMENT_LEASE_NAMESPACE.into(),
+        key: lease.environment.clone(),
+        detail,
     }
+    .into())
 }
 
 /// Sets the stop flag when dropped.
