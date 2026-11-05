@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use k8s_openapi::api::core::v1::{ContainerStatus, Pod};
 use serde_json::Value;
+use tenkai::software_executor::sanitize_diagnostic_text;
 
 /// A crash-looping container fails the step once it has restarted this often.
 pub(crate) const CRASH_LOOP_RESTARTS: i32 = 3;
@@ -252,22 +253,19 @@ fn last_termination(container: &ContainerStatus) -> String {
     )
 }
 
-/// `": <message>"`, single line and cut to [`MAX_MESSAGE_CHARS`], or empty.
+/// `": <message>"`, single line, sanitized like other deploy diagnostics,
+/// and cut to [`MAX_MESSAGE_CHARS`], or empty. A container's termination
+/// message is application output and may carry credentials.
 fn message_suffix(message: Option<&str>) -> String {
     let Some(message) = message.map(str::trim).filter(|message| !message.is_empty()) else {
         return String::new();
     };
-    let mut line: String = message
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(MAX_MESSAGE_CHARS)
-        .collect();
-    if message.chars().count() > MAX_MESSAGE_CHARS {
-        line.push('…');
+    let line = sanitize_diagnostic_text(&message.split_whitespace().collect::<Vec<_>>().join(" "));
+    let mut cut: String = line.chars().take(MAX_MESSAGE_CHARS).collect();
+    if line.chars().count() > MAX_MESSAGE_CHARS && !cut.ends_with('…') {
+        cut.push('…');
     }
-    format!(": {line}")
+    format!(": {cut}")
 }
 
 #[cfg(test)]
@@ -532,6 +530,28 @@ mod tests {
             "{}",
             stall.cause
         );
+    }
+
+    #[test]
+    fn termination_messages_are_sanitized() {
+        let leaking = evidence(
+            progressing(),
+            vec![pod(
+                "web-1",
+                json!({"containerStatuses": [{
+                    "name": "app",
+                    "restartCount": 5,
+                    "state": {"waiting": {"reason": "CrashLoopBackOff"}},
+                    "lastState": {"terminated": {"exitCode": 1,
+                        "message": "connect failed: DATABASE_PASSWORD=hunter2"}},
+                }]}),
+            )],
+        );
+        let stall = StallClassifier::default()
+            .classify("Deployment", "web", &leaking, Instant::now())
+            .unwrap();
+        assert!(!stall.cause.contains("hunter2"), "{}", stall.cause);
+        assert!(stall.cause.contains("connect failed"), "{}", stall.cause);
     }
 
     #[test]

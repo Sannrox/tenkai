@@ -1006,18 +1006,12 @@ async fn current_revision_selector(
     if observed.is_none() || observed < generation {
         return Ok(None);
     }
-    let Some(match_labels) = workload
-        .pointer("/spec/selector/matchLabels")
-        .and_then(Value::as_object)
-        .filter(|labels| !labels.is_empty())
+    let Some(selector) = workload
+        .pointer("/spec/selector")
+        .and_then(label_selector_query)
     else {
         return Ok(None);
     };
-    let selector = match_labels
-        .iter()
-        .filter_map(|(key, value)| Some(format!("{key}={}", value.as_str()?)))
-        .collect::<Vec<_>>()
-        .join(",");
     let revision = match kind {
         "Deployment" => {
             const REVISION: &str = "/metadata/annotations/deployment.kubernetes.io~1revision";
@@ -1057,6 +1051,44 @@ async fn current_revision_selector(
         _ => None,
     };
     Ok(revision.map(|revision| format!("{selector},{revision}")))
+}
+
+/// A workload's `spec.selector` as a label selector query, with both
+/// `matchLabels` and `matchExpressions`. `None` when it selects nothing
+/// expressible, so no pods are read.
+fn label_selector_query(selector: &Value) -> Option<String> {
+    let labels = selector
+        .get("matchLabels")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .map(|(key, value)| Some(format!("{key}={}", value.as_str()?)));
+    let expressions = selector
+        .get("matchExpressions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|expression| {
+            let key = expression.get("key")?.as_str()?;
+            let values = || -> Option<String> {
+                let values = expression
+                    .get("values")?
+                    .as_array()?
+                    .iter()
+                    .map(|value| value.as_str())
+                    .collect::<Option<Vec<_>>>()?;
+                Some(values.join(","))
+            };
+            Some(match expression.get("operator")?.as_str()? {
+                "In" => format!("{key} in ({})", values()?),
+                "NotIn" => format!("{key} notin ({})", values()?),
+                "Exists" => key.to_string(),
+                "DoesNotExist" => format!("!{key}"),
+                _ => return None,
+            })
+        });
+    let terms = labels.chain(expressions).collect::<Option<Vec<_>>>()?;
+    (!terms.is_empty()).then(|| terms.join(","))
 }
 
 async fn ensure_namespace(client: &kube::Client, namespace: &str) -> Result<()> {
@@ -1706,6 +1738,28 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(root);
         format!("{err:#}")
+    }
+
+    #[test]
+    fn label_selectors_keep_match_expressions() {
+        let selector = serde_json::json!({
+            "matchLabels": {"app": "edge"},
+            "matchExpressions": [
+                {"key": "tier", "operator": "In", "values": ["web", "api"]},
+                {"key": "canary", "operator": "DoesNotExist"},
+            ],
+        });
+        assert_eq!(
+            label_selector_query(&selector).as_deref(),
+            Some("app=edge,tier in (web,api),!canary")
+        );
+        assert_eq!(label_selector_query(&serde_json::json!({})), None);
+        assert_eq!(
+            label_selector_query(&serde_json::json!({"matchExpressions": [
+                {"key": "tier", "operator": "Unknown"},
+            ]})),
+            None
+        );
     }
 
     #[test]

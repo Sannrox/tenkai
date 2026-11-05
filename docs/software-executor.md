@@ -59,7 +59,9 @@ executor to stop, waits for it to return, and reports the lost lease after
 the step's own failure, if any; a
 cancelled apply stops it too. The in-process executor checks before every
 cluster call and bounds each call to 10 s, so it applies nothing more and
-returns within one call; other executors finish their current call. When a step fails and releasing the lease also fails, the error names the
+returns within one call; other executors finish their current call. A
+kubeconfig `exec` credential helper runs synchronously inside the cluster
+client, so a helper that hangs holds that call until it returns. When a step fails and releasing the lease also fails, the error names the
 step failure first and the release failure after it.
 
 ## Per-release selection
