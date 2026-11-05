@@ -199,7 +199,10 @@ fn failing_rollout_names_the_image_pull_failure() {
         err.contains("ImagePullBackOff") || err.contains("ErrImagePull"),
         "{err}"
     );
-    assert!(err.contains("Available="), "{err}");
+    assert!(
+        err.contains("rollout incomplete") || err.contains("cannot become Available"),
+        "{err}"
+    );
 }
 
 #[test]

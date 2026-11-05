@@ -55,14 +55,12 @@ pub struct WorkloadObservation {
     pub field_manager: String,
     pub version_label: Option<String>,
     pub conditions: Vec<WorkloadCondition>,
-    /// Live generation and replica/revision counts used to wait for the
-    /// applied revision, not merely `Available` of a previous ReplicaSet.
-    pub rollout: WorkloadRollout,
 }
 
 /// Workload status the wait uses to decide whether the applied revision is
 /// the one serving. Counts are `None` until the API has populated them.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct WorkloadRollout {
     pub generation: Option<i64>,
     pub observed_generation: Option<i64>,
@@ -106,6 +104,33 @@ pub trait ClusterApplyApi: Send + Sync {
         let _ = (cluster_config, namespace, name, kind);
         Ok(None)
     }
+    /// Generation and replica/revision counts for the applied-revision wait.
+    /// `None` when the object is absent or this adapter has no rollout data;
+    /// a workload wait then fails closed instead of succeeding on `Available`.
+    fn workload_rollout(
+        &self,
+        cluster_config: &Path,
+        namespace: &str,
+        name: &str,
+        kind: &str,
+    ) -> Result<Option<WorkloadRollout>> {
+        let _ = (cluster_config, namespace, name, kind);
+        Ok(None)
+    }
+    /// Observation and rollout from one live read so identity and replica
+    /// counts cannot be mixed across revisions. The default does not pair a
+    /// second read; missing rollout data fails the wait closed.
+    fn observe_with_rollout(
+        &self,
+        cluster_config: &Path,
+        namespace: &str,
+        name: &str,
+        kind: &str,
+    ) -> Result<Option<(WorkloadObservation, Option<WorkloadRollout>)>> {
+        Ok(self
+            .observe(cluster_config, namespace, name, kind)?
+            .map(|observation| (observation, None)))
+    }
 }
 
 impl<T: ClusterApplyApi + ?Sized> ClusterApplyApi for &T {
@@ -141,6 +166,26 @@ impl<T: ClusterApplyApi + ?Sized> ClusterApplyApi for &T {
         kind: &str,
     ) -> Result<Option<WorkloadEvidence>> {
         (**self).workload_evidence(cluster_config, namespace, name, kind)
+    }
+
+    fn workload_rollout(
+        &self,
+        cluster_config: &Path,
+        namespace: &str,
+        name: &str,
+        kind: &str,
+    ) -> Result<Option<WorkloadRollout>> {
+        (**self).workload_rollout(cluster_config, namespace, name, kind)
+    }
+
+    fn observe_with_rollout(
+        &self,
+        cluster_config: &Path,
+        namespace: &str,
+        name: &str,
+        kind: &str,
+    ) -> Result<Option<(WorkloadObservation, Option<WorkloadRollout>)>> {
+        (**self).observe_with_rollout(cluster_config, namespace, name, kind)
     }
 }
 
@@ -249,7 +294,7 @@ impl ClusterApplyApi for MemoryClusterApi {
                 field_manager: field_manager.into(),
                 object: object.clone(),
                 conditions: conditions.clone(),
-                rollout: rollout.clone(),
+                rollout,
             },
         );
         Ok(WorkloadObservation {
@@ -258,7 +303,6 @@ impl ClusterApplyApi for MemoryClusterApi {
             field_manager: field_manager.into(),
             version_label: object_version_label(object),
             conditions,
-            rollout,
         })
     }
 
@@ -281,7 +325,6 @@ impl ClusterApplyApi for MemoryClusterApi {
                 field_manager: stored.field_manager.clone(),
                 version_label: object_version_label(&stored.object),
                 conditions: stored.conditions.clone(),
-                rollout: stored.rollout.clone(),
             }))
     }
 
@@ -312,6 +355,48 @@ impl ClusterApplyApi for MemoryClusterApi {
             .expect("evidence mutex")
             .get(&object_key(namespace, kind, name))
             .cloned())
+    }
+
+    fn workload_rollout(
+        &self,
+        _cluster_config: &Path,
+        namespace: &str,
+        name: &str,
+        kind: &str,
+    ) -> Result<Option<WorkloadRollout>> {
+        Ok(self
+            .objects
+            .lock()
+            .expect("cluster mutex")
+            .get(&object_key(namespace, kind, name))
+            .map(|stored| stored.rollout.clone()))
+    }
+
+    fn observe_with_rollout(
+        &self,
+        _cluster_config: &Path,
+        namespace: &str,
+        name: &str,
+        kind: &str,
+    ) -> Result<Option<(WorkloadObservation, Option<WorkloadRollout>)>> {
+        let key = object_key(namespace, kind, name);
+        Ok(self
+            .objects
+            .lock()
+            .expect("cluster mutex")
+            .get(&key)
+            .map(|stored| {
+                (
+                    WorkloadObservation {
+                        kind: kind.into(),
+                        name: name.into(),
+                        field_manager: stored.field_manager.clone(),
+                        version_label: object_version_label(&stored.object),
+                        conditions: stored.conditions.clone(),
+                    },
+                    Some(stored.rollout.clone()),
+                )
+            }))
     }
 }
 
@@ -357,6 +442,31 @@ impl ClusterApplyApi for LiveKubeApi {
         kind: &str,
     ) -> Result<Option<WorkloadEvidence>> {
         block_on(bounded(live_workload_evidence(
+            cluster_config,
+            namespace,
+            name,
+            kind,
+        )))
+    }
+
+    fn workload_rollout(
+        &self,
+        cluster_config: &Path,
+        namespace: &str,
+        name: &str,
+        kind: &str,
+    ) -> Result<Option<WorkloadRollout>> {
+        block_on(bounded(live_rollout(cluster_config, namespace, name, kind)))
+    }
+
+    fn observe_with_rollout(
+        &self,
+        cluster_config: &Path,
+        namespace: &str,
+        name: &str,
+        kind: &str,
+    ) -> Result<Option<(WorkloadObservation, Option<WorkloadRollout>)>> {
+        block_on(bounded(live_observe_with_rollout(
             cluster_config,
             namespace,
             name,
@@ -489,7 +599,7 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
             let mut stalled = Vec::new();
             for applied in applied {
                 stop_if_lease_lost(stop, request)?;
-                let Some(live) = self.api.observe(
+                let Some((live, rollout)) = self.api.observe_with_rollout(
                     cluster_config,
                     &request.environment,
                     &applied.name,
@@ -503,7 +613,7 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
                     continue;
                 };
                 let mut ready = true;
-                if let Some(error) = disagreeing_condition(&live) {
+                if let Some(error) = disagreeing_condition(&live, rollout.as_ref()) {
                     failed.push(error);
                     ready = false;
                 }
@@ -674,21 +784,23 @@ impl<A: ClusterApplyApi> SoftwareExecutor for InProcessKubernetesExecutor<A> {
                     continue;
                 }
                 saw_workload = true;
-                match self
-                    .api
-                    .observe(cluster_config, &request.environment, &name, &kind)?
-                {
+                match self.api.observe_with_rollout(
+                    cluster_config,
+                    &request.environment,
+                    &name,
+                    &kind,
+                )? {
                     None => return Ok(SoftwareObserveStatus::Absent),
-                    Some(live) if disagreeing_condition(&live).is_some() => {
-                        return Ok(SoftwareObserveStatus::Mismatched);
-                    }
-                    Some(live)
+                    Some((live, rollout)) => {
+                        if disagreeing_condition(&live, rollout.as_ref()).is_some() {
+                            return Ok(SoftwareObserveStatus::Mismatched);
+                        }
                         if live.version_label.as_deref()
-                            != Some(k8s_label_value(&request.version).as_str()) =>
-                    {
-                        return Ok(SoftwareObserveStatus::Mismatched);
+                            != Some(k8s_label_value(&request.version).as_str())
+                        {
+                            return Ok(SoftwareObserveStatus::Mismatched);
+                        }
                     }
-                    Some(_) => {}
                 }
             }
         }
@@ -801,11 +913,14 @@ fn healthy_deployment_conditions() -> Vec<WorkloadCondition> {
     ]
 }
 
-pub(crate) fn disagreeing_condition(observation: &WorkloadObservation) -> Option<String> {
+pub(crate) fn disagreeing_condition(
+    observation: &WorkloadObservation,
+    rollout: Option<&WorkloadRollout>,
+) -> Option<String> {
     if !is_workload(&observation.kind) {
         return None;
     }
-    if let Some(error) = incomplete_rollout(observation) {
+    if let Some(error) = incomplete_rollout(observation, rollout) {
         return Some(error);
     }
     if observation.kind == "Deployment" {
@@ -840,10 +955,15 @@ pub(crate) fn disagreeing_condition(observation: &WorkloadObservation) -> Option
 
 /// Why the applied revision is not the one serving yet. `Available=True` is
 /// not enough: an upgrade keeps that condition on the old ReplicaSet.
-fn incomplete_rollout(observation: &WorkloadObservation) -> Option<String> {
+fn incomplete_rollout(
+    observation: &WorkloadObservation,
+    rollout: Option<&WorkloadRollout>,
+) -> Option<String> {
     let kind = observation.kind.as_str();
     let name = observation.name.as_str();
-    let rollout = &observation.rollout;
+    let Some(rollout) = rollout else {
+        return Some(format!("{kind} {name} rollout status is unavailable"));
+    };
     match (rollout.observed_generation, rollout.generation) {
         (Some(observed), Some(generation)) if observed >= generation => {}
         (observed, generation) => {
@@ -1015,15 +1135,56 @@ async fn live_observe(
     name: &str,
     kind: &str,
 ) -> Result<Option<WorkloadObservation>> {
+    Ok(
+        live_observe_with_rollout(cluster_config, namespace, name, kind)
+            .await?
+            .map(|(observation, _)| observation),
+    )
+}
+
+async fn live_observe_with_rollout(
+    cluster_config: &Path,
+    namespace: &str,
+    name: &str,
+    kind: &str,
+) -> Result<Option<(WorkloadObservation, Option<WorkloadRollout>)>> {
     let client = live_client(cluster_config).await?;
     let api_version = builtin_api_version(kind)?;
     let api = dynamic_api(client, namespace, kind, api_version)?;
     match api.get_opt(name).await {
-        Ok(Some(object)) => Ok(Some(observation_from_dynamic(&object, kind, name))),
+        Ok(Some(object)) => {
+            let value = serde_json::to_value(&object).unwrap_or(Value::Null);
+            Ok(Some((
+                observation_from_dynamic(&object, kind, name),
+                Some(rollout_from_value(kind, &value)),
+            )))
+        }
         Ok(None) => Ok(None),
         Err(error) if is_not_found(&error) => Ok(None),
         Err(error) => Err(anyhow::anyhow!(
             "observing {kind}/{name} in {namespace}: {error}"
+        )),
+    }
+}
+
+async fn live_rollout(
+    cluster_config: &Path,
+    namespace: &str,
+    name: &str,
+    kind: &str,
+) -> Result<Option<WorkloadRollout>> {
+    let client = live_client(cluster_config).await?;
+    let api_version = builtin_api_version(kind)?;
+    let api = dynamic_api(client, namespace, kind, api_version)?;
+    match api.get_opt(name).await {
+        Ok(Some(object)) => {
+            let value = serde_json::to_value(&object).unwrap_or(Value::Null);
+            Ok(Some(rollout_from_value(kind, &value)))
+        }
+        Ok(None) => Ok(None),
+        Err(error) if is_not_found(&error) => Ok(None),
+        Err(error) => Err(anyhow::anyhow!(
+            "reading rollout for {kind}/{name} in {namespace}: {error}"
         )),
     }
 }
@@ -1307,7 +1468,6 @@ fn observation_from_dynamic(
         field_manager: managed_field_manager(&value).unwrap_or_else(|| FIELD_MANAGER.into()),
         version_label: object_version_label(&value),
         conditions: conditions_from_value(&value),
-        rollout: rollout_from_value(kind, &value),
     }
 }
 
@@ -1783,7 +1943,6 @@ mod tests {
             *self.applied_at.lock().expect("applied_at") = Some(Instant::now());
             Ok(WorkloadObservation {
                 conditions: unavailable_conditions(),
-                rollout: incomplete_rollout_status(&observed.kind, object),
                 ..observed
             })
         }
@@ -1834,6 +1993,31 @@ mod tests {
         ) -> Result<Option<WorkloadEvidence>> {
             self.inner
                 .workload_evidence(cluster_config, namespace, name, kind)
+        }
+
+        fn workload_rollout(
+            &self,
+            cluster_config: &Path,
+            namespace: &str,
+            name: &str,
+            kind: &str,
+        ) -> Result<Option<WorkloadRollout>> {
+            self.inner
+                .workload_rollout(cluster_config, namespace, name, kind)
+        }
+
+        fn observe_with_rollout(
+            &self,
+            cluster_config: &Path,
+            namespace: &str,
+            name: &str,
+            kind: &str,
+        ) -> Result<Option<(WorkloadObservation, Option<WorkloadRollout>)>> {
+            // Apply the same delayed-ready mutation as `observe`, then read
+            // observation and rollout from one stored snapshot.
+            let _ = self.observe(cluster_config, namespace, name, kind)?;
+            self.inner
+                .observe_with_rollout(cluster_config, namespace, name, kind)
         }
     }
 
@@ -2196,6 +2380,20 @@ mod tests {
     }
 
     #[test]
+    fn missing_rollout_data_is_not_success() {
+        let observation = WorkloadObservation {
+            kind: "Deployment".into(),
+            name: "edge".into(),
+            field_manager: FIELD_MANAGER.into(),
+            version_label: Some("2.0.0".into()),
+            conditions: healthy_deployment_conditions(),
+        };
+        let err =
+            disagreeing_condition(&observation, None).expect("missing rollout is not success");
+        assert!(err.contains("rollout status is unavailable"), "{err}");
+    }
+
+    #[test]
     fn a_scale_to_zero_deployment_completes_when_status_omits_zero_counts() {
         let observation = WorkloadObservation {
             kind: "Deployment".into(),
@@ -2203,18 +2401,18 @@ mod tests {
             field_manager: FIELD_MANAGER.into(),
             version_label: Some("2.0.0".into()),
             conditions: healthy_deployment_conditions(),
-            rollout: WorkloadRollout {
-                generation: Some(2),
-                observed_generation: Some(2),
-                desired_replicas: Some(0),
-                replicas: None,
-                updated_replicas: None,
-                ready_replicas: None,
-                available_replicas: None,
-                ..WorkloadRollout::default()
-            },
         };
-        assert_eq!(disagreeing_condition(&observation), None);
+        let rollout = WorkloadRollout {
+            generation: Some(2),
+            observed_generation: Some(2),
+            desired_replicas: Some(0),
+            replicas: None,
+            updated_replicas: None,
+            ready_replicas: None,
+            available_replicas: None,
+            ..WorkloadRollout::default()
+        };
+        assert_eq!(disagreeing_condition(&observation, Some(&rollout)), None);
     }
 
     #[test]
@@ -2225,15 +2423,15 @@ mod tests {
             field_manager: FIELD_MANAGER.into(),
             version_label: Some("2.0.0".into()),
             conditions: healthy_deployment_conditions(),
-            rollout: WorkloadRollout {
-                generation: Some(2),
-                observed_generation: Some(1),
-                desired_replicas: Some(0),
-                ..WorkloadRollout::default()
-            },
         };
-        let err =
-            disagreeing_condition(&observation).expect("unobserved generation is not success");
+        let rollout = WorkloadRollout {
+            generation: Some(2),
+            observed_generation: Some(1),
+            desired_replicas: Some(0),
+            ..WorkloadRollout::default()
+        };
+        let err = disagreeing_condition(&observation, Some(&rollout))
+            .expect("unobserved generation is not success");
         assert!(err.contains("observedGeneration"), "{err}");
     }
 
@@ -2245,18 +2443,19 @@ mod tests {
             field_manager: FIELD_MANAGER.into(),
             version_label: Some("2.0.0".into()),
             conditions: healthy_deployment_conditions(),
-            rollout: WorkloadRollout {
-                generation: Some(2),
-                observed_generation: Some(2),
-                desired_replicas: Some(1),
-                replicas: Some(1),
-                updated_replicas: Some(0),
-                ready_replicas: Some(1),
-                available_replicas: Some(1),
-                ..WorkloadRollout::default()
-            },
         };
-        let err = disagreeing_condition(&observation).expect("old replicas are not success");
+        let rollout = WorkloadRollout {
+            generation: Some(2),
+            observed_generation: Some(2),
+            desired_replicas: Some(1),
+            replicas: Some(1),
+            updated_replicas: Some(0),
+            ready_replicas: Some(1),
+            available_replicas: Some(1),
+            ..WorkloadRollout::default()
+        };
+        let err = disagreeing_condition(&observation, Some(&rollout))
+            .expect("old replicas are not success");
         assert!(err.contains("0/1 updated"), "{err}");
     }
 
@@ -2270,14 +2469,14 @@ mod tests {
             .with_poll_interval(Duration::from_millis(10))
             .apply(&request(&root, &kubeconfig, "1.0.0"))
             .expect("StatefulSet rollout is waited on");
-        let live = api
+        let rollout = api
             .inner
-            .observe(Path::new("/unused"), "lab", "db", "StatefulSet")
+            .workload_rollout(Path::new("/unused"), "lab", "db", "StatefulSet")
             .unwrap()
-            .unwrap();
-        assert_eq!(live.rollout.current_revision.as_deref(), Some("complete"));
-        assert_eq!(live.rollout.update_revision.as_deref(), Some("complete"));
-        assert_eq!(live.rollout.ready_replicas, Some(1));
+            .expect("StatefulSet rollout is recorded");
+        assert_eq!(rollout.current_revision.as_deref(), Some("complete"));
+        assert_eq!(rollout.update_revision.as_deref(), Some("complete"));
+        assert_eq!(rollout.ready_replicas, Some(1));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2328,13 +2527,13 @@ mod tests {
             .with_poll_interval(Duration::from_millis(10))
             .apply(&request(&root, &kubeconfig, "1.0.0"))
             .expect("DaemonSet rollout is waited on");
-        let live = api
+        let rollout = api
             .inner
-            .observe(Path::new("/unused"), "lab", "agent", "DaemonSet")
+            .workload_rollout(Path::new("/unused"), "lab", "agent", "DaemonSet")
             .unwrap()
-            .unwrap();
-        assert_eq!(live.rollout.updated_number_scheduled, Some(1));
-        assert_eq!(live.rollout.number_available, Some(1));
+            .expect("DaemonSet rollout is recorded");
+        assert_eq!(rollout.updated_number_scheduled, Some(1));
+        assert_eq!(rollout.number_available, Some(1));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2381,32 +2580,32 @@ mod tests {
             field_manager: FIELD_MANAGER.into(),
             version_label: Some("1.0.0".into()),
             conditions: Vec::new(),
-            rollout: WorkloadRollout {
-                generation: Some(1),
-                observed_generation: Some(1),
-                desired_replicas: Some(1),
-                ready_replicas: Some(1),
-                current_revision: Some("db-1".into()),
-                update_revision: Some("db-1".into()),
-                ..WorkloadRollout::default()
-            },
         };
-        assert_eq!(disagreeing_condition(&sts), None);
+        let sts_rollout = WorkloadRollout {
+            generation: Some(1),
+            observed_generation: Some(1),
+            desired_replicas: Some(1),
+            ready_replicas: Some(1),
+            current_revision: Some("db-1".into()),
+            update_revision: Some("db-1".into()),
+            ..WorkloadRollout::default()
+        };
+        assert_eq!(disagreeing_condition(&sts, Some(&sts_rollout)), None);
         let ds = WorkloadObservation {
             kind: "DaemonSet".into(),
             name: "agent".into(),
             field_manager: FIELD_MANAGER.into(),
             version_label: Some("1.0.0".into()),
             conditions: Vec::new(),
-            rollout: WorkloadRollout {
-                generation: Some(1),
-                observed_generation: Some(1),
-                desired_number_scheduled: Some(1),
-                updated_number_scheduled: Some(1),
-                number_available: Some(1),
-                ..WorkloadRollout::default()
-            },
         };
-        assert_eq!(disagreeing_condition(&ds), None);
+        let ds_rollout = WorkloadRollout {
+            generation: Some(1),
+            observed_generation: Some(1),
+            desired_number_scheduled: Some(1),
+            updated_number_scheduled: Some(1),
+            number_available: Some(1),
+            ..WorkloadRollout::default()
+        };
+        assert_eq!(disagreeing_condition(&ds, Some(&ds_rollout)), None);
     }
 }

@@ -532,13 +532,15 @@ impl<A: ClusterApplyApi, P: SmokeProbe> KubernetesModelRuntimeExecutor<A, P> {
 
     fn wait_available(&self, name: &str, deadline: Instant) -> Result<()> {
         loop {
-            let problem = match self.api.observe(
+            let problem = match self.api.observe_with_rollout(
                 self.cluster(),
                 &self.config.namespace,
                 name,
                 "Deployment",
             )? {
-                Some(observation) => disagreeing_condition(&observation),
+                Some((observation, rollout)) => {
+                    disagreeing_condition(&observation, rollout.as_ref())
+                }
                 None => Some(format!("Deployment {name} is absent")),
             };
             let Some(problem) = problem else {
@@ -1127,7 +1129,9 @@ fn remove_file(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::in_process_kubernetes::{MemoryClusterApi, WorkloadCondition, WorkloadObservation};
+    use crate::in_process_kubernetes::{
+        MemoryClusterApi, WorkloadCondition, WorkloadObservation, WorkloadRollout,
+    };
     use std::sync::Mutex;
     use tenkai::manifest::{
         GpuRequirements, ModelRequirementsSection, ModelRuntimeSection, ModelSection,
@@ -1207,6 +1211,39 @@ mod tests {
             kind: &str,
         ) -> Result<()> {
             self.inner.remove(cluster_config, namespace, name, kind)
+        }
+
+        fn workload_rollout(
+            &self,
+            cluster_config: &Path,
+            namespace: &str,
+            name: &str,
+            kind: &str,
+        ) -> Result<Option<WorkloadRollout>> {
+            self.inner
+                .workload_rollout(cluster_config, namespace, name, kind)
+        }
+
+        fn observe_with_rollout(
+            &self,
+            cluster_config: &Path,
+            namespace: &str,
+            name: &str,
+            kind: &str,
+        ) -> Result<Option<(WorkloadObservation, Option<WorkloadRollout>)>> {
+            Ok(self
+                .inner
+                .observe_with_rollout(cluster_config, namespace, name, kind)?
+                .map(|(mut observation, rollout)| {
+                    if *self.unready.lock().unwrap() {
+                        observation.conditions = vec![WorkloadCondition {
+                            type_name: "Available".into(),
+                            status: "False".into(),
+                            reason: "MinimumReplicasUnavailable".into(),
+                        }];
+                    }
+                    (observation, rollout)
+                }))
         }
     }
 
