@@ -392,6 +392,7 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
         let applied = Instant::now();
         let mut observations = Vec::new();
         for mut object in objects {
+            stop_if_lease_lost(stop, request)?;
             stamp_ownership(&mut object, request);
             let observed = self.api.apply_server_side(
                 cluster_config,
@@ -441,18 +442,10 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
         let mut classifiers: HashMap<(String, String), StallClassifier> = HashMap::new();
         let mut causes: Vec<String> = Vec::new();
         loop {
-            if stop.load(Ordering::SeqCst) {
-                bail!(
-                    "in-process kubernetes apply stopped waiting for {}@{} in {} after {}s: the apply lease was lost",
-                    request.product,
-                    request.version,
-                    request.environment,
-                    started.elapsed().as_secs()
-                );
-            }
             let mut failed = Vec::new();
             let mut stalled = Vec::new();
             for applied in applied {
+                stop_if_lease_lost(stop, request)?;
                 let Some(live) = self.api.observe(
                     cluster_config,
                     &request.environment,
@@ -488,10 +481,11 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
                 return Ok(());
             }
             let now = Instant::now();
-            if (now >= next_diagnosis || now >= deadline) && !stop.load(Ordering::SeqCst) {
+            if now >= next_diagnosis || now >= deadline {
                 next_diagnosis = now + DIAGNOSIS_INTERVAL;
                 causes.clear();
                 for (kind, name) in stalled {
+                    stop_if_lease_lost(stop, request)?;
                     let stall = self.diagnose(
                         cluster_config,
                         &request.environment,
@@ -800,6 +794,20 @@ pub(crate) fn disagreeing_condition(observation: &WorkloadObservation) -> Option
             None
         }
     })
+}
+
+/// Checked before every live API call, so a lost lease stops apply and the
+/// wait within one call ([`LIVE_CALL_TIMEOUT`]) plus one poll.
+fn stop_if_lease_lost(stop: &AtomicBool, request: &SoftwareApplyRequest) -> Result<()> {
+    if stop.load(Ordering::SeqCst) {
+        bail!(
+            "in-process kubernetes apply for {}@{} in {} stopped: the apply lease was lost",
+            request.product,
+            request.version,
+            request.environment
+        );
+    }
+    Ok(())
 }
 
 fn next_health_poll(current: Duration, floor: Duration) -> Duration {
