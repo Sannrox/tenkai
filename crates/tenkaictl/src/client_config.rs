@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use crate::args::{Command, Target};
+use crate::args::{Cli, Command, Target};
 use crate::catalog_args::ApprovalCommand;
 use crate::migrate_args::MigrateCommand;
 
@@ -105,6 +105,7 @@ impl ClientConfig {
     }
 
     fn merge(&mut self, other: ClientConfig) {
+        let server_url_changed = other.server_url.is_some() && other.server_url != self.server_url;
         if other.target.is_some() {
             self.target = other.target;
         }
@@ -116,6 +117,9 @@ impl ClientConfig {
         }
         if other.token_file.is_some() {
             self.token_file = other.token_file;
+        } else if server_url_changed {
+            // A token_file is bound to the server_url it was configured with.
+            self.token_file = None;
         }
     }
 }
@@ -264,6 +268,23 @@ pub(crate) fn command_creates_store(command: &Command) -> bool {
     matches!(command, Command::Init | Command::Restore { .. })
 }
 
+/// Fill `server_url` and `token_file` from config. Capture whether the CLI
+/// already had a server URL (flag or `TENKAI_SERVER_URL`) *before* copying
+/// config: an override leaves the config token behind so it is not sent to a
+/// different host. Login and logout never take `token_file` from config.
+pub(crate) fn apply_server_and_token(cli: &mut Cli, config: &ClientConfig) {
+    let server_url_from_flag_or_env = cli.server_url.is_some();
+    if cli.server_url.is_none() {
+        cli.server_url = config.server_url.clone();
+    }
+    if cli.token_file.is_none()
+        && !server_url_from_flag_or_env
+        && !matches!(cli.command, Command::Login { .. } | Command::Logout)
+    {
+        cli.token_file = config.token_file.clone();
+    }
+}
+
 pub(crate) fn missing_default_store_message(database: &Path) -> String {
     format!(
         "no Tenkai store at {}; use --target remote --server-url <url>, or run tenkaictl init for a local store",
@@ -274,7 +295,50 @@ pub(crate) fn missing_default_store_message(database: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
     use std::io::Write;
+
+    fn sample_remote_config() -> ClientConfig {
+        ClientConfig {
+            target: Some(Target::Remote),
+            server_url: Some("http://127.0.0.1:8080".into()),
+            default_environment: None,
+            token_file: Some(PathBuf::from("/etc/tenkai/management.token")),
+        }
+    }
+
+    #[test]
+    fn config_token_file_applies_together_with_config_server_url() {
+        let mut cli = Cli::try_parse_from(["tenkaictl", "status"]).unwrap();
+        apply_server_and_token(&mut cli, &sample_remote_config());
+        assert_eq!(cli.server_url.as_deref(), Some("http://127.0.0.1:8080"));
+        assert_eq!(
+            cli.token_file.as_deref(),
+            Some(Path::new("/etc/tenkai/management.token"))
+        );
+    }
+
+    #[test]
+    fn flag_server_url_does_not_take_config_token_file() {
+        let mut cli = Cli::try_parse_from([
+            "tenkaictl",
+            "--server-url",
+            "http://other.example:8080",
+            "status",
+        ])
+        .unwrap();
+        apply_server_and_token(&mut cli, &sample_remote_config());
+        assert_eq!(cli.server_url.as_deref(), Some("http://other.example:8080"));
+        assert!(cli.token_file.is_none());
+    }
+
+    #[test]
+    fn login_does_not_take_config_token_file() {
+        let mut cli = Cli::try_parse_from(["tenkaictl", "login"]).unwrap();
+        apply_server_and_token(&mut cli, &sample_remote_config());
+        assert_eq!(cli.server_url.as_deref(), Some("http://127.0.0.1:8080"));
+        assert!(cli.token_file.is_none());
+    }
 
     fn temp_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -331,6 +395,45 @@ default_environment = "lab"
         let only_system = ClientConfig::load_from_paths(&system, &missing).unwrap();
         assert_eq!(only_system.target, Some(Target::Remote));
         assert_eq!(only_system.default_environment.as_deref(), Some("edge"));
+    }
+
+    #[test]
+    fn overlay_server_url_drops_inherited_token_file() {
+        let dir = temp_dir();
+        let system = dir.join("system.toml");
+        let user = dir.join("user.toml");
+        write(
+            &system,
+            r#"
+target = "remote"
+server_url = "http://127.0.0.1:8080"
+token_file = "/etc/tenkai/management.token"
+"#,
+        );
+        write(
+            &user,
+            r#"
+server_url = "http://other.example:8080"
+"#,
+        );
+        let config = ClientConfig::load_from_paths(&system, &user).unwrap();
+        assert_eq!(
+            config.server_url.as_deref(),
+            Some("http://other.example:8080")
+        );
+        assert_eq!(config.token_file, None);
+
+        write(
+            &user,
+            r#"
+default_environment = "lab"
+"#,
+        );
+        let same_server = ClientConfig::load_from_paths(&system, &user).unwrap();
+        assert_eq!(
+            same_server.token_file.as_deref(),
+            Some(Path::new("/etc/tenkai/management.token"))
+        );
     }
 
     #[test]

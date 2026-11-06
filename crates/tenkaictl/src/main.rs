@@ -139,21 +139,12 @@ async fn run(mut cli: Cli) -> Result<()> {
         tenkai::telemetry::bind_process_operation_id(operation_id);
     }
     let config = client_config::ClientConfig::load()?;
-    if cli.server_url.is_none() {
-        cli.server_url = config.server_url.clone();
-    }
     let token_file_from_flag = cli.token_file.is_some();
-    let server_url_from_flag_or_env = cli.server_url.is_some();
     // Login and logout manage the OIDC session. A root-only token_file from
     // client.toml would refuse non-root login before the session is used.
     // Overriding the server URL leaves the config token behind so it is not
     // sent to a different host.
-    if cli.token_file.is_none()
-        && !server_url_from_flag_or_env
-        && !matches!(cli.command, Command::Login { .. } | Command::Logout)
-    {
-        cli.token_file = config.token_file.clone();
-    }
+    client_config::apply_server_and_token(&mut cli, &config);
     let target_configured = cli.target.is_some() || config.target.is_some();
     let target = cli.target.or(config.target).unwrap_or(Target::Embedded);
     if cli.output == OutputFormat::JsonV1 && command_name(&cli.command, target).is_none() {
@@ -407,14 +398,16 @@ async fn run(mut cli: Cli) -> Result<()> {
         );
         return Ok(());
     }
-    if target == Target::Remote {
-        return remote::run(cli, &config, token_file_from_flag).await;
-    }
+    // Local only: keys, signatures, and restore never talk to a server.
+    // client.toml `target = "remote"` must not hijack them on a server host.
     if matches!(cli.command, Command::Restore { .. }) {
         return embedded_dev::restore(&cli).await;
     }
     if matches!(cli.command, Command::Dev { .. }) {
         return embedded_dev::run_dev(&cli).await;
+    }
+    if target == Target::Remote {
+        return remote::run(cli, &config, token_file_from_flag).await;
     }
     if !target_configured {
         let default = std::path::PathBuf::from(client_config::DEFAULT_DATABASE);
