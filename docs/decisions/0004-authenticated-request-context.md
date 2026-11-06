@@ -3,6 +3,8 @@
 - Status: Accepted
 - Date: 2026-07-25
 - Issue: [#36](https://github.com/Sannrox/tenkai/issues/36)
+- Amended by: [ADR 0047](0047-host-identity.md) (peer credentials as a
+  credential kind on a Unix socket)
 
 ## Context
 
@@ -63,3 +65,10 @@ Documented in `docs/auth-request-context.md` and implemented in
   tenant authority from ordinary metadata.
 - **Hard-link an identity provider into Tenkai:** rejected; makes enterprise
   identity a required dependency and confuses process boundaries.
+
+## Amendment (2026-11-06, proposed)
+
+[ADR 0047](0047-host-identity.md) proposes a third credential kind: kernel
+peer credentials on a Unix socket. Bearer tokens and assertions stay required
+on TCP. The principal is still produced by an authenticator; callers still
+cannot select identity through ordinary metadata.

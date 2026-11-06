@@ -3,6 +3,8 @@
 - Status: Accepted
 - Date: 2026-09-30
 - Amended: 2026-09-30 ([#469](https://github.com/Sannrox/tenkai/issues/469)), decision 5 and follow-ups
+- Amended by: [ADR 0047](0047-host-identity.md) (host identity as the
+  default console sign-in on a single-host install)
 - Issue: [#458](https://github.com/Sannrox/tenkai/issues/458)
 - Owner: Tenkai maintainers
 - Related: [ADR 0001](0001-standalone-core-and-service-evolution.md),
@@ -96,6 +98,17 @@ plain binaries and targets air-gapped sites, so the second style fits.
   iteration to server releases.
 - **Rust compiled to WASM.** Rejected: smaller ecosystem and accessibility
   tooling for a thin client whose boundary is a typed contract anyway.
+
+## Amendment (2026-11-06, proposed)
+
+[ADR 0047](0047-host-identity.md) proposes host identity as the default
+console sign-in on a single-host Linux install: SSH stream-local forwarding
+to the server's Unix socket, with `SO_PEERCRED` as the principal. The console
+remains a public-API client. OIDC and a pasted bearer stay available. There
+are still no cookies, server sessions, or passwords in Tenkai. Peer-credential
+requests replace ADR 0031's Bearer-as-CSRF-defence with a loopback `Host`
+requirement and an Origin check: a present `Origin` must be a loopback
+console origin.
 
 ## Follow-ups
 
