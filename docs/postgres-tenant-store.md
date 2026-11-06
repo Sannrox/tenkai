@@ -66,13 +66,20 @@ database tenkai
 Cross-tenant reads use non-disclosing deny (`resource not found`). Never put
 identity-plane tables in this database (ADR 0005).
 
-Each tenant schema is migrated in place when a replica first uses it, under a
-per-schema advisory lock. Changes stay readable by the previous release during
-a rolling deploy. The catalog property lookup index keys on the first 256
-characters of each value and rechecks the full value, so plan JSON and long
+Each tenant schema is migrated in place the first time a replica uses it at a
+new tenant-schema stamp, under a per-schema advisory lock. `tenkai_tenant_schema_versions`
+records that stamp (`TENANT_SCHEMA_VERSION` in the Postgres adapter, independent
+of SQLite `SCHEMA_VERSION`). Later catalog and partition calls in the same
+process skip the migrate; a restarted process short-circuits with one indexed
+SELECT when the stamp is current or newer. `CREATE INDEX` runs only inside that
+versioned migrate, not on the request path. Changes stay readable by the
+previous release during a rolling deploy: an older replica does not downgrade
+the stamp or re-run DDL. The catalog property lookup index keys on the first
+256 characters of each value and rechecks the full value, so plan JSON and long
 outcome details fit the btree row limit (#879). Upgrading rebuilds that index
-once per tenant schema, inside the first transaction that touches the schema;
-writes to that tenant's catalog properties wait for the rebuild.
+once per tenant schema, inside the first transaction that touches the schema
+after the stamp moves; writes to that tenant's catalog properties wait for the
+rebuild.
 
 ## Build and configure
 

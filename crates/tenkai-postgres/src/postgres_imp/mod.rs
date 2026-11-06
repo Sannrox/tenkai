@@ -2,6 +2,8 @@ use postgres::{Client, Transaction};
 use std::sync::mpsc::{self, SyncSender};
 use std::thread::{self, JoinHandle};
 
+use crate::tenant_schema::EnsuredTenantSchemas;
+
 pub(crate) use tenkai::storage::{
     AuditRecord, ChannelRecord, EnvironmentRecord, LeaseRecord, OfflineImportRecord,
     OfflineStepImportRecord, PlanRecord, PlanStatus, ProviderEventRecord, ReceiptRecord,
@@ -15,6 +17,8 @@ pub struct Inner {
     worker: Worker<Client>,
     /// Set on multi-replica hubs (#748): writes need the writer lease.
     fence: std::sync::OnceLock<std::sync::Arc<tenkai::writer_fence::WriterFence>>,
+    /// Schemas already migrated at this process's tenant stamp (#870).
+    ensured_tenant_schemas: EnsuredTenantSchemas,
 }
 
 enum WorkerMessage<C> {

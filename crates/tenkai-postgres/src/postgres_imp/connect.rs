@@ -16,6 +16,7 @@ impl Inner {
                 Client::is_closed,
             )?,
             fence: std::sync::OnceLock::new(),
+            ensured_tenant_schemas: crate::tenant_schema::EnsuredTenantSchemas::new(),
         })
     }
 }
@@ -193,6 +194,16 @@ fn connect_client(config: &Config, tls: MakeRustlsConnect) -> Result<Client> {
                  );",
         )
         .map_err(pg)?;
+    // Per-tenant migrate stamp (#870). Additive; older binaries ignore it.
+    // One indexed SELECT on this table short-circuits tenant DDL.
+    client
+        .batch_execute(
+            "CREATE TABLE IF NOT EXISTS public.tenkai_tenant_schema_versions (
+                    schema_name TEXT PRIMARY KEY,
+                    version INTEGER NOT NULL
+                 );",
+        )
+        .map_err(pg)?;
     client
         .query_one(
             "SELECT pg_advisory_unlock(hashtextextended('tenkai_global_schema_migration', 0))",
@@ -203,10 +214,40 @@ fn connect_client(config: &Config, tls: MakeRustlsConnect) -> Result<Client> {
 }
 
 impl Inner {
+    /// Migrate `schema` once per process at this binary's tenant stamp.
+    ///
+    /// A current (or newer) `tenkai_tenant_schema_versions` row is one indexed
+    /// SELECT and no tenant DDL. `CREATE INDEX` runs only inside that versioned
+    /// migrate, never on a later request.
     pub fn ensure_tenant_schema(&self, schema: &str) -> Result<()> {
+        if self.ensured_tenant_schemas.contains(schema) {
+            return Ok(());
+        }
         let schema = schema.to_owned();
+        let current = i32::try_from(crate::tenant_schema::TENANT_SCHEMA_VERSION).map_err(|_| {
+            StoreError::InvalidData {
+                kind: "schema",
+                detail: "tenant schema version does not fit INTEGER".into(),
+            }
+        })?;
+        let worker_schema = schema.clone();
         self.worker.run(
             move |client| {
+                let schema = worker_schema;
+                let stored: Option<i32> = client
+                    .query_opt(
+                        "SELECT version FROM public.tenkai_tenant_schema_versions
+                         WHERE schema_name = $1",
+                        &[&schema],
+                    )
+                    .map_err(pg)?
+                    .map(|row| row.get(0));
+                if crate::tenant_schema::tenant_schema_is_current(
+                    stored,
+                    crate::tenant_schema::TENANT_SCHEMA_VERSION,
+                ) {
+                    return Ok(());
+                }
                 let mut tx = client.transaction().map_err(pg)?;
                 tx.query_one(
                     "SELECT pg_advisory_xact_lock(
@@ -215,16 +256,48 @@ impl Inner {
                     &[&schema],
                 )
                 .map_err(pg)?;
+                let stored: Option<i32> = tx
+                    .query_opt(
+                        "SELECT version FROM public.tenkai_tenant_schema_versions
+                         WHERE schema_name = $1",
+                        &[&schema],
+                    )
+                    .map_err(pg)?
+                    .map(|row| row.get(0));
+                if crate::tenant_schema::tenant_schema_is_current(
+                    stored,
+                    crate::tenant_schema::TENANT_SCHEMA_VERSION,
+                ) {
+                    tx.commit().map_err(pg)?;
+                    return Ok(());
+                }
                 tx.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {schema}"))
                     .map_err(pg)?;
                 tx.batch_execute(&format!("SET LOCAL search_path TO {schema}, public"))
                     .map_err(pg)?;
                 migrate_tenant_schema(&mut tx)?;
+                tx.execute(
+                    "INSERT INTO public.tenkai_tenant_schema_versions(schema_name, version)
+                     VALUES ($1, $2)
+                     ON CONFLICT (schema_name) DO UPDATE
+                     SET version = EXCLUDED.version
+                     WHERE public.tenkai_tenant_schema_versions.version < EXCLUDED.version",
+                    &[&schema, &current],
+                )
+                .map_err(pg)?;
                 tx.commit().map_err(pg)?;
                 Ok(())
             },
             StoreError::Postgres("postgres worker thread panicked".into()),
-        )
+        )?;
+        self.ensured_tenant_schemas.insert(schema);
+        Ok(())
+    }
+
+    /// Drop the process memo so the next ensure consults the stamp row.
+    /// Tests that rewrite tenant DDL must also delete that row.
+    pub(crate) fn forget_ensured_schema(&self, schema: &str) {
+        self.ensured_tenant_schemas.remove(schema);
     }
 }
 

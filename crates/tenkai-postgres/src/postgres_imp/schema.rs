@@ -3,6 +3,8 @@ use super::*;
 use postgres::Transaction;
 use prost::Message;
 
+/// Apply tenant DDL and seeds. Callers run this only when the tenant stamp is
+/// stale; `CREATE INDEX` belongs here, not on the catalog request path (#870).
 pub(crate) fn migrate_tenant_schema(tx: &mut Transaction<'_>) -> Result<()> {
     tx.batch_execute(
         "
@@ -358,23 +360,65 @@ fn migrate_property_lookup_prefix(tx: &mut Transaction<'_>) -> Result<()> {
 /// action types so promote, subscribe, and the other catalog mutations can
 /// resolve. Existing rows stay; `register_schema` / `register_action` own upgrades.
 fn seed_builtin_catalog_ontology(tx: &mut Transaction<'_>) -> Result<()> {
-    for schema in tenkai::ontology::known_object_types() {
-        let payload = schema.encode_to_vec();
-        tx.execute(
-            "INSERT INTO catalog_schema_types(name,payload) VALUES($1,$2)
-             ON CONFLICT(name) DO NOTHING",
-            &[&schema.kind, &payload],
-        )
-        .map_err(pg)?;
-    }
-    for action in tenkai::ontology::known_actions() {
-        let payload = action.encode_to_vec();
-        tx.execute(
-            "INSERT INTO catalog_action_types(name,payload) VALUES($1,$2)
-             ON CONFLICT(name) DO NOTHING",
-            &[&action.name, &payload],
-        )
-        .map_err(pg)?;
-    }
+    let rows = BuiltinCatalogOntology::from_registry();
+    tx.execute(
+        "INSERT INTO catalog_schema_types(name, payload)
+         SELECT * FROM unnest($1::text[], $2::bytea[]) AS t(name, payload)
+         ON CONFLICT (name) DO NOTHING",
+        &[&rows.type_names, &rows.type_payloads],
+    )
+    .map_err(pg)?;
+    tx.execute(
+        "INSERT INTO catalog_action_types(name, payload)
+         SELECT * FROM unnest($1::text[], $2::bytea[]) AS t(name, payload)
+         ON CONFLICT (name) DO NOTHING",
+        &[&rows.action_names, &rows.action_payloads],
+    )
+    .map_err(pg)?;
     Ok(())
+}
+
+struct BuiltinCatalogOntology {
+    type_names: Vec<String>,
+    type_payloads: Vec<Vec<u8>>,
+    action_names: Vec<String>,
+    action_payloads: Vec<Vec<u8>>,
+}
+
+impl BuiltinCatalogOntology {
+    fn from_registry() -> Self {
+        let types = tenkai::ontology::known_object_types();
+        let actions = tenkai::ontology::known_actions();
+        Self {
+            type_names: types.iter().map(|schema| schema.kind.clone()).collect(),
+            type_payloads: types.iter().map(|schema| schema.encode_to_vec()).collect(),
+            action_names: actions.iter().map(|action| action.name.clone()).collect(),
+            action_payloads: actions
+                .iter()
+                .map(|action| action.encode_to_vec())
+                .collect(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builtin_catalog_ontology_rows_match_registry() {
+        let rows = BuiltinCatalogOntology::from_registry();
+        assert_eq!(
+            rows.type_names.len(),
+            tenkai::ontology::known_object_types().len()
+        );
+        assert_eq!(rows.type_names.len(), rows.type_payloads.len());
+        assert!(!rows.type_names.is_empty());
+        assert_eq!(
+            rows.action_names.len(),
+            tenkai::ontology::known_actions().len()
+        );
+        assert_eq!(rows.action_names.len(), rows.action_payloads.len());
+        assert!(!rows.action_names.is_empty());
+    }
 }

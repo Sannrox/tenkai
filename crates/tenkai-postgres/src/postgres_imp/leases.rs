@@ -111,13 +111,25 @@ impl Inner {
         }
         let schema = schema.to_owned();
         self.worker.run(
-            move |client| {
-                client
-                    .batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
-                    .map_err(pg)
+            {
+                let schema = schema.clone();
+                move |client| {
+                    client
+                        .batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+                        .map_err(pg)?;
+                    client
+                        .execute(
+                            "DELETE FROM public.tenkai_tenant_schema_versions WHERE schema_name = $1",
+                            &[&schema],
+                        )
+                        .map_err(pg)?;
+                    Ok(())
+                }
             },
             StoreError::AdapterUnavailable("postgres worker is unavailable".into()),
-        )
+        )?;
+        self.forget_ensured_schema(&schema);
+        Ok(())
     }
 
     #[cfg(test)]
