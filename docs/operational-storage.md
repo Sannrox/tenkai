@@ -50,6 +50,13 @@ skip kinds their version does not know, so a newer replica, or the release
 before a rollback, can add a kind without failing older readers' pages
 (#775).
 
+An environment execution claim whose only property diff is `expires_at` is a
+lease heartbeat and does not append a change row. Older heartbeat rows for
+those claims are deleted after seven days (`CATALOG_HISTORY_RETENTION_MS`)
+using the `timestamp` indexes. Decision rows and other object change history
+are kept: governed maintenance still reads the configuration's correlation
+change and matching authorization decision (#874).
+
 Remote runtime claims are durable, environment-scoped, expiring, and
 generation-fenced. Their completion payload retains per-step receipts and is
 immutable after the first accepted completion. Tokens are represented only by

@@ -218,6 +218,10 @@ pub(crate) fn migrate_tenant_schema(tx: &mut Transaction<'_>) -> Result<()> {
         );
         CREATE INDEX IF NOT EXISTS catalog_changes_object
             ON catalog_changes(object_id, timestamp, id);
+        CREATE INDEX IF NOT EXISTS catalog_changes_timestamp
+            ON catalog_changes(timestamp);
+        CREATE INDEX IF NOT EXISTS catalog_decisions_timestamp
+            ON catalog_decisions(timestamp);
         ",
     )
     .map_err(pg)?;

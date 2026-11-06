@@ -9,9 +9,40 @@ use std::sync::Mutex;
 use anyhow::{Context as _, Result as AnyResult, bail};
 
 use crate::feedback_observation::FeedbackObservation;
+use crate::ontology::KIND_ENVIRONMENT_EXECUTION;
 use crate::pb::graph_action::{ActionResult, ActionTypeDef};
 use crate::pb::sekai::{Decision, Lease, Link, Object, ObjectChange, ObjectType};
-use crate::storage::{ProviderEventRecord, Result, SqliteStore, StoreError};
+use crate::storage::{
+    CATALOG_HISTORY_RETENTION_MS, ProviderEventRecord, Result, SqliteStore, StoreError,
+};
+
+/// One namespaced lease to refresh inside [`CatalogGraph::refresh_leases_and_guarded_put`].
+#[derive(Clone, Debug)]
+pub struct LeaseRefresh {
+    pub namespace: String,
+    pub key: String,
+    pub fencing_token: String,
+    pub ttl_ms: i64,
+    /// When false, require the active holder without extending TTL (#874).
+    pub extend: bool,
+}
+
+/// True when `next` is an environment execution claim whose only property
+/// diff is `expires_at` (a lease heartbeat). Those diffs are not catalog
+/// history (#874).
+pub fn skip_execution_claim_heartbeat(previous: &Object, next: &Object) -> bool {
+    next.kind == KIND_ENVIRONMENT_EXECUTION
+        && previous
+            .properties
+            .keys()
+            .chain(next.properties.keys())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .all(|key| {
+                key.as_str() == "expires_at"
+                    || previous.properties.get(key) == next.properties.get(key)
+            })
+}
 
 /// Catalog object, link, lease, schema, and action contract.
 pub trait CatalogGraph: Send + Sync {
@@ -66,6 +97,61 @@ pub trait CatalogGraph: Send + Sync {
         fencing_token: &str,
         ttl_ms: i64,
     ) -> AnyResult<Lease>;
+    /// Refresh `refreshes` and guarded-put `object` in one catalog transaction.
+    ///
+    /// When a refreshed lease matches `object_namespace`/`object_key`, the
+    /// object's `expires_at` is taken from that lease so a heartbeat does not
+    /// take a second round trip (#874).
+    fn refresh_leases_and_guarded_put(
+        &self,
+        tenant: Option<&str>,
+        refreshes: &[LeaseRefresh],
+        mut object: Object,
+        object_namespace: &str,
+        object_key: &str,
+        object_fencing_token: &str,
+    ) -> AnyResult<(Vec<Lease>, Object)> {
+        let mut leases = Vec::with_capacity(refreshes.len());
+        for refresh in refreshes {
+            if refresh.extend {
+                leases.push(self.refresh_lease(
+                    tenant,
+                    &refresh.namespace,
+                    &refresh.key,
+                    &refresh.fencing_token,
+                    refresh.ttl_ms,
+                )?);
+            } else {
+                let lease = self
+                    .get_lease(tenant, &refresh.namespace, &refresh.key)?
+                    .with_context(|| {
+                        format!(
+                            "embedded lease {}/{} does not exist",
+                            refresh.namespace, refresh.key
+                        )
+                    })?;
+                anyhow::ensure!(
+                    lease.status == "active"
+                        && lease.fencing_token == refresh.fencing_token
+                        && lease.expires_at_ms > crate::now_millis(),
+                    "embedded lease {}/{} is not the active fenced holder",
+                    refresh.namespace,
+                    refresh.key
+                );
+                leases.push(lease);
+            }
+        }
+        stamp_claim_expiry(&mut object, &leases, object_namespace, object_key);
+        let object = self.guarded_put(
+            tenant,
+            object,
+            object_namespace,
+            object_key,
+            object_fencing_token,
+            false,
+        )?;
+        Ok((leases, object))
+    }
     fn release_lease(
         &self,
         tenant: Option<&str>,
@@ -872,11 +958,8 @@ impl MemoryCatalogGraph {
             outcome: outcome.into(),
         };
         let mut partitions = self.lock()?;
-        partitions
-            .entry(Self::key(tenant))
-            .or_default()
-            .decisions
-            .push(decision);
+        let partition = partitions.entry(Self::key(tenant)).or_default();
+        partition.decisions.push(decision);
         Ok(())
     }
 }
@@ -924,6 +1007,36 @@ fn require_memory_lease(
     Ok(lease)
 }
 
+fn prune_memory_execution_claim_history(partition: &mut Partition, now: i64) {
+    let cutoff = now.saturating_sub(CATALOG_HISTORY_RETENTION_MS);
+    let claim_ids: Vec<String> = partition
+        .objects
+        .values()
+        .filter(|object| object.kind == KIND_ENVIRONMENT_EXECUTION)
+        .map(|object| object.id.clone())
+        .collect();
+    for id in claim_ids {
+        if let Some(changes) = partition.changes.get_mut(&id) {
+            changes.retain(|change| change.timestamp >= cutoff);
+            if changes.is_empty() {
+                partition.changes.remove(&id);
+            }
+        }
+    }
+}
+
+pub fn stamp_claim_expiry(object: &mut Object, leases: &[Lease], namespace: &str, key: &str) {
+    if let Some(lease) = leases
+        .iter()
+        .find(|lease| lease.namespace == namespace && lease.key == key)
+    {
+        object
+            .properties
+            .insert("expires_at".into(), lease.expires_at_ms.to_string());
+        object.updated = lease.refreshed_at_ms;
+    }
+}
+
 fn record_memory_changes(
     partition: &mut Partition,
     previous: &Object,
@@ -931,6 +1044,10 @@ fn record_memory_changes(
     principal: &str,
 ) {
     let timestamp = crate::now_millis();
+    prune_memory_execution_claim_history(partition, timestamp);
+    if skip_execution_claim_heartbeat(previous, next) {
+        return;
+    }
     for key in previous
         .properties
         .keys()
@@ -1050,6 +1167,25 @@ impl CatalogGraph for SqliteStore {
         ttl_ms: i64,
     ) -> AnyResult<Lease> {
         self.refresh_namespaced_lease(namespace, key, fencing_token, ttl_ms)
+    }
+
+    fn refresh_leases_and_guarded_put(
+        &self,
+        _tenant: Option<&str>,
+        refreshes: &[LeaseRefresh],
+        object: Object,
+        object_namespace: &str,
+        object_key: &str,
+        object_fencing_token: &str,
+    ) -> AnyResult<(Vec<Lease>, Object)> {
+        SqliteStore::refresh_leases_and_guarded_put(
+            self,
+            refreshes,
+            object,
+            object_namespace,
+            object_key,
+            object_fencing_token,
+        )
     }
 
     fn release_lease(

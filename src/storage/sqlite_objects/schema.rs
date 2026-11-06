@@ -182,7 +182,11 @@ pub(in crate::storage) fn ensure_catalog(connection: &Connection) -> Result<()> 
              payload BLOB NOT NULL
          );
          CREATE INDEX IF NOT EXISTS catalog_changes_object
-             ON catalog_changes(object_id,timestamp,id);",
+             ON catalog_changes(object_id,timestamp,id);
+         CREATE INDEX IF NOT EXISTS catalog_changes_timestamp
+             ON catalog_changes(timestamp);
+         CREATE INDEX IF NOT EXISTS catalog_decisions_timestamp
+             ON catalog_decisions(timestamp);",
     )?;
     Ok(())
 }

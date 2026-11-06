@@ -50,6 +50,35 @@ pub(crate) struct HeldExecutionLease {
     pub key: String,
     pub fencing_token: String,
     pub ttl_ms: i64,
+    /// Known expiry; `0` means unknown, so the next fence refreshes it.
+    pub expires_at_ms: i64,
+}
+
+impl HeldExecutionLease {
+    pub(crate) fn new(
+        namespace: impl Into<String>,
+        key: impl Into<String>,
+        fencing_token: impl Into<String>,
+        ttl_ms: i64,
+    ) -> Self {
+        Self {
+            namespace: namespace.into(),
+            key: key.into(),
+            fencing_token: fencing_token.into(),
+            ttl_ms,
+            expires_at_ms: 0,
+        }
+    }
+
+    pub(crate) fn until(mut self, expires_at_ms: i64) -> Self {
+        self.expires_at_ms = expires_at_ms;
+        self
+    }
+
+    /// Wave/topology leases refresh when less than a third of TTL remains (#874).
+    pub(crate) fn due_for_refresh(&self, now: i64) -> bool {
+        self.expires_at_ms == 0 || self.expires_at_ms.saturating_sub(now) < self.ttl_ms / 3
+    }
 }
 
 #[derive(Clone)]

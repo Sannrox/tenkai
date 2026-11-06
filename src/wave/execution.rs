@@ -900,22 +900,25 @@ fn held_execution_leases(
     wave: &WaveLease,
     topology: &[(String, String)],
 ) -> Vec<crate::client::HeldExecutionLease> {
-    std::iter::once(crate::client::HeldExecutionLease {
-        namespace: WAVE_LEASE_NAMESPACE.into(),
-        key: wave.name.clone(),
-        fencing_token: wave.fencing_token.clone(),
-        ttl_ms: WAVE_LEASE_MS,
-    })
-    .chain(
-        topology
-            .iter()
-            .map(|(name, token)| crate::client::HeldExecutionLease {
-                namespace: TOPOLOGY_LEASE_NAMESPACE.into(),
-                key: name.clone(),
-                fencing_token: token.clone(),
-                ttl_ms: WAVE_LEASE_MS,
-            }),
+    let expires_at_ms = crate::now_millis().saturating_add(WAVE_LEASE_MS);
+    std::iter::once(
+        crate::client::HeldExecutionLease::new(
+            WAVE_LEASE_NAMESPACE,
+            wave.name.clone(),
+            wave.fencing_token.clone(),
+            WAVE_LEASE_MS,
+        )
+        .until(expires_at_ms),
     )
+    .chain(topology.iter().map(|(name, token)| {
+        crate::client::HeldExecutionLease::new(
+            TOPOLOGY_LEASE_NAMESPACE,
+            name.clone(),
+            token.clone(),
+            WAVE_LEASE_MS,
+        )
+        .until(expires_at_ms)
+    }))
     .collect()
 }
 

@@ -27,6 +27,98 @@ fn create_once_conflict_is_store_already_exists() {
 }
 
 #[test]
+fn catalog_history_older_than_retention_is_pruned() {
+    let path = std::env::temp_dir().join(format!(
+        "tenkai-874-prune-{}-{}.db",
+        std::process::id(),
+        crate::now_millis()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let store = SqliteStore::open(&path).unwrap();
+    let claim = Object {
+        id: "tenkai:env:lab:execution:v2".into(),
+        kind: crate::ontology::KIND_ENVIRONMENT_EXECUTION.into(),
+        name: "apply lease".into(),
+        properties: [("expires_at".into(), "1".into())].into_iter().collect(),
+        ..Object::default()
+    };
+    let other = Object {
+        id: "tenkai:conformance:object".into(),
+        kind: "tenkai.conformance".into(),
+        name: "original".into(),
+        properties: [("k".into(), "v1".into())].into_iter().collect(),
+        ..Object::default()
+    };
+    store.create(claim.clone()).unwrap();
+    store.create(other.clone()).unwrap();
+    let old_ts = crate::now_millis() - crate::storage::CATALOG_HISTORY_RETENTION_MS - 1;
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "INSERT INTO catalog_changes(id,object_id,timestamp,payload) VALUES(?1,?2,?3,?4)",
+            rusqlite::params!["old-claim-change", claim.id, old_ts, vec![0_u8]],
+        )
+        .unwrap();
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "INSERT INTO catalog_changes(id,object_id,timestamp,payload) VALUES(?1,?2,?3,?4)",
+            rusqlite::params!["old-other-change", other.id, old_ts, vec![0_u8]],
+        )
+        .unwrap();
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "INSERT INTO catalog_decisions(id,timestamp,actor,action,payload) VALUES(?1,?2,?3,?4,?5)",
+            rusqlite::params!["old-decision", old_ts, "tenkai", "x", vec![0_u8]],
+        )
+        .unwrap();
+    let mut heartbeat = claim;
+    heartbeat.properties.insert("expires_at".into(), "2".into());
+    store.put(heartbeat).unwrap();
+    let leftover_claim: i64 = store
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM catalog_changes WHERE id='old-claim-change'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let leftover_other: i64 = store
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM catalog_changes WHERE id='old-other-change'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let leftover_decisions: i64 = store
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM catalog_decisions WHERE id='old-decision'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        leftover_claim, 0,
+        "expired execution-claim changes must be deleted"
+    );
+    assert_eq!(
+        leftover_other, 1,
+        "other object change history must be kept"
+    );
+    assert_eq!(leftover_decisions, 1, "decision rows must be kept");
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn leftover_graph_cannot_authorize_apply_after_migration() {
     let path = std::env::temp_dir().join(format!(
         "tenkai-382-graph-{}-{}.db",

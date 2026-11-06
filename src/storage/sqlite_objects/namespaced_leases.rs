@@ -77,13 +77,63 @@ impl SqliteStore {
         anyhow::ensure!(ttl_ms > 0, "embedded lease TTL must be positive");
         let mut connection = self.connection()?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let mut lease = require_active_lease_in(&tx, namespace, key, fencing_token)?;
-        let now = crate::now_millis();
-        lease.refreshed_at_ms = now;
-        lease.expires_at_ms = now.saturating_add(ttl_ms);
-        save_lease_in(&tx, &lease)?;
+        let lease = refresh_lease_in(&tx, namespace, key, fencing_token, ttl_ms)?;
         tx.commit()?;
         Ok(lease)
+    }
+
+    pub fn refresh_leases_and_guarded_put(
+        &self,
+        refreshes: &[crate::storage::LeaseRefresh],
+        mut object: Object,
+        object_namespace: &str,
+        object_key: &str,
+        object_fencing_token: &str,
+    ) -> AnyResult<(Vec<Lease>, Object)> {
+        let mut connection = self.connection()?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut leases = Vec::with_capacity(refreshes.len());
+        for refresh in refreshes {
+            anyhow::ensure!(refresh.ttl_ms > 0, "embedded lease TTL must be positive");
+            if refresh.extend {
+                leases.push(refresh_lease_in(
+                    &tx,
+                    &refresh.namespace,
+                    &refresh.key,
+                    &refresh.fencing_token,
+                    refresh.ttl_ms,
+                )?);
+            } else {
+                leases.push(require_active_lease_in(
+                    &tx,
+                    &refresh.namespace,
+                    &refresh.key,
+                    &refresh.fencing_token,
+                )?);
+            }
+        }
+        crate::storage::stamp_claim_expiry(&mut object, &leases, object_namespace, object_key);
+        require_active_lease_in(&tx, object_namespace, object_key, object_fencing_token)?;
+        let previous = decode_optional(
+            tx.query_row(
+                "SELECT payload FROM catalog_objects WHERE id=?1",
+                [&object.id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?,
+            "object",
+        )?;
+        anyhow::ensure!(
+            previous.is_some(),
+            "embedded object {} does not exist",
+            object.id
+        );
+        upsert_object_in(&tx, &object, &self.principal).map_err(anyhow::Error::from)?;
+        if let Some(previous) = previous {
+            record_changes(&tx, &previous, &object, &self.principal)?;
+        }
+        tx.commit()?;
+        Ok((leases, object))
     }
 
     pub fn release_namespaced_lease(
@@ -147,6 +197,21 @@ impl SqliteStore {
         tx.commit()?;
         Ok(lease)
     }
+}
+
+fn refresh_lease_in(
+    tx: &Transaction<'_>,
+    namespace: &str,
+    key: &str,
+    fencing_token: &str,
+    ttl_ms: i64,
+) -> AnyResult<Lease> {
+    let mut lease = require_active_lease_in(tx, namespace, key, fencing_token)?;
+    let now = crate::now_millis();
+    lease.refreshed_at_ms = now;
+    lease.expires_at_ms = now.saturating_add(ttl_ms);
+    save_lease_in(tx, &lease)?;
+    Ok(lease)
 }
 
 pub(super) fn require_active_lease_in(

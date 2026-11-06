@@ -608,12 +608,12 @@ mod tests {
         )
         .await
         .unwrap();
-        ctx.held_execution_leases = vec![crate::client::HeldExecutionLease {
-            namespace: "tenkai/topology-availability".into(),
-            key: "ledger-ha".into(),
-            fencing_token: held.fencing_token,
-            ttl_ms: 60_000,
-        }];
+        ctx.held_execution_leases = vec![crate::client::HeldExecutionLease::new(
+            "tenkai/topology-availability",
+            "ledger-ha",
+            held.fencing_token,
+            60_000,
+        )];
         let lease = claim_environment(&mut ctx, "prod", "plan-1").await.unwrap();
         let err = run_mutation_command(&mut ctx, &lease, &release, "true")
             .await

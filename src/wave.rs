@@ -787,12 +787,12 @@ document = "suite.json"
         sign_current_approvals(&keys, &database, &approvals, &trust, &planned).await;
         let plan_id = planned.environments[0].plan_id.clone().unwrap();
         let approval = approvals.join(format!("{plan_id}.json"));
-        ctx.held_execution_leases = vec![crate::client::HeldExecutionLease {
-            namespace: "tenkai/topology-availability".into(),
-            key: "ledger-ha".into(),
-            fencing_token: "stale".into(),
-            ttl_ms: 60_000,
-        }];
+        ctx.held_execution_leases = vec![crate::client::HeldExecutionLease::new(
+            "tenkai/topology-availability",
+            "ledger-ha",
+            "stale",
+            60_000,
+        )];
         let err = crate::apply::execute_with_options(
             &mut ctx,
             &plan_id,
@@ -948,12 +948,12 @@ document = "suite.json"
             .acquire_lease("tenkai/topology-availability", "ledger-ha", "wave", 60_000)
             .await
             .unwrap();
-        ctx.held_execution_leases = vec![crate::client::HeldExecutionLease {
-            namespace: "tenkai/topology-availability".into(),
-            key: "ledger-ha".into(),
-            fencing_token: held.fencing_token.clone(),
-            ttl_ms: 60_000,
-        }];
+        ctx.held_execution_leases = vec![crate::client::HeldExecutionLease::new(
+            "tenkai/topology-availability",
+            "ledger-ha",
+            held.fencing_token.clone(),
+            60_000,
+        )];
         let err = crate::apply::execute_with_options(
             &mut ctx,
             &plan_id,
