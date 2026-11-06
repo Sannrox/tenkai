@@ -379,8 +379,9 @@ Rows beyond `## Testing Guidelines`:
 - ontology, graph-record, runtime-state, and configuration migration impact;
 - environment variables, defaults, examples, and operator documentation;
 - signing, approval, security, recovery, rollback, and operator actions;
-- after an authorized `vX.Y.Z` tag, the Release binaries workflow attached the
-  community hosts for `linux-x86_64` and `darwin-aarch64` plus `SHA256SUMS`
+- after an authorized `vX.Y.Z` or `vX.Y.Z-rc.N` tag, the dispatcher starts
+  the Release binaries workflow from main; it attaches the community hosts
+  for `linux-x86_64` and `darwin-aarch64` plus `SHA256SUMS`
   (`docs/release-binaries.md`); tags before that workflow have none. Do not
   rewrite existing Release notes when only uploading assets;
 - credit contributors through GitHub's generated release notes.
