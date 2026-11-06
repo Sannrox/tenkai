@@ -80,3 +80,10 @@ The bounded set now also includes:
 
 Secret overlays, hygiene timers, and full live-content comparison remain
 rejected.
+
+## Amendment (2026-11-06, proposed)
+
+[ADR 0045](0045-sealed-secrets.md) proposes sealed secrets: values the server
+stores but cannot open, delivered by the environment runtime through a plan.
+A sealed value's digest joins the configuration digest, so rotation emits the
+same Restart as an overlay change. Plain secret overlays remain rejected.

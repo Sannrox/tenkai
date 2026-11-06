@@ -15,7 +15,7 @@
 - [0013 — Evaluation gate evidence projection](0013-evaluation-gate-evidence-projection.md)
 - [0014 — Versioned Rust client facade](0014-versioned-rust-client-facade.md)
 - [0015 — Governed-action remote migration](0015-governed-action-remote-migration.md)
-- [0016 — Bounded same-version remediations](0016-same-version-remediation.md)
+- [0016 — Bounded same-version remediations](0016-same-version-remediation.md) (secret storage amended by 0045)
 - [0017 — Executable release-wave advancement](0017-executable-release-waves.md)
 - [0018 — Accepted change-set closure pin admission](0018-change-set-closure-pin.md)
 - [0019 — Versioned prompt-package delivery](0019-prompt-package-delivery.md)
@@ -44,3 +44,4 @@
 - [0042 — Signer windows are checked at an artifact's signed time](0042-signer-window-at-signed-time.md)
 - [0043 — Product dependencies in the environment graph](0043-product-dependencies.md) (proposed)
 - [0044 — Product instances and dependency bindings](0044-product-instances-and-dependency-bindings.md) (proposed)
+- [0045 — Sealed secrets delivered by the environment runtime](0045-sealed-secrets.md) (proposed)
