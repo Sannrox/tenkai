@@ -27,6 +27,8 @@ mod partition_store;
 #[cfg(feature = "postgres")]
 mod postgres_imp;
 mod store;
+#[cfg(any(test, feature = "postgres"))]
+mod tenant_schema;
 mod tenant_store;
 mod writer_lease;
 

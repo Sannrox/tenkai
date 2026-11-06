@@ -89,6 +89,7 @@ fn live_property_lookup_stores_large_values_after_migration() {
          {old_index};"
     ))
     .unwrap();
+    super::invalidate_tenant_schema_stamp(&store, &mut raw, &schema);
 
     let plan = plan_with_steps("tenkai:plan:large", "lab", 64);
     let object = plan_object(&plan);
@@ -167,4 +168,9 @@ fn live_property_lookup_stores_large_values_after_migration() {
     assert!(store.get(tenant, &plan.id).unwrap().is_some());
     raw.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
         .unwrap();
+    raw.execute(
+        "DELETE FROM public.tenkai_tenant_schema_versions WHERE schema_name = $1",
+        &[&schema],
+    )
+    .unwrap();
 }

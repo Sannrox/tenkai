@@ -35,6 +35,24 @@ async fn postgres_connect_from_spawn_blocking_does_not_nest_a_runtime() {
 }
 
 #[test]
+fn tenant_schema_stamp_skips_migrate_when_current_or_newer() {
+    use crate::tenant_schema::{EnsuredTenantSchemas, tenant_schema_is_current};
+    assert!(tenant_schema_is_current(
+        Some(i32::try_from(crate::tenant_schema::TENANT_SCHEMA_VERSION).unwrap()),
+        crate::tenant_schema::TENANT_SCHEMA_VERSION
+    ));
+    assert!(tenant_schema_is_current(Some(2), 1));
+    assert!(!tenant_schema_is_current(Some(0), 1));
+    assert!(!tenant_schema_is_current(None, 1));
+    assert!(!tenant_schema_is_current(Some(-1), 1));
+    let memo = EnsuredTenantSchemas::new();
+    memo.insert("tenkai_t_a".into());
+    assert!(memo.contains("tenkai_t_a"));
+    memo.remove("tenkai_t_a");
+    assert!(!memo.contains("tenkai_t_a"));
+}
+
+#[test]
 fn schema_names_are_safe() {
     assert_eq!(tenant_schema_name("tenant-a").unwrap(), "tenkai_t_tenant_a");
     assert!(tenant_schema_name("").is_err());
@@ -290,6 +308,20 @@ fn resolve_reconcile_fence_some_for_multi_replica() {
 }
 
 #[cfg(feature = "postgres")]
+fn invalidate_tenant_schema_stamp(
+    store: &PostgresTenantOperationalStore,
+    raw: &mut postgres::Client,
+    schema: &str,
+) {
+    raw.execute(
+        "DELETE FROM public.tenkai_tenant_schema_versions WHERE schema_name = $1",
+        &[&schema],
+    )
+    .expect("clear tenant schema stamp");
+    store.inner.forget_ensured_schema(schema);
+}
+
+#[cfg(feature = "postgres")]
 mod live_catalog;
 #[cfg(feature = "postgres")]
 mod live_change_events;
@@ -315,6 +347,8 @@ mod live_isolation;
 mod live_property_lookup;
 #[cfg(feature = "postgres")]
 mod live_retirement;
+#[cfg(feature = "postgres")]
+mod live_schema_ensure;
 #[cfg(feature = "postgres")]
 mod live_sole_store;
 #[cfg(feature = "postgres")]

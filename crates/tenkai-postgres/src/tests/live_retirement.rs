@@ -48,6 +48,7 @@ fn live_postgres_retirement_column_backfills_and_filters() {
              ('by-tenant-key',1,'{{"_tenkai_retirement":{{"reason":"r","actor":"a","retired_at":9}}}}');"#
     ))
     .unwrap();
+    super::invalidate_tenant_schema_stamp(&store, &mut raw, &schema);
 
     assert_eq!(
         store.list_active_environment_ids_for(&ctx).unwrap(),
@@ -73,4 +74,9 @@ fn live_postgres_retirement_column_backfills_and_filters() {
     );
     raw.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
         .unwrap();
+    raw.execute(
+        "DELETE FROM public.tenkai_tenant_schema_versions WHERE schema_name = $1",
+        &[&schema],
+    )
+    .unwrap();
 }
