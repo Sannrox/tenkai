@@ -72,7 +72,7 @@ mod tests {
                 ref product,
                 ref env,
                 ..
-            } if product == "api" && env == "prod"
+            } if product == "api" && env.as_deref() == Some("prod")
         ));
         let product = Cli::try_parse_from([
             "tenkaictl",

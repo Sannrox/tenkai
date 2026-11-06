@@ -1030,7 +1030,39 @@ pub(crate) async fn environment(ctx: &mut Ctx, env: &str) -> Result<Object> {
     validate_identifier("environment", env)?;
     match ctx.get(&env_id(env)).await? {
         Some(o) => Ok(o),
-        None => bail!("environment {env} is not registered (tenkaictl env add {env})"),
+        None => {
+            // Box the miss path so listing names does not enlarge every caller.
+            Box::pin(missing_environment(ctx, env)).await
+        }
+    }
+}
+
+async fn missing_environment(ctx: &mut Ctx, env: &str) -> Result<Object> {
+    bail!(
+        "{}",
+        unregistered_environment_message(env, &registered_environment_names(ctx).await?)
+    )
+}
+
+/// Names of environments that are still operational, sorted.
+pub async fn registered_environment_names(ctx: &mut Ctx) -> Result<Vec<String>> {
+    let mut environments = ctx.list_kind(KIND_ENVIRONMENT).await?;
+    environments.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(environments
+        .into_iter()
+        .filter(|object| retirement_from_object(object).is_none())
+        .map(|object| object.name)
+        .collect())
+}
+
+fn unregistered_environment_message(env: &str, registered: &[String]) -> String {
+    if registered.is_empty() {
+        format!("environment {env} is not registered; the store has no environments")
+    } else {
+        format!(
+            "environment {env} is not registered; registered: {}",
+            registered.join(", ")
+        )
     }
 }
 
@@ -3758,5 +3790,31 @@ mod tests {
             Some("approval policy is unreadable")
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn missing_environment_lists_registered_names_or_empty_store() {
+        let database = std::env::temp_dir().join(format!(
+            "tenkai-env-hint-{}-{}.db",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let _ = std::fs::remove_file(&database);
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let empty = environment(&mut ctx, "local")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(empty.contains("the store has no environments"), "{empty}");
+        env_add(&mut ctx, "edge", "Edge").await.unwrap();
+        env_add(&mut ctx, "lab", "Lab").await.unwrap();
+        let listed = environment(&mut ctx, "local")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(listed.contains("registered: edge, lab"), "{listed}");
+        assert!(!listed.contains("tenkaictl env add"), "{listed}");
+        let _ = std::fs::remove_file(&database);
     }
 }

@@ -779,6 +779,10 @@ fn signed_stateful_upgrade_survives_executor_loss() {
         .args(["restore", backup.to_str().unwrap()])
         .env("TENKAI_MANAGEMENT_TOKEN", "stateful-drill-token")
         .env("TMPDIR", &drill.cli.root)
+        .env(
+            "TENKAI_SYSTEM_CLIENT_CONFIG",
+            drill.cli.root.join("no-system-client.toml"),
+        )
         .output()
         .unwrap();
     assert!(
@@ -792,6 +796,10 @@ fn signed_stateful_upgrade_survives_executor_loss() {
         .args(["inspect"])
         .env("TENKAI_MANAGEMENT_TOKEN", "stateful-drill-token")
         .env("TMPDIR", &drill.cli.root)
+        .env(
+            "TENKAI_SYSTEM_CLIENT_CONFIG",
+            drill.cli.root.join("no-system-client.toml"),
+        )
         .output()
         .unwrap();
     assert!(isolated.status.success());

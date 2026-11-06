@@ -89,6 +89,10 @@ The script:
   [host applier](host-releases.md#install) as root, owned by root, at fixed
   paths, and refuses when any of their directories, or one above them, is a
   symbolic link or writable by anyone but root. It starts nothing;
+- with `--role server`, writes `/etc/tenkai/client.toml` (`target = "remote"`,
+  loopback URL) and a root-only `/etc/tenkai/management.token` unless they
+  already exist, so `sudo tenkaictl status --env <env>` talks to the server
+  instead of an empty embedded store;
 - prints the `gh attestation verify` command for each installed file.
 
 `install.sh` is listed in `SHA256SUMS` and covered by the provenance

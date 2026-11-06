@@ -2,8 +2,9 @@ use anyhow::Result;
 use tenkai::client;
 
 use crate::args::{Cli, Command};
+use crate::client_config::{self, ClientConfig};
 
-pub(crate) async fn run(cli: Cli) -> Result<()> {
+pub(crate) async fn run(mut cli: Cli, config: &ClientConfig) -> Result<()> {
     let output = cli.output;
     let database = cli.database.clone();
     // A support bundle is most needed when the store cannot open, so it
@@ -51,6 +52,15 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         return Ok(());
     }
     let mut ctx = client::Ctx::embedded(&database)?;
+    let fill_env = client_config::needs_env_resolution(&mut cli.command);
+    if fill_env {
+        let names = if config.default_environment.is_some() {
+            Vec::new()
+        } else {
+            tenkai::environment::registered_environment_names(&mut ctx).await?
+        };
+        client_config::apply_resolved_environment(&mut cli.command, config, &names)?;
+    }
     match cli.command {
         command @ (Command::Init
         | Command::Publish { .. }

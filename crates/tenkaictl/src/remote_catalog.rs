@@ -151,6 +151,7 @@ pub(crate) async fn run(
             Ok(())
         }
         Command::Plan { env, generation } => {
+            let env = crate::client_config::require_env(env)?;
             let generation = generation
                 .ok_or_else(|| anyhow::anyhow!("--generation is required with --target remote"))?;
             let result = client
@@ -191,6 +192,7 @@ pub(crate) async fn run(
                     generation,
                 },
         } => {
+            let env = crate::client_config::require_env(env)?;
             let generation = generation
                 .ok_or_else(|| anyhow::anyhow!("--generation is required with --target remote"))?;
             let request = tenkai::management_lifecycle::load_approve_request(

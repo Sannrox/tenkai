@@ -23,6 +23,7 @@ pub(crate) async fn run(
 ) -> Result<()> {
     match command {
         Command::Plan { env, generation: _ } => {
+            let env = crate::client_config::require_env(env)?;
             if output == OutputFormat::JsonV1 {
                 tenkai::command_result::validate_resource_reference(
                     "plan",
@@ -103,6 +104,7 @@ pub(crate) async fn run(
             .await?;
         }
         Command::Status { env } => {
+            let env = crate::client_config::require_env(env)?;
             let rows = plan::status(ctx, &env).await?;
             if output == OutputFormat::JsonV1 {
                 print_machine_result(&crate::output::status_result(&env, rows.len()))?;

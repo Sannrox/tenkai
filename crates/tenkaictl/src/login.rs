@@ -43,12 +43,26 @@ fn http_client() -> Result<Client> {
 }
 
 impl LoginRuntime {
-    pub(crate) fn from_env() -> Result<Self> {
+    pub(crate) fn from_env_with_token_file(
+        token_file: Option<&std::path::Path>,
+        token_file_required: bool,
+    ) -> Result<Self> {
+        let mut env_token = secret_nonempty("TENKAI_MANAGEMENT_TOKEN")?;
+        if env_token.is_none()
+            && let Some(path) = token_file
+        {
+            match tenkai::secret_source::read_from_path("token_file", path) {
+                Ok(token) => env_token = Some(token),
+                // A root-only system token is for sudo; this user uses OIDC.
+                Err(_) if !token_file_required && token_file_foreign(path) => {}
+                Err(err) => return Err(err),
+            }
+        }
         Ok(Self {
             http: http_client()?,
             open_browser: Arc::new(open_system_browser),
             config_dir: config_dir_from_env()?,
-            env_token: secret_nonempty("TENKAI_MANAGEMENT_TOKEN")?,
+            env_token,
             oidc_client_id: env_nonempty("TENKAI_OIDC_CLIENT_ID"),
             client_id: env_nonempty("TENKAI_CLIENT_ID"),
             client_secret: secret_nonempty("TENKAI_OIDC_CLIENT_SECRET")?,
@@ -68,6 +82,24 @@ fn env_nonempty(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+#[cfg(unix)]
+fn token_file_foreign(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    match std::fs::metadata(path) {
+        Ok(meta) => {
+            // SAFETY: geteuid has no preconditions and cannot fail.
+            let uid = unsafe { libc::geteuid() };
+            meta.uid() != uid
+        }
+        Err(_) => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn token_file_foreign(_path: &std::path::Path) -> bool {
+    false
 }
 
 #[derive(Debug, Deserialize)]
@@ -98,7 +130,10 @@ struct TokenResponse {
 }
 
 pub(crate) async fn run(cli: Cli) -> Result<()> {
-    let runtime = LoginRuntime::from_env()?;
+    let runtime = LoginRuntime::from_env_with_token_file(
+        cli.token_file.as_deref(),
+        cli.token_file.is_some(),
+    )?;
     match cli.command {
         Command::Login {
             client_id,

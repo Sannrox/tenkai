@@ -49,6 +49,9 @@ Options:
   --version X.Y.Z            release to install (default: ${RELEASE_VERSION:-none, required})
   --prefix DIR               install directory (default: /usr/local/bin as
                              root, ~/.local/bin otherwise)
+  --sysconfdir DIR           for --role server: write client.toml and a
+                             management token under DIR/tenkai
+                             (default: /etc)
   --base-url URL             release download root
                              (default: https://github.com/${REPO}/releases/download)
 
@@ -60,16 +63,18 @@ EOF
 role=cli
 version="$RELEASE_VERSION"
 prefix=""
+sysconfdir=/etc
 base_url="https://github.com/${REPO}/releases/download"
 with_applier=false
 while [ $# -gt 0 ]; do
   case "$1" in
-    --role | --version | --prefix | --base-url)
+    --role | --version | --prefix | --sysconfdir | --base-url)
       [ $# -ge 2 ] || die "$1 needs a value"
       case "$1" in
         --role) role="$2" ;;
         --version) version="$2" ;;
         --prefix) prefix="$2" ;;
+        --sysconfdir) sysconfdir="$2" ;;
         --base-url) base_url="$2" ;;
       esac
       shift 2
@@ -314,6 +319,107 @@ case "$prefix" in
     *) say "" && say "${prefix} is not on PATH; add it to run the binaries by name." ;;
   esac ;;
 esac
+# Server hosts: a client config so `sudo tenkaictl status --env <env>` talks
+# to the local server instead of an empty embedded store. The token stays in
+# a root-only file, never in client.toml.
+write_server_client_config() {
+  case "$sysconfdir" in
+    /*) ;;
+    *)
+      mkdir -p "$sysconfdir" || die "cannot create ${sysconfdir}"
+      sysconfdir="$(CDPATH= cd -- "$sysconfdir" && pwd)" || die "cannot resolve ${sysconfdir}"
+      ;;
+  esac
+  conf_dir="${sysconfdir}/tenkai"
+  mkdir -p "$conf_dir" || die "cannot create ${conf_dir}"
+  if [ "$(id -u)" = 0 ]; then
+    chmod 0755 "$conf_dir" || die "cannot set permissions on ${conf_dir}"
+    checked="$conf_dir"
+    while :; do
+      if [ -L "$checked" ]; then
+        die "${checked} is a symbolic link; refusing to write client config"
+      fi
+      # shellcheck disable=SC2046 # split ls -ldn into mode, links, uid, ...
+      set -- $(ls -ldn "$checked")
+      case "$1" in
+        d*) ;;
+        *) die "${checked} is not a directory; refusing to write client config" ;;
+      esac
+      [ "$3" = 0 ] || die "${checked} is owned by uid $3, not root; refusing to write client config"
+      case "$1" in
+        ?????w* | ????????w*) die "${checked} is writable by group or others; refusing to write client config" ;;
+      esac
+      [ "$checked" = / ] && break
+      checked="$(dirname "$checked")"
+    done
+  fi
+  token_file="${conf_dir}/management.token"
+  client_file="${conf_dir}/client.toml"
+  if [ ! -e "$token_file" ]; then
+    [ -r /dev/urandom ] || die "cannot read /dev/urandom to create ${token_file}"
+    token="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+    [ -n "$token" ] || die "cannot create ${token_file}"
+    pending="$(umask 077; mktemp "${conf_dir}/.tenkai-install.XXXXXX")" \
+      || die "cannot create a temporary file in ${conf_dir}"
+    printf '%s\n' "$token" >"$pending"
+    if [ "$(id -u)" = 0 ]; then
+      chown 0:0 "$pending"
+    fi
+    chmod 0600 "$pending"
+    if ln "$pending" "$token_file" 2>/dev/null; then
+      rm -f "$pending"
+      pending=""
+      say "  ${token_file}"
+    elif [ -e "$token_file" ]; then
+      rm -f "$pending"
+      pending=""
+    else
+      rm -f "$pending"
+      pending=""
+      die "cannot create ${token_file}"
+    fi
+  fi
+  if [ ! -e "$client_file" ]; then
+    pending="$(umask 077; mktemp "${conf_dir}/.tenkai-install.XXXXXX")" \
+      || die "cannot create a temporary file in ${conf_dir}"
+    cat >"$pending" <<EOF
+# Written by install.sh --role server. Flags and environment variables override this file.
+target = "remote"
+server_url = "http://127.0.0.1:8080"
+token_file = "${token_file}"
+EOF
+    if [ "$(id -u)" = 0 ]; then
+      chown 0:0 "$pending"
+    fi
+    chmod 0644 "$pending"
+    if ln "$pending" "$client_file" 2>/dev/null; then
+      rm -f "$pending"
+      pending=""
+      say "  ${client_file}"
+    elif [ -e "$client_file" ]; then
+      rm -f "$pending"
+      pending=""
+    else
+      rm -f "$pending"
+      pending=""
+      die "cannot create ${client_file}"
+    fi
+  fi
+  say ""
+  say "As root, set TENKAI_MANAGEMENT_TOKEN in ${conf_dir}/server.env to the"
+  say "contents of ${token_file}. systemd injects that value; the tenkai user"
+  say "cannot read a root-only token file. Then: sudo tenkaictl status --env <env>"
+}
+
+if [ "$role" = server ]; then
+  if [ "$(id -u)" = 0 ] || [ "$sysconfdir" != /etc ]; then
+    write_server_client_config
+  else
+    say ""
+    say "Not root; skipped ${sysconfdir}/tenkai/client.toml (pass --sysconfdir or re-run as root)."
+  fi
+fi
+
 if $with_applier; then
   say ""
   say "The host applier is installed and nothing was started. Next, as root"

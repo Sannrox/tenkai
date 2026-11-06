@@ -12,6 +12,7 @@ pub(crate) async fn run(ctx: &mut client::Ctx, command: MigrateCommand) -> Resul
             declaration,
             backup_receipt_digest,
         } => {
+            let env = crate::client_config::require_env(env)?;
             let declaration = package_migration::MigrationDeclaration::load(&declaration)?;
             let record = package_migration::preview(
                 ctx,
@@ -31,6 +32,7 @@ pub(crate) async fn run(ctx: &mut client::Ctx, command: MigrateCommand) -> Resul
             expected_generation: _,
             approval,
         } => {
+            let env = crate::client_config::require_env(env)?;
             let declaration = package_migration::MigrationDeclaration::load(&declaration)?;
             let authorization = migration_authorization(
                 approval.approval.as_deref(),

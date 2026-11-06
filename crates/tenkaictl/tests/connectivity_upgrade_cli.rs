@@ -23,6 +23,10 @@ fn tenkaictl(db: &Path, args: &[&str]) -> String {
         .arg(db)
         .args(args)
         .env("TENKAI_MANAGEMENT_TOKEN", "cli-upgrade-secret")
+        .env(
+            "TENKAI_SYSTEM_CLIENT_CONFIG",
+            db.parent().unwrap().join("no-system-client.toml"),
+        )
         .output()
         .unwrap_or_else(|error| panic!("failed to launch tenkaictl: {error}"));
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
