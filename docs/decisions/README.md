@@ -45,3 +45,4 @@
 - [0043 — Product dependencies in the environment graph](0043-product-dependencies.md) (proposed)
 - [0044 — Product instances and dependency bindings](0044-product-instances-and-dependency-bindings.md) (proposed)
 - [0045 — Sealed secrets delivered by the environment runtime](0045-sealed-secrets.md) (proposed)
+- [0046 — Workload identity and peer policy from dependency bindings](0046-workload-identity-and-peer-policy.md) (proposed)
