@@ -1,15 +1,18 @@
 # Software compatibility preflight
 
-Software releases can declare a version 1 `[compatibility]` profile in
-`tenkai.toml`. The complete profile is part of the manifest digest and release
-signature. It describes component pins, required and provided contracts, runtime
-capabilities, environment facts, and data-schema bounds. Compatibility is checked
-before execution independently of process health and ordinary evaluation gates.
+Software releases can declare a `[compatibility]` profile in `tenkai.toml`.
+Version 1 and version 2 are valid. The complete profile is part of the manifest
+digest and release signature. It describes component pins, required and provided
+contracts, runtime capabilities, environment facts, and data-schema bounds.
+Compatibility is checked before execution independently of process health and
+ordinary evaluation gates.
 
 Existing manifests without a profile retain their previous behavior. Specialized
 product kinds keep their own admission rules and cannot declare this profile.
 Adding a profile requires a new release version; changing published metadata
-cannot reuse its signature or immutable version identity.
+cannot reuse its signature or immutable version identity. Servers older than
+profile v2 refuse a manifest that declares `version = 2`. Publish v2 once every
+server that reads the catalog understands it.
 
 ## Declare the profile
 
@@ -42,6 +45,37 @@ value = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 database = "1.3.0"
 ```
 
+Version 2 accepts the same string form, which stays a required minimum, and a
+table form that can mark a requirement optional:
+
+```toml
+[compatibility]
+version = 2
+max_evidence_age_ms = 60000
+
+[compatibility.components.api.pin]
+kind = "digest"
+value = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[compatibility.components.api.requires]
+database = "1.2.0"
+"connector.capture" = { minimum = "0.1.0", optional = true }
+
+[compatibility.components.api.provides]
+"platform.customer-api" = "1.0.0"
+```
+
+An optional requirement with no provider is compatible. A provider that is
+present is still version-checked, including when several providers make the
+contract ambiguous. Quote dotted contract names so TOML treats them as a single
+key.
+
+Version 2 publication refuses a requirement cycle inside one release: a
+component that requires a contract another component in the same profile
+provides, including when a component requires a contract it provides itself.
+The refusal names the components and the contracts on the cycle. Version 1
+profiles with a satisfied self-requirement stay readable.
+
 Component identities are unique within the environment's checked software graph.
 A digest pin is a canonical lowercase SHA-256 digest. A revision is a complete
 40- or 64-character hexadecimal source revision. Component pins identify the
@@ -51,8 +85,11 @@ components; Tenkai does not infer their compatibility from a running process.
 
 Contract versions are stable semantic versions without prerelease or build
 suffixes. A provider satisfies a requirement when its major matches and its
-version is at least the declared minimum, including patch level. Thus `1.3.0`
-satisfies `1.2.0`, while `2.0.0` and `1.1.0` do not. Multiple providers of the
+version is at least the declared minimum, including patch level. `1.3.0`
+satisfies `1.2.0`; `2.0.0` and `1.1.0` are incompatible. Profile version 2 also
+requires the minor to match below 1.0, because a 0.y minor may break the surface:
+`0.1.4` satisfies `0.1.0`, and `0.2.0` is a different minor and is incompatible.
+Version 1 keeps the same-major rule for 0.y contracts. Multiple providers of the
 same required contract are ambiguous and refused even when their versions agree.
 
 The schema range is inclusive. Migration state is `stable` or `pending` and must
@@ -60,9 +97,11 @@ match exactly. Tenkai checks this declaration; it does not run migrations or
 reverse them during rollback. Facts use the existing admitted environment fact
 keys. Capabilities are explicit identifiers observed by the environment owner.
 
-Version 1 admits at most 128 components and 128 contracts per component.
-Evidence age is between 1 millisecond and one day. Identifiers contain only
-ASCII letters, digits, dots, underscores, or hyphens and are at most 128 bytes.
+Version 1 and version 2 admit at most 128 components and 128 contracts per
+component. Evidence age is between 1 millisecond and one day. Identifiers contain
+only ASCII letters, digits, dots, underscores, or hyphens and are at most 128
+bytes. Observations stay evidence version 1 with string minimums; optional is a
+profile declaration.
 
 ## Record observations
 

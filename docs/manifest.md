@@ -111,7 +111,11 @@ signed approval bound to the exact plan and environment; see
 
 Software releases can declare a versioned `[compatibility]` profile with immutable
 component pins, required and provided contracts, runtime capabilities, facts, and
-schema bounds. The profile is signed with the manifest. Planning, apply, restart,
+schema bounds. Version 1 keeps string minima and same-major matching, including
+below 1.0. Version 2 accepts `{ minimum, optional = true }` per requirement and
+matches 0.y contracts on major and minor. Version 2 publication refuses a
+requirement cycle inside one release. Servers older than profile v2 refuse a manifest that declares
+`version = 2`. The profile is signed with the manifest. Planning, apply, restart,
 and rollback check fresh environment-scoped evidence before mutation;
 `--skip-gates` does not bypass these checks. See
 [software compatibility preflight](software-compatibility.md) for the contract,

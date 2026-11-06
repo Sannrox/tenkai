@@ -1,12 +1,13 @@
 //! Signed software requirements and content-bound environment preflight evidence.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 /// Contract requirements use same-major semantic versions at or above the minimum.
+/// Profile version 2 also requires the minor to match below 1.0 (ADR 0043 §1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CompatibilityProfile {
@@ -20,14 +21,51 @@ pub struct CompatibilityProfile {
     pub max_evidence_age_ms: u64,
 }
 
+/// A contract requirement: a string minimum, or a table with `optional` on profile v2.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(untagged)]
+pub enum ContractRequirement {
+    Minimum(String),
+    Detailed {
+        minimum: String,
+        #[serde(default)]
+        optional: bool,
+    },
+}
+
+impl ContractRequirement {
+    pub fn minimum(&self) -> &str {
+        match self {
+            Self::Minimum(value) | Self::Detailed { minimum: value, .. } => value,
+        }
+    }
+
+    pub fn optional(&self) -> bool {
+        matches!(self, Self::Detailed { optional: true, .. })
+    }
+
+    fn is_table_form(&self) -> bool {
+        matches!(self, Self::Detailed { .. })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ComponentRequirement {
     pub pin: ComponentPin,
     #[serde(default)]
-    pub requires: BTreeMap<String, String>,
+    pub requires: BTreeMap<String, ContractRequirement>,
     #[serde(default)]
     pub provides: BTreeMap<String, String>,
+}
+
+impl ComponentRequirement {
+    fn required_minimums(&self) -> BTreeMap<String, String> {
+        self.requires
+            .iter()
+            .map(|(name, requirement)| (name.clone(), requirement.minimum().to_string()))
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -116,8 +154,11 @@ pub struct CompatibilityReport {
 
 impl CompatibilityProfile {
     pub fn validate(&self) -> Result<()> {
-        if self.version != 1 || self.components.is_empty() || self.components.len() > 128 {
-            bail!("software compatibility requires version 1 and 1..128 components");
+        if !matches!(self.version, 1 | 2)
+            || self.components.is_empty()
+            || self.components.len() > 128
+        {
+            bail!("software compatibility requires version 1 or 2 and 1..128 components");
         }
         if self.max_evidence_age_ms == 0 || self.max_evidence_age_ms > 86_400_000 {
             bail!("software compatibility evidence age must be 1..86400000 milliseconds");
@@ -125,8 +166,11 @@ impl CompatibilityProfile {
         for (name, component) in &self.components {
             validate_identifier(name)?;
             component.pin.validate()?;
-            validate_contracts(&component.requires)?;
+            validate_requirements(self.version, &component.requires)?;
             validate_contracts(&component.provides)?;
+        }
+        if self.version >= 2 {
+            refuse_requirement_cycle(&self.components)?;
         }
         if self.capabilities.len() > 128 || self.facts.len() > 128 {
             bail!("too many software compatibility requirements");
@@ -196,11 +240,110 @@ fn validate_contracts(contracts: &BTreeMap<String, String>) -> Result<()> {
     }
     for (name, version) in contracts {
         validate_identifier(name)?;
-        let parsed = semver::Version::parse(version)?;
-        if !parsed.pre.is_empty() || !parsed.build.is_empty() {
-            bail!("software contract versions must be stable semantic versions");
+        validate_contract_version(version)?;
+    }
+    Ok(())
+}
+
+fn validate_requirements(
+    profile_version: u32,
+    requirements: &BTreeMap<String, ContractRequirement>,
+) -> Result<()> {
+    if requirements.len() > 128 {
+        bail!("too many software contracts");
+    }
+    for (name, requirement) in requirements {
+        validate_identifier(name)?;
+        validate_contract_version(requirement.minimum())?;
+        if profile_version < 2 && requirement.is_table_form() {
+            bail!(
+                "table-form contract requirements need [compatibility] version = 2 (contract {name})"
+            );
         }
     }
+    Ok(())
+}
+
+fn validate_contract_version(version: &str) -> Result<()> {
+    let parsed = semver::Version::parse(version)?;
+    if !parsed.pre.is_empty() || !parsed.build.is_empty() {
+        bail!("software contract versions must be stable semantic versions");
+    }
+    Ok(())
+}
+
+/// Publication refuses a cycle among this release's own provides/requires.
+fn refuse_requirement_cycle(components: &BTreeMap<String, ComponentRequirement>) -> Result<()> {
+    let mut providers: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (name, component) in components {
+        for contract in component.provides.keys() {
+            providers
+                .entry(contract.as_str())
+                .or_default()
+                .push(name.as_str());
+        }
+    }
+    let mut edges: BTreeMap<&str, Vec<(&str, &str)>> = BTreeMap::new();
+    for (name, component) in components {
+        for contract in component.requires.keys() {
+            if let Some(targets) = providers.get(contract.as_str()) {
+                for target in targets {
+                    edges
+                        .entry(name.as_str())
+                        .or_default()
+                        .push((*target, contract.as_str()));
+                }
+            }
+        }
+    }
+    let mut visiting = Vec::new();
+    let mut visiting_set = BTreeMap::new();
+    let mut done = BTreeSet::new();
+    for name in components.keys() {
+        visit_requirement_edge(
+            name.as_str(),
+            &edges,
+            &mut visiting,
+            &mut visiting_set,
+            &mut done,
+        )?;
+    }
+    Ok(())
+}
+
+fn visit_requirement_edge<'a>(
+    node: &'a str,
+    edges: &BTreeMap<&'a str, Vec<(&'a str, &'a str)>>,
+    visiting: &mut Vec<(&'a str, &'a str)>,
+    visiting_set: &mut BTreeMap<&'a str, usize>,
+    done: &mut BTreeSet<&'a str>,
+) -> Result<()> {
+    if done.contains(node) {
+        return Ok(());
+    }
+    if let Some(&index) = visiting_set.get(node) {
+        let mut cycle: Vec<&str> = visiting[index..].iter().map(|(name, _)| *name).collect();
+        cycle.push(node);
+        let contracts: Vec<&str> = visiting[index..]
+            .iter()
+            .map(|(_, contract)| *contract)
+            .collect();
+        bail!(
+            "software compatibility requirement cycle: {} (contracts: {})",
+            cycle.join(" -> "),
+            contracts.join(", ")
+        );
+    }
+    visiting_set.insert(node, visiting.len());
+    if let Some(next) = edges.get(node) {
+        for &(target, contract) in next {
+            visiting.push((node, contract));
+            visit_requirement_edge(target, edges, visiting, visiting_set, done)?;
+            visiting.pop();
+        }
+    }
+    visiting_set.remove(node);
+    done.insert(node);
     Ok(())
 }
 
@@ -212,6 +355,26 @@ pub fn evaluate(
     evidence: Option<&CompatibilityEvidence>,
     facts: &BTreeMap<String, String>,
     now_ms: i64,
+) -> Result<CompatibilityReport> {
+    evaluate_owned(
+        profile,
+        release_digest,
+        environment,
+        evidence,
+        facts,
+        now_ms,
+        None,
+    )
+}
+
+fn evaluate_owned(
+    profile: &CompatibilityProfile,
+    release_digest: &str,
+    environment: &str,
+    evidence: Option<&CompatibilityEvidence>,
+    facts: &BTreeMap<String, String>,
+    now_ms: i64,
+    owned: Option<&BTreeSet<String>>,
 ) -> Result<CompatibilityReport> {
     profile.validate()?;
     let mut report = CompatibilityReport {
@@ -274,7 +437,7 @@ pub fn evaluate(
             Some(observed) => {
                 if observed.pin != required.pin
                     || observed.provides != required.provides
-                    || observed.requires != required.requires
+                    || observed.requires != required.required_minimums()
                 {
                     report
                         .failures
@@ -284,13 +447,34 @@ pub fn evaluate(
                 }
             }
         }
-        check_contracts(&required.requires, &contracts, &mut report.failures)?;
+        check_contracts(
+            profile.version,
+            &required.requires,
+            &contracts,
+            &mut report.failures,
+        )?;
     }
     // Retained observations constrain the proposed final component set too.
+    // Keep every component's provides. Skip requires owned by another profile;
+    // that profile is evaluated separately with its optional semantics.
     for (name, component) in &evidence.components {
-        if !profile.components.contains_key(name) {
-            check_contracts(&component.requires, &contracts, &mut report.failures)?;
+        if profile.components.contains_key(name) {
+            continue;
         }
+        if owned.is_some_and(|set| set.contains(name)) {
+            continue;
+        }
+        let retained = component
+            .requires
+            .iter()
+            .map(|(contract, minimum)| {
+                (
+                    contract.clone(),
+                    ContractRequirement::Minimum(minimum.clone()),
+                )
+            })
+            .collect();
+        check_contracts(1, &retained, &contracts, &mut report.failures)?;
     }
     let mut capabilities = profile.capabilities.clone();
     capabilities.sort();
@@ -326,19 +510,21 @@ pub fn evaluate(
 }
 
 fn check_contracts(
-    requirements: &BTreeMap<String, String>,
+    profile_version: u32,
+    requirements: &BTreeMap<String, ContractRequirement>,
     contracts: &BTreeMap<&str, Vec<&str>>,
     failures: &mut Vec<CompatibilityFailure>,
 ) -> Result<()> {
-    for (contract, minimum) in requirements {
+    for (contract, requirement) in requirements {
         let failure = match contracts.get(contract.as_str()).map(Vec::as_slice) {
+            None | Some([]) if requirement.optional() => None,
             None | Some([]) => Some(CompatibilityFailure::MissingContract {
                 contract: contract.clone(),
             }),
             Some([provided]) => {
                 let actual = semver::Version::parse(provided)?;
-                let minimum = semver::Version::parse(minimum)?;
-                (actual.major != minimum.major || actual < minimum).then(|| {
+                let minimum = semver::Version::parse(requirement.minimum())?;
+                (!contract_satisfies(profile_version, &actual, &minimum)).then(|| {
                     CompatibilityFailure::IncompatibleContract {
                         contract: contract.clone(),
                     }
@@ -353,6 +539,20 @@ fn check_contracts(
         }
     }
     Ok(())
+}
+
+fn contract_satisfies(
+    profile_version: u32,
+    actual: &semver::Version,
+    minimum: &semver::Version,
+) -> bool {
+    if actual.major != minimum.major || actual < minimum {
+        return false;
+    }
+    if profile_version >= 2 && minimum.major == 0 && actual.minor != minimum.minor {
+        return false;
+    }
+    true
 }
 
 /// Refusal retains the structured report across application error boundaries.
@@ -519,14 +719,6 @@ pub(crate) async fn report_manifest(
         }));
     }
     let now = crate::now_millis();
-    let mut result = evaluate(
-        profile,
-        digest,
-        environment,
-        observations.last(),
-        &facts,
-        now,
-    )?;
     let env = crate::environment::environment(ctx, environment).await?;
     let mut installed: Vec<_> = env
         .properties
@@ -537,7 +729,9 @@ pub(crate) async fn report_manifest(
         })
         .collect();
     installed.sort();
-    let mut names: std::collections::BTreeSet<_> = profile.components.keys().cloned().collect();
+    let mut owned: BTreeSet<String> = profile.components.keys().cloned().collect();
+    let mut installed_profiles = Vec::new();
+    let mut ambiguous = Vec::new();
     for (product, version) in installed {
         if product == manifest.product.name {
             continue;
@@ -551,25 +745,37 @@ pub(crate) async fn report_manifest(
             .get("manifest")
             .context("installed release has no manifest")?;
         let installed_manifest = crate::manifest::parse_raw(raw)?;
-        let Some(installed_profile) = &installed_manifest.compatibility else {
+        let Some(installed_profile) = installed_manifest.compatibility else {
             continue;
         };
         for name in installed_profile.components.keys() {
-            if !names.insert(name.clone()) {
-                result
-                    .failures
-                    .push(CompatibilityFailure::AmbiguousComponent {
-                        component: name.clone(),
-                    });
+            if !owned.insert(name.clone()) {
+                ambiguous.push(CompatibilityFailure::AmbiguousComponent {
+                    component: name.clone(),
+                });
             }
         }
-        let retained = evaluate(
+        installed_profiles.push(installed_profile);
+    }
+    let mut result = evaluate_owned(
+        profile,
+        digest,
+        environment,
+        observations.last(),
+        &facts,
+        now,
+        Some(&owned),
+    )?;
+    result.failures.extend(ambiguous);
+    for installed_profile in &installed_profiles {
+        let retained = evaluate_owned(
             installed_profile,
             digest,
             environment,
             observations.last(),
             &facts,
             now,
+            Some(&owned),
         )?;
         result.failures.extend(retained.failures);
     }
@@ -626,7 +832,10 @@ mod tests {
                 "web".into(),
                 ComponentRequirement {
                     pin: pin.clone(),
-                    requires: BTreeMap::from([("database".into(), "1.2.0".into())]),
+                    requires: BTreeMap::from([(
+                        "database".into(),
+                        ContractRequirement::Minimum("1.2.0".into()),
+                    )]),
                     provides: BTreeMap::new(),
                 },
             )]),
@@ -658,6 +867,269 @@ mod tests {
             migration: MigrationState::Stable,
         };
         (profile, evidence)
+    }
+
+    fn failures(
+        profile: &CompatibilityProfile,
+        evidence: &CompatibilityEvidence,
+    ) -> Vec<CompatibilityFailure> {
+        evaluate(
+            profile,
+            &evidence.release_digest,
+            "test",
+            Some(evidence),
+            &BTreeMap::new(),
+            1_050,
+        )
+        .unwrap()
+        .failures
+    }
+
+    const V1_STRING_MANIFEST: &str = concat!(
+        "[product]\nname = \"compat-app\"\nversion = \"1.0.0\"\n",
+        "[deploy]\ninstall = \"true\"\nuninstall = \"true\"\n",
+        "[compatibility]\nversion = 1\nmax_evidence_age_ms = 60000\n",
+        "[compatibility.components.web.pin]\nkind = \"revision\"\n",
+        "value = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
+        "[compatibility.components.web.requires]\ndatabase = \"1.2.0\"\n",
+    );
+
+    #[test]
+    fn v1_string_requirements_parse_validate_and_keep_digest() {
+        let digest = crate::manifest::digest(V1_STRING_MANIFEST);
+        let manifest = crate::manifest::parse_raw(V1_STRING_MANIFEST).unwrap();
+        let profile = manifest.compatibility.as_ref().unwrap();
+        profile.validate().unwrap();
+        assert_eq!(profile.version, 1);
+        assert_eq!(
+            profile.components["web"].requires["database"],
+            ContractRequirement::Minimum("1.2.0".into())
+        );
+        assert_eq!(crate::manifest::digest(V1_STRING_MANIFEST), digest);
+        let encoded = toml::to_string(&manifest).unwrap();
+        assert!(encoded.contains("database = \"1.2.0\""));
+        assert!(!encoded.contains("optional"));
+    }
+
+    #[test]
+    fn v1_refuses_table_form_requirements() {
+        let raw = concat!(
+            "[product]\nname = \"compat-app\"\nversion = \"1.0.0\"\n",
+            "[deploy]\ninstall = \"true\"\nuninstall = \"true\"\n",
+            "[compatibility]\nversion = 1\nmax_evidence_age_ms = 60000\n",
+            "[compatibility.components.web.pin]\nkind = \"revision\"\n",
+            "value = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
+            "[compatibility.components.web.requires]\n",
+            "database = { minimum = \"1.2.0\", optional = true }\n",
+        );
+        let err = crate::manifest::parse_raw(raw).unwrap_err().to_string();
+        assert!(err.contains("version = 2"), "{err}");
+        assert!(err.contains("database"), "{err}");
+    }
+
+    #[test]
+    fn v2_parses_and_signs_string_and_table_requirements() {
+        let raw = concat!(
+            "[product]\nname = \"compat-app\"\nversion = \"1.0.0\"\n",
+            "[deploy]\ninstall = \"true\"\nuninstall = \"true\"\n",
+            "[compatibility]\nversion = 2\nmax_evidence_age_ms = 60000\n",
+            "[compatibility.components.web.pin]\nkind = \"revision\"\n",
+            "value = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
+            "[compatibility.components.web.requires]\n",
+            "database = \"1.2.0\"\n",
+            "connector = { minimum = \"0.1.0\", optional = true }\n",
+        );
+        let manifest = crate::manifest::parse_raw(raw).unwrap();
+        let profile = manifest.compatibility.as_ref().unwrap();
+        profile.validate().unwrap();
+        assert_eq!(profile.version, 2);
+        assert_eq!(
+            profile.components["web"].requires["database"],
+            ContractRequirement::Minimum("1.2.0".into())
+        );
+        assert_eq!(
+            profile.components["web"].requires["connector"],
+            ContractRequirement::Detailed {
+                minimum: "0.1.0".into(),
+                optional: true,
+            }
+        );
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-compat-v2-sign-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("tenkai.toml");
+        std::fs::write(&path, raw).unwrap();
+        crate::dev_sign::sign_release(
+            &root.join("keys"),
+            &path,
+            &root.join("signature.json"),
+            &root.join("trust.toml"),
+        )
+        .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn v2_matching_requires_minor_below_one_and_keeps_same_major_above() {
+        let (mut profile, mut evidence) = fixture();
+        profile.version = 2;
+        profile.components.get_mut("web").unwrap().requires =
+            BTreeMap::from([("api".into(), ContractRequirement::Minimum("0.1.0".into()))]);
+        evidence.components.get_mut("web").unwrap().requires =
+            BTreeMap::from([("api".into(), "0.1.0".into())]);
+        evidence.contracts = BTreeMap::from([("api".into(), "0.1.4".into())]);
+        assert!(failures(&profile, &evidence).is_empty());
+
+        evidence.contracts.insert("api".into(), "0.2.0".into());
+        assert_eq!(
+            failures(&profile, &evidence),
+            vec![CompatibilityFailure::IncompatibleContract {
+                contract: "api".into()
+            }]
+        );
+
+        profile.components.get_mut("web").unwrap().requires =
+            BTreeMap::from([("api".into(), ContractRequirement::Minimum("1.2.0".into()))]);
+        evidence.components.get_mut("web").unwrap().requires =
+            BTreeMap::from([("api".into(), "1.2.0".into())]);
+        evidence.contracts.insert("api".into(), "1.3.0".into());
+        assert!(failures(&profile, &evidence).is_empty());
+        evidence.contracts.insert("api".into(), "2.0.0".into());
+        assert_eq!(
+            failures(&profile, &evidence),
+            vec![CompatibilityFailure::IncompatibleContract {
+                contract: "api".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn v2_optional_absent_is_not_missing_and_present_incompatible_fails() {
+        let (mut profile, mut evidence) = fixture();
+        profile.version = 2;
+        profile.components.get_mut("web").unwrap().requires = BTreeMap::from([(
+            "connector".into(),
+            ContractRequirement::Detailed {
+                minimum: "0.1.0".into(),
+                optional: true,
+            },
+        )]);
+        evidence.components.get_mut("web").unwrap().requires =
+            BTreeMap::from([("connector".into(), "0.1.0".into())]);
+        evidence.contracts.clear();
+        assert!(failures(&profile, &evidence).is_empty());
+
+        evidence
+            .contracts
+            .insert("connector".into(), "0.2.0".into());
+        assert_eq!(
+            failures(&profile, &evidence),
+            vec![CompatibilityFailure::IncompatibleContract {
+                contract: "connector".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn v1_self_requirement_on_a_provided_contract_still_validates() {
+        let (mut profile, _) = fixture();
+        profile
+            .components
+            .get_mut("web")
+            .unwrap()
+            .provides
+            .insert("database".into(), "1.3.0".into());
+        profile.validate().unwrap();
+        profile.version = 2;
+        let err = profile.validate().unwrap_err().to_string();
+        assert!(err.contains("requirement cycle"), "{err}");
+    }
+
+    #[test]
+    fn other_owned_components_keep_provides_and_skip_their_requires() {
+        let (profile, mut evidence) = fixture();
+        evidence.contracts.clear();
+        evidence.components.insert(
+            "api".into(),
+            ComponentObservation {
+                pin: ComponentPin::Revision("c".repeat(40)),
+                requires: BTreeMap::from([("connector".into(), "0.1.0".into())]),
+                provides: BTreeMap::from([("database".into(), "1.3.0".into())]),
+            },
+        );
+        evidence.components.insert(
+            "worker".into(),
+            ComponentObservation {
+                pin: ComponentPin::Revision("d".repeat(40)),
+                requires: BTreeMap::from([("queue".into(), "1.0.0".into())]),
+                provides: BTreeMap::new(),
+            },
+        );
+        let owned = BTreeSet::from(["web".into(), "api".into()]);
+        let report = evaluate_owned(
+            &profile,
+            &evidence.release_digest,
+            "test",
+            Some(&evidence),
+            &BTreeMap::new(),
+            1_050,
+            Some(&owned),
+        )
+        .unwrap();
+        assert_eq!(
+            report.failures,
+            vec![CompatibilityFailure::MissingContract {
+                contract: "queue".into()
+            }]
+        );
+        assert_eq!(
+            failures(&profile, &evidence),
+            vec![
+                CompatibilityFailure::MissingContract {
+                    contract: "connector".into()
+                },
+                CompatibilityFailure::MissingContract {
+                    contract: "queue".into()
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn publication_refuses_in_release_requirement_cycle() {
+        let (mut profile, _) = fixture();
+        profile.version = 2;
+        profile.components = BTreeMap::from([
+            (
+                "api".into(),
+                ComponentRequirement {
+                    pin: ComponentPin::Revision("a".repeat(40)),
+                    requires: BTreeMap::from([(
+                        "store".into(),
+                        ContractRequirement::Minimum("1.0.0".into()),
+                    )]),
+                    provides: BTreeMap::from([("api".into(), "1.0.0".into())]),
+                },
+            ),
+            (
+                "store".into(),
+                ComponentRequirement {
+                    pin: ComponentPin::Revision("b".repeat(40)),
+                    requires: BTreeMap::from([(
+                        "api".into(),
+                        ContractRequirement::Minimum("1.0.0".into()),
+                    )]),
+                    provides: BTreeMap::from([("store".into(), "1.0.0".into())]),
+                },
+            ),
+        ]);
+        let err = profile.validate().unwrap_err().to_string();
+        assert!(err.contains("requirement cycle"), "{err}");
+        assert!(err.contains("api -> store -> api"), "{err}");
+        assert!(err.contains("contracts: store, api"), "{err}");
     }
 
     #[test]
@@ -795,7 +1267,7 @@ mod tests {
             "database".into(),
             ComponentObservation {
                 pin: database.pin.clone(),
-                requires: database.requires.clone(),
+                requires: database.required_minimums(),
                 provides: database.provides.clone(),
             },
         );
