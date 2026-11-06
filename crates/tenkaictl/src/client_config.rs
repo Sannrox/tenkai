@@ -76,14 +76,16 @@ fn nonempty_owned(value: Option<String>) -> Option<String> {
 
 impl ClientConfig {
     /// Load system config, then user config. Missing files are skipped.
-    /// An unavailable user config directory is treated as no user file.
+    /// An unavailable user config directory or an unreadable user file is
+    /// treated as no user file (`sudo -u tenkai` often inherits another
+    /// account's `HOME` / `XDG_CONFIG_HOME`).
     pub(crate) fn load() -> Result<Self> {
         let mut config = ClientConfig::default();
         if let Some(system) = load_file(&system_config_path())? {
             config.merge(system);
         }
         if let Ok(user) = user_config_path()
-            && let Some(user) = load_file(&user)?
+            && let Some(user) = load_user_file(&user)?
         {
             config.merge(user);
         }
@@ -96,7 +98,7 @@ impl ClientConfig {
         if let Some(system) = load_file(system)? {
             config.merge(system);
         }
-        if let Some(user) = load_file(user)? {
+        if let Some(user) = load_user_file(user)? {
             config.merge(user);
         }
         Ok(config)
@@ -129,6 +131,24 @@ pub(crate) fn system_config_path() -> PathBuf {
 
 pub(crate) fn user_config_path() -> Result<PathBuf> {
     Ok(crate::token_cache::config_dir_from_env()?.join("client.toml"))
+}
+
+fn is_permission_denied(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied)
+    })
+}
+
+/// User overlay: skip a file this process cannot read. System config still
+/// fails closed so a present `/etc/tenkai/client.toml` is never ignored.
+fn load_user_file(path: &Path) -> Result<Option<ClientConfig>> {
+    match load_file(path) {
+        Ok(config) => Ok(config),
+        Err(err) if is_permission_denied(&err) => Ok(None),
+        Err(err) => Err(err),
+    }
 }
 
 fn load_file(path: &Path) -> Result<Option<ClientConfig>> {
@@ -363,6 +383,43 @@ default_environment = "lab"
         assert!(message.contains("--target remote"), "{message}");
         assert!(message.contains("tenkaictl init"), "{message}");
         assert!(message.contains(DEFAULT_DATABASE), "{message}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_user_config_is_treated_as_absent() {
+        use std::os::unix::fs::PermissionsExt as _;
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let dir = temp_dir();
+        let user = dir.join("client.toml");
+        write(&user, "target = \"remote\"\n");
+        fs::set_permissions(&user, fs::Permissions::from_mode(0o000)).unwrap();
+        let missing = dir.join("missing.toml");
+        let config = ClientConfig::load_from_paths(&missing, &user).unwrap();
+        assert_eq!(config, ClientConfig::default());
+        fs::set_permissions(&user, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_system_config_is_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let dir = temp_dir();
+        let system = dir.join("client.toml");
+        write(&system, "target = \"remote\"\n");
+        fs::set_permissions(&system, fs::Permissions::from_mode(0o000)).unwrap();
+        let err = ClientConfig::load_from_paths(&system, &dir.join("missing"))
+            .unwrap_err()
+            .to_string();
+        fs::set_permissions(&system, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(err.contains("reading"), "{err}");
     }
 
     #[cfg(unix)]
