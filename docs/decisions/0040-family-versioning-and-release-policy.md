@@ -2,6 +2,9 @@
 
 - Status: Accepted
 - Date: 2026-10-30
+- Amended: 2026-11-06 ([#915](https://github.com/Sannrox/tenkai/issues/915)),
+  §10 tagging (dispatcher from main, tagged commit on main, `-rc.N` first,
+  idempotent re-run) and §11 gate-flag range
 - Issue: [#883](https://github.com/Sannrox/tenkai/issues/883)
 - Owner: Tenkai maintainers
 - Related: [software compatibility](../software-compatibility.md),
@@ -112,10 +115,11 @@ and Breaking note fails CI.
 
 ### 10. Tagging
 
-1. **Format.** `vX.Y.Z`. Pre-releases are `vX.Y.Z-rc.N` and `vX.Y.Z-beta.N`.
-   Leading `v` always. One repository tag; lockstep crate versions. Per-crate
-   tags need a later ADR. The release workflow fails if the tag does not equal
-   the workspace version.
+1. **Format.** `vX.Y.Z`. Pre-releases are `vX.Y.Z-rc.N` (N from 1, no leading
+   zeros). `vX.Y.Z-beta.N` is allowed by this policy; a repository may refuse
+   it in its workflow. Leading `v` always. One repository tag; lockstep crate
+   versions. Per-crate tags need a later ADR. The release workflow fails if
+   the tag does not equal the workspace version.
 2. **Annotated and signed.** Every release tag is annotated and signed. The
    workflow runs `git verify-tag` and refuses unsigned or lightweight tags.
    The signer is the maintainer's registered signing key, or a keyless
@@ -127,44 +131,69 @@ and Breaking note fails CI.
 4. **Protection.** A ruleset on `refs/tags/v*` allows create only by repository
    admins and the release workflow or GitHub App, and blocks update and
    deletion. Immutable GitHub Releases are on.
-5. **What a tag triggers.** A `v*` push builds, tests, writes an SBOM, attests
-   provenance, pushes images by digest (never `latest`), drafts then publishes
-   a GitHub Release from the matching CHANGELOG section, and emits a signed
-   release manifest for Tenkai: component, version, git SHA, image and binary
-   digests, attestation references, and gate flags. Pull requests and dry runs
-   never mint attestations.
-6. **Immutable tags.** A tag is never moved, deleted, or reused. A bad release
-   gets a new patch version.
-7. **Hotfixes.** Fix on `main` first. Cherry-pick onto `release/vX.Y`, cut from
-   `vX.Y.0` at the first patch need. Tag `vX.Y.(Z+1)` on that branch, never on
-   `main` ahead of a minor. Pre-release patches are `vX.Y.(Z+1)-rc.N`. Release
-   branches get the same protection as `main`.
+5. **Releases from the default branch for a signed tag.** A `v*` tag push
+   starts a tiny dispatcher. The dispatcher only runs
+   `gh workflow run <release workflow> --ref main -f tag=<tag>`. The real
+   release workflow runs from main, not from the tagged commit. It refuses a
+   tagged run that is not from main. It verifies the signed annotated tag with
+   main's verifier and allowed keys against the tagged commit, requires that
+   commit to be on main, and uses that commit for the CI gate, packaging,
+   images, manifest `git_sha`, and GitHub Release. A failed run is fixed on
+   main and re-run for the same tag. A retry picks up fixes to the workflow
+   and to the tag verifier and keys only. Release scripts, CHANGELOG, and
+   sources come from the tagged commit; a bug there needs a new rc or patch.
+   Pull requests and dry runs never mint attestations.
+6. **Immutable tags.** A tag is never moved, deleted, or reused. A bad
+   published release gets a new patch version. A failed draft is retried for
+   the same tag.
+7. **Release candidates first.** Cut `vX.Y.Z-rc.N` before the final tag. The
+   rc tag equals workspace version `X.Y.Z-rc.N` and publishes as a GitHub
+   pre-release that is never marked latest. A failed rc costs only an rc
+   number. A final tag on a commit whose workspace version is still an rc is
+   refused. The final `vX.Y.Z` has its own CHANGELOG section; it never reuses
+   the rc notes.
+8. **Re-run.** A re-run resumes a draft release and replaces its assets.
+   Every job that uploads, pushes, attests, or publishes refuses a release
+   that is already published, so neither a new run nor "Re-run failed jobs"
+   on an old one can change it. One run per tag at a time.
+9. **Hotfixes.** Fix on `main` first. The tagged commit must be on main, so a
+   tag whose commit lives only on `release/vX.Y` is not releasable. Cherry-pick
+   onto `release/vX.Y` remains a maintenance line; to release a hotfix, land
+   it on main and tag there. Pre-release patches are `vX.Y.(Z+1)-rc.N` on
+   main.
 
 ### 11. Images, channels, and trains
 
 - Images carry the `vX.Y.Z` tag for humans and the immutable digest. Plans and
   manifests use the digest.
 - Tenkai admits the signed manifest into the `candidate` channel. Gate flags
-  from merged work since the previous tag (`risk:migration`, realm,
-  `risk:breaking`) set a human-approval hold. Promotion to `stable` follows
-  the train profile.
+  (`risk:migration`, realm, `risk:breaking`) cover pull requests merged since
+  the previous final tag (an rc never starts the range) and only those merged
+  into the release commit's range. They set a human-approval hold. Promotion
+  to `stable` follows the train profile.
 - A train profile lists every component of a train by digest.
 
 ## Out of scope
 
 Cutting the first tags. Enabling GitHub settings. Per-repository workflow
-changes. Those follow this record.
+file names and extra jobs. Those follow this record; the dispatcher,
+main-only run, tagged-commit, rc, and re-run rules above are the shared
+shape.
 
 ## Consequences
 
-- Sibling repositories add a `RELEASING.md` that links this ADR. This change
-  adds Tenkai's page only.
+- Sibling repositories add a `RELEASING.md` that links this ADR and keep
+  repo-local start, retry, and pre-release steps there.
 - Follow-up work (rulesets, workflows, breaking CI, train admission, pin
   moves, N-1 format tests, CLI and config version) implements this policy. It
   does not reopen the policy questions.
 - Existing lightweight or unsigned tags stay history. New `v*` tags must
   satisfy section 10.
 - Coding stays unblocked: SHA pins remain valid until a tag exists.
+- A workflow bug no longer burns a final version: fix main and re-run the
+  same tag. A bug in tagged sources still needs a new rc or patch.
+- Hotfix tags on `release/v*` are not releasable. The next family release
+  should go through `vX.Y.Z-rc.1` first.
 
 ## Alternatives considered
 
@@ -179,3 +208,8 @@ changes. Those follow this record.
 - **Require a 1.0 surface list in this record.** Rejected: each repository
   owns its listed surface. This record states the bump rules, not Tenkai's
   type list.
+- **Run the release workflow from the tagged commit.** Rejected: tags cannot
+  be moved or deleted, so a workflow bug that only shows on a real tag run
+  burns that version.
+- **Hotfix tags on `release/v*`.** Rejected: the tagged commit must be on
+  main so main's verifier and keys apply.

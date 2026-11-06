@@ -11,7 +11,8 @@ Latest milestone notes: [docs/releases/0.7.1.md](releases/0.7.1.md).
 ## 1. Scope
 
 - [ ] Target version and base tag/commit identified
-- [ ] Merged PR / closed issue range listed
+- [ ] Cut `vX.Y.Z-rc.N` before the final tag ([RELEASING.md](../RELEASING.md))
+- [ ] Merged PR / closed issue range listed (since the previous final tag)
 - [ ] User-visible changes classified: Added / Changed / Fixed / Security / Migration
 
 ## 2. Versions and contracts
