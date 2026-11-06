@@ -7,6 +7,7 @@
 - Amends: [software compatibility](../software-compatibility.md) (profile v2)
 - Related: [ADR 0040](0040-family-versioning-and-release-policy.md),
   [ADR 0016](0016-same-version-remediation.md),
+  [ADR 0044](0044-product-instances-and-dependency-bindings.md),
   [#985](https://github.com/Sannrox/tenkai/issues/985)
 
 ## Context
@@ -76,8 +77,9 @@ same answer, and it does not expire.
 
 Recorded observations remain for providers Tenkai does not install, such as a
 managed database. They keep their current age and conflict rules. A contract
-offered both by a deployed release and by an observation is ambiguous and
-refused, as two providers are today.
+offered by several providers, deployed or observed, is ambiguous and refused
+unless the dependent binds one of them
+([ADR 0044](0044-product-instances-and-dependency-bindings.md)).
 
 ### 3. Plans follow the dependency graph
 

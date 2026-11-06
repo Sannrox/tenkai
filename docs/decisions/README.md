@@ -43,3 +43,4 @@
 - [0041 — Per-release software executor and privileged host releases](0041-per-release-executor-and-privileged-host-releases.md)
 - [0042 — Signer windows are checked at an artifact's signed time](0042-signer-window-at-signed-time.md)
 - [0043 — Product dependencies in the environment graph](0043-product-dependencies.md) (proposed)
+- [0044 — Product instances and dependency bindings](0044-product-instances-and-dependency-bindings.md) (proposed)
