@@ -139,6 +139,12 @@ async fn run(mut cli: Cli) -> Result<()> {
         tenkai::telemetry::bind_process_operation_id(operation_id);
     }
     let config = client_config::ClientConfig::load()?;
+    // `--database PATH` names a local store. It overrides client.toml
+    // `target = "remote"` so `sudo -u tenkai tenkaictl --database … init`
+    // still writes the server's file.
+    if cli.target.is_none() && client_config::argv_has_database_flag(std::env::args_os().skip(1)) {
+        cli.target = Some(Target::Embedded);
+    }
     let token_file_from_flag = cli.token_file.is_some();
     // Login and logout manage the OIDC session. A root-only token_file from
     // client.toml would refuse non-root login before the session is used.

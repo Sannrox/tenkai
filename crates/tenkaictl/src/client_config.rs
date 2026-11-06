@@ -268,6 +268,31 @@ pub(crate) fn command_creates_store(command: &Command) -> bool {
     matches!(command, Command::Init | Command::Restore { .. })
 }
 
+/// True when `--database` / `--database=` is on argv. That names a local
+/// store, so it overrides client.toml `target = "remote"` unless `--target`
+/// is also set.
+pub(crate) fn argv_has_database_flag<I, S>(args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    for arg in args {
+        let arg = arg.as_ref();
+        if arg == "--" {
+            break;
+        }
+        if arg == "--database" {
+            return true;
+        }
+        if let Some(text) = arg.to_str()
+            && text.starts_with("--database=")
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Fill `server_url` and `token_file` from config. Capture whether the CLI
 /// already had a server URL (flag or `TENKAI_SERVER_URL`) *before* copying
 /// config: an override leaves the config token behind so it is not sent to a
@@ -305,6 +330,35 @@ mod tests {
             default_environment: None,
             token_file: Some(PathBuf::from("/etc/tenkai/management.token")),
         }
+    }
+
+    #[test]
+    fn argv_database_flag_is_detected() {
+        assert!(argv_has_database_flag([
+            "tenkaictl",
+            "--database",
+            "/var/lib/tenkai/tenkai.db",
+            "init"
+        ]));
+        assert!(argv_has_database_flag([
+            "tenkaictl",
+            "--database=/tmp/tenkai.db",
+            "env",
+            "add",
+            "edge"
+        ]));
+        assert!(!argv_has_database_flag([
+            "tenkaictl",
+            "status",
+            "--env",
+            "edge"
+        ]));
+        assert!(!argv_has_database_flag([
+            "tenkaictl",
+            "--",
+            "--database",
+            "nope"
+        ]));
     }
 
     #[test]
